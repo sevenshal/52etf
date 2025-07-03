@@ -66,8 +66,8 @@ const SzdtDashboard = () => {
       const [cnnData, spyEmotion, spyPriceResp, vixResp] = await Promise.all([
         fetchFearGreedData(-1),
         request.get('/api/quant/etf/emotion/history/US.SPY'),
-        fetch(`https://api.framework.cn/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line`),
-        fetch(`https://api.framework.cn/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01`)
+        fetch(`${process.env.REACT_APP_API_UR}/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line`),
+        fetch(`${process.env.REACT_APP_API_UR}/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01`)
       ]);
       
       const spyPrice = await spyPriceResp.json();
