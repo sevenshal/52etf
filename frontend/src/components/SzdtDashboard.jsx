@@ -66,8 +66,8 @@ const SzdtDashboard = () => {
       const [cnnData, spyEmotion, spyPriceResp, vixResp] = await Promise.all([
         fetchFearGreedData(-1),
         request.get('/api/quant/etf/emotion/history/US.SPY'),
-        fetch(`${process.env.REACT_APP_API_UR}/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line`),
-        fetch(`${process.env.REACT_APP_API_UR}/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01`)
+        fetch(`${process.env.REACT_APP_API_URL}/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line`),
+        fetch(`${process.env.REACT_APP_API_URL}/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01`)
       ]);
       
       const spyPrice = await spyPriceResp.json();
@@ -94,7 +94,7 @@ const SzdtDashboard = () => {
 
   const fetchAiaeData = async () => {
     try {
-      const response = await fetch('https://api.framework.cn/fred/series/observations?series_id=BOGZ1FL153064476Q&file_type=json');
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/fred/series/observations?series_id=BOGZ1FL153064476Q&file_type=json`);
       const data = await response.json();
 
       // 处理数据
