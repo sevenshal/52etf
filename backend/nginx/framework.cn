@@ -1,0 +1,151 @@
+# 前端配置
+server {
+    listen 443 ssl;
+    server_name quant.framework.cn;
+
+    # SSL 证书
+    ssl_certificate     /etc/nginx/ssl/framework.cn/fullchain.crt;
+    ssl_certificate_key /etc/nginx/ssl/framework.cn/private.key;
+ 
+    # 网站根目录
+    root /var/www/quant;
+    index index.html;
+
+    location / {
+	try_files $uri $uri/ /index.html;
+	add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+
+    # 静态资源缓存
+    location /static {
+	expires 1y;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # 安全相关头部
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+}
+
+# 后端配置
+server {
+    listen 443 ssl;
+    server_name api.framework.cn;
+
+    # SSL 证书
+    ssl_certificate     /etc/nginx/ssl/framework.cn/fullchain.crt;
+    ssl_certificate_key /etc/nginx/ssl/framework.cn/private.key;
+
+    # 代理设置
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # 代理FRED API
+    location /fred/ {
+
+        # 设置API_KEY
+        set $fred_api_key "f969b4eb2a07325467cffb3f100fa6ea";
+        
+	# 设置缓存
+        proxy_cache my_cache;
+        proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
+        proxy_cache_valid 200 10m;  # 成功响应缓存10分钟
+	proxy_cache_bypass $http_cache_control;  # 支持客户端控制缓存
+	add_header X-Cache-Status $upstream_cache_status;  # 添加缓存状态头
+    
+	proxy_pass https://api.stlouisfed.org$request_uri&api_key=$fred_api_key;
+	proxy_set_header Host api.stlouisfed.org;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+	# 添加缓存控制
+	# add_header Cache-Control "public, max-age=600";
+
+        # 添加CORS头
+        add_header 'Access-Control-Allow-Origin' '*';
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+
+        # 处理OPTIONS请求
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+    }
+
+
+    # 代理FMP API
+    location ~ ^/fmp/(?<path>.+)$ {
+	# 删除fmp前缀
+	#rewrite ^/fmp/(.*) /$1?apikey=OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8&$args break;
+	#rewrite ^/fmp/(.*)$ /$1 break;
+
+        # 设置缓存
+        proxy_cache my_cache;
+        proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
+        proxy_cache_valid 200 10m;  # 成功响应缓存10分钟
+        proxy_cache_bypass $http_cache_control;  # 支持客户端控制缓存
+        add_header X-Cache-Status $upstream_cache_status;  # 添加缓存状态头
+
+	#proxy_pass https://financialmodelingprep.com;
+	#proxy_pass https://financialmodelingprep.com$request_uri&apikey=OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8;
+        proxy_pass https://financialmodelingprep.com/$path?apikey=OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8&$args;
+
+        proxy_set_header Host financialmodelingprep.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+	proxy_hide_header Access-Control-Allow-Credentials;
+
+        # 设置缓存头
+	# add_header Cache-Control "public, max-age=600";
+
+        # 添加CORS头
+	#add_header 'Access-Control-Allow-Origin' '*';
+	#add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+	#add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+
+        # 处理OPTIONS请求
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+    }
+
+}
+
+server {
+    listen 80;
+    server_name quant.framework.cn framework.cn;
+
+    # 将所有HTTP请求重定向到HTTPS
+    return 301 https://$host$request_uri;
+}
+

@@ -1,0 +1,402 @@
+[
+    {
+        "code": "SH.510050",
+        "name": "上证50",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基，大盘股",
+        "index": "上证50指数"
+    },
+    {
+        "code": "SH.510210",
+        "name": "上证指数",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基，综合",
+        "index": "上证指数"
+    },
+    {
+        "code": "SH.510300",
+        "name": "沪深300",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基，大盘股",
+        "index": "沪深300指数"
+    },
+    {
+        "code": "SH.510500",
+        "name": "中证500",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "中证500指数"
+    },
+    {
+        "code": "SH.510880",
+        "name": "红利",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "策略，红利",
+        "index": "红利指数"
+    },
+    {
+        "code": "SH.511380",
+        "name": "可转债",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "债券",
+        "index": "中证转债及可交换债指数"
+    },
+    {
+        "code": "SH.512010",
+        "name": "医药",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，医药",
+        "index": "300医药指数"
+    },
+    {
+        "code": "SH.512100",
+        "name": "中证1000",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "中证1000指数"
+    },
+    {
+        "code": "SH.512170",
+        "name": "医疗",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，医药",
+        "index": "中证医疗指数"
+    },
+    {
+        "code": "SH.512480",
+        "name": "半导体",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，半导体，芯片",
+        "index": "半导体指数"
+    },
+    {
+        "code": "SH.512660",
+        "name": "军工",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，军工",
+        "index": "中证军工指数"
+    },
+    {
+        "code": "SH.512690",
+        "name": "酒",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，食品饮料，酒",
+        "index": "中证酒指数"
+    },
+    {
+        "code": "SH.512800",
+        "name": "银行",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，金融，银行",
+        "index": "中证银行指数"
+    },
+    {
+        "code": "SH.512880",
+        "name": "证券",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，金融，证券",
+        "index": "证券公司指数"
+    },
+    {
+        "code": "SH.513000",
+        "name": "日本",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "宽基，跨境",
+        "index": "日经225指数"
+    },
+    {
+        "code": "SH.513030",
+        "name": "德国",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "宽基，跨境",
+        "index": "德国DAX"
+    },
+    {
+        "code": "SH.513050",
+        "name": "中概互联网",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "跨境，中概股",
+        "index": "中国互联网50指数"
+    },
+    {
+        "code": "SH.513060",
+        "name": "恒生医疗",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "跨境，香港，医药，医疗保健",
+        "index": "恒生医疗保健指数"
+    },
+    {
+        "code": "SH.513080",
+        "name": "法国",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "宽基，跨境",
+        "index": "法国CAC40"
+    },
+    {
+        "code": "SH.513130",
+        "name": "恒生科技",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，跨境",
+        "index": "恒生科技指数"
+    },
+    {
+        "code": "SH.513290",
+        "name": "纳指生物科技",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "行业，跨境",
+        "index": "纳斯达克生物科技"
+    },
+    {
+        "code": "SH.513330",
+        "name": "恒生互联网",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "跨境，香港，互联网",
+        "index": "恒生互联网科技业指数"
+    },
+    {
+        "code": "SH.513400",
+        "name": "道琼斯",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "宽基，跨境",
+        "index": "道琼斯工业平均指数"
+    },
+    {
+        "code": "SH.513500",
+        "name": "标普500",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "宽基",
+        "index": "标准普尔500指数"
+    },
+    {
+        "code": "SH.513730",
+        "name": "东南亚科技",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "行业，跨境",
+        "index": "新交所泛东南亚科技指数"
+    },
+    {
+        "code": "SH.513850",
+        "name": "美国50",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "宽基，跨境",
+        "index": "美国50"
+    },
+    {
+        "code": "SH.515030",
+        "name": "新能源车",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "主题，新兴产业，新能源车",
+        "index": "CS新能车指数"
+    },
+    {
+        "code": "SH.515050",
+        "name": "5G通信",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "主题，新兴产业，5G",
+        "index": "5G通信指数"
+    },
+    {
+        "code": "SH.515790",
+        "name": "光伏",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "主题，光伏，新兴产业",
+        "index": "光伏产业指数"
+    },
+    {
+        "code": "SH.515800",
+        "name": "中证800",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "中证800指数"
+    },
+    {
+        "code": "SH.518880",
+        "name": "黄金",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "商品",
+        "index": "黄金9999指数"
+    },
+    {
+        "code": "SH.520830",
+        "name": "沙特",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "全球",
+        "index": "沙特综合指数"
+    },
+    {
+        "code": "SH.562500",
+        "name": "机器人",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业",
+        "index": "中证机器人指数"
+    },
+    {
+        "code": "SH.563300",
+        "name": "中证2000",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "中证2000指数"
+    },
+    {
+        "code": "SH.588000",
+        "name": "科创50",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "科创50指数"
+    },
+    {
+        "code": "SZ.159502",
+        "name": "标普生物科技",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "行业，跨境",
+        "index": "标普生物科技精选行业指数"
+    },
+    {
+        "code": "SZ.159509",
+        "name": "纳指科技",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "行业",
+        "index": "纳斯达克100科技指数"
+    },
+    {
+        "code": "SZ.159518",
+        "name": "标普油气",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "跨境，商品",
+        "index": "标普石油天然气勘探及生产精选行业指数"
+    },
+    {
+        "code": "SZ.159529",
+        "name": "标普消费",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "行业，跨境",
+        "index": "标普500消费精选指数"
+    },
+    {
+        "code": "SZ.159687",
+        "name": "亚太精选",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "宽基",
+        "index": "亚太精选指数"
+    },
+    {
+        "code": "SZ.159819",
+        "name": "人工智能",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业",
+        "index": "中证人工智能指数"
+    },
+    {
+        "code": "SZ.159865",
+        "name": "养殖",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业",
+        "index": "养殖产业指数"
+    },
+    {
+        "code": "SZ.159869",
+        "name": "游戏",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "主题，游戏",
+        "index": "动漫游戏指数"
+    },
+    {
+        "code": "SZ.159915",
+        "name": "创业板",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "宽基",
+        "index": "创业板指"
+    },
+    {
+        "code": "SZ.159920",
+        "name": "恒生",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "跨境，香港",
+        "index": "香港恒生指数"
+    },
+    {
+        "code": "SZ.159928",
+        "name": "消费",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，消费，必选消费",
+        "index": "中证消费指数"
+    },
+    {
+        "code": "SZ.159941",
+        "name": "纳指100",
+        "lever": 1,
+        "emo_area": "us",
+        "tag": "宽基",
+        "index": "纳斯达克100指数"
+    },
+    {
+        "code": "SZ.159992",
+        "name": "创新药",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，医药",
+        "index": "CS创新药指数"
+    },
+    {
+        "code": "SZ.159995",
+        "name": "芯片",
+        "lever": 1,
+        "emo_area": "a",
+        "tag": "行业，半导体，芯片",
+        "index": "国证芯片指数"
+    },
+    {
+        "code": "SZ.164824",
+        "name": "印度",
+        "lever": 1,
+        "emo_area": "other",
+        "tag": "宽基，跨境",
+        "index": "印度ETP指数"
+    }
+] 

@@ -1,0 +1,293 @@
+from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, JSON
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, scoped_session, relationship
+from contextlib import contextmanager
+import os
+from .utils import get_data_file
+from datetime import datetime
+
+# 创建基础目录
+DB_PATH = '/var/lib/quant_robot/evc_stocks.db'
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+# 创建基础引擎和Base类
+engine = create_engine(f'sqlite:///{DB_PATH}')
+Base = declarative_base()
+
+# 创建EVC会话
+Session = scoped_session(sessionmaker(bind=engine))
+
+# 股票-标签关联表
+stock_tags = Table(
+    'stock_tags',
+    Base.metadata,
+    Column('stock_symbol', String, ForeignKey('stock_evc.symbol')),
+    Column('tag_id', String, ForeignKey('stock_tag.id')),
+    Column('date', Date),
+    PrimaryKeyConstraint('stock_symbol', 'tag_id', 'date')
+)
+
+class StockTag(Base):
+    __tablename__ = 'stock_tag'
+
+    id = Column(String, primary_key=True)
+    created_at = Column(DateTime)
+    name = Column(String)
+    built_in = Column(Boolean)
+    official_only = Column(Boolean)
+    includes_option_put_call = Column(Boolean)
+    option_put_call_fetch_tag_ordinal = Column(Integer)
+    sort_group = Column(Integer)
+    updated_at = Column(DateTime)
+
+class StockEVC(Base):
+    __tablename__ = 'stock_evc'
+
+    symbol = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    company = Column(String)
+    last_price = Column(Float)
+    last_change = Column(Float)
+    last_change_percent = Column(Float)
+    fair_value_lo = Column(Float)
+    fair_value_hi = Column(Float)
+    fair_value_date = Column(Date)
+    forward_next_fy_lo = Column(Float)
+    forward_next_fy_hi = Column(Float)
+    forward_next_fy_max_value_lo = Column(Float)
+    forward_next_fy_max_value_hi = Column(Float)
+    beta = Column(Float)
+    pe_ratio = Column(Float)
+    forward_pe_ratio = Column(Float)
+    is_under = Column(Boolean)
+    is_over = Column(Boolean)
+    updated_at = Column(DateTime)
+    
+    # 添加与标签的关系
+    tags = relationship('StockTag', secondary=stock_tags, backref='stocks')
+
+class ETFAnalysis(Base):
+    __tablename__ = 'etf_analysis'
+
+    symbol = Column(String, primary_key=True)  # ETF代码
+    date = Column(Date, primary_key=True)      # 分析日期
+    name = Column(String)                      # ETF名称
+    update_date = Column(String)               # 持仓更新日期
+    total_shares = Column(Float)               # ETF总股数
+    total_market_value = Column(Float)         # 总市值
+    current_price = Column(Float)              # 当前价格
+    market_price = Column(Float)
+    total_weight = Column(Float)               # 总权重
+    fair_value_lo = Column(Float)              # 当前估值下限
+    fair_value_hi = Column(Float)              # 当前估值上限
+    forward_next_fy_lo = Column(Float)         # 下一财年估值下限
+    forward_next_fy_hi = Column(Float)         # 下一财年估值上限
+    forward_stocks_value_lo = Column(Float)    # 有估值股票的当前估值下限
+    forward_stocks_value_hi = Column(Float)    # 有估值股票的当前估值上限
+    forward_stocks_fy_lo = Column(Float)       # 有估值股票的下一财年估值下限
+    forward_stocks_fy_hi = Column(Float)       # 有估值股票的下一财年估值上限
+    forward_stocks_weight = Column(Float)      # 有估值股票的权重
+    min_fair_value_date = Column(Date)          # 有估值股票的最小估值日期
+    max_fair_value_date = Column(Date)          # 有估值股票的最大估值日期
+    leveraged_symbol = Column(String)          # 三倍做多ETF代码
+    leveraged_price = Column(Float)            # 三倍做多ETF价格
+    leveraged_szdt_score = Column(Float)       # 三倍做多ETF情绪指数
+    leveraged_szdt_update_time = Column(String) # 三倍做多ETF情绪指数更新时间
+    components = Column(JSON)                  # 持仓数据（JSON格式）
+    eps = Column(Float)
+    eps_v2 = Column(Float)
+    eps_ttm = Column(Float)
+    eps_forward = Column(Float)
+    created_at = Column(DateTime)              # 创建时间
+    updated_at = Column(DateTime)              # 更新时间
+
+class TradingLog(Base):
+    __tablename__ = "trading_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, index=True)
+    level = Column(String)
+    message = Column(String)
+
+class ETFHolding(Base):
+    """ETF持仓记录"""
+    __tablename__ = 'etf_holdings'
+    
+    etf_symbol = Column(String, primary_key=True)
+    symbol = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    name = Column(String)
+    asset_class = Column(String)
+    shares = Column(Integer)
+    weight = Column(Float)
+
+class StockKline(Base):
+    """股票K线数据表"""
+    __tablename__ = 'stock_klines'
+    
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Integer, nullable=False)
+    turnover = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+class FetchLog(Base):
+    __tablename__ = 'fetch_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False)
+    total_tags_fetched = Column(Integer, nullable=False)
+    total_stocks_fetched = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+class ETFEmotion(Base):
+    """ETF情绪指数记录"""
+    __tablename__ = 'etf_emotions'
+    
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    
+    # 总体情绪指标
+    score = Column(Float)
+    
+    # 各个子指标的分数
+    momentum_score = Column(Float)
+    strength_score = Column(Float)
+    breadth_score = Column(Float)
+    volatility_score = Column(Float)
+    rsi_score = Column(Float)
+    
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+class EVCTradeLog(Base):
+    __tablename__ = "evc_trade_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String, index=True)
+    quantity = Column(Integer)
+    price = Column(Float)
+    reason = Column(String)
+    operation = Column(String)  # 'buy' or 'sell'
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+
+
+class StockFavorite(Base):
+    """用户股票收藏表"""
+    __tablename__ = 'stock_favorites'
+
+    symbol = Column(String(32), primary_key=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+class CNNFearGreedIndex(Base):
+    __tablename__ = 'cnn_fear_greed_index'
+
+    date = Column(Date, primary_key=True)
+    index_value = Column(Float, nullable=False)  # 当前恐贪指数
+    index_timestamp = Column(DateTime)
+    previous_close = Column(Float)  # 上一个收盘恐贪指数
+    previous_1_week = Column(Float)  # 一周前恐贪指数
+    previous_1_month = Column(Float)  # 一个月前恐贪指数
+    previous_1_year = Column(Float)  # 一年前恐贪指数
+    market_momentum = Column(Float)  # 市场动量指数
+    market_momentum_125 = Column(Float)  # 市场动量指数
+    stock_price_strength = Column(Float)  # 股价强度指数
+    stock_price_breadth = Column(Float)  # 股价广度指数
+    put_call_options = Column(Float)  # 看跌看涨期权比率指数
+    market_volatility_vix = Column(Float)  # 市场波动率指数
+    market_volatility_vix_50 = Column(Float)  # 市场波动率指数
+    junk_bond_demand = Column(Float)  # 垃圾债券需求指数
+    safe_haven_demand = Column(Float)  # 避险需求指数
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+# 股票表
+class SzdtTradeStock(Base):
+    __tablename__ = 'szdt_trade_stocks'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    when_buy = Column(Integer, nullable=False)
+    when_sell = Column(Integer, nullable=False)
+    max_position = Column(Integer, nullable=False)
+    buy_amount = Column(Float, nullable=False)
+    sell_amount = Column(Float, nullable=False)
+    buy_factor = Column(Float, nullable=False, default=1)
+    sell_factor = Column(Float, nullable=False, default=1)
+    lever = Column(Integer, nullable=False)
+    emo_area = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class TradingState(Base):
+    """交易状态表"""
+    __tablename__ = "trading_states"
+    
+    cli_id = Column(String, primary_key=True)
+    current_index = Column(Integer, default=0)  # 当前处理的股票索引
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class StockCooldown(Base):
+    """股票冷却表"""
+    __tablename__ = "stock_cooldowns"
+    
+    cli_id = Column(String, primary_key=True)
+    stock_code = Column(String, primary_key=True)
+    until = Column(DateTime)  # 冷却结束时间
+    reason = Column(String)   # 冷却原因
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+# 用字典缓存每个账户的 session factory
+_session_factories = {}
+
+def get_db_session_factory(account_id: str):
+    """获取或创建 session factory"""
+    if account_id not in _session_factories:
+        db_path = get_data_file(account_id, "trading.db")
+        db_dir = os.path.dirname(db_path)
+        if not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+            
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},  # 允许多线程访问
+            pool_size=5,  # 连接池大小
+            max_overflow=10  # 最大额外连接数
+        )
+        Base.metadata.create_all(bind=engine)
+        
+        # 创建线程安全的 session factory
+        session_factory = scoped_session(
+            sessionmaker(
+                bind=engine,
+                autocommit=False,
+                autoflush=False
+            )
+        )
+        _session_factories[account_id] = session_factory
+    
+    return _session_factories[account_id]
+
+@contextmanager
+def get_db_session(account_id: str):
+    """上下文管理器，自动处理 session 的创建和关闭"""
+    session_factory = get_db_session_factory(account_id)
+    session = session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+# 创建所有表
+Base.metadata.create_all(engine)

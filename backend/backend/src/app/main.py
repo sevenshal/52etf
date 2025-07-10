@@ -1,0 +1,68 @@
+import logging
+
+# 设置全局日志格式
+logging.basicConfig(
+    level=logging.INFO,  # 设置日志级别
+    format='%(asctime)s %(levelname)s %(message)s',  # 设置日志格式
+    datefmt='%Y-%m-%d %H:%M:%S',  # 设置日期格式
+    handlers=[
+        logging.FileHandler("/var/log/quant/app.log"),  # 将日志输出到文件
+        logging.StreamHandler()  # 同时输出到控制台
+    ]
+)
+
+import threading
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
+from typing import List, Optional
+import os  # 导入工具函数
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest
+from ..robot.main import robot
+
+# 获取环境变量，默认为开发环境
+ENV = os.getenv("ENV", "dev")
+
+app = FastAPI()
+
+# 根据环境配置 CORS
+if ENV == "prod":
+    # 生产环境只允许特定域名
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://quant.framework.cn"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # 开发环境允许所有源
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# 注册EVC路由
+app.include_router(evc.router) 
+app.include_router(szdt.router)
+app.include_router(account.router)
+app.include_router(etf.router)
+app.include_router(cnn.router)
+app.include_router(stock.router)
+app.include_router(positions.router)
+app.include_router(trade.router)
+app.include_router(backtest.router)
+
+def start_robot():
+    robot()
+
+# # 启动一个线程来运行定时任务
+threading.Thread(target=start_robot, daemon=True).start()
+
+# 确保这个 if 语句在文件最后
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

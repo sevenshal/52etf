@@ -1,0 +1,102 @@
+Fund Ticker,Security Identifier,Holding Ticker,Shares/Par Value,MarketValue,Weight,Name,Class of Shares,Sector,Date
+QQQ,037833100,AAPL ,"124,377,313","28,604,294,443.74",8.807,Apple Inc,Common Stock,Information Technology,01/17/2025
+QQQ,67066G104,NVDA ,"201,510,747","27,750,044,969.37",8.544,NVIDIA Corp,Common Stock,Information Technology,01/17/2025
+QQQ,594918104,MSFT ,"61,176,313","26,246,473,566.39",8.081,Microsoft Corp,Common Stock,Information Technology,01/17/2025
+QQQ,023135106,AMZN ,"86,520,504","19,548,442,673.76",6.019,Amazon.com Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,11135F101,AVGO ,"63,560,991","15,091,921,703.04",4.647,Broadcom Inc,Common Stock,Information Technology,01/17/2025
+QQQ,88160R101,TSLA ,"29,846,941","12,729,720,336.50",3.920,Tesla Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,30303M102,META ,"17,937,654","10,991,656,241.58",3.384,Meta Platforms Inc,Common Stock,Communication Services,01/17/2025
+QQQ,02079K305,GOOGL ,"48,077,902","9,423,268,792.00",2.901,Alphabet Inc,Common Stock,Communication Services,01/17/2025
+QQQ,02079K107,GOOG ,"45,535,318","8,995,502,070.90",2.770,Alphabet Inc,Common Stock,Communication Services,01/17/2025
+QQQ,22160K105,COST ,"8,969,439","8,459,885,170.41",2.605,Costco Wholesale Corp,Common Stock,Consumer Staples,01/17/2025
+QQQ,64110L106,NFLX ,"8,653,345","7,425,435,344.50",2.286,Netflix Inc,Common Stock,Communication Services,01/17/2025
+QQQ,872590104,TMUS ,"23,492,530","5,144,159,294.10",1.584,T-Mobile US Inc,Common Stock,Communication Services,01/17/2025
+QQQ,17275R102,CSCO ,"80,625,784","4,856,090,970.32",1.495,Cisco Systems Inc,Common Stock,Information Technology,01/17/2025
+QQQ,46120E602,ISRG ,"7,210,393","4,273,167,307.52",1.316,Intuitive Surgical Inc,Common Stock,Health Care,01/17/2025
+QQQ,G54950103,LIN ,"9,639,200","4,202,691,200.00",1.294,Linde PLC,Common Stock,Materials,01/17/2025
+QQQ,713448108,PEP ,"27,774,132","4,117,515,069.00",1.268,PepsiCo Inc,Common Stock,Consumer Staples,01/17/2025
+QQQ,007903107,AMD ,"32,851,639","3,990,160,072.94",1.229,Advanced Micro Devices Inc,Common Stock,Information Technology,01/17/2025
+QQQ,00724F101,ADBE ,"8,911,303","3,831,771,176.97",1.180,Adobe Inc,Common Stock,Information Technology,01/17/2025
+QQQ,747525103,QCOM ,"22,490,760","3,701,079,465.60",1.140,QUALCOMM Inc,Common Stock,Information Technology,01/17/2025
+QQQ,882508104,TXN ,"18,466,654","3,553,353,562.68",1.094,Texas Instruments Inc,Common Stock,Information Technology,01/17/2025
+QQQ,461202103,INTU ,"5,666,553","3,423,334,663.89",1.054,Intuit Inc,Common Stock,Information Technology,01/17/2025
+QQQ,09857L108,BKNG ,"670,011","3,301,010,194.80",1.016,Booking Holdings Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,038222105,AMAT ,"16,688,989","3,205,120,337.45",0.987,Applied Materials Inc,Common Stock,Information Technology,01/17/2025
+QQQ,69608A108,PLTR ,"44,144,543","3,168,253,851.11",0.976,Palantir Technologies Inc,Common Stock,Information Technology,01/17/2025
+QQQ,031162100,AMGN ,"10,881,666","2,961,010,135.26",0.912,Amgen Inc,Common Stock,Health Care,01/17/2025
+QQQ,438516106,HON ,"13,163,417","2,929,913,355.86",0.902,Honeywell International Inc,Common Stock,Industrials,01/17/2025
+QQQ,20030N101,CMCSA ,"77,272,173","2,826,616,088.34",0.870,Comcast Corp,Common Stock,Communication Services,01/17/2025
+QQQ,053015103,ADP ,"8,248,421","2,443,017,331.78",0.752,Automatic Data Processing Inc,Common Stock,Industrials,01/17/2025
+QQQ,595112103,MU ,"22,552,364","2,384,912,493.00",0.734,Micron Technology Inc,Common Stock,Information Technology,01/17/2025
+QQQ,697435105,PANW ,"13,283,937","2,352,718,082.07",0.724,Palo Alto Networks Inc,Common Stock,Information Technology,01/17/2025
+QQQ,375558103,GILD ,"25,229,048","2,317,035,768.32",0.713,Gilead Sciences Inc,Common Stock,Health Care,01/17/2025
+QQQ,032654105,ADI ,"10,046,901","2,201,878,823.16",0.678,Analog Devices Inc,Common Stock,Information Technology,01/17/2025
+QQQ,92532F100,VRTX ,"5,213,367","2,200,040,874.00",0.677,Vertex Pharmaceuticals Inc,Common Stock,Health Care,01/17/2025
+QQQ,573874104,MRVL ,"17,535,097","2,187,678,701.72",0.674,Marvell Technology Inc,Common Stock,Information Technology,01/17/2025
+QQQ,855244109,SBUX ,"22,952,313","2,183,453,535.69",0.672,Starbucks Corp,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,512807306,LRCX ,"26,047,297","2,091,597,949.10",0.644,Lam Research Corp,Common Stock,Information Technology,01/17/2025
+QQQ,03831W108,APP ,"6,046,117","2,069,827,693.78",0.637,AppLovin Corp,Common Stock,Information Technology,01/17/2025
+QQQ,482480100,KLAC ,"2,707,771","2,051,055,299.37",0.632,KLA Corp,Common Stock,Information Technology,01/17/2025
+QQQ,21037T109,CEG ,"6,331,534","2,003,044,096.24",0.617,Constellation Energy Corp,Common Stock,Utilities,01/17/2025
+QQQ,58733R102,MELI ,"1,026,281","1,884,251,916.00",0.580,MercadoLibre Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,458140100,INTC ,"87,311,110","1,876,315,753.90",0.578,Intel Corp,Common Stock,Information Technology,01/17/2025
+QQQ,70450Y103,PYPL ,"20,295,119","1,863,294,875.39",0.574,PayPal Holdings Inc,Common Stock,Financials,01/17/2025
+QQQ,127387108,CDNS ,"5,552,109","1,696,724,510.40",0.522,Cadence Design Systems Inc,Common Stock,Information Technology,01/17/2025
+QQQ,22788C105,CRWD ,"4,734,009","1,690,041,213.00",0.520,Crowdstrike Holdings Inc,Common Stock,Information Technology,01/17/2025
+QQQ,871607107,SNPS ,"3,109,727","1,637,893,210.90",0.504,Synopsys Inc,Common Stock,Information Technology,01/17/2025
+QQQ,172908105,CTAS ,"8,164,281","1,619,058,565.11",0.499,Cintas Corp,Common Stock,Industrials,01/17/2025
+QQQ,609207105,MDLZ ,"27,069,786","1,566,257,817.96",0.482,Mondelez International Inc,Common Stock,Consumer Staples,01/17/2025
+QQQ,571903202,MAR ,"5,625,607","1,559,305,748.26",0.480,Marriott International Inc/MD,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,75886F107,REGN ,"2,187,803","1,491,162,768.74",0.459,Regeneron Pharmaceuticals Inc,Common Stock,Health Care,01/17/2025
+QQQ,594972408,MSTR ,"3,704,654","1,468,895,311.00",0.452,MicroStrategy Inc,Common Stock,Information Technology,01/17/2025
+QQQ,34959E109,FTNT ,"15,515,849","1,462,058,451.27",0.450,Fortinet Inc,Common Stock,Information Technology,01/17/2025
+QQQ,722304102,PDD ,"13,521,340","1,427,447,863.80",0.440,PDD Holdings Inc ADR,American Depository Receipt,Consumer Discretionary,01/17/2025
+QQQ,67103H107,ORLY ,"1,168,691","1,422,051,521.89",0.438,O'Reilly Automotive Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,25809K105,DASH ,"7,874,405","1,373,926,184.40",0.423,DoorDash Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,N07059210,ASML ,"1,795,620","1,358,081,274.60",0.418,ASML Holding NV,American Depository Receipt - NY,Information Technology,01/17/2025
+QQQ,126408103,CSX ,"39,038,366","1,277,725,719.18",0.393,CSX Corp,Common Stock,Industrials,01/17/2025
+QQQ,052769106,ADSK ,"4,352,371","1,268,498,527.95",0.391,Autodesk Inc,Common Stock,Information Technology,01/17/2025
+QQQ,009066101,ABNB ,"8,763,045","1,184,062,640.40",0.365,Airbnb Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,693718108,PCAR ,"10,613,773","1,171,017,575.09",0.361,PACCAR Inc,Common Stock,Industrials,01/17/2025
+QQQ,776696106,ROP ,"2,170,700","1,133,800,024.00",0.349,Roper Technologies Inc,Common Stock,Information Technology,01/17/2025
+QQQ,88339J105,TTD ,"9,102,688","1,132,556,440.96",0.349,Trade Desk Inc/The,Common Stock,Communication Services,01/17/2025
+QQQ,217204106,CPRT ,"19,505,373","1,109,855,723.70",0.342,Copart Inc,Common Stock,Industrials,01/17/2025
+QQQ,N6596X109,NXPI ,"5,145,044","1,108,036,675.84",0.341,NXP Semiconductors NV,Common Stock,Information Technology,01/17/2025
+QQQ,98138H101,WDAY ,"4,311,897","1,076,421,967.08",0.331,Workday Inc,Common Stock,Information Technology,01/17/2025
+QQQ,704326107,PAYX ,"7,285,669","1,065,820,518.01",0.328,Paychex Inc,Common Stock,Industrials,01/17/2025
+QQQ,25278X109,FANG ,"5,910,962","1,065,037,133.16",0.328,Diamondback Energy Inc,Common Stock,Energy,01/17/2025
+QQQ,025537101,AEP ,"10,781,112","1,048,463,142.00",0.323,American Electric Power Co Inc,Common Stock,Utilities,01/17/2025
+QQQ,16119P108,CHTR ,"2,878,593","1,011,451,222.41",0.311,Charter Communications Inc,Common Stock,Communication Services,01/17/2025
+QQQ,778296103,ROST ,"6,716,088","1,001,704,525.20",0.308,Ross Stores Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,61174X109,MNST ,"19,687,410","972,951,802.20",0.300,Monster Beverage Corp,Common Stock,Consumer Staples,01/17/2025
+QQQ,05722G100,BKR ,"20,031,842","932,281,926.68",0.287,Baker Hughes Co,Common Stock,Energy,01/17/2025
+QQQ,05464C101,AXON ,"1,543,682","916,777,302.98",0.282,Axon Enterprise Inc,Common Stock,Industrials,01/17/2025
+QQQ,550021109,LULU ,"2,381,872","890,105,566.40",0.274,Lululemon Athletica Inc,Common Stock,Consumer Discretionary,01/17/2025
+QQQ,311900104,FAST ,"11,597,333","882,325,094.64",0.272,Fastenal Co,Common Stock,Industrials,01/17/2025
+QQQ,23804L103,DDOG ,"6,340,598","877,538,763.20",0.270,Datadog Inc,Common Stock,Information Technology,01/17/2025
+QQQ,49271V100,KDP ,"27,459,652","868,274,196.24",0.267,Keurig Dr Pepper Inc,Common Stock,Consumer Staples,01/17/2025
+QQQ,049468101,TEAM ,"3,268,438","824,823,013.68",0.254,Atlassian Corp,Common Stock,Information Technology,01/17/2025
+QQQ,679580100,ODFL ,"4,321,979","819,231,119.45",0.252,Old Dominion Freight Line Inc,Common Stock,Industrials,01/17/2025
+QQQ,30161N101,EXC ,"20,341,537","801,863,388.54",0.247,Exelon Corp,Common Stock,Utilities,01/17/2025
+QQQ,92345Y106,VRSK ,"2,858,650","796,276,957.50",0.245,Verisk Analytics Inc,Common Stock,Industrials,01/17/2025
+QQQ,046353108,AZN ,"11,787,986","785,079,867.60",0.242,AstraZeneca PLC ADR,American Depository Receipt,Health Care,01/17/2025
+QQQ,36266G107,GEHC ,"9,248,820","783,745,006.80",0.241,GE HealthCare Technologies Inc,Common Stock,Health Care,01/17/2025
+QQQ,192446102,CTSH ,"10,037,322","781,004,024.82",0.240,Cognizant Technology Solutions Corp,Common Stock,Information Technology,01/17/2025
+QQQ,98389B100,XEL ,"11,624,758","775,603,853.76",0.239,Xcel Energy Inc,Common Stock,Utilities,01/17/2025
+QQQ,285512109,EA ,"5,309,357","753,928,694.00",0.232,Electronic Arts Inc,Common Stock,Communication Services,01/17/2025
+QQQ,G25839104,CCEP ,"9,319,609","718,262,265.63",0.221,Coca-Cola Europacific Partners PLC,Common Stock,Consumer Staples,01/17/2025
+QQQ,500754106,KHC ,"24,478,205","716,477,060.35",0.221,Kraft Heinz Co/The,Common Stock,Consumer Staples,01/17/2025
+QQQ,45168D104,IDXX ,"1,657,644","694,983,823.44",0.214,IDEXX Laboratories Inc,Common Stock,Health Care,01/17/2025
+QQQ,252131107,DXCM ,"7,907,102","667,201,266.76",0.205,Dexcom Inc,Common Stock,Health Care,01/17/2025
+QQQ,874054109,TTWO ,"3,555,324","662,747,946.84",0.204,Take-Two Interactive Software Inc,Common Stock,Communication Services,01/17/2025
+QQQ,595017104,MCHP ,"10,871,081","630,196,565.57",0.194,Microchip Technology Inc,Common Stock,Information Technology,01/17/2025
+QQQ,03662Q105,ANSS ,"1,770,303","619,482,128.79",0.191,ANSYS Inc,Common Stock,Information Technology,01/17/2025
+QQQ,22160N109,CSGP ,"8,299,079","612,886,984.15",0.189,CoStar Group Inc,Common Stock,Real Estate,01/17/2025
+QQQ,98980G102,ZS ,"3,105,898","582,604,346.84",0.179,Zscaler Inc,Common Stock,Information Technology,01/17/2025
+QQQ,12514G108,CDW ,"2,700,741","509,710,848.93",0.157,CDW Corp/DE,Common Stock,Information Technology,01/17/2025
+QQQ,G39387108,GFS ,"11,187,759","482,192,412.90",0.148,GLOBALFOUNDRIES Inc,Common Stock,Information Technology,01/17/2025
+QQQ,934423104,WBD ,"49,661,170","472,774,338.40",0.146,Warner Bros Discovery Inc,Common Stock,Communication Services,01/17/2025
+QQQ,682189105,ON ,"8,619,711","470,894,811.93",0.145,ON Semiconductor Corp,Common Stock,Information Technology,01/17/2025
+QQQ,09062X103,BIIB ,"2,952,917","415,032,484.35",0.128,Biogen Inc,Common Stock,Health Care,01/17/2025
+QQQ,042068205,ARM ,"2,594,486","387,252,980.36",0.119,ARM Holdings PLC ADR,American Depository Receipt,Information Technology,01/17/2025
+QQQ,60937P106,MDB ,"1,496,564","378,795,314.04",0.117,MongoDB Inc,Common Stock,Information Technology,01/17/2025

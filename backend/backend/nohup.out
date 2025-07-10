@@ -1,0 +1,59 @@
++----------+--------------------------------------------------------------------------------------------------+
+| US       | Nasdaq Basic                                                                                     |
+|----------+--------------------------------------------------------------------------------------------------|
+| CN       | LV1 Real-time Quotes                                                                             |
+|----------+--------------------------------------------------------------------------------------------------|
+| USOption | You do not have access to the market's Open API data. Please visit the Quotes Store to purchase. |
+|----------+--------------------------------------------------------------------------------------------------|
+| HK       | LV1 Real-time Quotes                                                                             |
++----------+--------------------------------------------------------------------------------------------------+
+[0;30m2025-01-29 14:26:20,909 | 9060 | [open_context_base.py] _send_init_connect_sync:311: InitConnect ok: conn_id=1, host=127.0.0.1, port=11111, user_id=207021[0m
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:56: FutureWarning: Passing bytes to 'read_excel' is deprecated and will be removed in a future version. To read from a byte string, wrap it in a `BytesIO` object.
+  df = pd.read_excel(response.content)
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:61: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  if isinstance(row[0], str) and 'Holdings:' in row[0]:
+/home/ecs-user/quant_src/backend/src/robot/etf/spdr.py:63: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
+  date_str = row[1].split('As of ')[-1].strip()
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ecs-user/quant_src/backend/src/robot/main.py", line 52, in <module>
+    execute_account_process()
+  File "/home/ecs-user/quant_src/backend/src/robot/main.py", line 44, in execute_account_process
+    account.process()
+  File "/home/ecs-user/quant_src/backend/src/robot/evc_strategy.py", line 279, in process
+    self._send_valued_stocks_email(undervalued, sell_stocks, buy_stocks)
+  File "/home/ecs-user/quant_src/backend/src/robot/evc_strategy.py", line 249, in _send_valued_stocks_email
+    receiver_email=self.trade.account_cfg.email, 
+                   ^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FutuTradeService' object has no attribute 'account_cfg'
