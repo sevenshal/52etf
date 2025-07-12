@@ -287,7 +287,7 @@ async def get_stock_positions(account_id: str = Depends(valid_account)):
                 option_market_value += market_value
 
     # 现金 = 冻结资金+可用余额
-    cash_balance = balance.get("available_balance", 0) + balance.get("frozen_balance", 0)
+    cash_balance = balance.get("withdraw_cash", 0) + balance.get("frozen_balance", 0)
     # 计算总资产（包含期权市值）
     total_assets = total_market_value + cash_balance + option_market_value
     
@@ -298,15 +298,19 @@ async def get_stock_positions(account_id: str = Depends(valid_account)):
     # 按市值排序
     stock_positions.sort(key=lambda x: x["market_value"], reverse=True)
     
-    # 计算无风险资产（短期国债ETF）
-    risk_free_amount = 0
-    risk_free_symbols = ['TBIL.US', 'SGOV.US']
+    # 计算债券资产（债券类ETF）
+    bond_amount = 0
+    bond_symbols = ['TBIL.US', 'SGOV.US', 'TLT.US', 'TMF.US']
     for pos in stock_positions:
-        if pos["symbol"] in risk_free_symbols:
-            risk_free_amount += Decimal(str(pos["market_value"]))
+        if pos["symbol"] in bond_symbols:
+            bond_amount += Decimal(str(pos["market_value"]))
+
+    # 计算股票资产（除债券外的其他资产）
+    stock_amount = total_market_value - bond_amount
 
     # 汇总信息
     summary = {
+        "balance": balance,
         "stock_count": len(stock_positions),
         "total_cost": float(total_cost),
         "total_market_value": float(total_market_value),
@@ -314,8 +318,8 @@ async def get_stock_positions(account_id: str = Depends(valid_account)):
         "total_unrealized_pnl_percent": float((total_market_value / total_cost - 1) * 100) if total_cost > 0 else 0,
         "cash_balance": cash_balance,
         "option_market_value": float(option_market_value),  # 添加期权市值
-        "risk_amount": float(total_market_value - risk_free_amount),
-        "risk_free_amount": float(risk_free_amount),
+        "stock_amount": float(stock_amount),
+        "bond_amount": float(bond_amount),
         "total_assets": float(total_assets)  # 更新后的总资产（包含期权市值）
     }
     
