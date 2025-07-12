@@ -699,6 +699,25 @@ const OptionsPositions = () => {
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={8} md={3}>
             <Statistic
+              title="总资产"
+              value={formatNumber(summary.total_assets, 2)}
+              prefix="$"
+              formatter={value => (
+                <>
+                  {value}
+                  <span style={{ fontSize: '12px', marginLeft: '4px' }}>
+                    ({formatNumber(summary.total_assets/10000, 1)}万)
+                  </span>
+                </>
+              )}
+              valueStyle={{ 
+                fontSize: '16px',
+                fontWeight: 'bold'
+              }}
+            />
+          </Col>
+          <Col xs={12} sm={8} md={3}>
+            <Statistic
               title="持仓总成本"
               value={formatNumber(summary.total_cost, 2)}
               prefix="$"
@@ -750,33 +769,33 @@ const OptionsPositions = () => {
           </Col>
           <Col xs={12} sm={8} md={3}>
             <Statistic
-              title="风险资产"
-              value={formatNumber(summary.risk_amount, 2)}
+              title="股票资产"
+              value={formatNumber(summary.stock_amount, 2)}
               prefix="$"
               formatter={value => (
                 <>
                   {value}
                   <span style={{ fontSize: '12px', marginLeft: '4px' }}>
-                    ({formatNumber(summary.risk_amount / summary.total_assets * 100, 1)}%)
+                    ({formatNumber(summary.stock_amount / summary.total_assets * 100, 1)}%)
                   </span>
                 </>
               )}
               valueStyle={{ 
                 fontSize: '16px',
-                color: '#f5222d'
+                color: '#1890ff'
               }}
             />
           </Col>
           <Col xs={12} sm={8} md={3}>
             <Statistic
-              title="无风险资产"
-              value={formatNumber(summary.risk_free_amount, 2)}
+              title="债券资产"
+              value={formatNumber(summary.bond_amount, 2)}
               prefix="$"
               formatter={value => (
                 <>
                   {value}
                   <span style={{ fontSize: '12px', marginLeft: '4px' }}>
-                    ({formatNumber(summary.risk_free_amount / summary.total_assets * 100, 1)}%)
+                    ({formatNumber(summary.bond_amount / summary.total_assets * 100, 1)}%)
                   </span>
                 </>
               )}
@@ -802,25 +821,6 @@ const OptionsPositions = () => {
               valueStyle={{ 
                 fontSize: '16px',
                 color: '#faad14'
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={8} md={3}>
-            <Statistic
-              title="总资产"
-              value={formatNumber(summary.total_assets, 2)}
-              prefix="$"
-              formatter={value => (
-                <>
-                  {value}
-                  <span style={{ fontSize: '12px', marginLeft: '4px' }}>
-                    ({formatNumber(summary.total_assets/10000, 1)}万)
-                  </span>
-                </>
-              )}
-              valueStyle={{ 
-                fontSize: '16px',
-                fontWeight: 'bold'
               }}
             />
           </Col>
