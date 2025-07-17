@@ -212,7 +212,7 @@ const StockDetail = () => {
           show: true,
           formatter: '{b}',
           color: '#fff',
-          fontSize: 16
+          fontSize: 12
         },
         symbolOffset: [0, '-50%']
       }
