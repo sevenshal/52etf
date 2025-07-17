@@ -85,7 +85,7 @@ const StockDetail = () => {
 
         // 从最低点之后到最新k线超过用户设定的K线数量
         if (klines.length - 1 - lowestPointAfterHigh.index > stabilizationPeriod) { // 使用 stabilizationPeriod
-          for (let i = lowestPointAfterHigh.index + 1; i < klines.length; i++) {
+          for (let i = lowestPointAfterHigh.index + stabilizationPeriod; i < klines.length; i++) {
             if (i >= 4) {
               const avgVolume = klines.slice(i - 4, i).reduce((sum, k) => sum + k.volume, 0) / 4;
               if (klines[i].volume > avgVolume * volumeRatio) {
@@ -123,7 +123,7 @@ const StockDetail = () => {
 
         // 从最高点之后到最新k线超过用户设定的K线数量
         if (klines.length - 1 - highestPointAfterLow.index > stabilizationPeriod) { // 使用 stabilizationPeriod
-          for (let i = highestPointAfterLow.index + 1; i < klines.length; i++) {
+          for (let i = highestPointAfterLow.index + stabilizationPeriod; i < klines.length; i++) {
             if (i >= 4) {
               const avgVolume = klines.slice(i - 4, i).reduce((sum, k) => sum + k.volume, 0) / 4;
               if (klines[i].volume > avgVolume * volumeRatio) {
