@@ -38,7 +38,7 @@ export const calculateSupportResistanceValues = (klines, days, volumeRatio) => {
  */
 export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1, days = 60) => {
   return klines.map((kline, index) => {
-    if (index < (dyas-1)) {
+    if (index < (days-1)) {
       // 前N个数据点，无法计算均线
       return {
         ...kline,
@@ -49,7 +49,7 @@ export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1, days = 60) 
     }
     
     // 计算N日成交量均线和标准差
-    const startIndex = index - (dyas-1);
+    const startIndex = index - (days-1);
     const volumes = klines.slice(startIndex, index + 1).map(k => k.volume);
     const mean = volumes.reduce((sum, v) => sum + v, 0) / days;
     const variance = volumes.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / days;
