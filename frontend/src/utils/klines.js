@@ -31,36 +31,36 @@ export const calculateSupportResistanceValues = (klines, days, volumeRatio) => {
   };
 
 /**
- * 预处理K线数据，计算成交量20日均线、标准差和放量判断
+ * 预处理K线数据，计算成交量N日均线、标准差和放量判断
  * @param {Array} klines - K线数据数组
  * @param {number} stdDevMultiplier - 标准差倍数，默认为1
  * @returns {Array} 处理后的K线数据，每个元素包含volumeMA20、volumeStdDev、isVolumeSpike属性
  */
-export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1) => {
+export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1, days = 60) => {
   return klines.map((kline, index) => {
-    if (index < 19) {
-      // 前19个数据点，无法计算20日均线
+    if (index < (dyas-1)) {
+      // 前N个数据点，无法计算均线
       return {
         ...kline,
-        volumeMA20: null,
+        volumeMA: null,
         volumeStdDev: null,
         isVolumeSpike: false
       };
     }
     
-    // 计算20日成交量均线和标准差
-    const startIndex = index - 19;
+    // 计算N日成交量均线和标准差
+    const startIndex = index - (dyas-1);
     const volumes = klines.slice(startIndex, index + 1).map(k => k.volume);
-    const mean = volumes.reduce((sum, v) => sum + v, 0) / 20;
-    const variance = volumes.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / 20;
+    const mean = volumes.reduce((sum, v) => sum + v, 0) / days;
+    const variance = volumes.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / days;
     const stdDev = Math.sqrt(variance);
     
-    // 判断是否放量（超过20日均线+n个标准差）
+    // 判断是否放量（超过均线+n个标准差）
     const isVolumeSpike = kline.volume > mean + (stdDev * stdDevMultiplier);
     
     return {
       ...kline,
-      volumeMA20: mean,
+      volumeMA: mean,
       volumeStdDev: stdDev,
       isVolumeSpike: isVolumeSpike
     };
@@ -80,7 +80,7 @@ export const calculateSupportResistanceValuesNew = (klines, days) => {
   let supports = [];
   let resistances = [];
 
-  for (let i = 19; i < recentKlines.length; i++) {
+  for (let i = 0; i < recentKlines.length; i++) {
     const kline = recentKlines[i];
     
     // 使用预处理后的放量判断
