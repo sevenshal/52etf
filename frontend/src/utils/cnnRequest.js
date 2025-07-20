@@ -4,8 +4,7 @@ const cnnRequest = axios.create({
   baseURL: 'https://production.dataviz.cnn.io/index/fearandgreed/graphdata',
   timeout: 10000,
   headers: {
-    'Accept': 'application/json',
-    'Origin': window.location.origin
+    'Accept': 'application/json'
   }
 });
 
