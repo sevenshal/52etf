@@ -223,8 +223,8 @@ const StockDetail = () => {
       };
     });
 
-    // 获取20日均线数据
-    const volumeMA20 = processedKlines.map(item => item.volumeMA20);
+    // 获取N日均线数据
+    const volumeMA = processedKlines.map(item => item.volumeMA);
 
     const buyPointMarkers = buyPoints.map(point => ({
       name: '买点',
@@ -268,11 +268,11 @@ const StockDetail = () => {
       yAxisIndex: 1,
       data: volumeData
     }, {
-      name: '成交量20日均线',
+      name: '成交量N日均线',
       type: 'line',
       xAxisIndex: 1,
       yAxisIndex: 1,
-      data: volumeMA20,
+      data: volumeMA,
       lineStyle: {
         color: '#FFA500',
         width: 1
