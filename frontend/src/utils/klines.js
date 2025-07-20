@@ -17,9 +17,8 @@ export const calculateSupportResistanceValues = (klines, days, volumeRatio) => {
       if (isVolumeSpike && bodySize > Math.max(upperShadow, lowerShadow)) {
         const bodyTop = Math.max(kline.close, kline.open);
         const bodyBottom = Math.min(kline.close, kline.open);
-        const bodyMiddle = (bodyTop + bodyBottom) / 2;
 
-        for(const bodyPrice of [bodyBottom, bodyMiddle, bodyTop]) {
+        for(const bodyPrice of [bodyBottom, bodyTop]) {
           if (bodyPrice > currentPrice) {
             resistances.push(bodyPrice.toFixed(2))
           } else {
@@ -30,3 +29,79 @@ export const calculateSupportResistanceValues = (klines, days, volumeRatio) => {
     }
     return { supports, resistances };
   };
+
+/**
+ * 预处理K线数据，计算成交量20日均线、标准差和放量判断
+ * @param {Array} klines - K线数据数组
+ * @param {number} stdDevMultiplier - 标准差倍数，默认为1
+ * @returns {Array} 处理后的K线数据，每个元素包含volumeMA20、volumeStdDev、isVolumeSpike属性
+ */
+export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1) => {
+  return klines.map((kline, index) => {
+    if (index < 19) {
+      // 前19个数据点，无法计算20日均线
+      return {
+        ...kline,
+        volumeMA20: null,
+        volumeStdDev: null,
+        isVolumeSpike: false
+      };
+    }
+    
+    // 计算20日成交量均线和标准差
+    const startIndex = index - 19;
+    const volumes = klines.slice(startIndex, index + 1).map(k => k.volume);
+    const mean = volumes.reduce((sum, v) => sum + v, 0) / 20;
+    const variance = volumes.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / 20;
+    const stdDev = Math.sqrt(variance);
+    
+    // 判断是否放量（超过20日均线+n个标准差）
+    const isVolumeSpike = kline.volume > mean + (stdDev * stdDevMultiplier);
+    
+    return {
+      ...kline,
+      volumeMA20: mean,
+      volumeStdDev: stdDev,
+      isVolumeSpike: isVolumeSpike
+    };
+  });
+};
+
+/**
+ * 使用新的放量判断标准计算支撑压力位
+ * @param {Array} klines - 预处理后的K线数据
+ * @param {number} days - 计算天数
+ * @returns {Object} 包含支撑位和压力位的对象
+ */
+export const calculateSupportResistanceValuesNew = (klines, days) => {
+  const recentKlines = klines.slice(-days);
+  const currentPrice = recentKlines[recentKlines.length - 1].close;
+
+  let supports = [];
+  let resistances = [];
+
+  for (let i = 19; i < recentKlines.length; i++) {
+    const kline = recentKlines[i];
+    
+    // 使用预处理后的放量判断
+    if (kline.isVolumeSpike) {
+      const bodySize = Math.abs(kline.close - kline.open);
+      const upperShadow = kline.high - Math.max(kline.close, kline.open);
+      const lowerShadow = Math.min(kline.close, kline.open) - kline.low;
+
+      if (bodySize > Math.max(upperShadow, lowerShadow)) {
+        const bodyTop = Math.max(kline.close, kline.open);
+        const bodyBottom = Math.min(kline.close, kline.open);
+
+        for(const bodyPrice of [bodyBottom, bodyTop]) {
+          if (bodyPrice > currentPrice) {
+            resistances.push(bodyPrice.toFixed(2))
+          } else {
+            supports.push(bodyPrice.toFixed(2))
+          }
+        }
+      }
+    }
+  }
+  return { supports, resistances };
+};

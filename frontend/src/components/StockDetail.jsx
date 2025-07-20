@@ -5,19 +5,20 @@ import ReactECharts from 'echarts-for-react';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import dayjs from 'dayjs';
-import { calculateSupportResistanceValues } from '../utils/klines';
+import { calculateSupportResistanceValuesNew, preprocessKlinesVolume } from '../utils/klines';
 
 const StockDetail = () => {
   const { symbol } = useParams();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [klines, setKlines] = useState([]);
+  const [processedKlines, setProcessedKlines] = useState([]);
   const [supportLevels, setSupportLevels] = useState([]);
   const [resistanceLevels, setResistanceLevels] = useState([]);
   const [days, setDays] = useState(200);
-  const [volumeRatio, setVolumeRatio] = useState(1.5);
   const [priceChangeRatio, setPriceChangeRatio] = useState(30);
   const [stabilizationPeriod, setStabilizationPeriod] = useState(10); // 新增：企稳时间 K线数量
+  const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(2); // 新增：成交量标准差倍数
   const [chartOption, setChartOption] = useState({});
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
@@ -26,23 +27,42 @@ const StockDetail = () => {
     fetchKlines();
   }, [symbol]);
 
+  // 当标准差倍数变化时，重新预处理数据
   useEffect(() => {
-    // 确保所有参数都有效才进行计算
-    if (klines.length > 0 && volumeRatio > 1 && days > 1 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      calculateSupportResistance(klines);
-      calculateBuySellPoints(klines);
+    if (klines.length > 0) {
+      const processed = preprocessKlinesVolume(klines, volumeStdDevMultiplier);
+      setProcessedKlines(processed);
     }
-  }, [days, volumeRatio, klines, priceChangeRatio, stabilizationPeriod]); // 依赖中添加 stabilizationPeriod
+  }, [klines, volumeStdDevMultiplier]);
 
+  // 当参数变化时，重新计算支撑压力位和买卖点
   useEffect(() => {
-    setChartOption(getChartOption());
-  }, [supportLevels, resistanceLevels, buyPoints, sellPoints]);
+    if (processedKlines.length > 0 && days > 1 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
+      // 重新计算支撑压力位
+      const { supports, resistances } = calculateSupportResistanceValuesNew(processedKlines, days);
+      setSupportLevels(supports);
+      setResistanceLevels(resistances);
+      
+      // 重新计算买卖点
+      calculateBuySellPoints(processedKlines);
+    }
+  }, [processedKlines, days, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
+
+  // 当计算结果变化时，更新图表选项
+  useEffect(() => {
+    if (processedKlines.length > 0) {
+      setChartOption(getChartOption());
+    }
+  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier]);
 
   const fetchKlines = async () => {
     setLoading(true);
     try {
       const { data } = await request.get(`/api/stock/klines/${symbol}?days=500`);
       setKlines(data);
+      // 预处理K线数据，计算成交量相关指标
+      const processed = preprocessKlinesVolume(data, volumeStdDevMultiplier);
+      setProcessedKlines(processed);
     } catch (error) {
       console.error('获取K线数据失败:', error);
     } finally {
@@ -50,11 +70,7 @@ const StockDetail = () => {
     }
   };
 
-  const calculateSupportResistance = (klines) => {
-    const { supports, resistances } = calculateSupportResistanceValues(klines, days, volumeRatio);
-    setSupportLevels(supports);
-    setResistanceLevels(resistances);
-  };
+
 
   /**
    * 计算股票买卖点
@@ -84,17 +100,14 @@ const StockDetail = () => {
           (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > (priceChangeRatio / 100)) {
 
         // 从最低点之后到最新k线超过用户设定的K线数量
-        if (klines.length - 1 - lowestPointAfterHigh.index > stabilizationPeriod) { // 使用 stabilizationPeriod
+        if (klines.length - 1 - lowestPointAfterHigh.index > stabilizationPeriod) {
           for (let i = lowestPointAfterHigh.index + stabilizationPeriod; i < klines.length; i++) {
-            if (i >= 4) {
-              const avgVolume = klines.slice(i - 4, i).reduce((sum, k) => sum + k.volume, 0) / 4;
-              if (klines[i].volume > avgVolume * volumeRatio) {
-                newBuyPoints.push({
-                  index: i,
-                  price: klines[i].low
-                });
-                break;
-              }
+            if (i >= 19 && klines[i].isVolumeSpike) {
+              newBuyPoints.push({
+                index: i,
+                price: klines[i].low
+              });
+              break;
             }
           }
         }
@@ -122,17 +135,14 @@ const StockDetail = () => {
           (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > (priceChangeRatio / 100)) {
 
         // 从最高点之后到最新k线超过用户设定的K线数量
-        if (klines.length - 1 - highestPointAfterLow.index > stabilizationPeriod) { // 使用 stabilizationPeriod
+        if (klines.length - 1 - highestPointAfterLow.index > stabilizationPeriod) {
           for (let i = highestPointAfterLow.index + stabilizationPeriod; i < klines.length; i++) {
-            if (i >= 4) {
-              const avgVolume = klines.slice(i - 4, i).reduce((sum, k) => sum + k.volume, 0) / 4;
-              if (klines[i].volume > avgVolume * volumeRatio) {
-                newSellPoints.push({
-                  index: i,
-                  price: klines[i].high
-                });
-                break;
-              }
+            if (i >= 19 && klines[i].isVolumeSpike) {
+              newSellPoints.push({
+                index: i,
+                price: klines[i].high
+              });
+              break;
             }
           }
         }
@@ -144,36 +154,77 @@ const StockDetail = () => {
   };
 
   const getChartOption = () => {
-    const dates = klines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
-    const klineData = klines.map(item => [
-      item.open,
-      item.close,
-      item.low,
-      item.high
-    ]);
-
-    const volumeData = klines.map((item, index) => {
-      if (index < 4) return item.volume;
-      const avgVolume = klines.slice(index - 4, index).reduce((sum, k) => sum + k.volume, 0) / 4;
+    const dates = processedKlines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
+    const klineData = processedKlines.map((item, index) => {
+      const isUp = item.close >= item.open;
+      
+      if (index < 19) {
+        // 前19根K线，根据涨跌设置颜色
+        return {
+          value: [item.open, item.close, item.low, item.high],
+          itemStyle: {
+            color: isUp ? '#ef232a' : '#14b143',
+            color0: isUp ? '#ef232a' : '#14b143',
+            borderColor: isUp ? '#ef232a' : '#14b143',
+            borderColor0: isUp ? '#ef232a' : '#14b143'
+          }
+        };
+      }
+      
+      // 使用预处理后的放量判断
+      let color;
+      if (item.isVolumeSpike) {
+        // 成交量放大（超过20日均线+n个标准差）
+        color = isUp ? '#8B0000' : '#006400'; // 深红色/深绿色
+      } else {
+        // 普通成交量
+        color = isUp ? '#ef232a' : '#14b143'; // 红色/绿色
+      }
+      
       return {
-        value: item.volume,
+        value: [item.open, item.close, item.low, item.high],
         itemStyle: {
-          color: item.volume > avgVolume * volumeRatio ? '#f5222d' : '#14b143'
+          color: color,
+          color0: color,
+          borderColor: color,
+          borderColor0: color
         }
       };
     });
 
-    const stopFallSignals = klines.map((item, index) => {
-      if (index < 4) return null;
-      const avgVolume = klines.slice(index - 4, index).reduce((sum, k) => sum + k.volume, 0) / 4;
-      const isVolumeSpike = item.volume > avgVolume * volumeRatio;
-      const bodySize = Math.abs(item.close - item.open);
-      const upperShadow = item.high - Math.max(item.close, item.open);
-      const lowerShadow = Math.min(item.close, item.open) - item.low;
-      const isStopFall = isVolumeSpike && bodySize < 0.5 * Math.max(upperShadow, lowerShadow);
-
-      return isStopFall ? item.close : null;
+    const volumeData = processedKlines.map((item, index) => {
+      const isUp = item.close >= item.open;
+      
+      if (index < 19) {
+        // 前19根K线，根据涨跌设置颜色
+        return {
+          value: item.volume,
+          itemStyle: {
+            color: isUp ? '#ef232a' : '#14b143'
+          }
+        };
+      }
+      
+      // 使用预处理后的放量判断
+      let color;
+      if (item.isVolumeSpike) {
+        // 成交量放大（超过20日均线+1个标准差）
+        color = isUp ? '#8B0000' : '#006400'; // 深红色/深绿色
+      } else {
+        // 普通成交量
+        color = isUp ? '#ef232a' : '#14b143'; // 红色/绿色
+      }
+      
+      return {
+        value: item.volume,
+        itemStyle: {
+          color: color
+        }
+      };
     });
+
+    // 获取20日均线数据
+    const volumeMA20 = processedKlines.map(item => item.volumeMA20);
 
     const buyPointMarkers = buyPoints.map(point => ({
       name: '买点',
@@ -199,12 +250,6 @@ const StockDetail = () => {
       name: 'K线',
       type: 'candlestick',
       data: klineData,
-      itemStyle: {
-        color: '#ef232a',
-        color0: '#14b143',
-        borderColor: '#ef232a',
-        borderColor0: '#14b143'
-      },
       markPoint: {
         data: [...buyPointMarkers, ...sellPointMarkers],
         symbolSize: 30,
@@ -212,7 +257,7 @@ const StockDetail = () => {
           show: true,
           formatter: '{b}',
           color: '#fff',
-          fontSize: 16
+          fontSize: 12
         },
         symbolOffset: [0, '-50%']
       }
@@ -223,13 +268,16 @@ const StockDetail = () => {
       yAxisIndex: 1,
       data: volumeData
     }, {
-      name: '止跌滞涨信号',
-      type: 'scatter',
-      data: stopFallSignals,
-      symbolSize: 8,
-      itemStyle: {
-        color: '#0000FF'
-      }
+      name: '成交量20日均线',
+      type: 'line',
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: volumeMA20,
+      lineStyle: {
+        color: '#FFA500',
+        width: 1
+      },
+      symbol: 'none'
     }];
 
     supportLevels.forEach((level) => {
@@ -264,10 +312,44 @@ const StockDetail = () => {
         trigger: 'axis',
         axisPointer: {
           type: 'cross'
+        },
+        formatter: function(params) {
+          const date = params[0].axisValue;
+          let result = `<div style="font-weight: bold; margin-bottom: 8px;">${date}</div>`;
+          
+          // 处理K线数据
+          const klineData = params.find(p => p.seriesName === 'K线');
+          if (klineData) {
+            // 现在klineData.data是对象格式，需要访问value属性
+            const [data, open, close, low, high] = klineData.data.value || klineData.data;
+            result += `
+              <div style="margin-bottom: 4px;">
+                <span style="color: #666;">开盘：</span><span style="color: #ef232a;">${open.toFixed(2)}</span>
+                <span style="color: #666; margin-left: 8px;">收盘：</span><span style="color: #ef232a;">${close.toFixed(2)}</span>
+              </div>
+              <div style="margin-bottom: 4px;">
+                <span style="color: #666;">最高：</span><span style="color: #ef232a;">${high.toFixed(2)}</span>
+                <span style="color: #666; margin-left: 8px;">最低：</span><span style="color: #ef232a;">${low.toFixed(2)}</span>
+              </div>
+            `;
+          }
+          
+          // 处理成交量数据 - 从预处理数据中获取
+          const dataIndex = params[0].dataIndex;
+          if (dataIndex !== undefined && processedKlines[dataIndex]) {
+            const volume = processedKlines[dataIndex].volume;
+            result += `
+              <div style="margin-bottom: 4px;">
+                <span style="color: #666;">成交量：</span><span style="color: #1890ff;">${volume.toLocaleString()}</span>
+              </div>
+            `;
+          }
+          
+          return result;
         }
       },
       legend: {
-        data: ['K线', '成交量', '止跌滞涨信号', '买点', '卖点', ...supportLevels.map((v) => `支撑位${v}`), ...resistanceLevels.map((v) => `压力位${v}`)]
+        data: ['K线', '成交量', '成交量20日均线', '买点', '卖点', ...supportLevels.map((v) => `支撑位${v}`), ...resistanceLevels.map((v) => `压力位${v}`)]
       },
       grid: [{
         left: '10%',
@@ -362,14 +444,6 @@ const StockDetail = () => {
               onChange={value => setDays(value)}
             />
           </Form.Item>
-          <Form.Item label="放量比率">
-            <InputNumber
-              min={1}
-              step={0.1}
-              value={volumeRatio}
-              onChange={value => setVolumeRatio(value)}
-            />
-          </Form.Item>
           <Form.Item label="涨跌幅(%)">
             <InputNumber
               min={1}
@@ -379,7 +453,7 @@ const StockDetail = () => {
               onChange={value => setPriceChangeRatio(value)}
             />
           </Form.Item>
-          <Form.Item label="企稳时间(K线数)"> {/* 新增：企稳时间输入框 */}
+          <Form.Item label="企稳时间(K线数)">
             <InputNumber
               min={1}
               max={100}
@@ -388,9 +462,18 @@ const StockDetail = () => {
               onChange={value => setStabilizationPeriod(value)}
             />
           </Form.Item>
+          <Form.Item label="成交量标准差倍数">
+            <InputNumber
+              min={0.1}
+              max={5}
+              step={0.1}
+              value={volumeStdDevMultiplier}
+              onChange={value => setVolumeStdDevMultiplier(value)}
+            />
+          </Form.Item>
         </Form>
         <ReactECharts
-          key={supportLevels.join(',') + resistanceLevels.join(',') + buyPoints.length + sellPoints.length}
+          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}`}
           option={chartOption}
           style={{ height: '600px' }}
         />
