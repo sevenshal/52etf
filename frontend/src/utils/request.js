@@ -6,6 +6,9 @@ const request = axios.create({
 });
 
 request.interceptors.request.use(config => {
+  if(!config.url.startsWith('/api/')) {
+    return config;
+  }
   const accountId = localStorage.getItem('accountId');
   
   // 允许 profile 和 validate-account 相关的请求通过
