@@ -1,5 +1,6 @@
 import httpx
 from bs4 import BeautifulSoup
+from diskcache import Cache
 
 class FedRateMonitorService:
     URL = 'https://cn.investing.com/central-banks/fed-rate-monitor'
@@ -19,28 +20,55 @@ class FedRateMonitorService:
         'upgrade-insecure-requests': '1',
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
     }
-    # SOCKS5代理配置
     PROXY = {
         'http://': 'socks5://127.0.0.1:7891',
         'https://': 'socks5://127.0.0.1:7891'
     }
+    CACHE = Cache(directory='.cache/fed_rate')
+    CACHE_TIMEOUT = 3600  # 1小时
 
     @staticmethod
-    def fetch_data():
+    def fetch_data(use_cache=True):
+        cache_key = 'fed_rate_parsed_data'
+        
+        if use_cache:
+            cached_data = FedRateMonitorService.CACHE.get(cache_key)
+            if cached_data is not None:
+                print(f"使用缓存数据 (有效期剩余 {int(FedRateMonitorService.CACHE.ttl(cache_key) or 0)} 秒)")
+                return cached_data
+
         try:
-            # 添加代理参数
+            html_content = FedRateMonitorService._fetch_html()
+            if not html_content:
+                return []
+                
+            data = FedRateMonitorService._parse_response(html_content)
+            
+            # 仅缓存解析后的数据
+            FedRateMonitorService.CACHE.set(cache_key, data, expire=FedRateMonitorService.CACHE_TIMEOUT)
+            
+            return data
+        except Exception as err:
+            print(f"数据获取或解析失败: {err}")
+            return []
+
+    @staticmethod
+    def _fetch_html():
+        """单独的HTML获取方法，不涉及缓存和解析"""
+        try:
             with httpx.Client(proxies=FedRateMonitorService.PROXY) as client:
                 response = client.get(FedRateMonitorService.URL, headers=FedRateMonitorService.HEADERS)
                 response.raise_for_status()
-                return FedRateMonitorService._parse_response(response.text)
+                return response.text
         except httpx.HTTPStatusError as http_err:
-            print(f"HTTP error occurred: {http_err}")
+            print(f"HTTP请求错误: {http_err}")
         except Exception as err:
-            print(f"An error occurred: {err}")
-        return []
+            print(f"网络请求异常: {err}")
+        return None
 
     @staticmethod
     def _parse_response(html_content):
+        # 保持原有解析逻辑不变
         soup = BeautifulSoup(html_content, 'html.parser')
         card_wrappers = soup.find_all('div', class_='cardWrapper')
         data = []
@@ -75,6 +103,14 @@ class FedRateMonitorService:
 
 if __name__ == "__main__":
     service = FedRateMonitorService()
+    
+    # 首次请求会获取、解析并缓存数据
+    print("第一次请求:")
     result = service.fetch_data()
-    for item in result:
-        print(item)    
+    for item in result[:1]:  # 只打印第一条结果
+        print(f"日期: {item['date']}, 会议时间: {item['meeting_time']}")
+    
+    # 再次请求会使用缓存
+    print("\n第二次请求:")
+    cached_result = service.fetch_data()
+    print(f"缓存数据条目数: {len(cached_result)}")    
