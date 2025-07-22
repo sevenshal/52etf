@@ -22,3 +22,5 @@ scipy
 aiocache
 cachetools
 diskcache
+beautifulsoup4
+socksio
