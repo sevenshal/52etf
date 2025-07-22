@@ -88,18 +88,14 @@ const SzdtDashboard = () => {
       const columns = [];
       const dateMap = {};
       for (const item of data) {
-        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
-        if (d > oneYearLater) continue;
-        const dateStr = item.date;
-        columns.push(dateStr);
-        dateMap[dateStr] = item;
+        item.date = item.date.replace(/年|月/g, '-').replace('日', '');
+        columns.push(item.date);
+        dateMap[item.date] = item;
       }
 
       // 2. 收集所有区间（行头，去重升序，所有rate_info都要）
       const rateSet = new Set();
       for (const item of data) {
-        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
-        if (d > oneYearLater) continue;
         if (item.rate_info && item.rate_info.length > 0) {
           for (const rate of item.rate_info) {
             rateSet.add(rate.target_rate);
@@ -112,9 +108,10 @@ const SzdtDashboard = () => {
         return aLow - bLow;
       });
 
-      // 3. 构建表格内容（所有区间都显示）
+      // 3. 构建表格内容（所有区间都显示，去除全为0或空的行）
       const rows = rates.map(rate => {
         const row = { rate };
+        let hasNonZero = false;
         for (const dateStr of columns) {
           const item = dateMap[dateStr];
           let prob = '';
@@ -123,16 +120,19 @@ const SzdtDashboard = () => {
             prob = found ? found.current_probability : '';
           }
           row[dateStr] = prob;
+          // 判断是否有非0且非空概率
+          if (prob && parseFloat(prob.replace('%', '')) > 0) {
+            hasNonZero = true;
+          }
         }
-        return row;
-      });
+        return hasNonZero ? row : null;
+      }).filter(Boolean);
       setForwardTable({ columns, rows });
 
       // 4. 计算贪恐区间（只用每个会议概率最高的区间）
       let allLowers = [], allUppers = [];
       for (const item of data) {
-        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
-        if (d > oneYearLater) continue;
+        if (new Date(item.date) > oneYearLater) continue;
         if (item.rate_info && item.rate_info.length > 0) {
           let maxProb = -1, bestRate = null;
           for (const rate of item.rate_info) {
@@ -865,7 +865,7 @@ const SzdtDashboard = () => {
                         const cellColor = getCellColor(forwardTable);
                         return (
                           <tr key={row.rate}>
-                            <td style={{ background: '#fafafa', position: 'sticky', left: 0, zIndex: 1, padding: '0 6px' }}>{row.rate}</td>
+                            <td style={{ background: '#fafafa', position: 'sticky', left: 0, zIndex: 1, whiteSpace: 'nowrap', padding: '0 6px' }}>{row.rate}</td>
                             {forwardTable.columns.map(dateStr => (
                               <td key={dateStr} style={{...cellColor(row, dateStr), whiteSpace: 'nowrap', padding: '0 6px'}}>
                                 {row[dateStr]}
