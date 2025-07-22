@@ -126,3 +126,22 @@ class FMPService:
         except Exception as e:
             self.logger.error(f"获取{symbol}除权除息后历史数据失败: {str(e)}")
             return None
+
+    async def get_us10y_yield(self) -> Optional[float]:
+        """获取美国10年期国债收益率（实时，单位%）
+        Returns:
+            float: 10年美债收益率（如4.25），获取失败返回None
+        """
+        try:
+            url = f"{self.base_url}/quote/^TNX?apikey={self.api_key}"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                if data and len(data) > 0 and 'price' in data[0]:
+                    # ^TNX单位为0.1%，需除以10
+                    return float(data[0]['price']) / 10
+            return None
+        except Exception as e:
+            self.logger.error(f"获取10年美债收益率失败: {str(e)}")
+            return None
