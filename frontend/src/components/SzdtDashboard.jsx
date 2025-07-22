@@ -807,7 +807,7 @@ const SzdtDashboard = () => {
 
       <Card title='美债贪恐指数及联邦概率预测' style={{ marginBottom: 16 }}>
         <Row>
-          <Col span={4}>
+          <Col span={4} xs={24} sm={24} md={4} lg={4} xl={4}>
             <Statistic
               title="美债贪恐值"
               style={{ marginBottom: 16 }}
@@ -834,11 +834,11 @@ const SzdtDashboard = () => {
                     : '#237804',
               }}
             />
-            <div>实时10Y国债收益率：{us10y || '...'}</div>
-            <div>当前利率区间：{fedRateFrom} - {fedRateTo}</div>
-            <div>未来一年预测区间：{forwardMin} - {forwardMax}</div>
+            <div>10Y国债实时利率：{us10y || '...'}</div>
+            <div>当前执行利率：{fedRateFrom} - {fedRateTo}</div>
+            <div>未来一年预测利率：{forwardMin} - {forwardMax}</div>
           </Col>
-          <Col span={20}>
+          <Col span={20} xs={24} sm={24} md={20} lg={20} xl={20}>
             <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start' }}>
                 {/* 表格 */}
                 <div style={{ minWidth: 320, overflowX: 'auto', marginRight: 16 }}>
