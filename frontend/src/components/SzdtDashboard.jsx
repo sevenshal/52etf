@@ -31,6 +31,13 @@ const SzdtDashboard = () => {
   const [aiaeData, setAiaeData] = useState(null);
   const [activeTab, setActiveTab] = useState('current');
   const [timeRange, setTimeRange] = useState(-1);
+  const [us10y, setUs10y] = useState(null); // 实时10年期国债收益率
+  const [fedRateFrom, setFedRateFrom] = useState(null); // 当前存款利率from
+  const [fedRateTo, setFedRateTo] = useState(null); // 当前存款利率to
+  const [forwardMin, setForwardMin] = useState(null); // 未来一年预测区间下限
+  const [forwardMax, setForwardMax] = useState(null); // 未来一年预测区间上限
+  const [bondFearGreed, setBondFearGreed] = useState(null); // 美债贪恐值
+  const [forwardTable, setForwardTable] = useState({ columns: [], rows: [] });
 
   useEffect(() => {
     // 并发请求初始数据
@@ -52,6 +59,124 @@ const SzdtDashboard = () => {
 
     fetchInitialData();
   }, []);
+
+  // 获取当前利率from/to
+  useEffect(() => {
+    async function fetchFedRate() {
+      const resp = await fetch('https://markets.newyorkfed.org/read?productCode=50&eventCodes=500&limit=1&startPosition=0&format=json');
+      const data = await resp.json();
+      if (data && data.refRates && data.refRates.length > 0) {
+        setFedRateFrom(data.refRates[0].targetRateFrom);
+        setFedRateTo(data.refRates[0].targetRateTo);
+      }
+    }
+    fetchFedRate();
+  }, []);
+
+  // 获取未来一年所有预测区间和表格数据
+  useEffect(() => {
+    async function fetchForward1y() {
+      const resp = await request.get('/api/fed-rate/monitor');
+      const result = resp.data;
+      if (!result || result.status !== 'success' || !Array.isArray(result.data) || result.data.length === 0) return;
+      const data = result.data;
+      const now = new Date();
+      const oneYearLater = new Date(now);
+      oneYearLater.setFullYear(now.getFullYear() + 1);
+
+      // 1. 收集所有日期（列头）
+      const columns = [];
+      const dateMap = {};
+      for (const item of data) {
+        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
+        if (d > oneYearLater) continue;
+        const dateStr = item.date;
+        columns.push(dateStr);
+        dateMap[dateStr] = item;
+      }
+
+      // 2. 收集所有区间（行头，去重升序，所有rate_info都要）
+      const rateSet = new Set();
+      for (const item of data) {
+        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
+        if (d > oneYearLater) continue;
+        if (item.rate_info && item.rate_info.length > 0) {
+          for (const rate of item.rate_info) {
+            rateSet.add(rate.target_rate);
+          }
+        }
+      }
+      const rates = Array.from(rateSet).sort((a, b) => {
+        const aLow = parseFloat(a.split('-')[0]);
+        const bLow = parseFloat(b.split('-')[0]);
+        return aLow - bLow;
+      });
+
+      // 3. 构建表格内容（所有区间都显示）
+      const rows = rates.map(rate => {
+        const row = { rate };
+        for (const dateStr of columns) {
+          const item = dateMap[dateStr];
+          let prob = '';
+          if (item && item.rate_info) {
+            const found = item.rate_info.find(r => r.target_rate === rate);
+            prob = found ? found.current_probability : '';
+          }
+          row[dateStr] = prob;
+        }
+        return row;
+      });
+      setForwardTable({ columns, rows });
+
+      // 4. 计算贪恐区间（只用每个会议概率最高的区间）
+      let allLowers = [], allUppers = [];
+      for (const item of data) {
+        const d = new Date(item.date.replace(/年|月/g, '-').replace('日', ''));
+        if (d > oneYearLater) continue;
+        if (item.rate_info && item.rate_info.length > 0) {
+          let maxProb = -1, bestRate = null;
+          for (const rate of item.rate_info) {
+            const prob = parseFloat(rate.current_probability.replace('%', ''));
+            if (prob > maxProb) {
+              maxProb = prob;
+              bestRate = rate.target_rate;
+            }
+          }
+          if (bestRate) {
+            const [low, up] = bestRate.split('-').map(s => parseFloat(s));
+            allLowers.push(low);
+            allUppers.push(up);
+          }
+        }
+      }
+      setForwardMin(allLowers.length > 0 ? Math.min(...allLowers) : null);
+      setForwardMax(allUppers.length > 0 ? Math.max(...allUppers) : null);
+    }
+    fetchForward1y();
+  }, []);
+
+  // 实时获取10年期国债收益率
+  useEffect(() => {
+    const { US10YWS } = require('../utils/us10yWS');
+    const ws = new US10YWS({
+      onYieldUpdate: (val) => setUs10y(val)
+    });
+    ws.connect();
+    return () => ws.disconnect();
+  }, []);
+
+  // 计算美债贪恐值
+  useEffect(() => {
+    if (us10y && fedRateFrom !== null && fedRateTo !== null && forwardMin !== null && forwardMax !== null) {
+      // 取所有下限和上限的最小值和最大值
+      const minRate = Math.min(fedRateFrom, fedRateTo, forwardMin, forwardMax);
+      const maxRate = Math.max(fedRateFrom, fedRateTo, forwardMin, forwardMax);
+      let val = 100 * (maxRate - us10y) / (maxRate - minRate);
+      if (us10y <= minRate) val = 100;
+      if (us10y >= maxRate) val = 0;
+      setBondFearGreed(Math.round(val));
+    }
+  }, [us10y, fedRateFrom, fedRateTo, forwardMin, forwardMax]);
 
   // 监听标签切换，按需加载数据
   useEffect(() => {
@@ -186,6 +311,30 @@ const SzdtDashboard = () => {
     if (score >= 45) return '中性';
     if (score >= 25) return '恐惧';
     return '极度恐惧';
+  };
+
+  const getCellColor = (forwardTable) => {
+    // 预处理每一列的最大最小概率
+    const colProbMap = {};
+    for (const dateStr of forwardTable.columns) {
+      const probs = forwardTable.rows.map(row => parseFloat((row[dateStr] || '').replace('%', ''))).filter(v => !isNaN(v));
+      if (probs.length === 0) continue;
+      const max = Math.max(...probs);
+      const min = Math.min(...probs);
+      colProbMap[dateStr] = { max, min };
+    }
+    // 返回一个函数用于渲染
+    return (row, dateStr) => {
+      const val = parseFloat((row[dateStr] || '').replace('%', ''));
+      if (isNaN(val)) return {};
+      const { max, min } = colProbMap[dateStr] || {};
+      if (val === max) return { background: '#003a8c', color: '#fff' };
+      if (val === min) return { background: '#fff' };
+      // 渐变色，最大深蓝，最小白色
+      const percent = (val - min) / (max - min || 1);
+      const blue = Math.round(255 - percent * 100);
+      return { background: `rgb(${blue},${blue + 30},255)` };
+    };
   };
 
   const renderHistoricalChart = () => {
@@ -655,6 +804,83 @@ const SzdtDashboard = () => {
           </Tabs>
         </Card>
       )}
+
+      <Card title='美债贪恐指数' style={{ marginBottom: 16 }}>
+        <Row>
+          <Col span={4}>
+            <Statistic
+              title="美债贪恐值"
+              style={{ marginBottom: 16 }}
+              value={
+                bondFearGreed !== null
+                  ? `${bondFearGreed}/100${
+                      bondFearGreed <= 30
+                        ? ' (恐慌)'
+                        : bondFearGreed >= 70
+                        ? ' (贪婪)'
+                        : ' (中性)'
+                    }`
+                  : '...'}
+              valueStyle={{
+                color:
+                  bondFearGreed >= 75
+                    ? '#cf1322'
+                    : bondFearGreed >= 55
+                    ? '#fa8c16'
+                    : bondFearGreed >= 45
+                    ? '#d9d9d9'
+                    : bondFearGreed >= 25
+                    ? '#52c41a'
+                    : '#237804',
+              }}
+            />
+            <div>实时10Y国债收益率：{us10y || '...'}</div>
+            <div>当前利率区间：{fedRateFrom} - {fedRateTo}</div>
+            <div>未来一年预测区间：{forwardMin} - {forwardMax}</div>
+          </Col>
+          <Col span={20}>
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start' }}>
+                {/* 表格 */}
+                <div style={{ minWidth: 320, overflowX: 'auto', marginRight: 16 }}>
+                  <table className="forward-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
+                    <thead>
+                      <tr>
+                        <th style={{ background: '#f0f0f0', position: 'sticky', left: 0, zIndex: 1, padding: '0 6px' }}>区间</th>
+                        {forwardTable.columns.map(dateStr => (
+                          <th
+                            key={dateStr}
+                            style={{
+                              background: '#f0f0f0',
+                              padding: '0 6px',
+                              whiteSpace: 'nowrap'
+                            }}
+                          >
+                            {dateStr}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {forwardTable.rows.slice().reverse().map(row => {
+                        const cellColor = getCellColor(forwardTable);
+                        return (
+                          <tr key={row.rate}>
+                            <td style={{ background: '#fafafa', position: 'sticky', left: 0, zIndex: 1, padding: '0 6px' }}>{row.rate}</td>
+                            {forwardTable.columns.map(dateStr => (
+                              <td key={dateStr} style={{...cellColor(row, dateStr), whiteSpace: 'nowrap', padding: '0 6px'}}>
+                                {row[dateStr]}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+          </Col>
+        </Row>
+      </Card>
 
       <Card title='守猪逮兔恐贪模型'>
         <List
