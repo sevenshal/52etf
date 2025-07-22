@@ -34,7 +34,6 @@ class FedRateMonitorService:
         if use_cache:
             cached_data = FedRateMonitorService.CACHE.get(cache_key)
             if cached_data is not None:
-                print(f"使用缓存数据 (有效期剩余 {int(FedRateMonitorService.CACHE.ttl(cache_key) or 0)} 秒)")
                 return cached_data
 
         try:
