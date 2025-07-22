@@ -1,6 +1,7 @@
 import httpx
 from bs4 import BeautifulSoup
 from diskcache import Cache
+import os
 
 class FedRateMonitorService:
     URL = 'https://cn.investing.com/central-banks/fed-rate-monitor'
@@ -24,7 +25,8 @@ class FedRateMonitorService:
         'http://': 'socks5://127.0.0.1:7891',
         'https://': 'socks5://127.0.0.1:7891'
     }
-    CACHE = Cache(directory='.cache/fed_rate')
+    CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "quant")
+    CACHE = Cache(directory=CACHE_DIR)
     CACHE_TIMEOUT = 3600  # 1小时
 
     @staticmethod

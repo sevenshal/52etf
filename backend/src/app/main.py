@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate
 from ..robot.main import robot
 
 # 获取环境变量，默认为开发环境
@@ -55,6 +55,7 @@ app.include_router(stock.router)
 app.include_router(positions.router)
 app.include_router(trade.router)
 app.include_router(backtest.router)
+app.include_router(fed_rate.router)
 
 def start_robot():
     robot()
