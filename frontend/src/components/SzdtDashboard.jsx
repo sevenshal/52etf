@@ -805,7 +805,7 @@ const SzdtDashboard = () => {
         </Card>
       )}
 
-      <Card title='美债贪恐指数' style={{ marginBottom: 16 }}>
+      <Card title='美债贪恐指数及联邦概率预测' style={{ marginBottom: 16 }}>
         <Row>
           <Col span={4}>
             <Statistic
