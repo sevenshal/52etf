@@ -121,7 +121,7 @@ const SzdtDashboard = () => {
           }
           row[dateStr] = prob;
           // 判断是否有非0且非空概率
-          if (prob && parseFloat(prob.replace('%', '')) > 0) {
+          if (prob && parseFloat(prob.replace('%', '')) > 1) {
             hasNonZero = true;
           }
         }
