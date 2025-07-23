@@ -19,6 +19,34 @@ export class US10YWS {
     this.onYieldUpdate = onYieldUpdate;
     this.connected = false;
     this._subscribed = false;
+  
+    // 初始化时立即获取最新利率数据
+    this._fetchInitialYieldData();
+  }
+
+  async _fetchInitialYieldData() {
+    try {
+      const response = await fetch('https://api.investing.com/api/financialdata/23705/historical/chart/?interval=PT1M&pointscount=60');
+
+      if (!response.ok) {
+        console.error(`HTTP error! status: ${response.status}`);
+        return;
+      }
+
+      const data = await response.json();
+      if (data && data.data && data.data.length > 0) {
+        // 获取最后一条数据的[4]对应的值
+        const latestYield = data.data[data.data.length - 1][4];
+
+        // 统一使用onYieldUpdate回调，上层无需区分数据来源
+        if (typeof this.onYieldUpdate === 'function') {
+          this.onYieldUpdate(latestYield);
+        }
+      }
+    } catch (error) {
+      console.error('获取初始美债收益率数据失败:', error);
+      // 可以添加重试逻辑或其他错误处理
+    }
   }
 
   connect() {
