@@ -198,7 +198,7 @@ const SzdtDashboard = () => {
       
       setHistoricalData(cnnData);
       setSpyEmotionData(spyEmotion.data);
-      setSpyPriceData(spyPrice.historical
+      setSpyPriceData(spyPrice.data.historical
         .sort((a, b) => new Date(a.date) - new Date(b.date))
         .map(item => ({
           timestamp: item.date,
