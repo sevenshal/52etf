@@ -204,7 +204,7 @@ const SzdtDashboard = () => {
           timestamp: item.date,
           close: item.close
         })));
-      setVixData(vixJson.observations
+      setVixData(vixJson.data.observations
         .sort((a, b) => new Date(a.date) - new Date(b.date))
         .map(item => ({
           timestamp: item.date,
