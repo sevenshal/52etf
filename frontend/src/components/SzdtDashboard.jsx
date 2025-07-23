@@ -218,9 +218,9 @@ const SzdtDashboard = () => {
   const fetchAiaeData = async () => {
     try {
       const data = await request.get('/fred/series/observations?series_id=BOGZ1FL153064476Q&file_type=json');
-
+      const observations = data.observations
       // 处理数据
-      const aiaeData = data.observations
+      const aiaeData = observations
         .map(item => ({
           date: item.date,
           value: parseFloat(item.value)
