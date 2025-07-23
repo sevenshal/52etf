@@ -132,7 +132,7 @@ const SzdtDashboard = () => {
       // 4. 计算贪恐区间（只用每个会议概率最高的区间）
       let allLowers = [], allUppers = [];
       for (const item of data) {
-        if (new Date(item.date) > oneYearLater) continue;
+        if (new Date(item.date.replace(/年|月/g, '-').replace('日', '')) > oneYearLater) continue;
         if (item.rate_info && item.rate_info.length > 0) {
           let maxProb = -1, bestRate = null;
           for (const rate of item.rate_info) {
