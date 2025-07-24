@@ -9,6 +9,7 @@ class FMPService:
     def __init__(self):
         self.api_key = "OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8"
         self.base_url = "https://financialmodelingprep.com/api/v3"
+        self.stable_base_url = "https://financialmodelingprep.com/stable"
         self.logger = logging.getLogger("FMPService")
 
     async def get_quote(self, symbol: str) -> Optional[Dict]:
@@ -115,7 +116,7 @@ class FMPService:
             ]
         """
         try:
-            url = f"https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted?symbol={symbol}&apikey={self.api_key}&limit={days}"
+            url = f"{self.stable_base_url}/historical-price-eod/dividend-adjusted?symbol={symbol}&apikey={self.api_key}&limit={days}"
             
             async with httpx.AsyncClient() as client:
                 response = await client.get(url)
@@ -144,4 +145,28 @@ class FMPService:
             return None
         except Exception as e:
             self.logger.error(f"获取10年美债收益率失败: {str(e)}")
+            return None
+
+    async def get_analyst_estimates(self, symbol: str, period: str = 'annual', page: int = 0, limit: int = 10) -> Optional[Dict]:
+        """获取某个股票的财报预测数据
+        
+        Args:
+            symbol: 股票代码，例如 'MSFT' 或 'AAPL'
+            period: 财报周期，'annual' 或 'quarter'，默认为 'annual'
+            page: 页码，默认为 0
+            limit: 每页数据数量，默认为 10
+            
+        Returns:
+            Dict: 财报预测数据，获取失败返回 None
+        """
+        try:
+            url = f"{self.stable_base_url}/analyst-estimates/{symbol}?period={period}&page={page}&limit={limit}&apikey={self.api_key}"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()
+                    
+        except Exception as e:
+            self.logger.error(f"获取{symbol}财报预测数据失败: {str(e)}")
             return None
