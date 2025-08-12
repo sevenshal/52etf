@@ -25,7 +25,6 @@ def robot():
   # etf_manager.calculate_all_emotions()
   # 定时执行数据抓取
   schedule.every().day.at("08:00").do(evc_manager.fetch_and_stocks)
-  schedule.every().day.at("20:00").do(evc_manager.fetch_and_stocks)
 
   # 定时执行ETF估值分析
   schedule.every().day.at("09:00").do(etf_manager.analyze_all_fair_value)
