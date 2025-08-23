@@ -38,6 +38,7 @@ const SzdtDashboard = () => {
   const [forwardMax, setForwardMax] = useState(null); // 未来一年预测区间上限
   const [bondFearGreed, setBondFearGreed] = useState(null); // 美债贪恐值
   const [forwardTable, setForwardTable] = useState({ columns: [], rows: [] });
+  const [predictionData, setPredictionData] = useState(null); // 走势预测数据
 
   useEffect(() => {
     // 并发请求初始数据
@@ -184,8 +185,210 @@ const SzdtDashboard = () => {
       fetchHistoricalData();
     } else if (activeTab === 'aiae' && !aiaeData) {
       fetchAiaeData();
+    } else if (activeTab === 'prediction' && !predictionData) {
+      fetchPredictionData();
     }
   }, [activeTab]);
+
+  const fetchPredictionData = async () => {
+    try {
+      const response = await request.get('https://api.52etf.vip/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line');
+      const historicalData = response.data.historical;
+      
+      // 按日期排序
+      const sortedData = historicalData.sort((a, b) => new Date(a.date) - new Date(b.date));
+      
+      // 填充缺失的日期数据
+      const filledData = [];
+      for (let i = 0; i < sortedData.length; i++) {
+        filledData.push(sortedData[i]);
+        // 如果不是最后一天，检查是否有缺失的日期
+        if (i < sortedData.length - 1) {
+          const currentDate = new Date(sortedData[i].date);
+          const nextDate = new Date(sortedData[i + 1].date);
+          const daysDiff = Math.floor((nextDate - currentDate) / (1000 * 60 * 60 * 24));
+          
+          // 如果有缺失的日期，用前一天的数据填充
+          for (let j = 1; j < daysDiff; j++) {
+            const missingDate = new Date(currentDate);
+            missingDate.setDate(currentDate.getDate() + j);
+            filledData.push({
+              date: missingDate.toISOString().split('T')[0],
+              close: sortedData[i].close
+            });
+          }
+        }
+      }
+      
+      // 按年份分组
+      const yearlyData = {};
+      filledData.forEach(item => {
+        const year = new Date(item.date).getFullYear();
+        if (!yearlyData[year]) {
+          yearlyData[year] = [];
+        }
+        yearlyData[year].push(item);
+      });
+      
+      // 对每年数据进行归一化处理
+      const normalizedData = {};
+      Object.keys(yearlyData).forEach(year => {
+        const yearData = yearlyData[year];
+        if (yearData.length === 0) return;
+        
+        // 找到该年第一天的股价作为基准
+        const firstDayPrice = yearData[0].close;
+        
+        // 归一化处理：第一天的股价记为100，其他天按比例折算
+        normalizedData[year] = yearData.map(item => ({
+          date: item.date,
+          normalizedPrice: (item.close / firstDayPrice) * 100
+        }));
+      });
+      
+      // 计算除今年外其他年份的平均值
+      const currentYear = new Date().getFullYear();
+      const allDates = new Set();
+      
+      // 收集所有日期
+      Object.keys(normalizedData).forEach(year => {
+        if (parseInt(year) !== currentYear) {
+          normalizedData[year].forEach(item => {
+            allDates.add(item.date);
+          });
+        }
+      });
+      
+      // 计算每个日期的平均值
+      const averageData = [];
+      const sortedDates = Array.from(allDates).sort();
+      
+      sortedDates.forEach(date => {
+        let sum = 0;
+        let count = 0;
+        
+        Object.keys(normalizedData).forEach(year => {
+          if (parseInt(year) !== currentYear) {
+            const yearData = normalizedData[year];
+            const item = yearData.find(d => d.date === date);
+            if (item) {
+              sum += item.normalizedPrice;
+              count++;
+            }
+          }
+        });
+        
+        if (count > 0) {
+          averageData.push({
+            date: date,
+            averagePrice: sum / count
+          });
+        }
+      });
+      
+      // 获取今年的数据
+      const currentYearData = normalizedData[currentYear] || [];
+      
+      // 将日期转换为月日格式（MM-DD）
+      const formatMonthDay = (dateStr) => {
+        const date = new Date(dateStr);
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        return `${month}-${day}`;
+      };
+      
+      // 创建月日到数据的映射
+      const monthDayToAverage = {};
+      averageData.forEach(item => {
+        const monthDay = formatMonthDay(item.date);
+        monthDayToAverage[monthDay] = item.averagePrice;
+      });
+      
+      const monthDayToCurrent = {};
+      currentYearData.forEach(item => {
+        const monthDay = formatMonthDay(item.date);
+        monthDayToCurrent[monthDay] = item.normalizedPrice;
+      });
+      
+      // 获取所有月日并排序
+      const allMonthDays = new Set();
+      Object.keys(monthDayToAverage).forEach(monthDay => allMonthDays.add(monthDay));
+      Object.keys(monthDayToCurrent).forEach(monthDay => allMonthDays.add(monthDay));
+      const sortedMonthDays = Array.from(allMonthDays).sort();
+      
+      // 创建图表配置
+      const option = {
+        tooltip: {
+          trigger: 'axis',
+          formatter: function(params) {
+            let result = `${params[0].name}<br/>`;
+            params.forEach(param => {
+              const value = param.value;
+              if (value !== null && value !== undefined && !isNaN(value)) {
+                result += `${param.seriesName}: ${value.toFixed(2)}<br/>`;
+              } else {
+                result += `${param.seriesName}: --<br/>`;
+              }
+            });
+            return result;
+          }
+        },
+        legend: {
+          data: ['历史平均', '今年实际'],
+          top: 0
+        },
+        grid: {
+          left: '3%',
+          right: '4%',
+          bottom: '3%',
+          containLabel: true
+        },
+        xAxis: {
+          type: 'category',
+          boundaryGap: false,
+          data: sortedMonthDays
+        },
+        yAxis: {
+          type: 'value',
+          name: '归一化价格',
+          axisLabel: {
+            formatter: '{value}'
+          }
+        },
+        series: [
+          {
+            name: '历史平均',
+            type: 'line',
+            smooth: true,
+            data: sortedMonthDays.map(monthDay => monthDayToAverage[monthDay] || null),
+            itemStyle: {
+              color: '#1890ff'
+            },
+            lineStyle: {
+              width: 2
+            }
+          },
+          {
+            name: '今年实际',
+            type: 'line',
+            smooth: true,
+            data: sortedMonthDays.map(monthDay => monthDayToCurrent[monthDay] || null),
+            itemStyle: {
+              color: '#fa8c16'
+            },
+            lineStyle: {
+              width: 2
+            }
+          }
+        ]
+      };
+      
+      setPredictionData(option);
+    } catch (error) {
+      console.error('获取预测数据失败:', error);
+      message.error('获取预测数据失败');
+    }
+  };
 
   const fetchHistoricalData = async () => {
     try {
@@ -779,6 +982,13 @@ const SzdtDashboard = () => {
             </Tabs.TabPane>
             <Tabs.TabPane tab="历史走势" key="historical">
               {renderHistoricalChart()}
+            </Tabs.TabPane>
+            <Tabs.TabPane tab="走势预测" key="prediction">
+              {predictionData ? (
+                <ReactECharts option={predictionData} style={{ height: '300px' }} />
+              ) : (
+                <div style={{ textAlign: 'center', padding: '20px' }}>加载中...</div>
+              )}
             </Tabs.TabPane>
             <Tabs.TabPane tab="AIAE" key="aiae">
               {aiaeData ? (
