@@ -200,24 +200,32 @@ const SzdtDashboard = () => {
       
       // 填充缺失的日期数据
       const filledData = [];
-      for (let i = 0; i < sortedData.length; i++) {
-        filledData.push(sortedData[i]);
-        // 如果不是最后一天，检查是否有缺失的日期
-        if (i < sortedData.length - 1) {
-          const currentDate = new Date(sortedData[i].date);
-          const nextDate = new Date(sortedData[i + 1].date);
-          const daysDiff = Math.floor((nextDate - currentDate) / (1000 * 60 * 60 * 24));
-          
-          // 如果有缺失的日期，用前一天的数据填充
-          for (let j = 1; j < daysDiff; j++) {
-            const missingDate = new Date(currentDate);
-            missingDate.setDate(currentDate.getDate() + j);
+      let currentIndex = 0;
+      let currentDate = new Date(sortedData[0].date);
+      const endDate = new Date(sortedData[sortedData.length - 1].date);
+      
+      while (currentDate <= endDate) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+        
+        // 查找当前日期是否有数据
+        const existingData = sortedData.find(item => item.date === dateStr);
+        
+        if (existingData) {
+          // 如果找到数据，使用实际数据
+          filledData.push(existingData);
+        } else {
+          // 如果没有数据，使用前一天的收盘价填充
+          const previousData = filledData[filledData.length - 1];
+          if (previousData) {
             filledData.push({
-              date: missingDate.toISOString().split('T')[0],
-              close: sortedData[i].close
+              date: dateStr,
+              close: previousData.close
             });
           }
         }
+        
+        // 移动到下一天
+        currentDate.setDate(currentDate.getDate() + 1);
       }
       
       // 按年份分组
@@ -246,48 +254,8 @@ const SzdtDashboard = () => {
         }));
       });
       
-      // 计算除今年外其他年份的平均值
+      // 计算除今年外其他年份按月日的平均值
       const currentYear = new Date().getFullYear();
-      const allDates = new Set();
-      
-      // 收集所有日期
-      Object.keys(normalizedData).forEach(year => {
-        if (parseInt(year) !== currentYear) {
-          normalizedData[year].forEach(item => {
-            allDates.add(item.date);
-          });
-        }
-      });
-      
-      // 计算每个日期的平均值
-      const averageData = [];
-      const sortedDates = Array.from(allDates).sort();
-      
-      sortedDates.forEach(date => {
-        let sum = 0;
-        let count = 0;
-        
-        Object.keys(normalizedData).forEach(year => {
-          if (parseInt(year) !== currentYear) {
-            const yearData = normalizedData[year];
-            const item = yearData.find(d => d.date === date);
-            if (item) {
-              sum += item.normalizedPrice;
-              count++;
-            }
-          }
-        });
-        
-        if (count > 0) {
-          averageData.push({
-            date: date,
-            averagePrice: sum / count
-          });
-        }
-      });
-      
-      // 获取今年的数据
-      const currentYearData = normalizedData[currentYear] || [];
       
       // 将日期转换为月日格式（MM-DD）
       const formatMonthDay = (dateStr) => {
@@ -297,11 +265,42 @@ const SzdtDashboard = () => {
         return `${month}-${day}`;
       };
       
+      // 按月日分组计算平均值
+      const monthDayToPrices = {};
+      
+      Object.keys(normalizedData).forEach(year => {
+        if (parseInt(year) !== currentYear) {
+          normalizedData[year].forEach(item => {
+            const monthDay = formatMonthDay(item.date);
+            if (!monthDayToPrices[monthDay]) {
+              monthDayToPrices[monthDay] = [];
+            }
+            monthDayToPrices[monthDay].push(item.normalizedPrice);
+          });
+        }
+      });
+      
+      // 计算每个月日的平均值
+      const averageData = [];
+      Object.keys(monthDayToPrices).forEach(monthDay => {
+        const prices = monthDayToPrices[monthDay];
+        const averagePrice = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+        averageData.push({
+          monthDay: monthDay,
+          averagePrice: averagePrice
+        });
+      });
+      
+      // 按月日排序
+      averageData.sort((a, b) => a.monthDay.localeCompare(b.monthDay));
+      
+      // 获取今年的数据
+      const currentYearData = normalizedData[currentYear] || [];
+      
       // 创建月日到数据的映射
       const monthDayToAverage = {};
       averageData.forEach(item => {
-        const monthDay = formatMonthDay(item.date);
-        monthDayToAverage[monthDay] = item.averagePrice;
+        monthDayToAverage[item.monthDay] = item.averagePrice;
       });
       
       const monthDayToCurrent = {};
