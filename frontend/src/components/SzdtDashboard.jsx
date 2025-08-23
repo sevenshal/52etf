@@ -353,6 +353,13 @@ const SzdtDashboard = () => {
           name: '归一化价格',
           axisLabel: {
             formatter: '{value}'
+          },
+          scale: true,
+          min: function(value) {
+            return Math.floor(value.min * 0.95);
+          },
+          max: function(value) {
+            return Math.ceil(value.max * 1.05);
           }
         },
         series: [
