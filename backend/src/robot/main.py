@@ -19,8 +19,8 @@ evc_manager = EVCManager()
 cnn_fear_index_scraper = CNNFearGreedIndexScraper()
 
 def robot():
-  evc_manager.fetch_and_stocks(force_fetch=False)
-  etf_manager.analyze_all_fair_value()
+  # evc_manager.fetch_and_stocks(force_fetch=False)
+  # etf_manager.analyze_all_fair_value()
   # cnn_fear_index_scraper.fetch_data_and_save()
   # etf_manager.calculate_all_emotions()
   # 定时执行数据抓取

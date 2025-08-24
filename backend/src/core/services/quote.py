@@ -50,7 +50,7 @@ class QuoteProvider(ABC):
     """行情数据提供者接口"""
     
     @abstractmethod
-    def get_candlesticks(self, symbol: str, count: int) -> List[Dict]:
+    def get_candlesticks(self, symbol: str, count: int, period: str = 'd') -> List[Dict]:
         """获取K线数据
         
         Args:
@@ -143,7 +143,7 @@ class QuoteService:
         """
         return self.provider.get_quote(symbol)
         
-    def get_klines(self, symbol: str, count: int, end_date: Optional[date] = None, cache_only: Optional[bool] = False) -> List[Dict]:
+    def get_klines(self, symbol: str, count: int, end_date: Optional[date] = None, cache_only: Optional[bool] = False, period: Optional[str] = 'd') -> List[Dict]:
         """获取K线数据(带缓存)
         
         Args:
@@ -157,10 +157,12 @@ class QuoteService:
         # 确定结束日期
         end_date = end_date or date.today()
         
+        db_symbol = symbol + ('' if period == 'd' else f':{period}')
+
         # 从数据库获取指定数量的历史K线
         db_klines = self.db.query(StockKline).filter(
             and_(
-                StockKline.symbol == symbol,
+                StockKline.symbol == db_symbol,
                 StockKline.date <= end_date
             )
         ).order_by(desc(StockKline.date)).limit(count).all()
@@ -173,16 +175,16 @@ class QuoteService:
             # 从接口获取数据
             if not db_klines:
                 # 如果没有历史数据，直接获取请求的数量
-                new_klines = self.provider.get_candlesticks(symbol, -1)
+                new_klines = self.provider.get_candlesticks(symbol, -1, period)
             else:
                 # 计算需要补充最新的k线
                 loss_count = (datetime.now().date() - db_klines[-1].date).days
-                new_klines = self.provider.get_candlesticks(symbol, loss_count + 1)
+                new_klines = self.provider.get_candlesticks(symbol, loss_count + 1, period)
             
             # 保存到数据库
             for kline in new_klines:
                 db_kline = StockKline(
-                    symbol=symbol,
+                    symbol=db_symbol,
                     date=kline['timestamp'],
                     open=kline['open'],
                     high=kline['high'],
@@ -198,7 +200,7 @@ class QuoteService:
             # 重新查询
             db_klines = self.db.query(StockKline).filter(
                 and_(
-                    StockKline.symbol == symbol,
+                    StockKline.symbol == db_symbol,
                     StockKline.date <= end_date
                 )
             ).order_by(desc(StockKline.date)).limit(count).all()

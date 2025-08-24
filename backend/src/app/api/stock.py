@@ -31,15 +31,18 @@ class FavoriteResponse(BaseModel):
 @router.get("/klines/{symbol}", response_model=List[KLineData])
 async def get_stock_klines(
     symbol: str,
-    days: Optional[int] = Query(90, ge=1, le=2000),
-    account_id: str = Depends(valid_account)
+    days: Optional[int] = Query(90, ge=1, le=10000),
+    account_id: str = Depends(valid_account),
+    period: Optional[str] = Query(default='d', enum=['d', 'w', 'm'])
 ):
     """获取股票的K线数据"""
     trade_service: LongPortService = LongPortService(account_id)
     quote_service = QuoteService(trade_service)
     
+    count = days / 30 if period == 'm' else days / 7 if period == 'w' else days
+
     # 从 LongPort 获取 K 线数据
-    klines_data = quote_service.get_klines(symbol, count=days, cache_only=False)
+    klines_data = quote_service.get_klines(symbol, count=count, cache_only=False, period=period)
     
     # 转换为响应格式
     klines = [

@@ -185,12 +185,12 @@ class LongPortService(QuoteProvider, TradeService):
 
     @sleep_and_retry
     @limits(calls=10, period=1)
-    def get_candlesticks(self, symbol: str, count: int) -> List[Dict]:
+    def get_candlesticks(self, symbol: str, count: int, period = 'd') -> List[Dict]:
         """实现QuoteProvider接口"""
         try:
             resp = self.ctx.candlesticks(
                 symbol=symbol,
-                period=Period.Day,
+                period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
                 count=count if count > 0 else 1000,
                 adjust_type=AdjustType.ForwardAdjust
             )
