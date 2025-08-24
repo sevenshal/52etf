@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Input, Button, Form, message } from 'antd';
+import { Card, Input, Button, Form, message, List, Space } from 'antd';
+import { RightOutlined } from '@ant-design/icons';
 import { useAccount } from '../contexts/AccountContext';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
@@ -49,9 +50,48 @@ const Profile = () => {
     }
   };
 
+  const items = [
+    {
+      title: '历史每月分析',
+      onClick: () => navigate('/monthly-analysis'),
+      arrow: true
+    }
+  ];
+
   return (
     <div style={{ padding: '24px' }}>
-      <Card title="账户设置">
+      <Card title="我的功能">
+        <List
+          style={{
+            backgroundColor: '#fff'
+          }}
+        >
+          {items.map((item, index) => (
+            <List.Item
+              key={index}
+              onClick={item.onClick}
+              style={{
+                padding: '16px',
+                cursor: item.onClick ? 'pointer' : 'default',
+                borderBottom: '1px solid #f0f0f0'
+              }}
+            >
+              <div style={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center',
+                width: '100%'
+              }}>
+                <span>{item.title}</span>
+                <Space>
+                  {item.arrow && <RightOutlined style={{ color: '#bfbfbf' }} />}
+                </Space>
+              </div>
+            </List.Item>
+          ))}
+        </List>
+      </Card>
+      <Card title="账户设置" style={{ marginBottom: 16 }}>
         {accountId ? (
           <div>
             <p>当前账户ID: {accountId}</p>
@@ -76,6 +116,7 @@ const Profile = () => {
           </Form>
         )}
       </Card>
+
     </div>
   );
 };

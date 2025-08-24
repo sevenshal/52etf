@@ -15,6 +15,7 @@ import EVCTradeLogs from './components/EVCTradeLogs';
 import StockDetail from './components/StockDetail';
 import OptionsPositions from './components/OptionsPositions';
 import SzdtBacktest from './components/SzdtBacktest';
+import MonthlyAnalysis from './components/MonthlyAnalysis';
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
           <Route path="/evc/valuation" element={<EVCValuation />} />
           <Route path="/evc/trade-logs" element={<EVCTradeLogs />} />
           <Route path="/stock/:symbol" element={<StockDetail />} />
+          <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
         </Route>
       </Routes>
     </AccountProvider>
