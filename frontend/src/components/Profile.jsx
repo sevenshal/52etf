@@ -59,8 +59,8 @@ const Profile = () => {
   ];
 
   return (
-    <div style={{ padding: '8px' }}>
-      <Card title="我的功能" style={{ marginBottom: 6 }}>
+    <div style={{ padding: '6px' }}>
+      <Card title="我的功能" style={{ marginBottom: '6px' }}>
         <List
           style={{
             backgroundColor: '#fff'
@@ -71,7 +71,6 @@ const Profile = () => {
               key={index}
               onClick={item.onClick}
               style={{
-                padding: '6px',
                 cursor: item.onClick ? 'pointer' : 'default',
                 borderBottom: '1px solid #f0f0f0'
               }}
@@ -94,8 +93,8 @@ const Profile = () => {
       <Card title="账户设置">
         {accountId ? (
           <div>
-            <p>当前账户ID: {accountId}</p>
-            <Button type="primary" danger onClick={handleLogout} style={{ marginBottom: '8px' }}>
+            <p>账户ID: {accountId}</p>
+            <Button type="primary" danger onClick={handleLogout} style={{ marginBottom: '6px' }}>
               退出账户
             </Button>
           </div>

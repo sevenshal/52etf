@@ -268,7 +268,7 @@ const MonthlyAnalysis = () => {
   ];
 
   return (
-    <div style={{ padding: '8px' }}>
+    <div style={{ padding: '6px' }}>
       <Card title="历史每月分析">
         <div style={{ marginBottom: '8px' }}>
           <Row gutter={16}>
@@ -280,7 +280,7 @@ const MonthlyAnalysis = () => {
                 onChange={(e) => setFormData({ ...formData, symbol: e.target.value })}
               />
             </Col>
-            <Col span={8}>
+            <Col span={12}>
               <div style={{ marginBottom: '6px' }}>开始时间:</div>
               <DatePicker
                 style={{ width: '100%' }}
@@ -291,7 +291,7 @@ const MonthlyAnalysis = () => {
                 })}
               />
             </Col>
-            <Col span={8}>
+            <Col span={4}>
               <div style={{ marginBottom: '6px' }}>置信度:</div>
               <Select
                 style={{ width: '100%' }}
@@ -319,15 +319,15 @@ const MonthlyAnalysis = () => {
               dataSource={data}
               pagination={false}
               size="small"
-              style={{ marginBottom: '8px' }}
+              style={{ marginBottom: '6px' }}
             />
             
             {summary && (
               <>
-                <Row gutter={16} style={{ marginBottom: '6px' }}>
+                <Row gutter={16} style={{ marginBottom: '4px' }}>
                   <Col span={8}>
                     <Statistic
-                      title="所有月平均涨跌幅"
+                      title="月平均涨幅"
                       value={summary.overallAvgRate}
                       valueStyle={{ color: parseFloat(summary.overallAvgRate) >= 0 ? '#52c41a' : '#ff4d4f' }}
                     />
@@ -355,7 +355,7 @@ const MonthlyAnalysis = () => {
                         textAlign: 'center', 
                         color: '#666', 
                         fontSize: '14px',
-                        padding: '4px 0',
+                        padding: '2px 0',
                         borderTop: '1px solid #f0f0f0'
                       }}>
                         数据时间范围：{timeRange.start} 至 {timeRange.end}
