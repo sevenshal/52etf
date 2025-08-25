@@ -265,7 +265,7 @@ const ETFReport = () => {
   }
 
   return (
-    <div style={{ padding: '6px' }}>
+    <div style={{ padding: '4px' }}>
       <Row gutter={16}>
         {reports.map(renderETFCard)}
       </Row>

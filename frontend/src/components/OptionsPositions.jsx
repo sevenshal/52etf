@@ -159,7 +159,7 @@ const OptionsPositions = () => {
   // 修改分组头部的统计卡片
   const renderExpiryHeader = (record, optionType) => {
     return (
-      <div style={{ padding: '16px 0' }}>
+      <div style={{ padding: '4px 0' }}>
         <Row justify="space-between" align="middle">
           <Col>
             <div style={{ fontSize: '16px', fontWeight: 'bold' }}>
@@ -183,7 +183,7 @@ const OptionsPositions = () => {
 
         <Row gutter={[16, 0]} style={{ marginTop: '16px', flexDirection: isMobile ? 'column':'row' }}>
           <Col xs={24} md={8}>
-            <Card size="small" bodyStyle={{ padding: '12px' }}>
+            <Card size="small" bodyStyle={{ padding: '4px' }}>
               <Row gutter={16}>
                 <Col span={8}>
                   <Statistic 
@@ -247,7 +247,7 @@ const OptionsPositions = () => {
             </Card>
           </Col>
           <Col xs={24} md={12}>
-            <Card size="small" bodyStyle={{ padding: '12px' }}>
+            <Card size="small" bodyStyle={{ padding: '4px' }}>
               <Row gutter={16}>
                 <Col span={8}>
                   <Statistic 
@@ -310,7 +310,7 @@ const OptionsPositions = () => {
             </Card>
           </Col>
           <Col xs={24} md={4}>
-            <Card size="small" bodyStyle={{ padding: '12px 8px' }}>
+            <Card size="small" bodyStyle={{ padding: '4px 8px' }}>
               <Statistic 
                 style={{display: isMobile ? "flex" : ""}}
                 title={

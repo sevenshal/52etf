@@ -268,7 +268,7 @@ const MonthlyAnalysis = () => {
   ];
 
   return (
-    <div style={{ padding: '6px' }}>
+    <div style={{ padding: '4px' }}>
       <Card title="历史每月分析">
         <div style={{ marginBottom: '8px' }}>
           <Row gutter={16}>
@@ -280,7 +280,7 @@ const MonthlyAnalysis = () => {
                 onChange={(e) => setFormData({ ...formData, symbol: e.target.value })}
               />
             </Col>
-            <Col span={12}>
+            <Col span={10}>
               <div style={{ marginBottom: '6px' }}>开始时间:</div>
               <DatePicker
                 style={{ width: '100%' }}
@@ -291,7 +291,7 @@ const MonthlyAnalysis = () => {
                 })}
               />
             </Col>
-            <Col span={4}>
+            <Col span={6}>
               <div style={{ marginBottom: '6px' }}>置信度:</div>
               <Select
                 style={{ width: '100%' }}
