@@ -268,9 +268,9 @@ const MonthlyAnalysis = () => {
   ];
 
   return (
-    <div style={{ padding: '24px' }}>
+    <div style={{ padding: '12px' }}>
       <Card title="历史每月分析">
-        <div style={{ marginBottom: '24px' }}>
+        <div style={{ marginBottom: '12px' }}>
           <Row gutter={16}>
             <Col span={8}>
               <div style={{ marginBottom: '8px' }}>股票代码:</div>
@@ -306,7 +306,7 @@ const MonthlyAnalysis = () => {
             type="primary" 
             onClick={handleAnalyze} 
             loading={loading}
-            style={{ marginTop: '16px' }}
+            style={{ marginTop: '8px' }}
           >
             立即分析
           </Button>
@@ -319,12 +319,12 @@ const MonthlyAnalysis = () => {
               dataSource={data}
               pagination={false}
               size="small"
-              style={{ marginBottom: '24px' }}
+              style={{ marginBottom: '12px' }}
             />
             
             {summary && (
               <>
-                <Row gutter={16} style={{ marginBottom: '16px' }}>
+                <Row gutter={16} style={{ marginBottom: '8px' }}>
                   <Col span={8}>
                     <Statistic
                       title="所有月平均涨跌幅"
@@ -355,7 +355,7 @@ const MonthlyAnalysis = () => {
                         textAlign: 'center', 
                         color: '#666', 
                         fontSize: '14px',
-                        padding: '8px 0',
+                        padding: '4px 0',
                         borderTop: '1px solid #f0f0f0'
                       }}>
                         数据时间范围：{timeRange.start} 至 {timeRange.end}
