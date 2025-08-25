@@ -268,12 +268,12 @@ const MonthlyAnalysis = () => {
   ];
 
   return (
-    <div style={{ padding: '12px' }}>
+    <div style={{ padding: '8px' }}>
       <Card title="历史每月分析">
-        <div style={{ marginBottom: '12px' }}>
+        <div style={{ marginBottom: '8px' }}>
           <Row gutter={16}>
             <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>股票代码:</div>
+              <div style={{ marginBottom: '6px' }}>股票代码:</div>
               <Input
                 placeholder="例如 QQQ.US"
                 value={formData.symbol}
@@ -281,7 +281,7 @@ const MonthlyAnalysis = () => {
               />
             </Col>
             <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>开始时间:</div>
+              <div style={{ marginBottom: '6px' }}>开始时间:</div>
               <DatePicker
                 style={{ width: '100%' }}
                 value={formData.startDate ? dayjs(formData.startDate) : dayjs('2005-01-01')}
@@ -292,7 +292,7 @@ const MonthlyAnalysis = () => {
               />
             </Col>
             <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>置信度:</div>
+              <div style={{ marginBottom: '6px' }}>置信度:</div>
               <Select
                 style={{ width: '100%' }}
                 value={formData.confidenceLevel}
@@ -306,7 +306,7 @@ const MonthlyAnalysis = () => {
             type="primary" 
             onClick={handleAnalyze} 
             loading={loading}
-            style={{ marginTop: '8px' }}
+            style={{ marginTop: '6px' }}
           >
             立即分析
           </Button>
@@ -319,12 +319,12 @@ const MonthlyAnalysis = () => {
               dataSource={data}
               pagination={false}
               size="small"
-              style={{ marginBottom: '12px' }}
+              style={{ marginBottom: '8px' }}
             />
             
             {summary && (
               <>
-                <Row gutter={16} style={{ marginBottom: '8px' }}>
+                <Row gutter={16} style={{ marginBottom: '6px' }}>
                   <Col span={8}>
                     <Statistic
                       title="所有月平均涨跌幅"
