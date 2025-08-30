@@ -279,20 +279,20 @@ const MonthlyAnalysis = () => {
   ];
 
   return (
-    <div style={{ padding: '24px' }}>
+    <div style={{ padding: '4px' }}>
       <Card title="历史每月分析">
-        <div style={{ marginBottom: '24px' }}>
+        <div style={{ marginBottom: '8px' }}>
           <Row gutter={16}>
             <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>股票代码:</div>
+              <div style={{ marginBottom: '6px' }}>股票代码:</div>
               <Input
                 placeholder="例如 QQQ.US"
                 value={formData.symbol}
                 onChange={(e) => setFormData({ ...formData, symbol: e.target.value })}
               />
             </Col>
-            <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>开始时间:</div>
+            <Col span={10}>
+              <div style={{ marginBottom: '6px' }}>开始时间:</div>
               <DatePicker
                 style={{ width: '100%' }}
                 value={formData.startDate ? dayjs(formData.startDate) : dayjs('2005-01-01')}
@@ -302,8 +302,8 @@ const MonthlyAnalysis = () => {
                 })}
               />
             </Col>
-            <Col span={8}>
-              <div style={{ marginBottom: '8px' }}>置信度:</div>
+            <Col span={6}>
+              <div style={{ marginBottom: '6px' }}>置信度:</div>
               <Select
                 style={{ width: '100%' }}
                 value={formData.confidenceLevel}
@@ -317,7 +317,7 @@ const MonthlyAnalysis = () => {
             type="primary" 
             onClick={handleAnalyze} 
             loading={loading}
-            style={{ marginTop: '16px' }}
+            style={{ marginTop: '6px' }}
           >
             立即分析
           </Button>
@@ -330,15 +330,15 @@ const MonthlyAnalysis = () => {
               dataSource={data}
               pagination={false}
               size="small"
-              style={{ marginBottom: '24px' }}
+              style={{ marginBottom: '6px' }}
             />
             
             {summary && (
               <>
-                <Row gutter={16} style={{ marginBottom: '16px' }}>
+                <Row gutter={16} style={{ marginBottom: '4px' }}>
                   <Col span={8}>
                     <Statistic
-                      title="所有月平均涨跌幅"
+                      title="月平均涨幅"
                       value={summary.overallAvgRate}
                       valueStyle={{ color: parseFloat(summary.overallAvgRate) >= 0 ? '#52c41a' : '#ff4d4f' }}
                     />
@@ -366,7 +366,7 @@ const MonthlyAnalysis = () => {
                         textAlign: 'center', 
                         color: '#666', 
                         fontSize: '14px',
-                        padding: '8px 0',
+                        padding: '2px 0',
                         borderTop: '1px solid #f0f0f0'
                       }}>
                         数据时间范围：{timeRange.start} 至 {timeRange.end}
