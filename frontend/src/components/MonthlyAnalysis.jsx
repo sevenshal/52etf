@@ -92,9 +92,20 @@ const MonthlyAnalysis = () => {
       
       const klines = response.data;
       
+      // 先处理pre_close值
+      const processedKlines = klines.map((kline, index) => {
+        if (index === 0) {
+          // 第一条数据，使用open作为pre_close
+          return { ...kline, pre_close: kline.open };
+        } else {
+          // 使用前一条数据的close作为pre_close
+          return { ...kline, pre_close: klines[index - 1].close };
+        }
+      });
+      
       // 过滤数据：筛选用户选择的开始时间后的数据，并删除今年的数据
       const currentYear = new Date().getFullYear();
-      const filteredKlines = klines.filter(kline => {
+      const filteredKlines = processedKlines.filter(kline => {
         const klineDate = new Date(kline.timestamp);
         const klineYear = klineDate.getFullYear();
         
@@ -122,7 +133,7 @@ const MonthlyAnalysis = () => {
           monthlyData[month] = [];
         }
         
-        const changeRate = (kline.close / kline.open) - 1;
+        const changeRate = (kline.close / kline.pre_close) - 1;
         monthlyData[month].push({
           changeRate,
           isUp: changeRate > 0
