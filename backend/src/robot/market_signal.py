@@ -25,7 +25,8 @@ class MarketSignalAnalyzer:
 
     def get_holdings(self):
         holdings = self.db_session.query(ETFHolding).filter(
-            ETFHolding.etf_symbol.in_(self.etf_symbols)
+            ETFHolding.etf_symbol.in_(self.etf_symbols),
+            ETFHolding.asset_class == 'Equity'
         ).all()
         #symbols = {h.symbol for h in holdings if h.market_cap and h.market_cap > self.min_market_cap}
         symbols = {h.symbol for h in holdings}
