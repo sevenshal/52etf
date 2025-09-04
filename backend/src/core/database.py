@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, JSON
+from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship
 from contextlib import contextmanager
@@ -16,6 +16,25 @@ Base = declarative_base()
 
 # 创建EVC会话
 Session = scoped_session(sessionmaker(bind=engine))
+
+# 潜在市场信号
+class MarketSignal(Base):
+    __tablename__ = 'market_signal'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(16), nullable=False)
+    close_price = Column(Float, nullable=False)
+    below_200ma_ratio = Column(Float, nullable=False)
+    vol_5_std = Column(Float, nullable=False)
+    today_vol_std = Column(Float, nullable=False)
+    low_50 = Column(Float, nullable=False)
+    close_vs_low_50 = Column(Float, nullable=False)
+    direction = Column(String(8), nullable=False)  # 'BUY'或'SELL'
+    date = Column(Date, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('symbol', 'date', name='uniq_symbol_date'),
+    )
 
 # 股票-标签关联表
 stock_tags = Table(
