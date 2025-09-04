@@ -4,7 +4,7 @@ from ..core.database import Session, MarketSignal
 router = APIRouter()
 db_session = Session()
 
-@router.get("/market_signal")
+@router.get("/api/market_signal")
 def get_market_signal(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100)
