@@ -21,7 +21,7 @@ export default function MarketSignalHistory() {
     if (loading || !hasMore) return;
     setLoading(true);
     try {
-      const res = await request.get('/market_signal', { params: { page, page_size: PAGE_SIZE } });
+      const res = await request.get('/api/market_signal', { params: { page, page_size: PAGE_SIZE } });
       setData(prev => [...prev, ...res.items]);
       setHasMore(res.page * res.page_size < res.total);
       setPage(prev => prev + 1);
