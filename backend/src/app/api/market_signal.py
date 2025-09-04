@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query
-from ..core.database import Session, MarketSignal
+from ...core.database import Session, MarketSignal
 
 router = APIRouter()
 db_session = Session()
