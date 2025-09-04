@@ -55,6 +55,11 @@ const Profile = () => {
       title: '历史每月分析',
       onClick: () => navigate('/monthly-analysis'),
       arrow: true
+    },
+    {
+      title: '个股买卖信号',
+      onClick: () => navigate('/market-signal-history'),
+      arrow: true
     }
   ];
 
