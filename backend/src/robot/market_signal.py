@@ -32,8 +32,7 @@ class MarketSignalAnalyzer:
         symbols = {h.symbol for h in holdings}
         return list(symbols)
 
-    def analyze(self, date=None):
-        today = date or datetime.date.today()
+    def analyze(self):
         symbols = self.get_holdings()
         results = []
         for symbol in symbols:
@@ -44,6 +43,8 @@ class MarketSignalAnalyzer:
             vols = np.array([float(k['volume']) for k in klines])
             lows = np.array([float(k['low']) for k in klines])
 
+            lst_date = klines[-1]['timestamp'].date()
+            
             close_today = closes[-1]
             vol_today = vols[-1]
             low_50 = np.min(lows[-50:])
@@ -72,7 +73,7 @@ class MarketSignalAnalyzer:
                     today_vol_std=round(today_vol_std, 2),
                     low_50=round(low_50, 2),
                     close_vs_low_50=round(close_vs_low_50, 2),
-                    date=today,
+                    date=lst_date,
                     direction='BUY'
                 )
                 results.append(record)
