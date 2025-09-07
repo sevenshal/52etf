@@ -76,7 +76,13 @@ class MarketSignalAnalyzer:
                     date=lst_date,
                     direction='BUY'
                 )
-                results.append(record)
-                self.db_session.merge(record)
+                existing = self.db_session.query(MarketSignal).filter_by(symbol=symbol, date=lst_date).first()
+                if existing:
+                    # 更新已存在的数据
+                    for k, v in record.__dict__.items():
+                        if not k.startswith('_') and k != 'id':
+                            setattr(existing, k, v)
+                else:
+                    self.db_session.add(record)
                 self.db_session.commit()
         return results
