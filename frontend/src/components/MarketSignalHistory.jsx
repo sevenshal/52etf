@@ -103,7 +103,7 @@ const MarketSignalHistory = () => {
                                 color: item.direction === 'SELL' ? '#ff4d4f' : (item.direction === 'BUY' ? '#52c41a' : 'inherit')
                             }}>
                                 <a onClick={() => navigate(`/stock/${symbol}`)} >{item.symbol}</a> 收盘:{item.close_price} 低于200MA比率:{item.below_200ma_ratio * 100}% <br/>
-                                5日成交量为{item.vol_5_std}个50日成交量标准差, 当日成交量为{item.today_vol_std}个50日成交量标准差 <br/>
+                                5日成交量高出50日成交量{item.vol_5_std}个标准差, 当日成交量高出{item.today_vol_std}个标准差 <br/>
                                 50日低点:{item.low_50} 收盘vs50日低点比率:{item.close_vs_low_50}
                             </Text>
                         </List.Item>
