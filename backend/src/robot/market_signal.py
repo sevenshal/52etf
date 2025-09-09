@@ -11,7 +11,7 @@ class MarketSignalAnalyzer:
         min_market_cap=1e10,
         below_200ma_ratio_thresh=0.2,
         vol_5_std_thresh=1,
-        today_vol_std_thresh=1,
+        today_vol_std_thresh=0.41,
         close_vs_low_50_ratio=1.1,
     ):
         self.quote_service = QuoteService(quote_provider)
