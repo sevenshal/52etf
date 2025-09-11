@@ -9,7 +9,7 @@ class MarketSignalAnalyzer:
         quote_provider: QuoteProvider,
         etf_symbols=None,
         min_market_cap=1e10,
-        below_200ma_ratio_thresh=0.2,
+        below_200ma_ratio_thresh=0.1,
         vol_5_std_thresh=1,
         today_vol_std_thresh=0.5,
         close_vs_low_50_ratio=1.1,
