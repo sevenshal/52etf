@@ -5,7 +5,6 @@ import numpy as np
 from scipy.stats import norm
 from ...core.services.trade import TradeService, OrderSide
 from ...core.services.longport import LongPortService
-from ...core.services.market import MarketService
 from ...core.services.fed_rate_monitor import FedRateMonitorService
 from .account import valid_account
 from itertools import groupby
@@ -110,7 +109,6 @@ async def get_option_positions(
 ):
     """获取期权持仓汇总"""
     trade_service: LongPortService = LongPortService(account_id)
-    market_service = MarketService()
     
     # 获取最新的联邦基金利率（使用上限利率）
     fed_rate_data = FedRateMonitorService.get_current_fed_rate('upper')
