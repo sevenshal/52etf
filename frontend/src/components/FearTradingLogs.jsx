@@ -8,7 +8,7 @@ import dayjs from 'dayjs';
 const { Header } = Layout;
 const { Title, Text } = Typography;
 
-const SzdtTradingLogs = () => {
+const FearTradingLogs = () => {
     const navigate = useNavigate();
     const [logs, setLogs] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -84,7 +84,7 @@ const SzdtTradingLogs = () => {
             }}>
                 <div style={{ display: 'flex', alignItems: 'center' }}>
                     <LeftOutlined 
-                        onClick={() => navigate('/szdt')}
+                        onClick={() => navigate('/fear')}
                         style={{ 
                             fontSize: '16px',
                             marginRight: '10px',
@@ -151,4 +151,4 @@ const SzdtTradingLogs = () => {
     );
 };
 
-export default SzdtTradingLogs;
+export default FearTradingLogs;

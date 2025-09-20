@@ -13,17 +13,17 @@ const AppLayout = () => {
   const items = [
     {
       key: '/',
-      label: 'ETF分析',
+      label: 'ETF',
       disabled: !accountId
     },
     {
-      key: '/szdt',
-      label: '贪恐模型',
+      key: '/fear',
+      label: '贪恐',
       disabled: !accountId
     },
     {
       key: '/evc',
-      label: '估值模型',
+      label: '估值',
       disabled: !accountId
     },
     {

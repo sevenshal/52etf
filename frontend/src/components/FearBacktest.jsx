@@ -6,7 +6,7 @@ import dayjs from 'dayjs';
 
 const { RangePicker } = DatePicker;
 
-const SzdtBacktest = () => {
+const FearBacktest = () => {
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [verifyForm] = Form.useForm();
@@ -671,4 +671,4 @@ const SzdtBacktest = () => {
   );
 };
 
-export default SzdtBacktest;
+export default FearBacktest;

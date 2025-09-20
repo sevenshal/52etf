@@ -17,7 +17,7 @@ const TIME_RANGES = [
   { label: '全部', value: -1 }
 ];
 
-const SzdtDashboard = () => {
+const FearDashboard = () => {
   const navigate = useNavigate();
   const [showActivation, setShowActivation] = useState(false);
   const [activationCode, setActivationCode] = useState('');
@@ -486,17 +486,17 @@ const SzdtDashboard = () => {
     },
     {
       title: '股票列表',
-      onClick: () => navigate('/szdt/stocks'),
+      onClick: () => navigate('/fear/stocks'),
       arrow: true
     },
     {
       title: '交易日志',
-      onClick: () => navigate('/szdt/logs'),
+      onClick: () => navigate('/fear/logs'),
       arrow: true
     },
     {
       title: 'ETF回测',
-      onClick: () => navigate('/szdt/backtest'),
+      onClick: () => navigate('/fear/backtest'),
       arrow: true
     }
   ];
@@ -1149,4 +1149,4 @@ const SzdtDashboard = () => {
   );
 };
 
-export default SzdtDashboard; 
+export default FearDashboard; 

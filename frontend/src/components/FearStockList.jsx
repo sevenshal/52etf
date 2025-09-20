@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import ReactECharts from 'echarts-for-react';
 
-const SzdtStockList = () => {
+const FearStockList = () => {
   const navigate = useNavigate();
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -524,7 +524,7 @@ const SzdtStockList = () => {
           <Button 
             type="text" 
             icon={<LeftOutlined />} 
-            onClick={() => navigate('/szdt')}
+            onClick={() => navigate('/fear')}
             style={{ marginRight: '12px' }}
           />
           <span style={{ fontSize: '16px', fontWeight: 500 }}>股票列表</span>
@@ -791,4 +791,4 @@ const SzdtStockList = () => {
   );
 };
 
-export default SzdtStockList;
+export default FearStockList;

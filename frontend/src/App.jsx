@@ -2,11 +2,11 @@ import React from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AccountProvider } from './contexts/AccountContext';
 import AppLayout from './components/Layout';
-import SzdtStockList from './components/SzdtStockList';
+import FearStockList from './components/FearStockList';
 import Profile from './components/Profile';
 import EVCDashboard from './components/EVCDashboard';
-import SzdtDashboard from './components/SzdtDashboard';
-import SzdtTradingLogs from './components/SzdtTradingLogs';
+import FearDashboard from './components/FearDashboard';
+import FearTradingLogs from './components/FearTradingLogs';
 import ETFReport from './components/ETFReport';
 import ETFDetail from './components/ETFDetail';
 import EVCStrategy from './components/EVCStrategy';
@@ -14,7 +14,6 @@ import EVCValuation from './components/EVCValuation';
 import EVCTradeLogs from './components/EVCTradeLogs';
 import StockDetail from './components/StockDetail';
 import OptionsPositions from './components/OptionsPositions';
-import SzdtBacktest from './components/SzdtBacktest';
 import MonthlyAnalysis from './components/MonthlyAnalysis';
 import MarketSignalHistory from './components/MarketSignalHistory';
 
@@ -24,13 +23,13 @@ function App() {
       <Routes>
         <Route path="/" element={<AppLayout />}>
           <Route index element={<ETFReport />} />
-          <Route path='/szdt' element={<SzdtDashboard />} />
-          <Route path="/szdt/stocks" element={<SzdtStockList />} />
+          <Route path='/fear' element={<FearDashboard />} />
+          <Route path="/fear/stocks" element={<FearStockList />} />
           <Route path="/evc" element={<EVCDashboard />} />
           <Route path="/options" element={<OptionsPositions />} />
           <Route path="/profile" element={<Profile />} />
-          <Route path="/szdt/logs" element={<SzdtTradingLogs />} />
-          <Route path="/szdt/backtest" element={<SzdtBacktest />} />
+          <Route path="/fear/logs" element={<FearTradingLogs />} />
+          <Route path="/fear/backtest" element={<FearDashboard />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
           <Route path="/evc/strategy" element={<EVCStrategy />} />
           <Route path="/evc/valuation" element={<EVCValuation />} />
