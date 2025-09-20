@@ -13,11 +13,28 @@ export const useFedRateData = () => {
   useEffect(() => {
     async function fetchFedRate() {
       try {
-        const resp = await fetch('https://markets.newyorkfed.org/read?productCode=50&eventCodes=500&limit=1&startPosition=0&format=json');
-        const data = await resp.json();
-        if (data && data.refRates && data.refRates.length > 0) {
-          setFedRateFrom(data.refRates[0].targetRateFrom);
-          setFedRateTo(data.refRates[0].targetRateTo);
+        // 获取前一天的日期
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const dateStr = yesterday.toISOString().split('T')[0];
+        
+        // 并行请求上限和下限利率
+        const [upperResp, lowerResp] = await Promise.all([
+          fetch(`https://api.52etf.vip/fred/series/observations?series_id=DFEDTARU&file_type=json&observation_start=${dateStr}&output_type=1`),
+          fetch(`https://api.52etf.vip/fred/series/observations?series_id=DFEDTARL&file_type=json&observation_start=${dateStr}&output_type=1`)
+        ]);
+        
+        const [upperData, lowerData] = await Promise.all([
+          upperResp.json(),
+          lowerResp.json()
+        ]);
+        
+        // 从返回数据中提取利率值
+        if (upperData.observations && upperData.observations.length > 0) {
+          setFedRateTo(parseFloat(upperData.observations[0].value));
+        }
+        if (lowerData.observations && lowerData.observations.length > 0) {
+          setFedRateFrom(parseFloat(lowerData.observations[0].value));
         }
       } catch (error) {
         console.error('获取联邦利率失败:', error);
