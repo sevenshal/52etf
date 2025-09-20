@@ -70,9 +70,16 @@ def calculate_exercise_probability(
     """计算期权行权概率"""
     try:
         T = days_to_expiry / 365  # 转换为年
+        
+        # 如果期权已到期或即将到期，根据股价和行权价关系判断
         if T <= 0:
-            return 0.0
-            
+            if option_type == "Call":
+                # 对于认购期权，如果股价高于行权价，行权概率为100%
+                return 100.0 if stock_price > strike_price else 0.0
+            else:  # Put
+                # 对于认沽期权，如果股价低于行权价，行权概率为100%
+                return 100.0 if stock_price < strike_price else 0.0
+        
         S = stock_price
         K = strike_price
         a = implied_volatility
