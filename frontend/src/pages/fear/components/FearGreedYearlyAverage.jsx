@@ -179,8 +179,8 @@ const FearGreedYearlyAverage = () => {
       const averagePoints = findHighLowPoints(monthDayToAverage, sortedMonthDays);
       
       // 调试信息
-      console.log('历史平均高点:', averagePoints.highPoints);
-      console.log('历史平均低点:', averagePoints.lowPoints);
+      console.log('阶段高点:', averagePoints.highPoints);
+      console.log('阶段低点:', averagePoints.lowPoints);
       
       // 创建图表配置
       const option = {
@@ -200,7 +200,7 @@ const FearGreedYearlyAverage = () => {
           }
         },
         legend: {
-          data: ['历史平均', '历史平均高点', '历史平均低点', '今年实际'],
+          data: ['历史平均', '阶段高点', '阶段低点', '今年实际'],
           top: 0
         },
         grid: {
@@ -244,7 +244,7 @@ const FearGreedYearlyAverage = () => {
           },
           // 历史平均高点标记
           {
-            name: '历史平均高点',
+            name: '阶段高点',
             type: 'scatter',
             data: averagePoints.highPoints.map(point => [point.date, point.value]),
             itemStyle: {
@@ -257,7 +257,7 @@ const FearGreedYearlyAverage = () => {
           },
           // 历史平均低点标记
           {
-            name: '历史平均低点',
+            name: '阶段低点',
             type: 'scatter',
             data: averagePoints.lowPoints.map(point => [point.date, point.value]),
             itemStyle: {
