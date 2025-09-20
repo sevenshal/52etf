@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import request from '../utils/request';
+import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
 
 const FearStockList = () => {

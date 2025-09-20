@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
 import { Card, Tabs } from 'antd';
-import { useFearGreedData } from './fear/hooks/useFearGreedData';
-import { useFedRateData } from './fear/hooks/useFedRateData';
-import { useBondData } from './fear/hooks/useBondData';
-import { useAutoTrading } from './fear/hooks/useAutoTrading';
-import FearGreedCurrent from './fear/components/FearGreedCurrent';
-import FearGreedHistorical from './fear/components/FearGreedHistorical';
-import FearGreedPrediction from './fear/components/FearGreedPrediction';
-import FearGreedAiae from './fear/components/FearGreedAiae';
-import BondFearGreed from './fear/components/BondFearGreed';
-import AutoTradingPanel from './fear/components/AutoTradingPanel';
+import { useFearGreedData } from './hooks/useFearGreedData';
+import { useFedRateData } from './hooks/useFedRateData';
+import { useBondData } from './hooks/useBondData';
+import { useAutoTrading } from './hooks/useAutoTrading';
+import FearGreedCurrent from './components/FearGreedCurrent';
+import FearGreedHistorical from './components/FearGreedHistorical';
+import FearGreedYearlyAverage from './components/FearGreedYearlyAverage';
+import FearGreedAiae from './components/FearGreedAiae';
+import BondFearGreed from './components/BondFearGreed';
+import AutoTradingPanel from './components/AutoTradingPanel';
 
 const FearDashboard = () => {
   const [activeTab, setActiveTab] = useState('current');
@@ -43,8 +43,8 @@ const FearDashboard = () => {
             <Tabs.TabPane tab="历史走势" key="historical">
               <FearGreedHistorical />
             </Tabs.TabPane>
-            <Tabs.TabPane tab="走势预测" key="prediction">
-              <FearGreedPrediction />
+            <Tabs.TabPane tab="年度平均" key="yearly-average">
+              <FearGreedYearlyAverage />
             </Tabs.TabPane>
             <Tabs.TabPane tab="AIAE" key="aiae">
               <FearGreedAiae />

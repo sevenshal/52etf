@@ -13,7 +13,7 @@ const FearGreedAiae = () => {
 
   const fetchAiaeData = async () => {
     try {
-      const { data } = await request.get('/fred/series/observations?series_id=BOGZ1FL153064476Q&file_type=json');
+      const { data } = await request.get('https://api.52etf.vip/fred/series/observations?series_id=BOGZ1FL153064476Q&file_type=json');
       // 处理数据
       const aiaeData = data.observations
         .map(item => ({

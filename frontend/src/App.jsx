@@ -1,21 +1,21 @@
 import React from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AccountProvider } from './contexts/AccountContext';
-import AppLayout from './components/Layout';
-import FearStockList from './components/FearStockList';
-import Profile from './components/Profile';
-import EVCDashboard from './components/EVCDashboard';
-import FearDashboard from './components/FearDashboard';
-import FearTradingLogs from './components/FearTradingLogs';
-import ETFReport from './components/ETFReport';
-import ETFDetail from './components/ETFDetail';
-import EVCStrategy from './components/EVCStrategy';
-import EVCValuation from './components/EVCValuation';
-import EVCTradeLogs from './components/EVCTradeLogs';
-import StockDetail from './components/StockDetail';
-import OptionsPositions from './components/OptionsPositions';
-import MonthlyAnalysis from './components/MonthlyAnalysis';
-import MarketSignalHistory from './components/MarketSignalHistory';
+import AppLayout from './pages/Layout';
+import FearDashboard from './pages/fear/FearDashboard';
+import FearStockList from './pages/fear/FearStockList';
+import FearTradingLogs from './pages/fear/FearTradingLogs';
+import Profile from './pages/Profile';
+import EVCDashboard from './pages/EVCDashboard';
+import ETFReport from './pages/ETFReport';
+import ETFDetail from './pages/ETFDetail';
+import EVCStrategy from './pages/EVCStrategy';
+import EVCValuation from './pages/EVCValuation';
+import EVCTradeLogs from './pages/EVCTradeLogs';
+import StockDetail from './pages/StockDetail';
+import OptionsPositions from './pages/OptionsPositions';
+import MonthlyAnalysis from './pages/MonthlyAnalysis';
+import MarketSignalHistory from './pages/MarketSignalHistory';
 
 function App() {
   return (

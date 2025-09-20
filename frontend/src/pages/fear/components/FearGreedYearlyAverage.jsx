@@ -3,14 +3,14 @@ import ReactECharts from 'echarts-for-react';
 import { message } from 'antd';
 import request from '../../utils/request';
 
-const FearGreedPrediction = () => {
-  const [predictionData, setPredictionData] = useState(null);
+const FearGreedYearlyAverage = () => {
+  const [yearlyAverageData, setYearlyAverageData] = useState(null);
 
   useEffect(() => {
-    fetchPredictionData();
+    fetchYearlyAverageData();
   }, []);
 
-  const fetchPredictionData = async () => {
+  const fetchYearlyAverageData = async () => {
     try {
       const response = await request.get('https://api.52etf.vip/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line');
       const historicalData = response.data.historical;
@@ -209,18 +209,18 @@ const FearGreedPrediction = () => {
         ]
       };
       
-      setPredictionData(option);
+      setYearlyAverageData(option);
     } catch (error) {
-      console.error('获取预测数据失败:', error);
-      message.error('获取预测数据失败');
+      console.error('获取年度平均数据失败:', error);
+      message.error('获取年度平均数据失败');
     }
   };
 
-  if (!predictionData) {
+  if (!yearlyAverageData) {
     return <div style={{ textAlign: 'center', padding: '20px' }}>加载中...</div>;
   }
 
-  return <ReactECharts option={predictionData} style={{ height: '300px' }} />;
+  return <ReactECharts option={yearlyAverageData} style={{ height: '300px' }} />;
 };
 
-export default FearGreedPrediction;
+export default FearGreedYearlyAverage;

@@ -21,8 +21,8 @@ const FearGreedHistorical = () => {
       const [cnnData, spyEmotion, spyPrice, vixJson] = await Promise.all([
         fetchFearGreedData(-1),
         request.get('/api/quant/etf/emotion/history/US.SPY'),
-        request.get('/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line'),
-        request.get('/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01')
+        request.get('https://api.52etf.vip/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line'),
+        request.get('https://api.52etf.vip/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01')
       ]);
       
       setHistoricalData(cnnData);

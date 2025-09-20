@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { List, Layout, Typography, Spin, Select } from 'antd';  // 添加 Select
 import { LeftOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import request from '../utils/request';
+import request from '../../utils/request';
 import dayjs from 'dayjs';
 
 const { Header } = Layout;

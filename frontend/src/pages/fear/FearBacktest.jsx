@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Form, InputNumber, Button, message, Space, Table, Progress, Modal, DatePicker, Input, Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
-import request from '../utils/request';
+import request from '../../utils/request';
 import dayjs from 'dayjs';
 
 const { RangePicker } = DatePicker;
