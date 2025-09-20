@@ -134,6 +134,53 @@ const FearGreedYearlyAverage = () => {
       Object.keys(monthDayToAverage).forEach(monthDay => allMonthDays.add(monthDay));
       Object.keys(monthDayToCurrent).forEach(monthDay => allMonthDays.add(monthDay));
       const sortedMonthDays = Array.from(allMonthDays).sort();
+
+      // 识别高点和低点的函数
+      const findHighLowPoints = (data, monthDays) => {
+        const dataArray = monthDays.map(monthDay => data[monthDay] || null);
+        const highPoints = [];
+        const lowPoints = [];
+        
+        for (let i = 15; i < dataArray.length - 15; i++) {
+          if (dataArray[i] === null) continue;
+          
+          // 检查是否是低点（前15天和后15天的最低点）
+          const windowStart = Math.max(0, i - 15);
+          const windowEnd = Math.min(dataArray.length - 1, i + 15);
+          const windowData = dataArray.slice(windowStart, windowEnd + 1).filter(val => val !== null);
+          
+          if (windowData.length === 0) continue;
+          const minInWindow = Math.min(...windowData);
+          const maxInWindow = Math.max(...windowData);
+          
+          // 如果是低点
+          if (dataArray[i] === minInWindow) {
+            lowPoints.push({
+              index: i,
+              value: dataArray[i],
+              date: monthDays[i]
+            });
+          }
+          
+          // 如果是高点
+          if (dataArray[i] === maxInWindow) {
+            highPoints.push({
+              index: i,
+              value: dataArray[i],
+              date: monthDays[i]
+            });
+          }
+        }
+        
+        return { highPoints, lowPoints };
+      };
+
+      // 只为历史平均数据找到高点和低点
+      const averagePoints = findHighLowPoints(monthDayToAverage, sortedMonthDays);
+      
+      // 调试信息
+      console.log('历史平均高点:', averagePoints.highPoints);
+      console.log('历史平均低点:', averagePoints.lowPoints);
       
       // 创建图表配置
       const option = {
@@ -153,7 +200,7 @@ const FearGreedYearlyAverage = () => {
           }
         },
         legend: {
-          data: ['历史平均', '今年实际'],
+          data: ['历史平均', '历史平均高点', '历史平均低点', '今年实际'],
           top: 0
         },
         grid: {
@@ -182,6 +229,7 @@ const FearGreedYearlyAverage = () => {
           }
         },
         series: [
+          // 历史平均线
           {
             name: '历史平均',
             type: 'line',
@@ -194,6 +242,33 @@ const FearGreedYearlyAverage = () => {
               width: 2
             }
           },
+          // 历史平均高点标记
+          {
+            name: '历史平均高点',
+            type: 'scatter',
+            data: averagePoints.highPoints.map(point => [point.date, point.value]),
+            itemStyle: {
+              color: '#ff4d4f',
+              size: 8
+            },
+            symbol: 'circle',
+            symbolSize: 8,
+            z: 10
+          },
+          // 历史平均低点标记
+          {
+            name: '历史平均低点',
+            type: 'scatter',
+            data: averagePoints.lowPoints.map(point => [point.date, point.value]),
+            itemStyle: {
+              color: '#52c41a',
+              size: 8
+            },
+            symbol: 'circle',
+            symbolSize: 8,
+            z: 10
+          },
+          // 今年实际线
           {
             name: '今年实际',
             type: 'line',
