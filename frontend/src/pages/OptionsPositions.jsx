@@ -84,7 +84,7 @@ const OptionsPositions = () => {
         
         // 计算时间进度
         const total_days = Math.ceil((new Date(pos.expiry) - new Date(pos.created_at || Date.now())) / (1000 * 60 * 60 * 24));
-        const time_progress = ((total_days - daysRemaining) / total_days * 100).toFixed(1);
+        const time_progress = Math.min(100, Math.max(0, ((total_days - daysRemaining) / total_days * 100))).toFixed(1);
 
         return {
           ...pos,
