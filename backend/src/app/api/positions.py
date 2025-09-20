@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import numpy as np
 from scipy.stats import norm
 from ...core.services.trade import TradeService, OrderSide
 from ...core.services.longport import LongPortService
 from ...core.services.market import MarketService
+from ...core.services.fed_rate_monitor import FedRateMonitorService
 from .account import valid_account
 from itertools import groupby
 from operator import itemgetter
@@ -100,7 +101,7 @@ def calculate_exercise_probability(
 class OptionPositionsResponse(BaseModel):
     positions: List[Dict]
     risk_free_rate: float
-    rate_update_date: str
+    rate_update_date: Optional[str] = None
 
 @router.get("/options")
 async def get_option_positions(
@@ -111,9 +112,9 @@ async def get_option_positions(
     trade_service: LongPortService = LongPortService(account_id)
     market_service = MarketService()
     
-    # 获取最新的联邦基金利率
-    fed_rate = await market_service.get_fed_rate()
-    risk_free_rate = fed_rate['targetRateTo'] / 100 if fed_rate else 0.05
+    # 获取最新的联邦基金利率（使用上限利率）
+    fed_rate_data = FedRateMonitorService.get_current_fed_rate('upper')
+    risk_free_rate = fed_rate_data['upper'] / 100 if fed_rate_data.get('upper') else 0.05
     
     positions = trade_service.stock_positions()
     
@@ -210,7 +211,7 @@ async def get_option_positions(
     return OptionPositionsResponse(
         positions=grouped_positions,
         risk_free_rate=risk_free_rate,
-        rate_update_date=fed_rate['effectiveDate'] if fed_rate else None
+        rate_update_date=fed_rate_data.get('upper_date')
     )
 
 
