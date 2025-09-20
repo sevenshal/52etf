@@ -1,6 +1,6 @@
 import React from 'react';
 import { Row, Col } from 'antd';
-import FearGreedCompass from '../../FearGreedCompass';
+import FearGreedCompass from './FearGreedCompass';
 import { getFearGreedColor, getFearGreedStatus } from '../utils';
 
 const FearGreedCurrent = ({ fearGreedData }) => {
