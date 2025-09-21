@@ -17,17 +17,18 @@ const StockDetail = () => {
   const [resistanceLevels, setResistanceLevels] = useState([]);
   const [days, setDays] = useState(200);
   const [priceChangeRatio, setPriceChangeRatio] = useState(30);
-  const [stabilizationPeriod, setStabilizationPeriod] = useState(10); // 新增：企稳时间 K线数量
-  const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(2); // 新增：成交量标准差倍数
+  const [stabilizationPeriod, setStabilizationPeriod] = useState(10);
+  const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(2);
   const [chartOption, setChartOption] = useState({});
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
+  const [evcHistory, setEvcHistory] = useState([]); // 新增
 
   useEffect(() => {
     fetchKlines();
+    fetchEvcHistory();
   }, [symbol]);
 
-  // 当标准差倍数变化时，重新预处理数据
   useEffect(() => {
     if (klines.length > 0) {
       const processed = preprocessKlinesVolume(klines, volumeStdDevMultiplier);
@@ -35,32 +36,26 @@ const StockDetail = () => {
     }
   }, [klines, volumeStdDevMultiplier]);
 
-  // 当参数变化时，重新计算支撑压力位和买卖点
   useEffect(() => {
     if (processedKlines.length > 0 && days > 1 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      // 重新计算支撑压力位
       const { supports, resistances } = calculateSupportResistanceValuesNew(processedKlines, days);
       setSupportLevels(supports);
       setResistanceLevels(resistances);
-      
-      // 重新计算买卖点
       calculateBuySellPoints(processedKlines);
     }
   }, [processedKlines, days, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
 
-  // 当计算结果变化时，更新图表选项
   useEffect(() => {
     if (processedKlines.length > 0) {
       setChartOption(getChartOption());
     }
-  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier]);
+  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier, evcHistory]);
 
   const fetchKlines = async () => {
     setLoading(true);
     try {
       const { data } = await request.get(`/api/stock/klines/${symbol}?days=500`);
       setKlines(data);
-      // 预处理K线数据，计算成交量相关指标
       const processed = preprocessKlinesVolume(data, volumeStdDevMultiplier);
       setProcessedKlines(processed);
     } catch (error) {
@@ -70,16 +65,23 @@ const StockDetail = () => {
     }
   };
 
+  // fetch EVC 估值历史
+  const fetchEvcHistory = async () => {
+    try {
+      const { data } = await request.get(`https://api.52etf.vip/api/evc/stock-evc/history/${symbol}?limit=365`);
+      setEvcHistory(data || []);
+    } catch (error) {
+      console.error('获取估值历史失败:', error);
+    }
+  };
 
+  // ... 其它不变的代码 ...
 
-  /**
-   * 计算股票买卖点
-   */
   const calculateBuySellPoints = (klines) => {
+    // ... 原有实现不变 ...
     const newBuyPoints = [];
     const newSellPoints = [];
 
-    // 计算买点
     let highestPoint = { price: 0, index: -1 };
     for (let i = 0; i < klines.length; i++) {
       if (klines[i].high > highestPoint.price) {
@@ -95,11 +97,8 @@ const StockDetail = () => {
         }
       }
 
-      // 并且这个最低点和最高点的跌幅超过用户设定的百分比
       if (lowestPointAfterHigh.index !== -1 && highestPoint.price > 0 &&
-          (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > (priceChangeRatio / 100)) {
-
-        // 从最低点之后到最新k线超过用户设定的K线数量
+        (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > (priceChangeRatio / 100)) {
         if (klines.length - 1 - lowestPointAfterHigh.index > stabilizationPeriod) {
           for (let i = lowestPointAfterHigh.index + stabilizationPeriod; i < klines.length; i++) {
             if (i >= 19 && klines[i].isVolumeSpike) {
@@ -114,7 +113,6 @@ const StockDetail = () => {
       }
     }
 
-    // 计算卖点（相反逻辑）
     let lowestPoint = { price: Infinity, index: -1 };
     for (let i = 0; i < klines.length; i++) {
       if (klines[i].low < lowestPoint.price) {
@@ -130,11 +128,8 @@ const StockDetail = () => {
         }
       }
 
-      // 并且这个最高点和最低点的涨幅超过用户设定的百分比
       if (highestPointAfterLow.index !== -1 && lowestPoint.price > 0 &&
-          (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > (priceChangeRatio / 100)) {
-
-        // 从最高点之后到最新k线超过用户设定的K线数量
+        (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > (priceChangeRatio / 100)) {
         if (klines.length - 1 - highestPointAfterLow.index > stabilizationPeriod) {
           for (let i = highestPointAfterLow.index + stabilizationPeriod; i < klines.length; i++) {
             if (i >= 19 && klines[i].isVolumeSpike) {
@@ -155,11 +150,32 @@ const StockDetail = () => {
 
   const getChartOption = () => {
     const dates = processedKlines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
+    // ... K线、成交量、买卖点等原有代码 ...
+
+    // 估值线：和日期对齐
+    const fairValueHi = [];
+    const fairValueLo = [];
+    const forwardNextFyHi = [];
+    const forwardNextFyLo = [];
+
+    if (evcHistory.length > 0) {
+      const evcMap = {};
+      evcHistory.forEach(item => {
+        evcMap[dayjs(item.date).format('YYYY-MM-DD')] = item;
+      });
+      dates.forEach(dateStr => {
+        const evc = evcMap[dateStr];
+        fairValueHi.push(evc?.fair_value_hi ?? null);
+        fairValueLo.push(evc?.fair_value_lo ?? null);
+        forwardNextFyHi.push(evc?.forward_next_fy_hi ?? null);
+        forwardNextFyLo.push(evc?.forward_next_fy_lo ?? null);
+      });
+    }
+
+    // series原有内容
     const klineData = processedKlines.map((item, index) => {
       const isUp = item.close >= item.open;
-      
       if (index < 19) {
-        // 前19根K线，根据涨跌设置颜色
         return {
           value: [item.open, item.close, item.low, item.high],
           itemStyle: {
@@ -170,17 +186,12 @@ const StockDetail = () => {
           }
         };
       }
-      
-      // 使用预处理后的放量判断
       let color;
       if (item.isVolumeSpike) {
-        // 成交量放大（超过20日均线+n个标准差）
-        color = isUp ? '#8B0000' : '#006400'; // 深红色/深绿色
+        color = isUp ? '#8B0000' : '#006400';
       } else {
-        // 普通成交量
-        color = isUp ? '#ef232a' : '#14b143'; // 红色/绿色
+        color = isUp ? '#ef232a' : '#14b143';
       }
-      
       return {
         value: [item.open, item.close, item.low, item.high],
         itemStyle: {
@@ -194,9 +205,7 @@ const StockDetail = () => {
 
     const volumeData = processedKlines.map((item, index) => {
       const isUp = item.close >= item.open;
-      
       if (index < 19) {
-        // 前19根K线，根据涨跌设置颜色
         return {
           value: item.volume,
           itemStyle: {
@@ -204,26 +213,18 @@ const StockDetail = () => {
           }
         };
       }
-      
-      // 使用预处理后的放量判断
       let color;
       if (item.isVolumeSpike) {
-        // 成交量放大（超过20日均线+1个标准差）
-        color = isUp ? '#8B0000' : '#006400'; // 深红色/深绿色
+        color = isUp ? '#8B0000' : '#006400';
       } else {
-        // 普通成交量
-        color = isUp ? '#ef232a' : '#14b143'; // 红色/绿色
+        color = isUp ? '#ef232a' : '#14b143';
       }
-      
       return {
         value: item.volume,
-        itemStyle: {
-          color: color
-        }
+        itemStyle: { color }
       };
     });
 
-    // 获取N日均线数据
     const volumeMA = processedKlines.map(item => item.volumeMA);
 
     const buyPointMarkers = buyPoints.map(point => ({
@@ -231,9 +232,7 @@ const StockDetail = () => {
       value: 'B',
       xAxis: point.index,
       yAxis: point.price,
-      itemStyle: {
-        color: 'red'
-      }
+      itemStyle: { color: 'red' }
     }));
 
     const sellPointMarkers = sellPoints.map(point => ({
@@ -241,9 +240,7 @@ const StockDetail = () => {
       value: 'S',
       xAxis: point.index,
       yAxis: point.price,
-      itemStyle: {
-        color: 'green'
-      }
+      itemStyle: { color: 'green' }
     }));
 
     const series = [{
@@ -254,10 +251,7 @@ const StockDetail = () => {
         data: [...buyPointMarkers, ...sellPointMarkers],
         symbolSize: 30,
         label: {
-          show: true,
-          formatter: '{b}',
-          color: '#fff',
-          fontSize: 12
+          show: true, formatter: '{b}', color: '#fff', fontSize: 12
         },
         symbolOffset: [0, '-50%']
       }
@@ -273,54 +267,78 @@ const StockDetail = () => {
       xAxisIndex: 1,
       yAxisIndex: 1,
       data: volumeMA,
-      lineStyle: {
-        color: '#FFA500',
-        width: 1
-      },
+      lineStyle: { color: '#FFA500', width: 1 },
       symbol: 'none'
     }];
 
-    supportLevels.forEach((level) => {
+    // 支撑压力位
+    supportLevels.forEach(level => {
       series.push({
         name: `支撑位${level}`,
         type: 'line',
         data: Array(dates.length).fill(level),
-        lineStyle: {
-          color: '#00FF00',
-          type: 'dashed'
-        },
+        lineStyle: { color: '#00FF00', type: 'dashed' },
         symbol: 'none'
       });
     });
-
-    resistanceLevels.forEach((level) => {
+    resistanceLevels.forEach(level => {
       series.push({
         name: `压力位${level}`,
         type: 'line',
         data: Array(dates.length).fill(level),
-        lineStyle: {
-          color: '#FF0000',
-          type: 'dashed'
-        },
+        lineStyle: { color: '#FF0000', type: 'dashed' },
         symbol: 'none'
       });
     });
+
+    // 估值线
+    if (evcHistory.length > 0) {
+      series.push(
+        {
+          name: '估值上限',
+          type: 'line',
+          data: fairValueHi,
+          lineStyle: { color: '#FF0000', width: 2 },
+          symbol: 'none',
+          connectNulls: true
+        },
+        {
+          name: '估值下限',
+          type: 'line',
+          data: fairValueLo,
+          lineStyle: { color: '#0066FF', width: 2 },
+          symbol: 'none',
+          connectNulls: true
+        },
+        {
+          name: '下财年估值上限',
+          type: 'line',
+          data: forwardNextFyHi,
+          lineStyle: { color: '#FFA6A6', width: 2 },
+          symbol: 'none',
+          connectNulls: true
+        },
+        {
+          name: '下财年估值下限',
+          type: 'line',
+          data: forwardNextFyLo,
+          lineStyle: { color: '#66CCFF', width: 2 },
+          symbol: 'none',
+          connectNulls: true
+        }
+      );
+    }
 
     return {
       animation: false,
       tooltip: {
         trigger: 'axis',
-        axisPointer: {
-          type: 'cross'
-        },
+        axisPointer: { type: 'cross' },
         formatter: function(params) {
           const date = params[0].axisValue;
           let result = `<div style="font-weight: bold; margin-bottom: 8px;">${date}</div>`;
-          
-          // 处理K线数据
           const klineData = params.find(p => p.seriesName === 'K线');
           if (klineData) {
-            // 现在klineData.data是对象格式，需要访问value属性
             const [data, open, close, low, high] = klineData.data.value || klineData.data;
             result += `
               <div style="margin-bottom: 4px;">
@@ -333,8 +351,6 @@ const StockDetail = () => {
               </div>
             `;
           }
-          
-          // 处理成交量数据 - 从预处理数据中获取
           const dataIndex = params[0].dataIndex;
           if (dataIndex !== undefined && processedKlines[dataIndex]) {
             const volume = processedKlines[dataIndex].volume;
@@ -344,74 +360,42 @@ const StockDetail = () => {
               </div>
             `;
           }
-          
+          // 估值信息
+          if (evcHistory.length > 0 && dataIndex !== undefined && evcHistory.length > 0) {
+            const evcMap = {};
+            evcHistory.forEach(item => {
+              evcMap[dayjs(item.date).format('YYYY-MM-DD')] = item;
+            });
+            const evc = evcMap[date];
+            if (evc) {
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color:#FF0000;">估值上限：</span>${evc.fair_value_hi?.toFixed(2) || '--'}
+                  <span style="color:#0066FF;margin-left:10px;">估值下限：</span>${evc.fair_value_lo?.toFixed(2) || '--'}
+                </div>
+                <div style="margin-bottom: 4px;">
+                  <span style="color:#FFA6A6;">下财年上限：</span>${evc.forward_next_fy_hi?.toFixed(2) || '--'}
+                  <span style="color:#66CCFF;margin-left:10px;">下财年下限：</span>${evc.forward_next_fy_lo?.toFixed(2) || '--'}
+                </div>
+              `;
+            }
+          }
           return result;
         }
       },
       legend: {
-        data: ['K线', '成交量', '成交量20日均线', '买点', '卖点', ...supportLevels.map((v) => `支撑位${v}`), ...resistanceLevels.map((v) => `压力位${v}`)]
+        data: [
+          'K线', '成交量', '成交量20日均线', '买点', '卖点',
+          ...supportLevels.map((v) => `支撑位${v}`),
+          ...resistanceLevels.map((v) => `压力位${v}`),
+          '估值上限', '估值下限', '下财年估值上限', '下财年估值下限'
+        ]
       },
-      grid: [{
-        left: '10%',
-        right: '8%',
-        height: '60%'
-      }, {
-        left: '10%',
-        right: '8%',
-        top: '75%',
-        height: '20%'
-      }],
-      xAxis: [{
-        type: 'category',
-        data: dates,
-        scale: true,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        splitLine: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax'
-      }, {
-        type: 'category',
-        gridIndex: 1,
-        data: dates,
-        scale: true,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        axisLabel: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax'
-      }],
-      yAxis: [{
-        scale: true,
-        splitArea: {
-          show: true
-        }
-      }, {
-        scale: true,
-        gridIndex: 1,
-        splitNumber: 2,
-        axisLabel: { show: false },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false }
-      }],
-      dataZoom: [{
-        type: 'inside',
-        xAxisIndex: [0, 1],
-        start: 0,
-        end: 100
-      }, {
-        show: true,
-        xAxisIndex: [0, 1],
-        type: 'slider',
-        top: '90%',
-        start: 0,
-        end: 100
-      }],
+      grid: [{ left: '10%', right: '8%', height: '60%' }, { left: '10%', right: '8%', top: '75%', height: '20%' }],
+      xAxis: [{ type: 'category', data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, splitLine: { show: false }, splitNumber: 20, min: 'dataMin', max: 'dataMax' },
+        { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, splitNumber: 20, min: 'dataMin', max: 'dataMax' }],
+      yAxis: [{ scale: true, splitArea: { show: true } }, { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }],
+      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }, { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }],
       series: series
     };
   };
@@ -473,7 +457,7 @@ const StockDetail = () => {
           </Form.Item>
         </Form>
         <ReactECharts
-          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}`}
+          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}-${evcHistory.length}`}
           option={chartOption}
           style={{ height: '600px' }}
         />
