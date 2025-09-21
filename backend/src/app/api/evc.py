@@ -223,3 +223,26 @@ async def update_token(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/stock_evc/history")
+def get_stock_evc_history(
+    symbol: str = Query(..., description="股票代码"),
+    limit: int = Query(10, description="查询天数"),
+    db: Session = Depends(get_db)
+):
+    records = (
+        db.query(StockEVC)
+        .filter(StockEVC.symbol == symbol)
+        .order_by(StockEVC.date.desc())
+        .limit(limit)
+        .all()
+    )
+    # 去掉 company 和 _sa_instance_state 字段
+    result = []
+    for r in records:
+        d = r.__dict__.copy()
+        d.pop("company", None)
+        d.pop("_sa_instance_state", None)
+        result.append(d)
+    return result
