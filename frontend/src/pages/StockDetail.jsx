@@ -68,7 +68,7 @@ const StockDetail = () => {
   // fetch EVC 估值历史
   const fetchEvcHistory = async () => {
     try {
-      const { data } = await request.get(`https://api.52etf.vip/api/evc/stock-evc/history/${symbol}?limit=365`);
+      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=365`);
       setEvcHistory(data || []);
     } catch (error) {
       console.error('获取估值历史失败:', error);
