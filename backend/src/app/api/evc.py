@@ -225,10 +225,10 @@ async def update_token(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/stock-evc/history")
+@router.get("/stock-evc/history/{symbol}")
 def get_stock_evc_history(
-    symbol: str = Query(..., description="股票代码"),
-    limit: int = Query(10, description="查询天数")
+    symbol: str,
+    limit: int = Query(100, description="查询天数")
 ):
     db = get_db()
     records = (
