@@ -228,9 +228,9 @@ async def update_token(
 @router.get("/stock-evc/history")
 def get_stock_evc_history(
     symbol: str = Query(..., description="股票代码"),
-    limit: int = Query(10, description="查询天数"),
-    db: Session = Depends(get_db)
+    limit: int = Query(10, description="查询天数")
 ):
+    db = get_db()
     records = (
         db.query(StockEVC)
         .filter(StockEVC.symbol == symbol)
