@@ -22,8 +22,8 @@ const StockDetail = () => {
   const [chartOption, setChartOption] = useState({});
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
-  const [evcHistory, setEvcHistory] = useState([]); // 新增
-  const [showSupportResistance, setShowSupportResistance] = useState(false); // 支撑压力线开关
+  const [evcHistory, setEvcHistory] = useState([]);
+  const [showSupportResistance, setShowSupportResistance] = useState(false);
 
   useEffect(() => {
     fetchKlines();
@@ -55,7 +55,7 @@ const StockDetail = () => {
     if (processedKlines.length > 0) {
       setChartOption(getChartOption());
     }
-  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier, evcHistory]);
+  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier, evcHistory, showSupportResistance]);
 
   const fetchKlines = async () => {
     setLoading(true);
@@ -71,7 +71,6 @@ const StockDetail = () => {
     }
   };
 
-  // fetch EVC 估值历史
   const fetchEvcHistory = async () => {
     try {
       const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=365`);
@@ -81,10 +80,7 @@ const StockDetail = () => {
     }
   };
 
-  // ... 其它不变的代码 ...
-
   const calculateBuySellPoints = (klines) => {
-    // ... 原有实现不变 ...
     const newBuyPoints = [];
     const newSellPoints = [];
 
@@ -156,7 +152,6 @@ const StockDetail = () => {
 
   const getChartOption = () => {
     const dates = processedKlines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
-    // ... K线、成交量、买卖点等原有代码 ...
 
     // 估值线：和日期对齐
     const fairValueHi = [];
@@ -178,7 +173,6 @@ const StockDetail = () => {
       });
     }
 
-    // series原有内容
     const klineData = processedKlines.map((item, index) => {
       const isUp = item.close >= item.open;
       if (index < 19) {
@@ -249,33 +243,37 @@ const StockDetail = () => {
       itemStyle: { color: 'green' }
     }));
 
-    const series = [{
-      name: 'K线',
-      type: 'candlestick',
-      data: klineData,
-      markPoint: {
-        data: [...buyPointMarkers, ...sellPointMarkers],
-        symbolSize: 30,
-        label: {
-          show: true, formatter: '{b}', color: '#fff', fontSize: 12
-        },
-        symbolOffset: [0, '-50%']
+    const series = [
+      {
+        name: 'K线',
+        type: 'candlestick',
+        data: klineData,
+        markPoint: {
+          data: [...buyPointMarkers, ...sellPointMarkers],
+          symbolSize: 30,
+          label: {
+            show: true, formatter: '{b}', color: '#fff', fontSize: 12
+          },
+          symbolOffset: [0, '-50%']
+        }
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumeData
+      },
+      {
+        name: '成交量N日均线',
+        type: 'line',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumeMA,
+        lineStyle: { color: '#FFA500', width: 1 },
+        symbol: 'none'
       }
-    }, {
-      name: '成交量',
-      type: 'bar',
-      xAxisIndex: 1,
-      yAxisIndex: 1,
-      data: volumeData
-    }, {
-      name: '成交量N日均线',
-      type: 'line',
-      xAxisIndex: 1,
-      yAxisIndex: 1,
-      data: volumeMA,
-      lineStyle: { color: '#FFA500', width: 1 },
-      symbol: 'none'
-    }];
+    ];
 
     // 支撑压力位（只在开关为true时显示）
     if (showSupportResistance) {
@@ -347,7 +345,8 @@ const StockDetail = () => {
           let result = `<div style="font-weight: bold; margin-bottom: 8px;">${date}</div>`;
           const klineData = params.find(p => p.seriesName === 'K线');
           if (klineData) {
-            const [data, open, close, low, high] = klineData.data.value || klineData.data;
+            const value = klineData.data.value || klineData.data;
+            const [open, close, low, high] = value;
             result += `
               <div style="margin-bottom: 4px;">
                 <span style="color: #666;">开盘：</span><span style="color: #ef232a;">${open.toFixed(2)}</span>
@@ -393,17 +392,66 @@ const StockDetail = () => {
       },
       legend: {
         data: [
-          'K线', '成交量', '成交量20日均线', '买点', '卖点',
+          'K线',
+          '成交量',
+          '成交量N日均线',
+          '买点',
+          '卖点',
           ...(showSupportResistance ? supportLevels.map((v) => `支撑位${v}`) : []),
           ...(showSupportResistance ? resistanceLevels.map((v) => `压力位${v}`) : []),
-          '估值上限', '估值下限', '下财年估值上限', '下财年估值下限'
+          '估值上限',
+          '估值下限',
+          '下财年估值上限',
+          '下财年估值下限'
         ]
       },
-      grid: [{ left: '10%', right: '8%', height: '60%' }, { left: '10%', right: '8%', top: '75%', height: '20%' }],
-      xAxis: [{ type: 'category', data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, splitLine: { show: false }, splitNumber: 20, min: 'dataMin', max: 'dataMax' },
-        { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, [...]
-      yAxis: [{ scale: true, splitArea: { show: true } }, { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { sh[...]
-      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }, { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }],
+      grid: [
+        { left: '10%', right: '8%', height: '60%' },
+        { left: '10%', right: '8%', top: '75%', height: '20%' }
+      ],
+      xAxis: [
+        {
+          type: 'category',
+          data: dates,
+          scale: true,
+          boundaryGap: false,
+          axisLine: { onZero: false },
+          splitLine: { show: false },
+          splitNumber: 20,
+          min: 'dataMin',
+          max: 'dataMax'
+        },
+        {
+          type: 'category',
+          gridIndex: 1,
+          data: dates,
+          scale: true,
+          boundaryGap: false,
+          axisLine: { onZero: false },
+          axisTick: { show: false },
+          splitLine: { show: false },
+          axisLabel: { show: false }
+        }
+      ],
+      yAxis: [
+        {
+          scale: true,
+          splitArea: { show: true }
+        },
+        {
+          scale: true,
+          gridIndex: 1,
+          splitNumber: 2,
+          axisLabel: { show: false },
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: false }
+        }
+      ],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+        { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }
+      ],
       series: series
     };
   };
