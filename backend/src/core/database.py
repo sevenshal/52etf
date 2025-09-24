@@ -22,16 +22,18 @@ class MarketSignal(Base):
     __tablename__ = 'market_signal'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    ver = Column(String(8), default='v1')
     symbol = Column(String(16), nullable=False)
     close_price = Column(Float, nullable=False)
-    below_200ma_ratio = Column(Float, nullable=False)
-    vol_5_std = Column(Float, nullable=False)
-    today_vol_std = Column(Float, nullable=False)
-    low_50 = Column(Float, nullable=False)
-    close_vs_low_50 = Column(Float, nullable=False)
     direction = Column(String(8), nullable=False)  # 'BUY'或'SELL'
     date = Column(Date, nullable=False)
-
+    below_200ma_ratio = Column(Float, nullable=True)
+    vol_5_std = Column(Float, nullable=True)
+    today_vol_std = Column(Float, nullable=True)
+    low_50 = Column(Float, nullable=True)
+    close_vs_low_50 = Column(Float, nullable=True)
+    v2_price_change_ratio = Column(Float, nullable=True)
+    v2_stabilization_period = Column(Integer, nullable=True)
     __table_args__ = (
         UniqueConstraint('symbol', 'date', name='uniq_symbol_date'),
     )

@@ -17,14 +17,17 @@ def get_market_signal(
     result = [
         {
             "symbol": item.symbol,
+            "ver": item.ver,
             "close_price": item.close_price,
+            "date": item.date.isoformat(),
+            "direction": item.direction,
             "below_200ma_ratio": item.below_200ma_ratio,
             "vol_5_std": item.vol_5_std,
             "today_vol_std": item.today_vol_std,
             "low_50": item.low_50,
             "close_vs_low_50": item.close_vs_low_50,
-            "date": item.date.isoformat(),
-            "direction": item.direction
+            "v2_price_change_ratio": item.v2_price_change_ratio,
+            "v2_stabilization_period": item.v2_stabilization_period
         }
         for item in items
     ]
