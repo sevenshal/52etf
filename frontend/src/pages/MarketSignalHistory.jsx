@@ -97,15 +97,28 @@ const MarketSignalHistory = () => {
                             <Text type="secondary" style={{ fontSize: '12px' }}>
                                 {item.date ? dayjs(item.date).format('YYYY-MM-DD') : ''} · {item.direction}
                             </Text>
-                            <Text style={{
-                                marginTop: '4px',
-                                fontSize: '12px',
-                                color: item.direction === 'SELL' ? '#ff4d4f' : (item.direction === 'BUY' ? '#52c41a' : 'inherit')
-                            }}>
-                                <a onClick={() => navigate(`/stock/${item.symbol}`)} >{item.symbol}</a> 收盘:{item.close_price} 低于200MA比率:{item.below_200ma_ratio * 100}% <br/>
-                                5日成交量高出50日成交量{item.vol_5_std}个标准差, 当日成交量高出{item.today_vol_std}个标准差 <br/>
-                                50日低点:{item.low_50} 收盘vs50日低点比率:{item.close_vs_low_50}
-                            </Text>
+                            {item.ver === 'v2' ? (
+                                <Text style={{
+                                    marginTop: '4px',
+                                    fontSize: '12px',
+                                    color: item.direction === 'SELL' ? '#ff4d4f' : (item.direction === 'BUY' ? '#52c41a' : 'inherit')
+                                }}>
+                                    <a onClick={() => navigate(`/stock/${item.symbol}`)} >{item.symbol}</a>
+                                    &nbsp;收盘价:{item.close_price}
+                                    &nbsp;幅度超过{item.v2_price_change_ratio}%
+                                    &nbsp;企稳超过{item.v2_stabilization_period}天
+                                </Text>
+                            ) : (
+                                <Text style={{
+                                    marginTop: '4px',
+                                    fontSize: '12px',
+                                    color: item.direction === 'SELL' ? '#ff4d4f' : (item.direction === 'BUY' ? '#52c41a' : 'inherit')
+                                }}>
+                                    <a onClick={() => navigate(`/stock/${item.symbol}`)} >{item.symbol}</a> 收盘:{item.close_price} 低于200MA比率:{item.below_200ma_ratio * 100}% <br/>
+                                    5日成交量高出50日成交量{item.vol_5_std}个标准差, 当日成交量高出{item.today_vol_std}个标准差 <br/>
+                                    50日低点:{item.low_50} 收盘vs50日低点比率:{item.close_vs_low_50}
+                                </Text>
+                            )}
                         </List.Item>
                     )}
                 />
