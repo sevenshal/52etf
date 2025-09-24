@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Spin, Button, InputNumber, Form } from 'antd';
+import { Card, Spin, Button, InputNumber, Form, Switch } from 'antd';
 import { LeftOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -23,6 +23,7 @@ const StockDetail = () => {
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
   const [evcHistory, setEvcHistory] = useState([]); // 新增
+  const [showSupportResistance, setShowSupportResistance] = useState(false); // 支撑压力线开关
 
   useEffect(() => {
     fetchKlines();
@@ -38,12 +39,17 @@ const StockDetail = () => {
 
   useEffect(() => {
     if (processedKlines.length > 0 && days > 1 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      const { supports, resistances } = calculateSupportResistanceValuesNew(processedKlines, days);
-      setSupportLevels(supports);
-      setResistanceLevels(resistances);
+      if (showSupportResistance) {
+        const { supports, resistances } = calculateSupportResistanceValuesNew(processedKlines, days);
+        setSupportLevels(supports);
+        setResistanceLevels(resistances);
+      } else {
+        setSupportLevels([]);
+        setResistanceLevels([]);
+      }
       calculateBuySellPoints(processedKlines);
     }
-  }, [processedKlines, days, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
+  }, [processedKlines, days, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier, showSupportResistance]);
 
   useEffect(() => {
     if (processedKlines.length > 0) {
@@ -271,25 +277,27 @@ const StockDetail = () => {
       symbol: 'none'
     }];
 
-    // 支撑压力位
-    supportLevels.forEach(level => {
-      series.push({
-        name: `支撑位${level}`,
-        type: 'line',
-        data: Array(dates.length).fill(level),
-        lineStyle: { color: '#00FF00', type: 'dashed' },
-        symbol: 'none'
+    // 支撑压力位（只在开关为true时显示）
+    if (showSupportResistance) {
+      supportLevels.forEach(level => {
+        series.push({
+          name: `支撑位${level}`,
+          type: 'line',
+          data: Array(dates.length).fill(level),
+          lineStyle: { color: '#00FF00', type: 'dashed' },
+          symbol: 'none'
+        });
       });
-    });
-    resistanceLevels.forEach(level => {
-      series.push({
-        name: `压力位${level}`,
-        type: 'line',
-        data: Array(dates.length).fill(level),
-        lineStyle: { color: '#FF0000', type: 'dashed' },
-        symbol: 'none'
+      resistanceLevels.forEach(level => {
+        series.push({
+          name: `压力位${level}`,
+          type: 'line',
+          data: Array(dates.length).fill(level),
+          lineStyle: { color: '#FF0000', type: 'dashed' },
+          symbol: 'none'
+        });
       });
-    });
+    }
 
     // 估值线
     if (evcHistory.length > 0) {
@@ -386,15 +394,15 @@ const StockDetail = () => {
       legend: {
         data: [
           'K线', '成交量', '成交量20日均线', '买点', '卖点',
-          ...supportLevels.map((v) => `支撑位${v}`),
-          ...resistanceLevels.map((v) => `压力位${v}`),
+          ...(showSupportResistance ? supportLevels.map((v) => `支撑位${v}`) : []),
+          ...(showSupportResistance ? resistanceLevels.map((v) => `压力位${v}`) : []),
           '估值上限', '估值下限', '下财年估值上限', '下财年估值下限'
         ]
       },
       grid: [{ left: '10%', right: '8%', height: '60%' }, { left: '10%', right: '8%', top: '75%', height: '20%' }],
       xAxis: [{ type: 'category', data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, splitLine: { show: false }, splitNumber: 20, min: 'dataMin', max: 'dataMax' },
-        { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, splitNumber: 20, min: 'dataMin', max: 'dataMax' }],
-      yAxis: [{ scale: true, splitArea: { show: true } }, { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }],
+        { type: 'category', gridIndex: 1, data: dates, scale: true, boundaryGap: false, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, [...]
+      yAxis: [{ scale: true, splitArea: { show: true } }, { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { sh[...]
       dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }, { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }],
       series: series
     };
@@ -455,9 +463,15 @@ const StockDetail = () => {
               onChange={value => setVolumeStdDevMultiplier(value)}
             />
           </Form.Item>
+          <Form.Item label="显示支撑压力线">
+            <Switch
+              checked={showSupportResistance}
+              onChange={setShowSupportResistance}
+            />
+          </Form.Item>
         </Form>
         <ReactECharts
-          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}-${evcHistory.length}`}
+          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}-${evcHistory.length}`}
           option={chartOption}
           style={{ height: '600px' }}
         />
