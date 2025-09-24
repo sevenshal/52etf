@@ -201,7 +201,7 @@ class MarketSignalAnalyzer:
             ETFHolding.etf_symbol.in_(self.etf_symbols),
             ETFHolding.asset_class == 'Equity'
         ).all()
-        symbols = {h.symbol for h in holdings if h.market_cap and h.market_cap > self.min_market_cap}
+        symbols = {h.symbol for h in holdings} #if h.market_cap and h.market_cap > self.min_market_cap
         return list(symbols)
 
     def analyze(self):
