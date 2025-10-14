@@ -122,14 +122,14 @@ const EVCValuation = () => {
             title: '估值下限', 
             dataIndex: 'fair_value_lo', 
             key: 'fair_value_lo',
-            render: (text) => text.toFixed(2),
+            render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
         { 
             title: '估值上限',
             dataIndex: 'fair_value_hi', 
             key: 'fair_value_hi',
-            render: (text) => text.toFixed(2),
+            render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
         {
@@ -150,14 +150,14 @@ const EVCValuation = () => {
             title: '下财年估值下限',
             dataIndex: 'forward_next_fy_lo', 
             key: 'forward_next_fy_lo',
-            render: (text) => text.toFixed(2),
+            render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
         { 
             title: '下财年估值上限',
             dataIndex: 'forward_next_fy_hi', 
             key: 'forward_next_fy_hi',
-            render: (text) => text.toFixed(2),
+            render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
         {
