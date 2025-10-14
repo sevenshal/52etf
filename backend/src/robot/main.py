@@ -22,7 +22,7 @@ cnn_fear_index_scraper = CNNFearGreedIndexScraper()
 market_signal_analyzer = MarketSignalAnalyzer(longPortService)
 
 def robot():
-  # evc_manager.fetch_and_stocks(force_fetch=False)
+  evc_manager.fetch_and_stocks(force_fetch=True)
   # etf_manager.analyze_all_fair_value()
   # cnn_fear_index_scraper.fetch_data_and_save()
   # etf_manager.calculate_all_emotions()
