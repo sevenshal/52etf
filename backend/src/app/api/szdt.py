@@ -18,6 +18,7 @@ class StockModel(BaseModel):
     id: Optional[int] = None
     code: str
     name: str
+    type: int = Field(3, ge=-1, le=8, description="ETF/类型: -1~8, 默认3(A股ETF)")
     when_buy: int = Field(..., ge=-100, le=100)
     when_sell: int = Field(..., ge=-100, le=100)
     max_position: int = Field(..., ge=0, le=100)
@@ -28,7 +29,7 @@ class StockModel(BaseModel):
     lever: int = Field(..., ge=1, le=4)
     emo_area: str = Field(..., pattern="^(a|us|coin|other)$")
 
-    @validator('when_buy', 'when_sell', 'max_position', pre=True)
+    @validator('when_buy', 'when_sell', 'max_position', 'type', pre=True)
     def convert_to_int(cls, v):
         if isinstance(v, str):
             return int(float(v))
@@ -51,6 +52,7 @@ class StockModel(BaseModel):
             "example": {
                 "code": "SH510500",
                 "name": "500ETF",
+                "type": 3,
                 "when_buy": 0,
                 "when_sell": 0,
                 "max_position": 0,
@@ -169,7 +171,10 @@ async def set_auto_trading_status(
     return {"message": "设置成功"}
 
 @router.get("/trading-stocks", response_model=List[StockModel])
-async def list_trading_stocks(account_id: str = Depends(get_account_id)):
+async def list_trading_stocks(
+    account_id: str = Depends(get_account_id),
+    etf_type: Optional[int] = Query(None, ge=-1, le=8, description="按类型筛选，可不传返回全部")
+):
     """获取自动交易的股票列表"""
     # 检查自动交易开关状态
     if not get_auto_trading_status(account_id):
@@ -177,15 +182,21 @@ async def list_trading_stocks(account_id: str = Depends(get_account_id)):
     
     # 如果开关打开，则返回股票列表
     with get_db_session(account_id) as db:
-        stocks = db.query(SzdtTradeStock).all()
+        query = db.query(SzdtTradeStock)
+        if etf_type is not None:
+            query = query.filter(SzdtTradeStock.type == etf_type)
+        stocks = query.all()
         return [StockModel.from_orm(stock) for stock in stocks]
 
 # API 路由
 @router.get("/stocks", response_model=List[StockModel])
-async def list_stocks(account_id: str = Depends(get_account_id)):
+async def list_stocks(
+    account_id: str = Depends(get_account_id),
+    etf_type: int = Query(3, ge=-1, le=8, description="类型，默认3(A股ETF)")
+):
     """获取股票列表"""
     with get_db_session(account_id) as db:
-        stocks = db.query(SzdtTradeStock).all()
+        stocks = db.query(SzdtTradeStock).filter(SzdtTradeStock.type == etf_type).all()
         return [StockModel.from_orm(stock) for stock in stocks]
 
 @router.post("/stocks")
@@ -233,33 +244,6 @@ async def get_stock(stock_id: int, account_id: str = Depends(get_account_id)):
         if not db_stock:
             raise HTTPException(status_code=404, detail="Stock not found")
         return db_stock
-
-@router.get("/stock-candidates", response_model=List[StockCandidate])
-async def list_stock_candidates():
-    """获取候选股票列表"""
-    try:
-        # 使用ETF情绪数据作为候选股票列表
-        response = await szdt_service.get_etf_emotion(etf_type=3)
-        
-        if response and response['status'] == 1:
-            candidates = []
-            for item in response['data']:
-                if 'code' in item and 'name' in item:
-                    # 转换代码格式，去掉前缀
-                    code = item['code'].replace('SH.', 'SH').replace('SZ.', 'SZ')
-                    candidates.append(StockCandidate(
-                        code=code,
-                        name=item['name'],
-                        lever=1,  # 默认杠杆为1
-                        emo_area='a',  # 默认情绪区域为A股
-                        tag=item.get('tag', ''),
-                        index=item.get('index', '')
-                    ))
-            return candidates
-        return []
-    except Exception as e:
-        print(f"Error reading stock candidates: {e}")
-        return []
 
 @router.get("/stock-emotion/{code}", response_model=StockEmotionResponse)
 async def get_stocks_emotions(

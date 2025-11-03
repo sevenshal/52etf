@@ -8,6 +8,7 @@ from .evc_manager import EVCManager
 from ..core.services.longport import LongPortService
 from .cnn_fear_index import CNNFearGreedIndexScraper
 from .market_signal import MarketSignalAnalyzer
+from .us_auto_trader import start_us_auto_trader
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
@@ -23,10 +24,10 @@ market_signal_analyzer = MarketSignalAnalyzer(longPortService)
 
 def robot():
   evc_manager.fetch_and_stocks(force_fetch=False)
-  etf_manager.analyze_all_fair_value()
+  #etf_manager.analyze_all_fair_value()
   # cnn_fear_index_scraper.fetch_data_and_save()
   # etf_manager.calculate_all_emotions()
-  market_signal_analyzer.analyze()
+  #market_signal_analyzer.analyze()
   
   # 定时执行数据抓取
   schedule.every().day.at("08:00").do(evc_manager.fetch_and_stocks)
@@ -46,6 +47,8 @@ def robot():
   # 定时执行CNN Fear & Greed Index 抓取
   schedule.every().day.at("10:00").do(cnn_fear_index_scraper.fetch_data_and_save)
   logging.info("listening deal")
+  # 启动美股自动交易（每分钟轮询，限美股开盘时段）
+  start_us_auto_trader(ACCOUNT_ID)
   while True:
     schedule.run_pending()
     time.sleep(10)

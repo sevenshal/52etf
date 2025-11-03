@@ -24,3 +24,4 @@ cachetools
 diskcache
 beautifulsoup4
 socksio
+ib-insync

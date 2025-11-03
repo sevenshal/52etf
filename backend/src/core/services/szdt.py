@@ -117,6 +117,7 @@ class SZDTService:
                 
                 response.raise_for_status()
                 resp = response.json()
+                self.logger.debug(f"响应数据: {resp}")
                 
                 # 如果提供了缓存键，则缓存响应
                 if cache_key:

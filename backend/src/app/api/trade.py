@@ -67,8 +67,8 @@ async def get_trade_opportunities(
             state = TradingState(cli_id=cli_id, current_index=0)
             db.add(state)
 
-        # 获取可交易的股票列表
-        stocks = db.query(SzdtTradeStock).all()
+        # 获取可交易的股票列表（限定 type=3）
+        stocks = db.query(SzdtTradeStock).filter(SzdtTradeStock.type == 3).all()
         if not stocks:
             return TradeResponse(opportunities=[], msg="未获取到可交易的股票列表")
 

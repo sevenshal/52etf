@@ -234,6 +234,7 @@ class SzdtTradeStock(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
+    type = Column(Integer, nullable=False, default=3)
     when_buy = Column(Integer, nullable=False)
     when_sell = Column(Integer, nullable=False)
     max_position = Column(Integer, nullable=False)
@@ -283,6 +284,16 @@ def get_db_session_factory(account_id: str):
             max_overflow=10  # 最大额外连接数
         )
         Base.metadata.create_all(bind=engine)
+        # 轻量迁移: 确保 szdt_trade_stocks 表存在 type 列
+        try:
+            with engine.connect() as conn:
+                result = conn.execute("PRAGMA table_info(szdt_trade_stocks)")
+                cols = [row[1] for row in result]  # 第二列为列名
+                if 'type' not in cols:
+                    conn.execute("ALTER TABLE szdt_trade_stocks ADD COLUMN type INTEGER NOT NULL DEFAULT 3")
+        except Exception:
+            # 静默失败，避免影响服务启动；后续操作若失败再暴露
+            pass
         
         # 创建线程安全的 session factory
         session_factory = scoped_session(
