@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip } from 'antd';
+import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
@@ -17,6 +17,18 @@ const FearStockList = () => {
   const [previewType, setPreviewType] = useState('buy'); // 'buy' or 'sell'
   const [previewRange, setPreviewRange] = useState([60, 100]);
   const [previewAmount, setPreviewAmount] = useState(0);
+  const [activeType, setActiveType] = useState(3);
+
+  const tabItems = [
+    { key: '1', label: '美股杠杆' },
+    { key: '2', label: '美股常规' },
+    { key: '7', label: '美股个股' },
+    { key: '3', label: 'A股ETF' },
+    { key: '4', label: '全球ETF' },
+    { key: '5', label: '港股杠杆' },
+    { key: '6', label: '港股常规' },
+    { key: '8', label: '港股个股' },
+  ];
 
   useEffect(() => {
     // 检查是否有账户ID
@@ -26,7 +38,7 @@ const FearStockList = () => {
       return;
     }
     loadStocks();
-  }, [navigate]);
+  }, [navigate, activeType]);
 
   const loadStocks = async () => {
     // 只有在有账户ID的情况下才获取数据
@@ -38,8 +50,8 @@ const FearStockList = () => {
     setLoading(true);
     try {
       const [stocksResponse, emoResponse] = await Promise.all([
-        request.get('/api/quant/stocks'),
-        request.get('/api/quant/etf/emotion/3')
+        request.get(`/api/quant/stocks`, { params: { etf_type: activeType } }),
+        request.get(`/api/quant/etf/emotion/${activeType}`)
       ]);
       
       // 处理ETF情绪数据作为候选股票列表
@@ -123,7 +135,7 @@ const FearStockList = () => {
         ? `/api/quant/stocks/${editingRecord.id}`
         : '/api/quant/stocks';
 
-      await request[method](url, data);
+      await request[method](url, { ...data, type: Number(activeType) });
       message.success(editingRecord ? '更新成功' : '添加成功');
       setIsModalVisible(false);
       form.resetFields();
@@ -147,7 +159,8 @@ const FearStockList = () => {
       sell_factor: 1,
       max_position: 5,
       lever: 1,
-      emo_area: 'a'
+      emo_area: 'a',
+      type: Number(activeType)
     });
     setEditingRecord(null);
     setIsModalVisible(true);
@@ -537,15 +550,24 @@ const FearStockList = () => {
           添加
         </Button>
       </Layout.Header>
-      
+
+      <Tabs
+        activeKey={String(activeType)}
+        onChange={(key) => {
+          setActiveType(Number(key));
+        }}
+        items={tabItems.map(t => ({ key: t.key, label: t.label }))}
+      />
+
       <Table
-          columns={columns}
-          dataSource={data}
-          rowKey="id"
-          scroll={{ x: 'max-content' }}
-          size="small"
-          pagination={false}
-        />
+        loading={loading}
+        columns={columns}
+        dataSource={data}
+        rowKey="id"
+        scroll={{ x: 'max-content' }}
+        size="small"
+        pagination={false}
+      />
 
       <Modal
         title={editingRecord ? "编辑股票" : "添加股票"}
@@ -762,6 +784,12 @@ const FearStockList = () => {
           </Form.Item>
           <Form.Item
             name="emo_area"
+            hidden
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item
+            name="type"
             hidden
           >
             <Input />
