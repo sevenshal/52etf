@@ -189,13 +189,14 @@ class SZDTService:
             if updated_at_str:
                 updated_at = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
                 if (datetime.now() - updated_at) > timedelta(minutes=15):
-                    logging.debug(f"get_etf_emotion list fetch failed: {updated_at}")
+                    logging.debug(f"get_etf_emotion list fetch not fresh: {updated_at}")
                     return None
             return {
                 'status': 1,
                 'data': {
                     'score': int(emo['score']),
-                    'price': float(emo['price']) if isinstance(emo['price'], str) else emo['price']
+                    'price': float(emo['price']) if isinstance(emo['price'], str) else emo['price'],
+                    'updated_at': updated_at_str
                 }
             }
         except Exception as e:
