@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 import httpx
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import hmac
 import hashlib
 from ratelimit import limits, sleep_and_retry
@@ -161,3 +161,43 @@ class SZDTService:
         cache_key = f"etf_emotion_history:{code}"
         return await self._make_request("GET", path, cache_key)
 
+    @staticmethod
+    def _normalize_code(code: str) -> str:
+        if not code:
+            return code
+        return code.replace('SH.', 'SH').replace('SZ.', 'SZ').replace('US.', 'US').replace('HK.', 'HK')
+
+    async def get_fresh_emotion_from_list(self, etf_type: int, code: str):
+        """从批量ETF情绪中得到某一标的的情绪与价格，并检查是否新鲜。"""
+        try:
+            res = await self.get_etf_emotion(etf_type)
+            if not res or res.get('status') != 1:
+                return None
+            target = None
+            norm_code = self._normalize_code(code)
+            for item in res.get('data', []) or []:
+                item_code = self._normalize_code(item.get('code'))
+                if item_code == norm_code:
+                    target = item
+                    break
+            if not target:
+                return None
+            emo = target.get('emotion') or {}
+            if 'score' not in emo or 'price' not in emo:
+                return None
+            updated_at_str = emo.get('updated_at')
+            if updated_at_str:
+                updated_at = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
+                if (datetime.now() - updated_at) > timedelta(minutes=15):
+                    logging.debug(f"get_etf_emotion list fetch failed: {updated_at}")
+                    return None
+            return {
+                'status': 1,
+                'data': {
+                    'score': int(emo['score']),
+                    'price': float(emo['price']) if isinstance(emo['price'], str) else emo['price']
+                }
+            }
+        except Exception as e:
+            logging.debug(f"get_etf_emotion list fetch failed: {e}")
+            return None

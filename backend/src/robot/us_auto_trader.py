@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 import os
 from typing import Dict, List
@@ -119,7 +119,6 @@ class USAutoTrader:
 
     def _get_next_stock(self) -> Dict:
         """仿 trade.py：按状态索引 + 冷却筛选，每次只取一只。"""
-        from datetime import timedelta
         with get_db_session(self.account_id) as db:
             state = db.query(TradingState).filter_by(cli_id=self.cli_id).first()
             if not state:
@@ -171,10 +170,14 @@ class USAutoTrader:
             return
         try:
             name = f"{stock['name']}({stock['code']})"
-            emotion = await self.szdt.get_stock_emotion(stock['code'], stock['lever'], stock['emo_area'])
+            # 先用列表接口低成本获取情绪
+            emotion = await self.szdt.get_fresh_emotion_from_list(stock['type'], stock['code'])
             if not emotion or emotion.get('status') != 1:
-                self._log('DEBUG', f"{name} 获取情绪失败，跳过。 {emotion}")
-                return
+                # 回退到逐标接口（可能有额度消耗）
+                emotion = await self.szdt.get_stock_emotion(stock['code'], stock['lever'], stock['emo_area'])
+                if not emotion or emotion.get('status') != 1:
+                    self._log('DEBUG', f"{name} 获取情绪失败，跳过。 {emotion}")
+                    return
             score = emotion['data']['score']
             price = emotion['data']['price']
 
@@ -183,7 +186,7 @@ class USAutoTrader:
             portfolio_value = max(self.ib.available_cash + position_value, 1.0)
             position_ratio = 100 * position_value / portfolio_value
 
-            # 过热/过冷保护并设置冷却
+            # 过热/过冷保护并设置冷却（先基于列表情绪判断触发，再二次确认）
             if score > (stock['when_buy'] + 10) and position_qty == 0:
                 self._log('DEBUG', f"{name} 无持仓且情绪分数过高(当前:{score},买:{stock['when_buy']})，冷却2小时")
                 with get_db_session(self.account_id) as db:

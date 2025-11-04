@@ -119,11 +119,9 @@ async def get_trade_opportunities(
                 }
             }
         else:
-            emotion = await szdt_service.get_stock_emotion(
-                trade_stock.code,
-                trade_stock.lever,
-                trade_stock.emo_area
-            )
+            emotion = await szdt_service.get_fresh_emotion_from_list(3, trade_stock.code)
+            if not emotion:
+                emotion = await szdt_service.get_stock_emotion(trade_stock.code, trade_stock.lever, trade_stock.emo_area)
 
         if not emotion or emotion['status'] != 1:
             return TradeResponse(opportunities=[], msg=(emotion['msg'] if emotion else None) or f'{name}获取情绪指标失败')
