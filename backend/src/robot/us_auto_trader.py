@@ -27,8 +27,8 @@ class IBTrader:
             # 默认 TWS 7497 / IBG 4001；用户可通过环境变量覆盖
             host = os.getenv('IB_HOST', '127.0.0.1')
             port = int(os.getenv('IB_PORT', '4001'))
-            client_id = int(os.getenv('IB_CLIENT_ID', '7'))
-            self.ib.connect(host, port, clientId=client_id, readonly=False, timeout=3)
+            client_id = int(os.getenv('IB_CLIENT_ID', '999'))
+            self.ib.connect(host, port, clientId=client_id, readonly=False, timeout=5)
             self.enabled = self.ib.isConnected()
         except Exception as e:
             logging.warning(f"IB 未连接，将仅记录日志: {e}")
