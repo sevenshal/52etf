@@ -10,7 +10,7 @@ const SystemLog = () => {
   }
 
   useEffect(() => {
-    const ws = new WebSocket("ws://api.52etf.vip/ws/log");
+    const ws = new WebSocket("wss://api.52etf.vip/ws/log");
 
     ws.onmessage = (event) => {
       setLogs(prevLogs => [...prevLogs, event.data]);
