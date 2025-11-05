@@ -4,12 +4,15 @@ import { RightOutlined } from '@ant-design/icons';
 import { useAccount } from '../contexts/AccountContext';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
+import AutoTradingPanel from './fear/components/AutoTradingPanel';
+import { useAutoTrading } from './fear/hooks/useAutoTrading';
 
 const Profile = () => {
   const { accountId, login, logout } = useAccount();
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const { autoTrading, loading: autoTradingLoading, handleAutoTradingChange } = useAutoTrading();
 
   const handleSubmit = async (values) => {
     setLoading(true);
@@ -94,6 +97,12 @@ const Profile = () => {
             </List.Item>
           ))}
         </List>
+      </Card>
+      <Card title='自动化交易' style={{ marginBottom: '6px' }}>
+        <AutoTradingPanel 
+          autoTrading={autoTrading}
+          onAutoTradingChange={handleAutoTradingChange}
+        />
       </Card>
       <Card title="账户设置">
         {accountId ? (

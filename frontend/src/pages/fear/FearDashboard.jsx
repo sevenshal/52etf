@@ -3,13 +3,11 @@ import { Card, Tabs } from 'antd';
 import { useFearGreedData } from './hooks/useFearGreedData';
 import { useFedRateData } from './hooks/useFedRateData';
 import { useBondData } from './hooks/useBondData';
-import { useAutoTrading } from './hooks/useAutoTrading';
 import FearGreedCurrent from './components/FearGreedCurrent';
 import FearGreedHistorical from './components/FearGreedHistorical';
 import FearGreedYearlyAverage from './components/FearGreedYearlyAverage';
 import FearGreedAiae from './components/FearGreedAiae';
 import BondFearGreed from './components/BondFearGreed';
-import AutoTradingPanel from './components/AutoTradingPanel';
 
 const FearDashboard = () => {
   const [activeTab, setActiveTab] = useState('current');
@@ -24,9 +22,8 @@ const FearDashboard = () => {
     forwardTable 
   } = useFedRateData();
   const { us10y, bondFearGreed } = useBondData(fedRateFrom, fedRateTo, forwardMin, forwardMax);
-  const { autoTrading, loading: autoTradingLoading, handleAutoTradingChange } = useAutoTrading();
 
-  const loading = fearGreedLoading || autoTradingLoading;
+  const loading = fearGreedLoading;
 
   if (loading) {
     return <div>加载中...</div>;
@@ -62,13 +59,6 @@ const FearDashboard = () => {
           forwardMin={forwardMin}
           forwardMax={forwardMax}
           forwardTable={forwardTable}
-        />
-      </Card>
-
-      <Card title='守猪逮兔恐贪模型'>
-        <AutoTradingPanel 
-          autoTrading={autoTrading}
-          onAutoTradingChange={handleAutoTradingChange}
         />
       </Card>
     </>
