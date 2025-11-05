@@ -16,6 +16,7 @@ import StockDetail from './pages/StockDetail';
 import OptionsPositions from './pages/OptionsPositions';
 import MonthlyAnalysis from './pages/MonthlyAnalysis';
 import MarketSignalHistory from './pages/MarketSignalHistory';
+import SystemLog from './pages/SystemLog';
 
 function App() {
   return (
@@ -37,6 +38,7 @@ function App() {
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
           <Route path="/market-signal-history" element={<MarketSignalHistory />} />
+          <Route path="/system-log" element={<SystemLog />} />
         </Route>
       </Routes>
     </AccountProvider>

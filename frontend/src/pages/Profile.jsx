@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Card, Input, Button, Form, message, List, Space } from 'antd';
 import { RightOutlined } from '@ant-design/icons';
 import { useAccount } from '../contexts/AccountContext';
@@ -12,7 +12,7 @@ const Profile = () => {
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
-  const { autoTrading, loading: autoTradingLoading, handleAutoTradingChange } = useAutoTrading();
+  const { autoTrading, handleAutoTradingChange } = useAutoTrading();
 
   const handleSubmit = async (values) => {
     setLoading(true);
@@ -62,6 +62,11 @@ const Profile = () => {
     {
       title: '个股买卖信号',
       onClick: () => navigate('/market-signal-history'),
+      arrow: true
+    },
+    {
+      title: '系统日志',
+      onClick: () => navigate('/system-log'),
       arrow: true
     }
   ];
