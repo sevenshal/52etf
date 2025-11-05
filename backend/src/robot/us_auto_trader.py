@@ -20,23 +20,44 @@ class IBTrader:
         self.enabled = False
         self._positions: Dict[str, int] = {}
         self._available_cash: float = 0.0
+        self.ib = IB()
         try:
             # 确保当前线程有事件循环（ib_insync 需要）
             util.startLoop()
-            self.ib = IB()
-            # 默认 TWS 7497 / IBG 4001；用户可通过环境变量覆盖
-            host = os.getenv('IB_HOST', '127.0.0.1')
-            port = int(os.getenv('IB_PORT', '4001'))
-            client_id = int(os.getenv('IB_CLIENT_ID', '999'))
+            self._connect()
+        except Exception as e:
+            logging.warning(f"IB 初始化连接失败: {e}")
+
+    def _connect(self):
+        if self.ib.isConnected():
+            return
+        
+        host = os.getenv('IB_HOST', '127.0.0.1')
+        port = int(os.getenv('IB_PORT', '4001'))
+        client_id = int(os.getenv('IB_CLIENT_ID', '999'))
+        
+        try:
+            logging.info(f"正在连接 IB: {host}:{port} clientId:{client_id}")
             self.ib.connect(host, port, clientId=client_id, readonly=False, timeout=5)
             self.enabled = self.ib.isConnected()
+            if not self.enabled:
+                logging.warning("IB 连接失败")
         except Exception as e:
-            logging.warning(f"IB 未连接，将仅记录日志: {e}")
+            self.enabled = False
+            logging.warning(f"IB 连接异常: {e}")
 
     def refresh_account(self):
-        if not self.enabled:
-            return
         try:
+            if not self.ib.isConnected():
+                logging.info("IB 连接已断开，正在尝试重新连接...")
+                self._connect()
+            
+            if not self.ib.isConnected():
+                logging.warning("IB 重新连接失败，无法刷新账户。")
+                self.enabled = False
+                return
+
+            self.enabled = True
             # 刷新账户资金
             account_values = {v.tag: v.value for v in self.ib.accountValues()}
             self._available_cash = float(account_values.get('AvailableFunds', '0') or 0)
@@ -47,6 +68,7 @@ class IBTrader:
                 self._positions[symbol] = self._positions.get(symbol, 0) + int(p.position)
         except Exception as e:
             logging.warning(f"刷新 IB 账户失败: {e}")
+            self.enabled = False
 
     @property
     def available_cash(self) -> float:
