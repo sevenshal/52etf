@@ -17,6 +17,11 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
+      key: '/fear',
+      label: '贪恐',
+      disabled: !accountId
+    },
+    {
       key: '/evc',
       label: '估值',
       disabled: !accountId
