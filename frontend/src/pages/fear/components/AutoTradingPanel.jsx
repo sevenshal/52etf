@@ -59,7 +59,6 @@ const AutoTradingPanel = ({ autoTrading, onAutoTradingChange }) => {
             key={index}
             onClick={item.onClick}
             style={{
-              padding: '16px',
               cursor: item.onClick ? 'pointer' : 'default',
               borderBottom: '1px solid #f0f0f0'
             }}

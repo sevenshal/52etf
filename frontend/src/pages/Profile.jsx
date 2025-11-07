@@ -72,7 +72,7 @@ const Profile = () => {
   ];
 
   return (
-    <div style={{ padding: '4px' }}>
+    <div>
       <Card title="我的功能" style={{ marginBottom: '6px' }}>
         <List
           style={{
