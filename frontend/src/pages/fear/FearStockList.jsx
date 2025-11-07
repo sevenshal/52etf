@@ -537,7 +537,7 @@ const FearStockList = () => {
           <Button 
             type="text" 
             icon={<LeftOutlined />} 
-            onClick={() => navigate('/fear')}
+            onClick={() => navigate('/profile')}
             style={{ marginRight: '12px' }}
           />
           <span style={{ fontSize: '16px', fontWeight: 500 }}>股票列表</span>

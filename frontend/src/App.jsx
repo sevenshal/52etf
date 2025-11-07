@@ -17,6 +17,7 @@ import OptionsPositions from './pages/OptionsPositions';
 import MonthlyAnalysis from './pages/MonthlyAnalysis';
 import MarketSignalHistory from './pages/MarketSignalHistory';
 import SystemLog from './pages/SystemLog';
+import FearBacktest from './pages/fear/FearBacktest';
 
 function App() {
   return (
@@ -30,7 +31,7 @@ function App() {
           <Route path="/options" element={<OptionsPositions />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
-          <Route path="/fear/backtest" element={<FearDashboard />} />
+          <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
           <Route path="/evc/strategy" element={<EVCStrategy />} />
           <Route path="/evc/valuation" element={<EVCValuation />} />

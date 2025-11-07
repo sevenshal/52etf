@@ -84,7 +84,7 @@ const FearTradingLogs = () => {
             }}>
                 <div style={{ display: 'flex', alignItems: 'center' }}>
                     <LeftOutlined 
-                        onClick={() => navigate('/fear')}
+                        onClick={() => navigate('/profile')}
                         style={{ 
                             fontSize: '16px',
                             marginRight: '10px',
