@@ -1,8 +1,31 @@
 import asyncio
+import os
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 
 router = APIRouter()
+
+def _read_last_lines(path: str, num_lines: int = 10, chunk_size: int = 8192):
+    """Read the last `num_lines` lines from a file efficiently."""
+    try:
+        lines = []
+        buffer = b""
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            while pos > 0 and len(lines) <= num_lines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size)
+                buffer = data + buffer
+                lines = buffer.splitlines()
+        if not lines:
+            return []
+        return [line.decode("utf-8", errors="replace") for line in lines[-num_lines:]]
+    except Exception as e:
+        print(f"Error reading last lines: {e}")
+        return []
 
 @router.websocket("/ws/log")
 async def websocket_endpoint(websocket: WebSocket):
@@ -10,6 +33,12 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         log_file = "/var/log/quant/app.log"
         print(f"Attempting to open and tail log file: {log_file}")
+        # Send last 10 lines immediately upon connection
+        for initial_line in _read_last_lines(log_file, num_lines=10):
+            if initial_line:
+                await websocket.send_text(initial_line)
+
+        # Continue tailing live updates
         with open(log_file, "r") as f:
             f.seek(0, 2)  # Go to the end of the file
             while True:
