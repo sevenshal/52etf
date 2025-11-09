@@ -85,7 +85,7 @@ const EVCValuation = () => {
             fixed: 'left', 
             width: 80,
             render: (text) => (
-                <a onClick={() => navigate(`/stock/${text}`)}>{text}</a>
+                <a href={`#/stock/${text}`}>{text}</a>
             )
         },
         { title: '公司名称', dataIndex: 'company', key: 'company', width: 100 },
