@@ -27,7 +27,7 @@ function App() {
           <Route index element={<ETFReport />} />
           <Route path='/fear' element={<FearDashboard />} />
           <Route path="/fear/stocks" element={<FearStockList />} />
-          <Route path="/evc" element={<EVCDashboard />} />
+          <Route path="/evc" element={<EVCValuation />} />
           <Route path="/options" element={<OptionsPositions />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />

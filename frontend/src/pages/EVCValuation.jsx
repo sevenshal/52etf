@@ -1,11 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Form, InputNumber, Input, Button, Table, message, Layout, Typography, Tabs } from 'antd';
-import { LeftOutlined } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { Card, Form, InputNumber, Input, Button, Table, message, Layout, Tabs } from 'antd';
 import request from '../utils/request';
-
-const { Header } = Layout;
-const { Title } = Typography;
 
 const EVCValuation = () => {
     const [form] = Form.useForm();
@@ -13,7 +8,6 @@ const EVCValuation = () => {
     const [favoriteStocks, setFavoriteStocks] = useState([]);
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
-    const navigate = useNavigate();
 
     // 默认值
     const defaultValues = {
@@ -225,27 +219,7 @@ const EVCValuation = () => {
 
     return (
         <Layout>
-            <Header style={{ 
-                position: 'fixed', 
-                zIndex: 999,
-                width: '100%', 
-                background: '#fff',
-                padding: '0 16px',
-                display: 'flex',
-                alignItems: 'center',
-                borderBottom: '1px solid #f0f0f0'
-            }}>
-                <LeftOutlined 
-                    onClick={() => navigate('/evc')}
-                    style={{ 
-                        fontSize: '16px',
-                        marginRight: '10px',
-                        cursor: 'pointer'
-                    }}
-                />
-                <Title level={4} style={{ margin: 0 }}>估值选股</Title>
-            </Header>
-            <Layout.Content style={{ marginTop: 64, background: '#fff', overflow: 'auto' }}>
+            <Layout.Content style={{ background: '#fff', overflow: 'auto' }}>
                 <Tabs
                     activeKey={activeTab}
                     onChange={handleTabChange}
