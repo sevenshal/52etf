@@ -239,7 +239,7 @@ class USAutoTrader:
                         order_id = self.ib.place_market_order(stock['code'], buy_quantity, 'BUY')
                         self._log('INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                     else:
-                        self._log('INFO', f"{name} 可用资金不足，跳过买入")
+                        self._log('INFO', f"{name} 可用资金 {self.ib.available_cash:.2f} 不足，跳过买入")
                 with get_db_session(self.account_id) as db:
                     from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=1), reason='决策后冷却1h'))
