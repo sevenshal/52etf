@@ -242,7 +242,7 @@ class USAutoTrader:
                         self._log('INFO', f"{name} 可用资金 {self.ib.available_cash:.2f} 不足，跳过买入")
                 with get_db_session(self.account_id) as db:
                     from datetime import timedelta
-                    db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=1), reason='决策后冷却1h'))
+                    db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却12h'))
                 return
 
             # 卖出条件
@@ -257,7 +257,7 @@ class USAutoTrader:
                     self._log('INFO', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                 with get_db_session(self.account_id) as db:
                     from datetime import timedelta
-                    db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=1), reason='决策后冷却1h'))
+                    db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却1h'))
                 return
 
             # 中性区间：设置距离相关冷却
