@@ -60,6 +60,8 @@ class IBTrader:
             self.enabled = True
             # 刷新账户资金
             account_values = {v.tag: v.value for v in self.ib.accountValues()}
+            logging.info(f"IB 账户值: {account_values}")
+            self._net_liquidation = float(account_values.get('NetLiquidation', '0') or 0)
             self._available_cash = float(account_values.get('AvailableFunds', '0') or 0)
             # 刷新持仓
             self._positions = {}
@@ -69,6 +71,10 @@ class IBTrader:
         except Exception as e:
             logging.warning(f"刷新 IB 账户失败: {e}")
             self.enabled = False
+
+    @property
+    def net_liquidation(self) -> float:
+        return self._net_liquidation
 
     @property
     def available_cash(self) -> float:
@@ -205,7 +211,7 @@ class USAutoTrader:
 
             position_qty = self.ib.get_position(stock['code'])
             position_value = position_qty * price
-            portfolio_value = max(self.ib.available_cash + position_value, 1.0)
+            portfolio_value = max(self.ib.net_liquidation, 1.0)
             position_ratio = 100 * position_value / portfolio_value
 
             # 过热/过冷保护并设置冷却（先基于列表情绪判断触发，再二次确认）
