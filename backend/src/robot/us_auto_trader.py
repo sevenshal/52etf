@@ -90,7 +90,7 @@ class IBTrader:
             logging.info(f"[DRY-RUN] {action} {quantity} {symbol}")
             return 'dry-run'
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            contract = Stock(symbol.replace('US.', ''), 'SMART', 'USD')
             order = MarketOrder(action, quantity)
             trade = self.ib.placeOrder(contract, order)
             return str(trade.order.orderId)
