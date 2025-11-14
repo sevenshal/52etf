@@ -1,7 +1,8 @@
 import datetime
 import numpy as np
 from typing import List, Dict, Any
-from ..core.database import ETFHolding, MarketSignal, Session
+from sqlalchemy import func
+from ..core.database import ETFHolding, MarketSignal, Session, StockEVC
 from ..core.services.quote import QuoteProvider, QuoteService
 
 def preprocess_klines_volume(
@@ -237,11 +238,11 @@ class MarketSignalAnalyzer:
         self.klines_volume_days = klines_volume_days
 
     def get_holdings(self):
-        holdings = self.db_session.query(ETFHolding).filter(
-            ETFHolding.etf_symbol.in_(self.etf_symbols),
-            ETFHolding.asset_class == 'Equity'
-        ).all()
-        symbols = {h.symbol for h in holdings} #if h.market_cap and h.market_cap > self.min_market_cap
+        latest_date = self.db_session.query(func.max(StockEVC.date)).scalar()
+        if not latest_date:
+            return []
+        rows = self.db_session.query(StockEVC).filter(StockEVC.date == latest_date).all()
+        symbols = {r.symbol for r in rows}
         return list(symbols)
 
     def analyze(self):
