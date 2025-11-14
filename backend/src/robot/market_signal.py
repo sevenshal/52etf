@@ -160,6 +160,45 @@ class BuySellAnalyzer:
 
         return None
 
+class VolumeTrendBuyAnalyzer:
+    def __init__(
+        self,
+        recent_days: int = 5,
+        mid_days: int = 5,
+        long_days: int = 100,
+        long_ratio_thresh: float = 2.0,
+        ma_days: int = 60,
+    ):
+        self.recent_days = recent_days
+        self.mid_days = mid_days
+        self.long_days = long_days
+        self.long_ratio_thresh = long_ratio_thresh
+        self.ma_days = ma_days
+
+    def analyze(self, klines: List[Dict[str, Any]]) -> Dict[str, Any] or None:
+        total_needed = self.recent_days + self.mid_days + self.long_days
+        if not klines or len(klines) < max(total_needed, self.ma_days):
+            return None
+        vols = np.array([float(k['volume']) for k in klines])
+        closes = np.array([float(k['close']) for k in klines])
+        recent_avg = float(np.mean(vols[-self.recent_days:]))
+        mid_start = self.recent_days + self.mid_days
+        mid_avg = float(np.mean(vols[-mid_start:-self.recent_days]))
+        long_end = self.recent_days + self.mid_days + self.long_days
+        long_avg = float(np.mean(vols[-long_end:-mid_start]))
+        cond_volume = recent_avg > mid_avg and mid_avg > long_avg * self.long_ratio_thresh
+        ma60 = float(np.mean(closes[-self.ma_days:]))
+        close_today = float(closes[-1])
+        cond_price = close_today > ma60
+        if cond_volume and cond_price:
+            k = klines[-1]
+            return {
+                "type": "BUY",
+                "price": close_today,
+                "timestamp": k['timestamp']
+            }
+        return None
+
 class MarketSignalAnalyzer:
     """
     主流程，结合两种算法
@@ -193,6 +232,7 @@ class MarketSignalAnalyzer:
             price_change_ratio=price_change_ratio,
             stabilization_period=stabilization_period
         )
+        self.volume_trend_buy_analyzer = VolumeTrendBuyAnalyzer()
         self.klines_volume_std_multiplier = klines_volume_std_multiplier
         self.klines_volume_days = klines_volume_days
 
@@ -220,6 +260,7 @@ class MarketSignalAnalyzer:
 
             signal_result = self.signal_calculator.analyze_signal(klines)
             buy_sell_result = self.buy_sell_analyzer.analyze(processed_klines)
+            volume_trend_result = self.volume_trend_buy_analyzer.analyze(klines)
 
             # 市场信号买点存库
             if signal_result and signal_result.get("direction") == "BUY":
@@ -267,10 +308,30 @@ class MarketSignalAnalyzer:
                     self.db_session.add(record)
                 self.db_session.commit()
 
+            if volume_trend_result:
+                record = MarketSignal(
+                    ver='v3',
+                    symbol=symbol,
+                    close_price=round(volume_trend_result["price"], 2),
+                    date=volume_trend_result["timestamp"].date() if hasattr(volume_trend_result["timestamp"], "date") else volume_trend_result["timestamp"],
+                    direction=volume_trend_result["type"],
+                )
+                existing = self.db_session.query(MarketSignal).filter_by(
+                    symbol=symbol, date=record.date, direction=record.direction
+                ).first()
+                if existing:
+                    for k, v in record.__dict__.items():
+                        if not k.startswith('_') and k != 'id':
+                            setattr(existing, k, v)
+                else:
+                    self.db_session.add(record)
+                self.db_session.commit()
+
             results.append({
                 "symbol": symbol,
                 "signal": signal_result,
-                "buy_sell": buy_sell_result
+                "buy_sell": buy_sell_result,
+                "volume_trend": volume_trend_result
             })
 
         return results
