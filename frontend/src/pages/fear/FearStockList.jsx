@@ -799,6 +799,7 @@ const FearStockList = () => {
               options={[
                 { value: 'a', label: 'A股' },
                 { value: 'us', label: '美股' },
+                { value: 'coin', label: '数字货币' },
                 { value: 'other', label: '其他' },
               ]}
               style={{ width: '100%' }}
