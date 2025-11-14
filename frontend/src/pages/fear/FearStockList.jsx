@@ -119,8 +119,8 @@ const FearStockList = () => {
       const data = {
         ...values,
         name: stockInfo?.name || '',
-        lever: stockInfo?.lever || 1,
-        emo_area: stockInfo?.emo_area || 'a',
+        lever: Number(values.lever ?? stockInfo?.lever ?? 1),
+        emo_area: values.emo_area || stockInfo?.emo_area || 'a',
         when_buy: Number(values.when_buy),
         when_sell: Number(values.when_sell),
         buy_factor: Number(values.buy_factor),
@@ -778,15 +778,31 @@ const FearStockList = () => {
           </Form.Item>
           <Form.Item
             name="lever"
-            hidden
+            label="杠杆"
+            rules={[{ required: true, message: '请选择杠杆' }]}
           >
-            <Input />
+            <Select
+              options={[
+                { value: 1, label: '1' },
+                { value: 2, label: '2' },
+                { value: 3, label: '3' },
+              ]}
+              style={{ width: '100%' }}
+            />
           </Form.Item>
           <Form.Item
             name="emo_area"
-            hidden
+            label="市场"
+            rules={[{ required: true, message: '请选择市场' }]}
           >
-            <Input />
+            <Select
+              options={[
+                { value: 'a', label: 'A股' },
+                { value: 'us', label: '美股' },
+                { value: 'other', label: '其他' },
+              ]}
+              style={{ width: '100%' }}
+            />
           </Form.Item>
           <Form.Item
             name="type"
