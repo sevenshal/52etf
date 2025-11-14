@@ -108,6 +108,16 @@ const MarketSignalHistory = () => {
                                     &nbsp;幅度超过{item.v2_price_change_ratio}%
                                     &nbsp;企稳超过{item.v2_stabilization_period}天
                                 </Text>
+                            ) : item.ver === 'v3' ? (
+                                <Text style={{
+                                    marginTop: '4px',
+                                    fontSize: '12px',
+                                    color: item.direction === 'SELL' ? '#ff4d4f' : (item.direction === 'BUY' ? '#52c41a' : 'inherit')
+                                }}>
+                                    <a onClick={() => navigate(`/stock/${item.symbol}`)} >{item.symbol}</a>
+                                    &nbsp;收盘价:{item.close_price}
+                                    &nbsp;连续放量且为上升趋势
+                                </Text>
                             ) : (
                                 <Text style={{
                                     marginTop: '4px',
