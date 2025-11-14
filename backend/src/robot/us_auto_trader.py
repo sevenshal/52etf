@@ -98,6 +98,15 @@ class IBTrader:
             logging.error(f"IB 下单失败 {action} {symbol} x{quantity}: {e}")
             return ''
 
+    def is_connected(self) -> bool:
+        return self.ib.isConnected()
+
+    def get_contract_details(self, symbol: str):
+        try:
+            return self.ib.reqContractDetails(Stock(symbol, 'SMART', 'USD'))
+        except Exception:
+            return []
+
 
 class USAutoTrader:
     def __init__(self, account_id: str):
@@ -119,7 +128,30 @@ class USAutoTrader:
         now = datetime.now(ZoneInfo('US/Eastern'))
         if now.weekday() >= 5:
             return False
-        start = dtime(9, 30)
+        try:
+            if self.ib.is_connected():
+                cds = self.ib.get_contract_details('SPY')
+                if cds:
+                    date_str = now.strftime('%Y%m%d')
+                    th = cds[0].tradingHours or ''
+                    for s in th.split(';'):
+                        if s.startswith(date_str + ':'):
+                            v = s.split(':', 1)[1]
+                            if v.upper() == 'CLOSED':
+                                return False
+                            for seg in v.split(','):
+                                se = seg.split('-')
+                                if len(se) == 2:
+                                    st, en = se
+                                    st_dt = now.replace(hour=int(st[:2]), minute=int(st[2:]), second=0, microsecond=0)
+                                    en_dt = now.replace(hour=int(en[:2]), minute=int(en[2:]), second=0, microsecond=0)
+                                    st_dt = st_dt + timedelta(minutes=15)
+                                    if st_dt <= now <= en_dt:
+                                        return True
+                            return False
+        except Exception:
+            pass
+        start = dtime(9, 45)
         end = dtime(16, 0)
         return start <= now.time() <= end
 
@@ -290,5 +322,3 @@ def start_us_auto_trader(account_id):
             time.sleep(60)
 
     threading.Thread(target=loop, daemon=True).start()
-
-
