@@ -34,7 +34,7 @@ class IBTrader:
         
         host = os.getenv('IB_HOST', '127.0.0.1')
         port = int(os.getenv('IB_PORT', '4001'))
-        client_id = int(os.getenv('IB_CLIENT_ID', '999'))
+        client_id = int(os.getenv('IB_CLIENT_ID', '1001'))
         
         try:
             logging.info(f"正在连接 IB: {host}:{port} clientId:{client_id}")
@@ -91,8 +91,16 @@ class IBTrader:
             return 'dry-run'
         try:
             contract = Stock(symbol.replace('US.', ''), 'SMART', 'USD')
+            self.ib.qualifyContracts(contract)
             order = MarketOrder(action, quantity)
             trade = self.ib.placeOrder(contract, order)
+            logging.info(f"placeOrder: {action} {quantity} {contract}")
+            self.ib.sleep(0.5)
+            try:
+                status = getattr(trade.orderStatus, 'status', '')
+                logging.info(f"orderStatus: {status} oid={trade.order.orderId}")
+            except Exception:
+                pass
             return str(trade.order.orderId)
         except Exception as e:
             logging.error(f"IB 下单失败 {action} {symbol} x{quantity}: {e}")
@@ -319,6 +327,7 @@ class USAutoTrader:
                     if buy_quantity >= 1:
                         order_id = self.ib.place_market_order(stock['code'], buy_quantity, 'BUY')
                         self._log('INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
+                        logging.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                     else:
                         self._log('INFO', f"{name} 可用资金 {self.ib.available_cash:.2f} 不足，跳过买入")
                 with get_db_session(self.account_id) as db:
@@ -365,9 +374,11 @@ def start_us_auto_trader(account_id):
 
     def loop():
         logging.info("USAutoTrader started")
+        evloop = asyncio.new_event_loop()
+        asyncio.set_event_loop(evloop)
         while True:
             try:
-                asyncio.run(tick())
+                evloop.run_until_complete(tick())
             except Exception as e:
                 logging.error(f"USAutoTrader tick error: {e}")
             time.sleep(60)
