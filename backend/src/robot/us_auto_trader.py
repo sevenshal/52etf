@@ -134,34 +134,7 @@ class USAutoTrader:
         if not (start <= now.time() <= end):
             logging.info("US market outside local hours")
             return False
-        try:
-            logging.info(f'美股 检查 {now.strftime("%Y-%m-%d %H:%M:%S")} 是否开盘')
-            if self.ib.is_connected():
-                logging.info(f'已连接，美股 检查 {now.strftime("%Y-%m-%d %H:%M:%S")} 是否开盘')
-                cds = self.ib.get_contract_details('SPY')
-                logging.info(f'美股 SPY 合约详情: {cds}')
-                if cds:
-                    date_str = now.strftime('%Y%m%d')
-                    th = cds[0].tradingHours or ''
-                    for s in th.split(';'):
-                        if s.startswith(date_str + ':'):
-                            v = s.split(':', 1)[1]
-                            if v.upper() == 'CLOSED':
-                                self._log('info', f'美股 {date_str} 已收盘')
-                                return False
-                            for seg in v.split(','):
-                                se = seg.split('-')
-                                if len(se) == 2:
-                                    st, en = se
-                                    st_dt = now.replace(hour=int(st[:2]), minute=int(st[2:]), second=0, microsecond=0)
-                                    en_dt = now.replace(hour=int(en[:2]), minute=int(en[2:]), second=0, microsecond=0)
-                                    st_dt = st_dt + timedelta(minutes=15)
-                                    if st_dt <= now <= en_dt:
-                                        return True
-                            break
-        except Exception:
-            logging.error('美股 检查开盘状态异常')
-            pass
+        
         return True
 
     def _fetch_candidates(self) -> List[Dict]:
