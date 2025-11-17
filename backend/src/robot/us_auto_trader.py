@@ -135,7 +135,9 @@ class USAutoTrader:
             logging.info("US market outside local hours")
             return False
         try:
+            logging.info(f'美股 检查 {now.strftime("%Y-%m-%d %H:%M:%S")} 是否开盘')
             if self.ib.is_connected():
+                logging.info(f'已连接，美股 检查 {now.strftime("%Y-%m-%d %H:%M:%S")} 是否开盘')
                 cds = self.ib.get_contract_details('SPY')
                 logging.info(f'美股 SPY 合约详情: {cds}')
                 if cds:
