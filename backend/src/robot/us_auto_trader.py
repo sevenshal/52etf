@@ -150,8 +150,7 @@ class USAutoTrader:
                                     st_dt = st_dt + timedelta(minutes=15)
                                     if st_dt <= now <= en_dt:
                                         return True
-                            self._log('info', f'美股 {date_str} 未开盘')
-                            return False
+                            break
         except Exception:
             self._log('error', '美股 检查开盘状态异常')
             pass
