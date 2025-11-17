@@ -138,6 +138,7 @@ class USAutoTrader:
                         if s.startswith(date_str + ':'):
                             v = s.split(':', 1)[1]
                             if v.upper() == 'CLOSED':
+                                self._log('info', f'美股 {date_str} 已收盘')
                                 return False
                             for seg in v.split(','):
                                 se = seg.split('-')
@@ -148,8 +149,10 @@ class USAutoTrader:
                                     st_dt = st_dt + timedelta(minutes=15)
                                     if st_dt <= now <= en_dt:
                                         return True
+                            self._log('info', f'美股 {date_str} 未开盘')
                             return False
         except Exception:
+            self._log('error', '美股 检查开盘状态异常')
             pass
         start = dtime(9, 45)
         end = dtime(16, 0)
