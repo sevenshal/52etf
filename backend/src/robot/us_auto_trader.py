@@ -129,9 +129,15 @@ class USAutoTrader:
         if now.weekday() >= 5:
             logging.info(f'美股 {now.strftime("%Y-%m-%d")} 为周末，不交易')
             return False
+        start = dtime(9, 45)
+        end = dtime(16, 0)
+        if not (start <= now.time() <= end):
+            logging.info("US market outside local hours")
+            return False
         try:
             if self.ib.is_connected():
                 cds = self.ib.get_contract_details('SPY')
+                logging.info(f'美股 SPY 合约详情: {cds}')
                 if cds:
                     date_str = now.strftime('%Y%m%d')
                     th = cds[0].tradingHours or ''
@@ -154,9 +160,7 @@ class USAutoTrader:
         except Exception:
             logging.error('美股 检查开盘状态异常')
             pass
-        start = dtime(9, 45)
-        end = dtime(16, 0)
-        return start <= now.time() <= end
+        return True
 
     def _fetch_candidates(self) -> List[Dict]:
         """在会话内将 ORM 对象转换为纯字典，避免会话关闭后的懒加载/刷新。"""
