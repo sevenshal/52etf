@@ -127,6 +127,7 @@ class USAutoTrader:
     def _us_market_open(self) -> bool:
         now = datetime.now(ZoneInfo('US/Eastern'))
         if now.weekday() >= 5:
+            self._log('info', f'美股 {now.strftime("%Y-%m-%d")} 为周末，不交易')
             return False
         try:
             if self.ib.is_connected():
