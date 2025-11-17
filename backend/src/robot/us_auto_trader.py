@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime, timedelta, date
 from zoneinfo import ZoneInfo
 import os
 from typing import Dict, List
@@ -124,13 +124,75 @@ class USAutoTrader:
                 message=message
             ))
 
+    def _nth_weekday_of_month(self, year: int, month: int, weekday: int, n: int) -> date:
+        d = date(year, month, 1)
+        count = 0
+        while True:
+            if d.weekday() == weekday:
+                count += 1
+                if count == n:
+                    return d
+            d += timedelta(days=1)
+
+    def _last_weekday_of_month(self, year: int, month: int, weekday: int) -> date:
+        d = date(year, month + 1, 1) - timedelta(days=1) if month < 12 else date(year, 12, 31)
+        while d.weekday() != weekday:
+            d -= timedelta(days=1)
+        return d
+
+    def _observed(self, d: date) -> date:
+        if d.weekday() == 5:
+            return d - timedelta(days=1)
+        if d.weekday() == 6:
+            return d + timedelta(days=1)
+        return d
+
+    def _easter_date(self, year: int) -> date:
+        a = year % 19
+        b = year // 100
+        c = year % 100
+        d0 = (19 * a + b - b // 4 - ((b + 8) // 25) + 15) % 30
+        e = (32 + 2 * (b % 4) + 2 * (c // 4) - d0 - (c % 4) - (a // 29)) % 7
+        f = d0 + e + 114
+        m = f // 31
+        day = (f % 31) + 1
+        return date(year, m, day)
+
+    def _is_us_market_holiday(self, d: date) -> bool:
+        y = d.year
+        holidays = {
+            self._observed(date(y, 1, 1)),
+            self._nth_weekday_of_month(y, 1, 0, 3),
+            self._nth_weekday_of_month(y, 2, 0, 3),
+            self._easter_date(y) - timedelta(days=2),
+            self._last_weekday_of_month(y, 5, 0),
+            self._observed(date(y, 6, 19)),
+            self._observed(date(y, 7, 4)),
+            self._nth_weekday_of_month(y, 9, 0, 1),
+            self._nth_weekday_of_month(y, 11, 3, 4),
+            self._observed(date(y, 12, 25)),
+        }
+        return d in holidays
+
+    def _get_us_market_close_time(self, d: date) -> dtime:
+        y = d.year
+        thanksgiving = self._nth_weekday_of_month(y, 11, 3, 4)
+        if d == thanksgiving + timedelta(days=1):
+            return dtime(13, 0)
+        if d.month == 12 and d.day == 24 and d.weekday() < 5:
+            return dtime(13, 0)
+        return dtime(16, 0)
+
     def _us_market_open(self) -> bool:
         now = datetime.now(ZoneInfo('US/Eastern'))
         if now.weekday() >= 5:
             logging.info(f'美股 {now.strftime("%Y-%m-%d")} 为周末，不交易')
             return False
+        if self._is_us_market_holiday(now.date()):
+            logging.info('美股 当日节假日休市')
+            return False
         start = dtime(9, 45)
-        end = dtime(16, 0)
+        end = self._get_us_market_close_time(now.date())
         if not (start <= now.time() <= end):
             logging.info("US market outside local hours")
             return False
