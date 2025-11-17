@@ -127,7 +127,7 @@ class USAutoTrader:
     def _us_market_open(self) -> bool:
         now = datetime.now(ZoneInfo('US/Eastern'))
         if now.weekday() >= 5:
-            self._log('info', f'美股 {now.strftime("%Y-%m-%d")} 为周末，不交易')
+            logging.info(f'美股 {now.strftime("%Y-%m-%d")} 为周末，不交易')
             return False
         try:
             if self.ib.is_connected():
@@ -152,7 +152,7 @@ class USAutoTrader:
                                         return True
                             break
         except Exception:
-            self._log('error', '美股 检查开盘状态异常')
+            logging.error('美股 检查开盘状态异常')
             pass
         start = dtime(9, 45)
         end = dtime(16, 0)
@@ -225,11 +225,15 @@ class USAutoTrader:
             return selected
 
     async def run_once(self):
+        logging.info("USAutoTrader tick")
         if not self._us_market_open():
+            logging.info("US market not open")
             return
         self.ib.refresh_account()
+        logging.info(f"Account net_liq={getattr(self.ib, 'net_liquidation', 0):.2f} cash={self.ib.available_cash:.2f}")
         stock = self._get_next_stock()
         if not stock:
+            logging.info("No candidate stock")
             return
         try:
             name = f"{stock['name']}({stock['code']})"
@@ -243,6 +247,7 @@ class USAutoTrader:
                     return
             score = emotion['data']['score']
             price = emotion['data']['price']
+            logging.info(f"Emotion fetched {name} score={score} price={price}")
 
             position_qty = self.ib.get_position(stock['code'])
             position_value = position_qty * price
@@ -290,6 +295,7 @@ class USAutoTrader:
                 if sell_quantity > 0:
                     order_id = self.ib.place_market_order(stock['code'], sell_quantity, 'SELL')
                     self._log('INFO', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
+                    logging.info(f"{name} SELL x{sell_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                 with get_db_session(self.account_id) as db:
                     from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却1h'))
@@ -304,6 +310,7 @@ class USAutoTrader:
                     from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(minutes=cooldown_minutes), reason='情绪分数距离买卖阈值较远'))
             self._log('DEBUG', f"{name} 情绪分数介于买卖阈值之间(当前:{score},买:{stock['when_buy']},卖:{stock['when_sell']}), 冷却{cooldown_minutes}分钟")
+            logging.info(f"{name} neutral score={score} buy={stock['when_buy']} sell={stock['when_sell']} cooldown={cooldown_minutes}m")
         except Exception as e:
             logging.error(f"USAutoTrader 处理 {stock['code']} 失败: {e}")
             self._log('ERROR', f"{stock['code']} 处理失败: {e}")
