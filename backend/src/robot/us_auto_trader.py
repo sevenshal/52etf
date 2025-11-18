@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import os
 from typing import Dict, List
 from ib_insync import IB, Stock, MarketOrder, util
-
+from math import pow
 
 from ..core.database import get_db_session, SzdtTradeStock, TradingLog, TradingState, StockCooldown
 from ..core.services.szdt import SZDTService
@@ -351,7 +351,6 @@ class USAutoTrader:
 
             # 中性区间：设置距离相关冷却
             score_delta = min(score - stock['when_buy'], stock['when_sell'] - score)
-            from math import pow
             cooldown_minutes = round(min(720, pow(1.6, score_delta)))
             if cooldown_minutes > 1:
                 with get_db_session(self.account_id) as db:
