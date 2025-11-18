@@ -1,7 +1,7 @@
 import asyncio
 import os
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from websockets.exceptions import ConnectionClosed
+from starlette.websockets import WebSocketState
 
 router = APIRouter()
 
@@ -36,7 +36,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # Send last 10 lines immediately upon connection
         for initial_line in _read_last_lines(log_file, num_lines=10):
             if initial_line:
-                await websocket.send_text(initial_line)
+                try:
+                    await websocket.send_text(initial_line)
+                except WebSocketDisconnect:
+                    print("Client disconnected while sending initial lines")
+                    return
 
         # Continue tailing live updates
         with open(log_file, "r") as f:
@@ -46,8 +50,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if line:
                     try:
                         await websocket.send_text(line)
-                    except ConnectionClosed:
-                        print("Client connection closed, stopping log tail.")
+                    except WebSocketDisconnect:
+                        print("Client disconnected, stopping log tail.")
                         break
                 else:
                     await asyncio.sleep(0.1)
@@ -63,4 +67,10 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_text(error_msg)
     finally:
         print("Closing WebSocket connection.")
-        await websocket.close()
+        try:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                await websocket.close()
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
