@@ -21,12 +21,6 @@ class IBTrader:
         self._positions: Dict[str, int] = {}
         self._available_cash: float = 0.0
         self.ib = IB()
-        try:
-            # 确保当前线程有事件循环（ib_insync 需要）
-            util.startLoop()
-            self._connect()
-        except Exception as e:
-            logging.warning(f"IB 初始化连接失败: {e}")
 
     def _connect(self):
         if self.ib.isConnected():
@@ -46,11 +40,17 @@ class IBTrader:
             self.enabled = False
             logging.warning(f"IB 连接异常: {e}")
 
-    def refresh_account(self):
+    async def refresh_account(self):
         try:
             if not self.ib.isConnected():
                 logging.info("IB 连接已断开，正在尝试重新连接...")
-                self._connect()
+                await self.ib.connectAsync(
+                    os.getenv('IB_HOST', '127.0.0.1'),
+                    int(os.getenv('IB_PORT', '4001')),
+                    clientId=int(os.getenv('IB_CLIENT_ID', '1001')),
+                    readonly=False,
+                    timeout=5
+                )
             
             if not self.ib.isConnected():
                 logging.warning("IB 重新连接失败，无法刷新账户。")
@@ -83,7 +83,7 @@ class IBTrader:
     def get_position(self, symbol: str) -> int:
         return self._positions.get(symbol, 0)
 
-    def place_market_order(self, symbol: str, quantity: int, action: str) -> str:
+    async def place_market_order(self, symbol: str, quantity: int, action: str) -> str:
         if quantity <= 0:
             return ''
         if not self.enabled:
@@ -91,11 +91,13 @@ class IBTrader:
             return 'dry-run'
         try:
             contract = Stock(symbol.replace('US.', ''), 'SMART', 'USD')
-            self.ib.qualifyContracts(contract)
+            try:
+                await self.ib.qualifyContractsAsync(contract)
+            except Exception:
+                pass
             order = MarketOrder(action, quantity)
             trade = self.ib.placeOrder(contract, order)
             logging.info(f"placeOrder: {action} {quantity} {contract}")
-            self.ib.sleep(0.5)
             try:
                 status = getattr(trade.orderStatus, 'status', '')
                 logging.info(f"orderStatus: {status} oid={trade.order.orderId}")
@@ -278,7 +280,7 @@ class USAutoTrader:
         if not self._us_market_open():
             logging.info("US market not open")
             return
-        self.ib.refresh_account()
+        await self.ib.refresh_account()
         logging.info(f"Account net_liq={getattr(self.ib, 'net_liquidation', 0):.2f} cash={self.ib.available_cash:.2f}")
         stock = self._get_next_stock()
         if not stock:
@@ -325,13 +327,12 @@ class USAutoTrader:
                     buy_amount = min(self.ib.available_cash, stock['buy_amount'] * score_factor)
                     buy_quantity = int(buy_amount / price)
                     if buy_quantity >= 1:
-                        order_id = self.ib.place_market_order(stock['code'], buy_quantity, 'BUY')
+                        order_id = await self.ib.place_market_order(stock['code'], buy_quantity, 'BUY')
                         self._log('INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                         logging.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                     else:
                         self._log('INFO', f"{name} 可用资金 {self.ib.available_cash:.2f} 不足，跳过买入")
                 with get_db_session(self.account_id) as db:
-                    from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却12h'))
                 return
 
@@ -343,11 +344,10 @@ class USAutoTrader:
                 sell_quantity = int(sell_amount / price)
                 sell_quantity = max(min(sell_quantity, position_qty), 1)
                 if sell_quantity > 0:
-                    order_id = self.ib.place_market_order(stock['code'], sell_quantity, 'SELL')
+                    order_id = await self.ib.place_market_order(stock['code'], sell_quantity, 'SELL')
                     self._log('INFO', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                     logging.info(f"{name} SELL x{sell_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                 with get_db_session(self.account_id) as db:
-                    from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却1h'))
                 return
 
@@ -357,7 +357,6 @@ class USAutoTrader:
             cooldown_minutes = round(min(720, pow(1.6, score_delta)))
             if cooldown_minutes > 1:
                 with get_db_session(self.account_id) as db:
-                    from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(minutes=cooldown_minutes), reason='情绪分数距离买卖阈值较远'))
             self._log('DEBUG', f"{name} 情绪分数介于买卖阈值之间(当前:{score},买:{stock['when_buy']},卖:{stock['when_sell']}), 冷却{cooldown_minutes}分钟")
             logging.info(f"{name} neutral score={score} buy={stock['when_buy']} sell={stock['when_sell']} cooldown={cooldown_minutes}m")
