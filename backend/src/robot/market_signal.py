@@ -247,6 +247,7 @@ class MarketSignalAnalyzer:
 
     def analyze(self):
         symbols = self.get_holdings()
+        to_insert = []
         results = []
         for symbol in symbols:
             klines = self.quote_service.get_klines(symbol, 200)
@@ -263,7 +264,7 @@ class MarketSignalAnalyzer:
             buy_sell_result = self.buy_sell_analyzer.analyze(processed_klines)
             volume_trend_result = self.volume_trend_buy_analyzer.analyze(klines)
 
-            # 市场信号买点存库
+            # 市场信号买点（延后入库，统一批量过滤市值）
             if signal_result and signal_result.get("direction") == "BUY":
                 record = MarketSignal(
                     ver='v1',
@@ -277,16 +278,9 @@ class MarketSignalAnalyzer:
                     date=signal_result["date"],
                     direction='BUY'
                 )
-                existing = self.db_session.query(MarketSignal).filter_by(symbol=symbol, date=signal_result["date"], direction='BUY').first()
-                if existing:
-                    for k, v in record.__dict__.items():
-                        if not k.startswith('_') and k != 'id':
-                            setattr(existing, k, v)
-                else:
-                    self.db_session.add(record)
-                self.db_session.commit()
+                to_insert.append(record)
 
-            # 只存最新一根K线的买卖点
+            # 只存最新一根K线的买卖点（延后入库）
             if buy_sell_result:
                 record = MarketSignal(
                     ver='v2',
@@ -296,18 +290,8 @@ class MarketSignalAnalyzer:
                     direction=buy_sell_result["type"],
                     v2_price_change_ratio=self.buy_sell_analyzer.price_change_ratio,
                     v2_stabilization_period=self.buy_sell_analyzer.stabilization_period
-
                 )
-                existing = self.db_session.query(MarketSignal).filter_by(
-                    symbol=symbol, date=record.date, direction=record.direction
-                ).first()
-                if existing:
-                    for k, v in record.__dict__.items():
-                        if not k.startswith('_') and k != 'id':
-                            setattr(existing, k, v)
-                else:
-                    self.db_session.add(record)
-                self.db_session.commit()
+                to_insert.append(record)
 
             if volume_trend_result:
                 record = MarketSignal(
@@ -317,16 +301,7 @@ class MarketSignalAnalyzer:
                     date=volume_trend_result["timestamp"].date() if hasattr(volume_trend_result["timestamp"], "date") else volume_trend_result["timestamp"],
                     direction=volume_trend_result["type"],
                 )
-                existing = self.db_session.query(MarketSignal).filter_by(
-                    symbol=symbol, date=record.date, direction=record.direction
-                ).first()
-                if existing:
-                    for k, v in record.__dict__.items():
-                        if not k.startswith('_') and k != 'id':
-                            setattr(existing, k, v)
-                else:
-                    self.db_session.add(record)
-                self.db_session.commit()
+                to_insert.append(record)
 
             results.append({
                 "symbol": symbol,
@@ -334,5 +309,34 @@ class MarketSignalAnalyzer:
                 "buy_sell": buy_sell_result,
                 "volume_trend": volume_trend_result
             })
+
+        # 批量计算市值，仅对准备入库的标的做一次报价与静态信息查询
+        insert_symbols = list({r.symbol for r in to_insert})
+        if insert_symbols:
+            static_infos = self.quote_service.get_static_info(insert_symbols)
+            shares_map = {}
+            for info in static_infos:
+                sym = info.get('symbol') or info.get('code')
+                shares = info.get('total_shares')
+                if sym is not None and isinstance(shares, (int, float)) and shares > 0:
+                    shares_map[sym] = float(shares)
+            quotes = self.quote_service.get_quote_batch(insert_symbols)
+            price_map = {q.get('symbol') or q.get('code'): q.get('price') for q in quotes}
+            for record in to_insert:
+                s = record.symbol
+                p = price_map.get(s)
+                sh = shares_map.get(s)
+                market_cap = (sh * p) if isinstance(p, (int, float)) and isinstance(sh, (int, float)) else 0
+                if market_cap >= 3_000_000_000:
+                    existing = self.db_session.query(MarketSignal).filter_by(
+                        symbol=s, date=record.date, direction=record.direction
+                    ).first()
+                    if existing:
+                        for k, v in record.__dict__.items():
+                            if not k.startswith('_') and k != 'id':
+                                setattr(existing, k, v)
+                    else:
+                        self.db_session.add(record)
+            self.db_session.commit()
 
         return results
