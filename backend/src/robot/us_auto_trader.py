@@ -309,13 +309,11 @@ class USAutoTrader:
             if score > (stock['when_buy'] + 10) and position_qty == 0:
                 self._log('DEBUG', f"{name} 无持仓且情绪分数过高(当前:{score},买:{stock['when_buy']})，冷却2小时")
                 with get_db_session(self.account_id) as db:
-                    from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=2), reason='无持仓且情绪分数过高'))
                 return
             if score < (stock['when_sell'] - 10) and position_ratio > stock['max_position']:
                 self._log('DEBUG', f"{name} 持仓已满(持仓:{position_ratio:.2f}% 上限:{stock['max_position']}%)且情绪分数过低(当前:{score},卖:{stock['when_sell']})，冷却2小时")
                 with get_db_session(self.account_id) as db:
-                    from datetime import timedelta
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=2), reason='持仓已满且情绪分数过低'))
                 return
 
