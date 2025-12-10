@@ -329,7 +329,7 @@ class MarketSignalAnalyzer:
                 market_cap = (sh * p) if isinstance(p, (int, float)) and isinstance(sh, (int, float)) else 0
                 if market_cap >= 3_000_000_000:
                     existing = self.db_session.query(MarketSignal).filter_by(
-                        symbol=s, date=record.date, direction=record.direction
+                        symbol=s, date=record.date
                     ).first()
                     if existing:
                         for k, v in record.__dict__.items():

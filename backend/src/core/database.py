@@ -323,3 +323,11 @@ def get_db_session(account_id: str):
 
 # 创建所有表
 Base.metadata.create_all(engine)
+
+def get_db():
+    """FastAPI dependency for database session"""
+    db = Session()
+    try:
+        yield db
+    finally:
+        db.close()

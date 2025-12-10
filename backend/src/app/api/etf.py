@@ -5,12 +5,12 @@ from datetime import date, datetime, timedelta
 import json
 from sqlalchemy import create_engine, select, desc, func, and_
 from sqlalchemy.orm import Session
-from ...core.database import ETFAnalysis, get_db_session, Session, ETFEmotion, ETFHolding, StockEVC
+from ...core.database import ETFAnalysis, get_db_session, Session, ETFEmotion, ETFHolding, StockEVC, get_db
 from .account import is_valid_account, valid_account
 from ...core.services.quote import QuoteProvider
 from ...core.services.longport import LongPortService
 
-db_session = Session()
+
 
 router = APIRouter(prefix="/api/etf")
 
@@ -63,11 +63,14 @@ class ETFReport(BaseModel):
         from_attributes = True
 
 @router.get("/reports", response_model=List[ETFReport])
-async def get_etf_reports(account_id: str = Depends(valid_account)):
+async def get_etf_reports(
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
     """获取最新的ETF分析报告列表"""
         # 获取最新分析日期
     latest_date = (
-        db_session.query(func.max(ETFAnalysis.date))
+        db.query(func.max(ETFAnalysis.date))
         .scalar()
     )
     
@@ -76,7 +79,7 @@ async def get_etf_reports(account_id: str = Depends(valid_account)):
     
     # 获取最新日期的所有ETF数据，按total_market_value降序排序
     latest_reports = (
-        db_session.query(ETFAnalysis)
+        db.query(ETFAnalysis)
         .filter(ETFAnalysis.date == latest_date)
         .order_by(desc(ETFAnalysis.total_market_value))
         .all()
@@ -100,12 +103,13 @@ async def get_etf_reports(account_id: str = Depends(valid_account)):
 @router.get("/reports/{symbol}", response_model=ETFReport)
 async def get_etf_report(
     symbol: str,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """获取指定ETF的详细报告"""
     # 获取最新的ETF分析记录
     latest_report = (
-        db_session.query(ETFAnalysis)
+        db.query(ETFAnalysis)
         .filter(ETFAnalysis.symbol == symbol)
         .order_by(desc(ETFAnalysis.date))
         .first()
@@ -144,13 +148,14 @@ async def get_etf_emotions(
     symbol: str,
     days: Optional[int] = Query(90, ge=1, le=365),
     account_id: str = Depends(valid_account),
-    weights: EmotionWeights = Body(...)
+    weights: EmotionWeights = Body(...),
+    db: Session = Depends(get_db)
 ):
     """获取ETF的历史情绪指标数据"""
     start_date = datetime.now() - timedelta(days=days)
     
     db_emotions = (
-        db_session.query(ETFEmotion)
+        db.query(ETFEmotion)
         .filter(
             ETFEmotion.symbol == symbol,
             ETFEmotion.date >= start_date
@@ -197,12 +202,13 @@ class ETFComponentDetail(BaseModel):
 @router.get("/components/{symbol}", response_model=List[ETFComponentDetail])
 async def get_etf_components(
     symbol: str,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """获取ETF的最新持仓和成分股估值信息"""
     # 获取ETF最新持仓日期
     latest_holding_date = (
-        db_session.query(func.max(ETFHolding.date))
+        db.query(func.max(ETFHolding.date))
         .filter(ETFHolding.etf_symbol == symbol)
         .scalar()
     )
@@ -212,7 +218,7 @@ async def get_etf_components(
     
     # 获取最新持仓信息
     holdings = (
-        db_session.query(ETFHolding)
+        db.query(ETFHolding)
         .filter(
             ETFHolding.etf_symbol == symbol,
             ETFHolding.date == latest_holding_date
@@ -228,14 +234,14 @@ async def get_etf_components(
     if stock_symbols:
         # 先获取StockEVC的最新日期
         latest_date = (
-            db_session.query(func.max(StockEVC.date))
+            db.query(func.max(StockEVC.date))
             .scalar()
         )
         
         if latest_date:
             # 使用最新日期获取所有成分股的信息
             stocks = (
-                db_session.query(StockEVC)
+                db.query(StockEVC)
                 .filter(
                     StockEVC.symbol.in_(stock_symbols),
                     StockEVC.date == latest_date
