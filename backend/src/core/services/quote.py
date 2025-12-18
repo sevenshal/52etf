@@ -143,17 +143,43 @@ class QuoteService:
         """
         return self.provider.get_quote(symbol)
         
-    def get_klines(self, symbol: str, count: int, end_date: Optional[date] = None, cache_only: Optional[bool] = False, period: Optional[str] = 'd') -> List[Dict]:
-        """获取K线数据(带缓存)
+    def get_klines(self, symbol: str, count: int = None, end_date: Optional[date] = None, start_date: Optional[date] = None, cache_only: Optional[bool] = False, period: Optional[str] = 'd') -> List[Dict]:
+        """获取K线数据
         
         Args:
             symbol: 股票代码
-            count: 需要的K线数量
-            end_date: 结束日期,默认为当前日期
+            count:需要的K线数量 (If provided, legacy behavior)
+            end_date: 结束日期
+            start_date: 开始日期 (If provided with end_date, uses date range fetch)
             
         Returns:
             List[Dict]: K线数据列表
         """
+        # Scenario 1: Date Range Fetching (New Mode)
+        if start_date and end_date:
+             # Use direct provider fetch for now -> user requested "can also only support start/end".
+             # Ignoring DB cache for this specific ad-hoc range request to ensure accuracy if it's for backtesting long periods
+             # Or we can implement caching later. Given the "Backtest" context which often needs fresh or verified full history,
+             # fetching from provider is safer and simpler for now.
+             if hasattr(self.provider, 'get_candlesticks_by_date'):
+                 data = self.provider.get_candlesticks_by_date(symbol, start_date, end_date, period)
+                 return [{
+                    'timestamp': datetime.combine(k['timestamp'], datetime.min.time()),
+                    'open': k['open'],
+                    'high': k['high'],
+                    'low': k['low'],
+                    'close': k['close'],
+                    'volume': k['volume'],
+                    'turnover': k['turnover']
+                } for k in data]
+             else:
+                 # Fallback if provider doesn't support it (should not happen with LongPortService updated)
+                 raise NotImplementedError("Provider does not support date range fetching")
+
+        # Scenario 2: Legacy Count-based Fetching (Preserved for existing calls)
+        if count is None:
+            count = 1000 # Default
+
         # 确定结束日期
         end_date = end_date or date.today()
         

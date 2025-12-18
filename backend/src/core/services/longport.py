@@ -210,6 +210,63 @@ class LongPortService(QuoteProvider, TradeService):
             return []
 
     @sleep_and_retry
+    @limits(calls=10, period=1)
+    def get_candlesticks_by_date(self, symbol: str, start: datetime.date, end: datetime.date, period = 'd') -> List[Dict]:
+        """根据日期范围获取K线数据(自动分页, 从后向前获取)"""
+        all_candlesticks = []
+        current_end = end
+        
+        try:
+            while start <= current_end:
+                resp = self.ctx.history_candlesticks_by_date(
+                    symbol=symbol,
+                    period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
+                    start=start,
+                    end=current_end,
+                    adjust_type=AdjustType.ForwardAdjust
+                )
+                
+                if not resp:
+                    break
+                    
+                processed_resp = [{
+                    'timestamp': candle.timestamp.date(),
+                    'open': float(candle.open),
+                    'high': float(candle.high),
+                    'low': float(candle.low),
+                    'close': float(candle.close),
+                    'volume': candle.volume,
+                    'turnover': float(candle.turnover)
+                } for candle in resp]
+                
+                # Prepend this batch to the results (since we fetching latest first, and want chronological order)
+                # But wait, resp is usually returned in chronological order for the requested range.
+                # So if we requested [T_early, T_late] and got the latest 1000 items (T_x to T_late),
+                # we should PREPEND these to our 'all_candlesticks' list which will eventually contain T_start...T_late.
+                all_candlesticks = processed_resp + all_candlesticks
+                
+                if len(resp) < 1000:
+                    # Fetched all remaining data in this range
+                    break
+                
+                # Update End Date: The record immediately before the first one we just got
+                first_date = resp[0].timestamp.date()
+                next_end = first_date - timedelta(days=1)
+                
+                if next_end >= current_end:
+                    # Prevent infinite loop if date doesn't retreat (shouldn't happen if API behaves)
+                    logging.warning(f"Fetching loop stuck for {symbol} at {first_date}")
+                    break
+                    
+                current_end = next_end
+                
+            return all_candlesticks
+            
+        except Exception as e:
+            logging.error(f"获取{symbol}历史K线数据失败: {str(e)}")
+            return []
+
+    @sleep_and_retry
     @limits(calls=30, period=30)
     def submit_order(self, side: OrderSide, symbol: str, order_type: OrderType,
                      submitted_price: float, submitted_quantity: int,

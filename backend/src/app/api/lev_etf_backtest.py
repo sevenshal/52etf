@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from .account import valid_account
@@ -27,6 +27,7 @@ class BacktestResult(BaseModel):
     trades: List[Dict]
     daily_data: List[Dict]
     equity_curve: List[Dict]
+    yearly_returns: List[Dict]
     params: Dict
 
 @router.post("/run", response_model=BacktestResult)
@@ -46,10 +47,30 @@ async def run_lev_etf_backtest(
     if not symbol.endswith('.US'):
         symbol = f"{symbol}.US"
 
-    # Fetch History (Fetch approx 20 years to be safe, e.g. 5000 trading days)
+    # Fetch History
     try:
-        # Using count=5000 to cover enough history since 2015
-        klines_data = quote_service.get_klines(symbol, count=5000, period='d')
+        # Determine Date Range
+        end_date = datetime.now().date()
+        if params.end_date:
+            end_date = datetime.strptime(params.end_date, "%Y-%m-%d").date()
+            
+        # User requested start date
+        user_start_date = datetime.strptime("2010-01-01", "%Y-%m-%d").date()
+        if params.start_date:
+            user_start_date = datetime.strptime(params.start_date, "%Y-%m-%d").date()
+
+        # Add buffer for EMA calculation (approx 2x long_window * 1.5 for weekends)
+        # 30 day MA -> need ~45 days prior. Let's be safe and use max(60, long_window * 3) days.
+        buffer_days = max(60, params.long_window * 3)
+        fetch_start_date = user_start_date - timedelta(days=buffer_days)
+
+        # Use new get_klines signature
+        klines_data = quote_service.get_klines(
+            symbol, 
+            start_date=fetch_start_date, 
+            end_date=end_date,
+            period='d'
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch data for {symbol}: {str(e)}")
     
@@ -70,20 +91,21 @@ async def run_lev_etf_backtest(
     df['open'] = df['open'].astype(float)
     df['high'] = df['high'].astype(float)
     df['low'] = df['low'].astype(float)
-    df = df.sort_values('date').reset_index(drop=True)
     
-    # Filter by date
-    if params.start_date:
-        df = df[df['date'] >= pd.to_datetime(params.start_date)]
-    if params.end_date:
-        df = df[df['date'] <= pd.to_datetime(params.end_date)]
-        
-    if df.empty:
-        raise HTTPException(status_code=400, detail="No data in selected date range")
-
-    # Calculate EMAs
+    # Calculate EMAs (Calculate on FULL data including buffer)
     df['EMA_short'] = df['price'].ewm(span=params.short_window, adjust=False).mean()
     df['EMA_long'] = df['price'].ewm(span=params.long_window, adjust=False).mean()
+    
+    # NOW Filter by user's requested start date
+    # Convert user_start_date to timestamp for comparison if needed, or just compare dates
+    df = df[df['date'].dt.date >= user_start_date]
+    
+    # Sort and reset index
+    df = df.sort_values('date').reset_index(drop=True)
+
+    # Re-check empty after filter
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No data in selected date range after filtering")
     
     # Generate Signals
     # 1: Short > Long, 0: Short <= Long
@@ -191,6 +213,30 @@ async def run_lev_etf_backtest(
     winning_trades = [t for t in trades if t['action'] == 'SELL' and t['profit'] > 0]
     total_sell_trades = len([t for t in trades if t['action'] == 'SELL'])
     win_rate = (len(winning_trades) / total_sell_trades * 100) if total_sell_trades > 0 else 0.0
+
+    # Calculate Yearly Returns
+    df['year'] = df['date'].dt.year
+    yearly_returns = []
+    
+    # We need to reconstruct daily values from equity_curve to calculate yearly returns accurately
+    # Or simpler: use the last equity of the year / last equity of prev year - 1
+    # Note: equity_curve has the same length as df
+    
+    equity_series = pd.Series([item['value'] for item in equity_curve], index=df['date'])
+    resampled = equity_series.resample('YE').last() # Year End
+    
+    previous_value = params.initial_capital
+    for date, value in resampled.items():
+        year = date.year
+        # Find start value of the year (or end of prev year)
+        # Handle first year potentially starting mid-year
+        
+        ret = (value - previous_value) / previous_value * 100
+        yearly_returns.append({
+            "year": str(year),
+            "return": ret
+        })
+        previous_value = value
     
     return {
         "total_return": total_return,
@@ -201,32 +247,8 @@ async def run_lev_etf_backtest(
         "trades": trades,
         "equity_curve": equity_curve,
         "daily_data": daily_data,
+        "yearly_returns": yearly_returns,
         "params": params.dict()
     }
 
-    # Final Stats
-    final_equity = equity_curve[-1]['value']
-    total_return = (final_equity - params.initial_capital) / params.initial_capital * 100
-    
-    # Annualized Return
-    days = (df['date'].iloc[-1] - df['date'].iloc[0]).days
-    if days > 0:
-        annualized_return = ((1 + total_return/100) ** (365/days) - 1) * 100
-    else:
-        annualized_return = 0.0
-        
-    # Win Rate
-    winning_trades = [t for t in trades if t['action'] == 'SELL' and t['profit'] > 0]
-    total_sell_trades = len([t for t in trades if t['action'] == 'SELL'])
-    win_rate = (len(winning_trades) / total_sell_trades * 100) if total_sell_trades > 0 else 0.0
-    
-    return {
-        "total_return": total_return,
-        "annualized_return": annualized_return,
-        "max_drawdown": max_drawdown * 100,
-        "win_rate": win_rate,
-        "total_trades": len(trades),
-        "trades": trades,
-        "equity_curve": equity_curve,
-        "params": params.dict()
-    }
+
