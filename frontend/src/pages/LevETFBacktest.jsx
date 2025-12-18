@@ -35,25 +35,7 @@ const LevETFBacktest = () => {
         }
     };
 
-    const columns = [
-        { title: 'Date', dataIndex: 'date', key: 'date' },
-        { title: 'Action', dataIndex: 'action', key: 'action', render: (text) => <span style={{ color: text === 'BUY' ? 'green' : 'red' }}>{text}</span> },
-        { title: 'Price', dataIndex: 'price', key: 'price', render: (val) => val.toFixed(2) },
-        { title: 'Quantity', dataIndex: 'quantity', key: 'quantity', render: (val) => val.toFixed(2) },
-        { title: 'Amount', dataIndex: 'amount', key: 'amount', render: (val) => val.toFixed(2) },
-        {
-            title: 'Profit',
-            dataIndex: 'profit',
-            key: 'profit',
-            render: (val, record) => record.action === 'SELL' ? <span style={{ color: val >= 0 ? 'red' : 'green' }}>{val.toFixed(2)}</span> : '-'
-        },
-        {
-            title: 'Return %',
-            dataIndex: 'percent',
-            key: 'percent',
-            render: (val, record) => record.action === 'SELL' ? <span style={{ color: val >= 0 ? 'red' : 'green' }}>{val.toFixed(2)}%</span> : '-'
-        },
-    ];
+
 
     const getPriceChartOption = () => {
         if (!result) return {};
@@ -113,6 +95,7 @@ const LevETFBacktest = () => {
                     type: 'line',
                     data: emaShort,
                     smooth: true,
+                    showSymbol: false,
                     lineStyle: { opacity: 0.5 }
                 },
                 {
@@ -120,6 +103,7 @@ const LevETFBacktest = () => {
                     type: 'line',
                     data: emaLong,
                     smooth: true,
+                    showSymbol: false,
                     lineStyle: { opacity: 0.5 }
                 }
             ]
@@ -128,12 +112,10 @@ const LevETFBacktest = () => {
 
     const getEquityOption = () => {
         if (!result) return {};
-
         const dates = result.equity_curve.map(item => item.date);
         const values = result.equity_curve.map(item => item.value);
-
         return {
-            title: { text: 'Equity Curve' },
+            title: { text: '资金曲线' },
             tooltip: { trigger: 'axis' },
             xAxis: { type: 'category', data: dates },
             yAxis: { type: 'value', scale: true },
@@ -141,15 +123,68 @@ const LevETFBacktest = () => {
                 data: values,
                 type: 'line',
                 smooth: true,
-                name: 'Account Value',
+                name: '账户净值',
                 areaStyle: {}
             }]
         };
     };
 
+    const getYearlyReturnOption = () => {
+        if (!result || !result.yearly_returns) return {};
+        const years = result.yearly_returns.map(item => item.year);
+        const values = result.yearly_returns.map(item => item.return);
+
+        return {
+            title: { text: '年度回报' },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: years },
+            yAxis: { type: 'value', axisLabel: { formatter: '{value}%' } },
+            series: [{
+                data: values,
+                type: 'bar',
+                name: '回报率',
+                itemStyle: {
+                    color: (params) => {
+                        return params.value >= 0 ? '#ef5350' : '#66bb6a';
+                    }
+                },
+                label: {
+                    show: true,
+                    position: 'top',
+                    formatter: '{c}%'
+                }
+            }]
+        };
+    };
+
+    const columns = [
+        { title: '日期', dataIndex: 'date', key: 'date' },
+        { title: '操作', dataIndex: 'action', key: 'action', render: (text) => <span style={{ color: text === 'BUY' ? '#ef5350' : '#66bb6a' }}>{text === 'BUY' ? '买入' : '卖出'}</span> },
+        { title: '价格', dataIndex: 'price', key: 'price', render: (val) => val.toFixed(2) },
+        { title: '数量', dataIndex: 'quantity', key: 'quantity', render: (val) => val.toFixed(2) },
+        { title: '金额', dataIndex: 'amount', key: 'amount', render: (val) => val.toFixed(2) },
+        {
+            title: '盈亏',
+            dataIndex: 'profit',
+            key: 'profit',
+            render: (val, record) => record.action === 'SELL' ? <span style={{ color: val >= 0 ? '#ef5350' : '#66bb6a' }}>{val.toFixed(2)}</span> : '-'
+        },
+        {
+            title: '回报率',
+            dataIndex: 'percent',
+            key: 'percent',
+            render: (val, record) => record.action === 'SELL' ? <span style={{ color: val >= 0 ? '#ef5350' : '#66bb6a' }}>{val.toFixed(2)}%</span> : '-'
+        },
+    ];
+
+    // Calculate Average Annual Return (Simple Average of Yearly Returns)
+    const avgAnnualReturn = result && result.yearly_returns && result.yearly_returns.length > 0
+        ? result.yearly_returns.reduce((sum, item) => sum + item.return, 0) / result.yearly_returns.length
+        : 0;
+
     return (
         <div style={{ padding: '24px' }}>
-            <Card title="Leveraged ETF Moving Average Crossover Backtest" style={{ marginBottom: 24 }}>
+            <Card title="杠杆ETF均线穿越策略回测" style={{ marginBottom: 24 }}>
                 <Form
                     form={form}
                     layout="inline"
@@ -162,7 +197,7 @@ const LevETFBacktest = () => {
                         date_range: [dayjs('2015-01-01'), dayjs()],
                     }}
                 >
-                    <Form.Item name="etf_code" label="ETF" rules={[{ required: true }]}>
+                    <Form.Item name="etf_code" label="标的" rules={[{ required: true }]}>
                         <Select style={{ width: 120 }}>
                             <Option value="TQQQ">TQQQ</Option>
                             <Option value="SOXL">SOXL</Option>
@@ -173,21 +208,21 @@ const LevETFBacktest = () => {
                             <Option value="YINN">YINN</Option>
                         </Select>
                     </Form.Item>
-                    <Form.Item name="short_window" label="Short MA" rules={[{ required: true }]}>
+                    <Form.Item name="short_window" label="快线" rules={[{ required: true }]}>
                         <InputNumber min={1} />
                     </Form.Item>
-                    <Form.Item name="long_window" label="Long MA" rules={[{ required: true }]}>
+                    <Form.Item name="long_window" label="慢线" rules={[{ required: true }]}>
                         <InputNumber min={2} />
                     </Form.Item>
-                    <Form.Item name="initial_capital" label="Initial Capital">
+                    <Form.Item name="initial_capital" label="初始资金">
                         <InputNumber min={100} step={100} />
                     </Form.Item>
-                    <Form.Item name="date_range" label="Date Range">
+                    <Form.Item name="date_range" label="日期范围">
                         <RangePicker />
                     </Form.Item>
                     <Form.Item>
                         <Button type="primary" htmlType="submit" loading={loading}>
-                            Run Backtest
+                            开始回测
                         </Button>
                     </Form.Item>
                 </Form>
@@ -196,37 +231,51 @@ const LevETFBacktest = () => {
             {result && (
                 <>
                     <Row gutter={16} style={{ marginBottom: 24 }}>
-                        <Col span={6}>
+                        <Col span={4}>
                             <Card>
-                                <Statistic title="Total Return" value={result.total_return} precision={2} suffix="%" valueStyle={{ color: result.total_return >= 0 ? '#cf1322' : '#3f8600' }} />
+                                <Statistic title="总回报率" value={result.total_return} precision={2} suffix="%" valueStyle={{ color: result.total_return >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={6}>
+                        <Col span={5}>
                             <Card>
-                                <Statistic title="Annualized Return" value={result.annualized_return} precision={2} suffix="%" valueStyle={{ color: '#cf1322' }} />
+                                <Statistic title="年化复合回报 (CAGR)" value={result.annualized_return} precision={2} suffix="%" valueStyle={{ color: result.annualized_return >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={6}>
+                        <Col span={5}>
                             <Card>
-                                <Statistic title="Max Drawdown" value={result.max_drawdown} precision={2} suffix="%" valueStyle={{ color: '#3f8600' }} />
+                                <Statistic title="平均年回报 (Arithmetic)" value={avgAnnualReturn} precision={2} suffix="%" valueStyle={{ color: avgAnnualReturn >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={6}>
+                        <Col span={5}>
                             <Card>
-                                <Statistic title="Win Rate" value={result.win_rate} precision={2} suffix="%" />
+                                <Statistic title="最大回撤" value={result.max_drawdown} precision={2} suffix="%" valueStyle={{ color: result.max_drawdown <= 0 ? '#ef5350' : '#66bb6a' }} />
+                            </Card>
+                        </Col>
+                        <Col span={5}>
+                            <Card>
+                                <Statistic title="赢率" value={result.win_rate} precision={2} suffix="%" />
                             </Card>
                         </Col>
                     </Row>
 
-                    <Card title="Price History with Signals" style={{ marginBottom: 24 }}>
+                    <Card title="价格走势与信号" style={{ marginBottom: 24 }}>
                         <ReactECharts option={getPriceChartOption()} style={{ height: 500 }} />
                     </Card>
 
-                    <Card title="Equity Curve" style={{ marginBottom: 24 }}>
-                        <ReactECharts option={getEquityOption()} style={{ height: 300 }} />
-                    </Card>
+                    <Row gutter={16}>
+                        <Col span={12}>
+                            <Card title="资金曲线" style={{ marginBottom: 24 }}>
+                                <ReactECharts option={getEquityOption()} style={{ height: 300 }} />
+                            </Card>
+                        </Col>
+                        <Col span={12}>
+                            <Card title="年度回报分布" style={{ marginBottom: 24 }}>
+                                <ReactECharts option={getYearlyReturnOption()} style={{ height: 300 }} />
+                            </Card>
+                        </Col>
+                    </Row>
 
-                    <Card title="Trade History">
+                    <Card title="交易记录">
                         <Table
                             dataSource={result.trades}
                             columns={columns}
