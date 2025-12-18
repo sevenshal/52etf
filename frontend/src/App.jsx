@@ -18,6 +18,7 @@ import MonthlyAnalysis from './pages/MonthlyAnalysis';
 import MarketSignalHistory from './pages/MarketSignalHistory';
 import SystemLog from './pages/SystemLog';
 import FearBacktest from './pages/fear/FearBacktest';
+import LevETFBacktest from './pages/LevETFBacktest';
 
 function App() {
   return (
@@ -40,6 +41,7 @@ function App() {
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
           <Route path="/market-signal-history" element={<MarketSignalHistory />} />
           <Route path="/system-log" element={<SystemLog />} />
+          <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
         </Route>
       </Routes>
     </AccountProvider>

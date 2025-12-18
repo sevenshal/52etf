@@ -21,11 +21,11 @@ const Profile = () => {
       const response = await request.get('/api/profile/validate-account', {
         params: { account_id: values.accountId }
       });
-      
+
       if (!response.data.valid) {
         throw new Error(response.data.message || '账户ID无效');
       }
-      
+
       // 验证成功后保存
       login(values.accountId);
       message.success('账户设置成功');
@@ -68,6 +68,11 @@ const Profile = () => {
       title: '系统日志',
       onClick: () => navigate('/system-log'),
       arrow: true
+    },
+    {
+      title: '杠杆ETF均线穿越策略回测',
+      onClick: () => navigate('/lev-etf-backtest'),
+      arrow: true
     }
   ];
 
@@ -88,9 +93,9 @@ const Profile = () => {
                 borderBottom: '1px solid #f0f0f0'
               }}
             >
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
                 alignItems: 'center',
                 width: '100%'
               }}>
@@ -104,7 +109,7 @@ const Profile = () => {
         </List>
       </Card>
       <Card title='自动化交易' style={{ marginBottom: '6px' }}>
-        <AutoTradingPanel 
+        <AutoTradingPanel
           autoTrading={autoTrading}
           onAutoTradingChange={handleAutoTradingChange}
         />
