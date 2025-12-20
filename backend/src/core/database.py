@@ -266,6 +266,34 @@ class StockCooldown(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class AutomatedTradingConfig(Base):
+    """自动化交易配置"""
+    __tablename__ = "automated_trading_configs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, unique=True) # 每个账户暂定一套配置
+    enabled = Column(Boolean, default=False)
+    etf_code = Column(String, nullable=False)
+    short_window = Column(Integer, nullable=False)
+    long_window = Column(Integer, nullable=False)
+    ib_port = Column(Integer, nullable=False)
+    target_ratio = Column(Float, default=10.0) # 目标仓位比例 (%)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class AutomatedTradeLog(Base):
+    """自动化交易日志"""
+    __tablename__ = "automated_trade_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    symbol = Column(String, nullable=False)
+    action = Column(String, nullable=False)  # 'BUY' or 'SELL'
+    price = Column(Float)
+    quantity = Column(Float)
+    status = Column(String)  # 'SUCCESS' or 'FAILED'
+    message = Column(String)
+
 # 用字典缓存每个账户的 session factory
 _session_factories = {}
 
