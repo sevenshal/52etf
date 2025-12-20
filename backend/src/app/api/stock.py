@@ -33,16 +33,43 @@ async def get_stock_klines(
     symbol: str,
     days: Optional[int] = Query(90, ge=1, le=10000),
     account_id: str = Depends(valid_account),
-    period: Optional[str] = Query(default='d', enum=['d', 'w', 'm'])
+    period: Optional[str] = Query(default='d', enum=['d', 'w', 'm']),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None)
 ):
     """获取股票的K线数据"""
     trade_service: LongPortService = LongPortService(account_id)
     quote_service = QuoteService(trade_service)
     
-    count = days / 30 if period == 'm' else days / 7 if period == 'w' else days
+    # 解析日期
+    parsed_start_date = None
+    parsed_end_date = None
+    if start_date:
+        try:
+            parsed_start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
+            
+    if end_date:
+        try:
+            parsed_end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+    else:
+        parsed_end_date = datetime.now().date()
 
-    # 从 LongPort 获取 K 线数据
-    klines_data = quote_service.get_klines(symbol, count=count, cache_only=False, period=period)
+    if parsed_start_date and parsed_end_date:
+        # 使用日期范围获取
+        klines_data = quote_service.get_klines(
+            symbol, 
+            start_date=parsed_start_date, 
+            end_date=parsed_end_date, 
+            period=period
+        )
+    else:
+        # 使用数量获取 (保留旧模式兼容性)
+        count = days / 30 if period == 'm' else days / 7 if period == 'w' else days
+        klines_data = quote_service.get_klines(symbol, count=int(count), cache_only=False, period=period)
     
     # 转换为响应格式
     klines = [
