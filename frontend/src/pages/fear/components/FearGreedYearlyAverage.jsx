@@ -12,24 +12,31 @@ const FearGreedYearlyAverage = () => {
 
   const fetchYearlyAverageData = async () => {
     try {
-      const response = await request.get('https://api.52etf.vip/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line');
-      const historicalData = response.data.historical;
-      
+      const response = await request.get('/api/stock/klines/SPY.US', {
+        params: {
+          start_date: '2005-01-01'
+        }
+      });
+      const historicalData = response.data.map(item => ({
+        date: item.timestamp.split('T')[0],
+        close: item.close
+      }));
+
       // 按日期排序
       const sortedData = historicalData.sort((a, b) => new Date(a.date) - new Date(b.date));
-      
+
       // 填充缺失的日期数据
       const filledData = [];
       let currentIndex = 0;
       let currentDate = new Date(sortedData[0].date);
       const endDate = new Date(sortedData[sortedData.length - 1].date);
-      
+
       while (currentDate <= endDate) {
         const dateStr = currentDate.toISOString().split('T')[0];
-        
+
         // 查找当前日期是否有数据
         const existingData = sortedData.find(item => item.date === dateStr);
-        
+
         if (existingData) {
           // 如果找到数据，使用实际数据
           filledData.push(existingData);
@@ -43,11 +50,11 @@ const FearGreedYearlyAverage = () => {
             });
           }
         }
-        
+
         // 移动到下一天
         currentDate.setDate(currentDate.getDate() + 1);
       }
-      
+
       // 按年份分组
       const yearlyData = {};
       filledData.forEach(item => {
@@ -57,26 +64,26 @@ const FearGreedYearlyAverage = () => {
         }
         yearlyData[year].push(item);
       });
-      
+
       // 对每年数据进行归一化处理
       const normalizedData = {};
       Object.keys(yearlyData).forEach(year => {
         const yearData = yearlyData[year];
         if (yearData.length === 0) return;
-        
+
         // 找到该年第一天的股价作为基准
         const firstDayPrice = yearData[0].close;
-        
+
         // 归一化处理：第一天的股价记为100，其他天按比例折算
         normalizedData[year] = yearData.map(item => ({
           date: item.date,
           normalizedPrice: (item.close / firstDayPrice) * 100
         }));
       });
-      
+
       // 计算除今年外其他年份按月日的平均值
       const currentYear = new Date().getFullYear();
-      
+
       // 将日期转换为月日格式（MM-DD）
       const formatMonthDay = (dateStr) => {
         const date = new Date(dateStr);
@@ -84,10 +91,10 @@ const FearGreedYearlyAverage = () => {
         const day = date.getDate().toString().padStart(2, '0');
         return `${month}-${day}`;
       };
-      
+
       // 按月日分组计算平均值
       const monthDayToPrices = {};
-      
+
       Object.keys(normalizedData).forEach(year => {
         if (parseInt(year) !== currentYear) {
           normalizedData[year].forEach(item => {
@@ -99,7 +106,7 @@ const FearGreedYearlyAverage = () => {
           });
         }
       });
-      
+
       // 计算每个月日的平均值
       const averageData = [];
       Object.keys(monthDayToPrices).forEach(monthDay => {
@@ -110,25 +117,25 @@ const FearGreedYearlyAverage = () => {
           averagePrice: averagePrice
         });
       });
-      
+
       // 按月日排序
       averageData.sort((a, b) => a.monthDay.localeCompare(b.monthDay));
-      
+
       // 获取今年的数据
       const currentYearData = normalizedData[currentYear] || [];
-      
+
       // 创建月日到数据的映射
       const monthDayToAverage = {};
       averageData.forEach(item => {
         monthDayToAverage[item.monthDay] = item.averagePrice;
       });
-      
+
       const monthDayToCurrent = {};
       currentYearData.forEach(item => {
         const monthDay = formatMonthDay(item.date);
         monthDayToCurrent[monthDay] = item.normalizedPrice;
       });
-      
+
       // 获取所有月日并排序
       const allMonthDays = new Set();
       Object.keys(monthDayToAverage).forEach(monthDay => allMonthDays.add(monthDay));
@@ -140,19 +147,19 @@ const FearGreedYearlyAverage = () => {
         const dataArray = monthDays.map(monthDay => data[monthDay] || null);
         const highPoints = [];
         const lowPoints = [];
-        
+
         for (let i = 15; i < dataArray.length - 15; i++) {
           if (dataArray[i] === null) continue;
-          
+
           // 检查是否是低点（前15天和后15天的最低点）
           const windowStart = Math.max(0, i - 15);
           const windowEnd = Math.min(dataArray.length - 1, i + 15);
           const windowData = dataArray.slice(windowStart, windowEnd + 1).filter(val => val !== null);
-          
+
           if (windowData.length === 0) continue;
           const minInWindow = Math.min(...windowData);
           const maxInWindow = Math.max(...windowData);
-          
+
           // 如果是低点
           if (dataArray[i] === minInWindow) {
             lowPoints.push({
@@ -161,7 +168,7 @@ const FearGreedYearlyAverage = () => {
               date: monthDays[i]
             });
           }
-          
+
           // 如果是高点
           if (dataArray[i] === maxInWindow) {
             highPoints.push({
@@ -171,22 +178,22 @@ const FearGreedYearlyAverage = () => {
             });
           }
         }
-        
+
         return { highPoints, lowPoints };
       };
 
       // 只为历史平均数据找到高点和低点
       const averagePoints = findHighLowPoints(monthDayToAverage, sortedMonthDays);
-      
+
       // 调试信息
       console.log('阶段高点:', averagePoints.highPoints);
       console.log('阶段低点:', averagePoints.lowPoints);
-      
+
       // 创建图表配置
       const option = {
         tooltip: {
           trigger: 'axis',
-          formatter: function(params) {
+          formatter: function (params) {
             let result = `${params[0].name}<br/>`;
             params.forEach(param => {
               const value = param.value;
@@ -221,10 +228,10 @@ const FearGreedYearlyAverage = () => {
             formatter: '{value}'
           },
           scale: true,
-          min: function(value) {
+          min: function (value) {
             return Math.floor(value.min * 0.95);
           },
-          max: function(value) {
+          max: function (value) {
             return Math.ceil(value.max * 1.05);
           }
         },
@@ -283,7 +290,7 @@ const FearGreedYearlyAverage = () => {
           }
         ]
       };
-      
+
       setYearlyAverageData(option);
     } catch (error) {
       console.error('获取年度平均数据失败:', error);

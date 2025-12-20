@@ -21,16 +21,16 @@ const FearGreedHistorical = () => {
       const [cnnData, spyEmotion, spyPrice, vixJson] = await Promise.all([
         fetchFearGreedData(-1),
         request.get('/api/quant/etf/emotion/history/US.SPY'),
-        request.get('https://api.52etf.vip/fmp/api/v3/historical-price-full/SPY?from=2005-01-01&serietype=line'),
+        request.get('/api/stock/klines/SPY.US', { params: { start_date: '2005-01-01' } }),
         request.get('https://api.52etf.vip/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01')
       ]);
-      
+
       setHistoricalData(cnnData);
       setSpyEmotionData(spyEmotion.data);
-      setSpyPriceData(spyPrice.data.historical
-        .sort((a, b) => new Date(a.date) - new Date(b.date))
+      setSpyPriceData(spyPrice.data
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
         .map(item => ({
-          timestamp: item.date,
+          timestamp: item.timestamp.split('T')[0],
           close: item.close
         })));
       setVixData(vixJson.data.observations
@@ -78,10 +78,10 @@ const FearGreedHistorical = () => {
     // 根据选择的时间范围过滤数据
     const filterDataByTimeRange = (data) => {
       if (timeRange === -1) return data;
-      
+
       const cutoffDate = new Date();
       cutoffDate.setFullYear(cutoffDate.getFullYear() - timeRange);
-      
+
       return data.filter(item => new Date(item.date) >= cutoffDate);
     };
 
@@ -138,10 +138,10 @@ const FearGreedHistorical = () => {
 
     // 获取过滤后的价格数据
     const filteredPrices = filteredSpyPriceData.map(item => item.value);
-    
+
     // 使用过滤后的数据计算趋势线
     const { A, B } = fitExponentialCurve(filteredPrices);
-    
+
     // 生成拟合曲线数据
     const fittedData = sortedDates.map((date, index) => ({
       date,
@@ -311,8 +311,8 @@ const FearGreedHistorical = () => {
     return (
       <>
         <div style={{ marginBottom: 16, textAlign: 'right' }}>
-          <Radio.Group 
-            value={timeRange} 
+          <Radio.Group
+            value={timeRange}
             onChange={e => setTimeRange(e.target.value)}
             optionType="button"
             buttonStyle="solid"
