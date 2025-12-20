@@ -294,6 +294,30 @@ class AutomatedTradeLog(Base):
     status = Column(String)  # 'SUCCESS' or 'FAILED'
     message = Column(String)
 
+class IBKRAccountConfig(Base):
+    """IBKR Gateway 账户配置与基础设施管理"""
+    __tablename__ = "ib_account_configs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)      # 应用内用户账号ID
+    name = Column(String, nullable=False)        # 账户别名
+    
+    # 连接信息
+    ib_host = Column(String, default='127.0.0.1')
+    ib_port = Column(Integer, unique=True, nullable=False) # 宿主机映射端口，全局唯一
+    client_id = Column(Integer, default=1)
+    
+    # 凭证信息 (Docker 环境变量)
+    tws_userid = Column(String)
+    tws_password = Column(String)
+    trading_mode = Column(String, default='paper') # live / paper
+    
+    # Docker 管理
+    container_name = Column(String)              # Docker 容器名称
+    
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 # 用字典缓存每个账户的 session factory
 _session_factories = {}
 
