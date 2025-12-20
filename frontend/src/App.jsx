@@ -20,6 +20,7 @@ import SystemLog from './pages/SystemLog';
 import FearBacktest from './pages/fear/FearBacktest';
 import LevETFBacktest from './pages/LevETFBacktest';
 import AutomatedTrading from './pages/AutomatedTrading';
+import IBKRAccountManager from './pages/IBKRAccountManager';
 
 function App() {
   return (
@@ -44,6 +45,7 @@ function App() {
           <Route path="/system-log" element={<SystemLog />} />
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
+          <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
         </Route>
       </Routes>
     </AccountProvider>
