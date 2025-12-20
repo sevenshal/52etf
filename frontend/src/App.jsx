@@ -19,6 +19,7 @@ import MarketSignalHistory from './pages/MarketSignalHistory';
 import SystemLog from './pages/SystemLog';
 import FearBacktest from './pages/fear/FearBacktest';
 import LevETFBacktest from './pages/LevETFBacktest';
+import AutomatedTrading from './pages/AutomatedTrading';
 
 function App() {
   return (
@@ -42,6 +43,7 @@ function App() {
           <Route path="/market-signal-history" element={<MarketSignalHistory />} />
           <Route path="/system-log" element={<SystemLog />} />
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
+          <Route path="/automated-trading" element={<AutomatedTrading />} />
         </Route>
       </Routes>
     </AccountProvider>

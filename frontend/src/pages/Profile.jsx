@@ -73,6 +73,11 @@ const Profile = () => {
       title: '杠杆ETF均线穿越策略回测',
       onClick: () => navigate('/lev-etf-backtest'),
       arrow: true
+    },
+    {
+      title: '杠杆ETF策略自动化交易',
+      onClick: () => navigate('/automated-trading'),
+      arrow: true
     }
   ];
 
