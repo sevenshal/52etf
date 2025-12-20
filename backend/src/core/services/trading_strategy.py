@@ -87,7 +87,7 @@ async def execute_trading_strategy(account_id: str):
                     # 当前持仓金额
                     current_value = position * price
                     
-                    if current_value < target_value * 0.9: # 如果当前持仓不足目标的 90%，则买入补齐
+                    if current_value < target_value * 0.1: # 如果当前持仓不足目标的 10%，则买入补齐
                         needed_value = target_value - current_value
                         # 确保不超过可用资金
                         actual_buy_value = min(needed_value, ib_service.available_cash)
