@@ -21,6 +21,7 @@ import FearBacktest from './pages/fear/FearBacktest';
 import LevETFBacktest from './pages/LevETFBacktest';
 import AutomatedTrading from './pages/AutomatedTrading';
 import IBKRAccountManager from './pages/IBKRAccountManager';
+import AllWeatherBacktest from './pages/AllWeatherBacktest';
 
 function App() {
   return (
@@ -46,6 +47,7 @@ function App() {
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
           <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
+          <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
         </Route>
       </Routes>
     </AccountProvider>

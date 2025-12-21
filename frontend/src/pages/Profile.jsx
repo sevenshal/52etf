@@ -77,11 +77,15 @@ const Profile = () => {
     {
       title: '杠杆ETF策略自动化交易',
       onClick: () => navigate('/automated-trading'),
-      arrow: true
     },
     {
       title: 'IBKR 账户管理',
       onClick: () => navigate('/ib-account-manager'),
+      arrow: true
+    },
+    {
+      title: '全天候策略回测',
+      onClick: () => navigate('/all-weather-backtest'),
       arrow: true
     }
   ];

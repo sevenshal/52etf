@@ -261,6 +261,7 @@ const LevETFBacktest = () => {
         { title: '年化 (CAGR)', dataIndex: 'annualized_return', key: 'annualized_return', render: (val) => `${val.toFixed(2)}%`, sorter: (a, b) => a.annualized_return - b.annualized_return },
         { title: '最大回撤', dataIndex: 'max_drawdown', key: 'max_drawdown', render: (val) => `${val.toFixed(2)}%`, sorter: (a, b) => a.max_drawdown - b.max_drawdown },
         { title: '赢率', dataIndex: 'win_rate', key: 'win_rate', render: (val) => `${val.toFixed(2)}%`, sorter: (a, b) => a.win_rate - b.win_rate },
+        { title: 'Sharpe', dataIndex: 'sharpe_ratio', key: 'sharpe_ratio', render: (val) => val.toFixed(2), sorter: (a, b) => a.sharpe_ratio - b.sharpe_ratio },
         { title: '操作', key: 'action', render: (_, record) => <Button type="link" size="small" onClick={() => runDetailedBacktest(record)}>详情</Button> }
     ];
 
@@ -368,24 +369,29 @@ const LevETFBacktest = () => {
                                 <Statistic title="总回报率" value={detailedResult.total_return} precision={2} suffix="%" valueStyle={{ color: detailedResult.total_return >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={5}>
+                        <Col span={4}>
                             <Card>
                                 <Statistic title="年化复合回报 (CAGR)" value={detailedResult.annualized_return} precision={2} suffix="%" valueStyle={{ color: detailedResult.annualized_return >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={5}>
+                        <Col span={4}>
                             <Card>
-                                <Statistic title="平均年回报 (Arithmetic)" value={avgAnnualReturn} precision={2} suffix="%" valueStyle={{ color: avgAnnualReturn >= 0 ? '#ef5350' : '#66bb6a' }} />
+                                <Statistic title="平均年回报" value={avgAnnualReturn} precision={2} suffix="%" valueStyle={{ color: avgAnnualReturn >= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={5}>
+                        <Col span={4}>
                             <Card>
                                 <Statistic title="最大回撤" value={detailedResult.max_drawdown} precision={2} suffix="%" valueStyle={{ color: detailedResult.max_drawdown <= 0 ? '#ef5350' : '#66bb6a' }} />
                             </Card>
                         </Col>
-                        <Col span={5}>
+                        <Col span={4}>
                             <Card>
                                 <Statistic title="赢率" value={detailedResult.win_rate} precision={2} suffix="%" />
+                            </Card>
+                        </Col>
+                        <Col span={4}>
+                            <Card>
+                                <Statistic title="Sharpe Ratio" value={detailedResult.sharpe_ratio} precision={2} />
                             </Card>
                         </Col>
                     </Row>
