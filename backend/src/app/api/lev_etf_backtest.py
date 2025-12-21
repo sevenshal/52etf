@@ -31,6 +31,7 @@ class BacktestResult(BaseModel):
     max_drawdown: float
     win_rate: float
     total_trades: int
+    sharpe_ratio: float
     trades: List[Dict]
     daily_data: List[Dict]
     equity_curve: List[Dict]
@@ -55,6 +56,7 @@ class BatchBacktestResultItem(BaseModel):
     max_drawdown: float
     win_rate: float
     total_trades: int
+    sharpe_ratio: float
 
 class AsyncJobResponse(BaseModel):
     task_id: str
@@ -116,6 +118,7 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
     # Trade Stats
     win_count = 0
     total_closed_trades = 0
+    equity_values = []
     
     for i, row in df.iterrows():
         date = row['date']
@@ -167,6 +170,7 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
                 })
             
         current_equity = capital + (position * price)
+        equity_values.append(current_equity)
         
         if detailed:
             equity_curve.append({
@@ -222,12 +226,21 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
             })
             previous_value = value
             
+    # Sharpe Ratio
+    sharpe_ratio = 0.0
+    if equity_values:
+        equity_series = pd.Series(equity_values)
+        daily_rets = equity_series.pct_change().dropna()
+        if not daily_rets.empty and daily_rets.std() > 0:
+            sharpe_ratio = (daily_rets.mean() / daily_rets.std()) * np.sqrt(252)
+
     return {
         "total_return": total_return,
         "annualized_return": annualized_return,
         "max_drawdown": max_drawdown * 100,
         "win_rate": win_rate,
         "total_trades": total_closed_trades,
+        "sharpe_ratio": sharpe_ratio,
         "trades": trades,
         "equity_curve": equity_curve,
         "daily_data": daily_data,
@@ -301,7 +314,8 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
                     "annualized_return": metrics['annualized_return'],
                     "max_drawdown": metrics['max_drawdown'],
                     "win_rate": metrics['win_rate'],
-                    "total_trades": metrics['total_trades']
+                    "total_trades": metrics['total_trades'],
+                    "sharpe_ratio": metrics['sharpe_ratio']
                 })
                 
                 processed_count += 1
