@@ -21,6 +21,8 @@ class IBKRService:
             try:
                 await self.ib.connectAsync(self.host, self.port, clientId=self.client_id)
                 logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
+                # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
+                self.ib.reqMarketDataType(3)
                 await self.refresh_account_data()
             except Exception as e:
                 logger.error(f"Failed to connect to IB Gateway: {e}")
