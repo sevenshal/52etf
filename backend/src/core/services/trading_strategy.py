@@ -5,7 +5,7 @@ from .longport import LongPortService
 from .quote import QuoteService
 from .market import MarketService
 from .ib_service import IBKRService
-from ..database import get_db, get_db_session, AutomatedTradingConfig, AutomatedTradeLog
+from ..database import get_db, get_db_ctx, get_db_session, AutomatedTradingConfig, AutomatedTradeLog
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ async def execute_trading_strategy(account_id: str):
     logger.info(f"Executing trading strategy for account: {account_id}")
     
     try:
-        with get_db() as db:
+        with get_db_ctx() as db:
             config = db.query(AutomatedTradingConfig).filter(
                 AutomatedTradingConfig.account_id == account_id,
                 AutomatedTradingConfig.enabled == True
