@@ -108,8 +108,19 @@ async def execute_trading_strategy(account_id: str):
 
                     # 下单
                     trade = await ib_service.place_market_order(config.etf_code, action, quantity)
-                    status = 'SUCCESS' if trade.isDone() else 'FAILED'
-                    message = f"Order {action} {quantity} {config.etf_code} @{price}. Status: {trade.orderStatus.status}"
+                    
+                    # 改进状态映射，避免误报 FAILED
+                    ib_status = trade.orderStatus.status
+                    if ib_status == 'Filled':
+                        status = 'SUCCESS'
+                    elif trade.isActive():
+                        status = 'SUBMITTED'
+                    elif ib_status in ('Cancelled', 'ApiCancelled'):
+                        status = 'CANCELLED'
+                    else:
+                        status = 'FAILED'
+                        
+                    message = f"Order {action} {quantity} {config.etf_code} @{price}. Status: {ib_status}"
                     
                     log = AutomatedTradeLog(
                         account_id=account_id,
