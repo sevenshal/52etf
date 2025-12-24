@@ -124,7 +124,7 @@ async def execute_trading_strategy(account_id: str):
 
     except Exception as e:
         logger.error(f"Error in execute_trading_strategy: {e}")
-        with get_db_session(account_id) as db:
+        with get_db_ctx() as db:
             db.add(AutomatedTradeLog(
                 account_id=account_id,
                 symbol="SYSTEM",

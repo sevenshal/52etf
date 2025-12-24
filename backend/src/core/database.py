@@ -390,5 +390,9 @@ def get_db_ctx():
     db = Session()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
