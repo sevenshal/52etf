@@ -100,6 +100,12 @@ async def execute_trading_strategy(account_id: str):
                     quantity = int(position) # 全部平仓
                 
                 if action and quantity > 0:
+                    # 检查今天是否已经有订单，防止重复下单
+                    if await ib_service.has_today_orders(config.etf_code):
+                        msg = f"Skipping order for {config.etf_code} as a non-cancelled order already exists for today."
+                        logger.info(msg)
+                        return
+
                     # 下单
                     trade = await ib_service.place_market_order(config.etf_code, action, quantity)
                     status = 'SUCCESS' if trade.isDone() else 'FAILED'

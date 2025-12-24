@@ -99,3 +99,21 @@ class IBKRService:
         
         [ticker] = await self.ib.reqTickersAsync(contract)
         return ticker.marketPrice()
+
+    async def has_today_orders(self, symbol: str) -> bool:
+        """检查今天是否有针对该代码的非取消订单 (包括待成交和已成交)"""
+        await self.connect()
+        clean_symbol = symbol.replace('US.', '')
+        
+        # 获取当前所有的 trades (包括活动的和最近完成的)
+        trades = self.ib.trades()
+        
+        for trade in trades:
+            if trade.contract.symbol == clean_symbol:
+                status = trade.orderStatus.status
+                # 只要不是取消状态，都认为今天已经有操作了
+                if status not in ('Cancelled', 'ApiCancelled', 'Inactive'):
+                    logger.info(f"Found existing order for {clean_symbol} with status: {status}")
+                    return True
+        
+        return False
