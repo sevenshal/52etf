@@ -4,7 +4,7 @@ import time
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from ..core.database import Session, AutomatedTradingConfig
+from ..core.database import get_db, Session, AutomatedTradingConfig
 from ..core.services.trading_strategy import is_market_closing_soon, execute_trading_strategy
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class LevETFTrader:
                     logger.info("Market is closing soon, checking Lev ETF strategies...")
                     
                     # 获取所有开启了自动化交易的账户
-                    db = Session()
+                    db = get_db()
                     try:
                         configs = db.query(AutomatedTradingConfig).filter(
                             AutomatedTradingConfig.enabled == True
