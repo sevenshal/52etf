@@ -66,7 +66,7 @@ async def execute_trading_strategy(account_id: str):
                 return
 
             # 2. 检查持仓
-            ib_service = IBKRService(port=config.ib_port)
+            ib_service = IBKRService(port=config.ib_port, client_id=2)
             try:
                 await ib_service.connect()
                 position = ib_service.get_position(config.etf_code)
