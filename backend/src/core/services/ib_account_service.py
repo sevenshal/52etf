@@ -101,6 +101,9 @@ class IBAccountService:
                 "-e", f"TRADING_MODE={config.trading_mode}",
                 "-e", f"TWS_ACCEPT_INCOMING=yes",
                 "-e", "READ_ONLY_API=no",
+                "-e", f"TWOFA_TIMEOUT_ACTION={config.twofa_timeout_action}",
+                "-e", f"AUTO_RESTART_TIME={config.auto_restart_time}",
+                "-e", f"RELOGIN_AFTER_TWOFA_TIMEOUT={config.relogin_after_twofa_timeout}",
             ]
             
             # 如果是 paper 模式，设置具体的 paper 环境变量

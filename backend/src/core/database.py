@@ -315,6 +315,11 @@ class IBKRAccountConfig(Base):
     # Docker 管理
     container_name = Column(String)              # Docker 容器名称
     
+    # 额外配置 (IB Gateway 环境变量)
+    twofa_timeout_action = Column(String, default='restart')
+    auto_restart_time = Column(String, default='08:59 PM')
+    relogin_after_twofa_timeout = Column(String, default='yes')
+    
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -343,6 +348,16 @@ def get_db_session_factory(account_id: str):
                 cols = [row[1] for row in result]  # 第二列为列名
                 if 'type' not in cols:
                     conn.execute("ALTER TABLE szdt_trade_stocks ADD COLUMN type INTEGER NOT NULL DEFAULT 3")
+                
+                # 为 IBKRAccountConfig 表添加新列
+                result = conn.execute("PRAGMA table_info(ib_account_configs)")
+                ib_cols = [row[1] for row in result]
+                if 'twofa_timeout_action' not in ib_cols:
+                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN twofa_timeout_action TEXT DEFAULT 'restart'")
+                if 'auto_restart_time' not in ib_cols:
+                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN auto_restart_time TEXT DEFAULT '08:59 PM'")
+                if 'relogin_after_twofa_timeout' not in ib_cols:
+                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN relogin_after_twofa_timeout TEXT DEFAULT 'yes'")
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass

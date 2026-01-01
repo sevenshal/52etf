@@ -19,6 +19,9 @@ class IBKRAccountSchema(BaseModel):
     tws_password: str = ""
     trading_mode: str = "paper"
     container_name: str = ""
+    twofa_timeout_action: str = "restart"
+    auto_restart_time: str = "08:59 PM"
+    relogin_after_twofa_timeout: str = "yes"
 
     class Config:
         from_attributes = True
@@ -42,6 +45,9 @@ async def save_ib_account(config_data: IBKRAccountSchema, db: Session = Depends(
         config.tws_password = config_data.tws_password
         config.trading_mode = config_data.trading_mode
         config.container_name = config_data.container_name
+        config.twofa_timeout_action = config_data.twofa_timeout_action
+        config.auto_restart_time = config_data.auto_restart_time
+        config.relogin_after_twofa_timeout = config_data.relogin_after_twofa_timeout
         config.updated_at = datetime.now()
     else:
         # 检查端口唯一性
@@ -58,7 +64,10 @@ async def save_ib_account(config_data: IBKRAccountSchema, db: Session = Depends(
             tws_userid=config_data.tws_userid,
             tws_password=config_data.tws_password,
             trading_mode=config_data.trading_mode,
-            container_name=config_data.container_name
+            container_name=config_data.container_name,
+            twofa_timeout_action=config_data.twofa_timeout_action,
+            auto_restart_time=config_data.auto_restart_time,
+            relogin_after_twofa_timeout=config_data.relogin_after_twofa_timeout
         )
         db.add(config)
     
