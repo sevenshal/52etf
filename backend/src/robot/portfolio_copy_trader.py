@@ -192,6 +192,14 @@ class PortfolioCopyTrader:
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (Should run in worker loop)"""
         try:
+            # 1. Check Market Status
+            # 既然我们需要在盘前盘后也交易，我们依赖 is_market_open (基于 liquidHours)
+            # 如果不开放，直接跳过
+            is_open = await self.ib_service.is_market_open("SPY")
+            if not is_open:
+                logger.info(f"Market is CLOSED (Liquid Hours check). Skipping rebalance for {config.account_id}")
+                return
+
             # Re-use the calculation logic
             plan = await self.calculate_rebalance_plan(config, client_id=client_id)
             plan = [p for p in plan if p["action"] != "HOLD" and p["quantity"] != 0]
@@ -201,7 +209,7 @@ class PortfolioCopyTrader:
                 return
 
             ib = self.ib_service
-            # No need to connect again, calculate_rebalance_plan checked it
+            # No need to connect again (is_market_open ensured connection)
             
             for item in plan:
                 symbol = item["symbol"]
@@ -211,10 +219,18 @@ class PortfolioCopyTrader:
                 target_ratio = item["target_ratio"]
 
                 try:
-                    trade = await ib.place_market_order(symbol, action, qty)
+                    # 使用限价单以支持盘前盘后
+                    # 价格缓冲：买入加价 0.5%，卖出减价 0.5% (可调整)
+                    limit_price = price
+                    if action == "BUY":
+                        limit_price = round(price * 1.005, 2)
+                    elif action == "SELL":
+                        limit_price = round(price * 0.995, 2)
+                        
+                    trade = await ib.place_limit_order(symbol, action, qty, limit_price, outside_rth=True)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
-                                f"{action} {qty} to reach target ratio {target_ratio:.2%}", 
-                                symbol=symbol, quantity=qty, price=price)
+                                f"{action} {qty} at limit ${limit_price} (Target Ratio: {target_ratio:.2%})", 
+                                symbol=symbol, quantity=qty, price=limit_price)
                 except Exception as e:
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
 

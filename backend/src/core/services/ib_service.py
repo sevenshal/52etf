@@ -1,4 +1,4 @@
-from ib_insync import IB, Stock, MarketOrder
+from ib_insync import IB, Stock, MarketOrder, LimitOrder
 import asyncio
 import logging
 import os
@@ -93,6 +93,28 @@ class IBKRService:
         await self.refresh_account_data()
         return trade
 
+    async def place_limit_order(self, symbol: str, action: str, quantity: int, price: float, outside_rth: bool = False):
+        """下限价单 (支持盘前盘后)"""
+        await self.connect()
+        clean_symbol = symbol.replace('US.', '')
+        contract = Stock(clean_symbol, 'SMART', 'USD')
+        await self.ib.qualifyContractsAsync(contract)
+        
+        order = LimitOrder(action, quantity, price)
+        if outside_rth:
+            order.outsideRth = True
+            
+        trade = self.ib.placeOrder(contract, order)
+        
+        logger.info(f"Placing {action} Limit order for {quantity} {clean_symbol} at ${price:.2f} (OutsideRth={outside_rth})")
+        
+        # 对于限价单，我们只等待提交成功，不一定要等待完全成交 (因为可能挂单)
+        # 但如果是 CopyTrading，我们通常希望尽快成交。
+        # 这里简单等待几秒确认状态，不强制要求 Done
+        await asyncio.sleep(2)
+        
+        return trade
+
     async def get_market_price(self, symbol: str):
         """获取当前市场价格"""
         await self.connect()
@@ -140,3 +162,81 @@ class IBKRService:
                     return True
         
         return False
+
+    async def is_market_open(self, symbol: str = "SPY") -> bool:
+        """
+        通过查询 SPY 的 liquidHours (包含盘前盘后) 判断当前是否为交易时段。
+        """
+        await self.connect()
+        try:
+            # 1. 获取合约详情
+            contract = Stock(symbol, 'SMART', 'USD')
+            details_list = await self.ib.reqContractDetailsAsync(contract)
+            if not details_list:
+                logger.warning(f"Could not get contract details for {symbol} to check market hours. Assuming Open.")
+                return True
+            
+            details = details_list[0]
+            
+            # liquidHours 格式示例: "20240101:CLOSED;20240102:0400-2000;..."
+            # 时间通常是交易所本地时间 (SPY 是 EST/EDT)
+            liquid_hours_str = details.liquidHours
+            time_zone_id = details.timeZoneId # e.g. "EST5EDT"
+            
+            # 简单解析: 找到今天的日期
+            # 注意: 这里简化处理，假设服务器时间和交易所时区差异不大，或者我们只匹配日期字符串
+            # 更严谨的做法是转换时区。虽然 ib_insync 会处理，但 liquidHours 是字符串。
+            
+            import datetime
+            import pytz
+            
+            # 映射 IB 时区 ID 到 pytz
+            tz_map = {
+                "EST5EDT": "US/Eastern",
+                "CST6CDT": "US/Central",
+                "PST8PDT": "US/Pacific"
+            }
+            tz_name = tz_map.get(time_zone_id, "US/Eastern")
+            tz = pytz.timezone(tz_name)
+            
+            now = datetime.datetime.now(tz)
+            today_str = now.strftime("%Y%m%d")
+            
+            # 查找今天的规则
+            today_rule = None
+            for item in liquid_hours_str.split(';'):
+                if item.startswith(today_str):
+                    today_rule = item
+                    break
+            
+            if not today_rule:
+                # 找不到今天的规则？可能是数据问题，默认开放或关闭？安全的做法是 Log 并默认开放以免误杀，或者关闭
+                # 这里我们再试一下 UTC 日期? 不，liquidHours 是本地日期。
+                # 找不到可能是还没更新还是？假设 False 比较安全
+                logger.warning(f"No market hours found for today {today_str} in {liquid_hours_str}")
+                return False
+                
+            if "CLOSED" in today_rule:
+                return False
+                
+            # 解析时间段: 20240102:0400-2000,2030-2200
+            # 去掉日期前缀
+            time_ranges_str = today_rule.split(':')[1]
+            now_hm = int(now.strftime("%H%M"))
+            
+            for segment in time_ranges_str.split(','):
+                # segment: 0400-2000
+                if '-' in segment:
+                    start_str, end_str = segment.split('-')
+                    start_hm = int(start_str)
+                    end_hm = int(end_str)
+                    
+                    if start_hm <= now_hm < end_hm:
+                        return True
+                        
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking market hours: {e}")
+            # 出错时默认开放，以免阻断
+            return True
