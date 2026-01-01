@@ -21,23 +21,23 @@ const FearTradingLogs = () => {
     // 修改 fetchLogs 函数，使用传入的 level 参数
     const fetchLogs = async (pageNum, level = minLevel) => {
         if (!hasMore || loading) return;
-        
+
         setLoading(true);
         try {
             const { data } = await request.get('/api/trade/trading-logs', {
-                params: { 
-                    page: pageNum, 
+                params: {
+                    page: pageNum,
                     page_size: PAGE_SIZE,
                     min_level: level
                 }
             });
-            
+
             if (pageNum === 1) {
                 setLogs(data.items);
             } else {
                 setLogs(prev => [...prev, ...data.items]);
             }
-            
+
             setHasMore(data.items.length === PAGE_SIZE);
         } catch (error) {
             console.error('获取交易日志失败:', error);
@@ -56,14 +56,14 @@ const FearTradingLogs = () => {
     // 修改 handleScroll 函数
     const handleScroll = () => {
         if (!containerRef.current) return;
-        
+
         const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
         if (scrollHeight - scrollTop - clientHeight < 100 && hasMore && !loading) {
             setPage(prev => prev + 1);
             fetchLogs(page + 1, minLevel);  // 传入当前的 level 值
         }
     };
-    
+
     // 修改 useEffect，添加 minLevel 依赖
     useEffect(() => {
         fetchLogs(1, minLevel);
@@ -71,10 +71,10 @@ const FearTradingLogs = () => {
 
     return (
         <Layout>
-            <Header style={{ 
-                position: 'fixed', 
-                zIndex: 1, 
-                width: '100%', 
+            <Header style={{
+                position: 'fixed',
+                zIndex: 1,
+                width: '100%',
                 background: '#fff',
                 padding: '0 16px',
                 display: 'flex',
@@ -83,9 +83,9 @@ const FearTradingLogs = () => {
                 borderBottom: '1px solid #f0f0f0'
             }}>
                 <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <LeftOutlined 
-                        onClick={() => navigate('/profile')}
-                        style={{ 
+                    <LeftOutlined
+                        onClick={() => navigate(-1)}
+                        style={{
                             fontSize: '16px',
                             marginRight: '10px',
                             cursor: 'pointer'
@@ -107,9 +107,9 @@ const FearTradingLogs = () => {
                     ]}
                 />
             </Header>
-            <Layout.Content 
+            <Layout.Content
                 ref={containerRef}
-                style={{ 
+                style={{
                     marginTop: 64,
                     padding: '16px',
                     background: '#fff',
@@ -121,9 +121,9 @@ const FearTradingLogs = () => {
                 <List
                     dataSource={logs}
                     renderItem={log => (
-                        <List.Item style={{ 
-                            display: 'flex', 
-                            flexDirection: 'column', 
+                        <List.Item style={{
+                            display: 'flex',
+                            flexDirection: 'column',
                             alignItems: 'flex-start',
                             padding: '12px 0',
                             borderBottom: '1px solid #f0f0f0'
@@ -131,7 +131,7 @@ const FearTradingLogs = () => {
                             <Text type="secondary" style={{ fontSize: '12px' }}>
                                 {dayjs(log.timestamp).format('YYYY-MM-DD HH:mm:ss')} · {log.level}
                             </Text>
-                            <Text style={{ 
+                            <Text style={{
                                 marginTop: '4px',
                                 fontSize: '12px',
                                 color: log.level === 'ERROR' ? '#ff4d4f' : 'inherit'

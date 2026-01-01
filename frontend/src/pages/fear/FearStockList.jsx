@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs } from 'antd';
-import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined } from '@ant-design/icons';
+import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch } from 'antd';
+import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
+import { useAutoTrading } from './hooks/useAutoTrading';
 
 const FearStockList = () => {
   const navigate = useNavigate();
@@ -18,6 +19,7 @@ const FearStockList = () => {
   const [previewRange, setPreviewRange] = useState([60, 100]);
   const [previewAmount, setPreviewAmount] = useState(0);
   const [activeType, setActiveType] = useState(3);
+  const { autoTrading, handleAutoTradingChange } = useAutoTrading();
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -53,7 +55,7 @@ const FearStockList = () => {
         request.get(`/api/quant/stocks`, { params: { etf_type: activeType } }),
         request.get(`/api/quant/etf/emotion/${activeType}`)
       ]);
-      
+
       // 处理ETF情绪数据作为候选股票列表
       const formattedCandidates = emoResponse.data.data.map(item => ({
         code: item.code,
@@ -64,7 +66,7 @@ const FearStockList = () => {
         index: item.index || ''
       }));
       setCandidates(formattedCandidates);
-      
+
       // 组合数据
       const stocksWithEmo = stocksResponse.data.map(stock => {
         const emoData = emoResponse.data.data.find(emo => emo.code === stock.code);
@@ -76,7 +78,7 @@ const FearStockList = () => {
           emo_price: emoData?.emotion?.price || '-'
         };
       }).sort((a, b) => b.etf_scale - a.etf_scale);
-      
+
       setData(stocksWithEmo);
     } catch (error) {
       const errorMessage = error.response?.detail || error.message || '获取数据失败';
@@ -115,7 +117,7 @@ const FearStockList = () => {
   const handleSubmit = async (values) => {
     try {
       const stockInfo = candidates.find(item => item.code === values.code);
-      
+
       const data = {
         ...values,
         name: stockInfo?.name || '',
@@ -131,7 +133,7 @@ const FearStockList = () => {
       };
 
       const method = editingRecord ? 'put' : 'post';
-      const url = editingRecord 
+      const url = editingRecord
         ? `/api/quant/stocks/${editingRecord.id}`
         : '/api/quant/stocks';
 
@@ -309,7 +311,7 @@ const FearStockList = () => {
       dataIndex: 'etf_scale',
       key: 'etf_scale',
       width: 80,
-      sorter: (a, b) =>  a.etf_scale - b.etf_scale
+      sorter: (a, b) => a.etf_scale - b.etf_scale
     },
     {
       title: '操作',
@@ -394,7 +396,7 @@ const FearStockList = () => {
       },
       tooltip: {
         trigger: 'axis',
-        formatter: function(params) {
+        formatter: function (params) {
           const score = params[0].data[0];
           const value = params[0].data[1];
           return `Score: ${score.toFixed(1)}<br/>金额: ${value.toFixed(2)}`;
@@ -521,11 +523,11 @@ const FearStockList = () => {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <Layout.Header 
-        style={{ 
-          height: '48px', 
-          lineHeight: '48px', 
-          padding: '0 16px', 
+      <Layout.Header
+        style={{
+          height: '48px',
+          lineHeight: '48px',
+          padding: '0 16px',
           backgroundColor: '#fff',
           borderBottom: '1px solid #f0f0f0',
           display: 'flex',
@@ -534,21 +536,35 @@ const FearStockList = () => {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          <Button 
-            type="text" 
-            icon={<LeftOutlined />} 
-            onClick={() => navigate('/profile')}
+          <Button
+            type="text"
+            icon={<LeftOutlined />}
+            onClick={() => navigate(-1)}
             style={{ marginRight: '12px' }}
           />
           <span style={{ fontSize: '16px', fontWeight: 500 }}>股票列表</span>
         </div>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={handleAdd}
-        >
-          添加
-        </Button>
+
+        <Space>
+          <Space style={{ marginRight: 12 }}>
+            <span>自动交易:</span>
+            <Switch checked={autoTrading} onChange={handleAutoTradingChange} />
+          </Space>
+          <Button
+            icon={<FileTextOutlined />}
+            onClick={() => navigate('/fear/logs')}
+            style={{ marginRight: 8 }}
+          >
+            日志
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={handleAdd}
+          >
+            添加
+          </Button>
+        </Space>
       </Layout.Header>
 
       <Tabs

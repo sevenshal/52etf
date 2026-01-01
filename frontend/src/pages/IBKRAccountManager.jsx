@@ -60,7 +60,7 @@ const IBKRAccountManager = () => {
             await request.post(`/api/ib-accounts/${id}/restart`);
             message.success({ content: '重启指令已发送', key: 'restart' });
             // 重启后延迟检查状态
-            setTimeout(() => checkStatus(id), 5000);
+            setTimeout(() => checkStatus(id), 30000);
         } catch (error) {
             message.error({ content: `重启失败: ${error.response?.data?.detail || error.message}`, key: 'restart' });
         }

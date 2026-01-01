@@ -4,15 +4,12 @@ import { RightOutlined } from '@ant-design/icons';
 import { useAccount } from '../contexts/AccountContext';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
-import AutoTradingPanel from './fear/components/AutoTradingPanel';
-import { useAutoTrading } from './fear/hooks/useAutoTrading';
 
 const Profile = () => {
   const { accountId, login, logout } = useAccount();
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
-  const { autoTrading, handleAutoTradingChange } = useAutoTrading();
 
   const handleSubmit = async (values) => {
     setLoading(true);
@@ -53,86 +50,117 @@ const Profile = () => {
     }
   };
 
-  const items = [
+  const sections = [
     {
-      title: '历史每月分析',
-      onClick: () => navigate('/monthly-analysis'),
-      arrow: true
+      title: '交易与执行',
+      items: [
+        {
+          title: '杠杆ETF策略自动化交易',
+          onClick: () => navigate('/automated-trading'),
+        },
+        {
+          title: '恐贪策略自动化交易',
+          onClick: () => navigate('/fear/stocks'),
+          arrow: true
+        },
+        {
+          title: '投资组合跟单配置',
+          onClick: () => navigate('/portfolio-copy-trading'),
+          arrow: true
+        },
+        {
+          title: 'IBKR 账户管理',
+          onClick: () => navigate('/ib-account-manager'),
+          arrow: true
+        },
+      ]
     },
     {
-      title: '个股买卖信号',
-      onClick: () => navigate('/market-signal-history'),
-      arrow: true
+      title: '策略与回测',
+      items: [
+        {
+          title: '杠杆ETF均线穿越策略回测',
+          onClick: () => navigate('/lev-etf-backtest'),
+          arrow: true
+        },
+        {
+          title: '全天候策略回测',
+          onClick: () => navigate('/all-weather-backtest'),
+          arrow: true
+        },
+        {
+          title: '恐贪策略回测',
+          onClick: () => navigate('/fear/backtest'),
+          arrow: true
+        }
+      ]
     },
     {
-      title: '系统日志',
-      onClick: () => navigate('/system-log'),
-      arrow: true
+      title: '分析与监控',
+      items: [
+        {
+          title: '历史每月分析',
+          onClick: () => navigate('/monthly-analysis'),
+          arrow: true
+        },
+        {
+          title: '个股买卖信号',
+          onClick: () => navigate('/market-signal-history'),
+          arrow: true
+        },
+      ]
     },
     {
-      title: '杠杆ETF均线穿越策略回测',
-      onClick: () => navigate('/lev-etf-backtest'),
-      arrow: true
-    },
-    {
-      title: '杠杆ETF策略自动化交易',
-      onClick: () => navigate('/automated-trading'),
-    },
-    {
-      title: 'IBKR 账户管理',
-      onClick: () => navigate('/ib-account-manager'),
-      arrow: true
-    },
-    {
-      title: '全天候策略回测',
-      onClick: () => navigate('/all-weather-backtest'),
-      arrow: true
-    },
-    {
-      title: '投资组合跟单配置',
-      onClick: () => navigate('/portfolio-copy-trading'),
-      arrow: true
+      title: '系统管理',
+      items: [
+        {
+          title: '系统日志',
+          onClick: () => navigate('/system-log'),
+          arrow: true
+        }
+      ]
     }
   ];
 
-  return (
-    <div>
-      <Card title="我的功能" style={{ marginBottom: '6px' }}>
-        <List
+  const renderList = (items) => (
+    <List
+      style={{
+        backgroundColor: '#fff'
+      }}
+    >
+      {items.map((item, index) => (
+        <List.Item
+          key={index}
+          onClick={item.onClick}
           style={{
-            backgroundColor: '#fff'
+            cursor: item.onClick ? 'pointer' : 'default',
+            borderBottom: '1px solid #f0f0f0'
           }}
         >
-          {items.map((item, index) => (
-            <List.Item
-              key={index}
-              onClick={item.onClick}
-              style={{
-                cursor: item.onClick ? 'pointer' : 'default',
-                borderBottom: '1px solid #f0f0f0'
-              }}
-            >
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                width: '100%'
-              }}>
-                <span>{item.title}</span>
-                <Space>
-                  {item.arrow && <RightOutlined style={{ color: '#bfbfbf' }} />}
-                </Space>
-              </div>
-            </List.Item>
-          ))}
-        </List>
-      </Card>
-      <Card title='自动化交易' style={{ marginBottom: '6px' }}>
-        <AutoTradingPanel
-          autoTrading={autoTrading}
-          onAutoTradingChange={handleAutoTradingChange}
-        />
-      </Card>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            width: '100%'
+          }}>
+            <span>{item.title}</span>
+            <Space>
+              {item.arrow && <RightOutlined style={{ color: '#bfbfbf' }} />}
+            </Space>
+          </div>
+        </List.Item>
+      ))}
+    </List>
+  );
+
+  return (
+    <div>
+      {sections.map((section, index) => (
+        <Card key={index} title={section.title} style={{ marginBottom: '6px' }}>
+          {renderList(section.items)}
+        </Card>
+      ))}
+
       <Card title="账户设置">
         {accountId ? (
           <div>
