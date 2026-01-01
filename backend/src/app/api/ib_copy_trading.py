@@ -19,6 +19,7 @@ class PortfolioCopyConfigSchema(BaseModel):
     total_position_ratio: float = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 10.0
+    price_buffer_pct: float = 0.5
     api_headers: Optional[dict] = None
 
     class Config:
@@ -58,6 +59,7 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
         config.total_position_ratio = config_data.total_position_ratio
         config.total_amount = config_data.total_amount
         config.tracking_error_pct = config_data.tracking_error_pct
+        config.price_buffer_pct = config_data.price_buffer_pct
         config.api_headers = config_data.api_headers
     else:
         config = PortfolioCopyConfig(
@@ -70,6 +72,7 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
             total_position_ratio=config_data.total_position_ratio,
             total_amount=config_data.total_amount,
             tracking_error_pct=config_data.tracking_error_pct,
+            price_buffer_pct=config_data.price_buffer_pct,
             api_headers=config_data.api_headers
         )
         db.add(config)

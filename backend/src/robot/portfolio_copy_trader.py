@@ -223,12 +223,13 @@ class PortfolioCopyTrader:
 
                 try:
                     # 使用限价单以支持盘前盘后
-                    # 价格缓冲：买入加价 0.5%，卖出减价 0.5% (可调整)
+                    # 价格缓冲 (可调整)
+                    buffer_pct = (config.price_buffer_pct or 0.5) / 100.0
                     limit_price = price
                     if action == "BUY":
-                        limit_price = round(price * 1.005, 2)
+                        limit_price = round(price * (1 + buffer_pct), 2)
                     elif action == "SELL":
-                        limit_price = round(price * 0.995, 2)
+                        limit_price = round(price * (1 - buffer_pct), 2)
                         
                     trade = await ib.place_limit_order(symbol, action, qty, limit_price, outside_rth=True)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
