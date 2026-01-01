@@ -22,6 +22,7 @@ import LevETFBacktest from './pages/LevETFBacktest';
 import AutomatedTrading from './pages/AutomatedTrading';
 import IBKRAccountManager from './pages/IBKRAccountManager';
 import AllWeatherBacktest from './pages/AllWeatherBacktest';
+import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 
 function App() {
   return (
@@ -48,6 +49,7 @@ function App() {
           <Route path="/automated-trading" element={<AutomatedTrading />} />
           <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
           <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
+          <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
         </Route>
       </Routes>
     </AccountProvider>

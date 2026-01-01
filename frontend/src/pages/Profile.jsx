@@ -87,6 +87,11 @@ const Profile = () => {
       title: '全天候策略回测',
       onClick: () => navigate('/all-weather-backtest'),
       arrow: true
+    },
+    {
+      title: '投资组合跟单配置',
+      onClick: () => navigate('/portfolio-copy-trading'),
+      arrow: true
     }
   ];
 
