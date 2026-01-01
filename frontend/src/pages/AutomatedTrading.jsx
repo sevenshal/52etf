@@ -126,7 +126,7 @@ const AutomatedTrading = () => {
 
     return (
         <div style={{ padding: '24px' }}>
-            <Title level={2}>自动化交易</Title>
+            <Title level={2}>杠杆ETF均线策略自动化交易</Title>
             <Tabs defaultActiveKey="1">
                 <TabPane
                     tab={<span><SettingOutlined />策略配置</span>}
