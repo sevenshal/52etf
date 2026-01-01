@@ -101,7 +101,8 @@ class PortfolioCopyTrader:
 
     async def calculate_rebalance_plan(self, config: PortfolioCopyConfig, client_id: Optional[int] = None) -> List[dict]:
         """计算调仓计划但不执行 (Should run in worker loop)"""
-        logger.info(f"Calculating rebalance plan for account {config.account_id} for portfolio {config.portfolio_id}")
+        masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+        logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
         # Use local service or managed service within this thread
         # 既然我们在 Worker 线程，我们可以安全地使用 managed service
@@ -193,8 +194,10 @@ class PortfolioCopyTrader:
         try:
             # Re-use the calculation logic
             plan = await self.calculate_rebalance_plan(config, client_id=client_id)
+            plan = [p for p in plan if p["action"] != "HOLD" and p["quantity"] != 0]
             if not plan:
-                logger.info(f"No rebalance needed for {config.account_id}")
+                masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+                logger.info(f"No rebalance needed for {masked_account_id}")
                 return
 
             ib = self.ib_service
@@ -216,7 +219,8 @@ class PortfolioCopyTrader:
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
 
         except Exception as e:
-            logger.error(f"Rebalance failed for {config.account_id}: {e}")
+            masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+            logger.error(f"Rebalance failed for {masked_account_id}: {e}")
             self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e))
 
     def _should_run(self, cron_rule: str) -> bool:
@@ -280,7 +284,8 @@ class PortfolioCopyTrader:
                         
                         try:
                             # 在当前 Worker 线程执行计算
-                            logger.info(f"Worker Processing task for {config.account_id}")
+                            masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+                            logger.info(f"Worker Processing task for {masked_account_id}")
                             result = await self.calculate_rebalance_plan(config, client_id=cid)
                             
                             # 在 API 线程设置结果
@@ -305,7 +310,8 @@ class PortfolioCopyTrader:
                         configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
                         for config in configs:
                             if self._should_run(config.cron_rule):
-                                logger.info(f"Triggering copy trading for account {config.account_id} with cron {config.cron_rule}")
+                                masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+                                logger.info(f"Triggering copy trading for account {masked_account_id} with cron {config.cron_rule}")
                                 await self.rebalance(config, client_id=100+config.id if config.id else 999)
                     finally:
                         db.close()
