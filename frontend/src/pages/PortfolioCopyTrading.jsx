@@ -189,6 +189,15 @@ const PortfolioCopyTrading = () => {
             render: (t) => new Date(t).toLocaleString()
         },
         {
+            title: '组合',
+            dataIndex: 'portfolio_id',
+            key: 'portfolio_id',
+            render: (pid) => {
+                const config = configs.find(c => c.portfolio_id === pid);
+                return config ? `${config.portfolio_name} (${pid})` : pid;
+            }
+        },
+        {
             title: '行为',
             dataIndex: 'action',
             key: 'action',
@@ -318,13 +327,19 @@ const PortfolioCopyTrading = () => {
             >
                 <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', tracking_error_pct: 10, total_position_ratio: 100, price_buffer_pct: 0.5 }}>
                     <Row gutter={16}>
-                        <Col span={12}>
-                            <Form.Item name="enabled" label="开启状态" valuePropName="checked">
-                                <Switch />
-                            </Form.Item>
+                        <Col span={24}>
+                            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, marginTop: 12 }}>
+                                <span style={{ marginRight: 8, fontSize: '14px' }}>开启状态:</span>
+                                <Form.Item name="enabled" valuePropName="checked" noStyle>
+                                    <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+                                </Form.Item>
+                            </div>
                         </Col>
+                    </Row>
+
+                    <Row gutter={16}>
                         <Col span={12}>
-                            <Form.Item label="投资组合 ID">
+                            <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
                                 <Space.Compact style={{ width: '100%' }}>
                                     <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
                                         <Input placeholder="例如: 158919" />
@@ -334,7 +349,7 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={12}>
-                            <Form.Item name="portfolio_name" label="组合名称">
+                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
                                 <Input placeholder="自动获取或手动输入" />
                             </Form.Item>
                         </Col>
@@ -360,7 +375,7 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={6}>
-                            <Form.Item name="total_amount" label="总金额 (可选)">
+                            <Form.Item name="total_amount" label="总金额 (优先)">
                                 <InputNumber style={{ width: '100%' }} />
                             </Form.Item>
                         </Col>
