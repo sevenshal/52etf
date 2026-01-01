@@ -84,19 +84,12 @@ class StockEmotionResponse(BaseModel):
     msg: str
     data: Optional[StockEmotionData] = None
 
-# 新增激活码模型
-class ActivationCode(BaseModel):
-    code: str
-
 # 添加新的模型
 class AutoTradingStatus(BaseModel):
     enabled: bool
 
 def get_stocks_config_path(account_id: str):
     return get_data_file(account_id, "szdt_stocks.json")
-
-def get_activation_path(account_id: str):
-    return get_data_file(account_id, "szdt_activated.json")
 
 def get_auto_trading_path(account_id: str):
     """获取自动交易配置文件路径"""
@@ -122,35 +115,6 @@ async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Missing account ID")
     return x_account_id
 
-def is_activated(account_id: str) -> bool:
-    """检查是否已激活"""
-    try:
-        file_path = get_activation_path(account_id)
-        data = read_json_file(file_path)
-        return data.get('activated', False)
-    except FileNotFoundError:
-        return False
-
-# 新增激活状态检查
-@router.get("/activation-status")
-async def get_activation_status(account_id: str = Depends(get_account_id)):
-    """获取激活状态"""
-    return {"activated": is_activated(account_id)}
-
-# 新增激活接口
-@router.post("/activate")
-async def activate(activation: ActivationCode, account_id: str = Depends(get_account_id)):
-    """激活贪恐模型"""
-    if len(activation.code) != 32:  # 这里设置激活码
-        raise HTTPException(status_code=400, detail="激活码格式不正确")
-    
-    file_path = get_activation_path(account_id)
-    write_json_file(file_path, {
-        "activated": True,
-        "code": activation.code,  # 保存激活码
-        "activated_at": datetime.now().isoformat()
-    })
-    return {"message": "激活成功"}
 
 @router.get("/auto-trading-status")
 async def get_auto_trading_status_api(account_id: str = Depends(get_account_id)):
@@ -163,8 +127,6 @@ async def set_auto_trading_status(
     account_id: str = Depends(get_account_id)
 ):
     """设置自动交易状态"""
-    if not is_activated(account_id):
-        raise HTTPException(status_code=403, detail="请先激活贪恐模型")
     
     file_path = get_auto_trading_path(account_id)
     write_json_file(file_path, {"enabled": status.enabled})
@@ -277,54 +239,6 @@ async def get_stocks_emotions(
             data=None
         )
 
-# 在其他模型定义后添加新的模型
-# 修改 MirrorActivation 模型定义
-class MirrorActivation(BaseModel):
-    id: Optional[int] = None
-    auth: Optional[str] = None
-    code: Optional[str] = None
-    code_invite: Optional[str] = None
-    expire_time: Optional[str] = None
-    auto_trade: bool = False
-    trade_hkd: int = 0
-    trade_usd: int = 0
-    futu_server: str = ""
-    lp_key: str = ""
-    tiger_id: str = ""
-    single_max_holding: int = 5
-
-    class Config:
-        extra = "allow"  # 允许额外的字段
-
-def get_mirror_activation_path(account_id: str):
-    """获取镜像激活配置文件路径"""
-    return get_data_file(account_id, "szdt_mirror.json")
-
-# 在其他路由后添加新的路由
-@router.post("/mirror-activate")
-async def activate_mirror(mirror_config: MirrorActivation, account_id: str = Depends(get_account_id)):
-    """激活镜像"""
-    try:
-        
-        # 保存到文件
-        file_path = get_mirror_activation_path(account_id)
-        write_json_file(file_path, mirror_config.dict())
-        
-        return {"message": "镜像激活成功"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"激活失败: {str(e)}")
-
-@router.get("/mirror-config", response_model=MirrorActivation)
-async def get_mirror_config(account_id: str = Depends(get_account_id)):
-    """获取镜像配置"""
-    try:
-        file_path = get_mirror_activation_path(account_id)
-        data = read_json_file(file_path)
-        return MirrorActivation(**data)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="镜像配置未找到")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"获取配置失败: {str(e)}")
 
 class ETFEmotionResponse(BaseModel):
     status: int
