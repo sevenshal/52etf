@@ -166,6 +166,7 @@ class IBKRService:
     async def is_market_open(self, symbol: str = "SPY") -> bool:
         """
         通过查询 SPY 的 liquidHours (包含盘前盘后) 判断当前是否为交易时段。
+        为避免服务器时区差异，统一基于 UTC 时间转换为交易所时区进行比较。
         """
         await self.connect()
         try:
@@ -178,14 +179,9 @@ class IBKRService:
             
             details = details_list[0]
             
-            # liquidHours 格式示例: "20240101:CLOSED;20240102:0400-2000;..."
-            # 时间通常是交易所本地时间 (SPY 是 EST/EDT)
+            # liquidHours Example: "20240101:CLOSED;20240102:0400-2000;..."
             liquid_hours_str = details.liquidHours
             time_zone_id = details.timeZoneId # e.g. "EST5EDT"
-            
-            # 简单解析: 找到今天的日期
-            # 注意: 这里简化处理，假设服务器时间和交易所时区差异不大，或者我们只匹配日期字符串
-            # 更严谨的做法是转换时区。虽然 ib_insync 会处理，但 liquidHours 是字符串。
             
             import datetime
             import pytz
@@ -194,13 +190,19 @@ class IBKRService:
             tz_map = {
                 "EST5EDT": "US/Eastern",
                 "CST6CDT": "US/Central",
-                "PST8PDT": "US/Pacific"
+                "PST8PDT": "US/Pacific",
+                "HKT": "Asia/Hong_Kong",
+                "GMT": "Europe/London"
             }
             tz_name = tz_map.get(time_zone_id, "US/Eastern")
-            tz = pytz.timezone(tz_name)
+            target_tz = pytz.timezone(tz_name)
             
-            now = datetime.datetime.now(tz)
-            today_str = now.strftime("%Y%m%d")
+            # 核心修改：使用 UTC 时间作为基准，然后转换到交易所时区
+            # 这能确保无论服务器是 UTC、UTC+8 还是其他时区，只要系统 UTC 时间准确，结果的一致性。
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_exchange = now_utc.astimezone(target_tz)
+            
+            today_str = now_exchange.strftime("%Y%m%d")
             
             # 查找今天的规则
             today_rule = None
@@ -209,31 +211,29 @@ class IBKRService:
                     today_rule = item
                     break
             
+            logger.info(f"Market Check for {symbol}: UTC={now_utc.strftime('%H:%M')}, Exchange({tz_name})={now_exchange.strftime('%H:%M')}, Rule='{today_rule}'")
+
             if not today_rule:
-                # 找不到今天的规则？可能是数据问题，默认开放或关闭？安全的做法是 Log 并默认开放以免误杀，或者关闭
-                # 这里我们再试一下 UTC 日期? 不，liquidHours 是本地日期。
-                # 找不到可能是还没更新还是？假设 False 比较安全
-                logger.warning(f"No market hours found for today {today_str} in {liquid_hours_str}")
+                logger.warning(f"No market hours found for today {today_str} (Exchange Time). Details: {liquid_hours_str}")
                 return False
                 
             if "CLOSED" in today_rule:
                 return False
-                
-            # 解析时间段: 20240102:0400-2000,2030-2200
-            # 去掉日期前缀
-            time_ranges_str = today_rule.split(':')[1]
-            now_hm = int(now.strftime("%H%M"))
             
-            for segment in time_ranges_str.split(','):
-                # segment: 0400-2000
-                if '-' in segment:
-                    start_str, end_str = segment.split('-')
-                    start_hm = int(start_str)
-                    end_hm = int(end_str)
-                    
-                    if start_hm <= now_hm < end_hm:
-                        return True
+            # 解析规则, e.g. "20240101:0400-2000,2030-2200"
+            if ':' in today_rule:
+                time_ranges_str = today_rule.split(':')[1]
+                now_hm = int(now_exchange.strftime("%H%M"))
+                
+                for segment in time_ranges_str.split(','):
+                    if '-' in segment:
+                        start_str, end_str = segment.split('-')
+                        start_hm = int(start_str)
+                        end_hm = int(end_str)
                         
+                        if start_hm <= now_hm < end_hm:
+                            return True
+            
             return False
             
         except Exception as e:

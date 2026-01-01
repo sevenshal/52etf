@@ -192,12 +192,15 @@ class PortfolioCopyTrader:
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (Should run in worker loop)"""
         try:
+            # 0. Ensure IB Service is ready
+            await self._ensure_ib_connected(config.ib_port, client_id)
+
             # 1. Check Market Status
             # 既然我们需要在盘前盘后也交易，我们依赖 is_market_open (基于 liquidHours)
             # 如果不开放，直接跳过
             is_open = await self.ib_service.is_market_open("SPY")
             if not is_open:
-                logger.info(f"Market is CLOSED (Liquid Hours check). Skipping rebalance for {config.account_id}")
+                logger.info(f"Market is CLOSED (Liquid Hours check). Skipping rebalance for ***{config.account_id[-4:]}")
                 return
 
             # Re-use the calculation logic
