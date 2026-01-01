@@ -56,6 +56,10 @@ class PortfolioCopyTrader:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
+    async def get_portfolio_info(self, portfolio_id: str, headers: dict) -> dict:
+        """异步包装器：获取组合信息"""
+        return await self._run_in_executor(self.get_portfolio_info_sync, portfolio_id, headers)
+
     def get_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
         """从 Futu API 获取组合信息 (同步方法，供 executor 调用)"""
         url = f"https://portfolio.futunn.com/portfolio-api/get-portfolio-info?portfolio_id={portfolio_id}&_={int(time.time() * 1000)}"
