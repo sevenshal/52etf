@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
+import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
     Space, Tag, message, Typography, Descriptions, Popconfirm,
-    Badge, Row, Col, Tooltip
+    Badge, Row, Col, Tooltip, Select, TimePicker, Radio
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, SyncOutlined,
     ThunderboltOutlined, DeleteOutlined, EditOutlined,
-    GlobalOutlined, ContainerOutlined, LockOutlined
+    GlobalOutlined, ContainerOutlined, LockOutlined,
+    ClockCircleOutlined, SettingOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 
@@ -78,7 +80,12 @@ const IBKRAccountManager = () => {
 
     const handleSave = async (values) => {
         try {
-            const payload = editingAccount ? { ...values, id: editingAccount.id } : values;
+            // 转换时间选择器为字符串格式 "hh:mm A"
+            const formattedValues = {
+                ...values,
+                auto_restart_time: values.auto_restart_time ? values.auto_restart_time.format('hh:mm A') : '08:59 PM'
+            };
+            const payload = editingAccount ? { ...formattedValues, id: editingAccount.id } : formattedValues;
             await request.post('/api/ib-accounts', payload);
             message.success(editingAccount ? '更新成功' : '添加成功');
             setModalVisible(false);
@@ -189,7 +196,11 @@ const IBKRAccountManager = () => {
                         icon={<EditOutlined />}
                         onClick={() => {
                             setEditingAccount(record);
-                            form.setFieldsValue(record);
+                            // 转换时间字符串为 dayjs 对象
+                            form.setFieldsValue({
+                                ...record,
+                                auto_restart_time: record.auto_restart_time ? dayjs(record.auto_restart_time, 'hh:mm A') : dayjs('08:59 PM', 'hh:mm A')
+                            });
                             setModalVisible(true);
                         }}
                         size="small"
@@ -239,9 +250,22 @@ const IBKRAccountManager = () => {
                 visible={modalVisible}
                 onCancel={() => setModalVisible(false)}
                 onOk={() => form.submit()}
-                width={600}
+                width={700}
             >
-                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ ib_host: '127.0.0.1', ib_port: 4001, client_id: 1, trading_mode: 'paper' }}>
+                <Form
+                    form={form}
+                    layout="vertical"
+                    onFinish={handleSave}
+                    initialValues={{
+                        ib_host: '127.0.0.1',
+                        ib_port: 4001,
+                        client_id: 1,
+                        trading_mode: 'paper',
+                        twofa_timeout_action: 'restart',
+                        auto_restart_time: dayjs('08:59 PM', 'hh:mm A'),
+                        relogin_after_twofa_timeout: 'yes'
+                    }}
+                >
                     <Row gutter={16}>
                         <Col span={12}>
                             <Form.Item name="name" label="账户别名" rules={[{ required: true }]}>
@@ -286,23 +310,41 @@ const IBKRAccountManager = () => {
                         </Col>
                     </Row>
 
-                    <Form.Item name="trading_mode" label="交易模式">
-                        <Row gutter={16}>
-                            <Col span={24}>
-                                <Button.Group style={{ width: '100%' }}>
-                                    <Button
-                                        type={form.getFieldValue('trading_mode') === 'paper' ? 'primary' : 'default'}
-                                        onClick={() => form.setFieldsValue({ trading_mode: 'paper' })}
-                                        style={{ width: '50%' }}
-                                    >模拟 (Paper)</Button>
-                                    <Button
-                                        type={form.getFieldValue('trading_mode') === 'live' ? 'primary' : 'default'}
-                                        onClick={() => form.setFieldsValue({ trading_mode: 'live' })}
-                                        style={{ width: '50%' }}
-                                    >实盘 (Live)</Button>
-                                </Button.Group>
-                            </Col>
-                        </Row>
+                    <Form.Item label="高级配置 (Gateway)">
+                        <Card size="small" type="inner">
+                            <Row gutter={16}>
+                                <Col span={12}>
+                                    <Form.Item name="twofa_timeout_action" label="2FA 超时操作" style={{ marginBottom: 0 }}>
+                                        <Select>
+                                            <Select.Option value="restart">重启容器 (restart)</Select.Option>
+                                            <Select.Option value="exit">退出 (exit)</Select.Option>
+                                        </Select>
+                                    </Form.Item>
+                                </Col>
+                                <Col span={12}>
+                                    <Form.Item name="relogin_after_twofa_timeout" label="2FA 超时后重新登录" style={{ marginBottom: 0 }}>
+                                        <Select>
+                                            <Select.Option value="yes">是 (yes)</Select.Option>
+                                            <Select.Option value="no">否 (no)</Select.Option>
+                                        </Select>
+                                    </Form.Item>
+                                </Col>
+                            </Row>
+                            <Row gutter={16} style={{ marginTop: 12 }}>
+                                <Col span={24}>
+                                    <Form.Item name="auto_restart_time" label="自动重启时间" style={{ marginBottom: 0 }}>
+                                        <TimePicker format="hh:mm A" style={{ width: '100%' }} use12Hours />
+                                    </Form.Item>
+                                </Col>
+                            </Row>
+                        </Card>
+                    </Form.Item>
+
+                    <Form.Item name="trading_mode" label="交易模式" rules={[{ required: true }]}>
+                        <Radio.Group optionType="button" buttonStyle="solid" style={{ width: '100%', display: 'flex' }}>
+                            <Radio.Button value="paper" style={{ flex: 1, textAlign: 'center' }}>模拟 (Paper)</Radio.Button>
+                            <Radio.Button value="live" style={{ flex: 1, textAlign: 'center' }}>实盘 (Live)</Radio.Button>
+                        </Radio.Group>
                     </Form.Item>
                 </Form>
             </Modal>
