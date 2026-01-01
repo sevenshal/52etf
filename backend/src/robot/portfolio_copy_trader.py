@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Any
 from croniter import croniter
 from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog
 from ..core.services.ib_service import IBKRService
+from ..core.services.market import MarketService
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,12 @@ class PortfolioCopyTrader:
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (Should run in worker loop)"""
         try:
+            
+            # 直接调用 MarketService 判断开盘
+            if not MarketService.is_us_market_open():
+                logger.info("Market is not open")
+                return
+
             # 0. Ensure IB Service is ready
             await self._ensure_ib_connected(config.ib_port, client_id)
 
