@@ -316,7 +316,7 @@ const PortfolioCopyTrading = () => {
                 onOk={() => form.submit()}
                 width={700}
             >
-                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', tracking_error_pct: 10, total_position_ratio: 100 }}>
+                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', tracking_error_pct: 10, total_position_ratio: 100, price_buffer_pct: 0.5 }}>
                     <Row gutter={16}>
                         <Col span={12}>
                             <Form.Item name="enabled" label="开启状态" valuePropName="checked">
@@ -354,23 +354,27 @@ const PortfolioCopyTrading = () => {
                     </Row>
 
                     <Row gutter={16}>
-                        <Col span={8}>
+                        <Col span={6}>
                             <Form.Item name="total_position_ratio" label="总仓位比例 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} />
                             </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        <Col span={6}>
                             <Form.Item name="total_amount" label="总金额 (可选)">
                                 <InputNumber style={{ width: '100%' }} />
                             </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        <Col span={6}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} />
                             </Form.Item>
                         </Col>
+                        <Col span={6}>
+                            <Form.Item name="price_buffer_pct" label="价格缓冲 (%)">
+                                <InputNumber style={{ width: '100%' }} min={0} step={0.1} />
+                            </Form.Item>
+                        </Col>
                     </Row>
-
                 </Form>
             </Modal>
         </div>
