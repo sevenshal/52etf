@@ -294,6 +294,38 @@ class AutomatedTradeLog(Base):
     status = Column(String)  # 'SUCCESS' or 'FAILED'
     message = Column(String)
 
+class PortfolioCopyConfig(Base):
+    """投资组合跟单配置"""
+    __tablename__ = "portfolio_copy_configs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    enabled = Column(Boolean, default=False)
+    portfolio_id = Column(String, nullable=False)
+    cron_rule = Column(String, default="0 8 * * *") # 默认每天 8 点
+    ib_port = Column(Integer, nullable=False)
+    total_position_ratio = Column(Float, default=100.0) # 操作的总仓位比例 (%)
+    total_amount = Column(Float) # 或者操作的总金额
+    tracking_error_pct = Column(Float, default=10.0) # 跟踪误差 (%)
+    api_headers = Column(JSON) # 包含 Cookie, User-Agent 等
+    portfolio_name = Column(String(100))
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class PortfolioCopyLog(Base):
+    """投资组合跟单日志"""
+    __tablename__ = "portfolio_copy_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    portfolio_id = Column(String)
+    action = Column(String) # REBALANCE, FETCH_ERROR, etc.
+    symbol = Column(String)
+    quantity = Column(Float)
+    price = Column(Float)
+    status = Column(String) # SUCCESS, FAILED
+    message = Column(String)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"
@@ -358,6 +390,9 @@ def get_db_session_factory(account_id: str):
                     conn.execute("ALTER TABLE ib_account_configs ADD COLUMN auto_restart_time TEXT DEFAULT '08:59 PM'")
                 if 'relogin_after_twofa_timeout' not in ib_cols:
                     conn.execute("ALTER TABLE ib_account_configs ADD COLUMN relogin_after_twofa_timeout TEXT DEFAULT 'yes'")
+                
+                # 确保新表存在
+                Base.metadata.create_all(bind=engine)
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass

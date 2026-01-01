@@ -2,7 +2,7 @@ from ib_insync import IB, Stock, MarketOrder
 import asyncio
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -11,15 +11,18 @@ class IBKRService:
         self.host = host or os.getenv('IB_HOST', '127.0.0.1')
         self.port = int(port or os.getenv('IB_PORT', '4001'))
         self.client_id = int(client_id or os.getenv('IB_CLIENT_ID', '1'))
-        self.ib = IB()
+        self.ib = None
         self._positions: Dict[str, float] = {}
         self._available_cash: float = 0.0
         self._net_liquidation: float = 0.0
 
-    async def connect(self):
+    async def connect(self, timeout: float = 4.0):
+        if self.ib is None:
+            self.ib = IB()
+            
         if not self.ib.isConnected():
             try:
-                await self.ib.connectAsync(self.host, self.port, clientId=self.client_id)
+                await self.ib.connectAsync(self.host, self.port, clientId=self.client_id, timeout=timeout)
                 logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
                 # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
                 self.ib.reqMarketDataType(3)
@@ -29,13 +32,13 @@ class IBKRService:
                 raise
 
     def disconnect(self):
-        if self.ib.isConnected():
+        if self.ib and self.ib.isConnected():
             self.ib.disconnect()
             logger.info("Disconnected from IB Gateway")
 
     async def refresh_account_data(self):
         """刷新账户资金和持仓数据"""
-        if not self.ib.isConnected():
+        if not self.ib or not self.ib.isConnected():
             return
             
         try:
@@ -99,6 +102,26 @@ class IBKRService:
         
         [ticker] = await self.ib.reqTickersAsync(contract)
         return ticker.marketPrice()
+
+    async def get_market_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """批量获取当前市场价格"""
+        await self.connect()
+        contracts = []
+        for symbol in symbols:
+            clean_symbol = symbol.replace('US.', '')
+            contracts.append(Stock(clean_symbol, 'SMART', 'USD'))
+            
+        if not contracts:
+            return {}
+            
+        await self.ib.qualifyContractsAsync(*contracts)
+        tickers = await self.ib.reqTickersAsync(*contracts)
+        
+        prices = {}
+        for ticker in tickers:
+            prices[ticker.contract.symbol] = ticker.marketPrice()
+            
+        return prices
 
     async def has_today_orders(self, symbol: str) -> bool:
         """检查今天是否有针对该代码的非取消订单 (包括待成交和已成交)"""

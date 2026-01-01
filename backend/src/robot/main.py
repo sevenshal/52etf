@@ -10,6 +10,7 @@ from .cnn_fear_index import CNNFearGreedIndexScraper
 from .market_signal import MarketSignalAnalyzer
 from .us_auto_trader import start_us_auto_trader
 from .lev_etf_trader import start_lev_etf_trader
+from .portfolio_copy_trader import start_portfolio_copy_trader
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
@@ -52,6 +53,10 @@ def robot():
   start_us_auto_trader(ACCOUNT_ID)
   # 启动杠杆ETF均线策略（收盘前10s检查）
   start_lev_etf_trader()
+
+  # 启动 Portfolio Copy Trader Worker
+  start_portfolio_copy_trader()
+
   while True:
     schedule.run_pending()
     time.sleep(10)
