@@ -69,6 +69,36 @@ class IBKRService:
         """从缓存获取指定代码的持仓数量"""
         return self._positions.get(symbol.replace('US.', ''), 0)
 
+    def get_pending_qty(self, symbol: str) -> float:
+        """获取指定代码的待成交订单总数量 (买为正，卖为负)"""
+        if not self.ib or not self.ib.isConnected():
+            return 0
+        
+        clean_symbol = symbol.replace('US.', '')
+        pending_qty = 0
+        for trade in self.ib.trades():
+            if trade.contract.symbol == clean_symbol:
+                status = trade.orderStatus.status
+                # 处于活动状态的订单
+                if status in ('Submitted', 'PreSubmitted', 'PendingSubmit', 'PendingCancel'):
+                    qty = trade.order.totalQuantity
+                    if trade.order.action == 'SELL':
+                        qty = -qty
+                    
+                    # 减去已经成交的部分
+                    filled = trade.orderStatus.filled
+                    if trade.order.action == 'SELL':
+                        remaining = qty + filled
+                    else:
+                        remaining = qty - filled
+                        
+                    pending_qty += remaining
+        return pending_qty
+
+    def get_effective_position(self, symbol: str) -> float:
+        """获取有效持仓 (当前持仓 + 待成交数量)"""
+        return self.get_position(symbol) + self.get_pending_qty(symbol)
+
     async def place_market_order(self, symbol: str, action: str, quantity: int):
         """下市价单"""
         await self.connect()

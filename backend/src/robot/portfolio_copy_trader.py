@@ -4,6 +4,7 @@ import threading
 import time
 import logging
 import requests
+import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from croniter import croniter
@@ -29,6 +30,8 @@ class PortfolioCopyTrader:
             return
         self._initialized = True
         self.is_running = False
+        self._thread_started = False
+        self._thread_lock = threading.Lock()
         self.task_queue = asyncio.Queue()
         self.ib_service = None # Use a shared service instance for the worker
         self.worker_loop_obj = None # Capture the worker loop
@@ -118,72 +121,71 @@ class PortfolioCopyTrader:
         try:
             # 1. 获取 Futu 持仓占比 (Run in executor to avoid blocking loop)
             futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
-            futu_positions_map = {r["stock_code"]: r["position_ratio"] / 1000000000.0 for r in futu_records}
             
+            # --- 符号归一化 (Normalizing symbols) ---
+            # Normalized Futu map: symbol (clean) -> target_ratio (0.0 - 1.0)
+            futu_positions_map = {}
+            for r in futu_records:
+                symbol = r["stock_code"].replace('US.', '')
+                ratio = r["position_ratio"] / 1000000000.0
+                if ratio > 1.0: # 14.0 代表 14%
+                    ratio /= 100.0
+                futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+
             # 2. IB 状态已经在 _ensure_ib_connected 中准备好
             net_liq = ib.net_liquidation
             if net_liq <= 0:
                 raise Exception("IB Account net liquidation is zero or negative")
 
-            # 3. 计算目标金额
+            # 3. 计算调仓总额 (Target amount for the entire strategy)
             total_target_amount = config.total_amount or (net_liq * config.total_position_ratio / 100.0)
-            # 4. 获取所有相关股票的价格 (批量获取以提高效率)
-            all_symbols = list(set(list(futu_positions_map.keys()) + list(ib._positions.keys())))
-            logger.info(f"Fetching market prices for {len(all_symbols)} symbols...")
-            market_prices = await ib.get_market_prices(all_symbols)
+            
+            # --- 目标符号集 ---
+            # 收集所有我们需要关注的股票代码 (Futu 目标 + IB 当前持仓)
+            all_clean_symbols = set(list(futu_positions_map.keys()) + [s.replace('US.', '') for s in ib._positions.keys()])
+            
+            # 4. 批量获取市场价格
+            logger.info(f"Fetching market prices for {len(all_clean_symbols)} symbols...")
+            market_prices = await ib.get_market_prices(list(all_clean_symbols))
             
             # 5. 计算调仓方案
             plan = []
-            total_target_amount = ib.net_liquidation
-            
-            # 这里的 ib._positions 已经在 refresh_account_data 中刷新过了
-            ib_positions = {}
-            for symbol, qty in ib._positions.items():
-                price = market_prices.get(symbol) or market_prices.get(f"US.{symbol}")
-                if price:
-                    ib_positions[symbol] = {
-                        "qty": qty,
-                        "price": price,
-                        "ratio": (qty * price) / total_target_amount
-                    }
-
-            for symbol in all_symbols:
+            for symbol in all_clean_symbols:
                 target_ratio = futu_positions_map.get(symbol, 0)
-                ib_pos = ib_positions.get(symbol, ib_positions.get(symbol.replace('US.', ''), {"qty": 0, "price": 0, "ratio": 0}))
                 
-                current_ratio = ib_pos["ratio"]
-                current_qty = ib_pos["qty"]
+                # 获取 IB 实时数据 (当前持仓和待成交挂单)
+                current_qty = ib.get_position(symbol)
+                pending_qty = ib.get_pending_qty(symbol)
                 
-                diff_ratio = target_ratio - current_ratio
-                
-                # Calculate basic params for all symbols
-                price = ib_pos["price"] or market_prices.get(symbol) or market_prices.get(symbol.replace('US.', ''))
-                if not price:
-                    logger.warning(f"Skipping {symbol} due to missing price")
+                price = market_prices.get(symbol)
+                if not price or math.isnan(price) or price <= 0:
+                    logger.warning(f"Skipping {symbol} due to missing or invalid price: {price}")
                     continue
 
+                # 当前实际占比 (基于现有持仓和最新价)
+                current_ratio = (current_qty * price) / net_liq
+                diff_ratio = target_ratio - current_ratio
+                
+                # 目标股数 = (总目标调仓额 * 目标占比) / 价格
                 target_qty = int((total_target_amount * target_ratio) / price)
-                trade_qty = target_qty - current_qty
+                # 核心逻辑：需交易股数 = 目标股数 - (当前股数 + 正在路上的股数)
+                trade_qty = target_qty - (current_qty + pending_qty)
                 
-                # Determine Action based on Tracking Error
                 action = "HOLD"
-                is_rebalance_needed = False
-                
+                # 只有当占比误差超过设定阈值 (Tracking Error %) 时才行动
                 if abs(diff_ratio) * 100 > (config.tracking_error_pct or 0):
                     if trade_qty != 0:
                         action = "BUY" if trade_qty > 0 else "SELL"
-                        is_rebalance_needed = True
                 
-                # Always add to plan for visibility
                 plan.append({
                     "symbol": symbol,
                     "action": action,
                     "quantity": abs(trade_qty),
                     "current_qty": current_qty,
+                    "pending_qty": pending_qty,
                     "target_qty": target_qty,
                     "price": price,
-                    "price": price,
-                    "current_ratio": round(current_ratio * 100, 2), # Correct if frontend expects 0-100
+                    "current_ratio": round(current_ratio * 100, 2),
                     "target_ratio": round(target_ratio * 100, 2)
                 })
             
@@ -233,19 +235,12 @@ class PortfolioCopyTrader:
                 target_ratio = item["target_ratio"]
 
                 try:
-                    # 使用限价单以支持盘前盘后
-                    # 价格缓冲 (可调整)
-                    buffer_pct = (config.price_buffer_pct or 0.5) / 100.0
-                    limit_price = price
-                    if action == "BUY":
-                        limit_price = round(price * (1 + buffer_pct), 2)
-                    elif action == "SELL":
-                        limit_price = round(price * (1 - buffer_pct), 2)
-                        
-                    trade = await ib.place_limit_order(symbol, action, qty, limit_price, outside_rth=True)
+                    # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
+                    trade = await ib.place_market_order(symbol, action, qty)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
-                                f"{action} {qty} at limit ${limit_price} (Target Ratio: {target_ratio:.2%})", 
-                                symbol=symbol, quantity=qty, price=limit_price)
+                                f"{action} {qty} (Market Order) for Target Ratio: {target_ratio:.2f}%", 
+                                symbol=symbol, quantity=qty, price=item["price"])
+                    logger.info(f"Placed MARKET {action} order for {qty} {symbol}")
                 except Exception as e:
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
 
@@ -327,26 +322,34 @@ class PortfolioCopyTrader:
                             if not fut.cancelled():
                                 api_loop.call_soon_threadsafe(fut.set_exception, e)
                         finally:
-                            self.task_queue.task_done()
+                            # 必须在主 try-finally 中，确保无论成功失败都会标志 done
+                            pass
+                    
+                    self.task_queue.task_done()
 
                 except Exception as e:
                     logger.error(f"Error processing task queue: {e}")
 
             # 2. 处理定时任务 (Cron)
             try:
+                # 记录每一个账户最后运行的分钟，避免由 while True 循环速度引起的重复触发
+                if not hasattr(self, '_last_ran_map'):
+                    self._last_ran_map = {}
+
                 now_minute = datetime.now().strftime("%Y-%m-%d %H:%M")
-                if now_minute != last_ran_minute:
-                    db = Session()
-                    try:
-                        configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
-                        for config in configs:
-                            if self._should_run(config.cron_rule):
+                db = Session()
+                try:
+                    configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
+                    for config in configs:
+                        key = f"{config.account_id}_{config.portfolio_id}"
+                        if self._should_run(config.cron_rule):
+                            if self._last_ran_map.get(key) != now_minute:
                                 masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
-                                logger.info(f"Triggering copy trading for account {masked_account_id} with cron {config.cron_rule}")
+                                logger.info(f"Cron Trigger: Triggering rebalance for {masked_account_id}")
                                 await self.rebalance(config, client_id=100+config.id if config.id else 999)
-                    finally:
-                        db.close()
-                    last_ran_minute = now_minute
+                                self._last_ran_map[key] = now_minute
+                finally:
+                    db.close()
             except Exception as e:
                 logger.error(f"Error in Cron check: {e}")
 
@@ -354,11 +357,16 @@ class PortfolioCopyTrader:
 
 def start_portfolio_copy_trader():
     """在单独的线程中启动 Worker"""
+    trader = PortfolioCopyTrader()
+    with trader._thread_lock:
+        if trader._thread_started:
+            logger.info("Portfolio Copy Trader Worker already started, skipping.")
+            return
+        trader._thread_started = True
+
     def run_worker():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        trader = PortfolioCopyTrader()
         loop.run_until_complete(trader.worker_loop())
 
     thread = threading.Thread(target=run_worker, daemon=True, name="PortfolioCopyTraderWorker")
