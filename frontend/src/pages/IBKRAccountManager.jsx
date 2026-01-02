@@ -9,7 +9,7 @@ import {
     PlusOutlined, ReloadOutlined, SyncOutlined,
     ThunderboltOutlined, DeleteOutlined, EditOutlined,
     GlobalOutlined, ContainerOutlined, LockOutlined,
-    ClockCircleOutlined, SettingOutlined
+    ClockCircleOutlined, SettingOutlined, FileTextOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 
@@ -23,6 +23,9 @@ const IBKRAccountManager = () => {
     const [form] = Form.useForm();
     const [statuses, setStatuses] = useState({}); // {accountId: statusData}
     const [statusLoading, setStatusLoading] = useState({});
+    const [logVisible, setLogVisible] = useState(false);
+    const [currentLogAccount, setCurrentLogAccount] = useState(null);
+    const [logs, setLogs] = useState([]);
 
     useEffect(() => {
         fetchAccounts();
@@ -175,6 +178,17 @@ const IBKRAccountManager = () => {
             key: 'action',
             render: (_, record) => (
                 <Space>
+                    <Tooltip title="查看日志">
+                        <Button
+                            icon={<FileTextOutlined />}
+                            onClick={() => {
+                                setCurrentLogAccount(record);
+                                setLogVisible(true);
+                                setLogs([]);
+                            }}
+                            size="small"
+                        />
+                    </Tooltip>
                     <Tooltip title="刷新状态">
                         <Button
                             icon={<SyncOutlined spin={statusLoading[record.id]} />}
@@ -348,6 +362,88 @@ const IBKRAccountManager = () => {
                     </Form.Item>
                 </Form>
             </Modal>
+
+            <Modal
+                title={
+                    <Space>
+                        <FileTextOutlined />
+                        <span>容器日志: {currentLogAccount?.name}</span>
+                        <Tag color="blue">{currentLogAccount?.container_name}</Tag>
+                    </Space>
+                }
+                visible={logVisible}
+                onCancel={() => setLogVisible(false)}
+                footer={[
+                    <Button key="clear" onClick={() => setLogs([])}>清空</Button>,
+                    <Button key="close" type="primary" onClick={() => setLogVisible(false)}>关闭</Button>
+                ]}
+                width={800}
+                destroyOnClose
+            >
+                <LogViewer accountId={currentLogAccount?.id} visible={logVisible} logs={logs} setLogs={setLogs} />
+            </Modal>
+        </div>
+    );
+};
+
+const LogViewer = ({ accountId, visible, logs, setLogs }) => {
+    const scrollRef = React.useRef(null);
+
+    useEffect(() => {
+        if (!visible || !accountId) return;
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host; // 假设前端和后端在同一个域名下，或者开发环境下有代理
+        // 如果是开发环境 (npm start)，host 可能是 localhost:3000，但后端在 8000
+        // 我们通常在 request.js(utils) 里定义了 baseURL
+        // 这里的逻辑需要根据实际部署环境调整。
+
+        // 尝试从环境变量或 window.location 推断 WS 地址
+        // 如果开发环境下前端运行在 3000，后端在 8000，我们需要显式指定地址
+        const wsUrl = process.env.NODE_ENV === 'development'
+            ? `${protocol}//${window.location.hostname}:8000/api/ib-accounts/${accountId}/logs`
+            : `${protocol}//${host}/api/ib-accounts/${accountId}/logs`;
+
+        const ws = new WebSocket(wsUrl);
+
+        ws.onmessage = (event) => {
+            setLogs(prev => [...prev, event.data].slice(-500)); // 最多保留500行
+        };
+
+        ws.onclose = () => {
+            setLogs(prev => [...prev, '\n--- 连接已断开 ---']);
+        };
+
+        ws.onerror = () => {
+            setLogs(prev => [...prev, '\n--- 发生错误，无法连接日志服务器 ---']);
+        };
+
+        return () => ws.close();
+    }, [accountId, visible]);
+
+    useEffect(() => {
+        if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+    }, [logs]);
+
+    return (
+        <div
+            ref={scrollRef}
+            style={{
+                backgroundColor: '#1e1e1e',
+                color: '#d4d4d4',
+                padding: '12px',
+                borderRadius: '4px',
+                height: '400px',
+                overflowY: 'auto',
+                fontFamily: 'monospace',
+                whiteSpace: 'pre-wrap',
+                fontSize: '12px',
+                border: '1px solid #333'
+            }}
+        >
+            {logs.length === 0 ? <div style={{ color: '#666', textAlign: 'center', marginTop: '180px' }}>正在加载日志...</div> : logs.join('')}
         </div>
     );
 };
