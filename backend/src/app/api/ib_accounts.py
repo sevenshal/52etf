@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
@@ -113,6 +113,7 @@ async def restart_ib_gateway(account_id: int, db: Session = Depends(get_db)):
         
     return result
 
+
 @router.post("/{account_id}/deploy")
 async def deploy_ib_gateway(account_id: int, db: Session = Depends(get_db)):
     config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
@@ -124,3 +125,45 @@ async def deploy_ib_gateway(account_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=result["message"])
         
     return result
+
+@router.websocket("/{account_id}/logs")
+async def ws_ib_account_logs(websocket: WebSocket, account_id: int, db: Session = Depends(get_db)):
+    await websocket.accept()
+    
+    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+    
+    if not config or not config.container_name:
+        await websocket.send_text("Error: Container not configured or account not found")
+        await websocket.close()
+        return
+
+    import asyncio
+    import os
+    docker_bin = os.getenv('DOCKER_BINARY_PATH', 'docker')
+    
+    process = await asyncio.create_subprocess_exec(
+        docker_bin, "logs", "--tail", "100", "-f", config.container_name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT
+    )
+    
+    try:
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            await websocket.send_text(line.decode('utf-8'))
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(f"Error: {str(e)}")
+        except:
+            pass
+    finally:
+        if process:
+            try:
+                process.terminate()
+                await process.wait()
+            except:
+                pass
