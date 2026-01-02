@@ -33,8 +33,8 @@ class PortfolioCopyTrader:
         self._thread_started = False
         self._thread_lock = threading.Lock()
         self.task_queue = asyncio.Queue()
-        self._processing_keys = set() # 正在处理中的 account_id_portfolio_id 集合
-        self.ib_service = None # Use a shared service instance for the worker
+        self._processing_keys = set()
+        self.ib_services: Dict[str, IBKRService] = {} # Key: "port_clientid"
         self.worker_loop_obj = None # Capture the worker loop
 
     def _log(self, account_id: str, portfolio_id: str, action: str, status: str, message: str, symbol: str = None, quantity: float = None, price: float = None):
@@ -95,28 +95,24 @@ class PortfolioCopyTrader:
             logger.error(f"Failed to fetch Futu positions: {e}")
             raise
 
-    async def _ensure_ib_connected(self, port: int, client_id: int):
-        """确保在当前线程(Worker)中连接 IB"""
-        if not self.ib_service:
-            self.ib_service = IBKRService(port=port, client_id=client_id)
+    async def _ensure_ib_connected(self, port: int, client_id: int) -> IBKRService:
+        """确保在当前线程(Worker)中连接到特定的 IB 账户，并返回该 service 实例"""
+        key = f"{port}_{client_id}"
+        if key not in self.ib_services:
+            logger.info(f"Creating new IBKRService instance for port={port}, client_id={client_id}")
+            self.ib_services[key] = IBKRService(port=port, client_id=client_id)
         
-        # 如果端口变了，需要重新初始化
-        if self.ib_service.port != port or self.ib_service.client_id != client_id:
-             if self.ib_service.ib and self.ib_service.isConnected:
-                 self.ib_service.disconnect()
-             self.ib_service = IBKRService(port=port, client_id=client_id)
-
-        await self.ib_service.connect()
+        service = self.ib_services[key]
+        await service.connect()
+        return service
 
     async def calculate_rebalance_plan(self, config: PortfolioCopyConfig, client_id: Optional[int] = None) -> List[dict]:
         """计算调仓计划但不执行 (Should run in worker loop)"""
         masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
         logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
-        # Use local service or managed service within this thread
-        # 既然我们在 Worker 线程，我们可以安全地使用 managed service
-        await self._ensure_ib_connected(config.ib_port, client_id)
-        ib = self.ib_service 
+        # 1. 获取针对该账户的 IB Service 实例 (多账户持久连接)
+        ib = await self._ensure_ib_connected(config.ib_port, client_id)
 
         plan = []
         try:
@@ -206,11 +202,11 @@ class PortfolioCopyTrader:
                 logger.info(f"Market is closed. Skipping rebalance for {masked_account_id}")
                 return
 
-            # 2. Ensure IB Service is ready
-            await self._ensure_ib_connected(config.ib_port, client_id)
+            # 2. Ensure IB Service is ready (获取对应账户的持久连接)
+            ib = await self._ensure_ib_connected(config.ib_port, client_id)
 
             # 3. Check Market Status via IB (Liquid Hours)
-            is_open = await self.ib_service.is_market_open("SPY")
+            is_open = await ib.is_market_open("SPY")
             if not is_open:
                 logger.info(f"Market is CLOSED (Liquid Hours check) for {masked_account_id}. Skipping.")
                 return
@@ -232,7 +228,7 @@ class PortfolioCopyTrader:
 
                 try:
                     # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
-                    await self.ib_service.place_market_order(symbol, action, qty)
+                    await ib.place_market_order(symbol, action, qty)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
                                 f"{action} {qty} (Market Order) for Target Ratio: {target_ratio:.2f}%", 
                                 symbol=symbol, quantity=qty, price=item["price"])
