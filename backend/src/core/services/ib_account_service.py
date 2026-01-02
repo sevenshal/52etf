@@ -10,11 +10,18 @@ logger = logging.getLogger(__name__)
 class IBAccountService:
     @staticmethod
     async def get_account_status(host: str, port: int, client_id: int) -> Dict:
-        """获取 IB 账户实时状态"""
+        """获取 IB 账户实时状态 (线程隔离版，解决 Loop 冲突)"""
+        # 使用 asyncio.to_thread 将同步的 IB 连接操作放到独立线程执行
+        # 这确保了 ib_insync 在该线程内创建私有的 Loop，不会影响 FastAPI 主进程的 Loop
+        return await asyncio.to_thread(IBAccountService._get_account_status_sync, host, port, client_id)
+
+    @staticmethod
+    def _get_account_status_sync(host: str, port: int, client_id: int) -> Dict:
+        """同步获取 IB 账户状态 (由 to_thread 调用)"""
         ib = IB()
         try:
-            # 建立连接，设置较短的超时
-            await ib.connectAsync(host, port, clientId=client_id, timeout=5)
+            # 使用同步连接，超时 5 秒
+            ib.connect(host, port, clientId=client_id, timeout=5)
             
             # 获取账户值
             account_values = {v.tag: v.value for v in ib.accountValues()}
@@ -25,17 +32,14 @@ class IBAccountService:
                 "net_liquidation": float(account_values.get('NetLiquidation', '0') or 0),
                 "available_funds": float(account_values.get('AvailableFunds', '0') or 0),
                 "gross_position_value": float(account_values.get('GrossPositionValue', '0') or 0),
-                "daily_pnl": float(account_values.get('DailyPnL', '0') or 0), # 注意：某些账户可能没开启实时 PnL
+                "daily_pnl": float(account_values.get('DailyPnL', '0') or 0),
                 "currency": account_values.get('Currency', 'USD'),
                 "message": "Connected"
             }
             
-            # 如果 DailyPnL 没直接通过 accountValues 拿到，尝试 reqPnL
-            # (这里简单处理，优先取 accountValues)
-            
             return status
         except Exception as e:
-            logger.error(f"Failed to check IB status on {host}:{port}: {e}")
+            logger.error(f"Failed to check IB status on {host}:{port} (sync): {e}")
             return {
                 "connected": False,
                 "net_liquidation": 0,
