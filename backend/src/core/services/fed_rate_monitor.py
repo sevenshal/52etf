@@ -22,10 +22,7 @@ class FedRateMonitorService:
         'upgrade-insecure-requests': '1',
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
     }
-    PROXY = {
-        'http://': 'socks5://127.0.0.1:7891',
-        'https://': 'socks5://127.0.0.1:7891'
-    }
+    PROXY = 'socks5://127.0.0.1:7891'
     CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "quant")
     CACHE = Cache(directory=CACHE_DIR)
     CACHE_TIMEOUT = 3600  # 1小时
@@ -62,7 +59,7 @@ class FedRateMonitorService:
     def _fetch_html():
         """单独的HTML获取方法，不涉及缓存和解析"""
         try:
-            with httpx.Client(proxies=FedRateMonitorService.PROXY) as client:
+            with httpx.Client(proxy=FedRateMonitorService.PROXY) as client:
                 response = client.get(FedRateMonitorService.URL, headers=FedRateMonitorService.HEADERS)
                 response.raise_for_status()
                 return response.text
@@ -157,7 +154,7 @@ class FedRateMonitorService:
             
             # 执行请求
             responses = {}
-            with httpx.Client(proxies=FedRateMonitorService.PROXY) as client:
+            with httpx.Client(proxy=FedRateMonitorService.PROXY) as client:
                 for rate_name, url in requests_to_make:
                     response = client.get(url)
                     response.raise_for_status()

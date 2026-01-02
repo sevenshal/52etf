@@ -70,7 +70,8 @@ def start_robot():
 # # 启动一个线程来运行定时任务
 threading.Thread(target=start_robot, daemon=True).start()
 
-# 确保这个 if 语句在文件最后
-if __name__ == "__main__":
+def start():
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("src.app.main:app", host="0.0.0.0", port=8000, reload=False)
+if __name__ == "__main__":
+    start()
