@@ -8,7 +8,7 @@ from longport.openapi import (
     OrderSide as LPOrderSide, OrderType as LPOrderType, TimeInForceType as LPTimeInForceType, OutsideRTH as LPOutsideRTH,
     Period, AdjustType, PushOrderChanged, OrderStatus, SubType as LPSubType, PushQuote
 )
-from ..utils import load_config_file, save_config_file
+from ..utils import load_config_file, save_config_file, mask_account_id
 from ..models.account import AccountCfg
 from .trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideRTH
 from .quote import QuoteProvider, SubType, QuoteObserver, QuoteEvent
@@ -414,9 +414,12 @@ class LongPortService(QuoteProvider, TradeService):
 
     def _process_order_change(self, event: PushOrderChanged, callback):
         """处理订单变更的内部逻辑"""
-        self.log.debug(f"order changed: {event}")
+        # 调试日志不包含敏感信息
+        logger.debug(f"Order state changed for symbol: {event.symbol}, status: {event.status}")
+        
+        masked_no = mask_account_id(event.account_no)
         if not event.account_no == self.account_cfg.account_no:
-            self.log.warn(f"order account {event.account_no} is not listening account, ignore")
+            logger.warning(f"Order account {masked_no} is not the listening account, ignore")
             return
         callback(event)
 

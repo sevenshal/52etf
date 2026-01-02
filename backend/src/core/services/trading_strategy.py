@@ -6,6 +6,7 @@ from .quote import QuoteService
 from .market import MarketService
 from .ib_service import IBKRService
 from ..database import get_db, get_db_ctx, get_db_session, AutomatedTradingConfig, AutomatedTradeLog
+from ..utils import mask_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,8 @@ async def calculate_ma_signal(symbol: str, short_window: int, long_window: int, 
 
 async def execute_trading_strategy(account_id: str):
     """执行自动化交易策略"""
-    logger.info(f"Executing trading strategy for account: {account_id}")
+    masked_account_id = mask_account_id(account_id)
+    logger.info(f"Executing trading strategy for account: {masked_account_id}")
     
     try:
         with get_db_ctx() as db:
@@ -55,7 +57,7 @@ async def execute_trading_strategy(account_id: str):
             ).first()
             
             if not config:
-                logger.info(f"No enabled trading config for {account_id}")
+                logger.info(f"No enabled trading config for {masked_account_id}")
                 return
 
             # 1. 计算信号

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from croniter import croniter
 from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog
+from ..core.utils import mask_account_id
 from ..core.services.ib_service import IBKRService
 from ..core.services.market import MarketService
 
@@ -108,7 +109,7 @@ class PortfolioCopyTrader:
 
     async def calculate_rebalance_plan(self, config: PortfolioCopyConfig, client_id: Optional[int] = None) -> List[dict]:
         """计算调仓计划但不执行 (Should run in worker loop)"""
-        masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+        masked_account_id = mask_account_id(config.account_id)
         logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
         # 1. 获取针对该账户的 IB Service 实例 (多账户持久连接)
@@ -199,7 +200,7 @@ class PortfolioCopyTrader:
 
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (由 worker_loop 调用)"""
-        masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
+        masked_account_id = mask_account_id(config.account_id)
         try:
             # 1. Check Market Status
             if not MarketService.is_us_market_open(include_extended=False):
@@ -336,9 +337,9 @@ class PortfolioCopyTrader:
                         key = f"{config.account_id}_{config.portfolio_id}"
                         
                         if self._should_run(config.cron_rule) and self._last_ran_map.get(key) != now_minute:
-                            # 1. 检查该账户是否已经在调仓中
                             if key in self._processing_keys:
-                                logger.warning(f"Cron Skip: Rebalance for {config.account_id} is still in progress. Skipping this tick.")
+                                masked_account_id = mask_account_id(config.account_id)
+                                logger.warning(f"Cron Skip: Rebalance for {masked_account_id} is still in progress. Skipping this tick.")
                                 self._last_ran_map[key] = now_minute # 标记本分钟已“处理”过
                                 continue
 
@@ -346,7 +347,8 @@ class PortfolioCopyTrader:
                             self._last_ran_map[key] = now_minute
                             
                             # 3. 提交到任务队列
-                            logger.info(f"Cron Trigger: Queuing rebalance for {config.account_id}")
+                            masked_account_id = mask_account_id(config.account_id)
+                            logger.info(f"Cron Trigger: Queuing rebalance for {masked_account_id}")
                             self.task_queue.put_nowait({
                                 "type": "rebalance",
                                 "config": config,

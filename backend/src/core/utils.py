@@ -117,3 +117,9 @@ def save_config_file(account_id: str, file_name: str, config: Any) -> None:
     except Exception as e:
         logging.error(f"保存配置文件失败 {file_name}: {str(e)}")
         raise
+
+def mask_account_id(account_id: str) -> str:
+    """脱敏显示账户ID"""
+    if not account_id:
+        return ""
+    return f"***{account_id[-4:]}" if len(account_id) > 4 else account_id

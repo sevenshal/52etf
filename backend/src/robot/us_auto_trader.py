@@ -10,6 +10,7 @@ from ..core.database import get_db_session, SzdtTradeStock, TradingLog, TradingS
 from ..core.services.szdt import SZDTService
 from ..core.services.market import MarketService
 from ..core.services.ib_service import IBKRService
+from ..core.utils import mask_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,8 @@ def start_us_auto_trader(account_id):
         await trader.run_once()
 
     def loop():
-        logging.info("USAutoTrader started")
+        masked_id = mask_account_id(account_id)
+        logging.info(f"USAutoTrader started for {masked_id}")
         evloop = asyncio.new_event_loop()
         asyncio.set_event_loop(evloop)
         while True:
