@@ -12,9 +12,6 @@ class IBKRService:
         self.port = int(port or os.getenv('IB_PORT', '4001'))
         self.client_id = int(client_id or os.getenv('IB_CLIENT_ID', '1'))
         self.ib = None
-        self._positions: Dict[str, float] = {}
-        self._available_cash: float = 0.0
-        self._net_liquidation: float = 0.0
 
     async def connect(self, timeout: float = 4.0):
         if self.ib is None:
@@ -26,7 +23,6 @@ class IBKRService:
                 logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
                 # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
                 self.ib.reqMarketDataType(3)
-                await self.refresh_account_data()
             except Exception as e:
                 logger.error(f"Failed to connect to IB Gateway: {e}")
                 raise
@@ -36,64 +32,58 @@ class IBKRService:
             self.ib.disconnect()
             logger.info("Disconnected from IB Gateway")
 
-    async def refresh_account_data(self):
-        """刷新账户资金和持仓数据"""
-        if not self.ib or not self.ib.isConnected():
-            return
-            
-        try:
-            # 刷新账户资金
-            account_values = {v.tag: v.value for v in self.ib.accountValues()}
-            self._net_liquidation = float(account_values.get('NetLiquidation', '0') or 0)
-            self._available_cash = float(account_values.get('AvailableFunds', '0') or 0)
-            
-            # 刷新持仓
-            self._positions = {}
-            for p in self.ib.positions():
-                symbol = p.contract.symbol
-                self._positions[symbol] = self._positions.get(symbol, 0) + float(p.position)
-                
-            logger.info(f"Refreshed IB Account: NetLiq={self._net_liquidation:.2f}, Cash={self._available_cash:.2f}")
-        except Exception as e:
-            logger.error(f"Failed to refresh IB account data: {e}")
+    def get_net_liquidation(self) -> float:
+        """从 IB 账户实时同步的数据中获取净资产"""
+        if not self.ib or not self.ib.isConnected(): return 0.0
+        for v in self.ib.accountValues():
+            if v.tag == 'NetLiquidation':
+                return float(v.value or 0)
+        return 0.0
 
-    @property
-    def net_liquidation(self) -> float:
-        return self._net_liquidation
+    def get_available_cash(self) -> float:
+        """获取可用资金"""
+        if not self.ib or not self.ib.isConnected(): return 0.0
+        for v in self.ib.accountValues():
+            if v.tag == 'AvailableFunds':
+                return float(v.value or 0)
+        return 0.0
 
-    @property
-    def available_cash(self) -> float:
-        return self._available_cash
+    def get_positions_dict(self) -> Dict[str, float]:
+        """获取当前最实时的持仓字典 (Symbol -> Qty)"""
+        if not self.ib or not self.ib.isConnected(): return {}
+        pos_map = {}
+        for p in self.ib.positions():
+            symbol = p.contract.symbol
+            pos_map[symbol] = pos_map.get(symbol, 0) + float(p.position)
+        return pos_map
 
     def get_position(self, symbol: str) -> float:
-        """从缓存获取指定代码的持仓数量"""
-        return self._positions.get(symbol.replace('US.', ''), 0)
+        """获取指定代码的实时持仓数量"""
+        return self.get_positions_dict().get(symbol.replace('US.', ''), 0)
+
+    def get_all_pending_qtys(self) -> Dict[str, float]:
+        """批量获取所有代码的待成交订单数量字典"""
+        if not self.ib or not self.ib.isConnected():
+            return {}
+        
+        pending_map = {}
+        for trade in self.ib.trades():
+            symbol = trade.contract.symbol
+            status = trade.orderStatus.status
+            if status in ('Submitted', 'PreSubmitted', 'PendingSubmit', 'PendingCancel'):
+                qty = trade.order.totalQuantity
+                if trade.order.action == 'SELL':
+                    qty = -qty
+                
+                filled = trade.orderStatus.filled
+                remaining = qty + filled if trade.order.action == 'SELL' else qty - filled
+                
+                pending_map[symbol] = pending_map.get(symbol, 0) + remaining
+        return pending_map
 
     def get_pending_qty(self, symbol: str) -> float:
-        """获取指定代码的待成交订单总数量 (买为正，卖为负)"""
-        if not self.ib or not self.ib.isConnected():
-            return 0
-        
-        clean_symbol = symbol.replace('US.', '')
-        pending_qty = 0
-        for trade in self.ib.trades():
-            if trade.contract.symbol == clean_symbol:
-                status = trade.orderStatus.status
-                # 处于活动状态的订单
-                if status in ('Submitted', 'PreSubmitted', 'PendingSubmit', 'PendingCancel'):
-                    qty = trade.order.totalQuantity
-                    if trade.order.action == 'SELL':
-                        qty = -qty
-                    
-                    # 减去已经成交的部分
-                    filled = trade.orderStatus.filled
-                    if trade.order.action == 'SELL':
-                        remaining = qty + filled
-                    else:
-                        remaining = qty - filled
-                        
-                    pending_qty += remaining
-        return pending_qty
+        """获取单个代码的待成交数量 (内部调用批量方法以保证逻辑统一)"""
+        return self.get_all_pending_qtys().get(symbol.replace('US.', ''), 0)
 
     def get_effective_position(self, symbol: str) -> float:
         """获取有效持仓 (当前持仓 + 待成交数量)"""

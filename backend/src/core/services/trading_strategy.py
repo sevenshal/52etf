@@ -69,8 +69,13 @@ async def execute_trading_strategy(account_id: str):
             ib_service = IBKRService(port=config.ib_port, client_id=2)
             try:
                 await ib_service.connect()
+                
+                # 获取账户快照 (Snapshot)
+                net_liq = ib_service.get_net_liquidation()
+                available_cash = ib_service.get_available_cash()
+                
                 position = ib_service.get_position(config.etf_code)
-                logger.info(f"Current Position for {config.etf_code}: {position}")
+                logger.info(f"Current Position for {config.etf_code}: {position}, NetLiq: {net_liq}, Cash: {available_cash}")
                 
                 action = None
                 quantity = 0
@@ -83,14 +88,14 @@ async def execute_trading_strategy(account_id: str):
 
                 if signal == 'BUY':
                     # 计算目标持仓金额 = 净资产 * 目标比例
-                    target_value = ib_service.net_liquidation * (config.target_ratio / 100.0)
+                    target_value = net_liq * (config.target_ratio / 100.0)
                     # 当前持仓金额
                     current_value = position * price
                     
                     if current_value < target_value * 0.1: # 如果当前持仓不足目标的 10%，则买入补齐
                         needed_value = target_value - current_value
                         # 确保不超过可用资金
-                        actual_buy_value = min(needed_value, ib_service.available_cash)
+                        actual_buy_value = min(needed_value, available_cash)
                         quantity = int(actual_buy_value / price)
                         if quantity > 0:
                             action = 'BUY'

@@ -130,29 +130,33 @@ class PortfolioCopyTrader:
                 futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
 
             # 2. IB 状态已经在 _ensure_ib_connected 中准备好
-            net_liq = ib.net_liquidation
+            net_liq = ib.get_net_liquidation()
             if net_liq <= 0:
                 raise Exception("IB Account net liquidation is zero or negative")
 
-            # 3. 计算调仓总额 (Target amount for the entire strategy)
+            # 3. 抓取 IB 实时快照 (一次性获取，避免在后续计算中多次触发 API 遍历)
+            ib_positions = ib.get_positions_dict()
+            ib_pending = ib.get_all_pending_qtys()
+
+            # 4. 计算调仓总额 (Target amount for the entire strategy)
             total_target_amount = config.total_amount or (net_liq * config.total_position_ratio / 100.0)
             
             # --- 目标符号集 ---
             # 收集所有我们需要关注的股票代码 (Futu 目标 + IB 当前持仓)
-            all_clean_symbols = set(list(futu_positions_map.keys()) + [s.replace('US.', '') for s in ib._positions.keys()])
+            all_clean_symbols = set(list(futu_positions_map.keys()) + [s.replace('US.', '') for s in ib_positions.keys()])
             
-            # 4. 批量获取市场价格
+            # 5. 批量获取市场价格
             logger.info(f"Fetching market prices for {len(all_clean_symbols)} symbols...")
             market_prices = await ib.get_market_prices(list(all_clean_symbols))
             
-            # 5. 计算调仓方案
+            # 6. 计算调仓方案
             plan = []
             for symbol in all_clean_symbols:
                 target_ratio = futu_positions_map.get(symbol, 0)
                 
-                # 获取 IB 实时数据 (当前持仓和待成交挂单)
-                current_qty = ib.get_position(symbol)
-                pending_qty = ib.get_pending_qty(symbol)
+                # 获取该代码的 IB 实时数据 (当前持仓和待成交挂单)
+                current_qty = ib_positions.get(symbol, 0)
+                pending_qty = ib_pending.get(symbol, 0)
                 
                 price = market_prices.get(symbol)
                 if not price or math.isnan(price) or price <= 0:

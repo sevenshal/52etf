@@ -104,7 +104,9 @@ class USAutoTrader:
             return
             
         await self.ib_service.connect()
-        logging.info(f"Account net_liq={self.ib_service.net_liquidation:.2f} cash={self.ib_service.available_cash:.2f}")
+        net_liq = self.ib_service.get_net_liquidation()
+        available_cash = self.ib_service.get_available_cash()
+        logging.info(f"Account net_liq={net_liq:.2f} cash={available_cash:.2f}")
         
         stock = self._get_next_stock()
         if not stock:
@@ -127,7 +129,7 @@ class USAutoTrader:
 
             position_qty = self.ib_service.get_position(stock['code'])
             position_value = position_qty * price
-            portfolio_value = max(self.ib_service.net_liquidation, 1.0)
+            portfolio_value = max(net_liq, 1.0)
             position_ratio = 100 * position_value / portfolio_value
 
             # 过热/过冷保护并设置冷却
@@ -147,7 +149,7 @@ class USAutoTrader:
                 if position_ratio < stock['max_position']:
                     score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
                     score_factor = 3 ** (score_factor ** stock['buy_factor'])
-                    buy_amount = min(self.ib_service.available_cash, stock['buy_amount'] * score_factor)
+                    buy_amount = min(available_cash, stock['buy_amount'] * score_factor)
                     buy_quantity = int(buy_amount / price)
                     if buy_quantity >= 1:
                         trade = await self.ib_service.place_market_order(stock['code'], 'BUY', buy_quantity)
@@ -155,7 +157,7 @@ class USAutoTrader:
                         self._log('INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                         logging.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                     else:
-                        self._log('INFO', f"{name} 可用资金 {self.ib_service.available_cash:.2f} 不足，跳过买入")
+                        self._log('INFO', f"{name} 可用资金 {available_cash:.2f} 不足，跳过买入")
                 with get_db_session(self.account_id) as db:
                     db.add(StockCooldown(cli_id=self.cli_id, stock_code=stock['code'], until=datetime.now() + timedelta(hours=12), reason='决策后冷却12h'))
                 return
