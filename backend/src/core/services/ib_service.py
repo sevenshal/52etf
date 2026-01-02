@@ -93,21 +93,17 @@ class IBKRService:
         """下市价单"""
         await self.connect()
         clean_symbol = symbol.replace('US.', '')
+        logger.debug(f"[{self.port}] Qualifying contract for {clean_symbol}...")
         contract = Stock(clean_symbol, 'SMART', 'USD')
         await self.ib.qualifyContractsAsync(contract)
         
+        logger.info(f"[{self.port}] Placing {action} market order for {quantity} {clean_symbol}")
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         
-        logger.info(f"Placing {action} order for {quantity} {clean_symbol}")
-        
-        # 等待订单完成或超时
-        start_time = asyncio.get_event_loop().time()
-        while not trade.isDone():
-            await asyncio.sleep(0.5)
-            if asyncio.get_event_loop().time() - start_time > 30: # 30秒超时
-                logger.warning(f"Order for {clean_symbol} timed out")
-                break
+        # 对于调仓，我们不阻塞等待成交 (由后续周期逻辑处理幂等性)
+        # 只要 placeOrder 异步执行即可，ib_insync 会在后台处理状态同步
+        await asyncio.sleep(0.1) 
                 
         # 下单后刷新一次持仓
         await self.refresh_account_data()

@@ -224,8 +224,10 @@ class PortfolioCopyTrader:
                 return
 
             # 4. Calculate plan
-            plan = await self.calculate_rebalance_plan(config, client_id=client_id)
-            plan = [p for p in plan if p["action"] != "HOLD" and p["quantity"] != 0]
+            plan_full = await self.calculate_rebalance_plan(config, client_id=client_id)
+            plan = [p for p in plan_full if p["action"] != "HOLD" and p["quantity"] != 0]
+            
+            logger.info(f"[{masked_account_id}] Rebalance plan filtered: {len(plan)} active trades (from total {len(plan_full)} symbols)")
             
             if not plan:
                 logger.info(f"No rebalance needed for {masked_account_id}")
