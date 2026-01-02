@@ -392,18 +392,20 @@ const LogViewer = ({ accountId, visible, logs, setLogs }) => {
     useEffect(() => {
         if (!visible || !accountId) return;
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host; // 假设前端和后端在同一个域名下，或者开发环境下有代理
-        // 如果是开发环境 (npm start)，host 可能是 localhost:3000，但后端在 8000
-        // 我们通常在 request.js(utils) 里定义了 baseURL
-        // 这里的逻辑需要根据实际部署环境调整。
+        const apiUrl = process.env.REACT_APP_API_URL || '';
+        let wsHost = '';
 
-        // 尝试从环境变量或 window.location 推断 WS 地址
-        // 如果开发环境下前端运行在 3000，后端在 8000，我们需要显式指定地址
-        const wsUrl = process.env.NODE_ENV === 'development'
-            ? `${protocol}//${window.location.hostname}:8000/api/ib-accounts/${accountId}/logs`
-            : `${protocol}//${host}/api/ib-accounts/${accountId}/logs`;
+        if (apiUrl) {
+            // 如果定义了 REACT_APP_API_URL (例如 https://api.52etf.vip)
+            // 去掉协议头，换成 ws/wss
+            wsHost = apiUrl.replace(/^http/, 'ws');
+        } else {
+            // 默认回退到当前 window.location
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            wsHost = `${protocol}//${window.location.host}`;
+        }
 
+        const wsUrl = `${wsHost}/api/ib-accounts/${accountId}/logs`;
         const ws = new WebSocket(wsUrl);
 
         ws.onmessage = (event) => {
