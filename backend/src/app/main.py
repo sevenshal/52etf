@@ -1,4 +1,8 @@
 import logging
+import nest_asyncio
+
+# Apply nest_asyncio to support ib_insync in FastAPI/uvicorn
+nest_asyncio.apply()
 
 # 设置全局日志格式
 logging.basicConfig(

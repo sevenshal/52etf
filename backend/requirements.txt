@@ -27,3 +27,4 @@ socksio
 ib-insync
 websockets
 croniter
+nest-asyncio
