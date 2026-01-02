@@ -165,8 +165,7 @@ class PortfolioCopyTrader:
                     continue
 
                 # 当前实际占比 (基于现有持仓和最新价)
-                current_ratio = (current_qty * price) / net_liq
-                diff_ratio = target_ratio - current_ratio
+                current_ratio = (current_qty * price) / total_target_amount
                 
                 # 目标股数 = (总目标调仓额 * 目标占比) / 价格
                 target_qty = int((total_target_amount * target_ratio) / price)
@@ -174,10 +173,18 @@ class PortfolioCopyTrader:
                 trade_qty = target_qty - (current_qty + pending_qty)
                 
                 action = "HOLD"
-                # 只有当占比误差超过设定阈值 (Tracking Error %) 时才行动
-                if abs(diff_ratio) * 100 > (config.tracking_error_pct or 0):
-                    if trade_qty != 0:
-                        action = "BUY" if trade_qty > 0 else "SELL"
+                # 决策触发逻辑：
+                # 1. 如果目标比例为 0，且当前有持仓，强制卖出 (不考虑阈值)
+                if target_ratio == 0:
+                    if (current_qty + pending_qty) > 0:
+                        action = "SELL"
+                else:
+                    # 2. 如果目标比例 > 0，计算相对偏差因子 (Relative Error)
+                    # 相对偏差 = abs(目标比例 - 当前比例) / 目标比例
+                    relative_error = abs(target_ratio - current_ratio) / target_ratio
+                    if relative_error * 100 > (config.tracking_error_pct or 0):
+                        if trade_qty != 0:
+                            action = "BUY" if trade_qty > 0 else "SELL"
                 
                 plan.append({
                     "symbol": symbol,
