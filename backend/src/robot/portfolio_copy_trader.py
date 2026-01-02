@@ -199,7 +199,7 @@ class PortfolioCopyTrader:
         try:
             
             # 直接调用 MarketService 判断开盘
-            if not MarketService.is_us_market_open(include_extended=True):
+            if not MarketService.is_us_market_open(include_extended=False):
                 logger.info("Market (including extended) is not open")
                 return
 
