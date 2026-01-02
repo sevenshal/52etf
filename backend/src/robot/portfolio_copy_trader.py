@@ -33,6 +33,7 @@ class PortfolioCopyTrader:
         self._thread_started = False
         self._thread_lock = threading.Lock()
         self.task_queue = asyncio.Queue()
+        self._processing_keys = set() # 正在处理中的 account_id_portfolio_id 集合
         self.ib_service = None # Use a shared service instance for the worker
         self.worker_loop_obj = None # Capture the worker loop
 
@@ -197,56 +198,51 @@ class PortfolioCopyTrader:
         # 注意：这里我们不再 disconnect，因为是保持长连接或者复用连接
 
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
-        """执行调仓逻辑 (Should run in worker loop)"""
+        """执行调仓逻辑 (由 worker_loop 调用)"""
+        masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
         try:
-            
-            # 直接调用 MarketService 判断开盘
+            # 1. Check Market Status
             if not MarketService.is_us_market_open(include_extended=False):
-                logger.info("Market (including extended) is not open")
+                logger.info(f"Market is closed. Skipping rebalance for {masked_account_id}")
                 return
 
-            # 0. Ensure IB Service is ready
+            # 2. Ensure IB Service is ready
             await self._ensure_ib_connected(config.ib_port, client_id)
 
-            # 1. Check Market Status
-            # 既然我们需要在盘前盘后也交易，我们依赖 is_market_open (基于 liquidHours)
-            # 如果不开放，直接跳过
+            # 3. Check Market Status via IB (Liquid Hours)
             is_open = await self.ib_service.is_market_open("SPY")
             if not is_open:
-                logger.info(f"Market is CLOSED (Liquid Hours check). Skipping rebalance for ***{config.account_id[-4:]}")
+                logger.info(f"Market is CLOSED (Liquid Hours check) for {masked_account_id}. Skipping.")
                 return
 
-            # Re-use the calculation logic
+            # 4. Calculate plan
             plan = await self.calculate_rebalance_plan(config, client_id=client_id)
             plan = [p for p in plan if p["action"] != "HOLD" and p["quantity"] != 0]
+            
             if not plan:
-                masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
                 logger.info(f"No rebalance needed for {masked_account_id}")
                 return
 
-            ib = self.ib_service
-            # No need to connect again (is_market_open ensured connection)
-            
+            # 5. Execute trades
             for item in plan:
                 symbol = item["symbol"]
                 action = item["action"]
                 qty = item["quantity"]
-                price = item["price"]
                 target_ratio = item["target_ratio"]
 
                 try:
                     # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
-                    trade = await ib.place_market_order(symbol, action, qty)
+                    await self.ib_service.place_market_order(symbol, action, qty)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
                                 f"{action} {qty} (Market Order) for Target Ratio: {target_ratio:.2f}%", 
                                 symbol=symbol, quantity=qty, price=item["price"])
-                    logger.info(f"Placed MARKET {action} order for {qty} {symbol}")
+                    logger.info(f"[{masked_account_id}] Placed MARKET {action} order for {qty} {symbol}")
                 except Exception as e:
+                    logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
 
         except Exception as e:
-            masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
-            logger.error(f"Rebalance failed for {masked_account_id}: {e}")
+            logger.error(f"Rebalance process failed for {masked_account_id}: {e}")
             self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e))
 
     def _should_run(self, cron_rule: str) -> bool:
@@ -285,75 +281,82 @@ class PortfolioCopyTrader:
         
         return await future
 
+    async def _handle_task(self, task: dict):
+        """统一处理不同类型的任务"""
+        task_type = task.get("type")
+        config = task.get("config")
+        cid = task.get("client_id")
+        
+        if task_type == "calculate_plan":
+            api_loop = task["loop"]
+            fut = task["future"]
+            try:
+                result = await self.calculate_rebalance_plan(config, client_id=cid)
+                if not fut.cancelled():
+                    api_loop.call_soon_threadsafe(fut.set_result, result)
+            except Exception as e:
+                logger.error(f"Calculate plan task error: {e}")
+                if not fut.cancelled():
+                    api_loop.call_soon_threadsafe(fut.set_exception, e)
+        
+        elif task_type == "rebalance":
+            key = task.get("key")
+            try:
+                if key: self._processing_keys.add(key)
+                await self.rebalance(config, client_id=cid)
+            except Exception as e:
+                logger.error(f"Rebalance task error: {e}")
+            finally:
+                if key: self._processing_keys.discard(key)
+
     async def worker_loop(self):
-        """
-        后台 Worker 主循环
-        """
+        """后台 Worker 主循环 (Task Queue Mode)"""
         logger.info(f"Starting Portfolio Copy Trader Worker Loop in thread {threading.get_ident()}")
         self.worker_loop_obj = asyncio.get_running_loop()
-        
-        last_ran_minute = ""
-        
+        self._last_ran_map = {}
+
         while True:
-            # 1. 优先处理队列任务
-            while not self.task_queue.empty():
-                try:
-                    task = self.task_queue.get_nowait()
-                    # ... processing logic ...
-                    task_type = task.get("type")
-                    
-                    if task_type == "calculate_plan":
-                        config = task["config"]
-                        cid = task["client_id"]
-                        api_loop = task["loop"]
-                        fut = task["future"]
-                        
-                        try:
-                            # 在当前 Worker 线程执行计算
-                            masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
-                            logger.info(f"Worker Processing task for {masked_account_id}")
-                            result = await self.calculate_rebalance_plan(config, client_id=cid)
-                            
-                            # 在 API 线程设置结果
-                            if not fut.cancelled():
-                                api_loop.call_soon_threadsafe(fut.set_result, result)
-                        except Exception as e:
-                            logger.error(f"Task processing error: {e}")
-                            if not fut.cancelled():
-                                api_loop.call_soon_threadsafe(fut.set_exception, e)
-                        finally:
-                            # 必须在主 try-finally 中，确保无论成功失败都会标志 done
-                            pass
-                    
-                    self.task_queue.task_done()
-
-                except Exception as e:
-                    logger.error(f"Error processing task queue: {e}")
-
-            # 2. 处理定时任务 (Cron)
+            # 1. 尝试从队列获取任务 (等待最多 1 秒)
             try:
-                # 记录每一个账户最后运行的分钟，避免由 while True 循环速度引起的重复触发
-                if not hasattr(self, '_last_ran_map'):
-                    self._last_ran_map = {}
+                task = await asyncio.wait_for(self.task_queue.get(), timeout=1.0)
+                await self._handle_task(task)
+                self.task_queue.task_done()
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                logger.error(f"Error in worker loop task execution: {e}")
 
+            # 2. 定时检查 Cron 规则并提交任务
+            try:
                 now_minute = datetime.now().strftime("%Y-%m-%d %H:%M")
                 db = Session()
                 try:
-                    configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
-                    for config in configs:
+                    active_configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
+                    for config in active_configs:
                         key = f"{config.account_id}_{config.portfolio_id}"
-                        if self._should_run(config.cron_rule):
-                            if self._last_ran_map.get(key) != now_minute:
-                                masked_account_id = f"***{config.account_id[-4:]}" if len(config.account_id) > 4 else config.account_id
-                                logger.info(f"Cron Trigger: Triggering rebalance for {masked_account_id}")
-                                await self.rebalance(config, client_id=100+config.id if config.id else 999)
-                                self._last_ran_map[key] = now_minute
+                        
+                        if self._should_run(config.cron_rule) and self._last_ran_map.get(key) != now_minute:
+                            # 1. 检查该账户是否已经在调仓中
+                            if key in self._processing_keys:
+                                logger.warning(f"Cron Skip: Rebalance for {config.account_id} is still in progress. Skipping this tick.")
+                                self._last_ran_map[key] = now_minute # 标记本分钟已“处理”过
+                                continue
+
+                            # 2. 标记本轮已处理
+                            self._last_ran_map[key] = now_minute
+                            
+                            # 3. 提交到任务队列
+                            logger.info(f"Cron Trigger: Queuing rebalance for {config.account_id}")
+                            self.task_queue.put_nowait({
+                                "type": "rebalance",
+                                "config": config,
+                                "client_id": 100 + (config.id or 0),
+                                "key": key # 传递 key 用于完成后清除状态
+                            })
                 finally:
                     db.close()
             except Exception as e:
                 logger.error(f"Error in Cron check: {e}")
-
-            await asyncio.sleep(1) # 1秒轮询一次
 
 def start_portfolio_copy_trader():
     """在单独的线程中启动 Worker"""
