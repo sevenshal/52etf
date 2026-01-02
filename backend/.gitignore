@@ -37,3 +37,6 @@ cache/
 *.zip
 
 myenv/
+
+build_dist
+*.pyz
