@@ -89,16 +89,26 @@ class MarketService:
         return dtime(16, 0)
 
     @classmethod
-    def is_us_market_open(cls) -> bool:
-        """判断当前美股是否处于交易时段 (9:30 - 16:00 ET, 排除假日和周末)"""
+    def is_us_market_open(cls, include_extended: bool = False) -> bool:
+        """
+        判断当前美股是否处于交易时段
+        - 默认盘中: 9:30 - 16:00 ET
+        - 含盘前盘后: 04:00 - 20:00 ET
+        (排除假日和周末)
+        """
         now = cls.get_eastern_now()
         if now.weekday() >= 5:
             return False
         if cls.is_us_market_holiday(now.date()):
             return False
             
-        start = dtime(9, 30)
-        end = cls.get_us_market_close_time(now.date())
+        if include_extended:
+            start = dtime(4, 0)
+            end = dtime(20, 0)
+        else:
+            start = dtime(9, 30)
+            end = cls.get_us_market_close_time(now.date())
+            
         return start <= now.time() <= end
 
     @classmethod

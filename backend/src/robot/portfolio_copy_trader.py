@@ -199,8 +199,8 @@ class PortfolioCopyTrader:
         try:
             
             # 直接调用 MarketService 判断开盘
-            if not MarketService.is_us_market_open():
-                logger.info("Market is not open")
+            if not MarketService.is_us_market_open(include_extended=True):
+                logger.info("Market (including extended) is not open")
                 return
 
             # 0. Ensure IB Service is ready
