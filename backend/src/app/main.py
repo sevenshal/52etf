@@ -2,12 +2,12 @@ import logging
 
 # 设置全局日志格式
 logging.basicConfig(
-    level=logging.INFO,  # 设置日志级别
-    format='%(asctime)s %(levelname)s %(message)s',  # 设置日志格式
-    datefmt='%Y-%m-%d %H:%M:%S',  # 设置日期格式
+    level=logging.INFO,
+    format='%(asctime)s [%(process)d] [%(threadName)s] %(levelname)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler("/var/log/quant/app.log"),  # 将日志输出到文件
-        logging.StreamHandler()  # 同时输出到控制台
+        logging.FileHandler("/var/log/quant/app.log"),
+        logging.StreamHandler()
     ]
 )
 
@@ -20,6 +20,9 @@ from typing import List, Optional
 import os  # 导入工具函数
 from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, market_signal, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading
 from ..robot.main import robot
+
+_robot_started = False
+_robot_lock = threading.Lock()
 
 # 获取环境变量，默认为开发环境
 ENV = os.getenv("ENV", "dev")
@@ -73,6 +76,12 @@ app.include_router(all_weather_backtest.router)
 app.include_router(ib_copy_trading.router)
 
 def start_robot():
+    global _robot_started
+    with _robot_lock:
+        if _robot_started:
+            logging.info("Robot already started in this process, skipping redundant start.")
+            return
+        _robot_started = True
     robot()
 
 def start():
