@@ -17,40 +17,53 @@ class IBAccountService:
 
     @staticmethod
     def _get_account_status_sync(host: str, port: int, client_id: int) -> Dict:
-        """同步获取 IB 账户状态 (由 to_thread 调用)"""
-        ib = IB()
+        """同步获取 IB 账户状态 (由 to_thread 调用，内部使用 asyncio.run 保证 Loop 隔离)"""
+        async def _internal_check():
+            ib = IB()
+            try:
+                # 在私有 Loop 中进行异步连接
+                await ib.connectAsync(host, port, clientId=client_id, timeout=5)
+                
+                # 获取账户值
+                account_values = {v.tag: v.value for v in ib.accountValues()}
+                
+                # 提取关键指标
+                return {
+                    "connected": True,
+                    "net_liquidation": float(account_values.get('NetLiquidation', '0') or 0),
+                    "available_funds": float(account_values.get('AvailableFunds', '0') or 0),
+                    "gross_position_value": float(account_values.get('GrossPositionValue', '0') or 0),
+                    "daily_pnl": float(account_values.get('DailyPnL', '0') or 0),
+                    "currency": account_values.get('Currency', 'USD'),
+                    "message": "Connected"
+                }
+            except Exception as e:
+                logger.error(f"Internal IB check error for {host}:{port}: {e}")
+                return {
+                    "connected": False,
+                    "net_liquidation": 0,
+                    "available_funds": 0,
+                    "gross_position_value": 0,
+                    "daily_pnl": 0,
+                    "message": str(e)
+                }
+            finally:
+                if ib.isConnected():
+                    ib.disconnect()
+
+        # asyncio.run 会为当前线程创建一个全新的 Loop，执行完后自动关闭
         try:
-            # 使用同步连接，超时 5 秒
-            ib.connect(host, port, clientId=client_id, timeout=5)
-            
-            # 获取账户值
-            account_values = {v.tag: v.value for v in ib.accountValues()}
-            
-            # 提取关键指标
-            status = {
-                "connected": True,
-                "net_liquidation": float(account_values.get('NetLiquidation', '0') or 0),
-                "available_funds": float(account_values.get('AvailableFunds', '0') or 0),
-                "gross_position_value": float(account_values.get('GrossPositionValue', '0') or 0),
-                "daily_pnl": float(account_values.get('DailyPnL', '0') or 0),
-                "currency": account_values.get('Currency', 'USD'),
-                "message": "Connected"
-            }
-            
-            return status
+            return asyncio.run(_internal_check())
         except Exception as e:
-            logger.error(f"Failed to check IB status on {host}:{port} (sync): {e}")
+            logger.error(f"asyncio.run fallback error for {host}:{port}: {e}")
             return {
                 "connected": False,
                 "net_liquidation": 0,
                 "available_funds": 0,
                 "gross_position_value": 0,
                 "daily_pnl": 0,
-                "message": str(e)
+                "message": f"Loop error: {str(e)}"
             }
-        finally:
-            if ib.isConnected():
-                ib.disconnect()
 
     @staticmethod
     def restart_gateway(container_name: str) -> Dict:
