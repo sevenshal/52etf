@@ -10,7 +10,7 @@ from ..core.database import get_db_session, SzdtTradeStock, TradingLog, TradingS
 from ..core.services.szdt import SZDTService
 from ..core.services.market import MarketService
 from ..core.services.ib_service import IBKRService
-from ..core.utils import mask_account_id
+from ..core.utils import mask_account_id, get_data_file, read_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,17 @@ class USAutoTrader:
         self.ib_service = IBKRService()
         self.szdt = SZDTService()
         self.cli_id = f'us-auto-{account_id}'
+        self.config_filename = "szdt_auto_trading.json"
+
+    def _is_enabled(self) -> bool:
+        """从配置文件读取自动交易开关状态"""
+        try:
+            file_path = get_data_file(self.account_id, self.config_filename)
+            data = read_json_file(file_path)
+            return data.get('enabled', False)
+        except Exception as e:
+            logger.error(f"Error reading auto trading status: {e}")
+            return False
 
     def _log(self, level: str, message: str):
         with get_db_session(self.account_id) as db:
@@ -98,6 +109,11 @@ class USAutoTrader:
             return selected
 
     async def run_once(self):
+        if not self._is_enabled():
+            # 为避免日志过多，这里可以改为 debug 或仅在状态变化时记录
+            # logger.debug("USAutoTrader is disabled")
+            return
+
         logging.info("USAutoTrader tick")
         # 直接调用 MarketService 判断开盘
         if not MarketService.is_us_market_open():
