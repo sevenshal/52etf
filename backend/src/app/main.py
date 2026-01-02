@@ -1,8 +1,4 @@
 import logging
-import nest_asyncio
-
-# Apply nest_asyncio to support ib_insync in FastAPI/uvicorn
-nest_asyncio.apply()
 
 # 设置全局日志格式
 logging.basicConfig(
@@ -15,6 +11,7 @@ logging.basicConfig(
     ]
 )
 
+from contextlib import asynccontextmanager
 import threading
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +24,14 @@ from ..robot.main import robot
 # 获取环境变量，默认为开发环境
 ENV = os.getenv("ENV", "dev")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动机器人后台任务
+    threading.Thread(target=start_robot, daemon=True).start()
+    yield
+    # 清理工作（如果有）
+
+app = FastAPI(lifespan=lifespan)
 
 # 根据环境配置 CORS
 if ENV == "prod":
@@ -70,9 +74,6 @@ app.include_router(ib_copy_trading.router)
 
 def start_robot():
     robot()
-
-# # 启动一个线程来运行定时任务
-threading.Thread(target=start_robot, daemon=True).start()
 
 def start():
     import uvicorn
