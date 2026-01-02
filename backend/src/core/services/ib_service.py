@@ -95,26 +95,33 @@ class IBKRService:
         clean_symbol = symbol.replace('US.', '')
         logger.debug(f"[{self.port}] Qualifying contract for {clean_symbol}...")
         contract = Stock(clean_symbol, 'SMART', 'USD')
-        await self.ib.qualifyContractsAsync(contract)
+        try:
+            # 增加 10 秒超时防止卡在合约校验上
+            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.error(f"[{self.port}] Contract qualification timed out for {clean_symbol}")
+            raise Exception(f"Contract qualification timed out for {clean_symbol}")
+        except Exception as e:
+            logger.error(f"[{self.port}] Contract qualification failed for {clean_symbol}: {e}")
+            raise
         
         logger.info(f"[{self.port}] Placing {action} market order for {quantity} {clean_symbol}")
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         
-        # 对于调仓，我们不阻塞等待成交 (由后续周期逻辑处理幂等性)
-        # 只要 placeOrder 异步执行即可，ib_insync 会在后台处理状态同步
-        await asyncio.sleep(0.1) 
-                
-        # 下单后刷新一次持仓
-        await self.refresh_account_data()
         return trade
 
     async def place_limit_order(self, symbol: str, action: str, quantity: int, price: float, outside_rth: bool = False):
         """下限价单 (支持盘前盘后)"""
         await self.connect()
         clean_symbol = symbol.replace('US.', '')
+        logger.debug(f"[{self.port}] Qualifying contract for {clean_symbol}...")
         contract = Stock(clean_symbol, 'SMART', 'USD')
-        await self.ib.qualifyContractsAsync(contract)
+        try:
+            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=10.0)
+        except Exception as e:
+            logger.error(f"[{self.port}] Limit order qualification failed for {clean_symbol}: {e}")
+            raise
         
         order = LimitOrder(action, quantity, price)
         if outside_rth:
@@ -122,11 +129,9 @@ class IBKRService:
             
         trade = self.ib.placeOrder(contract, order)
         
-        logger.info(f"Placing {action} Limit order for {quantity} {clean_symbol} at ${price:.2f} (OutsideRth={outside_rth})")
+        logger.info(f"[{self.port}] Placing {action} Limit order for {quantity} {clean_symbol} at ${price:.2f} (OutsideRth={outside_rth})")
         
         # 对于限价单，我们只等待提交成功，不一定要等待完全成交 (因为可能挂单)
-        # 但如果是 CopyTrading，我们通常希望尽快成交。
-        # 这里简单等待几秒确认状态，不强制要求 Done
         await asyncio.sleep(2)
         
         return trade

@@ -234,19 +234,21 @@ class PortfolioCopyTrader:
                 return
 
             # 5. Execute trades
+            logger.info(f"[{masked_account_id}] Starting execution loop for {len(plan)} trades...")
             for item in plan:
                 symbol = item["symbol"]
                 action = item["action"]
                 qty = item["quantity"]
                 target_ratio = item["target_ratio"]
 
+                logger.info(f"[{masked_account_id}] Attempting {action} {qty} for {symbol}...")
                 try:
                     # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
                     await ib.place_market_order(symbol, action, qty)
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
                                 f"{action} {qty} (Market Order) for Target Ratio: {target_ratio:.2f}%", 
                                 symbol=symbol, quantity=qty, price=item["price"])
-                    logger.info(f"[{masked_account_id}] Placed MARKET {action} order for {qty} {symbol}")
+                    logger.info(f"[{masked_account_id}] Successfully placed MARKET {action} order for {qty} {symbol}")
                 except Exception as e:
                     logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
                     self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
