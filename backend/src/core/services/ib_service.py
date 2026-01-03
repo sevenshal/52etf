@@ -14,7 +14,7 @@ class IBKRService:
         self.client_id = int(client_id or os.getenv('IB_CLIENT_ID', '1'))
         self.ib = None
 
-    async def connect(self, timeout: float = 4.0):
+    async def connect(self, timeout: float = 15.0):
         if self.ib is None:
             self.ib = IB()
             
@@ -107,7 +107,7 @@ class IBKRService:
         contract = Stock(clean_symbol, 'SMART', 'USD')
         try:
             # 增加 10 秒超时防止卡在合约校验上
-            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=10.0)
+            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=15.0)
         except asyncio.TimeoutError:
             logger.error(f"[{self.port}] Contract qualification timed out for {clean_symbol}")
             raise Exception(f"Contract qualification timed out for {clean_symbol}")
