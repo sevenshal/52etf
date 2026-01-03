@@ -1,5 +1,6 @@
 from ib_insync import IB, Stock, MarketOrder, LimitOrder
 import asyncio
+import math
 import logging
 import os
 from typing import Dict, Optional, List
@@ -48,13 +49,20 @@ class IBKRService:
                 return float(v.value or 0)
         return 0.0
 
-    def get_positions_dict(self) -> Dict[str, float]:
-        """获取当前最实时的持仓字典 (Symbol -> Qty)"""
-        if not self.ib or not self.ib.isConnected(): return {}
+    def get_positions_dict(self) -> Dict[str, dict]:
+        """获取当前最实时的持仓字典 (Symbol -> {qty, price})"""
+        if not self.ib or not self.ib.isConnected(): 
+            return {}
         pos_map = {}
         for p in self.ib.positions():
             symbol = p.contract.symbol
-            pos_map[symbol] = pos_map.get(symbol, 0) + float(p.position)
+            qty = float(p.position)
+            price = float(p.marketPrice) if hasattr(p, 'marketPrice') and p.marketPrice and not math.isnan(p.marketPrice) else None
+            
+            if symbol in pos_map:
+                pos_map[symbol]['qty'] += qty
+            else:
+                pos_map[symbol] = {'qty': qty, 'price': price}
         return pos_map
 
     def get_position(self, symbol: str) -> float:

@@ -120,23 +120,30 @@ class PortfolioCopyTrader:
             # 1. 获取 Futu 持仓占比 (Run in executor to avoid blocking loop)
             futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
             
-            # --- 符号归一化 (Normalizing symbols) ---
-            # Normalized Futu map: symbol (clean) -> target_ratio (0.0 - 1.0)
+            # --- 符号归一化 + 价格提取 (Normalizing symbols + extracting prices) ---
+            # Normalized Futu map: symbol (clean) -> {target_ratio, price}
             futu_positions_map = {}
+            futu_price_map = {}
             for r in futu_records:
                 symbol = r["stock_code"].replace('US.', '')
                 ratio = r["position_ratio"] / 1000000000.0
                 if ratio > 1.0: # 14.0 代表 14%
                     ratio /= 100.0
                 futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                # 从 Futu 提取价格 (价格被放大了 10^9 倍，需要除以 1000000000)
+                if "current_price" in r and r["current_price"]:
+                    futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
 
             # 2. IB 状态已经在 _ensure_ib_connected 中准备好
             net_liq = ib.get_net_liquidation()
             if net_liq <= 0:
                 raise Exception("IB Account net liquidation is zero or negative")
 
-            # 3. 抓取 IB 实时快照 (一次性获取，避免在后续计算中多次触发 API 遍历)
-            ib_positions = ib.get_positions_dict()
+            # 3. 抓取 IB 实时快照 + 价格 (一次性获取，避免在后续计算中多次触发 API 遍历)
+            ib_positions_data = ib.get_positions_dict()  # {symbol: {qty, price}}
+            ib_positions = {symbol: data['qty'] for symbol, data in ib_positions_data.items()}
+            ib_price_map = {symbol: data['price'] for symbol, data in ib_positions_data.items() if data['price'] is not None}
+            
             ib_pending = ib.get_all_pending_qtys()
 
             # 4. 计算调仓总额 (Target amount for the entire strategy)
@@ -144,11 +151,22 @@ class PortfolioCopyTrader:
             
             # --- 目标符号集 ---
             # 收集所有我们需要关注的股票代码 (Futu 目标 + IB 当前持仓)
-            all_clean_symbols = set(list(futu_positions_map.keys()) + [s.replace('US.', '') for s in ib_positions.keys()])
+            all_clean_symbols = set(list(futu_positions_map.keys()) + list(ib_positions.keys()))
             
-            # 5. 批量获取市场价格
-            logger.info(f"Fetching market prices for {len(all_clean_symbols)} symbols...")
-            market_prices = await ib.get_market_prices(list(all_clean_symbols))
+            # 5. 构建价格字典 (优先使用 IB 价格，回退到 Futu 价格)
+            market_prices = {}
+            for symbol in all_clean_symbols:
+                if symbol in ib_price_map:
+                    market_prices[symbol] = ib_price_map[symbol]
+                elif symbol in futu_price_map:
+                    market_prices[symbol] = futu_price_map[symbol]
+            
+            # 对于缺失价格的股票，批量查询 (这应该很少发生)
+            missing_symbols = [s for s in all_clean_symbols if s not in market_prices]
+            if missing_symbols:
+                logger.warning(f"Fetching missing prices for {len(missing_symbols)} symbols: {missing_symbols}")
+                missing_prices = await ib.get_market_prices(missing_symbols)
+                market_prices.update(missing_prices)
             
             # 6. 计算调仓方案
             plan = []
