@@ -143,8 +143,13 @@ const PortfolioCopyTrading = () => {
         },
         {
             title: '触发规则',
-            dataIndex: 'cron_rule',
             key: 'cron_rule',
+            render: (_, record) => (
+                <Space direction="vertical" size={0}>
+                    <Text>{record.cron_rule}</Text>
+                    <Text type="secondary" style={{ fontSize: '12px' }}>{record.timezone}</Text>
+                </Space>
+            )
         },
         {
             title: 'IB 账户',
@@ -347,7 +352,7 @@ const PortfolioCopyTrading = () => {
                 onOk={() => form.submit()}
                 width={700}
             >
-                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', tracking_error_pct: 5, total_position_ratio: 100 }}>
+                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', timezone: 'America/New_York', tracking_error_pct: 5, total_position_ratio: 100 }}>
                     <Row gutter={16}>
                         <Col span={24}>
                             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, marginTop: 12 }}>
@@ -380,9 +385,19 @@ const PortfolioCopyTrading = () => {
                     <Row gutter={16}>
                         <Col span={12}>
                             <Form.Item name="cron_rule" label="触发 Cron 规则" rules={[{ required: true }]}>
-                                <Input placeholder="例如: 0 8 * * * 或 */30 * * * *" />
+                                <Input placeholder="例如: 0 8 * * *" />
                             </Form.Item>
                         </Col>
+                        <Col span={12}>
+                            <Form.Item name="timezone" label="触发时区" rules={[{ required: true }]}>
+                                <Select>
+                                    <Select.Option value="America/New_York">美股 (America/New_York)</Select.Option>
+                                    <Select.Option value="Asia/Shanghai">A股 (Asia/Shanghai)</Select.Option>
+                                </Select>
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
                         <Col span={12}>
                             <Form.Item name="ib_account_id" label="IB 账户" rules={[{ required: true, message: '请选择 IB 账户' }]}>
                                 <Select placeholder="选择 IB 账户">
