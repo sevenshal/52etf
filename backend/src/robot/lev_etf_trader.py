@@ -30,7 +30,7 @@ class LevETFTrader:
                         
                         for config in configs:
                             # 为每个账户执行策略
-                            asyncio.create_task(execute_trading_strategy(config.account_id))
+                            asyncio.create_task(execute_trading_strategy(config.account_id, client_id=2))
                     finally:
                         db.close()
                     

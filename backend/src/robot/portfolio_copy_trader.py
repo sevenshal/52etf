@@ -34,7 +34,7 @@ class PortfolioCopyTrader:
         self.is_running = False
         self._thread_started = False
         self._thread_lock = threading.Lock()
-        self.task_queue = asyncio.Queue()
+        self.task_queue = None
         self._processing_keys = set()
         self.ib_services: Dict[str, IBKRService] = {} # Key: "port_clientid"
         self.worker_loop_obj = None # Capture the worker loop
@@ -378,6 +378,7 @@ class PortfolioCopyTrader:
     async def worker_loop(self):
         """后台 Worker 主循环 (Task Queue Mode)"""
         logger.info(f"Starting Portfolio Copy Trader Worker Loop in thread {threading.get_ident()}")
+        self.task_queue = asyncio.Queue()
         self.worker_loop_obj = asyncio.get_running_loop()
         self._last_ran_map = {}
 

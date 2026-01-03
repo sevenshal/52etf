@@ -44,10 +44,10 @@ async def calculate_ma_signal(symbol: str, short_window: int, long_window: int, 
     
     return 'HOLD'
 
-async def execute_trading_strategy(account_id: str):
+async def execute_trading_strategy(account_id: str, client_id: int = 2):
     """执行自动化交易策略"""
     masked_account_id = mask_account_id(account_id)
-    logger.info(f"Executing trading strategy for account: {masked_account_id}")
+    logger.info(f"Executing trading strategy for account: {masked_account_id} with client_id={client_id}")
     
     try:
         with get_db_ctx() as db:
@@ -68,7 +68,7 @@ async def execute_trading_strategy(account_id: str):
                 return
 
             # 2. 检查持仓
-            ib_service = IBKRService(port=config.ib_port, client_id=2)
+            ib_service = IBKRService(port=config.ib_port, client_id=client_id)
             try:
                 await ib_service.connect()
                 
@@ -89,6 +89,9 @@ async def execute_trading_strategy(account_id: str):
                         return
                 
                 logger.info(f"Current Position for {config.etf_code}: {position}, Price: {price}, NetLiq: {net_liq}, Cash: {available_cash}")
+                
+                action = None
+                quantity = 0
 
                 if signal == 'BUY':
                     # 计算目标持仓金额 = 净资产 * 目标比例
@@ -143,6 +146,16 @@ async def execute_trading_strategy(account_id: str):
                     db.add(log)
                     logger.info(message)
                 else:
+                    log = AutomatedTradeLog(
+                        account_id=account_id,
+                        symbol=config.etf_code,
+                        action='HOLD',
+                        price=price,
+                        quantity=0,
+                        status='SUCCESS',
+                        message="No action needed"
+                    )
+                    db.add(log)
                     logger.info(f"No action needed for {config.etf_code} (Signal: {signal}, Position: {position}, TargetRatio: {config.target_ratio}%)")
                     
             finally:

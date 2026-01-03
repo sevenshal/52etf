@@ -1,10 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
+import threading
+import asyncio
+import logging
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 from ...core.database import get_db, AutomatedTradingConfig, AutomatedTradeLog
 from .account import valid_account
+from ...core.services.trading_strategy import execute_trading_strategy
 
 router = APIRouter(prefix="/api/trading", tags=["Automated Trading"])
 
@@ -90,10 +94,19 @@ async def manual_strategy_check(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    # 手动触发策略检查
-    from ...core.services.trading_strategy import execute_trading_strategy
+    # 手动触发策略检查，运行在独立线程和Loop中以避免冲突
+    def task_runner(acc_id):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(execute_trading_strategy(acc_id, client_id=10))
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Manual strategy execution failed: {e}")
+        finally:
+            loop.close()
     try:
-        await execute_trading_strategy(account_id)
-        return {"message": "Strategy check triggered"}
+        t = threading.Thread(target=task_runner, args=(account_id,), daemon=True)
+        t.start()
+        return {"message": "Strategy check triggered in background thread"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
