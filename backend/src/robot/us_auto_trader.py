@@ -141,10 +141,15 @@ class USAutoTrader:
                     return
             
             score = emotion['data']['score']
-            price = emotion['data']['price']
-            logging.info(f"Emotion fetched {name} score={score} price={price}")
+            emotion_price = emotion['data']['price']
+            logging.info(f"Emotion fetched {name} score={score} emotion_price={emotion_price}")
 
-            position_qty = self.ib_service.get_position(stock['code'])
+            # 获取持仓数据 (包含数量和 IB 市场价格)
+            pos_data = self.ib_service.get_position(stock['code'])
+            position_qty = pos_data['qty']
+            # 优先使用 IB 的市场价格，回退到情绪 API 价格
+            price = pos_data['price'] if pos_data['price'] else emotion_price
+            
             position_value = position_qty * price
             portfolio_value = max(net_liq, 1.0)
             position_ratio = 100 * position_value / portfolio_value

@@ -65,9 +65,10 @@ class IBKRService:
                 pos_map[symbol] = {'qty': qty, 'price': price}
         return pos_map
 
-    def get_position(self, symbol: str) -> float:
-        """获取指定代码的实时持仓数量"""
-        return self.get_positions_dict().get(symbol.replace('US.', ''), 0)
+    def get_position(self, symbol: str) -> dict:
+        """获取指定代码的实时持仓数据 {qty, price}"""
+        pos_data = self.get_positions_dict().get(symbol.replace('US.', ''))
+        return pos_data if pos_data else {'qty': 0, 'price': None}
 
     def get_all_pending_qtys(self) -> Dict[str, float]:
         """批量获取所有代码的待成交订单数量字典"""
@@ -95,7 +96,8 @@ class IBKRService:
 
     def get_effective_position(self, symbol: str) -> float:
         """获取有效持仓 (当前持仓 + 待成交数量)"""
-        return self.get_position(symbol) + self.get_pending_qty(symbol)
+        pos_data = self.get_position(symbol)
+        return pos_data['qty'] + self.get_pending_qty(symbol)
 
     async def place_market_order(self, symbol: str, action: str, quantity: int):
         """下市价单"""

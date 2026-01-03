@@ -76,17 +76,19 @@ async def execute_trading_strategy(account_id: str):
                 net_liq = ib_service.get_net_liquidation()
                 available_cash = ib_service.get_available_cash()
                 
-                position = ib_service.get_position(config.etf_code)
-                logger.info(f"Current Position for {config.etf_code}: {position}, NetLiq: {net_liq}, Cash: {available_cash}")
+                # 获取持仓数据 (包含数量和价格)
+                pos_data = ib_service.get_position(config.etf_code)
+                position = pos_data['qty']
+                price = pos_data['price']
                 
-                action = None
-                quantity = 0
-                
-                # 获取当前价格
-                price = await ib_service.get_market_price(config.etf_code)
+                # 如果 IB 没有价格数据，则查询市场价格
                 if not price or price <= 0:
-                    logger.error(f"Invalid market price for {config.etf_code}: {price}")
-                    return
+                    price = await ib_service.get_market_price(config.etf_code)
+                    if not price or price <= 0:
+                        logger.error(f"Invalid market price for {config.etf_code}: {price}")
+                        return
+                
+                logger.info(f"Current Position for {config.etf_code}: {position}, Price: {price}, NetLiq: {net_liq}, Cash: {available_cash}")
 
                 if signal == 'BUY':
                     # 计算目标持仓金额 = 净资产 * 目标比例
