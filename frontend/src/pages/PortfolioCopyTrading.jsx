@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
     Space, Tag, message, Typography, Switch, Row, Col, List,
-    Tabs
+    Tabs, Select
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, HistoryOutlined,
@@ -23,6 +23,7 @@ const PortfolioCopyTrading = () => {
     const [editingConfig, setEditingConfig] = useState(null);
     const [form] = Form.useForm();
     const [activeTab, setActiveTab] = useState('configs');
+    const [ibAccounts, setIbAccounts] = useState([]);
     const [previewVisible, setPreviewVisible] = useState(false);
     const [previewPlan, setPreviewPlan] = useState([]);
     const [previewLoading, setPreviewLoading] = useState(false);
@@ -45,8 +46,18 @@ const PortfolioCopyTrading = () => {
         if (accountId) {
             fetchConfigs();
             fetchLogs();
+            fetchIbAccounts();
         }
     }, [accountId]);
+
+    const fetchIbAccounts = async () => {
+        try {
+            const response = await request.get('/api/ib-accounts');
+            setIbAccounts(response.data);
+        } catch (error) {
+            message.error('获取 IB 账户列表失败');
+        }
+    };
 
     const fetchConfigs = async () => {
         setLoading(true);
@@ -136,9 +147,20 @@ const PortfolioCopyTrading = () => {
             key: 'cron_rule',
         },
         {
-            title: 'IB 端口',
-            dataIndex: 'ib_port',
-            key: 'ib_port',
+            title: 'IB 账户',
+            key: 'ib_account',
+            render: (_, record) => {
+                if (record.ib_account_id) {
+                    const account = ibAccounts.find(a => a.id === record.ib_account_id);
+                    return account ? (
+                        <Space direction="vertical" size={0}>
+                            <Text>{account.name}</Text>
+                            <Text type="secondary" style={{ fontSize: '12px' }}>Port: {account.ib_port}</Text>
+                        </Space>
+                    ) : `Unknown (ID: ${record.ib_account_id})`;
+                }
+                return `Port: ${record.ib_port}`;
+            }
         },
         {
             title: '配置',
@@ -362,8 +384,14 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={12}>
-                            <Form.Item name="ib_port" label="IB Gateway 端口" rules={[{ required: true }]}>
-                                <InputNumber style={{ width: '100%' }} />
+                            <Form.Item name="ib_account_id" label="IB 账户" rules={[{ required: true, message: '请选择 IB 账户' }]}>
+                                <Select placeholder="选择 IB 账户">
+                                    {ibAccounts.map(account => (
+                                        <Select.Option key={account.id} value={account.id}>
+                                            {account.name} (Port: {account.ib_port})
+                                        </Select.Option>
+                                    ))}
+                                </Select>
                             </Form.Item>
                         </Col>
                     </Row>
