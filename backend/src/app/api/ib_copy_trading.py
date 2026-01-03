@@ -15,10 +15,11 @@ class PortfolioCopyConfigSchema(BaseModel):
     portfolio_id: str
     portfolio_name: Optional[str] = None
     cron_rule: str = "0 8 * * *"
-    ib_port: int
+    ib_port: Optional[int] = None # Now optional
+    ib_account_id: Optional[int] = None # Added
     total_position_ratio: float = 100.0
     total_amount: Optional[float] = None
-    tracking_error_pct: float =5.0
+    tracking_error_pct: float = 5.0
     api_headers: Optional[dict] = None
 
     class Config:
@@ -54,7 +55,8 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
         config.portfolio_id = config_data.portfolio_id
         config.portfolio_name = config_data.portfolio_name
         config.cron_rule = config_data.cron_rule
-        config.ib_port = config_data.ib_port
+        config.ib_port = config_data.ib_port or 0
+        config.ib_account_id = config_data.ib_account_id
         config.total_position_ratio = config_data.total_position_ratio
         config.total_amount = config_data.total_amount
         config.tracking_error_pct = config_data.tracking_error_pct
@@ -66,7 +68,8 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
             portfolio_id=config_data.portfolio_id,
             portfolio_name=config_data.portfolio_name,
             cron_rule=config_data.cron_rule,
-            ib_port=config_data.ib_port,
+            ib_port=config_data.ib_port or 0,
+            ib_account_id=config_data.ib_account_id,
             total_position_ratio=config_data.total_position_ratio,
             total_amount=config_data.total_amount,
             tracking_error_pct=config_data.tracking_error_pct,

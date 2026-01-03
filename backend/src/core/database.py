@@ -302,8 +302,9 @@ class PortfolioCopyConfig(Base):
     account_id = Column(String, index=True)
     enabled = Column(Boolean, default=False)
     portfolio_id = Column(String, nullable=False)
+    ib_account_id = Column(Integer, nullable=True) # 关联的 IB 账户 ID
     cron_rule = Column(String, default="0 8 * * *") # 默认每天 8 点
-    ib_port = Column(Integer, nullable=False)
+    ib_port = Column(Integer, nullable=True) # 以前是 nullable=False，现在允许为空 (如果使用了 ib_account_id)
     total_position_ratio = Column(Float, default=100.0) # 操作的总仓位比例 (%)
     total_amount = Column(Float) # 或者操作的总金额
     tracking_error_pct = Column(Float, default=5.0) # 跟踪误差 (%)
@@ -390,6 +391,12 @@ def get_db_session_factory(account_id: str):
                     conn.execute("ALTER TABLE ib_account_configs ADD COLUMN auto_restart_time TEXT DEFAULT '08:59 PM'")
                 if 'relogin_after_twofa_timeout' not in ib_cols:
                     conn.execute("ALTER TABLE ib_account_configs ADD COLUMN relogin_after_twofa_timeout TEXT DEFAULT 'yes'")
+
+                # 为 PortfolioCopyConfig 表添加新列
+                result = conn.execute("PRAGMA table_info(portfolio_copy_configs)")
+                pcc_cols = [row[1] for row in result]
+                if 'ib_account_id' not in pcc_cols:
+                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN ib_account_id INTEGER DEFAULT NULL")
                 
                 # 确保新表存在
                 Base.metadata.create_all(bind=engine)

@@ -8,7 +8,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from croniter import croniter
-from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog
+from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog, IBKRAccountConfig
 from ..core.utils import mask_account_id
 from ..core.services.ib_service import IBKRService
 from ..core.services.market import MarketService
@@ -113,7 +113,23 @@ class PortfolioCopyTrader:
         logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
         # 1. 获取针对该账户的 IB Service 实例 (多账户持久连接)
-        ib = await self._ensure_ib_connected(config.ib_port, client_id)
+        port = config.ib_port
+        if config.ib_account_id:
+            db = Session()
+            try:
+                ib_account = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config.ib_account_id).first()
+                if ib_account:
+                    port = ib_account.ib_port
+                    logger.info(f"Resolved port {port} from account {ib_account.name} (ID: {config.ib_account_id})")
+                else:
+                    logger.warning(f"IB Account ID {config.ib_account_id} not found, falling back to legacy port {port}")
+            finally:
+                db.close()
+        
+        if not port:
+             raise ValueError("No IB port configured (neither ib_account_id nor ib_port is valid)")
+
+        ib = await self._ensure_ib_connected(port, client_id)
 
         plan = []
         try:
@@ -233,7 +249,21 @@ class PortfolioCopyTrader:
                 return
 
             # 2. Ensure IB Service is ready (获取对应账户的持久连接)
-            ib = await self._ensure_ib_connected(config.ib_port, client_id)
+            port = config.ib_port
+            if config.ib_account_id:
+                db = Session()
+                try:
+                    ib_account = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config.ib_account_id).first()
+                    if ib_account:
+                        port = ib_account.ib_port
+                finally:
+                    db.close()
+            
+            if not port:
+                logger.error(f"[{masked_account_id}] No IB port configured. Skipping rebalance.")
+                return
+
+            ib = await self._ensure_ib_connected(port, client_id)
 
             # 3. Check Market Status via IB (Liquid Hours)
             is_open = await ib.is_market_open("SPY")
