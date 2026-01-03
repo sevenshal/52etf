@@ -306,10 +306,9 @@ class PortfolioCopyConfig(Base):
     ib_port = Column(Integer, nullable=False)
     total_position_ratio = Column(Float, default=100.0) # 操作的总仓位比例 (%)
     total_amount = Column(Float) # 或者操作的总金额
-    tracking_error_pct = Column(Float, default=10.0) # 跟踪误差 (%)
+    tracking_error_pct = Column(Float, default=5.0) # 跟踪误差 (%)
     api_headers = Column(JSON) # 包含 Cookie, User-Agent 等
     portfolio_name = Column(String(100))
-    price_buffer_pct = Column(Float, default=0.5) # 限价单价格缓冲 (%)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class PortfolioCopyLog(Base):
