@@ -197,10 +197,10 @@ class PortfolioCopyTrader:
                     if (current_qty + pending_qty) > 0:
                         action = "SELL"
                 else:
-                    # 2. 如果目标比例 > 0，计算相对偏差因子 (Relative Error)
-                    # 相对偏差 = abs(目标比例 - 当前比例) / 目标比例
-                    relative_error = abs(target_ratio - current_ratio) / target_ratio
-                    if relative_error * 100 > (config.tracking_error_pct or 0):
+                    # 2. 如果目标比例 > 0，计算绝对仓位变化比例 (Absolute Position Difference)
+                    # 绝对偏差 = abs(目标比例 - 当前比例) * 100 (转换为百分点)
+                    absolute_diff_pct = abs(target_ratio - current_ratio) * 100
+                    if absolute_diff_pct > (config.tracking_error_pct or 0):
                         if trade_qty != 0:
                             action = "BUY" if trade_qty > 0 else "SELL"
                 
