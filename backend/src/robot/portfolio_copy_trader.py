@@ -5,6 +5,7 @@ import time
 import logging
 import requests
 import math
+import pytz
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from croniter import croniter
@@ -305,16 +306,21 @@ class PortfolioCopyTrader:
             logger.error(f"Rebalance process failed for {masked_account_id}: {e}")
             self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e))
 
-    def _should_run(self, cron_rule: str) -> bool:
+    def _should_run(self, cron_rule: str, timezone_str: str = "America/New_York") -> bool:
         """使用 croniter 检查当前时间是否符合 cron 规则"""
         try:
-            now = datetime.now().replace(second=0, microsecond=0)
-            # 检查当前分钟是否在 cron 规则触发点
+            # 1. 获取目标时区的当前时间
+            tz = pytz.timezone(timezone_str)
+            now = datetime.now(tz).replace(second=0, microsecond=0)
+            
+            # 2. 检查当前分钟是否在 cron 规则触发点
+            # croniter 需要 awareness-consistent 的时间
             iter = croniter(cron_rule, now - timedelta(minutes=1))
             next_run = iter.get_next(datetime)
+            
             return next_run == now
         except Exception as e:
-            logger.error(f"Cron parse error: {cron_rule} - {e}")
+            logger.error(f"Cron parse error: {cron_rule} ({timezone_str}) - {e}")
             return False
 
     async def submit_rebalance_task(self, config: PortfolioCopyConfig, client_id: int) -> List[dict]:
@@ -395,7 +401,7 @@ class PortfolioCopyTrader:
                     for config in active_configs:
                         key = f"{config.account_id}_{config.portfolio_id}"
                         
-                        if self._should_run(config.cron_rule) and self._last_ran_map.get(key) != now_minute:
+                        if self._should_run(config.cron_rule, config.timezone or "America/New_York") and self._last_ran_map.get(key) != now_minute:
                             if key in self._processing_keys:
                                 masked_account_id = mask_account_id(config.account_id)
                                 logger.warning(f"Cron Skip: Rebalance for {masked_account_id} is still in progress. Skipping this tick.")

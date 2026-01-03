@@ -15,6 +15,7 @@ class PortfolioCopyConfigSchema(BaseModel):
     portfolio_id: str
     portfolio_name: Optional[str] = None
     cron_rule: str = "0 8 * * *"
+    timezone: str = "America/New_York"
     ib_port: Optional[int] = None # Now optional
     ib_account_id: Optional[int] = None # Added
     total_position_ratio: float = 100.0
@@ -55,6 +56,7 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
         config.portfolio_id = config_data.portfolio_id
         config.portfolio_name = config_data.portfolio_name
         config.cron_rule = config_data.cron_rule
+        config.timezone = config_data.timezone
         config.ib_port = config_data.ib_port or 0
         config.ib_account_id = config_data.ib_account_id
         config.total_position_ratio = config_data.total_position_ratio
@@ -68,6 +70,7 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
             portfolio_id=config_data.portfolio_id,
             portfolio_name=config_data.portfolio_name,
             cron_rule=config_data.cron_rule,
+            timezone=config_data.timezone,
             ib_port=config_data.ib_port or 0,
             ib_account_id=config_data.ib_account_id,
             total_position_ratio=config_data.total_position_ratio,

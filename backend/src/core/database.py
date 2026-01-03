@@ -304,6 +304,7 @@ class PortfolioCopyConfig(Base):
     portfolio_id = Column(String, nullable=False)
     ib_account_id = Column(Integer, nullable=True) # 关联的 IB 账户 ID
     cron_rule = Column(String, default="0 8 * * *") # 默认每天 8 点
+    timezone = Column(String, default="America/New_York") # 触发时区
     ib_port = Column(Integer, nullable=True) # 以前是 nullable=False，现在允许为空 (如果使用了 ib_account_id)
     total_position_ratio = Column(Float, default=100.0) # 操作的总仓位比例 (%)
     total_amount = Column(Float) # 或者操作的总金额
@@ -397,6 +398,8 @@ def get_db_session_factory(account_id: str):
                 pcc_cols = [row[1] for row in result]
                 if 'ib_account_id' not in pcc_cols:
                     conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN ib_account_id INTEGER DEFAULT NULL")
+                if 'timezone' not in pcc_cols:
+                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
                 
                 # 确保新表存在
                 Base.metadata.create_all(bind=engine)
