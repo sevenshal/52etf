@@ -112,7 +112,10 @@ class IBAccountService:
             cmd = [
                 docker_bin, "run", "-d",
                 "--name", config.container_name,
+                "--memory", "450m",
+                "--memory-swap", "512m",
                 "--restart", "always",
+                "-e", "JAVA_HEAP_SIZE=256",
                 "-e", f"TWS_USERID={config.tws_userid}",
                 "-e", f"TWS_PASSWORD={config.tws_password}",
                 "-e", f"TRADING_MODE={config.trading_mode}",
