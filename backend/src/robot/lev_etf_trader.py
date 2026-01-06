@@ -6,6 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from ..core.database import get_db, Session, AutomatedTradingConfig
 from ..core.services.trading_strategy import is_market_closing_soon, execute_trading_strategy
+from ..core.services.market import MarketService
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,27 @@ class LevETFTrader:
     async def scheduler_loop(self):
         """后台调度循环"""
         logger.info("Starting Leveraged ETF Trader Scheduler Loop")
+        logger.info(f"Current Eastern Time: {MarketService.get_eastern_now()}")
+
         while True:
             try:
-                if is_market_closing_soon():
-                    logger.info("Market is closing soon, checking Lev ETF strategies...")
+                now = MarketService.get_eastern_now()
+                
+                # Check if today is a holiday or weekend
+                if now.weekday() >= 5 or MarketService.is_us_market_holiday(now.date()):
+                    # Sleep for an hour and check again
+                    await asyncio.sleep(3600)
+                    continue
+
+                close_time = MarketService.get_us_market_close_time(now.date())
+                target_close = datetime.combine(now.date(), close_time, tzinfo=ZoneInfo('US/Eastern'))
+                
+                # Calculate time until market close (in seconds)
+                delta = (target_close - now).total_seconds()
+                
+                # Close window: 10 seconds before close
+                if 0 < delta <= 10:
+                    logger.info(f"Market is closing in {delta:.2f}s, Triggering Lev ETF Strategies...")
                     
                     # 获取所有开启了自动化交易的账户
                     db = get_db()
@@ -28,20 +46,42 @@ class LevETFTrader:
                             AutomatedTradingConfig.enabled == True
                         ).all()
                         
+                        count = 0
                         for config in configs:
                             # 为每个账户执行策略
                             asyncio.create_task(execute_trading_strategy(config.account_id, client_id=2))
+                            count += 1
+                        
+                        logger.info(f"Triggered strategies for {count} configs.")
                     finally:
                         db.close()
                     
-                    # 执行完后休息 60 秒，避免在 10s 窗口内重复触发
-                    await asyncio.sleep(60)
+                    # Wait long enough to pass the close time to avoid double trigger
+                    await asyncio.sleep(120)
+
+                elif 10 < delta <= 60:
+                    # Less than 1 minute to close, check frequently
+                    await asyncio.sleep(1)
+                elif 60 < delta <= 300:
+                    # Less than 5 minutes, check every 10s
+                    await asyncio.sleep(10)
+                elif delta > 300:
+                    # More than 5 minutes, sleep longer (up to 1 hour, but check at least once an hour)
+                    # Sleep until 5 mins before close
+                    sleep_time = min(delta - 60, 3600)
+                    await asyncio.sleep(sleep_time)
                 else:
-                    # 每 5 秒检查一次时间
-                    await asyncio.sleep(5)
+                    # Market already closed (delta <= 0)
+                    # Check if it was closed just now
+                    if delta > -60:
+                         logger.info("Market closed recently.")
+                    
+                    # Sleep a bit before checking for "tomorrow" or simply loop
+                    await asyncio.sleep(300)
+                    
             except Exception as e:
-                logger.error(f"Error in LevETFTrader loop: {e}")
-                await asyncio.sleep(10)
+                logger.error(f"Error in LevETFTrader loop: {e}", exc_info=True)
+                await asyncio.sleep(60)
 
 def start_lev_etf_trader():
     """启动调度器线程"""
