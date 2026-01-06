@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
-from ...core.database import Session, StockKline, StockFavorite, StockEVC, get_db_session
+from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db_session
 from .account import valid_account
 from sqlalchemy import and_
 from ...core.services.longport import LongPortService
@@ -22,6 +22,8 @@ class KLineData(BaseModel):
     close: float
     volume: float
     turnover: float
+    pe: Optional[float] = None
+    forward_pe: Optional[float] = None
 
 class FavoriteResponse(BaseModel):
     """收藏响应"""
@@ -71,18 +73,49 @@ async def get_stock_klines(
         count = days / 30 if period == 'm' else days / 7 if period == 'w' else days
         klines_data = quote_service.get_klines(symbol, count=int(count), cache_only=False, period=period)
     
+    # 获取 ETFAnalysis 数据
+    etf_analysis_dict = {}
+    
+    if klines_data:
+        start_date_limit = min([k['timestamp'] for k in klines_data]).date()
+        end_date_limit = max([k['timestamp'] for k in klines_data]).date()
+
+        with get_db_session(account_id) as session:
+            analysis_records = session.query(ETFAnalysis).filter(
+                and_(
+                    ETFAnalysis.symbol == symbol,
+                    ETFAnalysis.date >= start_date_limit,
+                    ETFAnalysis.date <= end_date_limit
+                )
+            ).all()
+            
+            for record in analysis_records:
+                # PE = market_price / eps
+                # Forward PE = market_price / eps_forward
+                pe = record.market_price / record.eps if record.market_price and record.eps else None
+                forward_pe = record.market_price / record.eps_forward if record.market_price and record.eps_forward else None
+                etf_analysis_dict[record.date] = {
+                    'pe': pe,
+                    'forward_pe': forward_pe
+                }
+
     # 转换为响应格式
-    klines = [
-        KLineData(
+    klines = []
+    for k in klines_data:
+        k_date = k['timestamp'].date()
+        analysis_data = etf_analysis_dict.get(k_date, {})
+        
+        klines.append(KLineData(
             timestamp=k['timestamp'],
             open=k['open'],
             high=k['high'],
             low=k['low'],
             close=k['close'],
             volume=k['volume'],
-            turnover=k['turnover']
-        ) for k in klines_data
-    ]
+            turnover=k['turnover'],
+            pe=analysis_data.get('pe'),
+            forward_pe=analysis_data.get('forward_pe')
+        ))
     
     return klines
 
