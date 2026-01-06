@@ -77,7 +77,9 @@ const ETFDetail = () => {
       item.close,
       item.low,
       item.high,
-      item.volume
+      item.volume,
+      item.pe,        // 5
+      item.forward_pe // 6
     ]);
 
     const series = [{
@@ -100,7 +102,34 @@ const ETFDetail = () => {
       type: 'bar',
       xAxisIndex: 1,
       yAxisIndex: 1,
-      data: klineData.map(item => item[4])
+      data: klineData.map(item => item[4]),
+      itemStyle: {
+        color: (params) => {
+          const kline = klineData[params.dataIndex];
+          return kline[1] > kline[0] ? '#ef232a' : '#14b143';
+        }
+      }
+    }, {
+      name: 'PE',
+      type: 'line',
+      yAxisIndex: 2,
+      data: klineData.map(item => item[5]),
+      symbol: 'none',
+      lineStyle: {
+        width: 1,
+        color: '#1890ff'
+      }
+    }, {
+      name: '前瞻PE',
+      type: 'line',
+      yAxisIndex: 2,
+      data: klineData.map(item => item[6]),
+      symbol: 'none',
+      lineStyle: {
+        width: 1,
+        color: '#722ed1',
+        type: 'dashed'
+      }
     }];
 
     // 添加支撑位线
@@ -142,18 +171,18 @@ const ETFDetail = () => {
         }
       },
       legend: {
-        data: ['K线', '成交量', 
-          ...supportLevels.map(v => `支撑位${v}`), 
+        data: ['K线', '成交量', 'PE', '前瞻PE',
+          ...supportLevels.map(v => `支撑位${v}`),
           ...resistanceLevels.map(v => `压力位${v}`)
         ]
       },
       grid: [{
-        left: '10%',
-        right: '8%',
+        left: '5%',
+        right: '5%', // Adjusted right margin to accommodate right Y-axis if needed, but using overlay for now might be safer
         height: '60%'
       }, {
-        left: '10%',
-        right: '8%',
+        left: '5%',
+        right: '5%',
         top: '75%',
         height: '20%'
       }],
@@ -183,9 +212,7 @@ const ETFDetail = () => {
       }],
       yAxis: [{
         scale: true,
-        splitArea: {
-          show: true
-        }
+        splitArea: { show: true }
       }, {
         scale: true,
         gridIndex: 1,
@@ -194,6 +221,15 @@ const ETFDetail = () => {
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false }
+      }, {
+        type: 'value',
+        name: 'PE',
+        scale: true,
+        position: 'right',
+        splitLine: { show: false },
+        axisLabel: {
+          formatter: '{value}'
+        }
       }],
       dataZoom: [{
         type: 'inside',
@@ -211,7 +247,7 @@ const ETFDetail = () => {
       series: series
     };
   };
-  
+
   // 响应式布局配置
   const isMobile = window.innerWidth <= window.innerHeight;
 
@@ -341,7 +377,7 @@ const ETFDetail = () => {
   }
 
   return (
-    <div style={{ padding: '6px'}}>
+    <div style={{ padding: '6px' }}>
       <Card
         title={
           <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -354,7 +390,7 @@ const ETFDetail = () => {
             <span>{symbol} {report?.name}</span>
           </div>
         }
-        bodyStyle={{ padding: '6px'}}
+        bodyStyle={{ padding: '6px' }}
       >
         {report && (
           <>
@@ -362,9 +398,9 @@ const ETFDetail = () => {
             <Row gutter={[16, 16]}>
               <Col xs={8} sm={6}>
                 <Card size="small">
-                  <Statistic 
-                    title="市场价格" 
-                    value={report.market_price || report.current_price} 
+                  <Statistic
+                    title="市场价格"
+                    value={report.market_price || report.current_price}
                     precision={2}
                     valueStyle={{ fontSize: '16px' }}
                   />
@@ -372,9 +408,9 @@ const ETFDetail = () => {
               </Col>
               <Col xs={8} sm={6}>
                 <Card size="small">
-                  <Statistic 
-                    title="总市值" 
-                    value={report.total_market_value / 100000000} 
+                  <Statistic
+                    title="总市值"
+                    value={report.total_market_value / 100000000}
                     precision={2}
                     suffix="亿"
                     valueStyle={{ fontSize: '16px' }}
@@ -383,8 +419,8 @@ const ETFDetail = () => {
               </Col>
               <Col xs={8} sm={6}>
                 <Card size="small">
-                  <Statistic 
-                    title="总发行量" 
+                  <Statistic
+                    title="总发行量"
                     value={report.total_shares / 100000000}
                     precision={2}
                     suffix="亿"
@@ -396,14 +432,14 @@ const ETFDetail = () => {
                 <Card size="small">
                   <Row gutter={[8, 0]}>
                     <Col span={12}>
-                      <Statistic 
+                      <Statistic
                         title="PE"
                         value={report.market_price && report.eps ? (report.market_price / report.eps).toFixed(2) : '-'}
                         valueStyle={{ fontSize: '16px' }}
                       />
                     </Col>
                     <Col span={12}>
-                      <Statistic 
+                      <Statistic
                         title="前瞻PE"
                         value={report.market_price && report.eps_forward ? (report.market_price / report.eps_forward).toFixed(2) : '-'}
                         valueStyle={{ fontSize: '16px' }}
@@ -418,7 +454,7 @@ const ETFDetail = () => {
             <Card
               size="small"
               style={{ marginTop: '16px' }}
-              bodyStyle={{ padding: '6px'}}
+              bodyStyle={{ padding: '6px' }}
             >
               <Row gutter={[16, 16]}>
                 <Col xs={12} md={6}>
@@ -452,7 +488,7 @@ const ETFDetail = () => {
                 <Col xs={12} sm={6}>
                   <Card size="small" title="有估值成分股权重" >
                     <Statistic
-                      value={report.forward_stocks_weight * 100} 
+                      value={report.forward_stocks_weight * 100}
                       precision={2}
                       suffix="%"
                     />
@@ -470,7 +506,7 @@ const ETFDetail = () => {
                   <>
                     <Col xs={12} sm={8}>
                       <Card size="small">
-                        <Statistic 
+                        <Statistic
                           title={`${report.leveraged_symbol}价格`}
                           value={report.leveraged_price}
                           precision={2}
@@ -479,7 +515,7 @@ const ETFDetail = () => {
                     </Col>
                     <Col xs={12} sm={8}>
                       <Card size="small">
-                        <Statistic 
+                        <Statistic
                           title="情绪指数"
                           value={report.leveraged_szdt_score}
                           color={report.leveraged_szdt_score >= 60 ? '#cf1322' : report.leveraged_szdt_score <= -60 ? '#3f8600' : ''}
@@ -489,7 +525,7 @@ const ETFDetail = () => {
                     </Col>
                     <Col xs={24} sm={8}>
                       <Card size="small">
-                        <Statistic 
+                        <Statistic
                           title="情绪指数更新时间"
                           value={report.leveraged_szdt_update_time}
                           valueStyle={{ fontSize: '12px' }}
@@ -504,12 +540,12 @@ const ETFDetail = () => {
         )}
       </Card>
       {/*  支撑压力阈值参数设置 */}
-      <Card 
-        size="small" 
+      <Card
+        size="small"
         style={{ marginTop: '16px' }}
         bodyStyle={{ padding: '6px' }}
       >
-        <Form layout="inline" style={{paddingLeft:'6px'}}>
+        <Form layout="inline" style={{ paddingLeft: '6px' }}>
           <Form.Item label="计算天数">
             <InputNumber
               min={1}
@@ -529,22 +565,22 @@ const ETFDetail = () => {
         </Form>
       </Card>
       {/* K线图表 */}
-      <Card 
-        size="small" 
+      <Card
+        size="small"
         style={{ marginTop: '16px' }}
         bodyStyle={{ padding: '4px' }}
       >
-        <ReactECharts 
-          option={getChartOption()} 
+        <ReactECharts
+          option={getChartOption()}
           key={supportLevels.join(',') + resistanceLevels.join(',')}
           style={{ height: '400px' }}
         />
       </Card>
 
       {/* 成分股信息表格 */}
-      <Card 
+      <Card
         title="成分股信息"
-        size="small" 
+        size="small"
         style={{ marginTop: '16px' }}
         bodyStyle={{ padding: '4px' }}
       >
