@@ -6,7 +6,8 @@ import httpx
 import logging
 from sqlalchemy.orm import Session
 from ...core.database import get_db_session, SnowballCopyConfig, SnowballCopyLog
-from .account import valid_account, TradeRequest
+from .account import valid_account
+from .trade import TradeRequest
 
 router = APIRouter(prefix="/api/snowball")
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class SnowballConfigResponse(SnowballConfigCreate):
     updated_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class TradeResponse(BaseModel):
     opportunities: List[Any]
@@ -121,13 +122,25 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
             logger.error(f"Failed to fetch Xueqiu quotes: {e}")
             return {}
 
+@router.get("/info/{symbol}")
+async def get_combination_info(
+    symbol: str, 
+    account_id: str = Depends(valid_account)
+):
+    """Get combination info (name) from Xueqiu"""
+    info = await fetch_xueqiu_cube_info(symbol)
+    if not info:
+         raise HTTPException(status_code=404, detail="Combination not found or Xueqiu API error")
+    return info
+
+
 # --- Endpoints ---
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(account_id: str = Depends(valid_account)):
     with get_db_session(account_id) as db:
         configs = db.query(SnowballCopyConfig).all()
-        return configs
+        return [SnowballConfigResponse.from_orm(c) for c in configs]
 
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
@@ -148,7 +161,9 @@ async def create_config(
             
         db_config = SnowballCopyConfig(**config.dict())
         db.add(db_config)
-        return db_config
+        db.commit()
+        db.refresh(db_config)
+        return SnowballConfigResponse.from_orm(db_config)
 
 @router.put("/configs/{config_id}", response_model=SnowballConfigResponse)
 async def update_config(
@@ -172,7 +187,9 @@ async def update_config(
         for key, value in update_data.items():
             setattr(db_config, key, value)
             
-        return db_config
+        db.commit()
+        db.refresh(db_config)
+        return SnowballConfigResponse.from_orm(db_config)
 
 @router.delete("/configs/{config_id}")
 async def delete_config(
