@@ -298,11 +298,16 @@ async def get_snowball_opportunities(
                 
             action = "BUY" if diff_val > 0 else "SELL"
             
-            # Round to 100 lots
+            # Round to 100 lots (Standard A-share logic)
+            # STAR Market (SH.688) has special rule: min 200 shares.
+            is_star = symbol.startswith("SH.688")
+            min_qty = 200 if is_star else 100
+            
             raw_qty = abs(diff_val) / price
+            # We still keep 100 increments for simplicity/safety across boards
             qty = int(raw_qty / 100) * 100
             
-            if qty < 100:
+            if qty < min_qty:
                 continue
                 
             ops_info = {
