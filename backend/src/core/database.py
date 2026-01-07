@@ -328,6 +328,35 @@ class PortfolioCopyLog(Base):
     status = Column(String) # SUCCESS, FAILED
     message = Column(String)
 
+class SnowballCopyConfig(Base):
+    """雪球组合跟单配置"""
+    __tablename__ = "snowball_copy_configs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cli_id = Column(String, index=True, unique=True, nullable=False) # 外部调用标识
+    combination_id = Column(String, nullable=False) # 雪球组合ID, 如 ZH123456
+    combination_name = Column(String)
+    enabled = Column(Boolean, default=True)
+    total_position_ratio = Column(Float, default=100.0) # 总仓位比例 (%)
+    total_amount = Column(Float) # 总金额 (优先)
+    tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class SnowballCopyLog(Base):
+    """雪球跟单日志"""
+    __tablename__ = "snowball_copy_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cli_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    combination_id = Column(String)
+    action = Column(String)
+    symbol = Column(String)
+    quantity = Column(Float)
+    price = Column(Float)
+    status = Column(String)
+    message = Column(String)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"
@@ -401,7 +430,10 @@ def get_db_session_factory(account_id: str):
                 if 'timezone' not in pcc_cols:
                     conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
                 
-                # 确保新表存在
+                if 'timezone' not in pcc_cols:
+                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
+                
+                # 检查并创建新表
                 Base.metadata.create_all(bind=engine)
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
