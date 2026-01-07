@@ -134,6 +134,21 @@ const PortfolioCopyTrading = () => {
         }
     };
 
+    const fetchSnowballName = async () => {
+        const id = snowballForm.getFieldValue('combination_id');
+        if (!id) {
+            message.warning('请先输入雪球组合 ID');
+            return;
+        }
+        try {
+            const response = await request.get(`/api/snowball/info/${id}`);
+            snowballForm.setFieldsValue({ combination_name: response.data.name });
+            message.success('获取成功: ' + response.data.name);
+        } catch (error) {
+            message.error('获取组合名称失败: ' + (error.response?.data?.detail || error.message));
+        }
+    };
+
     // Snowball Handlers
     const handleSnowballSave = async (values) => {
         try {
@@ -151,6 +166,7 @@ const PortfolioCopyTrading = () => {
             message.error('保存失败: ' + (error.response?.data?.detail || error.message));
         }
     };
+
 
     const handleSnowballDelete = async (id) => {
         try {
@@ -316,18 +332,12 @@ const PortfolioCopyTrading = () => {
                 }
                 extra={
                     <Space>
-                        <Button icon={<ReloadOutlined />} onClick={() => { fetchConfigs(); fetchLogs(); }}>刷新数据</Button>
-                        <Button
-                            type="primary"
-                            icon={<PlusOutlined />}
-                            onClick={() => {
-                                setEditingConfig(null);
-                                form.resetFields();
-                                setModalVisible(true);
-                            }}
-                        >
-                            添加配置
-                        </Button>
+                        <Button icon={<ReloadOutlined />} onClick={() => {
+                            if (activeTab === 'ib_configs') fetchConfigs();
+                            else if (activeTab === 'snowball_configs') fetchSnowballConfigs();
+                            fetchLogs();
+                        }}>刷新数据</Button>
+
                     </Space>
                 }
             >
@@ -568,13 +578,18 @@ const PortfolioCopyTrading = () => {
                     </Form.Item>
                     <Row gutter={16}>
                         <Col span={12}>
-                            <Form.Item name="combination_id" label="雪球组合ID" rules={[{ required: true }]}>
-                                <Input placeholder="例如: ZH123456" />
+                            <Form.Item label="雪球组合ID" required>
+                                <Space.Compact style={{ width: '100%' }}>
+                                    <Form.Item name="combination_id" noStyle rules={[{ required: true, message: '请输入组合ID' }]}>
+                                        <Input placeholder="例如: ZH123456" />
+                                    </Form.Item>
+                                    <Button onClick={fetchSnowballName}>获取名称</Button>
+                                </Space.Compact>
                             </Form.Item>
                         </Col>
                         <Col span={12}>
                             <Form.Item name="combination_name" label="组合名称">
-                                <Input placeholder="选填" />
+                                <Input placeholder="自动获取或手动输入" />
                             </Form.Item>
                         </Col>
                     </Row>
