@@ -69,6 +69,7 @@ const LevETFBacktest = () => {
                 initial_capital: values.initial_capital,
                 start_date: values.date_range ? values.date_range[0].format('YYYY-MM-DD') : undefined,
                 end_date: values.date_range ? values.date_range[1].format('YYYY-MM-DD') : undefined,
+                cash_strategy: values.cash_strategy || 'Cash',
             };
 
             const response = await request.post('/api/lev-etf-backtest/batch-run', payload);
@@ -97,6 +98,7 @@ const LevETFBacktest = () => {
                 initial_capital: values.initial_capital,
                 start_date: values.date_range ? values.date_range[0].format('YYYY-MM-DD') : undefined,
                 end_date: values.date_range ? values.date_range[1].format('YYYY-MM-DD') : undefined,
+                cash_strategy: values.cash_strategy || 'Cash',
             };
 
             const response = await request.post('/api/lev-etf-backtest/run', payload);
@@ -236,7 +238,15 @@ const LevETFBacktest = () => {
 
     const columns = [
         { title: '日期', dataIndex: 'date', key: 'date' },
-        { title: '操作', dataIndex: 'action', key: 'action', render: (text) => <span style={{ color: text === 'BUY' ? '#ef5350' : '#66bb6a' }}>{text === 'BUY' ? '买入' : '卖出'}</span> },
+        {
+            title: '操作',
+            key: 'action',
+            render: (_, record) => (
+                <span style={{ color: record.action.startsWith('BUY') ? '#ef5350' : '#66bb6a' }}>
+                    {record.action.startsWith('BUY') ? '买入' : '卖出'} {record.symbol || record.etf_code || ''}
+                </span>
+            )
+        },
         { title: '价格', dataIndex: 'price', key: 'price', render: (val) => val.toFixed(2) },
         { title: '数量', dataIndex: 'quantity', key: 'quantity', render: (val) => val.toFixed(2) },
         { title: '金额', dataIndex: 'amount', key: 'amount', render: (val) => val.toFixed(2) },
@@ -285,6 +295,7 @@ const LevETFBacktest = () => {
                         long_window_max: 60,
                         initial_capital: 10000,
                         date_range: [dayjs('2015-01-01'), dayjs()],
+                        cash_strategy: 'Cash',
                     }}
                 >
                     <Form.Item name="etf_code" label="标的" rules={[{ required: true }]}>
@@ -300,6 +311,13 @@ const LevETFBacktest = () => {
                             <Option value="UPRO">UPRO</Option>
                             <Option value="TNA">TNA</Option>
                             <Option value="YINN">YINN</Option>
+                        </Select>
+                    </Form.Item>
+                    <Form.Item name="cash_strategy" label="空仓策略">
+                        <Select style={{ width: 100 }}>
+                            <Option value="Cash">空仓</Option>
+                            <Option value="SPMO">持有SPMO</Option>
+                            <Option value="GLD">持有GLD</Option>
                         </Select>
                     </Form.Item>
                     <Form.Item label="快线范围" style={{ marginBottom: 0 }}>
