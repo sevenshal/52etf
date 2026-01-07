@@ -24,6 +24,7 @@ class LevETFBacktestParams(BaseModel):
     initial_capital: float = 10000.0
     start_date: Optional[str] = "2015-01-01"
     end_date: Optional[str] = None
+    cash_strategy: str = "Cash" # Cash, SPMO, GLD
 
 class BacktestResult(BaseModel):
     total_return: float
@@ -46,7 +47,9 @@ class BatchBacktestParams(BaseModel):
     long_window_max: int = 60
     initial_capital: float = 10000.0
     start_date: Optional[str] = "2015-01-01"
+    start_date: Optional[str] = "2015-01-01"
     end_date: Optional[str] = None
+    cash_strategy: str = "Cash" # Cash, SPMO, GLD
 
 class BatchBacktestResultItem(BaseModel):
     short_window: int
@@ -73,7 +76,7 @@ def get_params_hash(params: BatchBacktestParams) -> str:
     params_str = json.dumps(params.dict() if hasattr(params, 'dict') else params.model_dump(), sort_keys=True)
     return hashlib.md5(params_str.encode()).hexdigest()
 
-def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window: int, initial_capital: float, start_date: datetime.date, detailed: bool = False) -> Dict:
+def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window: int, initial_capital: float, start_date: datetime.date, detailed: bool = False, alt_prices: Dict[datetime.date, float] = None) -> Dict:
     # Copy DF to avoid modifying original if reused
     df = df.copy()
     
@@ -120,13 +123,43 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
     total_closed_trades = 0
     equity_values = []
     
+    # Alt Strategy State
+    alt_position = 0.0
+    
     for i, row in df.iterrows():
         date = row['date']
         price = row['price']
         
         # Check signals
         if row['position_diff'] == 1.0 and not has_position:
-            # Buy All
+            # Signal: BUY Main ETF
+            
+            # 1. Sell Alt if held
+            if alt_position > 0:
+                # Sell Alt
+                current_alt_price = 0.0
+                if alt_prices:
+                    current_alt_price = alt_prices.get(date.date(), 0.0)
+                
+                if current_alt_price > 0:
+                    capital = alt_position * current_alt_price
+                    if detailed:
+                         trades.append({
+                            "date": date.strftime("%Y-%m-%d"),
+                            "action": "SELL_ALT",
+                            "price": current_alt_price,
+                            "amount": capital,
+                            "quantity": 0,
+                            "profit": 0,
+                            "percent": 0
+                        })
+                else:
+                    # Fallback logic if price is 0
+                    pass
+
+                alt_position = 0.0
+            
+            # 2. Buy Main ETF
             position = capital / price
             entry_price = price
             cost = capital
@@ -155,8 +188,18 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
                 win_count += 1
             
             capital = revenue
+            capital = revenue
             position = 0.0
             has_position = False
+            
+            # Alternative Strategy Entry (Buy Alt)
+            if alt_prices:
+                alt_price = alt_prices.get(date.date())
+                if alt_price:
+                    # Buy Alt with all capital
+                    # Note: Simplified, assuming 0 cost and full execution
+                    pass 
+            
             
             if detailed:
                 trades.append({
@@ -169,7 +212,39 @@ def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window:
                     "percent": profit_percent
                 })
             
-        current_equity = capital + (position * price)
+            # 2. Buy Alt Asset (if configured and data exists)
+            if alt_prices:
+                alt_price = alt_prices.get(date.date())
+                if alt_price and alt_price > 0:
+                    alt_position = capital / alt_price
+                    capital = 0.0
+                    if detailed:
+                        trades.append({
+                            "date": date.strftime("%Y-%m-%d"),
+                            "action": "BUY_ALT",
+                            "price": alt_price,
+                            "amount": revenue,
+                            "quantity": alt_position,
+                            "profit": 0,
+                            "percent": 0
+                        })
+            
+        # Calculate Current Equity
+        if has_position:
+            current_equity = position * price
+        elif alt_position > 0:
+             # Holding Alt
+             current_alt_price = alt_prices.get(date.date(), 0.0) if alt_prices else 0.0
+             # Fallback if missing data: use last known or just previous equity? 
+             # Ideally forward fill alt_prices before passing here.
+             if current_alt_price > 0:
+                 current_equity = alt_position * current_alt_price
+             else:
+                 # If data missing, assume same as previous (flat)
+                 current_equity = equity_values[-1] if equity_values else initial_capital
+        else:
+            current_equity = capital
+            
         equity_values.append(current_equity)
         
         if detailed:
@@ -269,6 +344,23 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
         fetch_start_date = user_start_date - timedelta(days=buffer_days)
 
         klines_data = quote_service.get_klines(symbol, start_date=fetch_start_date, end_date=end_date, period='d')
+        
+        # Fetch Alt Data if needed
+        alt_prices = {}
+        if params.cash_strategy in ['SPMO', 'GLD']:
+            try:
+                alt_symbol = f"{params.cash_strategy}.US"
+                # Need same range
+                alt_klines = quote_service.get_klines(alt_symbol, start_date=fetch_start_date, end_date=end_date, period='d')
+                if alt_klines:
+                    for k in alt_klines:
+                         # Normalize date to date object
+                         k_date = k['timestamp'].date() if isinstance(k['timestamp'], datetime) else datetime.strptime(k['timestamp'], "%Y-%m-%d").date()
+                         alt_prices[k_date] = float(k['close'])
+            except Exception as e:
+                print(f"Warning: Failed to fetch data for {params.cash_strategy}: {e}")
+                # Fallback to empty -> Cash
+
 
         if not klines_data:
              raise ValueError(f"No data found for {symbol}")
@@ -302,9 +394,10 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
                     df, 
                     short, 
                     long, 
-                    params.initial_capital, 
+                    initial_capital=params.initial_capital,
                     start_date=user_start_date,
-                    detailed=False
+                    detailed=False,
+                    alt_prices=alt_prices
                 )
                 
                 results.append({
@@ -442,13 +535,29 @@ async def run_lev_etf_backtest(
     # Sort and reset index
     df = df.sort_values('date').reset_index(drop=True)
 
+    # Fetch Alt Data if needed
+    alt_prices = {}
+    if params.cash_strategy in ['SPMO', 'GLD']:
+        try:
+            alt_symbol = f"{params.cash_strategy}.US"
+            # Need same range
+            alt_klines = quote_service.get_klines(alt_symbol, start_date=fetch_start_date, end_date=end_date, period='d')
+            if alt_klines:
+                for k in alt_klines:
+                        # Normalize date to date object
+                        k_date = k['timestamp'].date() if isinstance(k['timestamp'], datetime) else k['timestamp']
+                        alt_prices[k_date] = float(k['close'])
+        except Exception as e:
+            print(f"Warning: Failed to fetch data for {params.cash_strategy}: {e}")
+
     result = calculate_strategy_metrics(
         df, 
         params.short_window, 
         params.long_window, 
         params.initial_capital, 
         start_date=user_start_date,
-        detailed=True
+        detailed=True,
+        alt_prices=alt_prices
     )
     
     print(f"DEBUG: Calculated metrics for {symbol}. Total Return: {result.get('total_return')}")
