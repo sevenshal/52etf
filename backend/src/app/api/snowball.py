@@ -60,6 +60,16 @@ class TradeResponse(BaseModel):
 
 # --- Helpers ---
 
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol to SH.xxxxxx format from SHxxxxxx"""
+    if not symbol: 
+        return symbol
+    if "." in symbol:
+        return symbol
+    if len(symbol) > 2 and (symbol.startswith("SH") or symbol.startswith("SZ")):
+        return f"{symbol[:2]}.{symbol[2:]}"
+    return symbol
+
 async def fetch_xueqiu_holdings(symbol: str) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
     url = f"https://api.xueqiu.com/cube/center/cube/holdSymbols.json?symbol={symbol}"
@@ -70,7 +80,10 @@ async def fetch_xueqiu_holdings(symbol: str) -> List[Dict]:
             response.raise_for_status()
             data = response.json()
             if data.get("result_code") == 0 and data.get("success"):
-                return data.get("data", [])
+                holdings = data.get("data", [])
+                for h in holdings:
+                    h['symbol'] = normalize_symbol(h.get('symbol'))
+                return holdings
             else:
                 logger.error(f"Xueqiu API Error (Holdings): {data}")
                 return []
@@ -104,8 +117,11 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
         return {}
     
     # URL encode comma is %2C, but usually httpx handles params or we can just join
-    symbol_str = ",".join(symbols)
-    url = f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={symbol_str}"
+    # Map dotted to raw for API call (SH.600 -> SH600)
+    raw_to_dotted = {s.replace(".", ""): s for s in symbols}
+    raw_symbol_str = ",".join(raw_to_dotted.keys())
+    
+    url = f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={raw_symbol_str}"
     
     async with httpx.AsyncClient() as client:
         try:
@@ -116,7 +132,10 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
             result = {}
             if "data" in data:
                 for item in data["data"]:
-                    result[item["symbol"]] = item["current"]
+                    raw_sym = item["symbol"]
+                    # Map back to dotted symbol if possible
+                    dotted_sym = raw_to_dotted.get(raw_sym, raw_sym)
+                    result[dotted_sym] = item["current"]
             return result
         except Exception as e:
             logger.error(f"Failed to fetch Xueqiu quotes: {e}")
