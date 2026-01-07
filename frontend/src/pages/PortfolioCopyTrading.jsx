@@ -22,11 +22,17 @@ const PortfolioCopyTrading = () => {
     const [modalVisible, setModalVisible] = useState(false);
     const [editingConfig, setEditingConfig] = useState(null);
     const [form] = Form.useForm();
-    const [activeTab, setActiveTab] = useState('configs');
+    const [activeTab, setActiveTab] = useState('ib_configs'); // Changed default to ib_configs
     const [ibAccounts, setIbAccounts] = useState([]);
     const [previewVisible, setPreviewVisible] = useState(false);
     const [previewPlan, setPreviewPlan] = useState([]);
     const [previewLoading, setPreviewLoading] = useState(false);
+
+    // Snowball States
+    const [snowballConfigs, setSnowballConfigs] = useState([]);
+    const [snowballModalVisible, setSnowballModalVisible] = useState(false);
+    const [snowballForm] = Form.useForm();
+    const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
 
     const handlePreview = async (configId) => {
         setPreviewLoading(true);
@@ -42,13 +48,17 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    useEffect(() => {
-        if (accountId) {
-            fetchConfigs();
-            fetchLogs();
-            fetchIbAccounts();
+    const fetchSnowballConfigs = async () => {
+        setLoading(true);
+        try {
+            const response = await request.get('/api/snowball/configs');
+            setSnowballConfigs(response.data);
+        } catch (error) {
+            message.error('获取雪球配置失败');
+        } finally {
+            setLoading(false);
         }
-    }, [accountId]);
+    };
 
     const fetchIbAccounts = async () => {
         try {
@@ -123,6 +133,47 @@ const PortfolioCopyTrading = () => {
             message.error('删除失败');
         }
     };
+
+    // Snowball Handlers
+    const handleSnowballSave = async (values) => {
+        try {
+            const payload = { ...values, account_id: accountId };
+            if (snowballEditingConfig) {
+                await request.put(`/api/snowball/configs/${snowballEditingConfig.id}`, payload);
+                message.success('更新成功');
+            } else {
+                await request.post('/api/snowball/configs', payload);
+                message.success('添加成功');
+            }
+            setSnowballModalVisible(false);
+            fetchSnowballConfigs();
+        } catch (error) {
+            message.error('保存失败: ' + (error.response?.data?.detail || error.message));
+        }
+    };
+
+    const handleSnowballDelete = async (id) => {
+        try {
+            await request.delete(`/api/snowball/configs/${id}`);
+            message.success('删除成功');
+            fetchSnowballConfigs();
+        } catch (error) {
+            message.error('删除失败');
+        }
+    };
+
+    useEffect(() => {
+        if (accountId) {
+            if (activeTab === 'ib_configs') {
+                fetchConfigs();
+            } else if (activeTab === 'snowball_configs') {
+                fetchSnowballConfigs();
+            }
+            // Logs and IB accounts are always useful or global
+            fetchLogs();
+            fetchIbAccounts();
+        }
+    }, [accountId, activeTab]);
 
     const configColumns = [
         {
@@ -281,7 +332,7 @@ const PortfolioCopyTrading = () => {
                 }
             >
                 <Tabs activeKey={activeTab} onChange={setActiveTab}>
-                    <Tabs.TabPane tab={<span><SettingOutlined />跟单配置</span>} key="configs">
+                    <Tabs.TabPane tab={<span><SettingOutlined />IB账户跟单配置</span>} key="ib_configs">
                         <Table
                             dataSource={configs}
                             columns={configColumns}
@@ -289,7 +340,78 @@ const PortfolioCopyTrading = () => {
                             loading={loading}
                             pagination={false}
                         />
+                        <div style={{ marginTop: 16 }}>
+                            <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+                                setEditingConfig(null);
+                                form.resetFields();
+                                setModalVisible(true);
+                            }}>添加IB跟单配置</Button>
+                        </div>
                     </Tabs.TabPane>
+
+                    <Tabs.TabPane tab={<span><SettingOutlined />A股雪球跟单配置</span>} key="snowball_configs">
+                        <Table
+                            dataSource={snowballConfigs}
+                            rowKey="id"
+                            loading={loading}
+                            pagination={false}
+                            columns={[
+                                {
+                                    title: '状态',
+                                    dataIndex: 'enabled',
+                                    render: (enabled) => <Tag color={enabled ? 'green' : 'gray'}>{enabled ? '开启' : '关闭'}</Tag>
+                                },
+                                {
+                                    title: '组合信息',
+                                    key: 'info',
+                                    render: (_, r) => (
+                                        <Space direction="vertical" size={0}>
+                                            <Text strong>{r.combination_name || '未命名'}</Text>
+                                            <Text type="secondary">ID: {r.combination_id}</Text>
+                                        </Space>
+                                    )
+                                },
+                                {
+                                    title: 'API标识',
+                                    dataIndex: 'cli_id',
+                                    render: (id) => <Tag color="blue">{id}</Tag>
+                                },
+                                {
+                                    title: '参数',
+                                    key: 'params',
+                                    render: (_, r) => (
+                                        <Space direction="vertical" size={0}>
+                                            <Text type="secondary">仓位: {r.total_position_ratio}%</Text>
+                                            <Text type="secondary">金额: {r.total_amount || 'Portfolio'}</Text>
+                                            <Text type="secondary">跟踪误差: {r.tracking_error_pct}%</Text>
+                                        </Space>
+                                    )
+                                },
+                                {
+                                    title: '操作',
+                                    key: 'action',
+                                    render: (_, record) => (
+                                        <Space>
+                                            <Button icon={<EditOutlined />} size="small" onClick={() => {
+                                                setSnowballEditingConfig(record);
+                                                snowballForm.setFieldsValue(record);
+                                                setSnowballModalVisible(true);
+                                            }} />
+                                            <Button icon={<DeleteOutlined />} size="small" danger onClick={() => handleSnowballDelete(record.id)} />
+                                        </Space>
+                                    )
+                                }
+                            ]}
+                        />
+                        <div style={{ marginTop: 16 }}>
+                            <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+                                setSnowballEditingConfig(null);
+                                snowballForm.resetFields();
+                                setSnowballModalVisible(true);
+                            }}>添加雪球跟单配置</Button>
+                        </div>
+                    </Tabs.TabPane>
+
                     <Tabs.TabPane tab={<span><HistoryOutlined />跟单日志</span>} key="logs">
                         <Table
                             dataSource={logs}
@@ -301,6 +423,7 @@ const PortfolioCopyTrading = () => {
                 </Tabs>
             </Card>
 
+            {/* Existing Modal for IB Config */}
             <Modal
                 title="调仓计划预览"
                 visible={previewVisible}
@@ -430,7 +553,58 @@ const PortfolioCopyTrading = () => {
                     </Row>
                 </Form>
             </Modal>
-        </div>
+
+            {/* Snowball Config Modal */}
+            <Modal
+                title={snowballEditingConfig ? "编辑雪球跟单配置" : "添加雪球跟单配置"}
+                visible={snowballModalVisible}
+                onCancel={() => setSnowballModalVisible(false)}
+                onOk={() => snowballForm.submit()}
+                width={700}
+            >
+                <Form form={snowballForm} layout="vertical" onFinish={handleSnowballSave} initialValues={{ enabled: true, total_position_ratio: 100, tracking_error_pct: 1 }}>
+                    <Form.Item name="enabled" valuePropName="checked">
+                        <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+                    </Form.Item>
+                    <Row gutter={16}>
+                        <Col span={12}>
+                            <Form.Item name="combination_id" label="雪球组合ID" rules={[{ required: true }]}>
+                                <Input placeholder="例如: ZH123456" />
+                            </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                            <Form.Item name="combination_name" label="组合名称">
+                                <Input placeholder="选填" />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
+                        <Col span={12}>
+                            <Form.Item name="cli_id" label="API调用标识 (CLI_ID)" rules={[{ required: true }]}>
+                                <Input placeholder="唯一ID, 用于API调用" />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
+                        <Col span={8}>
+                            <Form.Item name="total_position_ratio" label="总仓位比例 (%)">
+                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                            <Form.Item name="total_amount" label="总金额 (优先)">
+                                <InputNumber style={{ width: '100%' }} placeholder="为空则使用Portfolio" />
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                            <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
+                                <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                </Form>
+            </Modal>
+        </div >
     );
 };
 
