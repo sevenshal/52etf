@@ -319,4 +319,6 @@ async def get_snowball_opportunities(
             }
             opportunities.append(ops_info)
             
+        opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
+            
         return TradeResponse(opportunities=opportunities, msg="Success")
