@@ -54,6 +54,21 @@ class SnowballConfigResponse(SnowballConfigCreate):
     class Config:
         from_attributes = True
 
+class SnowballLogResponse(BaseModel):
+    id: int
+    cli_id: Optional[str]
+    timestamp: datetime
+    combination_id: Optional[str]
+    action: Optional[str]
+    symbol: Optional[str]
+    quantity: Optional[float]
+    price: Optional[float]
+    status: Optional[str]
+    message: Optional[str]
+
+    class Config:
+        from_attributes = True
+
 class TradeResponse(BaseModel):
     opportunities: List[Any]
     msg: Optional[str] = None
@@ -219,6 +234,15 @@ async def delete_config(
         db.query(SnowballCopyConfig).filter_by(id=config_id).delete()
         return {"message": "Deleted successfully"}
 
+@router.get("/logs", response_model=List[SnowballLogResponse])
+async def get_logs(
+    account_id: str = Depends(valid_account),
+    limit: int = 100
+):
+    with get_db_session(account_id) as db:
+        logs = db.query(SnowballCopyLog).order_by(SnowballCopyLog.timestamp.desc()).limit(limit).all()
+        return [SnowballLogResponse.from_orm(log) for log in logs]
+
 # --- Core Logic ---
 
 @router.post("/opportunities", response_model=TradeResponse)
@@ -321,5 +345,21 @@ async def get_snowball_opportunities(
         opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
 
         logger.info(f"/opportunities request: {str(request)} \nprices: {price}\ntarget_holdings_raw: {target_holdings_raw}\nopportunities: {str(opportunities)}")
+
+        # Record Logs if opportunities exist
+        if opportunities:
+            for op in opportunities:
+                log_entry = SnowballCopyLog(
+                    cli_id=cli_id,
+                    combination_id=config.combination_id,
+                    action=op['action'],
+                    symbol=op['symbol'],
+                    quantity=op['quantity'],
+                    price=prices.get(op['symbol'], 0.0), # Use fetched price
+                    status='SIGNAL',
+                    message=op['reason']
+                )
+                db.add(log_entry)
+            db.commit()
 
         return TradeResponse(opportunities=opportunities, msg="Success")

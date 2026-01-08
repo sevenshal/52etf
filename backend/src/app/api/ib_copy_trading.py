@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from ...core.database import get_db, PortfolioCopyConfig, PortfolioCopyLog
+from .account import valid_account
 
 router = APIRouter(prefix="/api/ib-copy-trading", tags=["ib-copy-trading"])
 
@@ -42,13 +43,23 @@ class PortfolioCopyLogSchema(BaseModel):
         from_attributes = True
 
 @router.get("/configs", response_model=List[PortfolioCopyConfigSchema])
-async def list_configs(db: Session = Depends(get_db)):
-    return db.query(PortfolioCopyConfig).all()
+async def list_configs(
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    return db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.account_id == account_id).all()
 
 @router.post("/configs", response_model=PortfolioCopyConfigSchema)
-async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depends(get_db)):
+async def save_config(
+    config_data: PortfolioCopyConfigSchema,
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
     if config_data.id:
-        config = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.id == config_data.id).first()
+        config = db.query(PortfolioCopyConfig).filter(
+            PortfolioCopyConfig.id == config_data.id,
+            PortfolioCopyConfig.account_id == account_id
+        ).first()
         if not config:
             raise HTTPException(status_code=404, detail="Config not found")
         
@@ -65,7 +76,7 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
         config.api_headers = config_data.api_headers
     else:
         config = PortfolioCopyConfig(
-            account_id=config_data.account_id,
+            account_id=account_id,
             enabled=config_data.enabled,
             portfolio_id=config_data.portfolio_id,
             portfolio_name=config_data.portfolio_name,
@@ -85,8 +96,15 @@ async def save_config(config_data: PortfolioCopyConfigSchema, db: Session = Depe
     return config
 
 @router.delete("/configs/{config_id}")
-async def delete_config(config_id: int, db: Session = Depends(get_db)):
-    config = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.id == config_id).first()
+async def delete_config(
+    config_id: int,
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(PortfolioCopyConfig).filter(
+        PortfolioCopyConfig.id == config_id,
+        PortfolioCopyConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
     
@@ -95,10 +113,17 @@ async def delete_config(config_id: int, db: Session = Depends(get_db)):
     return {"message": "Deleted successfully"}
 
 @router.get("/logs", response_model=List[PortfolioCopyLogSchema])
-async def list_logs(account_id: Optional[str] = None, db: Session = Depends(get_db)):
+async def list_logs(
+    portfolio_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
     query = db.query(PortfolioCopyLog)
-    if account_id:
-        query = query.filter(PortfolioCopyLog.account_id == account_id)
+    query = db.query(PortfolioCopyLog)
+    # Always filter by authenticated account_id
+    query = query.filter(PortfolioCopyLog.account_id == account_id)
+    if portfolio_id:
+        query = query.filter(PortfolioCopyLog.portfolio_id == portfolio_id)
     return query.order_by(PortfolioCopyLog.timestamp.desc()).limit(100).all()
 
 @router.get("/portfolio-info/{portfolio_id}")
@@ -115,9 +140,16 @@ async def get_portfolio_info_proxy(portfolio_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/configs/{config_id}/preview")
-async def preview_rebalance(config_id: int, db: Session = Depends(get_db)):
+async def preview_rebalance(
+    config_id: int,
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
     from ...robot.portfolio_copy_trader import PortfolioCopyTrader
-    config = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.id == config_id).first()
+    config = db.query(PortfolioCopyConfig).filter(
+        PortfolioCopyConfig.id == config_id,
+        PortfolioCopyConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
     
