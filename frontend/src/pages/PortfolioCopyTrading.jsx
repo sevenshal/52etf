@@ -5,7 +5,7 @@ import {
     Tabs, Select
 } from 'antd';
 import {
-    PlusOutlined, ReloadOutlined, HistoryOutlined,
+    PlusOutlined, ReloadOutlined, PlayCircleOutlined, HistoryOutlined,
     SettingOutlined, DeleteOutlined, EditOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
@@ -273,7 +273,7 @@ const PortfolioCopyTrading = () => {
                         title="查看日志"
                     >日志</Button>
                     <Button
-                        icon={<ReloadOutlined />}
+                        icon={<PlayCircleOutlined />}
                         onClick={() => handlePreview(record.id)}
                         size="small"
                         title="预览调仓"
