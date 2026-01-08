@@ -421,8 +421,11 @@ const PortfolioCopyTrading = () => {
                                     key: 'params',
                                     render: (_, r) => (
                                         <Space direction="vertical" size={0}>
-                                            <Text type="secondary">仓位: {r.total_position_ratio}%</Text>
-                                            <Text type="secondary">金额: {r.total_amount || 'Portfolio'}</Text>
+                                            {r.total_amount ? (
+                                                <Text type="secondary">金额: {r.total_amount}</Text>
+                                            ) : (
+                                                <Text type="secondary">仓位: {r.total_position_ratio}%</Text>
+                                            )}
                                             <Text type="secondary">跟踪误差: {r.tracking_error_pct}%</Text>
                                         </Space>
                                     )
