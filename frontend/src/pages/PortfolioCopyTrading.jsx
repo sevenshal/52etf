@@ -98,10 +98,16 @@ const PortfolioCopyTrading = () => {
 
     const fetchLogs = async () => {
         try {
-            const response = await request.get('/api/ib-copy-trading/logs', {
-                params: { account_id: accountId }
+            const [ibLogsRes, snowballLogsRes] = await Promise.all([
+                request.get('/api/ib-copy-trading/logs'),
+                request.get('/api/snowball/logs')
+            ]);
+
+            const mergedLogs = [...ibLogsRes.data, ...snowballLogsRes.data].sort((a, b) => {
+                return new Date(b.timestamp) - new Date(a.timestamp);
             });
-            setLogs(response.data);
+
+            setLogs(mergedLogs);
         } catch (error) {
             message.error('获取日志失败');
         }
@@ -111,7 +117,6 @@ const PortfolioCopyTrading = () => {
         try {
             const payload = {
                 ...values,
-                account_id: accountId,
                 id: editingConfig?.id
             };
 
@@ -152,7 +157,7 @@ const PortfolioCopyTrading = () => {
     // Snowball Handlers
     const handleSnowballSave = async (values) => {
         try {
-            const payload = { ...values, account_id: accountId };
+            const payload = { ...values };
             if (snowballEditingConfig) {
                 await request.put(`/api/snowball/configs/${snowballEditingConfig.id}`, payload);
                 message.success('更新成功');
@@ -284,11 +289,18 @@ const PortfolioCopyTrading = () => {
         },
         {
             title: '组合',
-            dataIndex: 'portfolio_id',
             key: 'portfolio_id',
-            render: (pid) => {
-                const config = configs.find(c => c.portfolio_id === pid);
-                return config ? `${config.portfolio_name} (${pid})` : pid;
+            render: (_, record) => {
+                if (record.combination_id) {
+                    const config = snowballConfigs.find(c => c.combination_id === record.combination_id);
+                    return config ? `${config.combination_name} (${record.combination_id})` : record.combination_id;
+                }
+                if (record.portfolio_id) {
+                    const config = configs.find(c => c.portfolio_id === record.portfolio_id);
+                    const name = config ? config.portfolio_name : '';
+                    return name ? `${name} (${record.portfolio_id})` : record.portfolio_id;
+                }
+                return '-';
             }
         },
         {
