@@ -400,7 +400,8 @@ class PortfolioCopyTrader:
                 try:
                     active_configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
                     for config in active_configs:
-                        key = f"{config.account_id}_{config.portfolio_id}"
+                        # Ensure unique key per configuration entry (using config.id)
+                        key = f"cfg_{config.id}"
                         
                         if self._should_run(config.cron_rule, config.timezone or "America/New_York") and self._last_ran_map.get(key) != now_minute:
                             if key in self._processing_keys:
