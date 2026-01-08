@@ -232,8 +232,6 @@ async def get_snowball_opportunities(
     """
     cli_id = request.cli_id
 
-    logger.info(f"/opportunities request: ${str(request)}")
-
     with get_db_session(account_id) as db:
         config = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id).first()
         if not config or not config.enabled:
@@ -322,5 +320,7 @@ async def get_snowball_opportunities(
             opportunities.append(ops_info)
             
         opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
-            
+
+        logger.info(f"/opportunities request: ${str(request)} \n opportunities: ${str(opportunities)}")
+
         return TradeResponse(opportunities=opportunities, msg="Success")
