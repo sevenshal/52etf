@@ -17,7 +17,12 @@ const { TextArea } = Input;
 const PortfolioCopyTrading = () => {
     const { accountId } = useAccount();
     const [configs, setConfigs] = useState([]);
-    const [logs, setLogs] = useState([]);
+    // Logs State
+    const [logModalVisible, setLogModalVisible] = useState(false);
+    const [currentLogs, setCurrentLogs] = useState([]);
+    const [logLoading, setLogLoading] = useState(false);
+    const [currentLogTitle, setCurrentLogTitle] = useState('');
+
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [editingConfig, setEditingConfig] = useState(null);
@@ -96,20 +101,28 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const fetchLogs = async () => {
+    const handleViewLogs = async (record, type) => {
+        setLogLoading(true);
+        setLogModalVisible(true);
+        setCurrentLogs([]);
+        if (type === 'ib') {
+            setCurrentLogTitle(`跟单日志 - ${record.portfolio_name} (${record.portfolio_id})`);
+        } else {
+            setCurrentLogTitle(`跟单日志 - ${record.combination_name} (${record.combination_id})`);
+        }
+
         try {
-            const [ibLogsRes, snowballLogsRes] = await Promise.all([
-                request.get('/api/ib-copy-trading/logs'),
-                request.get('/api/snowball/logs')
-            ]);
-
-            const mergedLogs = [...ibLogsRes.data, ...snowballLogsRes.data].sort((a, b) => {
-                return new Date(b.timestamp) - new Date(a.timestamp);
-            });
-
-            setLogs(mergedLogs);
-        } catch (error) {
+            let res;
+            if (type === 'ib') {
+                res = await request.get('/api/ib-copy-trading/logs', { params: { portfolio_id: record.portfolio_id } });
+            } else {
+                res = await request.get('/api/snowball/logs', { params: { cli_id: record.cli_id } });
+            }
+            setCurrentLogs(res.data);
+        } catch (e) {
             message.error('获取日志失败');
+        } finally {
+            setLogLoading(false);
         }
     };
 
@@ -190,8 +203,7 @@ const PortfolioCopyTrading = () => {
             } else if (activeTab === 'snowball_configs') {
                 fetchSnowballConfigs();
             }
-            // Logs and IB accounts are always useful or global
-            fetchLogs();
+            // IB accounts are always useful or global
             fetchIbAccounts();
         }
     }, [accountId, activeTab]);
@@ -256,6 +268,12 @@ const PortfolioCopyTrading = () => {
                 <Space>
                     <Button
                         icon={<HistoryOutlined />}
+                        onClick={() => handleViewLogs(record, 'ib')}
+                        size="small"
+                        title="查看日志"
+                    >日志</Button>
+                    <Button
+                        icon={<ReloadOutlined />}
                         onClick={() => handlePreview(record.id)}
                         size="small"
                         title="预览调仓"
@@ -347,7 +365,7 @@ const PortfolioCopyTrading = () => {
                         <Button icon={<ReloadOutlined />} onClick={() => {
                             if (activeTab === 'ib_configs') fetchConfigs();
                             else if (activeTab === 'snowball_configs') fetchSnowballConfigs();
-                            fetchLogs();
+                            // fetchLogs(); // Removed
                         }}>刷新数据</Button>
 
                     </Space>
@@ -414,6 +432,7 @@ const PortfolioCopyTrading = () => {
                                     key: 'action',
                                     render: (_, record) => (
                                         <Space>
+                                            <Button icon={<HistoryOutlined />} size="small" onClick={() => handleViewLogs(record, 'snowball')}>日志</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
                                                 setSnowballEditingConfig(record);
                                                 snowballForm.setFieldsValue(record);
@@ -434,25 +453,56 @@ const PortfolioCopyTrading = () => {
                         </div>
                     </Tabs.TabPane>
 
-                    <Tabs.TabPane tab={<span><HistoryOutlined />跟单日志</span>} key="logs">
-                        <Table
-                            dataSource={logs}
-                            columns={logColumns}
-                            rowKey="id"
-                            pagination={{ pageSize: 20 }}
-                        />
-                    </Tabs.TabPane>
                 </Tabs>
             </Card>
 
-            {/* Existing Modal for IB Config */}
+            {/* Logs Modal */}
             <Modal
+                title={currentLogTitle}
+                visible={logModalVisible}
+                onCancel={() => setLogModalVisible(false)}
+                footer={null}
+                width={900}
+            >
+                <Table
+                    dataSource={currentLogs}
+                    loading={logLoading}
+                    rowKey="id"
+                    pagination={{ pageSize: 20 }}
+                    columns={[
+                        { title: '时间', dataIndex: 'timestamp', key: 'timestamp', render: (t) => new Date(t).toLocaleString() },
+                        { title: '行为', dataIndex: 'action', key: 'action' },
+                        { title: '标的', dataIndex: 'symbol', key: 'symbol' },
+                        { title: '数量', dataIndex: 'quantity', key: 'quantity' },
+                        {
+                            title: '价格',
+                            dataIndex: 'price',
+                            key: 'price',
+                            render: (p) => p && typeof p === 'number' ? p.toFixed(2) : p
+                        },
+                        {
+                            title: '结果',
+                            key: 'status',
+                            render: (_, record) => (
+                                <Tag color={record.status === 'SUCCESS' ? 'green' : (record.status === 'SIGNAL' ? 'blue' : 'red')}>
+                                    {record.status}
+                                </Tag>
+                            )
+                        },
+                        { title: '消息', dataIndex: 'message', key: 'message' }
+                    ]}
+                />
+            </Modal >
+
+            {/* Existing Modal for IB Config */}
+            < Modal
                 title="调仓计划预览"
                 visible={previewVisible}
                 onCancel={() => setPreviewVisible(false)}
-                footer={[
-                    <Button key="close" onClick={() => setPreviewVisible(false)}>关闭</Button>
-                ]}
+                footer={
+                    [
+                        <Button key="close" onClick={() => setPreviewVisible(false)}>关闭</Button>
+                    ]}
                 width={800}
             >
                 <Table
@@ -488,7 +538,7 @@ const PortfolioCopyTrading = () => {
                     ]}
                     pagination={false}
                 />
-            </Modal>
+            </Modal >
 
             <Modal
                 title={editingConfig ? "编辑跟单配置" : "添加跟单配置"}
