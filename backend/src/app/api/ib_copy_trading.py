@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/ib-copy-trading", tags=["ib-copy-trading"])
 
 class PortfolioCopyConfigSchema(BaseModel):
     id: Optional[int] = None
-    account_id: str
+    account_id: Optional[str] = None
     enabled: bool = False
     portfolio_id: str
     portfolio_name: Optional[str] = None
