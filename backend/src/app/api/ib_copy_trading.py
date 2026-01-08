@@ -119,7 +119,6 @@ async def list_logs(
     account_id: str = Depends(valid_account)
 ):
     query = db.query(PortfolioCopyLog)
-    query = db.query(PortfolioCopyLog)
     # Always filter by authenticated account_id
     query = query.filter(PortfolioCopyLog.account_id == account_id)
     if portfolio_id:

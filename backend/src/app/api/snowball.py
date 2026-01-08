@@ -237,10 +237,14 @@ async def delete_config(
 @router.get("/logs", response_model=List[SnowballLogResponse])
 async def get_logs(
     account_id: str = Depends(valid_account),
-    limit: int = 100
+    limit: int = 100,
+    cli_id: Optional[str] = None
 ):
     with get_db_session(account_id) as db:
-        logs = db.query(SnowballCopyLog).order_by(SnowballCopyLog.timestamp.desc()).limit(limit).all()
+        query = db.query(SnowballCopyLog)
+        if cli_id:
+            query = query.filter(SnowballCopyLog.cli_id == cli_id)
+        logs = query.order_by(SnowballCopyLog.timestamp.desc()).limit(limit).all()
         return [SnowballLogResponse.from_orm(log) for log in logs]
 
 # --- Core Logic ---
