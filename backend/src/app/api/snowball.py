@@ -321,6 +321,6 @@ async def get_snowball_opportunities(
             
         opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
 
-        logger.info(f"/opportunities request: ${str(request)} \n opportunities: ${str(opportunities)}")
+        logger.info(f"/opportunities request: ${str(request)} \ntarget_holdings_raw: ${target_holdings_raw}\nopportunities: ${str(opportunities)}")
 
         return TradeResponse(opportunities=opportunities, msg="Success")
