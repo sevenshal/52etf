@@ -260,12 +260,10 @@ async def get_snowball_opportunities(
             target_positions[symbol] = target_value
             all_symbols.add(symbol)
 
-        # 4. Calculate Current Positions (Value) and Collect Symbols
-        current_positions = {} # symbol -> current_value
+        # 4. Calculate Current Positions (Quantity) and Collect Symbols
+        current_quantities = {} # symbol -> quantity
         for pos in request.positions:
-             # Use raw symbol for now.
-             current_value = pos.quantity * pos.cost_price # Approximate current value
-             current_positions[pos.symbol] = current_value
+             current_quantities[pos.symbol] = pos.quantity
              all_symbols.add(pos.symbol) # Add held symbols to fetch price too
 
         # 5. Fetch Real-time Prices
@@ -286,7 +284,8 @@ async def get_snowball_opportunities(
             if not price:
                 continue
                 
-            current_val = current_positions.get(symbol, 0.0)
+            qty = current_quantities.get(symbol, 0)
+            current_val = qty * price
             target_val = target_positions.get(symbol, 0.0)
             diff_val = target_val - current_val
             
