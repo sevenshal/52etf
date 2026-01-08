@@ -231,7 +231,9 @@ async def get_snowball_opportunities(
     External caller provides current positions and cli_id.
     """
     cli_id = request.cli_id
-    
+
+    logger.info(f"/opportunities request: ${str(request)}")
+
     with get_db_session(account_id) as db:
         config = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id).first()
         if not config or not config.enabled:
