@@ -1,0 +1,21 @@
+# /etc/systemd/system/quant-server.service
+[Unit]
+Description=Quant Strategy Server
+After=network.target
+[Service]
+# Ubuntu 默认用户通常是 ubuntu 或你的用户名
+User=ecs-user
+# 项目根目录，根据实际路径修改
+WorkingDirectory=/opt/quant/backend
+# 启动命令
+ExecStart=/usr/bin/python3 /opt/quant/backend/quant_server.pyz
+# 自动重启
+Restart=always
+RestartSec=5
+# 环境变量
+Environment=ENV=prod
+# 日志处理
+StandardOutput=append:/var/log/quant/service.log
+StandardError=inherit
+[Install]
+WantedBy=multi-user.target
