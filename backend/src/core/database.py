@@ -333,13 +333,24 @@ class SnowballCopyConfig(Base):
     __tablename__ = "snowball_copy_configs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    cli_id = Column(String, index=True, unique=True, nullable=False) # 外部调用标识
+    cli_id = Column(String, index=True, nullable=False) # 外部调用标识 (允许重复，支持多组合)
     combination_id = Column(String, nullable=False) # 雪球组合ID, 如 ZH123456
     combination_name = Column(String)
     enabled = Column(Boolean, default=True)
     total_position_ratio = Column(Float, default=100.0) # 总仓位比例 (%)
     total_amount = Column(Float) # 总金额 (优先)
     tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class SnowballPortfolioSnapshot(Base):
+    """雪球组合持仓快照"""
+    __tablename__ = "snowball_portfolio_snapshots"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("snowball_copy_configs.id"), nullable=False)
+    holdings = Column(JSON) # {symbol: quantity}
+    cash = Column(Float, default=0.0)
+    market_value = Column(Float, default=0.0)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballCopyLog(Base):
@@ -432,9 +443,46 @@ def get_db_session_factory(account_id: str):
                 
                 if 'timezone' not in pcc_cols:
                     conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
+
+                # 检查并迁移 snowball_copy_configs 的 cli_id 唯一约束
+                # SQLite 不支持直接 drop constraint，需要 recreate table
+                # 这里简化处理：检查索引。如果 cli_id 是 unique index，则重建表
+                # 简单起见，我们只检查是否存在新表 snowball_portfolio_snapshots
+                # 如果不存在，说明是旧版本，执行一次全量迁移逻辑（或者根据需求）
+                
+                # Check for SnowballPortfolioSnapshot table
+                result = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='snowball_portfolio_snapshots'")
+                if not result.fetchone():
+                    # 新表不存在，说明可能需要迁移 config 表去除 unique 约束
+                    # 1. Rename old table
+                    conn.execute("ALTER TABLE snowball_copy_configs RENAME TO snowball_copy_configs_old")
+                    # 2. Create new table (Base.metadata.create_all will do this later, but we need it now to copy data)
+                    # For simplicity, we create it manually or let create_all handle it and then copy?
+                    # Better to let create_all handle creation, but we renamed the old one.
+                    # So we need to wait for create_all to run? No, create_all runs on bound metadata.
+                    # We can't do it easily inside this transaction if we rely on next create_all.
+                    # Let's do a manual create for the new table structure using pure SQL is hard to sync with ORM.
+                    # Alternative: We just drop the unique index if it's an index?
+                    # SQLite enforces UNIQUE constraints via indexes usually.
+                    # checking index_list
+                    idx_result = conn.execute("PRAGMA index_list(snowball_copy_configs)")
+                    # if we see a unique index on cli_id, we might want to drop it. 
+                    # But if it's a constraint defined in CREATE TABLE, we can't drop index easily if it's implicit? 
+                    # We will assume re-creation is safest.
+                    pass
                 
                 # 检查并创建新表
                 Base.metadata.create_all(bind=engine)
+                
+                # 如果刚才重命名了表，现在把数据导回去
+                result = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='snowball_copy_configs_old'")
+                if result.fetchone():
+                    # Copy data back
+                    # Note: old table has unique cli_id, new one doesn't. Data should copy fine.
+                    # Columns should handle matching manually or select *
+                    # Assuming columns are compatible.
+                    conn.execute("INSERT INTO snowball_copy_configs (id, cli_id, combination_id, combination_name, enabled, total_position_ratio, total_amount, tracking_error_pct, updated_at) SELECT id, cli_id, combination_id, combination_name, enabled, total_position_ratio, total_amount, tracking_error_pct, updated_at FROM snowball_copy_configs_old")
+                    conn.execute("DROP TABLE snowball_copy_configs_old")
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass

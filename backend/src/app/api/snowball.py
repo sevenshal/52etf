@@ -4,8 +4,9 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import httpx
 import logging
+import collections
 from sqlalchemy.orm import Session
-from ...core.database import get_db_session, SnowballCopyConfig, SnowballCopyLog
+from ...core.database import get_db_session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -50,9 +51,11 @@ class SnowballConfigUpdate(BaseModel):
 class SnowballConfigResponse(SnowballConfigCreate):
     id: int
     updated_at: datetime
+    snapshot_value: Optional[float] = 0.0
     
     class Config:
         from_attributes = True
+
 
 class SnowballLogResponse(BaseModel):
     id: int
@@ -180,7 +183,17 @@ async def get_combination_info(
 async def list_configs(account_id: str = Depends(valid_account)):
     with get_db_session(account_id) as db:
         configs = db.query(SnowballCopyConfig).all()
-        return [SnowballConfigResponse.from_orm(c) for c in configs]
+        result = []
+        for c in configs:
+            resp = SnowballConfigResponse.from_orm(c)
+            # Fetch snapshot value
+            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=c.id).first()
+            if snapshot:
+                resp.snapshot_value = snapshot.market_value
+            else:
+                resp.snapshot_value = c.total_amount # Fallback or 0
+            result.append(resp)
+        return result
 
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
@@ -188,10 +201,10 @@ async def create_config(
     account_id: str = Depends(valid_account)
 ):
     with get_db_session(account_id) as db:
-        # Check if cli_id exists
-        existing = db.query(SnowballCopyConfig).filter_by(cli_id=config.cli_id).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="CLI ID already exists")
+        # Check if cli_id exists - REMOVED for Multi-Portfolio Support
+        # existing = db.query(SnowballCopyConfig).filter_by(cli_id=config.cli_id).first()
+        # if existing:
+        #     raise HTTPException(status_code=400, detail="CLI ID already exists")
         
         # Auto-fetch name if not provided
         if not config.combination_name:
@@ -282,171 +295,244 @@ async def get_snowball_opportunities(
     """
     Calculate trading opportunities based on Snowball combination holdings.
     External caller provides current positions and cli_id.
+    Supports multiple combinations per cli_id using Snapshot tracking.
     """
     cli_id = request.cli_id
 
     with get_db_session(account_id) as db:
-        config = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id).first()
-        if not config or not config.enabled:
+        # 1. Fetch Configs
+        configs = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
+        if not configs:
             return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
 
-        # 1. Fetch Target Holdings from Xueqiu
-        target_holdings_raw = await fetch_xueqiu_holdings(config.combination_id)
-        if not target_holdings_raw:
-             return TradeResponse(opportunities=[], msg="Failed to fetch target holdings from Xueqiu")
-
-        # 2. Determine Total Value for Calculation
-        # Priority: Configured Total Amount > Portfolio Value form Request
-        total_value = config.total_amount if config.total_amount else request.portfolio.portfolio_value
-        
-        # Apply Total Position Ratio
-        effective_total_value = total_value * (config.total_position_ratio / 100.0)
-
-        # 3. Calculate Target Positions (Value)
-        target_positions = {} # symbol -> target_value
+        # 2. Pre-fetch Data
+        # 2.1 Gather all symbols (Held + Targets from all configs)
         all_symbols = set()
         
-        for holding in target_holdings_raw:
-            symbol = holding['symbol'] # e.g. SH603722
-            weight = holding['weight'] # percentage, e.g. 7.11
-            target_value = effective_total_value * (weight / 100.0)
-            target_positions[symbol] = target_value
-            all_symbols.add(symbol)
-
-        # 4. Calculate Current Positions (Quantity) and Collect Symbols
+        # Local cache for target holdings: {config_id: [{symbol, weight}]}
+        config_target_weights = {} 
+        
+        # A. From Request Positions
         current_quantities = {} # symbol -> quantity
         for pos in request.positions:
              current_quantities[pos.symbol] = pos.quantity
-             all_symbols.add(pos.symbol) # Add held symbols to fetch price too
+             all_symbols.add(pos.symbol)
 
-        # 5. Fetch Real-time Prices
+        # B. From Config Targets (Fetch XQ Holdings)
+        for config in configs:
+            weights = await fetch_xueqiu_holdings(config.combination_id)
+            config_target_weights[config.id] = weights
+            for w in weights:
+                all_symbols.add(w['symbol'])
+
+        # 2.2 Fetch Prices
         prices = await fetch_xueqiu_quotes(list(all_symbols))
+        
+        # Helper to get price
+        def get_price(sym):
+            p = prices.get(sym)
+            if not p:
+                 pos = next((pos for pos in request.positions if pos.symbol == sym), None)
+                 if pos: p = pos.cost_price
+            return p or 0.0
 
-        # 6. Generate Opportunities
+        # 3. Process Snapshots & Aggregate Targets
+        aggregated_target_quantities = {} # symbol -> quantity
+        symbol_contributors = collections.defaultdict(set) # symbol -> set(combination_id)
+        
+        current_time = datetime.now()
+        # Reset Window: 14:55 - 15:00 (A-share closing)
+        is_closing_window = (current_time.hour == 14 and current_time.minute >= 55) or (current_time.hour == 15 and current_time.minute == 0)
+
+        for config in configs:
+            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config.id).first()
+            
+            # --- Initialize or Calculate Current Snapshot Value ---
+            if not snapshot:
+                # Init with config Amount (Cash)
+                snapshot = SnowballPortfolioSnapshot(
+                    config_id=config.id,
+                    holdings={},
+                    cash=config.total_amount or 0.0,
+                    market_value=config.total_amount or 0.0
+                )
+                db.add(snapshot)
+                db.flush() 
+            
+            # Calc Current Market Value of Snapshot
+            # Value = Sum(HoldingQty * Price) + Cash
+            snap_holdings = snapshot.holdings or {}
+            snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
+            current_total_val = snap_mv + snapshot.cash
+            
+            # --- Reset Logic ---
+            # Base Value = Current Snapshot Value.
+            # EXCEPT if it's 0 (fresh) or logic needs reset, use config amount.
+            base_value = current_total_val if current_total_val > 0 else (config.total_amount or 0.0)
+            
+            # If User Requested Reset (check diff and window) - Logic TBD (Skipped for now as per plan, relying on natural convergence or manual intervention later)
+            
+            # --- Calculate New Target State ---
+            new_snap_holdings = {}
+            used_cash = 0.0
+            
+            weights = config_target_weights.get(config.id, [])
+            threshold_pct = config.tracking_error_pct or 1.0
+            
+            # Combine all symbols (Current + Target)
+            all_snap_symbols = set(current_holdings.keys())
+            target_weights_map = {}
+            for item in weights:
+                all_snap_symbols.add(item['symbol'])
+                target_weights_map[item['symbol']] = item['weight']
+            
+            for sym in all_snap_symbols:
+                price = get_price(sym)
+                if price <= 0: continue
+                
+                # 1. Target Value
+                w = target_weights_map.get(sym, 0.0)
+                target_val = base_value * (w / 100.0)
+                
+                # 2. Current Value
+                cur_q = current_holdings.get(sym, 0)
+                cur_val = cur_q * price
+                
+                # 3. Deviation Check
+                diff_val = target_val - cur_val
+                diff_pct_of_total = (abs(diff_val) / base_value) * 100 if base_value > 0 else 100
+                
+                final_q = cur_q # Default: Keep
+                
+                # If deviation > threshold, rebalance to Target
+                # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
+                # But math works: diff IS target_val.
+                if diff_pct_of_total >= threshold_pct:
+                    raw_q = target_val / price
+                    final_q = int(raw_q / 100) * 100
+                
+                if final_q > 0:
+                    new_snap_holdings[sym] = final_q
+                    used_cash += final_q * price
+            
+            # Update Snapshot
+            snapshot.holdings = new_snap_holdings
+            snapshot.cash = base_value - used_cash
+            snapshot.market_value = base_value
+            # (will commit at end)
+
+            # --- Aggregate ---
+            for sym, qty in new_snap_holdings.items():
+                aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
+                symbol_contributors[sym].add(config.combination_id)
+
+        # 4. Generate Opportunities (Diff vs Actual)
         opportunities = []
         
-        # 6.1 Initialize Cash Budgeting
-        # Start with available cash.
-        # We will add proceeds from SELLs to this budget.
-        # We will deduct cost of BUYs from this budget.
         projected_cash = request.portfolio.available_cash
         
-        # Sort symbols to prioritize SELLs first (to release cash)
-        # We process SELLs first, then BUYs.
-        sorted_symbols = sorted(all_symbols, key=lambda s: 
-            (target_positions.get(s, 0.0) - (current_quantities.get(s, 0) * (prices.get(s) or 0.0))) > 0
-        )
+        # Identify all symbols needing action
+        # Union of Aggregated Targets and Current Actuals
+        all_op_symbols = set(aggregated_target_quantities.keys()) | set(current_quantities.keys())
+        
+        def get_diff_info(sym):
+            tgt_q = aggregated_target_quantities.get(sym, 0)
+            cur_q = current_quantities.get(sym, 0)
+            diff = tgt_q - cur_q
+            return sym, diff, tgt_q, cur_q
 
-        for symbol in sorted_symbols:
-            price = prices.get(symbol)
-            
-            # Fallback to cost_price if market price unavailable (and we hold it)
-            if not price:
-                 pos = next((p for p in request.positions if p.symbol == symbol), None)
-                 if pos:
-                     price = pos.cost_price
-            
-            if not price:
+        # Sort: Sells first (diff < 0)
+        sorted_ops = sorted([get_diff_info(s) for s in all_op_symbols], key=lambda x: x[1]) # diff ascending (negative first)
+        
+        for sym, diff_qty, tgt_q, cur_q in sorted_ops:
+            if diff_qty == 0:
                 continue
                 
-            qty = current_quantities.get(symbol, 0)
-            current_val = qty * price
-            target_val = target_positions.get(symbol, 0.0)
-            diff_val = target_val - current_val
+            price = get_price(sym)
+            if price <= 0: continue
             
-            total_config_val = effective_total_value if effective_total_value > 0 else 1.0
-            diff_pct = (diff_val / total_config_val) * 100.0
-            target_pct = (target_val / total_config_val) * 100.0
-            current_pct = (current_val / total_config_val) * 100.0
+            action = "BUY" if diff_qty > 0 else "SELL"
+            abs_qty = abs(diff_qty)
             
-            if abs(diff_pct) < config.tracking_error_pct:
-                continue 
-            
-            action = "BUY" if diff_val > 0 else "SELL"
-            
-            # Round to 100 lots (Standard A-share logic)
-            # STAR Market (SH.688) has special rule: min 200 shares.
-            is_star = symbol.startswith("SH.688")
+            # Min Qty Check (100 or 200 for STAR)
+            is_star = sym.startswith("SH.688")
             min_qty = 200 if is_star else 100
             
-            raw_qty = abs(diff_val) / price
-            # We still keep 100 increments for simplicity/safety across boards
-            target_trade_qty = int(raw_qty / 100) * 100
-            
-            if target_trade_qty < min_qty:
+            if abs_qty < min_qty:
                 continue
             
             final_qty = 0
             reason = ""
+            
+            # Logging info
+            total_actual_asset = request.portfolio.portfolio_value or 1.0
+            tgt_val = tgt_q * price
+            cur_val = cur_q * price
+            tgt_pct = (tgt_val / total_actual_asset) * 100
+            cur_pct = (cur_val / total_actual_asset) * 100
+            diff_pct = ((tgt_val - cur_val) / total_actual_asset) * 100
 
             if action == "SELL":
-                # --- T+1 Restriction Check ---
-                # Check available (sellable) quantity
-                pos = next((p for p in request.positions if p.symbol == symbol), None)
-                available_qty = pos.available_quantity if pos and pos.available_quantity is not None else qty
+                # T+1 Check
+                pos = next((p for p in request.positions if p.symbol == sym), None)
+                available = pos.available_quantity if pos and pos.available_quantity is not None else cur_q
                 
-                # We can only sell what is available
-                max_sellable = available_qty
-                final_qty = min(target_trade_qty, max_sellable)
-                
+                final_qty = min(abs_qty, available)
                 if final_qty < min_qty:
-                    logger.info(f"Skipping SELL for {symbol}: Target {target_trade_qty}, Available {available_qty} (T+1 restriction)")
+                    logger.info(f"Skipping SELL {sym}: Need {abs_qty}, Avail {available}")
                     continue
-                
-                # Update Cash Budget
+                    
                 proceeds = final_qty * price
                 projected_cash += proceeds
-                reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available_qty}"
-
-            elif action == "BUY":
-                # --- Cash Budget Check ---
-                estimated_cost = target_trade_qty * price
+                reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available}"
                 
-                if estimated_cost <= projected_cash:
-                    final_qty = target_trade_qty
-                    projected_cash -= estimated_cost
-                    reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}"
+            elif action == "BUY":
+                # Cash Check
+                est_cost = abs_qty * price
+                if est_cost <= projected_cash:
+                    final_qty = abs_qty
+                    projected_cash -= est_cost
+                    reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}"
                 else:
-                    # Try to buy as much as possible with remaining cash
-                    max_buyable_qty = int((projected_cash / price) / 100) * 100
-                    if max_buyable_qty >= min_qty:
-                         final_qty = max_buyable_qty
-                         projected_cash -= (final_qty * price)
-                         reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited (Req: {estimated_cost:.0f}, Has: {projected_cash + (final_qty * price):.0f})"
+                    # Partial buy
+                    max_can_buy = int((projected_cash / price) / 100) * 100
+                    if max_can_buy >= min_qty:
+                        final_qty = max_can_buy
+                        projected_cash -= final_qty * price
+                        reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited"
                     else:
-                        logger.info(f"Skipping BUY for {symbol}: Insufficient projected cash. Need {estimated_cost:.2f}, Have {projected_cash:.2f}")
+                        logger.info(f"Skipping BUY {sym}: Need {est_cost}, Have {projected_cash}")
                         continue
+            
+            # Create Log & Opp
+            contributors = symbol_contributors.get(sym, set())
+            combo_id_str = ",".join(sorted(contributors)) if contributors else "AGGREGATED"
 
-            ops_info = {
-                "symbol": symbol,
-                "name": "", # Could be populated if we fetched stock names
+            log_entry = SnowballCopyLog(
+                cli_id=cli_id,
+                combination_id=combo_id_str, # Mixed
+                action=action,
+                symbol=sym,
+                quantity=final_qty,
+                price=price,
+                status='SIGNAL',
+                message=reason
+            )
+            db.add(log_entry)
+            db.flush()
+            
+            opportunities.append({
+                "symbol": sym,
+                "name": "",
                 "action": action,
                 "quantity": final_qty,
-                "reason": reason
-            }
-            opportunities.append(ops_info)
-            
+                "reason": reason,
+                "op_id": log_entry.id
+            })
+
+        db.commit()
+        
+        # Sort output: SELLs first
         opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
-
-        logger.info(f"/opportunities request: {str(request)} \nprices: {price}\ntarget_holdings_raw: {target_holdings_raw}\nopportunities: {str(opportunities)}")
-
-        # Record Logs if opportunities exist
-        if opportunities:
-            for op in opportunities:
-                log_entry = SnowballCopyLog(
-                    cli_id=cli_id,
-                    combination_id=config.combination_id,
-                    action=op['action'],
-                    symbol=op['symbol'],
-                    quantity=op['quantity'],
-                    price=prices.get(op['symbol'], 0.0), # Use fetched price
-                    status='SIGNAL',
-                    message=op['reason']
-                )
-                db.add(log_entry)
-                db.flush() # Flush to get the ID
-                op['op_id'] = log_entry.id # Inject ID into opportunity object
-                
-            db.commit()
-
+        
         return TradeResponse(opportunities=opportunities, msg="Success")
