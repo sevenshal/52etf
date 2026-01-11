@@ -490,28 +490,7 @@ const PortfolioCopyTrading = () => {
                     loading={logLoading}
                     rowKey="id"
                     pagination={{ pageSize: 20 }}
-                    columns={[
-                        { title: '时间', dataIndex: 'timestamp', key: 'timestamp', render: (t) => new Date(t).toLocaleString() },
-                        { title: '行为', dataIndex: 'action', key: 'action' },
-                        { title: '标的', dataIndex: 'symbol', key: 'symbol' },
-                        { title: '数量', dataIndex: 'quantity', key: 'quantity' },
-                        {
-                            title: '价格',
-                            dataIndex: 'price',
-                            key: 'price',
-                            render: (p) => p && typeof p === 'number' ? p.toFixed(2) : p
-                        },
-                        {
-                            title: '结果',
-                            key: 'status',
-                            render: (_, record) => (
-                                <Tag color={record.status === 'SUCCESS' ? 'green' : (record.status === 'SIGNAL' ? 'blue' : 'red')}>
-                                    {record.status}
-                                </Tag>
-                            )
-                        },
-                        { title: '消息', dataIndex: 'message', key: 'message' }
-                    ]}
+                    columns={logColumns}
                 />
             </Modal >
 
