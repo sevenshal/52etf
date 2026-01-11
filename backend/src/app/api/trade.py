@@ -24,6 +24,7 @@ class Position(BaseModel):
     symbol: str
     quantity: int
     cost_price: float
+    available_quantity: Optional[int] = None
 
 class Portfolio(BaseModel):
     portfolio_value: float      # 总资产

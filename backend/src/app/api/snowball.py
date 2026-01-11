@@ -300,7 +300,19 @@ async def get_snowball_opportunities(
         # 6. Generate Opportunities
         opportunities = []
         
-        for symbol in all_symbols:
+        # 6.1 Initialize Cash Budgeting
+        # Start with available cash.
+        # We will add proceeds from SELLs to this budget.
+        # We will deduct cost of BUYs from this budget.
+        projected_cash = request.portfolio.available_cash
+        
+        # Sort symbols to prioritize SELLs first (to release cash)
+        # We process SELLs first, then BUYs.
+        sorted_symbols = sorted(all_symbols, key=lambda s: 
+            (target_positions.get(s, 0.0) - (current_quantities.get(s, 0) * (prices.get(s) or 0.0))) > 0
+        )
+
+        for symbol in sorted_symbols:
             price = prices.get(symbol)
             
             # Fallback to cost_price if market price unavailable (and we hold it)
@@ -322,7 +334,7 @@ async def get_snowball_opportunities(
             
             if abs(diff_pct) < config.tracking_error_pct:
                 continue 
-                
+            
             action = "BUY" if diff_val > 0 else "SELL"
             
             # Round to 100 lots (Standard A-share logic)
@@ -332,17 +344,58 @@ async def get_snowball_opportunities(
             
             raw_qty = abs(diff_val) / price
             # We still keep 100 increments for simplicity/safety across boards
-            qty = int(raw_qty / 100) * 100
+            target_trade_qty = int(raw_qty / 100) * 100
             
-            if qty < min_qty:
+            if target_trade_qty < min_qty:
                 continue
+            
+            final_qty = 0
+            reason = ""
+
+            if action == "SELL":
+                # --- T+1 Restriction Check ---
+                # Check available (sellable) quantity
+                pos = next((p for p in request.positions if p.symbol == symbol), None)
+                available_qty = pos.available_quantity if pos and pos.available_quantity is not None else qty
                 
+                # We can only sell what is available
+                max_sellable = available_qty
+                final_qty = min(target_trade_qty, max_sellable)
+                
+                if final_qty < min_qty:
+                    logger.info(f"Skipping SELL for {symbol}: Target {target_trade_qty}, Available {available_qty} (T+1 restriction)")
+                    continue
+                
+                # Update Cash Budget
+                proceeds = final_qty * price
+                projected_cash += proceeds
+                reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available_qty}"
+
+            elif action == "BUY":
+                # --- Cash Budget Check ---
+                estimated_cost = target_trade_qty * price
+                
+                if estimated_cost <= projected_cash:
+                    final_qty = target_trade_qty
+                    projected_cash -= estimated_cost
+                    reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}"
+                else:
+                    # Try to buy as much as possible with remaining cash
+                    max_buyable_qty = int((projected_cash / price) / 100) * 100
+                    if max_buyable_qty >= min_qty:
+                         final_qty = max_buyable_qty
+                         projected_cash -= (final_qty * price)
+                         reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited (Req: {estimated_cost:.0f}, Has: {projected_cash + (final_qty * price):.0f})"
+                    else:
+                        logger.info(f"Skipping BUY for {symbol}: Insufficient projected cash. Need {estimated_cost:.2f}, Have {projected_cash:.2f}")
+                        continue
+
             ops_info = {
                 "symbol": symbol,
                 "name": "", # Could be populated if we fetched stock names
                 "action": action,
-                "quantity": qty,
-                "reason": f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}"
+                "quantity": final_qty,
+                "reason": reason
             }
             opportunities.append(ops_info)
             
