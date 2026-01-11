@@ -73,6 +73,12 @@ class TradeResponse(BaseModel):
     opportunities: List[Any]
     msg: Optional[str] = None
 
+class SnowballLogStatusUpdate(BaseModel):
+    id: int
+    status: str
+    message: Optional[str] = None
+    price: Optional[float] = None
+
 # --- Helpers ---
 
 def normalize_symbol(symbol: str) -> str:
@@ -247,6 +253,25 @@ async def get_logs(
         logs = query.order_by(SnowballCopyLog.timestamp.desc()).limit(limit).all()
         return [SnowballLogResponse.from_orm(log) for log in logs]
 
+@router.post("/logs/status")
+async def update_log_status(
+    status_update: SnowballLogStatusUpdate,
+    account_id: str = Depends(valid_account)
+):
+    with get_db_session(account_id) as db:
+        log = db.query(SnowballCopyLog).filter_by(id=status_update.id).first()
+        if not log:
+            raise HTTPException(status_code=404, detail="Log entry not found")
+        
+        log.status = status_update.status
+        if status_update.message:
+            log.message = status_update.message
+        if status_update.price:
+            log.price = status_update.price
+            
+        db.commit()
+        return {"message": "Status updated"}
+
 # --- Core Logic ---
 
 @router.post("/opportunities", response_model=TradeResponse)
@@ -417,6 +442,9 @@ async def get_snowball_opportunities(
                     message=op['reason']
                 )
                 db.add(log_entry)
+                db.flush() # Flush to get the ID
+                op['op_id'] = log_entry.id # Inject ID into opportunity object
+                
             db.commit()
 
         return TradeResponse(opportunities=opportunities, msg="Success")

@@ -119,33 +119,61 @@ def handle_data(context, data):
         # 执行交易机会
         for opp in opportunities:
             symbol = convert_to_client_code(opp["symbol"])
+            op_id = opp.get("op_id")
+            
             # 获取限价
             limit_price = get_limit_price(symbol, opp["action"])
+            
+            status = "FAILED"
+            msg = ""
+            order_sn = None
+            
             if opp["action"] == "BUY":
                 order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
-                log_to_backend("INFO" if order_sn else 'ERROR', "买入%s %s, 数量: %d, 价格: %s, 原因: %s" % ('成功' if order_sn else '失败' ,opp['name'], opp['quantity'], limit_price, opp["reason"]))
+                if order_sn:
+                    status = "SUCCESS"
+                    msg = "买入%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
+                else:
+                    msg = "买入%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
             elif opp["action"] == "SELL":
                 order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
-                log_to_backend("INFO" if order_sn else 'ERROR', "卖出%s %s, 数量: %d, 价格: %s, 原因: %s" % ('成功' if order_sn else '失败', opp['name'], opp['quantity'], limit_price, opp["reason"]))
+                if order_sn:
+                    status = "SUCCESS"
+                    msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
+                else:
+                    msg = "卖出%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
+            
+            # 优先使用结构化日志上报
+            report_execution(op_id, status, msg, price=limit_price if order_sn else None)
+            
+            # 本地日志
+            if order_sn:
+                log.info("交易成功: " + msg)
+            else:
+                log.error("交易失败: " + msg)
                 
     except Exception as e:
         log.error("处理交易时发生异常: %s" % str(e))
 
 # 保留日志相关函数
-def log_to_backend(level, message):
-    """记录日志到后端"""
-    if level == "ERROR":
-        log.error(message)
-    else:
-        log.info(message)
+def report_execution(op_id, status, message, price=None):
+    """上报执行结果到后端"""
+    if not op_id:
+        return
     try:
+        payload = {
+            "id": op_id,
+            "status": status,
+            "message": str(message)
+        }
+        if price:
+            payload["price"] = price
+            
         requests.post(
-            g.api_base_url + "/trading-logs",
+            g.api_base_url + "/logs/status",
             headers=g.headers,
-            json={
-                "level": level,
-                "message": message
-            }
+            json=payload,
+            timeout=5
         )
     except Exception as e:
-        log.error("记录日志到后端失败: %s" % str(e))
+        log.error("上报执行结果失败: %s" % str(e))
