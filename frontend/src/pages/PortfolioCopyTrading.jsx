@@ -108,7 +108,7 @@ const PortfolioCopyTrading = () => {
         if (type === 'ib') {
             setCurrentLogTitle(`跟单日志 - ${record.portfolio_name} (${record.portfolio_id})`);
         } else {
-            setCurrentLogTitle(`跟单日志 - ${record.combination_name} (${record.combination_id})`);
+            setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
         }
 
         try {
@@ -310,8 +310,13 @@ const PortfolioCopyTrading = () => {
             key: 'portfolio_id',
             render: (_, record) => {
                 if (record.combination_id) {
-                    const config = snowballConfigs.find(c => c.combination_id === record.combination_id);
-                    return config ? `${config.combination_name} (${record.combination_id})` : record.combination_id;
+                    // Handle comma-separated IDs for Snowball
+                    const ids = record.combination_id.split(',');
+                    const names = ids.map(id => {
+                        const config = snowballConfigs.find(c => c.combination_id === id);
+                        return config ? config.combination_name : id;
+                    });
+                    return names.join(', ');
                 }
                 if (record.portfolio_id) {
                     const config = configs.find(c => c.portfolio_id === record.portfolio_id);
@@ -414,19 +419,33 @@ const PortfolioCopyTrading = () => {
                                 {
                                     title: 'API标识',
                                     dataIndex: 'cli_id',
-                                    render: (id) => <Tag color="blue">{id}</Tag>
+                                    render: (id, record) => (
+                                        <Space>
+                                            <Tag color="blue">{id}</Tag>
+                                            <Button
+                                                icon={<HistoryOutlined />}
+                                                size="small"
+                                                type="text"
+                                                onClick={() => handleViewLogs(record, 'snowball')}
+                                                title="查看日志"
+                                            />
+                                        </Space>
+                                    )
                                 },
                                 {
-                                    title: '参数',
+                                    title: '资金/参数',
                                     key: 'params',
                                     render: (_, r) => (
                                         <Space direction="vertical" size={0}>
+                                            <Text strong style={{ color: '#1890ff' }}>
+                                                当前市值: {r.snapshot_value ? r.snapshot_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 0}
+                                            </Text>
                                             {r.total_amount ? (
-                                                <Text type="secondary">金额: {r.total_amount}</Text>
+                                                <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {r.total_amount.toLocaleString()}</Text>
                                             ) : (
-                                                <Text type="secondary">仓位: {r.total_position_ratio}%</Text>
+                                                <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {r.total_position_ratio}%</Text>
                                             )}
-                                            <Text type="secondary">跟踪误差: {r.tracking_error_pct}%</Text>
+                                            <Text type="secondary" style={{ fontSize: '12px' }}>误差: {r.tracking_error_pct}%</Text>
                                         </Space>
                                     )
                                 },
@@ -435,7 +454,6 @@ const PortfolioCopyTrading = () => {
                                     key: 'action',
                                     render: (_, record) => (
                                         <Space>
-                                            <Button icon={<HistoryOutlined />} size="small" onClick={() => handleViewLogs(record, 'snowball')}>日志</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
                                                 setSnowballEditingConfig(record);
                                                 snowballForm.setFieldsValue(record);
