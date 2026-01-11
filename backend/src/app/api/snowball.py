@@ -35,7 +35,7 @@ class SnowballConfigCreate(BaseModel):
     combination_id: str
     combination_name: Optional[str] = None
     enabled: bool = True
-    total_position_ratio: float = 100.0
+    total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
 
@@ -380,7 +380,7 @@ async def get_snowball_opportunities(
             threshold_pct = config.tracking_error_pct or 1.0
             
             # Combine all symbols (Current + Target)
-            all_snap_symbols = set(current_holdings.keys())
+            all_snap_symbols = set(snap_holdings.keys())
             target_weights_map = {}
             for item in weights:
                 all_snap_symbols.add(item['symbol'])
@@ -395,7 +395,7 @@ async def get_snowball_opportunities(
                 target_val = base_value * (w / 100.0)
                 
                 # 2. Current Value
-                cur_q = current_holdings.get(sym, 0)
+                cur_q = snap_holdings.get(sym, 0)
                 cur_val = cur_q * price
                 
                 # 3. Deviation Check
