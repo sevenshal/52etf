@@ -351,6 +351,7 @@ class SnowballPortfolioSnapshot(Base):
     holdings = Column(JSON) # {symbol: quantity}
     cash = Column(Float, default=0.0)
     market_value = Column(Float, default=0.0)
+    last_synced_amount = Column(Float, default=0.0)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballCopyLog(Base):
@@ -483,6 +484,12 @@ def get_db_session_factory(account_id: str):
                     # Assuming columns are compatible.
                     conn.execute("INSERT INTO snowball_copy_configs (id, cli_id, combination_id, combination_name, enabled, total_position_ratio, total_amount, tracking_error_pct, updated_at) SELECT id, cli_id, combination_id, combination_name, enabled, total_position_ratio, total_amount, tracking_error_pct, updated_at FROM snowball_copy_configs_old")
                     conn.execute("DROP TABLE snowball_copy_configs_old")
+
+                # Check SnowballPortfolioSnapshot for `last_synced_amount`
+                result = conn.execute("PRAGMA table_info(snowball_portfolio_snapshots)")
+                snap_cols = [row[1] for row in result]
+                if 'last_synced_amount' not in snap_cols:
+                     conn.execute("ALTER TABLE snowball_portfolio_snapshots ADD COLUMN last_synced_amount FLOAT DEFAULT 0.0")
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass

@@ -349,26 +349,43 @@ async def get_snowball_opportunities(
             
             # --- Initialize or Calculate Current Snapshot Value ---
             if not snapshot:
-                # Init with config Amount (Cash)
+                # Init with 0. Wait for adjustment logic to inject capital
                 snapshot = SnowballPortfolioSnapshot(
                     config_id=config.id,
                     holdings={},
-                    cash=config.total_amount or 0.0,
-                    market_value=config.total_amount or 0.0
+                    cash=0.0,
+                    market_value=0.0,
+                    last_synced_amount=0.0
                 )
                 db.add(snapshot)
                 db.flush() 
             
+            # --- Capital Adjustment Logic ---
+            # Handles Fresh Start (last_synced=0) and Adjustments (last_synced != total_amount)
+            # Only applies during closing window (14:55-15:00) to respect T+1 setup.
+            
+            target_amt = config.total_amount or 0.0
+            synced_amt = snapshot.last_synced_amount or 0.0
+            diff = target_amt - synced_amt
+            
+            if abs(diff) > 1e-6: # Float epsilon
+                if is_closing_window:
+                    snapshot.cash += diff
+                    snapshot.last_synced_amount = target_amt
+                    logger.info(f"Adjusted capital for Config {config.id}: {synced_amt} -> {target_amt} (Diff: {diff})")
+                    # Force recalc of current value after injection
+                    snapshot.market_value += diff 
+                else:
+                    # Pending adjustment
+                    pass
+
             # Calc Current Market Value of Snapshot
             # Value = Sum(HoldingQty * Price) + Cash
             snap_holdings = snapshot.holdings or {}
             snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
-            current_total_val = snap_mv + snapshot.cash
             
-            # --- Reset Logic ---
-            # Base Value = Current Snapshot Value.
-            # EXCEPT if it's 0 (fresh) or logic needs reset, use config amount.
-            base_value = current_total_val if current_total_val > 0 else (config.total_amount or 0.0)
+            # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
+            base_value = snap_mv + snapshot.cash
             
             # If User Requested Reset (check diff and window) - Logic TBD (Skipped for now as per plan, relying on natural convergence or manual intervention later)
             
