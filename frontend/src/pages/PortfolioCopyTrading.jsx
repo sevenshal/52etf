@@ -308,6 +308,7 @@ const PortfolioCopyTrading = () => {
         {
             title: '组合',
             key: 'portfolio_id',
+            width: 100,
             render: (_, record) => {
                 if (record.combination_id) {
                     // Handle comma-separated IDs for Snowball
