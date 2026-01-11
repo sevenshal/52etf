@@ -356,6 +356,8 @@ async def get_snowball_opportunities(
             
             total_config_val = effective_total_value if effective_total_value > 0 else 1.0
             diff_pct = (diff_val / total_config_val) * 100.0
+            target_pct = (target_val / total_config_val) * 100.0
+            current_pct = (current_val / total_config_val) * 100.0
             
             if abs(diff_pct) < config.tracking_error_pct:
                 continue 
@@ -394,7 +396,7 @@ async def get_snowball_opportunities(
                 # Update Cash Budget
                 proceeds = final_qty * price
                 projected_cash += proceeds
-                reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available_qty}"
+                reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available_qty}"
 
             elif action == "BUY":
                 # --- Cash Budget Check ---
@@ -403,14 +405,14 @@ async def get_snowball_opportunities(
                 if estimated_cost <= projected_cash:
                     final_qty = target_trade_qty
                     projected_cash -= estimated_cost
-                    reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}"
+                    reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}"
                 else:
                     # Try to buy as much as possible with remaining cash
                     max_buyable_qty = int((projected_cash / price) / 100) * 100
                     if max_buyable_qty >= min_qty:
                          final_qty = max_buyable_qty
                          projected_cash -= (final_qty * price)
-                         reason = f"Target: {target_val:.2f}, Current: {current_val:.2f}, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited (Req: {estimated_cost:.0f}, Has: {projected_cash + (final_qty * price):.0f})"
+                         reason = f"Current: {current_pct:.2f}% -> Target: {target_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited (Req: {estimated_cost:.0f}, Has: {projected_cash + (final_qty * price):.0f})"
                     else:
                         logger.info(f"Skipping BUY for {symbol}: Insufficient projected cash. Need {estimated_cost:.2f}, Have {projected_cash:.2f}")
                         continue

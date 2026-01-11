@@ -132,14 +132,14 @@ def handle_data(context, data):
                 order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "买入%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
+                    msg = "买入%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp['name'], symbol, opp['quantity'], limit_price, opp["reason"])
                 else:
                     msg = "买入%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
             elif opp["action"] == "SELL":
                 order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
+                    msg = "卖出%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp['name'], symbol, opp['quantity'], limit_price, opp["reason"])
                 else:
                     msg = "卖出%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
             
