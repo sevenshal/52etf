@@ -340,6 +340,7 @@ class SnowballCopyConfig(Base):
     total_position_ratio = Column(Float, default=100.0) # 总仓位比例 (%)
     total_amount = Column(Float) # 总金额 (优先)
     tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
+    blacklisted_symbols = Column(JSON, default=list) # 黑名单股票列表
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballPortfolioSnapshot(Base):
@@ -460,6 +461,12 @@ def get_db_session_factory(account_id: str):
                 snap_cols = [row[1] for row in result]
                 if 'last_synced_amount' not in snap_cols:
                      conn.execute("ALTER TABLE snowball_portfolio_snapshots ADD COLUMN last_synced_amount FLOAT DEFAULT 0.0")
+
+                # Check SnowballCopyConfig for `blacklisted_symbols`
+                result = conn.execute("PRAGMA table_info(snowball_copy_configs)")
+                scc_cols = [row[1] for row in result]
+                if 'blacklisted_symbols' not in scc_cols:
+                     conn.execute("ALTER TABLE snowball_copy_configs ADD COLUMN blacklisted_symbols JSON DEFAULT '[]'")
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass

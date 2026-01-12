@@ -38,6 +38,7 @@ class SnowballConfigCreate(BaseModel):
     total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
+    blacklisted_symbols: List[str] = []
 
 class SnowballConfigUpdate(BaseModel):
     cli_id: Optional[str] = None
@@ -47,6 +48,7 @@ class SnowballConfigUpdate(BaseModel):
     total_position_ratio: Optional[float] = None
     total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
+    blacklisted_symbols: Optional[List[str]] = None
 
 class SnowballConfigResponse(SnowballConfigCreate):
     id: int
@@ -90,7 +92,7 @@ def normalize_symbol(symbol: str) -> str:
         return symbol
     if "." in symbol:
         return symbol
-    if len(symbol) > 2 and (symbol.startswith("SH") or symbol.startswith("SZ")):
+    if len(symbol) > 2 and (symbol.startswith("SH") or symbol.startswith("SZ") or symbol.startswith("BJ")):
         return f"{symbol[:2]}.{symbol[2:]}"
     return symbol
 
@@ -314,7 +316,8 @@ async def get_snowball_opportunities(
                 "combination_name": c.combination_name,
                 "total_amount": c.total_amount,
                 "tracking_error_pct": c.tracking_error_pct,
-                "cli_id": c.cli_id
+                "cli_id": c.cli_id,
+                "blacklisted_symbols": c.blacklisted_symbols or []
             })
 
         # 2. Pre-fetch Data
@@ -410,6 +413,10 @@ async def get_snowball_opportunities(
             all_snap_symbols = set(snap_holdings.keys())
             target_weights_map = {}
             for item in weights:
+                # Blacklist Check: Treat target weight as 0 if blacklisted
+                if item['symbol'] in config.get('blacklisted_symbols', []):
+                    continue
+                    
                 all_snap_symbols.add(item['symbol'])
                 target_weights_map[item['symbol']] = item['weight']
             
