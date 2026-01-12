@@ -136,8 +136,6 @@ def handle_data(context, data):
     """每分钟执行一次"""
     try:
         log.info("--- Starting Simulation Tick ---")
-        # Update Context Time
-        context.current_dt = datetime.now()
         
         # 模拟：更新持仓市值 (Mock update)
         # simplistic update: all held positions valued @ 10.0
@@ -170,7 +168,8 @@ def handle_data(context, data):
                 "locked_cash": 0.0, # Zero for simple simulation
                 "total_cash": context.portfolio.cash,  
                 "total_positions_value": context.portfolio.positions_value
-            }
+            },
+            "current_time": context.current_dt.isoformat()
         }
         
         log.info(f"Posting to {g.api_base_url}/opportunities with cli_id={CLI_ID}")
@@ -234,17 +233,45 @@ def handle_data(context, data):
 # --- Main Runner ---
 
 if __name__ == "__main__":
+    import argparse
+    from datetime import timedelta
+    
+    parser = argparse.ArgumentParser(description="Local PTrade Simulation")
+    parser.add_argument("--start", type=str, help="Start time (YYYY-MM-DD HH:MM)")
+    parser.add_argument("--end", type=str, help="End time (YYYY-MM-DD HH:MM)")
+    args = parser.parse_args()
+
     print(f"Starting Local Simulation for CLI_ID: {CLI_ID}")
     print("Ensure your local backend is running at http://127.0.0.1:8000")
-    print("Press Ctrl+C to stop.")
     
     # Initialize Context
     # You can pre-load positions here if needed
     # g.context.portfolio.positions['600000.SS'] = MockPosition('600000.SS', 1000, 9.5)
     
     try:
-        while True:
-            handle_data(g.context, None)
-            time.sleep(60) # Run every minute
+        if args.start and args.end:
+            # Backtest / Range Mode
+            start_dt = datetime.strptime(args.start, "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(args.end, "%Y-%m-%d %H:%M")
+            print(f"Running simulation from {start_dt} to {end_dt}")
+            
+            curr = start_dt
+            while curr <= end_dt:
+                g.context.current_dt = curr
+                handle_data(g.context, None)
+                curr += timedelta(minutes=1)
+                time.sleep(5)
+                # No sleep here for faster execution in range mode
+        else:
+            # Live Simulation Mode
+            print("Press Ctrl+C to stop.")
+            while True:
+                handle_data(g.context, None)
+                time.sleep(60) # Run every minute
+                
     except KeyboardInterrupt:
         print("Simulation Stopped")
+    except Exception as e:
+        log.error("Simulation failed: %s", e)
+        import traceback
+        traceback.print_exc()
