@@ -39,6 +39,7 @@ class TradeRequest(BaseModel):
     orders: List[Order]
     positions: List[Position]
     portfolio: Portfolio        # 新增 portfolio 字段
+    current_time: Optional[datetime] = None # Optional simulated time
 
 class TradeOpportunity(BaseModel):
     symbol: str

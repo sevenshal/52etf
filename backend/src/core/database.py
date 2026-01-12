@@ -333,13 +333,25 @@ class SnowballCopyConfig(Base):
     __tablename__ = "snowball_copy_configs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    cli_id = Column(String, index=True, unique=True, nullable=False) # 外部调用标识
+    cli_id = Column(String, index=True, nullable=False) # 外部调用标识 (允许重复，支持多组合)
     combination_id = Column(String, nullable=False) # 雪球组合ID, 如 ZH123456
     combination_name = Column(String)
     enabled = Column(Boolean, default=True)
     total_position_ratio = Column(Float, default=100.0) # 总仓位比例 (%)
     total_amount = Column(Float) # 总金额 (优先)
     tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class SnowballPortfolioSnapshot(Base):
+    """雪球组合持仓快照"""
+    __tablename__ = "snowball_portfolio_snapshots"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("snowball_copy_configs.id"), nullable=False)
+    holdings = Column(JSON) # {symbol: quantity}
+    cash = Column(Float, default=0.0)
+    market_value = Column(Float, default=0.0)
+    last_synced_amount = Column(Float, default=0.0)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballCopyLog(Base):
@@ -432,9 +444,22 @@ def get_db_session_factory(account_id: str):
                 
                 if 'timezone' not in pcc_cols:
                     conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
-                
-                # 检查并创建新表
-                Base.metadata.create_all(bind=engine)
+
+                # 检查并迁移 snowball_copy_configs 的 cli_id 唯一约束
+                # 尝试直接删除唯一索引
+                try:
+                    conn.execute("DROP INDEX IF EXISTS ix_snowball_copy_configs_cli_id")
+                except Exception:
+                    pass
+
+                # Check for SnowballPortfolioSnapshot table (Ensure creation if missing, handled by create_all below)
+                pass
+
+                # Check SnowballPortfolioSnapshot for `last_synced_amount`
+                result = conn.execute("PRAGMA table_info(snowball_portfolio_snapshots)")
+                snap_cols = [row[1] for row in result]
+                if 'last_synced_amount' not in snap_cols:
+                     conn.execute("ALTER TABLE snowball_portfolio_snapshots ADD COLUMN last_synced_amount FLOAT DEFAULT 0.0")
         except Exception:
             # 静默失败，避免影响服务启动；后续操作若失败再暴露
             pass
