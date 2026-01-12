@@ -445,6 +445,9 @@ const PortfolioCopyTrading = () => {
                                                 <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {r.total_amount.toLocaleString()}</Text>
                                             )}
                                             <Text type="secondary" style={{ fontSize: '12px' }}>误差: {r.tracking_error_pct}%</Text>
+                                            {r.blacklisted_symbols && r.blacklisted_symbols.length > 0 && (
+                                                <Text type="secondary" style={{ fontSize: '12px', color: 'red' }}>黑名单: {r.blacklisted_symbols.length}个</Text>
+                                            )}
                                         </Space>
                                     )
                                 },
@@ -658,6 +661,13 @@ const PortfolioCopyTrading = () => {
                         <Col span={12}>
                             <Form.Item name="cli_id" label="API调用标识 (CLI_ID)" rules={[{ required: true }]}>
                                 <Input placeholder="唯一ID, 用于API调用" />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
+                        <Col span={24}>
+                            <Form.Item name="blacklisted_symbols" label="跟单黑名单 (不买入/若持有会卖出)">
+                                <Select mode="tags" style={{ width: '100%' }} placeholder="输入股票代码 (如 SH.600519), 回车确认" tokenSeparators={[',', ' ']} />
                             </Form.Item>
                         </Col>
                     </Row>
