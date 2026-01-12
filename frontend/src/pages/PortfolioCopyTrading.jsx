@@ -645,7 +645,7 @@ const PortfolioCopyTrading = () => {
                             <Form.Item label="雪球组合ID" required>
                                 <Space.Compact style={{ width: '100%' }}>
                                     <Form.Item name="combination_id" noStyle rules={[{ required: true, message: '请输入组合ID' }]}>
-                                        <Input placeholder="例如: ZH123456" />
+                                        <Input placeholder="例如: ZH123456" disabled={!!snowballEditingConfig} />
                                     </Form.Item>
                                     <Button onClick={fetchSnowballName}>获取名称</Button>
                                 </Space.Compact>
