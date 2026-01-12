@@ -245,8 +245,27 @@ if __name__ == "__main__":
     print("Ensure your local backend is running at http://127.0.0.1:8000")
     
     # Initialize Context
-    # You can pre-load positions here if needed
-    # g.context.portfolio.positions['600000.SS'] = MockPosition('600000.SS', 1000, 9.5)
+    # Pre-load positions from user request
+    initial_positions = [
+        ("300179.SZ", 8600, 16.374),
+        ("688448.SS", 2700, 52.420),
+        ("301590.SZ", 700, 193.241),
+        ("300775.SZ", 11400, 10.0),
+        ("301312.SZ", 7000, 10.0),
+        ("688416.SS", 3100, 10.0),
+        ("000034.SZ", 4800, 10.0),
+        ("002860.SZ", 14000, 10.0),
+        ("688135.SS", 5500, 10.0),
+        ("300733.SZ", 8500, 10.0),
+        ("688500.SS", 2100, 10.0),
+        ("300004.SZ", 10900, 10.0),
+        ("688807.SS", 800, 10.0),
+        ("002725.SZ", 7800, 10.0),
+        ("301157.SZ", 2500, 10.0)
+    ]
+    
+    for sid, amount, cost in initial_positions:
+        g.context.portfolio.positions[sid] = MockPosition(sid, amount, cost)
     
     try:
         if args.start and args.end:
