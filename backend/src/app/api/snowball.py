@@ -301,9 +301,21 @@ async def get_snowball_opportunities(
 
     with get_db_session(account_id) as db:
         # 1. Fetch Configs
-        configs = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
-        if not configs:
+        _configs_orm = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
+        if not _configs_orm:
             return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
+            
+        # Convert to dicts to avoid DetachedInstanceError across awaits
+        configs = []
+        for c in _configs_orm:
+            configs.append({
+                "id": c.id,
+                "combination_id": c.combination_id,
+                "combination_name": c.combination_name,
+                "total_amount": c.total_amount,
+                "tracking_error_pct": c.tracking_error_pct,
+                "cli_id": c.cli_id
+            })
 
         # 2. Pre-fetch Data
         # 2.1 Gather all symbols (Held + Targets from all configs)
@@ -320,8 +332,8 @@ async def get_snowball_opportunities(
 
         # B. From Config Targets (Fetch XQ Holdings)
         for config in configs:
-            weights = await fetch_xueqiu_holdings(config.combination_id)
-            config_target_weights[config.id] = weights
+            weights = await fetch_xueqiu_holdings(config['combination_id'])
+            config_target_weights[config['id']] = weights
             for w in weights:
                 all_symbols.add(w['symbol'])
 
@@ -339,19 +351,22 @@ async def get_snowball_opportunities(
         # 3. Process Snapshots & Aggregate Targets
         aggregated_target_quantities = {} # symbol -> quantity
         symbol_contributors = collections.defaultdict(set) # symbol -> set(combination_id)
+        symbol_needs = collections.defaultdict(list) # symbol -> list of {id, reason, diff}
         
-        current_time = datetime.now()
+        current_time = request.current_time or datetime.now()
         # Reset Window: 14:55 - 15:00 (A-share closing)
         is_closing_window = (current_time.hour == 14 and current_time.minute >= 55) or (current_time.hour == 15 and current_time.minute == 0)
 
+        logger.info(f"Current time: {current_time}, Is closing window: {is_closing_window}")
+
         for config in configs:
-            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config.id).first()
+            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config['id']).first()
             
             # --- Initialize or Calculate Current Snapshot Value ---
             if not snapshot:
                 # Init with 0. Wait for adjustment logic to inject capital
                 snapshot = SnowballPortfolioSnapshot(
-                    config_id=config.id,
+                    config_id=config['id'],
                     holdings={},
                     cash=0.0,
                     market_value=0.0,
@@ -361,10 +376,7 @@ async def get_snowball_opportunities(
                 db.flush() 
             
             # --- Capital Adjustment Logic ---
-            # Handles Fresh Start (last_synced=0) and Adjustments (last_synced != total_amount)
-            # Only applies during closing window (14:55-15:00) to respect T+1 setup.
-            
-            target_amt = config.total_amount or 0.0
+            target_amt = config['total_amount'] or 0.0
             synced_amt = snapshot.last_synced_amount or 0.0
             diff = target_amt - synced_amt
             
@@ -372,7 +384,7 @@ async def get_snowball_opportunities(
                 if is_closing_window:
                     snapshot.cash += diff
                     snapshot.last_synced_amount = target_amt
-                    logger.info(f"Adjusted capital for Config {config.id}: {synced_amt} -> {target_amt} (Diff: {diff})")
+                    logger.info(f"Adjusted capital for Config {config['id']}: {synced_amt} -> {target_amt} (Diff: {diff})")
                     # Force recalc of current value after injection
                     snapshot.market_value += diff 
                 else:
@@ -387,14 +399,12 @@ async def get_snowball_opportunities(
             # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
             base_value = snap_mv + snapshot.cash
             
-            # If User Requested Reset (check diff and window) - Logic TBD (Skipped for now as per plan, relying on natural convergence or manual intervention later)
-            
             # --- Calculate New Target State ---
             new_snap_holdings = {}
             used_cash = 0.0
             
-            weights = config_target_weights.get(config.id, [])
-            threshold_pct = config.tracking_error_pct or 1.0
+            weights = config_target_weights.get(config['id'], [])
+            threshold_pct = config['tracking_error_pct'] or 1.0
             
             # Combine all symbols (Current + Target)
             all_snap_symbols = set(snap_holdings.keys())
@@ -423,7 +433,6 @@ async def get_snowball_opportunities(
                 
                 # If deviation > threshold, rebalance to Target
                 # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
-                # But math works: diff IS target_val.
                 if diff_pct_of_total >= threshold_pct:
                     raw_q = target_val / price
                     final_q = int(raw_q / 100) * 100
@@ -431,17 +440,30 @@ async def get_snowball_opportunities(
                 if final_q > 0:
                     new_snap_holdings[sym] = final_q
                     used_cash += final_q * price
-            
+                
+                # Record Need & Reason per Combo
+                snapshot_diff = final_q - cur_q
+                if snapshot_diff != 0:
+                    s_tgt_pct = (target_val / base_value) * 100 if base_value > 0 else 0
+                    s_cur_pct = (cur_val / base_value) * 100 if base_value > 0 else 0
+                    # s_diff_pct = ((target_val - cur_val) / base_value) * 100 if base_value > 0 else 0
+                    
+                    # Concise Reason: "ZH123: 10%->12%"
+                    combo_name = config['combination_name'] or config['combination_id'] or str(config['id'])
+                    short_name = combo_name[:10] # Truncate if too long
+                    need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
+                    
+                    symbol_needs[sym].append(need_reason)
+
             # Update Snapshot
             snapshot.holdings = new_snap_holdings
             snapshot.cash = base_value - used_cash
             snapshot.market_value = base_value
-            # (will commit at end)
 
-            # --- Aggregate ---
+            # Aggregate Targets
             for sym, qty in new_snap_holdings.items():
                 aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
-                symbol_contributors[sym].add(config.combination_id)
+                symbol_contributors[sym].add(config['combination_id'])
 
         # 4. Generate Opportunities (Diff vs Actual)
         opportunities = []
@@ -449,7 +471,6 @@ async def get_snowball_opportunities(
         projected_cash = request.portfolio.available_cash
         
         # Identify all symbols needing action
-        # Union of Aggregated Targets and Current Actuals
         all_op_symbols = set(aggregated_target_quantities.keys()) | set(current_quantities.keys())
         
         def get_diff_info(sym):
@@ -479,16 +500,13 @@ async def get_snowball_opportunities(
                 continue
             
             final_qty = 0
-            reason = ""
+            reason_global = ""
             
-            # Logging info
-            total_actual_asset = request.portfolio.portfolio_value or 1.0
-            tgt_val = tgt_q * price
-            cur_val = cur_q * price
-            tgt_pct = (tgt_val / total_actual_asset) * 100
-            cur_pct = (cur_val / total_actual_asset) * 100
-            diff_pct = ((tgt_val - cur_val) / total_actual_asset) * 100
-
+            # Global Stats (Optional, maybe append at end?)
+            # total_actual_asset = request.portfolio.portfolio_value or 1.0
+            # cur_val = cur_q * price
+            # cur_pct = (cur_val / total_actual_asset) * 100
+            
             if action == "SELL":
                 # T+1 Check
                 pos = next((p for p in request.positions if p.symbol == sym), None)
@@ -501,7 +519,6 @@ async def get_snowball_opportunities(
                     
                 proceeds = final_qty * price
                 projected_cash += proceeds
-                reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Avail: {available}"
                 
             elif action == "BUY":
                 # Cash Check
@@ -509,14 +526,13 @@ async def get_snowball_opportunities(
                 if est_cost <= projected_cash:
                     final_qty = abs_qty
                     projected_cash -= est_cost
-                    reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}"
                 else:
                     # Partial buy
                     max_can_buy = int((projected_cash / price) / 100) * 100
                     if max_can_buy >= min_qty:
                         final_qty = max_can_buy
                         projected_cash -= final_qty * price
-                        reason = f"Current: {cur_pct:.2f}% -> Target: {tgt_pct:.2f}%, Diff%: {diff_pct:.2f}%, Price: {price}, Cash Limited"
+                        reason_global = " [Cash Ltd]"
                     else:
                         logger.info(f"Skipping BUY {sym}: Need {est_cost}, Have {projected_cash}")
                         continue
@@ -524,6 +540,12 @@ async def get_snowball_opportunities(
             # Create Log & Opp
             contributors = symbol_contributors.get(sym, set())
             combo_id_str = ",".join(sorted(contributors)) if contributors else "AGGREGATED"
+            
+            # Concatenate Reasons
+            specific_reasons = " ".join(symbol_needs.get(sym, []))
+            final_message = f"{specific_reasons}{reason_global}"
+            if not final_message:
+                final_message = f"Adjusting to Target"
 
             log_entry = SnowballCopyLog(
                 cli_id=cli_id,
@@ -533,7 +555,7 @@ async def get_snowball_opportunities(
                 quantity=final_qty,
                 price=price,
                 status='SIGNAL',
-                message=reason
+                message=final_message
             )
             db.add(log_entry)
             db.flush()
@@ -544,8 +566,8 @@ async def get_snowball_opportunities(
                 "action": action,
                 "quantity": final_qty,
                 "price": price,
-                "reason": reason,
-                "op_id": log_entry.id
+                "reason": final_message,
+                "op_id": log_entry.id # Single ID as Int
             })
 
         db.commit()
