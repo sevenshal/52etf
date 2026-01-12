@@ -78,6 +78,7 @@ def handle_data(context, data):
             json={
                 "cli_id": 'GS66301027527' + ('B' if backtest else ''),
                 "backtest": backtest,
+                "current_time": context.current_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "orders": [
                     {
                         "symbol": convert_to_api_code(order['symbol']),
@@ -132,16 +133,16 @@ def handle_data(context, data):
                 order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "买入%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp['name'], symbol, opp['quantity'], limit_price, opp["reason"])
+                    msg = "买入%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
                 else:
-                    msg = "买入%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
+                    msg = "买入%s %s失败" % (opp['name'], symbol)
             elif opp["action"] == "SELL":
                 order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "卖出%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp['name'], symbol, opp['quantity'], limit_price, opp["reason"])
+                    msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
                 else:
-                    msg = "卖出%s %s失败, 原因: %s" % (opp['name'], symbol, opp["reason"])
+                    msg = "卖出%s %s失败" % (opp['name'], symbol)
             
             # 优先使用结构化日志上报
             report_execution(op_id, status, msg, price=limit_price if order_sn else None)

@@ -279,8 +279,8 @@ async def update_log_status(
             raise HTTPException(status_code=404, detail="Log entry not found")
         
         log.status = status_update.status
-        if status_update.message:
-            log.message = status_update.message
+        if status_update.message and status_update.message not in log.message:
+            log.message = f"{log.message} | {status_update.message}"
         if status_update.price:
             log.price = status_update.price
             
@@ -358,7 +358,7 @@ async def get_snowball_opportunities(
         
         current_time = request.current_time or datetime.now()
         # Reset Window: 14:55 - 15:00 (A-share closing)
-        is_closing_window = (current_time.hour == 14 and current_time.minute >= 55) or (current_time.hour == 15 and current_time.minute == 0)
+        is_closing_window = (current_time.hour == 14 and current_time.minute >= 50) or (current_time.hour == 15 and current_time.minute == 0)
 
         logger.info(f"Current time: {current_time}, Is closing window: {is_closing_window}")
 

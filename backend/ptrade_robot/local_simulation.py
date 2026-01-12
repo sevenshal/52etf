@@ -205,16 +205,16 @@ def handle_data(context, data):
                 order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "买入%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price, opp["reason"])
+                    msg = "买入%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
                 else:
-                    msg = "买入%s %s失败, 原因: %s" % (opp.get('name',''), symbol, opp["reason"])
+                    msg = "买入%s %s失败" % (opp.get('name',''), symbol)
             elif opp["action"] == "SELL":
                 order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
                 if order_sn:
                     status = "SUCCESS"
-                    msg = "卖出%s %s, 数量: %d, 价格: %s, 原因: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price, opp["reason"])
+                    msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
                 else:
-                    msg = "卖出%s %s失败, 原因: %s" % (opp.get('name',''), symbol, opp["reason"])
+                    msg = "卖出%s %s失败" % (opp.get('name',''), symbol)
             
             # 优先使用结构化日志上报
             report_execution(op_id, status, msg, price=limit_price if order_sn else None)
