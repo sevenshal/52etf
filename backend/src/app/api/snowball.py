@@ -110,10 +110,10 @@ async def fetch_xueqiu_holdings(symbol: str) -> List[Dict]:
                 return holdings
             else:
                 logger.error(f"Xueqiu API Error (Holdings): {data}")
-                return []
+                raise Exception(f"Xueqiu API Error: {data.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Failed to fetch Xueqiu holdings: {e}")
-            return []
+            raise e
 
 async def fetch_xueqiu_cube_info(symbol: str) -> Optional[Dict]:
     """Fetch cube info including name from Xueqiu"""
@@ -543,6 +543,7 @@ async def get_snowball_opportunities(
                 "name": "",
                 "action": action,
                 "quantity": final_qty,
+                "price": price,
                 "reason": reason,
                 "op_id": log_entry.id
             })

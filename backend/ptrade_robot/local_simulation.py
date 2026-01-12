@@ -196,7 +196,7 @@ def handle_data(context, data):
             op_id = opp.get("op_id")
             
             # 获取限价
-            limit_price = get_limit_price(symbol, opp["action"])
+            limit_price = opp["price"] #get_limit_price(symbol, opp["action"])
             
             status = "FAILED"
             msg = ""
