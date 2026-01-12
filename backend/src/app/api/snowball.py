@@ -440,7 +440,8 @@ async def get_snowball_opportunities(
                 
                 # If deviation > threshold, rebalance to Target
                 # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
-                if diff_pct_of_total >= threshold_pct:
+                # Force rebalance if target is 0 (Clearance) or deviation exceeds threshold
+                if diff_pct_of_total >= threshold_pct or (target_val == 0 and cur_q > 0):
                     raw_q = target_val / price
                     final_q = int(raw_q / 100) * 100
                 
