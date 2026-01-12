@@ -108,7 +108,7 @@ const PortfolioCopyTrading = () => {
         if (type === 'ib') {
             setCurrentLogTitle(`跟单日志 - ${record.portfolio_name} (${record.portfolio_id})`);
         } else {
-            setCurrentLogTitle(`跟单日志 - ${record.combination_name} (${record.combination_id})`);
+            setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
         }
 
         try {
@@ -308,10 +308,16 @@ const PortfolioCopyTrading = () => {
         {
             title: '组合',
             key: 'portfolio_id',
+            width: 100,
             render: (_, record) => {
                 if (record.combination_id) {
-                    const config = snowballConfigs.find(c => c.combination_id === record.combination_id);
-                    return config ? `${config.combination_name} (${record.combination_id})` : record.combination_id;
+                    // Handle comma-separated IDs for Snowball
+                    const ids = record.combination_id.split(',');
+                    const names = ids.map(id => {
+                        const config = snowballConfigs.find(c => c.combination_id === id);
+                        return config ? config.combination_name : id;
+                    });
+                    return names.join(', ');
                 }
                 if (record.portfolio_id) {
                     const config = configs.find(c => c.portfolio_id === record.portfolio_id);
@@ -414,19 +420,31 @@ const PortfolioCopyTrading = () => {
                                 {
                                     title: 'API标识',
                                     dataIndex: 'cli_id',
-                                    render: (id) => <Tag color="blue">{id}</Tag>
+                                    render: (id, record) => (
+                                        <Space>
+                                            <Tag color="blue">{id}</Tag>
+                                            <Button
+                                                icon={<HistoryOutlined />}
+                                                size="small"
+                                                type="text"
+                                                onClick={() => handleViewLogs(record, 'snowball')}
+                                                title="查看日志"
+                                            />
+                                        </Space>
+                                    )
                                 },
                                 {
-                                    title: '参数',
+                                    title: '资金/参数',
                                     key: 'params',
                                     render: (_, r) => (
                                         <Space direction="vertical" size={0}>
-                                            {r.total_amount ? (
-                                                <Text type="secondary">金额: {r.total_amount}</Text>
-                                            ) : (
-                                                <Text type="secondary">仓位: {r.total_position_ratio}%</Text>
+                                            <Text strong style={{ color: '#1890ff' }}>
+                                                当前市值: {r.snapshot_value ? r.snapshot_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 0}
+                                            </Text>
+                                            {r.total_amount && (
+                                                <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {r.total_amount.toLocaleString()}</Text>
                                             )}
-                                            <Text type="secondary">跟踪误差: {r.tracking_error_pct}%</Text>
+                                            <Text type="secondary" style={{ fontSize: '12px' }}>误差: {r.tracking_error_pct}%</Text>
                                         </Space>
                                     )
                                 },
@@ -435,7 +453,6 @@ const PortfolioCopyTrading = () => {
                                     key: 'action',
                                     render: (_, record) => (
                                         <Space>
-                                            <Button icon={<HistoryOutlined />} size="small" onClick={() => handleViewLogs(record, 'snowball')}>日志</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
                                                 setSnowballEditingConfig(record);
                                                 snowballForm.setFieldsValue(record);
@@ -472,28 +489,7 @@ const PortfolioCopyTrading = () => {
                     loading={logLoading}
                     rowKey="id"
                     pagination={{ pageSize: 20 }}
-                    columns={[
-                        { title: '时间', dataIndex: 'timestamp', key: 'timestamp', render: (t) => new Date(t).toLocaleString() },
-                        { title: '行为', dataIndex: 'action', key: 'action' },
-                        { title: '标的', dataIndex: 'symbol', key: 'symbol' },
-                        { title: '数量', dataIndex: 'quantity', key: 'quantity' },
-                        {
-                            title: '价格',
-                            dataIndex: 'price',
-                            key: 'price',
-                            render: (p) => p && typeof p === 'number' ? p.toFixed(2) : p
-                        },
-                        {
-                            title: '结果',
-                            key: 'status',
-                            render: (_, record) => (
-                                <Tag color={record.status === 'SUCCESS' ? 'green' : (record.status === 'SIGNAL' ? 'blue' : 'red')}>
-                                    {record.status}
-                                </Tag>
-                            )
-                        },
-                        { title: '消息', dataIndex: 'message', key: 'message' }
-                    ]}
+                    columns={logColumns}
                 />
             </Modal >
 
@@ -666,17 +662,12 @@ const PortfolioCopyTrading = () => {
                         </Col>
                     </Row>
                     <Row gutter={16}>
-                        <Col span={8}>
-                            <Form.Item name="total_position_ratio" label="总仓位比例 (%)">
-                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
-                            </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                            <Form.Item name="total_amount" label="总金额 (优先)">
+                        <Col span={12}>
+                            <Form.Item name="total_amount" label="总金额">
                                 <InputNumber style={{ width: '100%' }} placeholder="为空则使用Portfolio" />
                             </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        <Col span={12}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
                             </Form.Item>
