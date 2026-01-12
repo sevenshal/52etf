@@ -441,10 +441,8 @@ const PortfolioCopyTrading = () => {
                                             <Text strong style={{ color: '#1890ff' }}>
                                                 当前市值: {r.snapshot_value ? r.snapshot_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 0}
                                             </Text>
-                                            {r.total_amount ? (
+                                            {r.total_amount && (
                                                 <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {r.total_amount.toLocaleString()}</Text>
-                                            ) : (
-                                                <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {r.total_position_ratio}%</Text>
                                             )}
                                             <Text type="secondary" style={{ fontSize: '12px' }}>误差: {r.tracking_error_pct}%</Text>
                                         </Space>
@@ -664,17 +662,12 @@ const PortfolioCopyTrading = () => {
                         </Col>
                     </Row>
                     <Row gutter={16}>
-                        <Col span={8}>
-                            <Form.Item name="total_position_ratio" label="总仓位比例 (%)">
-                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
-                            </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                            <Form.Item name="total_amount" label="总金额 (优先)">
+                        <Col span={12}>
+                            <Form.Item name="total_amount" label="总金额">
                                 <InputNumber style={{ width: '100%' }} placeholder="为空则使用Portfolio" />
                             </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        <Col span={12}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
                             </Form.Item>
