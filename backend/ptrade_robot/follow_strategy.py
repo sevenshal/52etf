@@ -119,39 +119,56 @@ def handle_data(context, data):
         
         # 执行交易机会
         for opp in opportunities:
-            symbol = convert_to_client_code(opp["symbol"])
             op_id = opp.get("op_id")
-            
-            # 获取限价
-            limit_price = get_limit_price(symbol, opp["action"])
-            
-            status = "FAILED"
-            msg = ""
-            order_sn = None
-            
-            if opp["action"] == "BUY":
-                order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
+            try:
+                symbol = convert_to_client_code(opp["symbol"])
+                
+                # 获取限价
+                limit_price = get_limit_price(symbol, opp["action"])
+                
+                status = "FAILED"
+                msg = ""
+                order_sn = None
+                
+                if opp["action"] == "BUY":
+                    order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
+                    if order_sn:
+                        orders = get_order(order_sn)
+                        o = orders[0] if orders else None
+                        if o and o.status == 8:
+                            status = "FAILED"
+                            msg = "买入%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
+                        else:
+                            status = "SUCCESS"
+                            msg = "买入%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
+                    else:
+                        msg = "买入%s %s失败" % (opp.get('name',''), symbol)
+                elif opp["action"] == "SELL":
+                    order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
+                    if order_sn:
+                        orders = get_order(order_sn)
+                        o = orders[0] if orders else None
+                        if o and o.status == 8:
+                            status = "FAILED"
+                            msg = "卖出%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
+                        else:
+                            status = "SUCCESS"
+                            msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
+                    else:
+                        msg = "卖出%s %s失败" % (opp.get('name',''), symbol)
+                
+                # 优先使用结构化日志上报
+                report_execution(op_id, status, msg, price=limit_price if order_sn else None)
+                
+                # 本地日志
                 if order_sn:
-                    status = "SUCCESS"
-                    msg = "买入%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
+                    log.info("交易成功: " + msg)
                 else:
-                    msg = "买入%s %s失败" % (opp['name'], symbol)
-            elif opp["action"] == "SELL":
-                order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
-                if order_sn:
-                    status = "SUCCESS"
-                    msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp['name'], symbol, opp['quantity'], limit_price)
-                else:
-                    msg = "卖出%s %s失败" % (opp['name'], symbol)
-            
-            # 优先使用结构化日志上报
-            report_execution(op_id, status, msg, price=limit_price if order_sn else None)
-            
-            # 本地日志
-            if order_sn:
-                log.info("交易成功: " + msg)
-            else:
-                log.error("交易失败: " + msg)
+                    log.error("交易失败: " + msg)
+
+            except Exception as e:
+                log.error("处理单笔交易失败(op_id=%s): %s" % (op_id, str(e)))
+                report_execution(op_id, "FAILED", "策略执行异常: " + str(e))
                 
     except Exception as e:
         log.error("处理交易时发生异常: %s" % str(e))

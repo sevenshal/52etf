@@ -71,6 +71,15 @@ def get_all_orders():
 def is_trade():
     return True # Simulation is always "trading"
 
+class MockOrder:
+    def __init__(self, order_id, status=0):
+        self.order_id = order_id
+        self.status = status
+
+def get_order(order_id):
+    # Mock: Return a list containing a mock order with Success status (not 8)
+    return [MockOrder(order_id, 0)]
+
 def get_limit_price(symbol, side):
     # Mock: Return a static price or fetch simple one
     # For simulation, we'll try to fetch from Xueqiu via simple request or just return 10.0
