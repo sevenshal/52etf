@@ -308,7 +308,27 @@ const PortfolioCopyTrading = () => {
         {
             title: '组合',
             key: 'portfolio_id',
-            width: 100,
+            width: 120,
+            filters: Array.from(new Set(currentLogs.flatMap(log => {
+                if (log.combination_id) return log.combination_id.split(',');
+                if (log.portfolio_id) return [log.portfolio_id];
+                return [];
+            }))).filter(Boolean).map(id => {
+                let name = id;
+                const sbConfig = snowballConfigs.find(c => c.combination_id === id);
+                if (sbConfig) name = sbConfig.combination_name;
+                else {
+                    const ibConfig = configs.find(c => c.portfolio_id === id);
+                    if (ibConfig) name = ibConfig.portfolio_name;
+                }
+                return { text: name || id, value: id };
+            }),
+            onFilter: (value, record) => {
+                if (record.combination_id) return record.combination_id.split(',').includes(value);
+                if (record.portfolio_id) return record.portfolio_id == value;
+                return false;
+            },
+            filterSearch: true,
             render: (_, record) => {
                 if (record.combination_id) {
                     // Handle comma-separated IDs for Snowball
