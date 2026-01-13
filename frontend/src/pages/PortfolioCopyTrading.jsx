@@ -314,7 +314,12 @@ const PortfolioCopyTrading = () => {
                     // Handle comma-separated IDs for Snowball
                     const ids = record.combination_id.split(',');
                     const names = ids.map(id => {
-                        const config = snowballConfigs.find(c => c.combination_id === id);
+                        // Prioritize matching by both ID and CLI_ID
+                        let config = snowballConfigs.find(c => c.combination_id === id && c.cli_id === record.cli_id);
+                        if (!config) {
+                            // Fallback to matching by ID only
+                            config = snowballConfigs.find(c => c.combination_id === id);
+                        }
                         return config ? config.combination_name : id;
                     });
                     return names.join(', ');
