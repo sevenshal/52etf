@@ -425,6 +425,10 @@ const PortfolioCopyTrading = () => {
                                 {
                                     title: 'API标识',
                                     dataIndex: 'cli_id',
+                                    sorter: (a, b) => (a.cli_id || '').localeCompare(b.cli_id || ''),
+                                    filters: Array.from(new Set(snowballConfigs.map(c => c.cli_id))).filter(Boolean).map(id => ({ text: id, value: id })),
+                                    onFilter: (value, record) => record.cli_id === value,
+                                    filterSearch: true,
                                     render: (id, record) => (
                                         <Space>
                                             <Tag color="blue">{id}</Tag>
