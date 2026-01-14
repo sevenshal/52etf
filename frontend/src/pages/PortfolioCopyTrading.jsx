@@ -425,7 +425,7 @@ const PortfolioCopyTrading = () => {
             title: '消息',
             dataIndex: 'message',
             key: 'message',
-            render: (text) => <Text type="secondary" style={{ fontSize: '12px' }} ellipsis={{ tooltip: text }}>{text}</Text>
+            render: (text) => <div style={{ fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'rgba(0, 0, 0, 0.45)' }}>{text}</div>
         }
     ];
 
