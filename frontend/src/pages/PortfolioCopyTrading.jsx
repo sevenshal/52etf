@@ -119,15 +119,9 @@ const PortfolioCopyTrading = () => {
 
             if (type === 'ib') {
                 params.portfolio_id = record.portfolio_id;
-                // IB logs endpoint might not support pagination yet, keeping original call if so
-                // Assuming we only implemented pagination for Snowball as per task
-                // But let's check if we break IB logs. 
-                // The task was "Snowball portfolio log filtering".
-                // If IB logs endpoint is not updated, sending extra params might be ignored or error.
-                // Assuming IB logs are small or handled separately. 
-                // For now, let's keep IB logs as is (non-paginated list) or adapt.
-                // The user request was specific to Snowball. 
-                // Let's stick to Snowball pagination logic here.
+                // Add config_id for IB logs 
+                if (record.id) params.config_id = record.id;
+
                 const res = await request.get('/api/ib-copy-trading/logs', { params });
                 setCurrentLogs(res.data); // IB returns List
                 setLogPagination(prev => ({ ...prev, current: 1, total: res.data.length })); // Fake pagination for IB
@@ -164,10 +158,11 @@ const PortfolioCopyTrading = () => {
         setActiveLogConfig({ record, type });
         setCurrentLogs([]);
 
-        // Auto-select combination_id if present
+        // Auto-select combination_id if present (Snowball only)
         const initialCombId = record.combination_id || '';
         const initialFilters = { combination_id: initialCombId, symbol: '' };
 
+        // For IB, we don't have combination_id filter in state, but we need to ensure config_id is passed implicitly via 'record' in activeLogConfig
         setLogFilters(initialFilters);
         setLogPagination(prev => ({ ...prev, current: 1, total: 0 }));
 
@@ -177,7 +172,7 @@ const PortfolioCopyTrading = () => {
             setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
         }
 
-        // Initial fetch with auto-selected filters
+        // Initial fetch
         fetchLogs(1, initialFilters, { record, type });
     };
 
