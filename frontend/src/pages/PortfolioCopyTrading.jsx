@@ -163,7 +163,12 @@ const PortfolioCopyTrading = () => {
         setLogModalVisible(true);
         setActiveLogConfig({ record, type });
         setCurrentLogs([]);
-        setLogFilters({ combination_id: '', symbol: '' }); // Reset filters
+
+        // Auto-select combination_id if present
+        const initialCombId = record.combination_id || '';
+        const initialFilters = { combination_id: initialCombId, symbol: '' };
+
+        setLogFilters(initialFilters);
         setLogPagination(prev => ({ ...prev, current: 1, total: 0 }));
 
         if (type === 'ib') {
@@ -172,9 +177,8 @@ const PortfolioCopyTrading = () => {
             setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
         }
 
-        // Initial fetch with reset filters
-        // Using timeout to ensure state update? No, just pass config directly
-        fetchLogs(1, { combination_id: '', symbol: '' }, { record, type });
+        // Initial fetch with auto-selected filters
+        fetchLogs(1, initialFilters, { record, type });
     };
 
     const handleSave = async (values) => {
@@ -518,16 +522,7 @@ const PortfolioCopyTrading = () => {
                                     onFilter: (value, record) => record.cli_id === value,
                                     filterSearch: true,
                                     render: (id, record) => (
-                                        <Space>
-                                            <Tag color="blue">{id}</Tag>
-                                            <Button
-                                                icon={<HistoryOutlined />}
-                                                size="small"
-                                                type="text"
-                                                onClick={() => handleViewLogs(record, 'snowball')}
-                                                title="查看日志"
-                                            />
-                                        </Space>
+                                        <Tag color="blue">{id}</Tag>
                                     )
                                 },
                                 {
@@ -553,6 +548,12 @@ const PortfolioCopyTrading = () => {
                                     key: 'action',
                                     render: (_, record) => (
                                         <Space>
+                                            <Button
+                                                icon={<HistoryOutlined />}
+                                                size="small"
+                                                onClick={() => handleViewLogs(record, 'snowball')}
+                                                title="查看日志"
+                                            >日志</Button>
                                             <Button
                                                 size="small"
                                                 onClick={() => handleViewSnapshot(record)}
