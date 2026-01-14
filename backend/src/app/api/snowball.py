@@ -138,7 +138,7 @@ async def fetch_xueqiu_cube_info(symbol: str) -> Optional[Dict]:
             return None
 
 async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
-    """Fetch real-time quotes for a list of symbols"""
+    """Fetch real-time quotes using the lightweight API (Price Only)"""
     if not symbols:
         return {}
     
@@ -165,6 +165,38 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
             return result
         except Exception as e:
             logger.error(f"Failed to fetch Xueqiu quotes: {e}")
+            return {}
+
+async def fetch_xueqiu_batch_quotes(symbols: List[str]) -> Dict[str, Dict]:
+    """Fetch detailed quotes (Price + Name) using the batch API"""
+    if not symbols:
+        return {}
+    
+    raw_to_dotted = {s.replace(".", ""): s for s in symbols}
+    raw_symbol_str = ",".join(raw_to_dotted.keys())
+    
+    url = f"https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol={raw_symbol_str}"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=XUEQIU_STOCK_HEADERS)
+            response.raise_for_status()
+            data = response.json()
+            # Format: {"data": {"items": [{"quote": {"symbol": "SH520830", "name": "沙特ETF", "current": 0.937 ...}}]}}
+            result = {}
+            if "data" in data and "items" in data["data"]:
+                for item in data["data"]["items"]:
+                    quote = item.get("quote", {})
+                    raw_sym = quote.get("symbol")
+                    if raw_sym:
+                        dotted_sym = raw_to_dotted.get(raw_sym, raw_to_dotted.get(raw_sym.upper(), raw_sym))
+                        result[dotted_sym] = {
+                            "price": quote.get("current", 0.0),
+                            "name": quote.get("name", "")
+                        }
+            return result
+        except Exception as e:
+            logger.error(f"Failed to fetch Xueqiu batch quotes: {e}")
             return {}
 
 @router.get("/info/{symbol}")
@@ -289,6 +321,7 @@ async def update_log_status(
 
 class SnapshotHolding(BaseModel):
     symbol: str
+    name: str # Added name
     quantity: float
     price: float
     market_value: float
@@ -332,19 +365,23 @@ async def get_snapshot(
         symbols = list(holdings_dict.keys())
         
         # 1. Fetch Real-time Prices
-        prices = await fetch_xueqiu_quotes(symbols)
+        quotes = await fetch_xueqiu_batch_quotes(symbols)
         
         # 2. Build Holding Details & Calc Total
         detailed_holdings = []
         total_stock_value = 0.0
         
         for sym, qty in holdings_dict.items():
-            price = prices.get(sym, 0.0)
+            info = quotes.get(sym, {})
+            price = info.get("price", 0.0)
+            name = info.get("name", "")
+            
             mv = qty * price
             total_stock_value += mv
             
             detailed_holdings.append(SnapshotHolding(
                 symbol=sym,
+                name=name,
                 quantity=qty,
                 price=price,
                 market_value=mv,
