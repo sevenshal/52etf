@@ -383,6 +383,28 @@ const PortfolioCopyTrading = () => {
         }
     ];
 
+    // Snapshot Modal State
+    const [snapshotModalVisible, setSnapshotModalVisible] = useState(false);
+    const [snapshotData, setSnapshotData] = useState(null);
+    const [snapshotLoading, setSnapshotLoading] = useState(false);
+    const [currentSnapshotTitle, setCurrentSnapshotTitle] = useState('');
+
+    const handleViewSnapshot = async (record) => {
+        setSnapshotLoading(true);
+        setSnapshotModalVisible(true);
+        setCurrentSnapshotTitle(`组合详情 - ${record.combination_name || record.combination_id}`);
+        setSnapshotData(null);
+
+        try {
+            const response = await request.get(`/api/snowball/snapshot/${record.id}`);
+            setSnapshotData(response.data);
+        } catch (error) {
+            message.error('获取组合详情失败');
+        } finally {
+            setSnapshotLoading(false);
+        }
+    };
+
     return (
         <div style={{ padding: '24px' }}>
             <Card
@@ -396,7 +418,6 @@ const PortfolioCopyTrading = () => {
                         <Button icon={<ReloadOutlined />} onClick={() => {
                             if (activeTab === 'ib_configs') fetchConfigs();
                             else if (activeTab === 'snowball_configs') fetchSnowballConfigs();
-                            // fetchLogs(); // Removed
                         }}>刷新数据</Button>
 
                     </Space>
@@ -485,6 +506,10 @@ const PortfolioCopyTrading = () => {
                                     key: 'action',
                                     render: (_, record) => (
                                         <Space>
+                                            <Button
+                                                size="small"
+                                                onClick={() => handleViewSnapshot(record)}
+                                            >详情</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
                                                 setSnowballEditingConfig(record);
                                                 snowballForm.setFieldsValue(record);
@@ -713,6 +738,104 @@ const PortfolioCopyTrading = () => {
                         </Col>
                     </Row>
                 </Form>
+            </Modal>
+
+            {/* Snowball Snapshot Modal */}
+            <Modal
+                title={currentSnapshotTitle}
+                visible={snapshotModalVisible}
+                onCancel={() => setSnapshotModalVisible(false)}
+                footer={null}
+                width={700}
+            >
+                {snapshotLoading ? (
+                    <div style={{ textAlign: 'center', padding: '20px' }}><ReloadOutlined spin /> 加载中...</div>
+                ) : snapshotData ? (
+                    <div>
+                        <Row gutter={16} style={{ marginBottom: 20 }}>
+                            <Col span={10}>
+                                <Card size="small" bodyStyle={{ padding: '12px' }}>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>总市值 (Market Value)</Text>
+                                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#1890ff' }}>
+                                        {snapshotData.market_value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                        <Text type="secondary">Stock: </Text>
+                                        <Text>{snapshotData.stock_ratio.toFixed(1)}%</Text>
+                                        <Text type="secondary" style={{ marginLeft: 8 }}>Cash: </Text>
+                                        <Text>{snapshotData.cash_ratio.toFixed(1)}%</Text>
+                                    </div>
+                                </Card>
+                            </Col>
+                            <Col span={7}>
+                                <Card size="small" bodyStyle={{ padding: '12px' }}>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>可用现金 (Cash)</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#52c41a' }}>
+                                        {snapshotData.cash.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                    </div>
+                                </Card>
+                            </Col>
+                            <Col span={7}>
+                                <Card size="small" bodyStyle={{ padding: '12px' }}>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>配置金额 (Synced)</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold' }}>
+                                        {snapshotData.last_synced_amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                    </div>
+                                </Card>
+                            </Col>
+                        </Row>
+
+                        <div style={{ marginBottom: 16 }}>
+                            <Text type="secondary">更新时间: {new Date(snapshotData.updated_at).toLocaleString()}</Text>
+                        </div>
+
+                        <Table
+                            dataSource={snapshotData.holdings}
+                            pagination={false}
+                            size="small"
+                            rowKey="symbol"
+                            scroll={{ y: 400 }}
+                            columns={[
+                                {
+                                    title: 'Symbol',
+                                    dataIndex: 'symbol',
+                                    key: 'symbol',
+                                    render: (text) => <Text strong>{text}</Text>
+                                },
+                                {
+                                    title: 'Quantity',
+                                    dataIndex: 'quantity',
+                                    key: 'quantity',
+                                    align: 'right',
+                                    render: (val) => val.toLocaleString()
+                                },
+                                {
+                                    title: 'Price',
+                                    dataIndex: 'price',
+                                    key: 'price',
+                                    align: 'right',
+                                    render: (val) => val.toFixed(2)
+                                },
+                                {
+                                    title: 'Value',
+                                    dataIndex: 'market_value',
+                                    key: 'market_value',
+                                    align: 'right',
+                                    render: (val) => val.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                },
+                                {
+                                    title: 'Ratio',
+                                    dataIndex: 'ratio',
+                                    key: 'ratio',
+                                    align: 'right',
+                                    render: (val) => <Tag color="blue">{val.toFixed(2)}%</Tag>
+                                },
+                            ]}
+                        />
+                    </div>
+                ) : (
+                    <div style={{ textAlign: 'center', color: '#999' }}>暂无数据</div>
+                )}
             </Modal>
         </div >
     );
