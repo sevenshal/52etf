@@ -287,6 +287,98 @@ async def update_log_status(
         db.commit()
         return {"message": "Status updated"}
 
+class SnapshotHolding(BaseModel):
+    symbol: str
+    quantity: float
+    price: float
+    market_value: float
+    ratio: float # Percentage 0-100
+
+class SnowballSnapshotResponse(BaseModel):
+    config_id: int
+    market_value: float # Total MV (Stocks + Cash)
+    cash: float
+    stock_ratio: float
+    cash_ratio: float
+    last_synced_amount: float
+    holdings: List[SnapshotHolding] = []
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+@router.get("/snapshot/{config_id}", response_model=SnowballSnapshotResponse)
+async def get_snapshot(
+    config_id: int,
+    account_id: str = Depends(valid_account)
+):
+    with get_db_session(account_id) as db:
+        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config_id).first()
+        
+        if not snapshot:
+             return SnowballSnapshotResponse(
+                 config_id=config_id,
+                 market_value=0.0,
+                 cash=0.0,
+                 stock_ratio=0.0,
+                 cash_ratio=0.0,
+                 last_synced_amount=0.0,
+                 holdings=[],
+                 updated_at=datetime.now()
+             )
+        
+        # Calculate Real-time Values
+        holdings_dict = snapshot.holdings or {}
+        symbols = list(holdings_dict.keys())
+        
+        # 1. Fetch Real-time Prices
+        prices = await fetch_xueqiu_quotes(symbols)
+        
+        # 2. Build Holding Details & Calc Total
+        detailed_holdings = []
+        total_stock_value = 0.0
+        
+        for sym, qty in holdings_dict.items():
+            price = prices.get(sym, 0.0)
+            mv = qty * price
+            total_stock_value += mv
+            
+            detailed_holdings.append(SnapshotHolding(
+                symbol=sym,
+                quantity=qty,
+                price=price,
+                market_value=mv,
+                ratio=0.0 # Calc later
+            ))
+            
+        current_cash = snapshot.cash or 0.0
+        total_market_value = total_stock_value + current_cash
+        
+        # 3. Calculate Ratios
+        if total_market_value > 0:
+            for h in detailed_holdings:
+                h.ratio = (h.market_value / total_market_value) * 100
+            
+            stock_ratio = (total_stock_value / total_market_value) * 100
+            cash_ratio = (current_cash / total_market_value) * 100
+        else:
+            stock_ratio = 0.0
+            cash_ratio = 100.0 if current_cash > 0 else 0.0
+
+        # Sort by Market Value desc
+        detailed_holdings.sort(key=lambda x: x.market_value, reverse=True)
+
+        return SnowballSnapshotResponse(
+            config_id=config_id,
+            market_value=total_market_value,
+            cash=current_cash,
+            stock_ratio=stock_ratio,
+            cash_ratio=cash_ratio,
+            last_synced_amount=snapshot.last_synced_amount,
+            holdings=detailed_holdings,
+            updated_at=snapshot.updated_at or datetime.now()
+        )
+
 # --- Core Logic ---
 
 @router.post("/opportunities", response_model=TradeResponse)
