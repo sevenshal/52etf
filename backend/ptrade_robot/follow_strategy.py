@@ -37,45 +37,83 @@ def convert_to_client_code(api_code):
         market = 'SS'
     return "{0}.{1}".format(code, market.upper())
 
-def get_limit_price(symbol: str, side: str) -> float:
-    """获取限价
+def get_limit_price(symbol: str, side: str, quantity: int) -> float:
+    """获取限价 - 智能深度撮合
     Args:
         symbol: 股票代码
         side: 交易方向，"BUY" 或 "SELL"
+        quantity: 需要执行的数量
     Returns:
-        float: 限价价格
-    Raises:
-        Exception: 获取失败或档位缺失抛出异常
+        float: 满足数量的限价
     """
     gear_price = get_gear_price(symbol)
     if not gear_price or not gear_price.get('bid_grp') or not gear_price.get('offer_grp'):
         raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
         
-    # 买入使用卖二价，卖出使用买二价
-    # 优先用二档，没有则用一档
-    if side == "BUY":
-        grp = gear_price['offer_grp']
-        if 2 in grp:
-            return grp[2][0]  # 卖二
-        if 1 in grp:
-            return grp[1][0]  # 卖一
-        raise Exception("获取 %s 卖价失败: 卖一卖二档位均缺失" % symbol)
-    else:
-        grp = gear_price['bid_grp']
-        if 2 in grp:
-            return grp[2][0]  # 买二
-        if 1 in grp:
-            return grp[1][0]  # 买一
-        raise Exception("获取 %s 买价失败: 买一买二档位均缺失" % symbol)
+    # BUY: 看卖盘 (offer_grp), SELL: 看买盘 (bid_grp)
+    grp = gear_price['offer_grp'] if side == "BUY" else gear_price['bid_grp']
+    
+    accumulated_vol = 0
+    target_price = 0.0
+    
+    # 遍历档位 1-10
+    # grp format: {1: [price, volume], 2: [price, volume], ...}
+    sorted_levels = sorted(grp.keys()) # 1, 2, 3...
+    
+    if not sorted_levels:
+        raise Exception(f"获取 {symbol} 档位价格失败: 档位数据为空")
+
+    # 初始化为第1档价格，防止返回0
+    target_price = grp[sorted_levels[0]][0]
+    
+    for level in sorted_levels:
+        # 只看前x档
+        if level > 5:
+            break
+            
+        price_vol = grp.get(level)
+        if not price_vol: continue
+        
+        p = price_vol[0]
+        v = price_vol[1]
+        
+        accumulated_vol += v
+        target_price = p
+        
+        if accumulated_vol >= quantity:
+            log.info(f"{symbol} {side} 数量{quantity}, 档位{level}满足 (累积{accumulated_vol}), 价格{p}")
+            return p
+            
+    # 如果深度不够（或超过5档仍不够），就用当前遍历到的最后一档价格
+    log.warn(f"{symbol} 前5档深度不足以覆盖数量{quantity} (累积{accumulated_vol}), 使用最终价格 {target_price}")
+    return target_price
 
 
 def handle_data(context, data):
     """每分钟执行一次"""
     try:
-        # 获取当日订单
+        # 1. 撤销所有未完成订单
         today_orders = get_all_orders() or []
-        # 获取持仓
+        pending_orders = [
+            o for o in today_orders 
+            if str(o['status']) not in ["5", "6", "8", "9"]
+        ]
+        
+        if pending_orders:
+            log.info(f"检测到 {len(pending_orders)} 个未完成订单，准备撤单...")
+            for po in pending_orders:
+                try:
+                    cancel_order(po['entrust_no'])
+                    log.info(f"已请求撤单: {po['symbol']} (订单号: {po['entrust_no']})")
+                except Exception as e:
+                    log.warn(f"撤单失败 {po['symbol']} (订单号: {po['entrust_no']}): {str(e)}")
+        
+        # 重新获取持仓
         positions_dict = get_positions()
+        
+        # 重新获取今日订单状态
+        today_orders = get_all_orders() or []
+
         backtest = not is_trade()
         # 请求交易机会
         response = requests.post(
@@ -128,40 +166,42 @@ def handle_data(context, data):
             op_id = opp.get("op_id")
             try:
                 symbol = convert_to_client_code(opp["symbol"])
+                qty = int(opp["quantity"])
+                action = opp["action"]
                 
-                # 获取限价
-                limit_price = get_limit_price(symbol, opp["action"])
+                # 获取限价 (带数量)
+                limit_price = get_limit_price(symbol, action, qty)
                 
                 status = "FAILED"
                 msg = ""
                 order_sn = None
                 
-                if opp["action"] == "BUY":
-                    order_sn = order(symbol, opp["quantity"], limit_price=limit_price)
+                if action == "BUY":
+                    order_sn = order(symbol, qty, limit_price=limit_price)
                     if order_sn:
                         orders = get_order(order_sn)
                         o = orders[0] if orders else None
-                        if o and o.status == 8:
+                        if o and str(o.status) == "9":
                             status = "FAILED"
                             msg = "买入%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
                         else:
                             status = "SUCCESS"
-                            msg = "买入%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
+                            msg = "买入%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, qty, limit_price)
                     else:
-                        msg = "买入%s %s失败" % (opp.get('name',''), symbol)
-                elif opp["action"] == "SELL":
-                    order_sn = order(symbol, -opp["quantity"], limit_price=limit_price)
+                        msg = "买入%s %s失败(无订单号)" % (opp.get('name',''), symbol)
+                elif action == "SELL":
+                    order_sn = order(symbol, -qty, limit_price=limit_price)
                     if order_sn:
                         orders = get_order(order_sn)
                         o = orders[0] if orders else None
-                        if o and o.status == 8:
+                        if o and str(o.status) == "9":
                             status = "FAILED"
                             msg = "卖出%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
                         else:
                             status = "SUCCESS"
-                            msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, opp['quantity'], limit_price)
+                            msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, qty, limit_price)
                     else:
-                        msg = "卖出%s %s失败" % (opp.get('name',''), symbol)
+                        msg = "卖出%s %s失败(无订单号)" % (opp.get('name',''), symbol)
                 
                 # 优先使用结构化日志上报
                 report_execution(op_id, status, msg, price=limit_price if order_sn else None)
