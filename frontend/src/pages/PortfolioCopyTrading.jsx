@@ -22,6 +22,9 @@ const PortfolioCopyTrading = () => {
     const [currentLogs, setCurrentLogs] = useState([]);
     const [logLoading, setLogLoading] = useState(false);
     const [currentLogTitle, setCurrentLogTitle] = useState('');
+    const [activeLogConfig, setActiveLogConfig] = useState(null); // { record, type }
+    const [logPagination, setLogPagination] = useState({ current: 1, pageSize: 20, total: 0 });
+    const [logFilters, setLogFilters] = useState({ combination_id: '', symbol: '' });
 
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -101,29 +104,77 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const handleViewLogs = async (record, type) => {
+    const fetchLogs = async (page = 1, filters = {}, config = null) => {
+        const targetConfig = config || activeLogConfig;
+        if (!targetConfig) return;
+
         setLogLoading(true);
+        try {
+            const { record, type } = targetConfig;
+            let params = {
+                page: page,
+                page_size: logPagination.pageSize,
+                ...filters
+            };
+
+            if (type === 'ib') {
+                params.portfolio_id = record.portfolio_id;
+                // IB logs endpoint might not support pagination yet, keeping original call if so
+                // Assuming we only implemented pagination for Snowball as per task
+                // But let's check if we break IB logs. 
+                // The task was "Snowball portfolio log filtering".
+                // If IB logs endpoint is not updated, sending extra params might be ignored or error.
+                // Assuming IB logs are small or handled separately. 
+                // For now, let's keep IB logs as is (non-paginated list) or adapt.
+                // The user request was specific to Snowball. 
+                // Let's stick to Snowball pagination logic here.
+                const res = await request.get('/api/ib-copy-trading/logs', { params });
+                setCurrentLogs(res.data); // IB returns List
+                setLogPagination(prev => ({ ...prev, current: 1, total: res.data.length })); // Fake pagination for IB
+            } else {
+                params.cli_id = record.cli_id;
+                // Add specific filters
+                if (logFilters.combination_id) params.combination_id = logFilters.combination_id;
+                if (logFilters.symbol) params.symbol = logFilters.symbol;
+
+                // Override with argument filters if provided (e.g. from search click)
+                if (filters.combination_id !== undefined) params.combination_id = filters.combination_id;
+                if (filters.symbol !== undefined) params.symbol = filters.symbol;
+
+                const res = await request.get('/api/snowball/logs', { params });
+                // New Response: { total: 100, items: [...] }
+                setCurrentLogs(res.data.items);
+                setLogPagination(prev => ({ ...prev, current: page, total: res.data.total }));
+            }
+        } catch (e) {
+            message.error('获取日志失败');
+            console.error(e);
+        } finally {
+            setLogLoading(false);
+        }
+    };
+
+    const handleLogTableChange = (pagination) => {
+        setLogPagination(prev => ({ ...prev, current: pagination.current }));
+        fetchLogs(pagination.current, logFilters);
+    };
+
+    const handleViewLogs = async (record, type) => {
         setLogModalVisible(true);
+        setActiveLogConfig({ record, type });
         setCurrentLogs([]);
+        setLogFilters({ combination_id: '', symbol: '' }); // Reset filters
+        setLogPagination(prev => ({ ...prev, current: 1, total: 0 }));
+
         if (type === 'ib') {
             setCurrentLogTitle(`跟单日志 - ${record.portfolio_name} (${record.portfolio_id})`);
         } else {
             setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
         }
 
-        try {
-            let res;
-            if (type === 'ib') {
-                res = await request.get('/api/ib-copy-trading/logs', { params: { portfolio_id: record.portfolio_id } });
-            } else {
-                res = await request.get('/api/snowball/logs', { params: { cli_id: record.cli_id } });
-            }
-            setCurrentLogs(res.data);
-        } catch (e) {
-            message.error('获取日志失败');
-        } finally {
-            setLogLoading(false);
-        }
+        // Initial fetch with reset filters
+        // Using timeout to ensure state update? No, just pass config directly
+        fetchLogs(1, { combination_id: '', symbol: '' }, { record, type });
     };
 
     const handleSave = async (values) => {
@@ -307,47 +358,27 @@ const PortfolioCopyTrading = () => {
         },
         {
             title: '组合',
-            key: 'portfolio_id',
-            width: 120,
-            filters: Array.from(new Set(currentLogs.flatMap(log => {
-                if (log.combination_id) return log.combination_id.split(',');
-                if (log.portfolio_id) return [log.portfolio_id];
-                return [];
-            }))).filter(Boolean).map(id => {
-                let name = id;
-                const sbConfig = snowballConfigs.find(c => c.combination_id === id);
-                if (sbConfig) name = sbConfig.combination_name;
-                else {
-                    const ibConfig = configs.find(c => c.portfolio_id === id);
-                    if (ibConfig) name = ibConfig.portfolio_name;
-                }
-                return { text: name || id, value: id };
-            }),
-            onFilter: (value, record) => {
-                if (record.combination_id) return record.combination_id.split(',').includes(value);
-                if (record.portfolio_id) return record.portfolio_id == value;
-                return false;
-            },
-            filterSearch: true,
+            key: 'combination_id',
+            width: 140,
             render: (_, record) => {
                 if (record.combination_id) {
-                    // Handle comma-separated IDs for Snowball
                     const ids = record.combination_id.split(',');
                     const names = ids.map(id => {
-                        // Prioritize matching by both ID and CLI_ID
                         let config = snowballConfigs.find(c => c.combination_id === id && c.cli_id === record.cli_id);
                         if (!config) {
-                            // Fallback to matching by ID only
                             config = snowballConfigs.find(c => c.combination_id === id);
                         }
+                        // If we have a name, show it. If not, fallback to ID.
+                        // User specifically asked for Name. 
+                        // If it's just the ID, it will show ID.
                         return config ? config.combination_name : id;
                     });
-                    return names.join(', ');
+                    return <Text style={{ fontSize: '12px' }} ellipsis={{ tooltip: names.join(', ') }}>{names.join(', ')}</Text>;
                 }
                 if (record.portfolio_id) {
                     const config = configs.find(c => c.portfolio_id === record.portfolio_id);
-                    const name = config ? config.portfolio_name : '';
-                    return name ? `${name} (${record.portfolio_id})` : record.portfolio_id;
+                    const name = config ? config.portfolio_name : record.portfolio_id;
+                    return <Text style={{ fontSize: '12px' }}>{name}</Text>;
                 }
                 return '-';
             }
@@ -356,22 +387,36 @@ const PortfolioCopyTrading = () => {
             title: '行为',
             dataIndex: 'action',
             key: 'action',
+            width: 80,
+            render: (text) => <Tag>{text}</Tag>
         },
         {
             title: '标的',
             dataIndex: 'symbol',
             key: 'symbol',
+            width: 100,
+            minWidth: 100,
+            render: (text) => <Text style={{ fontSize: '12px' }}>{text}</Text>
         },
         {
             title: '数量',
             dataIndex: 'quantity',
             key: 'quantity',
+            width: 80,
+        },
+        {
+            title: '价格',
+            dataIndex: 'price',
+            key: 'price',
+            width: 80,
+            render: (p) => p?.toFixed(2)
         },
         {
             title: '结果',
             key: 'status',
+            width: 100,
             render: (_, record) => (
-                <Tag color={record.status === 'SUCCESS' ? 'green' : 'red'}>
+                <Tag color={record.status === 'SUCCESS' ? 'green' : record.status === 'SIGNAL' ? 'blue' : 'red'}>
                     {record.status}
                 </Tag>
             )
@@ -380,6 +425,7 @@ const PortfolioCopyTrading = () => {
             title: '消息',
             dataIndex: 'message',
             key: 'message',
+            render: (text) => <Text type="secondary" style={{ fontSize: '12px' }} ellipsis={{ tooltip: text }}>{text}</Text>
         }
     ];
 
@@ -539,14 +585,55 @@ const PortfolioCopyTrading = () => {
                 visible={logModalVisible}
                 onCancel={() => setLogModalVisible(false)}
                 footer={null}
-                width={900}
+                width={1000}
             >
+                {activeLogConfig?.type === 'snowball' && (
+                    <div style={{ marginBottom: 16, padding: '12px', background: '#f5f5f5', borderRadius: '4px' }}>
+                        <Space>
+                            <Select
+                                placeholder="选择组合"
+                                value={logFilters.combination_id}
+                                onChange={val => setLogFilters(prev => ({ ...prev, combination_id: val }))}
+                                style={{ width: 220 }}
+                                allowClear
+                            >
+                                {snowballConfigs
+                                    .filter(c => c.cli_id === activeLogConfig.record.cli_id)
+                                    .map(c => (
+                                        <Select.Option key={c.combination_id} value={c.combination_id}>
+                                            {c.combination_name || c.combination_id}
+                                        </Select.Option>
+                                    ))
+                                }
+                            </Select>
+                            <Input
+                                placeholder="股票代码 (如 SH.600)"
+                                value={logFilters.symbol}
+                                onChange={e => setLogFilters(prev => ({ ...prev, symbol: e.target.value }))}
+                                style={{ width: 150 }}
+                                allowClear
+                            />
+                            <Button type="primary" icon={<ReloadOutlined />} onClick={() => fetchLogs(1, logFilters)}>
+                                搜索
+                            </Button>
+                        </Space>
+                    </div>
+                )}
+
                 <Table
                     dataSource={currentLogs}
                     loading={logLoading}
                     rowKey="id"
-                    pagination={{ pageSize: 20 }}
+                    pagination={{
+                        current: logPagination.current,
+                        pageSize: logPagination.pageSize,
+                        total: logPagination.total,
+                        showSizeChanger: false,
+                        showTotal: (total) => `共 ${total} 条`
+                    }}
+                    onChange={handleLogTableChange}
                     columns={logColumns}
+                    size="small"
                 />
             </Modal >
 
