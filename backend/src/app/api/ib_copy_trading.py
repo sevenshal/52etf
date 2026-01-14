@@ -29,6 +29,7 @@ class PortfolioCopyConfigSchema(BaseModel):
 
 class PortfolioCopyLogSchema(BaseModel):
     id: int
+    config_id: Optional[int] = None
     account_id: str
     timestamp: datetime
     portfolio_id: Optional[str] = None
@@ -115,6 +116,7 @@ async def delete_config(
 @router.get("/logs", response_model=List[PortfolioCopyLogSchema])
 async def list_logs(
     portfolio_id: Optional[str] = None,
+    config_id: Optional[int] = None,
     db: Session = Depends(get_db),
     account_id: str = Depends(valid_account)
 ):
@@ -123,6 +125,8 @@ async def list_logs(
     query = query.filter(PortfolioCopyLog.account_id == account_id)
     if portfolio_id:
         query = query.filter(PortfolioCopyLog.portfolio_id == portfolio_id)
+    if config_id:
+        query = query.filter(PortfolioCopyLog.config_id == config_id)
     return query.order_by(PortfolioCopyLog.timestamp.desc()).limit(100).all()
 
 @router.get("/portfolio-info/{portfolio_id}")

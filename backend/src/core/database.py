@@ -318,6 +318,7 @@ class PortfolioCopyLog(Base):
     __tablename__ = "portfolio_copy_logs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, index=True, nullable=True) # 关联的配置ID
     account_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.now, index=True)
     portfolio_id = Column(String)
@@ -452,6 +453,12 @@ def get_db_session_factory(account_id: str):
                     conn.execute("DROP INDEX IF EXISTS ix_snowball_copy_configs_cli_id")
                 except Exception:
                     pass
+
+                # Check for PortfolioCopyLog table config_id
+                result = conn.execute("PRAGMA table_info(portfolio_copy_logs)")
+                pcl_cols = [row[1] for row in result]
+                if 'config_id' not in pcl_cols:
+                    conn.execute("ALTER TABLE portfolio_copy_logs ADD COLUMN config_id INTEGER DEFAULT NULL")
 
                 # Check for SnowballPortfolioSnapshot table (Ensure creation if missing, handled by create_all below)
                 pass

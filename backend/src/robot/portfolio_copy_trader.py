@@ -39,12 +39,13 @@ class PortfolioCopyTrader:
         self.ib_services: Dict[str, IBKRService] = {} # Key: "port_clientid"
         self.worker_loop_obj = None # Capture the worker loop
 
-    def _log(self, account_id: str, portfolio_id: str, action: str, status: str, message: str, symbol: str = None, quantity: float = None, price: float = None):
+    def _log(self, account_id: str, portfolio_id: str, action: str, status: str, message: str, symbol: str = None, quantity: float = None, price: float = None, config_id: int = None):
         db = Session()
         try:
             log = PortfolioCopyLog(
                 account_id=account_id,
                 portfolio_id=portfolio_id,
+                config_id=config_id,
                 action=action,
                 status=status,
                 message=message,
@@ -301,16 +302,16 @@ class PortfolioCopyTrader:
                     
                     self._log(config.account_id, config.portfolio_id, action, "SUCCESS", 
                                 msg, 
-                                symbol=symbol, quantity=qty, price=item["price"])
+                                symbol=symbol, quantity=qty, price=item["price"], config_id=config.id)
                                 
                     logger.info(f"[{masked_account_id}] Successfully placed MARKET {action} order for {qty} {symbol}")
                 except Exception as e:
                     logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
-                    self._log(config.account_id, config.portfolio_id, action, "FAILED", str(e), symbol=symbol)
+                    self._log(config.account_id, config.portfolio_id, action, "FAILED", str(e), symbol=symbol, config_id=config.id)
 
         except Exception as e:
             logger.error(f"Rebalance process failed for {masked_account_id}: {e}")
-            self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e))
+            self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e), config_id=config.id)
 
     def _should_run(self, cron_rule: str, timezone_str: str = "America/New_York") -> bool:
         """使用 croniter 检查当前时间是否符合 cron 规则"""
