@@ -354,12 +354,13 @@ const PortfolioCopyTrading = () => {
             title: '时间',
             dataIndex: 'timestamp',
             key: 'timestamp',
+            width: 80,
             render: (t) => new Date(t).toLocaleString()
         },
         {
             title: '组合',
             key: 'combination_id',
-            width: 140,
+            width: 80,
             render: (_, record) => {
                 if (record.combination_id) {
                     const ids = record.combination_id.split(',');
