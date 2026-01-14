@@ -43,25 +43,31 @@ def get_limit_price(symbol: str, side: str) -> float:
         symbol: 股票代码
         side: 交易方向，"BUY" 或 "SELL"
     Returns:
-        float: 限价价格，如果获取失败返回 None
+        float: 限价价格
+    Raises:
+        Exception: 获取失败或档位缺失抛出异常
     """
-    try:
-        gear_price = get_gear_price(symbol)
-        if not gear_price or not gear_price.get('bid_grp') or not gear_price.get('offer_grp'):
-            log.error("获取 %s 档位价格失败" % symbol)
-            return None
-            
-        # 买入使用卖二价，卖出使用买二价
-        if side == "BUY":
-            if 2 in gear_price['offer_grp']:
-                return gear_price['offer_grp'][2][0]  # 卖二价格
-        else:
-            if 2 in gear_price['bid_grp']:
-                return gear_price['bid_grp'][2][0]  # 买二价格
-        return None
-    except Exception as e:
-        log.error("获取 %s 限价时发生异常: %s" % (symbol, e))
-        return None
+    gear_price = get_gear_price(symbol)
+    if not gear_price or not gear_price.get('bid_grp') or not gear_price.get('offer_grp'):
+        raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
+        
+    # 买入使用卖二价，卖出使用买二价
+    # 优先用二档，没有则用一档
+    if side == "BUY":
+        grp = gear_price['offer_grp']
+        if 2 in grp:
+            return grp[2][0]  # 卖二
+        if 1 in grp:
+            return grp[1][0]  # 卖一
+        raise Exception("获取 %s 卖价失败: 卖一卖二档位均缺失" % symbol)
+    else:
+        grp = gear_price['bid_grp']
+        if 2 in grp:
+            return grp[2][0]  # 买二
+        if 1 in grp:
+            return grp[1][0]  # 买一
+        raise Exception("获取 %s 买价失败: 买一买二档位均缺失" % symbol)
+
 
 def handle_data(context, data):
     """每分钟执行一次"""
