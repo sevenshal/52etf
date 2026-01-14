@@ -84,6 +84,11 @@ class SnowballLogStatusUpdate(BaseModel):
     message: Optional[str] = None
     price: Optional[float] = None
 
+class PaginatedSnowballLogs(BaseModel):
+    total: int
+    items: List[SnowballLogResponse]
+
+
 # --- Helpers ---
 
 def normalize_symbol(symbol: str) -> str:
@@ -287,18 +292,41 @@ async def delete_config(
         db.query(SnowballCopyConfig).filter_by(id=config_id).delete()
         return {"message": "Deleted successfully"}
 
-@router.get("/logs", response_model=List[SnowballLogResponse])
+@router.get("/logs", response_model=PaginatedSnowballLogs)
 async def get_logs(
     account_id: str = Depends(valid_account),
-    limit: int = 100,
-    cli_id: Optional[str] = None
+    page: int = 1,
+    page_size: int = 20,
+    cli_id: Optional[str] = None,
+    combination_id: Optional[str] = None,
+    symbol: Optional[str] = None
 ):
     with get_db_session(account_id) as db:
         query = db.query(SnowballCopyLog)
+        
         if cli_id:
             query = query.filter(SnowballCopyLog.cli_id == cli_id)
-        logs = query.order_by(SnowballCopyLog.timestamp.desc()).limit(limit).all()
-        return [SnowballLogResponse.from_orm(log) for log in logs]
+        if combination_id:
+            # combination_id might be comma separated in DB for aggregated orders, 
+            # or we might want to partial match. 
+            # For now, let's assume we want to find any log where the combination_id involved this ID.
+            # Assuming simple match or partial match if needed. 
+            # Given the DB design: combination_id = Column(String) # Mixed
+            query = query.filter(SnowballCopyLog.combination_id.contains(combination_id))
+        if symbol:
+            query = query.filter(SnowballCopyLog.symbol.contains(symbol))
+            
+        total = query.count()
+        
+        logs = query.order_by(SnowballCopyLog.timestamp.desc())\
+            .offset((page - 1) * page_size)\
+            .limit(page_size)\
+            .all()
+            
+        return PaginatedSnowballLogs(
+            total=total,
+            items=[SnowballLogResponse.from_orm(log) for log in logs]
+        )
 
 @router.post("/logs/status")
 async def update_log_status(
