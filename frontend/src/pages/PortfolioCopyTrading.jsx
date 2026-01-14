@@ -800,7 +800,12 @@ const PortfolioCopyTrading = () => {
                                     title: 'Symbol',
                                     dataIndex: 'symbol',
                                     key: 'symbol',
-                                    render: (text) => <Text strong>{text}</Text>
+                                    render: (text, record) => (
+                                        <Space direction="vertical" size={0}>
+                                            <Text strong>{text}</Text>
+                                            {record.name && <Text type="secondary" style={{ fontSize: '12px' }}>{record.name}</Text>}
+                                        </Space>
+                                    )
                                 },
                                 {
                                     title: 'Quantity',
@@ -814,7 +819,7 @@ const PortfolioCopyTrading = () => {
                                     dataIndex: 'price',
                                     key: 'price',
                                     align: 'right',
-                                    render: (val) => val.toFixed(2)
+                                    render: (val) => val.toFixed(3)
                                 },
                                 {
                                     title: 'Value',
