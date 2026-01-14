@@ -288,19 +288,25 @@ class PortfolioCopyTrader:
                 symbol = item["symbol"]
                 action = item["action"]
                 qty = item["quantity"]
+                current_ratio = item.get("current_ratio", 0.0)
                 target_ratio = item["target_ratio"]
 
                 logger.info(f"[{masked_account_id}] Attempting {action} {qty} for {symbol}...")
                 try:
                     # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
                     await ib.place_market_order(symbol, action, qty)
-                    self._log(config.account_id, config.portfolio_id, "REBALANCE", "SUCCESS", 
-                                f"{action} {qty} (Market Order) for Target Ratio: {target_ratio:.2f}%", 
+                    
+                    # Log with specific Action and Ratio change
+                    msg = f"{action} {qty} (Market Order). Ratio: {current_ratio:.2f}% -> {target_ratio:.2f}%"
+                    
+                    self._log(config.account_id, config.portfolio_id, action, "SUCCESS", 
+                                msg, 
                                 symbol=symbol, quantity=qty, price=item["price"])
+                                
                     logger.info(f"[{masked_account_id}] Successfully placed MARKET {action} order for {qty} {symbol}")
                 except Exception as e:
                     logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
-                    self._log(config.account_id, config.portfolio_id, "REBALANCE", "FAILED", str(e), symbol=symbol)
+                    self._log(config.account_id, config.portfolio_id, action, "FAILED", str(e), symbol=symbol)
 
         except Exception as e:
             logger.error(f"Rebalance process failed for {masked_account_id}: {e}")
