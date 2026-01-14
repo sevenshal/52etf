@@ -56,21 +56,17 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
     accumulated_vol = 0
     target_price = 0.0
     
-    # 遍历档位 1-10
-    # grp format: {1: [price, volume], 2: [price, volume], ...}
-    sorted_levels = sorted(grp.keys()) # 1, 2, 3...
+    # 遍历档位 1-5
+    sorted_levels = [1, 2, 3, 4, 5]
     
-    if not sorted_levels:
-        raise Exception(f"获取 {symbol} 档位价格失败: 档位数据为空")
-
     # 初始化为第1档价格，防止返回0
-    target_price = grp[sorted_levels[0]][0]
-    
+    # 先检查是否有第1档
+    if 1 in grp:
+        target_price = grp[1][0]
+    else:
+        raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
+
     for level in sorted_levels:
-        # 只看前x档
-        if level > 5:
-            break
-            
         price_vol = grp.get(level)
         if not price_vol: continue
         
@@ -81,11 +77,11 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
         target_price = p
         
         if accumulated_vol >= quantity:
-            log.info(f"{symbol} {side} 数量{quantity}, 档位{level}满足 (累积{accumulated_vol}), 价格{p}")
+            log.info("%s %s 数量%d, 档位%d满足 (累积%d), 价格%s" % (symbol, side, quantity, level, accumulated_vol, p))
             return p
             
     # 如果深度不够（或超过5档仍不够），就用当前遍历到的最后一档价格
-    log.warn(f"{symbol} 前5档深度不足以覆盖数量{quantity} (累积{accumulated_vol}), 使用最终价格 {target_price}")
+    log.info("%s 前5档深度不足以覆盖数量%d (累积%d), 使用最终价格 %s" % (symbol, quantity, accumulated_vol, target_price))
     return target_price
 
 
@@ -100,13 +96,13 @@ def handle_data(context, data):
         ]
         
         if pending_orders:
-            log.info(f"检测到 {len(pending_orders)} 个未完成订单，准备撤单...")
+            log.info("检测到 %d 个未完成订单，准备撤单..." % len(pending_orders))
             for po in pending_orders:
                 try:
                     cancel_order(po['entrust_no'])
-                    log.info(f"已请求撤单: {po['symbol']} (订单号: {po['entrust_no']})")
+                    log.info("已请求撤单: %s (订单号: %s)" % (po['symbol'], po['entrust_no']))
                 except Exception as e:
-                    log.warn(f"撤单失败 {po['symbol']} (订单号: {po['entrust_no']}): {str(e)}")
+                    log.error("撤单失败 %s (订单号: %s): %s" % (po['symbol'], po['entrust_no'], str(e)))
         
         # 重新获取持仓
         positions_dict = get_positions()
