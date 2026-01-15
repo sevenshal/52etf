@@ -123,8 +123,6 @@ async def list_logs(
     query = db.query(PortfolioCopyLog)
     # Always filter by authenticated account_id
     query = query.filter(PortfolioCopyLog.account_id == account_id)
-    if portfolio_id:
-        query = query.filter(PortfolioCopyLog.portfolio_id == portfolio_id)
     if config_id:
         query = query.filter(PortfolioCopyLog.config_id == config_id)
     return query.order_by(PortfolioCopyLog.timestamp.desc()).limit(100).all()
