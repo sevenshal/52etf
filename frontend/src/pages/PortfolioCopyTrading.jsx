@@ -704,7 +704,7 @@ const PortfolioCopyTrading = () => {
                             <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
                                 <Space.Compact style={{ width: '100%' }}>
                                     <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
-                                        <Input placeholder="例如: 158919" disabled={!!editingConfig} />
+                                        <Input placeholder="例如: 158919" />
                                     </Form.Item>
                                     <Button onClick={fetchPortfolioName}>获取名称</Button>
                                 </Space.Compact>
