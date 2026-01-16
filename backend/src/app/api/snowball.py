@@ -619,6 +619,7 @@ async def get_snowball_opportunities(
                     need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
                     
                     symbol_needs[sym].append(need_reason)
+                    symbol_contributors[sym].add(config['combination_id'])
 
             # Update Snapshot
             snapshot.holdings = new_snap_holdings
@@ -628,7 +629,6 @@ async def get_snowball_opportunities(
             # Aggregate Targets
             for sym, qty in new_snap_holdings.items():
                 aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
-                symbol_contributors[sym].add(config['combination_id'])
 
         # 4. Generate Opportunities (Diff vs Actual)
         opportunities = []
