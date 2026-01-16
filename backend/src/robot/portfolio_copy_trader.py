@@ -71,8 +71,22 @@ class PortfolioCopyTrader:
     def get_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
         """从 Futu API 获取组合信息 (同步方法，供 executor 调用)"""
         url = f"https://portfolio.futunn.com/portfolio-api/get-portfolio-info?portfolio_id={portfolio_id}&_={int(time.time() * 1000)}"
+        
+        # Merge defaults with provided headers
+        final_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            "Referer": f"https://portfolio.futunn.com/portfolio/{portfolio_id}",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"macOS\""
+        }
+        if headers:
+            final_headers.update(headers)
+            
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=final_headers, timeout=10)
             response.raise_for_status()
             data = response.json()
             if data.get("code") == 0:
@@ -80,14 +94,30 @@ class PortfolioCopyTrader:
             else:
                 raise Exception(f"Futu API error: {data.get('message')}")
         except Exception as e:
-            logger.error(f"Failed to fetch Futu portfolio info: {e}")
+            # Log full response text for debugging 439/403 errors
+            error_details = response.text if 'response' in locals() and response else "No response content"
+            logger.error(f"Failed to fetch Futu portfolio info: {e}. Response: {error_details}")
             raise
 
     def get_futu_positions_sync(self, portfolio_id: str, headers: dict) -> List[dict]:
         """从 Futu API 获取持仓 (同步方法，供 executor 调用)"""
         url = f"https://portfolio.futunn.com/portfolio-api/get-portfolio-position?portfolio_id={portfolio_id}&language=0&_={int(time.time() * 1000)}"
+        
+        # Merge defaults with provided headers
+        final_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            "Referer": f"https://portfolio.futunn.com/portfolio/{portfolio_id}",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"macOS\""
+        }
+        if headers:
+            final_headers.update(headers)
+            
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=final_headers, timeout=10)
             response.raise_for_status()
             data = response.json()
             if data.get("code") == 0:
@@ -95,7 +125,9 @@ class PortfolioCopyTrader:
             else:
                 raise Exception(f"Futu API error: {data.get('message')}")
         except Exception as e:
-            logger.error(f"Failed to fetch Futu positions: {e}")
+            # Log full response text for debugging 439/403 errors
+            error_details = response.text if 'response' in locals() and response else "No response content"
+            logger.error(f"Failed to fetch Futu positions: {e}. Response: {error_details}")
             raise
 
     async def _ensure_ib_connected(self, port: int, client_id: int) -> IBKRService:
