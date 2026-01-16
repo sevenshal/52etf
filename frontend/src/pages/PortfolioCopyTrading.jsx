@@ -601,6 +601,7 @@ const PortfolioCopyTrading = () => {
                                 style={{ width: 220 }}
                                 allowClear
                             >
+                                <Select.Option key="AGGREGATED" value="AGGREGATED">AGGREGATED</Select.Option>
                                 {snowballConfigs
                                     .filter(c => c.cli_id === activeLogConfig.record.cli_id)
                                     .map(c => (
