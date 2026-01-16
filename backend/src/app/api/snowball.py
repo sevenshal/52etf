@@ -66,6 +66,7 @@ class SnowballLogResponse(BaseModel):
     combination_id: Optional[str]
     action: Optional[str]
     symbol: Optional[str]
+    stock_name: Optional[str] = None # Added field
     quantity: Optional[float]
     price: Optional[float]
     status: Optional[str]
@@ -323,9 +324,20 @@ async def get_logs(
             .limit(page_size)\
             .all()
             
+        # --- Fetch Stock Names ---
+        unique_symbols = {log.symbol for log in logs if log.symbol}
+        quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols))
+        
+        items = []
+        for log in logs:
+            item = SnowballLogResponse.from_orm(log)
+            if log.symbol and log.symbol in quotes:
+                item.stock_name = quotes[log.symbol].get("name", "")
+            items.append(item)
+            
         return PaginatedSnowballLogs(
             total=total,
-            items=[SnowballLogResponse.from_orm(log) for log in logs]
+            items=items
         )
 
 @router.post("/logs/status")
