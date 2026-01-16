@@ -368,9 +368,6 @@ const PortfolioCopyTrading = () => {
                         if (!config) {
                             config = snowballConfigs.find(c => c.combination_id === id);
                         }
-                        // If we have a name, show it. If not, fallback to ID.
-                        // User specifically asked for Name. 
-                        // If it's just the ID, it will show ID.
                         return config ? config.combination_name : id;
                     });
                     return <Text style={{ fontSize: '12px' }} ellipsis={{ tooltip: names.join(', ') }}>{names.join(', ')}</Text>;
@@ -388,15 +385,25 @@ const PortfolioCopyTrading = () => {
             dataIndex: 'action',
             key: 'action',
             width: 80,
-            render: (text) => <Tag>{text}</Tag>
+            render: (text) => {
+                let color = 'default';
+                if (text === 'BUY') color = 'red';
+                if (text === 'SELL') color = 'blue';
+                return <Text style={{ color: color, fontWeight: 'bold' }}>{text}</Text>;
+            }
         },
         {
             title: '标的',
             dataIndex: 'symbol',
             key: 'symbol',
-            width: 100,
+            width: 140, // Increased width for name
             minWidth: 100,
-            render: (text) => <Text style={{ fontSize: '12px' }}>{text}</Text>
+            render: (text, record) => (
+                <Space direction="vertical" size={0}>
+                    <Text style={{ fontSize: '12px', fontWeight: 'bold' }}>{text}</Text>
+                    {record.stock_name && <Text type="secondary" style={{ fontSize: '10px' }}>{record.stock_name}</Text>}
+                </Space>
+            )
         },
         {
             title: '数量',
