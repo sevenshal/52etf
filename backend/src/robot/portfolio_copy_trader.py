@@ -467,6 +467,54 @@ class PortfolioCopyTrader:
             except Exception as e:
                 logger.error(f"Error in Cron check: {e}")
 
+
+    async def trigger_rebalance_if_name_in_content(self, content: str) -> List[str]:
+        """
+        Check if any active portfolio name exists in the content, and trigger rebalance if so.
+        """
+        triggered_accounts = []
+        if not content:
+            return triggered_accounts
+
+        if not self.worker_loop_obj:
+            logger.warning("Worker loop not ready, cannot trigger rebalance")
+            return triggered_accounts
+
+        db = Session()
+        try:
+            # Get all active configs
+            configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
+
+            for config in configs:
+                # Check if portfolio name is valid and exists in content
+                if config.portfolio_name and config.portfolio_name.strip() and config.portfolio_name in content:
+                    
+                    key = f"cfg_{config.id}"
+                    
+                    # Check if already processing
+                    if key in self._processing_keys:
+                        logger.info(f"Skipping rebalance trigger for {config.portfolio_name} (ID: {config.id}) - already in progress")
+                        continue
+
+                    masked_account_id = mask_account_id(config.account_id)
+                    logger.info(f"Notification Trigger: Content '{content}' matched portfolio '{config.portfolio_name}'. Queuing rebalance.")
+                    
+                    # Submit to queue
+                    self.worker_loop_obj.call_soon_threadsafe(self.task_queue.put_nowait, {
+                        "type": "rebalance",
+                        "config": config,
+                        "client_id": 100 + (config.id or 0),
+                        "key": key
+                    })
+                    triggered_accounts.append(masked_account_id)
+                
+        except Exception as e:
+            logger.error(f"Error checking rebalance trigger for content: {e}")
+        finally:
+            db.close()
+            
+        return triggered_accounts
+
 def start_portfolio_copy_trader():
     """在单独的线程中启动 Worker"""
     trader = PortfolioCopyTrader()
