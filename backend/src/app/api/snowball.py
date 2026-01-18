@@ -6,7 +6,7 @@ import httpx
 import logging
 import collections
 from sqlalchemy.orm import Session
-from ...core.database import get_db_session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
+from ...core.database import get_db, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -71,7 +71,7 @@ class SnowballLogResponse(BaseModel):
     price: Optional[float]
     status: Optional[str]
     message: Optional[str]
-
+    
     class Config:
         from_attributes = True
 
@@ -166,7 +166,7 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
                 for item in data["data"]:
                     raw_sym = item["symbol"]
                     # Map back to dotted symbol if possible
-                    dotted_sym = raw_to_dotted.get(raw_sym, raw_sym)
+                    dotted_sym = raw_to_dotted.get(raw_sym, raw_to_dotted.get(raw_sym.upper(), raw_sym))
                     result[dotted_sym] = item["current"]
             return result
         except Exception as e:
@@ -220,78 +220,78 @@ async def get_combination_info(
 # --- Endpoints ---
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
-async def list_configs(account_id: str = Depends(valid_account)):
-    with get_db_session(account_id) as db:
-        configs = db.query(SnowballCopyConfig).all()
-        result = []
-        for c in configs:
-            resp = SnowballConfigResponse.from_orm(c)
-            # Fetch snapshot value
-            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=c.id).first()
-            if snapshot:
-                resp.snapshot_value = snapshot.market_value
-            else:
-                resp.snapshot_value = c.total_amount # Fallback or 0
-            result.append(resp)
-        return result
+async def list_configs(
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
+    configs = db.query(SnowballCopyConfig).all()
+    result = []
+    for c in configs:
+        resp = SnowballConfigResponse.from_orm(c)
+        # Fetch snapshot value
+        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=c.id).first()
+        if snapshot:
+            resp.snapshot_value = snapshot.market_value
+        else:
+            resp.snapshot_value = c.total_amount # Fallback or 0
+        result.append(resp)
+    return result
 
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
     config: SnowballConfigCreate,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        # Check if cli_id exists - REMOVED for Multi-Portfolio Support
-        # existing = db.query(SnowballCopyConfig).filter_by(cli_id=config.cli_id).first()
-        # if existing:
-        #     raise HTTPException(status_code=400, detail="CLI ID already exists")
+    # Auto-fetch name if not provided
+    if not config.combination_name:
+        cube_info = await fetch_xueqiu_cube_info(config.combination_id)
+        if cube_info:
+            config.combination_name = cube_info.get("name")
         
-        # Auto-fetch name if not provided
-        if not config.combination_name:
-            cube_info = await fetch_xueqiu_cube_info(config.combination_id)
-            if cube_info:
-                config.combination_name = cube_info.get("name")
-            
-        db_config = SnowballCopyConfig(**config.dict())
-        db.add(db_config)
-        db.commit()
-        db.refresh(db_config)
-        return SnowballConfigResponse.from_orm(db_config)
+    db_config = SnowballCopyConfig(**config.dict())
+    db_config.account_id = account_id
+
+    db.add(db_config)
+    db.commit()
+    db.refresh(db_config)
+    return SnowballConfigResponse.from_orm(db_config)
 
 @router.put("/configs/{config_id}", response_model=SnowballConfigResponse)
 async def update_config(
     config_id: int,
     config_update: SnowballConfigUpdate,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        db_config = db.query(SnowballCopyConfig).filter_by(id=config_id).first()
-        if not db_config:
-            raise HTTPException(status_code=404, detail="Config not found")
-            
-        update_data = config_update.dict(exclude_unset=True)
+    db_config = db.query(SnowballCopyConfig).filter_by(id=config_id).first()
+    if not db_config:
+        raise HTTPException(status_code=404, detail="Config not found")
         
-        # If updating combination_id but not name, try to fetch name
-        if "combination_id" in update_data and "combination_name" not in update_data:
-             cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"])
-             if cube_info:
-                 update_data["combination_name"] = cube_info.get("name")
-                 
-        for key, value in update_data.items():
-            setattr(db_config, key, value)
-            
-        db.commit()
-        db.refresh(db_config)
-        return SnowballConfigResponse.from_orm(db_config)
+    update_data = config_update.dict(exclude_unset=True)
+    
+    # If updating combination_id but not name, try to fetch name
+    if "combination_id" in update_data and "combination_name" not in update_data:
+            cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"])
+            if cube_info:
+                update_data["combination_name"] = cube_info.get("name")
+                
+    for key, value in update_data.items():
+        setattr(db_config, key, value)
+        
+    db.commit()
+    db.refresh(db_config)
+    return SnowballConfigResponse.from_orm(db_config)
 
 @router.delete("/configs/{config_id}")
 async def delete_config(
     config_id: int,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        db.query(SnowballCopyConfig).filter_by(id=config_id).delete()
-        return {"message": "Deleted successfully"}
+    db.query(SnowballCopyConfig).filter_by(id=config_id).delete()
+    db.commit()
+    return {"message": "Deleted successfully"}
 
 @router.get("/logs", response_model=PaginatedSnowballLogs)
 async def get_logs(
@@ -300,64 +300,59 @@ async def get_logs(
     page_size: int = 20,
     cli_id: Optional[str] = None,
     combination_id: Optional[str] = None,
-    symbol: Optional[str] = None
+    symbol: Optional[str] = None,
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        query = db.query(SnowballCopyLog)
+    query = db.query(SnowballCopyLog)
+    
+    if cli_id:
+        query = query.filter(SnowballCopyLog.cli_id == cli_id)
+    if combination_id:
+        query = query.filter(SnowballCopyLog.combination_id.contains(combination_id))
+    if symbol:
+        query = query.filter(SnowballCopyLog.symbol.contains(symbol))
         
-        if cli_id:
-            query = query.filter(SnowballCopyLog.cli_id == cli_id)
-        if combination_id:
-            # combination_id might be comma separated in DB for aggregated orders, 
-            # or we might want to partial match. 
-            # For now, let's assume we want to find any log where the combination_id involved this ID.
-            # Assuming simple match or partial match if needed. 
-            # Given the DB design: combination_id = Column(String) # Mixed
-            query = query.filter(SnowballCopyLog.combination_id.contains(combination_id))
-        if symbol:
-            query = query.filter(SnowballCopyLog.symbol.contains(symbol))
-            
-        total = query.count()
+    total = query.count()
+    
+    logs = query.order_by(SnowballCopyLog.timestamp.desc())\
+        .offset((page - 1) * page_size)\
+        .limit(page_size)\
+        .all()
         
-        logs = query.order_by(SnowballCopyLog.timestamp.desc())\
-            .offset((page - 1) * page_size)\
-            .limit(page_size)\
-            .all()
-            
-        # --- Fetch Stock Names ---
-        unique_symbols = {log.symbol for log in logs if log.symbol}
-        quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols))
+    # --- Fetch Stock Names ---
+    unique_symbols = {log.symbol for log in logs if log.symbol}
+    quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols))
+    
+    items = []
+    for log in logs:
+        item = SnowballLogResponse.from_orm(log)
+        if log.symbol and log.symbol in quotes:
+            item.stock_name = quotes[log.symbol].get("name", "")
+        items.append(item)
         
-        items = []
-        for log in logs:
-            item = SnowballLogResponse.from_orm(log)
-            if log.symbol and log.symbol in quotes:
-                item.stock_name = quotes[log.symbol].get("name", "")
-            items.append(item)
-            
-        return PaginatedSnowballLogs(
-            total=total,
-            items=items
-        )
+    return PaginatedSnowballLogs(
+        total=total,
+        items=items
+    )
 
 @router.post("/logs/status")
 async def update_log_status(
     status_update: SnowballLogStatusUpdate,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        log = db.query(SnowballCopyLog).filter_by(id=status_update.id).first()
-        if not log:
-            raise HTTPException(status_code=404, detail="Log entry not found")
+    log = db.query(SnowballCopyLog).filter_by(id=status_update.id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+    
+    log.status = status_update.status
+    if status_update.message and status_update.message not in log.message:
+        log.message = f"{log.message} | {status_update.message}"
+    if status_update.price:
+        log.price = status_update.price
         
-        log.status = status_update.status
-        if status_update.message and status_update.message not in log.message:
-            log.message = f"{log.message} | {status_update.message}"
-        if status_update.price:
-            log.price = status_update.price
-            
-        db.commit()
-        return {"message": "Status updated"}
+    db.commit()
+    return {"message": "Status updated"}
 
 class SnapshotHolding(BaseModel):
     symbol: str
@@ -383,85 +378,86 @@ class SnowballSnapshotResponse(BaseModel):
 @router.get("/snapshot/{config_id}", response_model=SnowballSnapshotResponse)
 async def get_snapshot(
     config_id: int,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
-    with get_db_session(account_id) as db:
-        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config_id).first()
+    snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config_id).first()
+    
+    if not snapshot:
+            return SnowballSnapshotResponse(
+                config_id=config_id,
+                market_value=0.0,
+                cash=0.0,
+                stock_ratio=0.0,
+                cash_ratio=0.0,
+                last_synced_amount=0.0,
+                holdings=[],
+                updated_at=datetime.now()
+            )
+    
+    # Calculate Real-time Values
+    holdings_dict = snapshot.holdings or {}
+    symbols = list(holdings_dict.keys())
+    
+    # 1. Fetch Real-time Prices
+    quotes = await fetch_xueqiu_batch_quotes(symbols)
+    
+    # 2. Build Holding Details & Calc Total
+    detailed_holdings = []
+    total_stock_value = 0.0
+    
+    for sym, qty in holdings_dict.items():
+        info = quotes.get(sym, {})
+        price = info.get("price", 0.0)
+        name = info.get("name", "")
         
-        if not snapshot:
-             return SnowballSnapshotResponse(
-                 config_id=config_id,
-                 market_value=0.0,
-                 cash=0.0,
-                 stock_ratio=0.0,
-                 cash_ratio=0.0,
-                 last_synced_amount=0.0,
-                 holdings=[],
-                 updated_at=datetime.now()
-             )
+        mv = qty * price
+        total_stock_value += mv
         
-        # Calculate Real-time Values
-        holdings_dict = snapshot.holdings or {}
-        symbols = list(holdings_dict.keys())
+        detailed_holdings.append(SnapshotHolding(
+            symbol=sym,
+            name=name,
+            quantity=qty,
+            price=price,
+            market_value=mv,
+            ratio=0.0 # Calc later
+        ))
         
-        # 1. Fetch Real-time Prices
-        quotes = await fetch_xueqiu_batch_quotes(symbols)
+    current_cash = snapshot.cash or 0.0
+    total_market_value = total_stock_value + current_cash
+    
+    # 3. Calculate Ratios
+    if total_market_value > 0:
+        for h in detailed_holdings:
+            h.ratio = (h.market_value / total_market_value) * 100
         
-        # 2. Build Holding Details & Calc Total
-        detailed_holdings = []
-        total_stock_value = 0.0
-        
-        for sym, qty in holdings_dict.items():
-            info = quotes.get(sym, {})
-            price = info.get("price", 0.0)
-            name = info.get("name", "")
-            
-            mv = qty * price
-            total_stock_value += mv
-            
-            detailed_holdings.append(SnapshotHolding(
-                symbol=sym,
-                name=name,
-                quantity=qty,
-                price=price,
-                market_value=mv,
-                ratio=0.0 # Calc later
-            ))
-            
-        current_cash = snapshot.cash or 0.0
-        total_market_value = total_stock_value + current_cash
-        
-        # 3. Calculate Ratios
-        if total_market_value > 0:
-            for h in detailed_holdings:
-                h.ratio = (h.market_value / total_market_value) * 100
-            
-            stock_ratio = (total_stock_value / total_market_value) * 100
-            cash_ratio = (current_cash / total_market_value) * 100
-        else:
-            stock_ratio = 0.0
-            cash_ratio = 100.0 if current_cash > 0 else 0.0
+        stock_ratio = (total_stock_value / total_market_value) * 100
+        cash_ratio = (current_cash / total_market_value) * 100
+    else:
+        stock_ratio = 0.0
+        cash_ratio = 100.0 if current_cash > 0 else 0.0
 
-        # Sort by Market Value desc
-        detailed_holdings.sort(key=lambda x: x.market_value, reverse=True)
+    # Sort by Market Value desc
+    detailed_holdings.sort(key=lambda x: x.market_value, reverse=True)
 
-        return SnowballSnapshotResponse(
-            config_id=config_id,
-            market_value=total_market_value,
-            cash=current_cash,
-            stock_ratio=stock_ratio,
-            cash_ratio=cash_ratio,
-            last_synced_amount=snapshot.last_synced_amount,
-            holdings=detailed_holdings,
-            updated_at=snapshot.updated_at or datetime.now()
-        )
+    return SnowballSnapshotResponse(
+        config_id=config_id,
+        market_value=total_market_value,
+        cash=current_cash,
+        stock_ratio=stock_ratio,
+        cash_ratio=cash_ratio,
+        last_synced_amount=snapshot.last_synced_amount,
+        holdings=detailed_holdings,
+        updated_at=snapshot.updated_at or datetime.now()
+    )
 
 # --- Core Logic ---
 
 @router.post("/opportunities", response_model=TradeResponse)
 async def get_snowball_opportunities(
     request: TradeRequest,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """
     Calculate trading opportunities based on Snowball combination holdings.
@@ -470,286 +466,288 @@ async def get_snowball_opportunities(
     """
     cli_id = request.cli_id
 
-    with get_db_session(account_id) as db:
-        # 1. Fetch Configs
-        _configs_orm = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
-        if not _configs_orm:
-            return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
-            
-        # Convert to dicts to avoid DetachedInstanceError across awaits
-        configs = []
-        for c in _configs_orm:
-            configs.append({
-                "id": c.id,
-                "combination_id": c.combination_id,
-                "combination_name": c.combination_name,
-                "total_amount": c.total_amount,
-                "tracking_error_pct": c.tracking_error_pct,
-                "cli_id": c.cli_id,
-                "blacklisted_symbols": c.blacklisted_symbols or []
-            })
-
-        # 2. Pre-fetch Data
-        # 2.1 Gather all symbols (Held + Targets from all configs)
-        all_symbols = set()
+    # 1. Fetch Configs
+    _configs_orm = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
+    if not _configs_orm:
+        return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
         
-        # Local cache for target holdings: {config_id: [{symbol, weight}]}
-        config_target_weights = {} 
+    # Convert to dicts to avoid DetachedInstanceError across awaits
+    configs = []
+    for c in _configs_orm:
+        configs.append({
+            "id": c.id,
+            "combination_id": c.combination_id,
+            "combination_name": c.combination_name,
+            "total_amount": c.total_amount,
+            "tracking_error_pct": c.tracking_error_pct,
+            "cli_id": c.cli_id,
+            "blacklisted_symbols": c.blacklisted_symbols or []
+        })
+
+    # 2. Pre-fetch Data
+    # 2.1 Gather all symbols (Held + Targets from all configs)
+    all_symbols = set()
+    
+    # Local cache for target holdings: {config_id: [{symbol, weight}]}
+    config_target_weights = {} 
+    
+    # A. From Request Positions
+    current_quantities = {} # symbol -> quantity
+    for pos in request.positions:
+            current_quantities[pos.symbol] = pos.quantity
+            all_symbols.add(pos.symbol)
+
+    # B. From Config Targets (Fetch XQ Holdings)
+    for config in configs:
+        weights = await fetch_xueqiu_holdings(config['combination_id'])
+        config_target_weights[config['id']] = weights
+        for w in weights:
+            all_symbols.add(w['symbol'])
+
+    # 2.2 Fetch Prices
+    prices = await fetch_xueqiu_quotes(list(all_symbols))
+    
+    # Helper to get price
+    def get_price(sym):
+        p = prices.get(sym)
+        if not p:
+                pos = next((pos for pos in request.positions if pos.symbol == sym), None)
+                if pos: p = pos.cost_price
+        return p or 0.0
+
+    # 3. Process Snapshots & Aggregate Targets
+    aggregated_target_quantities = {} # symbol -> quantity
+    symbol_contributors = collections.defaultdict(set) # symbol -> set(combination_id)
+    symbol_needs = collections.defaultdict(list) # symbol -> list of {id, reason, diff}
+    
+    current_time = request.current_time or datetime.now()
+    # Reset Window: 14:55 - 15:00 (A-share closing)
+    is_closing_window = (current_time.hour == 14 and current_time.minute >= 50) or (current_time.hour == 15 and current_time.minute == 0)
+
+    logger.info(f"Current time: {current_time}, Is closing window: {is_closing_window}")
+
+    for config in configs:
+        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config['id']).first()
         
-        # A. From Request Positions
-        current_quantities = {} # symbol -> quantity
-        for pos in request.positions:
-             current_quantities[pos.symbol] = pos.quantity
-             all_symbols.add(pos.symbol)
-
-        # B. From Config Targets (Fetch XQ Holdings)
-        for config in configs:
-            weights = await fetch_xueqiu_holdings(config['combination_id'])
-            config_target_weights[config['id']] = weights
-            for w in weights:
-                all_symbols.add(w['symbol'])
-
-        # 2.2 Fetch Prices
-        prices = await fetch_xueqiu_quotes(list(all_symbols))
+        # --- Initialize or Calculate Current Snapshot Value ---
+        if not snapshot:
+            # Init with 0. Wait for adjustment logic to inject capital
+            snapshot = SnowballPortfolioSnapshot(
+                config_id=config['id'],
+                holdings={},
+                cash=0.0,
+                market_value=0.0,
+                last_synced_amount=0.0,
+                account_id=account_id
+            )
+            db.add(snapshot)
+            db.flush() 
         
-        # Helper to get price
-        def get_price(sym):
-            p = prices.get(sym)
-            if not p:
-                 pos = next((pos for pos in request.positions if pos.symbol == sym), None)
-                 if pos: p = pos.cost_price
-            return p or 0.0
-
-        # 3. Process Snapshots & Aggregate Targets
-        aggregated_target_quantities = {} # symbol -> quantity
-        symbol_contributors = collections.defaultdict(set) # symbol -> set(combination_id)
-        symbol_needs = collections.defaultdict(list) # symbol -> list of {id, reason, diff}
+        # --- Capital Adjustment Logic ---
+        target_amt = config['total_amount'] or 0.0
+        synced_amt = snapshot.last_synced_amount or 0.0
+        diff = target_amt - synced_amt
         
-        current_time = request.current_time or datetime.now()
-        # Reset Window: 14:55 - 15:00 (A-share closing)
-        is_closing_window = (current_time.hour == 14 and current_time.minute >= 50) or (current_time.hour == 15 and current_time.minute == 0)
+        if abs(diff) > 1e-6: # Float epsilon
+            if is_closing_window:
+                snapshot.cash += diff
+                snapshot.last_synced_amount = target_amt
+                logger.info(f"Adjusted capital for Config {config['id']}: {synced_amt} -> {target_amt} (Diff: {diff})")
+                # Force recalc of current value after injection
+                snapshot.market_value += diff 
+            else:
+                # Pending adjustment
+                pass
 
-        logger.info(f"Current time: {current_time}, Is closing window: {is_closing_window}")
-
-        for config in configs:
-            snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config['id']).first()
-            
-            # --- Initialize or Calculate Current Snapshot Value ---
-            if not snapshot:
-                # Init with 0. Wait for adjustment logic to inject capital
-                snapshot = SnowballPortfolioSnapshot(
-                    config_id=config['id'],
-                    holdings={},
-                    cash=0.0,
-                    market_value=0.0,
-                    last_synced_amount=0.0
-                )
-                db.add(snapshot)
-                db.flush() 
-            
-            # --- Capital Adjustment Logic ---
-            target_amt = config['total_amount'] or 0.0
-            synced_amt = snapshot.last_synced_amount or 0.0
-            diff = target_amt - synced_amt
-            
-            if abs(diff) > 1e-6: # Float epsilon
-                if is_closing_window:
-                    snapshot.cash += diff
-                    snapshot.last_synced_amount = target_amt
-                    logger.info(f"Adjusted capital for Config {config['id']}: {synced_amt} -> {target_amt} (Diff: {diff})")
-                    # Force recalc of current value after injection
-                    snapshot.market_value += diff 
-                else:
-                    # Pending adjustment
-                    pass
-
-            # Calc Current Market Value of Snapshot
-            # Value = Sum(HoldingQty * Price) + Cash
-            snap_holdings = snapshot.holdings or {}
-            snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
-            
-            # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
-            base_value = snap_mv + snapshot.cash
-            
-            # --- Calculate New Target State ---
-            new_snap_holdings = {}
-            used_cash = 0.0
-            
-            weights = config_target_weights.get(config['id'], [])
-            threshold_pct = config['tracking_error_pct'] or 1.0
-            
-            # Combine all symbols (Current + Target)
-            all_snap_symbols = set(snap_holdings.keys())
-            target_weights_map = {}
-            for item in weights:
-                # Blacklist Check: Treat target weight as 0 if blacklisted
-                if item['symbol'] in config.get('blacklisted_symbols', []):
-                    continue
-                    
-                all_snap_symbols.add(item['symbol'])
-                target_weights_map[item['symbol']] = item['weight']
-            
-            for sym in all_snap_symbols:
-                price = get_price(sym)
-                if price <= 0: continue
-                
-                # 1. Target Value
-                w = target_weights_map.get(sym, 0.0)
-                target_val = base_value * (w / 100.0)
-                
-                # 2. Current Value
-                cur_q = snap_holdings.get(sym, 0)
-                cur_val = cur_q * price
-                
-                # 3. Deviation Check
-                diff_val = target_val - cur_val
-                diff_pct_of_total = (abs(diff_val) / base_value) * 100 if base_value > 0 else 100
-                
-                final_q = cur_q # Default: Keep
-                
-                # If deviation > threshold, rebalance to Target
-                # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
-                # Force rebalance if target is 0 (Clearance) or deviation exceeds threshold
-                if diff_pct_of_total >= threshold_pct or (target_val == 0 and cur_q > 0):
-                    raw_q = target_val / price
-                    final_q = int(raw_q / 100) * 100
-                
-                if final_q > 0:
-                    new_snap_holdings[sym] = final_q
-                    used_cash += final_q * price
-                
-                # Record Need & Reason per Combo
-                snapshot_diff = final_q - cur_q
-                if snapshot_diff != 0:
-                    s_tgt_pct = (target_val / base_value) * 100 if base_value > 0 else 0
-                    s_cur_pct = (cur_val / base_value) * 100 if base_value > 0 else 0
-                    # s_diff_pct = ((target_val - cur_val) / base_value) * 100 if base_value > 0 else 0
-                    
-                    # Concise Reason: "ZH123: 10%->12%"
-                    combo_name = config['combination_name'] or config['combination_id'] or str(config['id'])
-                    short_name = combo_name[:10] # Truncate if too long
-                    need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
-                    
-                    symbol_needs[sym].append(need_reason)
-                    symbol_contributors[sym].add(config['combination_id'])
-
-            # Update Snapshot
-            snapshot.holdings = new_snap_holdings
-            snapshot.cash = base_value - used_cash
-            snapshot.market_value = base_value
-
-            # Aggregate Targets
-            for sym, qty in new_snap_holdings.items():
-                aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
-
-        # 4. Generate Opportunities (Diff vs Actual)
-        opportunities = []
+        # Calc Current Market Value of Snapshot
+        # Value = Sum(HoldingQty * Price) + Cash
+        snap_holdings = snapshot.holdings or {}
+        snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
         
-        projected_cash = request.portfolio.available_cash
+        # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
+        base_value = snap_mv + snapshot.cash
         
-        # Identify all symbols needing action
-        all_op_symbols = set(aggregated_target_quantities.keys()) | set(current_quantities.keys())
+        # --- Calculate New Target State ---
+        new_snap_holdings = {}
+        used_cash = 0.0
         
-        def get_diff_info(sym):
-            tgt_q = aggregated_target_quantities.get(sym, 0)
-            cur_q = current_quantities.get(sym, 0)
-            diff = tgt_q - cur_q
-            return sym, diff, tgt_q, cur_q
-
-        # Sort: Sells first (diff < 0)
-        sorted_ops = sorted([get_diff_info(s) for s in all_op_symbols], key=lambda x: x[1]) # diff ascending (negative first)
+        weights = config_target_weights.get(config['id'], [])
+        threshold_pct = config['tracking_error_pct'] or 1.0
         
-        for sym, diff_qty, tgt_q, cur_q in sorted_ops:
-            if diff_qty == 0:
+        # Combine all symbols (Current + Target)
+        all_snap_symbols = set(snap_holdings.keys())
+        target_weights_map = {}
+        for item in weights:
+            # Blacklist Check: Treat target weight as 0 if blacklisted
+            if item['symbol'] in config.get('blacklisted_symbols', []):
                 continue
                 
+            all_snap_symbols.add(item['symbol'])
+            target_weights_map[item['symbol']] = item['weight']
+        
+        for sym in all_snap_symbols:
             price = get_price(sym)
             if price <= 0: continue
             
-            action = "BUY" if diff_qty > 0 else "SELL"
-            abs_qty = abs(diff_qty)
+            # 1. Target Value
+            w = target_weights_map.get(sym, 0.0)
+            target_val = base_value * (w / 100.0)
             
-            # Min Qty Check (100 or 200 for STAR)
-            is_star = sym.startswith("SH.688")
-            min_qty = 200 if is_star else 100
+            # 2. Current Value
+            cur_q = snap_holdings.get(sym, 0)
+            cur_val = cur_q * price
             
-            if abs_qty < min_qty:
+            # 3. Deviation Check
+            diff_val = target_val - cur_val
+            diff_pct_of_total = (abs(diff_val) / base_value) * 100 if base_value > 0 else 100
+            
+            final_q = cur_q # Default: Keep
+            
+            # If deviation > threshold, rebalance to Target
+            # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
+            # Force rebalance if target is 0 (Clearance) or deviation exceeds threshold
+            if diff_pct_of_total >= threshold_pct or (target_val == 0 and cur_q > 0):
+                raw_q = target_val / price
+                final_q = int(raw_q / 100) * 100
+            
+            if final_q > 0:
+                new_snap_holdings[sym] = final_q
+                used_cash += final_q * price
+            
+            # Record Need & Reason per Combo
+            snapshot_diff = final_q - cur_q
+            if snapshot_diff != 0:
+                s_tgt_pct = (target_val / base_value) * 100 if base_value > 0 else 0
+                s_cur_pct = (cur_val / base_value) * 100 if base_value > 0 else 0
+                # s_diff_pct = ((target_val - cur_val) / base_value) * 100 if base_value > 0 else 0
+                
+                # Concise Reason: "ZH123: 10%->12%"
+                combo_name = config['combination_name'] or config['combination_id'] or str(config['id'])
+                short_name = combo_name[:10] # Truncate if too long
+                need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
+                
+                symbol_needs[sym].append(need_reason)
+                symbol_contributors[sym].add(config['combination_id'])
+
+        # Update Snapshot
+        snapshot.holdings = new_snap_holdings
+        snapshot.cash = base_value - used_cash
+        snapshot.market_value = base_value
+
+        # Aggregate Targets
+        for sym, qty in new_snap_holdings.items():
+            aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
+
+    # 4. Generate Opportunities (Diff vs Actual)
+    opportunities = []
+    
+    projected_cash = request.portfolio.available_cash
+    
+    # Identify all symbols needing action
+    all_op_symbols = set(aggregated_target_quantities.keys()) | set(current_quantities.keys())
+    
+    def get_diff_info(sym):
+        tgt_q = aggregated_target_quantities.get(sym, 0)
+        cur_q = current_quantities.get(sym, 0)
+        diff = tgt_q - cur_q
+        return sym, diff, tgt_q, cur_q
+
+    # Sort: Sells first (diff < 0)
+    sorted_ops = sorted([get_diff_info(s) for s in all_op_symbols], key=lambda x: x[1]) # diff ascending (negative first)
+    
+    for sym, diff_qty, tgt_q, cur_q in sorted_ops:
+        if diff_qty == 0:
+            continue
+            
+        price = get_price(sym)
+        if price <= 0: continue
+        
+        action = "BUY" if diff_qty > 0 else "SELL"
+        abs_qty = abs(diff_qty)
+        
+        # Min Qty Check (100 or 200 for STAR)
+        is_star = sym.startswith("SH.688")
+        min_qty = 200 if is_star else 100
+        
+        if abs_qty < min_qty:
+            continue
+        
+        final_qty = 0
+        reason_global = ""
+        
+        # Global Stats (Optional, maybe append at end?)
+        # total_actual_asset = request.portfolio.portfolio_value or 1.0
+        # cur_val = cur_q * price
+        # cur_pct = (cur_val / total_actual_asset) * 100
+        
+        if action == "SELL":
+            # T+1 Check
+            pos = next((p for p in request.positions if p.symbol == sym), None)
+            available = pos.available_quantity if pos and pos.available_quantity is not None else cur_q
+            
+            final_qty = min(abs_qty, available)
+            if final_qty < min_qty:
+                logger.info(f"Skipping SELL {sym}: Need {abs_qty}, Avail {available}")
                 continue
-            
-            final_qty = 0
-            reason_global = ""
-            
-            # Global Stats (Optional, maybe append at end?)
-            # total_actual_asset = request.portfolio.portfolio_value or 1.0
-            # cur_val = cur_q * price
-            # cur_pct = (cur_val / total_actual_asset) * 100
-            
-            if action == "SELL":
-                # T+1 Check
-                pos = next((p for p in request.positions if p.symbol == sym), None)
-                available = pos.available_quantity if pos and pos.available_quantity is not None else cur_q
                 
-                final_qty = min(abs_qty, available)
-                if final_qty < min_qty:
-                    logger.info(f"Skipping SELL {sym}: Need {abs_qty}, Avail {available}")
-                    continue
-                    
-                proceeds = final_qty * price
-                projected_cash += proceeds
-                
-            elif action == "BUY":
-                # Cash Check
-                est_cost = abs_qty * price
-                if est_cost <= projected_cash:
-                    final_qty = abs_qty
-                    projected_cash -= est_cost
+            proceeds = final_qty * price
+            projected_cash += proceeds
+            
+        elif action == "BUY":
+            # Cash Check
+            est_cost = abs_qty * price
+            if est_cost <= projected_cash:
+                final_qty = abs_qty
+                projected_cash -= est_cost
+            else:
+                # Partial buy
+                max_can_buy = int((projected_cash / price) / 100) * 100
+                if max_can_buy >= min_qty:
+                    final_qty = max_can_buy
+                    projected_cash -= final_qty * price
+                    reason_global = " [Cash Ltd]"
                 else:
-                    # Partial buy
-                    max_can_buy = int((projected_cash / price) / 100) * 100
-                    if max_can_buy >= min_qty:
-                        final_qty = max_can_buy
-                        projected_cash -= final_qty * price
-                        reason_global = " [Cash Ltd]"
-                    else:
-                        logger.info(f"Skipping BUY {sym}: Need {est_cost}, Have {projected_cash}")
-                        continue
-            
-            # Create Log & Opp
-            contributors = symbol_contributors.get(sym, set())
-            combo_id_str = ",".join(sorted(contributors)) if contributors else "AGGREGATED"
-            
-            # Concatenate Reasons
-            specific_reasons = " ".join(symbol_needs.get(sym, []))
-            final_message = f"{specific_reasons}{reason_global}"
-            if not final_message:
-                final_message = f"Adjusting to Target"
-
-            log_entry = SnowballCopyLog(
-                cli_id=cli_id,
-                combination_id=combo_id_str, # Mixed
-                action=action,
-                symbol=sym,
-                quantity=final_qty,
-                price=price,
-                status='SIGNAL',
-                message=final_message
-            )
-            db.add(log_entry)
-            db.flush()
-            
-            opportunities.append({
-                "symbol": sym,
-                "name": "",
-                "action": action,
-                "quantity": final_qty,
-                "price": price,
-                "reason": final_message,
-                "op_id": log_entry.id # Single ID as Int
-            })
-
-        db.commit()
+                    logger.info(f"Skipping BUY {sym}: Need {est_cost}, Have {projected_cash}")
+                    continue
         
-        # Sort output: SELLs first
-        opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
+        # Create Log & Opp
+        contributors = symbol_contributors.get(sym, set())
+        combo_id_str = ",".join(sorted(contributors)) if contributors else "AGGREGATED"
         
-        return TradeResponse(opportunities=opportunities, msg="Success")
+        # Concatenate Reasons
+        specific_reasons = " ".join(symbol_needs.get(sym, []))
+        final_message = f"{specific_reasons}{reason_global}"
+        if not final_message:
+            final_message = f"Adjusting to Target"
+
+        log_entry = SnowballCopyLog(
+            cli_id=cli_id,
+            combination_id=combo_id_str, # Mixed
+            action=action,
+            symbol=sym,
+            quantity=final_qty,
+            price=price,
+            status='SIGNAL',
+            message=final_message,
+            account_id=account_id
+        )
+            
+        db.add(log_entry)
+        db.flush()
+        
+        opportunities.append({
+            "symbol": sym,
+            "name": "",
+            "action": action,
+            "quantity": final_qty,
+            "price": price,
+            "reason": final_message,
+            "op_id": log_entry.id # Single ID as Int
+        })
+
+    db.commit()
+    
+    # Sort output: SELLs first
+    opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
+    
+    return TradeResponse(opportunities=opportunities, msg="Success")

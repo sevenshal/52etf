@@ -334,6 +334,7 @@ class SnowballCopyConfig(Base):
     __tablename__ = "snowball_copy_configs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True) # 归属的 Web 账户 ID (迁移新增)
     cli_id = Column(String, index=True, nullable=False) # 外部调用标识 (允许重复，支持多组合)
     combination_id = Column(String, nullable=False) # 雪球组合ID, 如 ZH123456
     combination_name = Column(String)
@@ -349,6 +350,7 @@ class SnowballPortfolioSnapshot(Base):
     __tablename__ = "snowball_portfolio_snapshots"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True) # 归属的 Web 账户 ID (迁移新增)
     config_id = Column(Integer, ForeignKey("snowball_copy_configs.id"), nullable=False)
     holdings = Column(JSON) # {symbol: quantity}
     cash = Column(Float, default=0.0)
@@ -361,6 +363,7 @@ class SnowballCopyLog(Base):
     __tablename__ = "snowball_copy_logs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True) # 归属的 Web 账户 ID (迁移新增)
     cli_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.now, index=True)
     combination_id = Column(String)

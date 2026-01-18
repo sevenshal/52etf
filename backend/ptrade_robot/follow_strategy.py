@@ -1,11 +1,102 @@
+# --- WebSocket Client Logic (Tornado Implementation) ---
+try:
+    from tornado import websocket, ioloop
+    import threading
+    import time
+    import json
+    HAS_WEBSOCKET = True
+except ImportError:
+    HAS_WEBSOCKET = False
+    
+# Global Signal Flag
+g.ws_trigger_signal = None 
+
+def run_ws_client():
+    if not HAS_WEBSOCKET:
+        log.info("Tornado library not found, skipping WebSocket client")
+        return
+        
+    cli_id = g.cli_id
+    ws_url = "wss://api.framework.cn/api/monitor/ws/%s" % cli_id
+    
+    async def msg_handler(msg):
+        if not msg: return
+        log.info("WebSocket Message Received: %s" % msg)
+        if msg.startswith("TRIGGER:"):
+            comb_id = msg.split(":")[1]
+            g.ws_trigger_signal = {
+                "combination_id": comb_id,
+                "timestamp": datetime.now()
+            }
+            log.info("Signal Set for Combination: %s" % comb_id)
+
+    def start_tornado_client():
+        loop = ioloop.IOLoop.current() # PTrade thread likely has no loop, create one
+        
+        # Use simple callback based client if available or standard connect
+        # Tornado's websocket_connect returns a Future
+        log.info("Connecting to %s..." % ws_url)
+        
+        headers = None # Add headers if needed
+        conn = None
+
+        try:
+            # Synchronous-like wrapper for the connection loop
+            # Since we are in a dedicated thread, we can block or run loop
+            
+            # Use websocket_connect
+            future = websocket.websocket_connect(ws_url, connect_timeout=10)
+            conn = loop.run_sync(lambda: future)
+            log.info("WebSocket Connected")
+            
+            # Message Loop
+            while True:
+                msg = loop.run_sync(conn.read_message)
+                if msg is None: # Connection closed
+                    log.info("WebSocket Closed by Server")
+                    break
+                loop.run_sync(lambda: msg_handler(msg))
+                
+        except Exception as e:
+            log.error("WebSocket Connection Error: %s" % e)
+        finally:
+             if conn: 
+                 conn.close() 
+
+    while True:
+        try:
+            # Create a fresh IOLoop for this thread
+            asyncio_loop = ioloop.IOLoop()
+            asyncio_loop.make_current()
+            start_tornado_client()
+        except Exception as e:
+            log.error("WebSocket Client Loop Crash: %s" % e)
+        
+        time.sleep(5) # Reconnect delay
+
 import requests
-from datetime import datetime, timedelta
+
+# --- End WebSocket Client Logic ---
 
 def initialize(context):
     # 全局变量初始化
     g.api_base_url = "https://api.framework.cn/api/snowball"
     g.account_id = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
     g.headers = {"x-account-id": g.account_id}
+    
+    # Initialize CLI ID
+    backtest = not is_trade()
+    g.cli_id = 'GS66301027527' + ('B' if backtest else '')
+    
+    g.ws_trigger_signal = None
+    
+    # Start WebSocket thread if supported
+    if HAS_WEBSOCKET:
+        log.info("Starting WebSocket Client Thread...")
+        t = threading.Thread(target=run_ws_client, daemon=True)
+        t.start()
+    else:
+        log.warn("WebSocket library (websocket-client) not installed. Real-time trigger disabled.")
 
 def convert_to_api_code(client_code):
     """转换股票代码格式（客户端格式转API格式）
@@ -85,8 +176,10 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
     return target_price
 
 
-def handle_data(context, data):
-    """每分钟执行一次"""
+# ... (Keep WebSocket and Helper functions above) ...
+
+def check_and_trade(context, trigger_combination_id=None):
+    """核心交易逻辑，供 handle_data 和 tick_data 调用"""
     try:
         # 1. 撤销所有未完成订单
         today_orders = get_all_orders() or []
@@ -111,12 +204,10 @@ def handle_data(context, data):
         today_orders = get_all_orders() or []
 
         backtest = not is_trade()
-        # 请求交易机会
-        response = requests.post(
-            g.api_base_url + "/opportunities",
-            headers=g.headers,
-            json={
-                "cli_id": 'GS66301027527' + ('B' if backtest else ''),
+        
+        # Prepare payload
+        payload = {
+                "cli_id": g.cli_id,
                 "backtest": backtest,
                 "current_time": context.current_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "orders": [
@@ -142,11 +233,22 @@ def handle_data(context, data):
                 "portfolio": {
                     "portfolio_value": context.portfolio.portfolio_value,  # 总资产（现金+持仓）
                     "available_cash": context.portfolio.cash,  # 可用资金
-                    "locked_cash": context.portfolio.portfolio_value - context.portfolio.positions_value - context.portfolio.cash,  # 由于没有冻结资金的字段，我们可以用总资产减去持仓市值得到
+                    "locked_cash": context.portfolio.portfolio_value - context.portfolio.positions_value - context.portfolio.cash,  
                     "total_cash": context.portfolio.cash,  # 总现金就是可用现金
                     "total_positions_value": context.portfolio.positions_value  # 持仓市值
                 }
             }
+        
+        # Add trigger info if present
+        if trigger_combination_id:
+             payload["trigger_combination_id"] = trigger_combination_id
+             log.info("Including trigger_combination_id %s in request" % trigger_combination_id)
+
+        # 请求交易机会
+        response = requests.post(
+            g.api_base_url + "/opportunities",
+            headers=g.headers,
+            json=payload
         )
         
         if response.status_code != 200:
@@ -215,7 +317,32 @@ def handle_data(context, data):
     except Exception as e:
         log.error("处理交易时发生异常: %s" % str(e))
 
-# 保留日志相关函数
+
+def handle_data(context, data):
+    """每分钟执行一次 (保底)"""
+    # 正常分钟级轮询，不带 WebSocket Trigger 参数
+    check_and_trade(context, trigger_combination_id=None)
+
+def tick_data(context, data):
+    """Tick 级回调 (仅在有 WebSocket 信号时触发交易)"""
+    trigger_combination_id = None
+    
+    # Check for WebSocket trigger signal
+    if hasattr(g, 'ws_trigger_signal') and g.ws_trigger_signal:
+        trigger = g.ws_trigger_signal
+        # Check if signal is fresh (e.g., within last 60 seconds)
+        if (datetime.now() - trigger['timestamp']).total_seconds() < 60:
+            log.info("[Tick Trigger] Processing WebSocket Signal for %s" % trigger['combination_id'])
+            trigger_combination_id = trigger['combination_id']
+            # Clear signal immediately to prevent duplicate processing
+            g.ws_trigger_signal = None
+            
+            # 立即触发核心交易逻辑
+            check_and_trade(context, trigger_combination_id=trigger_combination_id)
+        else:
+             # Stale signal, clear it
+             g.ws_trigger_signal = None
+
 def report_execution(op_id, status, message, price=None):
     """上报执行结果到后端"""
     if not op_id:
