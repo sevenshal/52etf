@@ -1,3 +1,6 @@
+from datetime import datetime
+import requests
+
 # --- WebSocket Client Logic (Tornado Implementation) ---
 try:
     from tornado import websocket, ioloop
@@ -73,8 +76,6 @@ def run_ws_client():
             log.error("WebSocket Client Loop Crash: %s" % e)
         
         time.sleep(5) # Reconnect delay
-
-import requests
 
 # --- End WebSocket Client Logic ---
 
