@@ -191,6 +191,7 @@ class EVCTradeLog(Base):
     __tablename__ = "evc_trade_logs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True) # Added for migration
     symbol = Column(String, index=True)
     quantity = Column(Integer)
     price = Column(Float)
@@ -203,6 +204,7 @@ class StockFavorite(Base):
     """用户股票收藏表"""
     __tablename__ = 'stock_favorites'
 
+    account_id = Column(String, primary_key=True) # Added for migration
     symbol = Column(String(32), primary_key=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -232,6 +234,7 @@ class SzdtTradeStock(Base):
     __tablename__ = 'szdt_trade_stocks'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True) # Added for migration
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     type = Column(Integer, nullable=False, default=3)
@@ -251,6 +254,7 @@ class TradingState(Base):
     """交易状态表"""
     __tablename__ = "trading_states"
     
+    account_id = Column(String, primary_key=True) # Added for migration
     cli_id = Column(String, primary_key=True)
     current_index = Column(Integer, default=0)  # 当前处理的股票索引
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -259,6 +263,7 @@ class StockCooldown(Base):
     """股票冷却表"""
     __tablename__ = "stock_cooldowns"
     
+    account_id = Column(String, primary_key=True) # Added for migration
     cli_id = Column(String, primary_key=True)
     stock_code = Column(String, primary_key=True)
     until = Column(DateTime)  # 冷却结束时间
@@ -402,110 +407,6 @@ class IBKRAccountConfig(Base):
     
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-# 用字典缓存每个账户的 session factory
-_session_factories = {}
-
-def get_db_session_factory(account_id: str):
-    """获取或创建 session factory"""
-    if account_id not in _session_factories:
-        db_path = get_data_file(account_id, "trading.db")
-        db_dir = os.path.dirname(db_path)
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            
-        engine = create_engine(
-            f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False},  # 允许多线程访问
-            pool_size=5,  # 连接池大小
-            max_overflow=10  # 最大额外连接数
-        )
-        Base.metadata.create_all(bind=engine)
-        # 轻量迁移: 确保 szdt_trade_stocks 表存在 type 列
-        try:
-            with engine.connect() as conn:
-                result = conn.execute("PRAGMA table_info(szdt_trade_stocks)")
-                cols = [row[1] for row in result]  # 第二列为列名
-                if 'type' not in cols:
-                    conn.execute("ALTER TABLE szdt_trade_stocks ADD COLUMN type INTEGER NOT NULL DEFAULT 3")
-                
-                # 为 IBKRAccountConfig 表添加新列
-                result = conn.execute("PRAGMA table_info(ib_account_configs)")
-                ib_cols = [row[1] for row in result]
-                if 'twofa_timeout_action' not in ib_cols:
-                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN twofa_timeout_action TEXT DEFAULT 'restart'")
-                if 'auto_restart_time' not in ib_cols:
-                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN auto_restart_time TEXT DEFAULT '08:59 PM'")
-                if 'relogin_after_twofa_timeout' not in ib_cols:
-                    conn.execute("ALTER TABLE ib_account_configs ADD COLUMN relogin_after_twofa_timeout TEXT DEFAULT 'yes'")
-
-                # 为 PortfolioCopyConfig 表添加新列
-                result = conn.execute("PRAGMA table_info(portfolio_copy_configs)")
-                pcc_cols = [row[1] for row in result]
-                if 'ib_account_id' not in pcc_cols:
-                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN ib_account_id INTEGER DEFAULT NULL")
-                if 'timezone' not in pcc_cols:
-                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
-                
-                if 'timezone' not in pcc_cols:
-                    conn.execute("ALTER TABLE portfolio_copy_configs ADD COLUMN timezone TEXT DEFAULT 'America/New_York'")
-
-                # 检查并迁移 snowball_copy_configs 的 cli_id 唯一约束
-                # 尝试直接删除唯一索引
-                try:
-                    conn.execute("DROP INDEX IF EXISTS ix_snowball_copy_configs_cli_id")
-                except Exception:
-                    pass
-
-                # Check for PortfolioCopyLog table config_id
-                result = conn.execute("PRAGMA table_info(portfolio_copy_logs)")
-                pcl_cols = [row[1] for row in result]
-                if 'config_id' not in pcl_cols:
-                    conn.execute("ALTER TABLE portfolio_copy_logs ADD COLUMN config_id INTEGER DEFAULT NULL")
-
-                # Check for SnowballPortfolioSnapshot table (Ensure creation if missing, handled by create_all below)
-                pass
-
-                # Check SnowballPortfolioSnapshot for `last_synced_amount`
-                result = conn.execute("PRAGMA table_info(snowball_portfolio_snapshots)")
-                snap_cols = [row[1] for row in result]
-                if 'last_synced_amount' not in snap_cols:
-                     conn.execute("ALTER TABLE snowball_portfolio_snapshots ADD COLUMN last_synced_amount FLOAT DEFAULT 0.0")
-
-                # Check SnowballCopyConfig for `blacklisted_symbols`
-                result = conn.execute("PRAGMA table_info(snowball_copy_configs)")
-                scc_cols = [row[1] for row in result]
-                if 'blacklisted_symbols' not in scc_cols:
-                     conn.execute("ALTER TABLE snowball_copy_configs ADD COLUMN blacklisted_symbols JSON DEFAULT '[]'")
-        except Exception:
-            # 静默失败，避免影响服务启动；后续操作若失败再暴露
-            pass
-        
-        # 创建线程安全的 session factory
-        session_factory = scoped_session(
-            sessionmaker(
-                bind=engine,
-                autocommit=False,
-                autoflush=False
-            )
-        )
-        _session_factories[account_id] = session_factory
-    
-    return _session_factories[account_id]
-
-@contextmanager
-def get_db_session(account_id: str):
-    """上下文管理器，自动处理 session 的创建和关闭"""
-    session_factory = get_db_session_factory(account_id)
-    session = session_factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 # 创建所有表
 Base.metadata.create_all(engine)

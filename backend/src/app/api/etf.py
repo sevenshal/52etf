@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import json
 from sqlalchemy import create_engine, select, desc, func, and_
 from sqlalchemy.orm import Session
-from ...core.database import ETFAnalysis, get_db_session, Session, ETFEmotion, ETFHolding, StockEVC, get_db
+from ...core.database import ETFAnalysis, Session, ETFEmotion, ETFHolding, StockEVC, get_db
 from .account import is_valid_account, valid_account
 from ...core.services.quote import QuoteProvider
 from ...core.services.longport import LongPortService

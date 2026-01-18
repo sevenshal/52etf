@@ -2,15 +2,14 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
-from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db_session
+from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db
 from .account import valid_account
 from sqlalchemy import and_
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
 
-db_session = Session()
-
+# db_session removed, use dependency injection
 router = APIRouter(prefix="/api/stock")
 
 class KLineData(BaseModel):
@@ -37,7 +36,8 @@ async def get_stock_klines(
     account_id: str = Depends(valid_account),
     period: Optional[str] = Query(default='d', enum=['d', 'w', 'm']),
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
 ):
     """获取股票的K线数据"""
     trade_service: LongPortService = LongPortService(account_id)
@@ -80,24 +80,23 @@ async def get_stock_klines(
         start_date_limit = min([k['timestamp'] for k in klines_data]).date()
         end_date_limit = max([k['timestamp'] for k in klines_data]).date()
 
-        with get_db_session(account_id) as session:
-            analysis_records = session.query(ETFAnalysis).filter(
-                and_(
-                    ETFAnalysis.symbol == symbol,
-                    ETFAnalysis.date >= start_date_limit,
-                    ETFAnalysis.date <= end_date_limit
-                )
-            ).all()
+        analysis_records = db.query(ETFAnalysis).filter(
+            and_(
+                ETFAnalysis.symbol == symbol,
+                ETFAnalysis.date >= start_date_limit,
+                ETFAnalysis.date <= end_date_limit
+            )
+        ).all()
             
-            for record in analysis_records:
-                # PE = market_price / eps
-                # Forward PE = market_price / eps_forward
-                pe = record.market_price / record.eps if record.market_price and record.eps else None
-                forward_pe = record.market_price / record.eps_forward if record.market_price and record.eps_forward else None
-                etf_analysis_dict[record.date] = {
-                    'pe': pe,
-                    'forward_pe': forward_pe
-                }
+        for record in analysis_records:
+            # PE = market_price / eps
+            # Forward PE = market_price / eps_forward
+            pe = record.market_price / record.eps if record.market_price and record.eps else None
+            forward_pe = record.market_price / record.eps_forward if record.market_price and record.eps_forward else None
+            etf_analysis_dict[record.date] = {
+                'pe': pe,
+                'forward_pe': forward_pe
+            }
 
     # 转换为响应格式
     klines = []
@@ -122,62 +121,64 @@ async def get_stock_klines(
 @router.post("/favorites/{symbol}", response_model=FavoriteResponse)
 async def add_favorite(
     symbol: str,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """添加股票收藏"""
-    with get_db_session(account_id) as session:
-        favorite = session.query(StockFavorite).filter_by(
-            symbol=symbol
-        ).first()
+    favorite = db.query(StockFavorite).filter_by(
+        symbol=symbol,
+        account_id=account_id
+    ).first()
+    
+    if favorite:
+        return FavoriteResponse(success=False, message="已经收藏过该股票")
         
-        if favorite:
-            return FavoriteResponse(success=False, message="已经收藏过该股票")
-            
-        new_favorite = StockFavorite(
-            symbol=symbol
-        )
-        session.add(new_favorite)
-        session.commit()
+    new_favorite = StockFavorite(
+        symbol=symbol,
+        account_id=account_id
+    )
+    db.add(new_favorite)
+    db.commit()
         
     return FavoriteResponse(success=True, message="收藏成功")
 
 @router.delete("/favorites/{symbol}", response_model=FavoriteResponse)
 async def remove_favorite(
     symbol: str,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """取消股票收藏"""
-    with get_db_session(account_id) as session:
-        favorite = session.query(StockFavorite).filter_by(
-            symbol=symbol
-        ).first()
+    favorite = db.query(StockFavorite).filter_by(
+        symbol=symbol,
+        account_id=account_id
+    ).first()
+    
+    if not favorite:
+        return FavoriteResponse(success=False, message="未找到收藏记录")
         
-        if not favorite:
-            return FavoriteResponse(success=False, message="未找到收藏记录")
-            
-        session.delete(favorite)
-        session.commit()
-        
+    db.delete(favorite)
+    db.commit()
     return FavoriteResponse(success=True, message="取消收藏成功")
 
 @router.get("/favorites", response_model=List[dict])
 async def get_favorites(
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """获取用户收藏的股票列表（包含完整信息）"""
-    with get_db_session(account_id) as session:
-        favorite_symbols = [f[0] for f in session.query(StockFavorite.symbol).all()]
+    favorite_symbols = [f[0] for f in db.query(StockFavorite.symbol).filter(StockFavorite.account_id == account_id).all()]
         
     if not favorite_symbols:
         return []
     
     # 从主数据库中获取这些股票的最新信息
     latest_stocks = (
-        db_session.query(StockEVC)
+        db.query(StockEVC)
         .filter(
             and_(
                 StockEVC.symbol.in_(favorite_symbols),
-                StockEVC.date == db_session.query(StockEVC.date)
+                StockEVC.date == db.query(StockEVC.date)
                 .filter(StockEVC.symbol == StockEVC.symbol)
                 .order_by(StockEVC.date.desc())
                 .limit(1)

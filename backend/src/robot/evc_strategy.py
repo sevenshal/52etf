@@ -12,7 +12,7 @@ from ..core.utils import load_config_file, get_data_file
 from ..core.services.longport import LongPortService, QuoteProvider
 from ..core.services.futu import FutuTradeService
 from ..core.services.evc import EVCService
-from ..core.database import StockEVC, Session, StockTag, stock_tags, EVCTradeLog, get_db_session
+from ..core.database import StockEVC, Session, StockTag, stock_tags, EVCTradeLog, get_db_ctx
 from ..core.services.trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideRTH
 from ..core.services.quote import QuoteService, SubType, QuoteEvent, QuoteObserver
 from ..core.services.szdt import SZDTService
@@ -69,7 +69,8 @@ class EvcStrategy(QuoteObserver):
     def _log_trade_operation(self, trade_log: EVCTradeLog):
         """记录交易操作到数据库"""
         self.log.info(f'{trade_log.symbol} {trade_log.operation} {trade_log.quantity} {trade_log.price} {trade_log.reason}')
-        with get_db_session(self.account_id) as session:
+        trade_log.account_id = self.account_id
+        with get_db_ctx() as session:
             session.add(trade_log)
     
     def get_undervalued_stocks(self) -> List[StockEVC]:

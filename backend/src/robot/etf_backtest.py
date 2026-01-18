@@ -4,7 +4,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from ..core.services.szdt import SZDTService
-from ..core.database import get_db_session, SzdtTradeStock
+from ..core.database import SzdtTradeStock
 import logging
 from dataclasses import dataclass
 

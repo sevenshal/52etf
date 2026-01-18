@@ -7,7 +7,7 @@ from ...core.utils import get_data_file, read_json_file, write_json_file, load_c
 from ...core.models.account import AccountCfg
 from datetime import datetime
 from sqlalchemy.orm import Session
-from ...core.database import StockEVC, StockTag, stock_tags, Session as get_db, EVCTradeLog, get_db_session
+from ...core.database import StockEVC, StockTag, stock_tags, get_db, EVCTradeLog, Session
 from sqlalchemy import func, and_
 from ...core.services.longport import LongPortService
 
@@ -90,10 +90,10 @@ async def update_strategy(
 @router.post("/valuation-search")
 async def valuation_search(
     request: ValuationSearchRequest,
-    account_id: str = Depends(get_account_id)
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
 ):
     try:
-        db = get_db()
         latest_date = db.query(func.max(StockEVC.date)).scalar()
         tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
 
@@ -165,30 +165,32 @@ async def valuation_search(
 async def get_trade_logs(
     account_id: str = Depends(get_account_id),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100)
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
 ):
     try:
-        with get_db_session(account_id) as session:
-            query = session.query(EVCTradeLog).order_by(EVCTradeLog.timestamp.desc())
-            total = query.count()
-            logs = query.offset((page - 1) * page_size).limit(page_size).all()
+        query = db.query(EVCTradeLog).filter(
+            EVCTradeLog.account_id == account_id
+        ).order_by(EVCTradeLog.timestamp.desc())
+        total = query.count()
+        logs = query.offset((page - 1) * page_size).limit(page_size).all()
             
-            return {
-                "total": total,
-                "page": page,
-                "page_size": page_size,
-                "items": [
-                    {
-                        "symbol": log.symbol,
-                        "quantity": log.quantity,
-                        "price": log.price,
-                        "reason": log.reason,
-                        "operation": log.operation,
-                        "timestamp": log.timestamp.isoformat()
-                    }
-                    for log in logs
-                ]
-            }
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "symbol": log.symbol,
+                    "quantity": log.quantity,
+                    "price": log.price,
+                    "reason": log.reason,
+                    "operation": log.operation,
+                    "timestamp": log.timestamp.isoformat()
+                }
+                for log in logs
+            ]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -228,9 +230,9 @@ async def update_token(
 @router.get("/stock-evc/history/{symbol}")
 def get_stock_evc_history(
     symbol: str,
-    limit: int = Query(100, description="查询天数")
+    limit: int = Query(100, description="查询天数"),
+    db: Session = Depends(get_db)
 ):
-    db = get_db()
     records = (
         db.query(StockEVC)
         .filter(StockEVC.symbol == symbol)

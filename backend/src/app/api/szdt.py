@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 import os
 from ...core.utils import get_data_file, read_json_file, write_json_file
 from datetime import datetime
-from ...core.database import get_db_session, TradingLog, SzdtTradeStock
+from ...core.database import get_db, TradingLog, SzdtTradeStock
 from ...core.services.szdt import SZDTService
 from sqlalchemy.orm import Session
 
@@ -95,11 +95,10 @@ def get_auto_trading_path(account_id: str):
     """获取自动交易配置文件路径"""
     return get_data_file(account_id, "szdt_auto_trading.json")
 
-def read_stocks(account_id: str) -> List[StockModel]:
+def read_stocks(account_id: str, db: Session) -> List[StockModel]:
     """读取股票列表"""
-    with get_db_session(account_id) as db:
-        stocks = db.query(SzdtTradeStock).all()
-        return stocks
+    stocks = db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == account_id).all()
+    return stocks
 
 def get_auto_trading_status(account_id: str) -> bool:
     """获取自动交易状态"""
@@ -135,7 +134,8 @@ async def set_auto_trading_status(
 @router.get("/trading-stocks", response_model=List[StockModel])
 async def list_trading_stocks(
     account_id: str = Depends(get_account_id),
-    etf_type: Optional[int] = Query(None, ge=-1, le=8, description="按类型筛选，可不传返回全部")
+    etf_type: Optional[int] = Query(None, ge=-1, le=8, description="按类型筛选，可不传返回全部"),
+    db: Session = Depends(get_db)
 ):
     """获取自动交易的股票列表"""
     # 检查自动交易开关状态
@@ -143,69 +143,96 @@ async def list_trading_stocks(
         return []
     
     # 如果开关打开，则返回股票列表
-    with get_db_session(account_id) as db:
-        query = db.query(SzdtTradeStock)
-        if etf_type is not None:
-            query = query.filter(SzdtTradeStock.type == etf_type)
-        stocks = query.all()
-        return [StockModel.from_orm(stock) for stock in stocks]
+    query = db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == account_id)
+    if etf_type is not None:
+        query = query.filter(SzdtTradeStock.type == etf_type)
+    stocks = query.all()
+    return [StockModel.from_orm(stock) for stock in stocks]
 
 # API 路由
 @router.get("/stocks", response_model=List[StockModel])
 async def list_stocks(
     account_id: str = Depends(get_account_id),
-    etf_type: int = Query(3, ge=-1, le=8, description="类型，默认3(A股ETF)")
+    etf_type: int = Query(3, ge=-1, le=8, description="类型，默认3(A股ETF)"),
+    db: Session = Depends(get_db)
 ):
     """获取股票列表"""
-    with get_db_session(account_id) as db:
-        stocks = db.query(SzdtTradeStock).filter(SzdtTradeStock.type == etf_type).all()
-        return [StockModel.from_orm(stock) for stock in stocks]
+    stocks = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.account_id == account_id,
+        SzdtTradeStock.type == etf_type
+    ).all()
+    return [StockModel.from_orm(stock) for stock in stocks]
 
 @router.post("/stocks")
-async def create_stock(stock: StockModel, account_id: str = Depends(get_account_id)):
+async def create_stock(
+    stock: StockModel, 
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
     """创建新的股票记录"""
-    with get_db_session(account_id) as db:
-        db_stock = SzdtTradeStock(**stock.dict())
-        db.add(db_stock)
-        db.commit()
-        return {"message": "Stock Saved"}
+    db_stock = SzdtTradeStock(**stock.dict())
+    db_stock.account_id = account_id
+    db.add(db_stock)
+    db.commit()
+    return {"message": "Stock Saved"}
 
 @router.put("/stocks/{stock_id}")
-async def update_stock(stock_id: int, stock_update: StockModel, account_id: str = Depends(get_account_id)):
+async def update_stock(
+    stock_id: int, 
+    stock_update: StockModel, 
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
     """更新股票记录"""
-    with get_db_session(account_id) as db:
-        db_stock = db.query(SzdtTradeStock).filter(SzdtTradeStock.id == stock_id).first()
-        if not db_stock:
-            raise HTTPException(status_code=404, detail="Stock not found")
-        
-        # 确保不更新id字段
-        update_data = stock_update.dict(exclude_unset=True, exclude={"id"})
-        for key, value in update_data.items():
-            setattr(db_stock, key, value)
-        
-        db.commit()
-        return {"message": "Stock Saved"}
+    db_stock = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.id == stock_id,
+        SzdtTradeStock.account_id == account_id
+    ).first()
+    
+    if not db_stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    
+    # 确保不更新id字段
+    update_data = stock_update.dict(exclude_unset=True, exclude={"id"})
+    for key, value in update_data.items():
+        setattr(db_stock, key, value)
+    
+    db.commit()
+    return {"message": "Stock Saved"}
 
 @router.delete("/stocks/{stock_id}")
-async def delete_stock(stock_id: int, account_id: str = Depends(get_account_id)):
+async def delete_stock(
+    stock_id: int, 
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
     """删除股票记录"""
-    with get_db_session(account_id) as db:
-        db_stock = db.query(SzdtTradeStock).filter(SzdtTradeStock.id == stock_id).first()
-        if not db_stock:
-            raise HTTPException(status_code=404, detail="Stock not found")
-        
-        db.delete(db_stock)
-        db.commit()
-        return {"message": "Stock deleted"}
+    db_stock = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.id == stock_id,
+        SzdtTradeStock.account_id == account_id
+    ).first()
+
+    if not db_stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    
+    db.delete(db_stock)
+    db.commit()
+    return {"message": "Stock deleted"}
 
 @router.get("/stocks/{stock_id}", response_model=StockModel)
-async def get_stock(stock_id: int, account_id: str = Depends(get_account_id)):
+async def get_stock(
+    stock_id: int, 
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
     """获取单个股票记录"""
-    with get_db_session(account_id) as db:
-        db_stock = db.query(SzdtTradeStock).filter(SzdtTradeStock.id == stock_id).first()
-        if not db_stock:
-            raise HTTPException(status_code=404, detail="Stock not found")
-        return db_stock
+    db_stock = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.id == stock_id,
+        SzdtTradeStock.account_id == account_id
+    ).first()
+    if not db_stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    return db_stock
 
 @router.get("/stock-emotion/{code}", response_model=StockEmotionResponse)
 async def get_stocks_emotions(
