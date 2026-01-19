@@ -11,6 +11,9 @@ from itertools import groupby
 from operator import itemgetter
 from pydantic import BaseModel
 from decimal import Decimal
+from sqlalchemy.orm import Session
+from fastapi import HTTPException
+from ...core.database import get_db, LongPortAccount
 
 router = APIRouter(prefix="/api/positions")
 
@@ -111,11 +114,22 @@ class OptionPositionsResponse(BaseModel):
 
 @router.get("/options")
 async def get_option_positions(
+    lp_account_id: str,
     account_id: str = Depends(valid_account),
-    option_type: str = None  # 可选值: "Call" 或 "Put"
+    option_type: str = None,  # 可选值: "Call" 或 "Put"
+    db: Session = Depends(get_db)
 ):
     """获取期权持仓汇总"""
-    trade_service: LongPortService = LongPortService(account_id)
+    # 验证长桥账户归属
+    lp_account = db.query(LongPortAccount).filter(
+        LongPortAccount.lp_account_id == lp_account_id,
+        LongPortAccount.account_id == account_id
+    ).first()
+    
+    if not lp_account:
+        raise HTTPException(status_code=403, detail="Invalid LongPort Account ID")
+
+    trade_service: LongPortService = LongPortService.get_instance(lp_account_id)
     
     # 获取最新的联邦基金利率（使用上限利率）
     fed_rate_data = FedRateMonitorService.get_current_fed_rate('upper')
@@ -227,9 +241,22 @@ class StockPositionsResponse(BaseModel):
 
 # 添加新的路由处理函数
 @router.get("/stocks")
-async def get_stock_positions(account_id: str = Depends(valid_account)):
+async def get_stock_positions(
+    lp_account_id: str,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
     """获取正股持仓汇总"""
-    trade_service: LongPortService = LongPortService(account_id)
+    # 验证长桥账户归属
+    lp_account = db.query(LongPortAccount).filter(
+        LongPortAccount.lp_account_id == lp_account_id,
+        LongPortAccount.account_id == account_id
+    ).first()
+    
+    if not lp_account:
+        raise HTTPException(status_code=403, detail="Invalid LongPort Account ID")
+
+    trade_service: LongPortService = LongPortService.get_instance(lp_account_id)
     
     # 获取所有持仓
     positions = trade_service.stock_positions()
