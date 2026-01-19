@@ -32,6 +32,7 @@ const PortfolioCopyTrading = () => {
     const [form] = Form.useForm();
     const [activeTab, setActiveTab] = useState('ib_configs'); // Changed default to ib_configs
     const [ibAccounts, setIbAccounts] = useState([]);
+    const [longportAccounts, setLongportAccounts] = useState([]);
     const [previewVisible, setPreviewVisible] = useState(false);
     const [previewPlan, setPreviewPlan] = useState([]);
     const [previewLoading, setPreviewLoading] = useState(false);
@@ -74,6 +75,15 @@ const PortfolioCopyTrading = () => {
             setIbAccounts(response.data);
         } catch (error) {
             message.error('获取 IB 账户列表失败');
+        }
+    };
+
+    const fetchLongportAccounts = async () => {
+        try {
+            const response = await request.get('/api/longport-accounts');
+            setLongportAccounts(response.data);
+        } catch (error) {
+            message.error('获取长桥账户列表失败');
         }
     };
 
@@ -253,8 +263,9 @@ const PortfolioCopyTrading = () => {
             } else if (activeTab === 'snowball_configs') {
                 fetchSnowballConfigs();
             }
-            // IB accounts are always useful or global
+            // IB accounts and Longport accounts are always useful or global
             fetchIbAccounts();
+            fetchLongportAccounts();
         }
     }, [accountId, activeTab]);
 
@@ -286,19 +297,40 @@ const PortfolioCopyTrading = () => {
             )
         },
         {
-            title: 'IB 账户',
-            key: 'ib_account',
+            title: '跟单账户',
+            key: 'account',
             render: (_, record) => {
-                if (record.ib_account_id) {
-                    const account = ibAccounts.find(a => a.id === record.ib_account_id);
-                    return account ? (
+                if (record.account_type === 'longport') {
+                    if (record.longport_account_id) {
+                        const account = longportAccounts.find(a => a.lp_account_id === record.longport_account_id);
+                        return account ? (
+                            <Space direction="vertical" size={0}>
+                                <Tag color="purple">Longport</Tag>
+                                <Text>{account.name}</Text>
+                                <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.longport_account_id}</Text>
+                            </Space>
+                        ) : `Longport (ID: ${record.longport_account_id})`;
+                    }
+                    return <Tag color="purple">Longport</Tag>;
+                } else {
+                    // Default to IB
+                    if (record.ib_account_id) {
+                        const account = ibAccounts.find(a => a.id === record.ib_account_id);
+                        return account ? (
+                            <Space direction="vertical" size={0}>
+                                <Tag color="blue">IBKR</Tag>
+                                <Text>{account.name}</Text>
+                                <Text type="secondary" style={{ fontSize: '12px' }}>Port: {account.ib_port}</Text>
+                            </Space>
+                        ) : `Unknown IB (ID: ${record.ib_account_id})`;
+                    }
+                    return (
                         <Space direction="vertical" size={0}>
-                            <Text>{account.name}</Text>
-                            <Text type="secondary" style={{ fontSize: '12px' }}>Port: {account.ib_port}</Text>
+                            <Tag color="blue">IBKR</Tag>
+                            <Text>Port: {record.ib_port}</Text>
                         </Space>
-                    ) : `Unknown (ID: ${record.ib_account_id})`;
+                    );
                 }
-                return `Port: ${record.ib_port}`;
             }
         },
         {
@@ -306,7 +338,11 @@ const PortfolioCopyTrading = () => {
             key: 'settings',
             render: (_, record) => (
                 <Space direction="vertical" size={0}>
-                    <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {record.total_position_ratio}%</Text>
+                    {record.total_amount ? (
+                        <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {record.total_amount.toLocaleString()}</Text>
+                    ) : (
+                        <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {record.total_position_ratio}%</Text>
+                    )}
                     <Text type="secondary" style={{ fontSize: '12px' }}>跟踪误差: {record.tracking_error_pct}%</Text>
                 </Space>
             )
@@ -477,7 +513,7 @@ const PortfolioCopyTrading = () => {
                 }
             >
                 <Tabs activeKey={activeTab} onChange={setActiveTab}>
-                    <Tabs.TabPane tab={<span><SettingOutlined />IB账户跟单配置</span>} key="ib_configs">
+                    <Tabs.TabPane tab={<span><SettingOutlined />美股账户跟单配置</span>} key="ib_configs">
                         <Table
                             dataSource={configs}
                             columns={configColumns}
@@ -490,7 +526,7 @@ const PortfolioCopyTrading = () => {
                                 setEditingConfig(null);
                                 form.resetFields();
                                 setModalVisible(true);
-                            }}>添加IB跟单配置</Button>
+                            }}>添加跟单配置</Button>
                         </div>
                     </Tabs.TabPane>
 
@@ -695,7 +731,16 @@ const PortfolioCopyTrading = () => {
                 onOk={() => form.submit()}
                 width={700}
             >
-                <Form form={form} layout="vertical" onFinish={handleSave} initialValues={{ enabled: true, cron_rule: '0 8 * * *', timezone: 'America/New_York', tracking_error_pct: 5, total_position_ratio: 100 }}>
+                <Form form={form} layout="vertical" onFinish={handleSave}
+                    initialValues={{
+                        enabled: true,
+                        cron_rule: '0 8 * * *',
+                        timezone: 'America/New_York',
+                        tracking_error_pct: 5,
+                        total_position_ratio: 100,
+                        account_type: 'ib'
+                    }}
+                >
                     <Row gutter={16}>
                         <Col span={24}>
                             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, marginTop: 12 }}>
@@ -740,16 +785,49 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                     </Row>
+
                     <Row gutter={16}>
                         <Col span={12}>
-                            <Form.Item name="ib_account_id" label="IB 账户" rules={[{ required: true, message: '请选择 IB 账户' }]}>
-                                <Select placeholder="选择 IB 账户">
-                                    {ibAccounts.map(account => (
-                                        <Select.Option key={account.id} value={account.id}>
-                                            {account.name} (Port: {account.ib_port})
-                                        </Select.Option>
-                                    ))}
+                            <Form.Item name="account_type" label="账户类型" rules={[{ required: true }]}>
+                                <Select onChange={() => {
+                                    // Reset account fields on type change
+                                    form.setFieldsValue({ ib_account_id: undefined, longport_account_id: undefined });
+                                }}>
+                                    <Select.Option value="ib">Interactive Brokers (IB)</Select.Option>
+                                    <Select.Option value="longport">长桥证券 (Longport)</Select.Option>
                                 </Select>
+                            </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                            <Form.Item shouldUpdate={(prev, curr) => prev.account_type !== curr.account_type}>
+                                {() => {
+                                    const type = form.getFieldValue('account_type');
+                                    if (type === 'longport') {
+                                        return (
+                                            <Form.Item name="longport_account_id" label="长桥账户" rules={[{ required: true, message: '请选择长桥账户' }]}>
+                                                <Select placeholder="选择长桥账户">
+                                                    {longportAccounts.map(account => (
+                                                        <Select.Option key={account.lp_account_id} value={account.lp_account_id}>
+                                                            {account.name} (ID: {account.lp_account_id})
+                                                        </Select.Option>
+                                                    ))}
+                                                </Select>
+                                            </Form.Item>
+                                        );
+                                    } else {
+                                        return (
+                                            <Form.Item name="ib_account_id" label="IB 账户" rules={[{ required: true, message: '请选择 IB 账户' }]}>
+                                                <Select placeholder="选择 IB 账户">
+                                                    {ibAccounts.map(account => (
+                                                        <Select.Option key={account.id} value={account.id}>
+                                                            {account.name} (Port: {account.ib_port})
+                                                        </Select.Option>
+                                                    ))}
+                                                </Select>
+                                            </Form.Item>
+                                        );
+                                    }
+                                }}
                             </Form.Item>
                         </Col>
                     </Row>
