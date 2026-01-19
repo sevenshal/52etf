@@ -68,6 +68,11 @@ const Profile = () => {
           onClick: () => navigate('/portfolio-copy-trading'),
           arrow: true
         },
+      ]
+    },
+    {
+      title: '账户管理',
+      items: [
         {
           title: 'IBKR 账户管理',
           onClick: () => navigate('/ib-account-manager'),
