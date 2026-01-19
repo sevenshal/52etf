@@ -328,6 +328,11 @@ class PortfolioCopyConfig(Base):
     tracking_error_pct = Column(Float, default=5.0) # 跟踪误差 (%)
     api_headers = Column(JSON) # 包含 Cookie, User-Agent 等
     portfolio_name = Column(String(100))
+    
+    # 新增字段以支持长桥
+    account_type = Column(String, default="ib") # "ib" or "longport"
+    longport_account_id = Column(String, nullable=True) # 关联的长桥账户 ID (lp_account_id)
+    
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class PortfolioCopyLog(Base):

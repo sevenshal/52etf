@@ -38,6 +38,10 @@ class PortfolioCopyTrader:
         self._processing_keys = set()
         self.ib_services: Dict[str, IBKRService] = {} # Key: "port_clientid"
         self.worker_loop_obj = None # Capture the worker loop
+        
+        # Initialize sub-traders
+        from .longport_copy_trader import LongportCopyTrader
+        self.longport_trader = LongportCopyTrader(self)
 
     def _log(self, account_id: str, portfolio_id: str, action: str, status: str, message: str, symbol: str = None, quantity: float = None, price: float = None, config_id: int = None):
         db = Session()
@@ -144,6 +148,11 @@ class PortfolioCopyTrader:
     async def calculate_rebalance_plan(self, config: PortfolioCopyConfig, client_id: Optional[int] = None) -> List[dict]:
         """计算调仓计划但不执行 (Should run in worker loop)"""
         masked_account_id = mask_account_id(config.account_id)
+        
+        # Dispatch to Longport Trader if configured
+        if config.account_type == "longport":
+             return await self.longport_trader.calculate_rebalance_plan(config)
+             
         logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
         # 1. 获取针对该账户的 IB Service 实例 (多账户持久连接)
@@ -276,6 +285,11 @@ class PortfolioCopyTrader:
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (由 worker_loop 调用)"""
         masked_account_id = mask_account_id(config.account_id)
+        
+        # Dispatch to Longport Trader
+        if config.account_type == "longport":
+            return await self.longport_trader.rebalance(config)
+
         try:
             # 1. Check Market Status
             if not MarketService.is_us_market_open(include_extended=False):

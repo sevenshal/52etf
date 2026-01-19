@@ -19,10 +19,12 @@ class PortfolioCopyConfigSchema(BaseModel):
     timezone: str = "America/New_York"
     ib_port: Optional[int] = None # Now optional
     ib_account_id: Optional[int] = None # Added
-    total_position_ratio: float = 100.0
+    total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
-    tracking_error_pct: float = 5.0
+    tracking_error_pct: Optional[float] = 5.0
     api_headers: Optional[dict] = None
+    account_type: Optional[str] = "ib" 
+    longport_account_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -75,6 +77,8 @@ async def save_config(
         config.total_amount = config_data.total_amount
         config.tracking_error_pct = config_data.tracking_error_pct
         config.api_headers = config_data.api_headers
+        config.account_type = config_data.account_type
+        config.longport_account_id = config_data.longport_account_id
     else:
         config = PortfolioCopyConfig(
             account_id=account_id,
@@ -88,7 +92,9 @@ async def save_config(
             total_position_ratio=config_data.total_position_ratio,
             total_amount=config_data.total_amount,
             tracking_error_pct=config_data.tracking_error_pct,
-            api_headers=config_data.api_headers
+            api_headers=config_data.api_headers,
+            account_type=config_data.account_type,
+            longport_account_id=config_data.longport_account_id
         )
         db.add(config)
     
