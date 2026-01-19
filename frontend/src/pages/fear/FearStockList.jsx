@@ -4,7 +4,7 @@ import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, 
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
-import { useAutoTrading } from './hooks/useAutoTrading';
+import { SZDTConfigForm } from '../SZDTAutoTrading';
 
 const FearStockList = () => {
   const navigate = useNavigate();
@@ -19,7 +19,7 @@ const FearStockList = () => {
   const [previewRange, setPreviewRange] = useState([60, 100]);
   const [previewAmount, setPreviewAmount] = useState(0);
   const [activeType, setActiveType] = useState(3);
-  const { autoTrading, handleAutoTradingChange } = useAutoTrading();
+  const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -546,16 +546,18 @@ const FearStockList = () => {
         </div>
 
         <Space>
-          <Space style={{ marginRight: 12 }}>
-            <span>自动交易:</span>
-            <Switch checked={autoTrading} onChange={handleAutoTradingChange} />
-          </Space>
           <Button
             icon={<FileTextOutlined />}
             onClick={() => navigate('/fear/logs')}
             style={{ marginRight: 8 }}
           >
             日志
+          </Button>
+          <Button
+            onClick={() => setIsConfigModalVisible(true)}
+            style={{ marginRight: 8 }}
+          >
+            策略配置
           </Button>
           <Button
             type="primary"
@@ -584,6 +586,17 @@ const FearStockList = () => {
         size="small"
         pagination={false}
       />
+
+      {/* Config Modal */}
+      <Modal
+        title="贪恐策略配置"
+        open={isConfigModalVisible}
+        onCancel={() => setIsConfigModalVisible(false)}
+        footer={null}
+        destroyOnClose
+      >
+        <SZDTConfigForm onSuccess={() => setIsConfigModalVisible(false)} />
+      </Modal>
 
       <Modal
         title={editingRecord ? "编辑股票" : "添加股票"}

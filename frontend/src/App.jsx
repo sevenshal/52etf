@@ -24,6 +24,7 @@ import IBKRAccountManager from './pages/IBKRAccountManager';
 import AllWeatherBacktest from './pages/AllWeatherBacktest';
 import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 import LongPortAccountManager from './pages/LongPortAccountManager';
+import SZDTAutoTrading from './pages/SZDTAutoTrading';
 
 function App() {
   return (
@@ -52,6 +53,7 @@ function App() {
           <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
           <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
+          <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
         </Route>
       </Routes>
     </AccountProvider>
