@@ -193,7 +193,7 @@ def check_and_trade(context, trigger_combination_id=None):
             log.info("检测到 %d 个未完成订单，准备撤单..." % len(pending_orders))
             for po in pending_orders:
                 try:
-                    cancel_order(po['entrust_no'])
+                    cancel_order_ex(po)
                     log.info("已请求撤单: %s (订单号: %s)" % (po['symbol'], po['entrust_no']))
                 except Exception as e:
                     log.error("撤单失败 %s (订单号: %s): %s" % (po['symbol'], po['entrust_no'], str(e)))
