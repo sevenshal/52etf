@@ -8,8 +8,8 @@ from longport.openapi import (
     OrderSide as LPOrderSide, OrderType as LPOrderType, TimeInForceType as LPTimeInForceType, OutsideRTH as LPOutsideRTH,
     Period, AdjustType, PushOrderChanged, OrderStatus, SubType as LPSubType, PushQuote
 )
-from ..utils import load_config_file, save_config_file, mask_account_id
-from ..models.account import AccountCfg
+from ..utils import mask_account_id
+from ..database import Session, LongPortAccount
 from .trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideRTH
 from .quote import QuoteProvider, SubType, QuoteObserver, QuoteEvent
 
@@ -45,44 +45,170 @@ class LongPortService(QuoteProvider, TradeService):
     
     _instances = {}
 
-    def __new__(cls, account_id: str):
-        if account_id not in cls._instances:
-            instance = super(LongPortService, cls).__new__(cls)
-            cls._instances[account_id] = instance
-        return cls._instances[account_id]
+    @classmethod
+    def get_instance(cls, lp_account_id: str = "LBPT10001248"):
+        """获取LongPortService实例 (Factory Method)"""
+            
+        if lp_account_id not in cls._instances:
+            cls._instances[lp_account_id] = cls(lp_account_id)
+        return cls._instances[lp_account_id]
 
-    def __init__(self, account_id: str):
+    def __init__(self, lp_account_id: str):
         if hasattr(self, 'initialized') and self.initialized:
             return
 
-        self.account_id = account_id
-        self.account_cfg = load_config_file(account_id, "evc_config.json", AccountCfg)
-        self.__init_lp_config()
+        self.lp_account_id = lp_account_id
+        
+        try:
+            self.__load_config_from_db()
+            self.__init_lp_config()
 
-        self.ctx = QuoteContext(self.lp_config)
-        self.trade_ctx = TradeContext(self.lp_config)
-        self.trade_ctx.subscribe([TopicType.Private])
+            self.ctx = QuoteContext(self.lp_config)
+            self.trade_ctx = TradeContext(self.lp_config)
+            self.trade_ctx.subscribe([TopicType.Private])
 
-        self.initialized = True
+            self.initialized = True
+        except Exception as e:
+            logging.error(f"Failed to initialize LongPortService for {lp_account_id}: {str(e)}")
+            # Do not set initialized=True, so next attempt will try again.
+
+    def reload(self):
+        """重新加载配置 (用于更新账户信息后)"""
+        try:
+            logging.info(f"Reloading LongPortService config for {self.lp_account_id}...")
+            # Reset
+            self.initialized = False
+            if hasattr(self, 'ctx'):
+                del self.ctx
+            if hasattr(self, 'trade_ctx'):
+                del self.trade_ctx
+                
+            self.__load_config_from_db()
+            self.__init_lp_config()
+            
+            self.ctx = QuoteContext(self.lp_config)
+            self.trade_ctx = TradeContext(self.lp_config)
+            self.trade_ctx.subscribe([TopicType.Private])
+            
+            self.initialized = True
+            logging.info(f"Successfully reloaded LongPortService for {self.lp_account_id}")
+        except Exception as e:
+            logging.error(f"Failed to reload LongPortService for {self.lp_account_id}: {str(e)}")
+            raise
+
+    def get_status(self) -> dict:
+        """获取服务状态"""
+        if not hasattr(self, 'initialized') or not self.initialized:
+            return {"status": "error", "message": "未初始化或初始化失败"}
+        
+        # 尝试进行一次简单的API调用来验证连接
+        # 由于 quote ctx 比较轻量，我们检查一下 ctx 是否存在
+        if not self.ctx:
+             return {"status": "error", "message": "QuoteContext 未初始化"}
+
+        return {"status": "ok", "message": "运行正常"}
+
+    def __load_config_from_db(self):
+        session = Session()
+        try:
+            account = session.query(LongPortAccount).filter(LongPortAccount.lp_account_id == self.lp_account_id).first()
+            if not account:
+                raise ValueError(f"LongPort Account {self.lp_account_id} not found in database")
+            
+            self.app_key = account.app_key
+            self.app_secret = account.app_secret
+            self.access_token = account.access_token
+            # access_token_expired_at stored as DateTime in DB
+            self.access_token_expired_at = account.access_token_expired_at
+        finally:
+            session.close()
 
     def __init_lp_config(self):
+        # 尝试解析 Access Token 的过期时间 (如果数据库中没有)
+        if self.access_token and self.access_token_expired_at is None:
+            try:
+                # 简单解析 JWT payload
+                token_str = self.access_token
+                #有些token可能带前缀，如 'm_'，但也可能就是标准的。JWT通常是 xxx.yyy.zzz
+                #如果是 'm_' 开头，去掉它
+                if token_str.startswith('m_'):
+                    token_str = token_str[2:]
+                
+                parts = token_str.split('.')
+                if len(parts) >= 2:
+                    payload = parts[1]
+                    # Fix padding
+                    padding = len(payload) % 4
+                    if padding > 0:
+                        payload += '=' * (4 - padding)
+                    
+                    import base64
+                    import json
+                    decoded = base64.urlsafe_b64decode(payload)
+                    data = json.loads(decoded)
+                    
+                    if 'exp' in data:
+                        self.access_token_expired_at = datetime.fromtimestamp(data['exp'])
+                        logging.info(f"Parsed token expiry from JWT: {self.access_token_expired_at}")
+                        # Update DB immediately
+                        self.__update_token_in_db()
+            except Exception as e:
+                logging.warning(f"Failed to parse access token expiry: {e}")
+
         self.lp_config = Config(
-            app_key=self.account_cfg.app_key,
-            app_secret=self.account_cfg.app_secret,
-            access_token=self.account_cfg.access_token,
+            app_key=self.app_key,
+            app_secret=self.app_secret,
+            access_token=self.access_token,
             language = Language.ZH_CN
         )
         
-        if (self.account_cfg.access_token_expired_at is not None and 
-            time.time() < self.account_cfg.access_token_expired_at - timedelta(days=7).total_seconds()):
+        # Check expiry. self.access_token_expired_at is DateTime or None
+        # 如果有效期大于7天，直接使用
+        if (self.access_token_expired_at is not None and 
+            datetime.now() < self.access_token_expired_at - timedelta(days=7)):
             return
             
+        logging.info(f"Refreshing access token for {self.lp_account_id}...")
         access_token = self.lp_config.refresh_access_token()
-        self.account_cfg.access_token = access_token
-        self.account_cfg.access_token_expired_at = (datetime.now() + timedelta(days=365)).timestamp()
+        self.access_token = access_token
+        # 刷新后，重新解析过期时间，或者默认长一点?
+        # refresh_access_token 返回的只是token字符串。我们再解析一次
+        try:
+             token_str = self.access_token
+             if token_str.startswith('m_'):
+                token_str = token_str[2:]
+             parts = token_str.split('.')
+             if len(parts) >= 2:
+                payload = parts[1]
+                padding = len(payload) % 4
+                if padding > 0:
+                    payload += '=' * (4 - padding)
+                import base64
+                import json
+                decoded = base64.urlsafe_b64decode(payload)
+                data = json.loads(decoded)
+                if 'exp' in data:
+                    self.access_token_expired_at = datetime.fromtimestamp(data['exp'])
+                else:
+                    self.access_token_expired_at = datetime.now() + timedelta(days=90) # Fallback
+        except:
+             self.access_token_expired_at = datetime.now() + timedelta(days=90)
         
-        # 保存更新后的配置
-        save_config_file(self.account_id, "evc_config.json", self.account_cfg)
+        self.__update_token_in_db()
+
+    def __update_token_in_db(self):
+        # Save back to DB
+        session = Session()
+        try:
+            account = session.query(LongPortAccount).filter(LongPortAccount.lp_account_id == self.lp_account_id).first()
+            if account:
+                account.access_token = self.access_token
+                account.access_token_expired_at = self.access_token_expired_at
+                session.commit()
+        except Exception as e:
+            logging.error(f"Failed to update token in DB: {e}")
+        finally:
+            session.close()
 
     @sleep_and_retry
     @limits(calls=10, period=1)
@@ -418,7 +544,7 @@ class LongPortService(QuoteProvider, TradeService):
         logger.debug(f"Order state changed for symbol: {event.symbol}, status: {event.status}")
         
         masked_no = mask_account_id(event.account_no)
-        if not event.account_no == self.account_cfg.account_no:
+        if not str(event.account_no) == self.lp_account_id:
             logger.warning(f"Order account {masked_no} is not the listening account, ignore")
             return
         callback(event)

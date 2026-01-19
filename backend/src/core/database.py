@@ -408,6 +408,22 @@ class IBKRAccountConfig(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class LongPortAccount(Base):
+    """长桥账户管理"""
+    __tablename__ = "longport_accounts"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)      # 应用内用户账号ID
+    lp_account_id = Column(String, unique=True, index=True, nullable=False) # 长桥账户ID
+    name = Column(String, nullable=False)        # 账户别名
+    app_key = Column(String, nullable=False)
+    app_secret = Column(String, nullable=False)
+    access_token = Column(String)
+    access_token_expired_at = Column(DateTime)
+    
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 # 创建所有表
 Base.metadata.create_all(engine)
 

@@ -20,7 +20,7 @@ from ..core.database import Session, ETFEmotion
 from .etf_manager import ETFManager
 from tqdm import tqdm
 
-quote_provider = LongPortService("vNKpHJkLMnBQRSTUVWXYZabcdefghijkl")
+quote_provider = LongPortService.get_instance()
 quote_service = QuoteService(quote_provider)
 etf_manager = ETFManager(quote_provider)
 

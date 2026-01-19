@@ -90,7 +90,7 @@ async def get_etf_reports(
     for report in latest_reports:
         symbols_to_quote.append(report.symbol)
 
-    quote_service: QuoteProvider = LongPortService('vNKpHJkLMnBQRSTUVWXYZabcdefghijkl')
+    quote_service: QuoteProvider = LongPortService.get_instance()
     quote_info_list = quote_service.get_quote_batch(symbols_to_quote)
     quote_dict = {info['symbol']: info['price'] for info in quote_info_list}
 
@@ -119,7 +119,7 @@ async def get_etf_report(
         raise HTTPException(status_code=404, message="未找到ETF报告")
     
     # 获取最新市场价格
-    quote_service: QuoteProvider = LongPortService('vNKpHJkLMnBQRSTUVWXYZabcdefghijkl')
+    quote_service: QuoteProvider = LongPortService.get_instance()
     quote_info = quote_service.get_quote(symbol)
     if quote_info:
         latest_report.market_price = quote_info['price']

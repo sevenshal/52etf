@@ -18,7 +18,7 @@ pd.set_option("display.width", 10000)
 # 初始化账户 (建议从环境变量或配置中读取)
 ACCOUNT_ID = 'vNKpHJkLMnBQRSTUVWXYZabcdefghijkl'
 #lpAccounts = [EvcStrategy(account_id=ACCOUNT_ID, account_type='longport')]
-longPortService = LongPortService(ACCOUNT_ID)
+longPortService = LongPortService.get_instance()
 etf_manager = ETFManager(longPortService)
 evc_manager = EVCManager()
 cnn_fear_index_scraper = CNNFearGreedIndexScraper()

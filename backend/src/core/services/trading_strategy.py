@@ -15,7 +15,7 @@ async def calculate_ma_signal(symbol: str, short_window: int, long_window: int, 
     计算均线信号
     返回: 'BUY', 'SELL' 或 'HOLD'
     """
-    trade_service = LongPortService(account_id)
+    trade_service = LongPortService.get_instance(account_id)
     quote_service = QuoteService(trade_service)
     
     end_date = MarketService.get_eastern_now().date()
