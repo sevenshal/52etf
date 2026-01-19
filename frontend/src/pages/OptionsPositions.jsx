@@ -975,17 +975,17 @@ const OptionsPositions = () => {
         defaultActiveKey="Call"
         tabBarExtraContent={
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            <span style={{ marginRight: 8 }}>选择账户:</span>
+            <span style={{ marginRight: 8 }}>账户:</span>
             <Select
-              style={{ width: 220 }}
+              style={{ width: 100 }}
               value={selectedAccount}
               onChange={setSelectedAccount}
-              placeholder="请选择长桥账户"
+              placeholder="长桥账户"
               loading={!accounts.length}
             >
               {accounts.map(acc => (
                 <Option key={acc.lp_account_id} value={acc.lp_account_id}>
-                  {acc.name} ({acc.lp_account_id})
+                  {acc.name}
                 </Option>
               ))}
             </Select>
