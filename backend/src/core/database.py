@@ -445,7 +445,7 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        Session.remove()
 
 @contextmanager
 def get_db_ctx():
@@ -458,4 +458,4 @@ def get_db_ctx():
         db.rollback()
         raise
     finally:
-        db.close()
+        Session.remove()
