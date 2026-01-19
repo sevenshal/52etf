@@ -73,6 +73,11 @@ const Profile = () => {
           onClick: () => navigate('/ib-account-manager'),
           arrow: true
         },
+        {
+          title: '长桥账户管理',
+          onClick: () => navigate('/longport-account-manager'),
+          arrow: true
+        },
       ]
     },
     {
