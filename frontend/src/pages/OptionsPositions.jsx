@@ -48,7 +48,12 @@ const OptionsPositions = () => {
         if (data && data.length > 0) {
           // Default select the first account if not selected
           if (!selectedAccount) {
-            setSelectedAccount(data[0].lp_account_id);
+            const savedAccount = localStorage.getItem('longport_selected_account');
+            const accountToSelect = data.find(acc => acc.lp_account_id === savedAccount)
+              ? savedAccount
+              : data[0].lp_account_id;
+
+            setSelectedAccount(accountToSelect);
           }
         }
       } catch (error) {
@@ -58,6 +63,11 @@ const OptionsPositions = () => {
     }
     fetchAccounts();
   }, []);
+
+  const handleAccountChange = (value) => {
+    setSelectedAccount(value);
+    localStorage.setItem('longport_selected_account', value);
+  };
 
   const [riskFreeRate, setRiskFreeRate] = useState(null);
 
@@ -979,7 +989,7 @@ const OptionsPositions = () => {
             <Select
               style={{ width: 100 }}
               value={selectedAccount}
-              onChange={setSelectedAccount}
+              onChange={handleAccountChange}
               placeholder="长桥账户"
               loading={!accounts.length}
             >
