@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, market_signal, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, market_signal, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, szdt_configs
 from ..robot.main import robot
 
 _robot_started = False
@@ -77,6 +77,7 @@ app.include_router(ib_copy_trading.router)
 app.include_router(snowball.router)
 app.include_router(monitor.router)
 app.include_router(longport_accounts.router)
+app.include_router(szdt_configs.router)
 
 def start_robot():
     global _robot_started

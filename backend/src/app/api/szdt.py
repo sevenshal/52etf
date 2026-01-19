@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 import os
 from ...core.utils import get_data_file, read_json_file, write_json_file
 from datetime import datetime
-from ...core.database import get_db, TradingLog, SzdtTradeStock
+from ...core.database import get_db, TradingLog, SzdtTradeStock, SZDTTradingConfig
 from ...core.services.szdt import SZDTService
 from sqlalchemy.orm import Session
 
@@ -84,52 +84,18 @@ class StockEmotionResponse(BaseModel):
     msg: str
     data: Optional[StockEmotionData] = None
 
-# 添加新的模型
-class AutoTradingStatus(BaseModel):
-    enabled: bool
-
 def get_stocks_config_path(account_id: str):
     return get_data_file(account_id, "szdt_stocks.json")
-
-def get_auto_trading_path(account_id: str):
-    """获取自动交易配置文件路径"""
-    return get_data_file(account_id, "szdt_auto_trading.json")
 
 def read_stocks(account_id: str, db: Session) -> List[StockModel]:
     """读取股票列表"""
     stocks = db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == account_id).all()
     return stocks
 
-def get_auto_trading_status(account_id: str) -> bool:
-    """获取自动交易状态"""
-    try:
-        file_path = get_auto_trading_path(account_id)
-        data = read_json_file(file_path)
-        return data.get('enabled', False)
-    except FileNotFoundError:
-        return False
-
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
         raise HTTPException(status_code=401, detail="Missing account ID")
     return x_account_id
-
-
-@router.get("/auto-trading-status")
-async def get_auto_trading_status_api(account_id: str = Depends(get_account_id)):
-    """获取自动交易状态"""
-    return {"enabled": get_auto_trading_status(account_id)}
-
-@router.post("/auto-trading")
-async def set_auto_trading_status(
-    status: AutoTradingStatus,
-    account_id: str = Depends(get_account_id)
-):
-    """设置自动交易状态"""
-    
-    file_path = get_auto_trading_path(account_id)
-    write_json_file(file_path, {"enabled": status.enabled})
-    return {"message": "设置成功"}
 
 @router.get("/trading-stocks", response_model=List[StockModel])
 async def list_trading_stocks(
@@ -138,10 +104,7 @@ async def list_trading_stocks(
     db: Session = Depends(get_db)
 ):
     """获取自动交易的股票列表"""
-    # 检查自动交易开关状态
-    if not get_auto_trading_status(account_id):
-        return []
-    
+        
     # 如果开关打开，则返回股票列表
     query = db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == account_id)
     if etf_type is not None:

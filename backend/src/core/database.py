@@ -285,6 +285,18 @@ class AutomatedTradingConfig(Base):
     target_ratio = Column(Float, default=10.0) # 目标仓位比例 (%)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class SZDTTradingConfig(Base):
+    """SZDT贪恐策略交易配置"""
+    __tablename__ = "szdt_trading_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, unique=True)
+    enabled = Column(Boolean, default=False) # 美股开关
+    enabled_a = Column(Boolean, default=False) # A股开关
+    ib_account_id = Column(Integer, nullable=True) # 关联的 IB 账户 ID
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class AutomatedTradeLog(Base):
     """自动化交易日志"""
     __tablename__ = "automated_trade_logs"

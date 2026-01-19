@@ -4,9 +4,9 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import logging
 import random
-from ...core.database import get_db, TradingState, StockCooldown, SzdtTradeStock, TradingLog, Session
+from ...core.database import get_db, TradingState, StockCooldown, SzdtTradeStock, TradingLog, Session, SZDTTradingConfig
 from .account import valid_account
-from .szdt import szdt_service, get_auto_trading_status
+from .szdt import szdt_service
 from ...core.models.account import SzdtActiveCode
 from ...core.utils import load_config_file
 from sqlalchemy import and_
@@ -59,7 +59,9 @@ async def get_trade_opportunities(
     db: Session = Depends(get_db)
 ):
     """获取交易机会"""
-    if not get_auto_trading_status(account_id):
+    # 检查自动交易开关状态 (A股)
+    config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
+    if not config or not config.enabled_a:
         return TradeResponse(opportunities=[], msg="自动交易未启用")
     
     cli_id = request.cli_id

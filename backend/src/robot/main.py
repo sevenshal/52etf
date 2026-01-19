@@ -8,7 +8,7 @@ from .evc_manager import EVCManager
 from ..core.services.longport import LongPortService
 from .cnn_fear_index import CNNFearGreedIndexScraper
 from .market_signal import MarketSignalAnalyzer
-from .us_auto_trader import start_us_auto_trader
+from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 pd.set_option("display.max_rows", None)
@@ -49,8 +49,8 @@ def robot():
   # 定时执行CNN Fear & Greed Index 抓取
   schedule.every().day.at("10:00").do(cnn_fear_index_scraper.fetch_data_and_save)
   logging.info("listening deal")
-  # 启动美股自动交易（每分钟轮询，限美股开盘时段）
-  start_us_auto_trader(ACCOUNT_ID)
+  # 启动 SZDT 贪恐策略美股自动交易（每分钟轮询，限美股开盘时段，检查所有开启配置）
+  start_szdt_us_trader()
   # 启动杠杆ETF均线策略（收盘前10s检查）
   start_lev_etf_trader()
 
