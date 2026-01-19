@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Card, Typography, Tag, Row, Col, Statistic, Tabs, Tooltip } from 'antd';
+import { Table, Card, Typography, Tag, Row, Col, Statistic, Tabs, Tooltip, Select, message } from 'antd';
 import { formatNumber, formatDate } from '../utils/format';
 import request from '../utils/request';
 import { InfoCircleOutlined, RocketFilled } from '@ant-design/icons';
@@ -11,8 +11,13 @@ const { TabPane } = Tabs;
 
 const OptionsPositions = () => {
   const navigate = useNavigate();  // 添加这行
-  
+
+  const { Option } = Select;
+
   const [loading, setLoading] = useState(false);
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccount, setSelectedAccount] = useState(null);
+
   const [positions, setPositions] = useState({
     Call: [],
     Put: []
@@ -34,13 +39,38 @@ const OptionsPositions = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Fetch Longport Accounts
+  useEffect(() => {
+    const fetchAccounts = async () => {
+      try {
+        const { data } = await request.get('/api/longport-accounts');
+        setAccounts(data);
+        if (data && data.length > 0) {
+          // Default select the first account if not selected
+          if (!selectedAccount) {
+            setSelectedAccount(data[0].lp_account_id);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch longport accounts:', error);
+        message.error('获取长桥账户列表失败');
+      }
+    }
+    fetchAccounts();
+  }, []);
+
   const [riskFreeRate, setRiskFreeRate] = useState(null);
 
   const fetchPositions = async (optionType) => {
+    if (!selectedAccount) return;
+
     setLoading(true);
     try {
       const { data } = await request.get('/api/positions/options', {
-        params: { option_type: optionType }
+        params: {
+          option_type: optionType,
+          lp_account_id: selectedAccount
+        }
       });
       setPositions(prev => ({
         ...prev,
@@ -56,22 +86,24 @@ const OptionsPositions = () => {
 
   useEffect(() => {
     // 初始只加载当前激活tab的数据
-    fetchPositions(activeTab);
-  }, [activeTab]);
+    if (selectedAccount) {
+      fetchPositions(activeTab);
+    }
+  }, [activeTab, selectedAccount]);
 
   const processPositionsData = (data) => {
     return data.map(group => {
       // 计算距离到期天数
       const daysRemaining = Math.ceil((new Date(group.expiry) - new Date()) / (1000 * 60 * 60 * 24));
-      
+
       // 处理每个持仓的数据
       const processedPositions = group.positions.map(pos => {
         // 计算价差百分比
         const price_diff = ((pos.strike_price - pos.stock_price) / pos.stock_price * 100).toFixed(2);
-        
+
         // 计算持仓市值
         const position_value = pos.quantity * pos.market_price * 100;
-        
+
         // 计算持仓成本
         const position_cost = pos.quantity * pos.cost_price * 100;
 
@@ -81,7 +113,7 @@ const OptionsPositions = () => {
         // 计算已实现盈亏
         const realized_amount = (pos.market_price - pos.cost_price) * pos.quantity * 100;
         const realized_percentage = (realized_amount / (Math.abs(pos.quantity) * pos.cost_price * 100) * 100).toFixed(2);
-        
+
         // 计算时间进度
         const total_days = Math.ceil((new Date(pos.expiry) - new Date(pos.created_at || Date.now())) / (1000 * 60 * 60 * 24));
         const time_progress = Math.min(100, Math.max(0, ((total_days - daysRemaining) / total_days * 100))).toFixed(1);
@@ -108,17 +140,17 @@ const OptionsPositions = () => {
       const put_count = processedPositions
         .filter(p => p.option_type === 'Put')
         .reduce((sum, p) => sum + p.quantity, 0);
-      
+
       // 计算价值区间统计
       const positions_by_price = processedPositions.reduce((acc, pos) => {
         const price_diff_percent = ((pos.strike_price - pos.stock_price) / pos.stock_price * 100);
         const position_value = pos.quantity * pos.strike_price * 100;
         const position_cost = pos.quantity * pos.cost_price * 100;
-        
+
         // 计算行权期望值
         const expected_value = (pos.strike_amount * (pos.exercise_probability / 100));
         acc.total_expected_value += expected_value;
-        
+
         if (price_diff_percent < -10) {
           acc.below_market_value += position_value;
         } else if (price_diff_percent > 10) {
@@ -129,15 +161,15 @@ const OptionsPositions = () => {
         acc.total_realized_pnl += pos.realized_pnl.amount;
         acc.total_position_cost += position_cost;
         return acc;
-      }, { 
-        below_market_value: 0, 
-        near_market_value: 0, 
-        above_market_value: 0, 
-        total_realized_pnl: 0, 
+      }, {
+        below_market_value: 0,
+        near_market_value: 0,
+        above_market_value: 0,
+        total_realized_pnl: 0,
         total_position_cost: 0,
-        total_expected_value: 0 
+        total_expected_value: 0
       });
-      
+
       return {
         ...group,
         days_remaining: daysRemaining,
@@ -154,7 +186,7 @@ const OptionsPositions = () => {
       fetchStockPositions();
     }
   }, [activeTab]);
-  
+
 
   // 修改分组头部的统计卡片
   const renderExpiryHeader = (record, optionType) => {
@@ -175,18 +207,18 @@ const OptionsPositions = () => {
                 行权价值: ${formatNumber(record.total_strike_value, 2)}
               </div>
               <div style={{ color: '#666', fontSize: '14px' }}>
-                ({formatNumber(record.total_strike_value/10000, 1)}万)
+                ({formatNumber(record.total_strike_value / 10000, 1)}万)
               </div>
             </div>
           </Col>
         </Row>
 
-        <Row gutter={[16, 0]} style={{ marginTop: '16px', flexDirection: isMobile ? 'column':'row' }}>
+        <Row gutter={[16, 0]} style={{ marginTop: '16px', flexDirection: isMobile ? 'column' : 'row' }}>
           <Col xs={24} md={8}>
             <Card size="small" bodyStyle={{ padding: '4px' }}>
               <Row gutter={16}>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <span style={{ fontSize: '12px', color: optionType === 'Call' ? '#f5222d' : '#52c41a' }}>
                         {optionType === 'Call' ? '看涨期权' : '看跌期权'}
@@ -194,15 +226,15 @@ const OptionsPositions = () => {
                     }
                     value={optionType === 'Call' ? record.call_count : record.put_count}
                     suffix="个"
-                    valueStyle={{ 
-                      color: optionType === 'Call' ? '#f5222d' : '#52c41a', 
+                    valueStyle={{
+                      color: optionType === 'Call' ? '#f5222d' : '#52c41a',
                       fontSize: '14px',
                       wordBreak: 'break-all'
                     }}
                   />
                 </Col>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <span style={{ fontSize: '12px' }}>
                         持仓成本
@@ -218,7 +250,7 @@ const OptionsPositions = () => {
                   />
                 </Col>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <span style={{ fontSize: '12px' }}>
                         已实现盈亏
@@ -233,8 +265,8 @@ const OptionsPositions = () => {
                         </span>
                       </>
                     )}
-                    valueStyle={{ 
-                      color: record.total_realized_pnl >= 0 ? '#52c41a' : '#f5222d', 
+                    valueStyle={{
+                      color: record.total_realized_pnl >= 0 ? '#52c41a' : '#f5222d',
                       fontSize: '14px',
                       fontWeight: 'bold',
                       wordBreak: 'break-all',
@@ -250,57 +282,57 @@ const OptionsPositions = () => {
             <Card size="small" bodyStyle={{ padding: '4px' }}>
               <Row gutter={16}>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <Tooltip title={optionType === 'Call' ? "行权概率高" : "行权概率低"}>
                         <span style={{ fontSize: '12px', cursor: 'help' }}>低于市价10%</span>
                       </Tooltip>
                     }
                     value={record.below_market_value}
-                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#f5222d' : '#52c41a' , fontWeight: 'bold' }}
+                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#f5222d' : '#52c41a', fontWeight: 'bold' }}
                     formatter={value => (
                       <>
                         $ {formatNumber(value, 2)}
                         <span style={{ fontSize: '12px', color: '#666', display: isMobile ? 'block' : 'inline' }}>
-                          ({formatNumber(value/10000, 1)}万)
+                          ({formatNumber(value / 10000, 1)}万)
                         </span>
                       </>
                     )}
                   />
                 </Col>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <Tooltip title="行权概率中等">
                         <span style={{ fontSize: '12px', cursor: 'help' }}>接近市价</span>
                       </Tooltip>
                     }
                     value={record.near_market_value}
-                    valueStyle={{ fontSize: '14px', color: '#faad14' , fontWeight: 'bold' }}
+                    valueStyle={{ fontSize: '14px', color: '#faad14', fontWeight: 'bold' }}
                     formatter={value => (
                       <>
                         $ {formatNumber(value, 2)}
                         <span style={{ fontSize: '12px', color: '#666', display: isMobile ? 'block' : 'inline' }}>
-                          ({formatNumber(value/10000, 1)}万)
+                          ({formatNumber(value / 10000, 1)}万)
                         </span>
                       </>
                     )}
                   />
                 </Col>
                 <Col span={8}>
-                  <Statistic 
+                  <Statistic
                     title={
                       <Tooltip title={optionType === 'Call' ? "行权概率低" : "行权概率高"}>
                         <span style={{ fontSize: '12px', cursor: 'help' }}>高于市价10%</span>
                       </Tooltip>
                     }
                     value={record.above_market_value}
-                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#52c41a' : '#f5222d' , fontWeight: 'bold' }}
+                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#52c41a' : '#f5222d', fontWeight: 'bold' }}
                     formatter={value => (
                       <>
                         $ {formatNumber(value, 2)}
                         <span style={{ fontSize: '12px', color: '#666', display: isMobile ? 'block' : 'inline' }}>
-                          ({formatNumber(value/10000, 1)}万)
+                          ({formatNumber(value / 10000, 1)}万)
                         </span>
                       </>
                     )}
@@ -311,8 +343,8 @@ const OptionsPositions = () => {
           </Col>
           <Col xs={24} md={4}>
             <Card size="small" bodyStyle={{ padding: '4px 8px' }}>
-              <Statistic 
-                style={{display: isMobile ? "flex" : ""}}
+              <Statistic
+                style={{ display: isMobile ? "flex" : "" }}
                 title={
                   <Tooltip title="根据行权概率计算的行权价值的数学期望值">
                     <span style={{ fontSize: '12px', cursor: 'help', marginRight: '4px' }}>行权期望值</span>
@@ -320,8 +352,8 @@ const OptionsPositions = () => {
                 }
                 value={record.total_expected_value}
                 prefix="$"
-                valueStyle={{ 
-                  fontSize: '14px', 
+                valueStyle={{
+                  fontSize: '14px',
                   fontWeight: 'bold',
                   color: '#f5222d',
                   whiteSpace: 'nowrap'
@@ -330,7 +362,7 @@ const OptionsPositions = () => {
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px' }}>
                     <span>{formatNumber(value, 2)}</span>
                     <span style={{ fontSize: '12px', color: '#666', whiteSpace: 'nowrap' }}>
-                      ({formatNumber(value/10000, 1)}万)
+                      ({formatNumber(value / 10000, 1)}万)
                     </span>
                   </div>
                 )}
@@ -350,31 +382,31 @@ const OptionsPositions = () => {
       acc.totalPositionCost += group.total_position_cost;
       acc.totalExpectedValue += group.total_expected_value;
       return acc;
-    }, { 
-      totalCount: 0, 
-      totalStrikeValue: 0, 
-      totalRealizedPnl: 0, 
+    }, {
+      totalCount: 0,
+      totalStrikeValue: 0,
+      totalRealizedPnl: 0,
       totalPositionCost: 0,
-      totalExpectedValue: 0 
+      totalExpectedValue: 0
     });
 
     const renderStatItem = (label, value, extra, tooltip) => {
       const content = (
-        <div style={{ 
-          display: 'flex', 
+        <div style={{
+          display: 'flex',
           flexDirection: 'row',
           gap: '4px',
           display: 'flex',
           alignItems: 'center',
         }}>
-          <div style={{ 
+          <div style={{
             fontSize: '13px',
             color: '#666',
             whiteSpace: 'nowrap'
           }}>
             {label}
           </div>
-          <div style={{ 
+          <div style={{
             fontSize: '14px',
             fontWeight: 'bold',
             wordBreak: 'break-all',
@@ -382,8 +414,8 @@ const OptionsPositions = () => {
           }}>
             {value}
             {extra && (
-              <span style={{ 
-                fontSize: '12px', 
+              <span style={{
+                fontSize: '12px',
                 color: '#666',
                 display: 'inline'
               }}>
@@ -393,10 +425,10 @@ const OptionsPositions = () => {
           </div>
         </div>
       );
-    
+
       return tooltip ? <Tooltip title={tooltip}>{content}</Tooltip> : content;
     };
-  
+
     return (
       <Card style={{ marginBottom: '16px' }}>
         <Row gutter={[8, 16]}>
@@ -425,7 +457,7 @@ const OptionsPositions = () => {
             {renderStatItem(
               '行权总价值',
               `$ ${formatNumber(summary.totalStrikeValue, 2)}`,
-              ` (${formatNumber(summary.totalStrikeValue/10000, 1)}万)`
+              ` (${formatNumber(summary.totalStrikeValue / 10000, 1)}万)`
             )}
           </Col>
           <Col xs={24} sm={12} md={5}>
@@ -434,7 +466,7 @@ const OptionsPositions = () => {
               <span style={{ color: summary.totalExpectedValue >= 0 ? '#52c41a' : '#f5222d' }}>
                 $ {formatNumber(summary.totalExpectedValue, 2)}
               </span>,
-              ` (${formatNumber(summary.totalExpectedValue/10000, 1)}万)`,
+              ` (${formatNumber(summary.totalExpectedValue / 10000, 1)}万)`,
               "根据行权概率计算的总行权价值的数学期望值"
             )}
           </Col>
@@ -447,10 +479,10 @@ const OptionsPositions = () => {
     <div style={{ padding: '4px' }}>
       {/* 添加汇总信息 */}
       {renderSummary(optionType, positions[optionType])}
-      
+
       {/* 原有的分组列表 */}
       {positions[optionType].map(group => (
-        <Card 
+        <Card
           key={group.expiry}
           style={{ marginBottom: '16px' }}
           bodyStyle={{ padding: '0 16px' }}
@@ -487,7 +519,7 @@ const OptionsPositions = () => {
       dataIndex: 'stock_symbol',
       width: 80,
       render: (symbol) => (
-        <a 
+        <a
           onClick={() => navigate(`/stock/${symbol}`)}
           style={{ color: '#1890ff' }}
         >
@@ -511,12 +543,12 @@ const OptionsPositions = () => {
       width: 90,
       render: (value, record) => {
         // 判断颜色显示条件
-        const isRed = record.option_type === 'Put' 
+        const isRed = record.option_type === 'Put'
           ? value > record.stock_price  // Put时行权成本高于市价显示红色
           : value < record.stock_price; // Call时行权成本低于市价显示红色
-        
+
         return (
-          <span style={{ 
+          <span style={{
             color: isRed ? '#f5222d' : 'inherit',
             fontWeight: isRed ? 'bold' : 'normal'
           }}>
@@ -544,7 +576,7 @@ const OptionsPositions = () => {
       render: (value, record) => {
         let color = renderColorByPriceDiff(record);
         return (
-          <span style={{ color , fontWeight: 'bold'}}>
+          <span style={{ color, fontWeight: 'bold' }}>
             {value > 0 ? '+' : ''}{formatNumber(value, 1)}%
           </span>
         );
@@ -574,9 +606,9 @@ const OptionsPositions = () => {
       render: (value, record) => {
         let color = renderColorByPriceDiff(record);
         return (
-        <span style={{ color: color , fontWeight: 'bold'}}>
-          ${formatNumber(value, 2)}
-        </span>
+          <span style={{ color: color, fontWeight: 'bold' }}>
+            ${formatNumber(value, 2)}
+          </span>
         )
       },
     },
@@ -599,7 +631,7 @@ const OptionsPositions = () => {
       render: (value, record) => {
         // 检查是否达到平仓建议条件
         const shouldClose = value.percentage > (record.time_progress * 1.2);
-        
+
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <span style={{ color: value.amount >= 0 ? '#52c41a' : '#f5222d', fontWeight: 'bold' }}>
@@ -608,8 +640,8 @@ const OptionsPositions = () => {
             </span>
             {shouldClose && (
               <Tooltip title={`盈利进度(${formatNumber(value.percentage, 1)}%)超过时间进度(${formatNumber(record.time_progress, 1)}%)的1.2倍，建议考虑平仓`}>
-                <RocketFilled style={{ 
-                  color: '#52c41a', 
+                <RocketFilled style={{
+                  color: '#52c41a',
                   fontSize: '16px',
                   animation: 'bounce 1s infinite'
                 }} />
@@ -653,7 +685,7 @@ const OptionsPositions = () => {
       dataIndex: 'time_progress',
       width: 90,
       render: value => (
-        <div style={{ 
+        <div style={{
           background: '#f0f0f0',
           borderRadius: '10px',
           padding: '2px 8px',
@@ -679,9 +711,13 @@ const OptionsPositions = () => {
 
   // 添加获取股票持仓的函数
   const fetchStockPositions = async () => {
+    if (!selectedAccount) return;
+
     setLoading(true);
     try {
-      const { data } = await request.get('/api/positions/stocks');
+      const { data } = await request.get('/api/positions/stocks', {
+        params: { lp_account_id: selectedAccount }
+      });
       setStockPositions(data);
     } catch (error) {
       console.error('Failed to fetch stock positions:', error);
@@ -693,7 +729,7 @@ const OptionsPositions = () => {
   // 添加渲染股票持仓汇总的函数
   const renderStockSummary = () => {
     const { summary } = stockPositions;
-    
+
     return (
       <Card style={{ marginBottom: '16px' }}>
         <Row gutter={[16, 16]}>
@@ -706,11 +742,11 @@ const OptionsPositions = () => {
                 <>
                   {value}
                   <span style={{ fontSize: '12px', marginLeft: '4px' }}>
-                    ({formatNumber(summary.total_assets/10000, 1)}万)
+                    ({formatNumber(summary.total_assets / 10000, 1)}万)
                   </span>
                 </>
               )}
-              valueStyle={{ 
+              valueStyle={{
                 fontSize: '16px',
                 fontWeight: 'bold'
               }}
@@ -745,7 +781,7 @@ const OptionsPositions = () => {
                   </span>
                 </>
               )}
-              valueStyle={{ 
+              valueStyle={{
                 fontSize: '16px',
                 color: summary.total_unrealized_pnl >= 0 ? '#52c41a' : '#f5222d'
               }}
@@ -780,7 +816,7 @@ const OptionsPositions = () => {
                   </span>
                 </>
               )}
-              valueStyle={{ 
+              valueStyle={{
                 fontSize: '16px',
                 color: '#1890ff'
               }}
@@ -799,7 +835,7 @@ const OptionsPositions = () => {
                   </span>
                 </>
               )}
-              valueStyle={{ 
+              valueStyle={{
                 fontSize: '16px',
                 color: '#52c41a'
               }}
@@ -818,7 +854,7 @@ const OptionsPositions = () => {
                   </span>
                 </>
               )}
-              valueStyle={{ 
+              valueStyle={{
                 fontSize: '16px',
                 color: '#faad14'
               }}
@@ -872,7 +908,7 @@ const OptionsPositions = () => {
         <>
           ${formatNumber(value, 2)}
           <small style={{ marginLeft: '4px', color: '#666' }}>
-            ({formatNumber(value/10000, 1)}万)
+            ({formatNumber(value / 10000, 1)}万)
           </small>
         </>
       ),
@@ -885,7 +921,7 @@ const OptionsPositions = () => {
         <>
           ${formatNumber(value, 2)}
           <small style={{ marginLeft: '4px', color: '#666' }}>
-            ({formatNumber(value/10000, 1)}万)
+            ({formatNumber(value / 10000, 1)}万)
           </small>
         </>
       ),
@@ -932,27 +968,47 @@ const OptionsPositions = () => {
   );
 
   return (
-    <Tabs 
-      activeKey={activeTab}
-      onChange={setActiveTab}
-      defaultActiveKey="Call"
-    >
-      <TabPane 
-        tab={<span style={{ color: '#f5222d' }}>看涨期权</span>} 
-        key="Call"
+    <div style={{ padding: '24px' }}>
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        defaultActiveKey="Call"
+        tabBarExtraContent={
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <span style={{ marginRight: 8 }}>选择账户:</span>
+            <Select
+              style={{ width: 220 }}
+              value={selectedAccount}
+              onChange={setSelectedAccount}
+              placeholder="请选择长桥账户"
+              loading={!accounts.length}
+            >
+              {accounts.map(acc => (
+                <Option key={acc.lp_account_id} value={acc.lp_account_id}>
+                  {acc.name} ({acc.lp_account_id})
+                </Option>
+              ))}
+            </Select>
+          </div>
+        }
       >
-        {renderPositionsList('Call')}
-      </TabPane>
-      <TabPane 
-        tab={<span style={{ color: '#52c41a' }}>看跌期权</span>} 
-        key="Put"
-      >
-        {renderPositionsList('Put')}
-      </TabPane>
-      <TabPane tab="正股" key="Stock">
-        {renderStockPositions()}
-      </TabPane>
-    </Tabs>
+        <TabPane
+          tab={<span style={{ color: '#f5222d' }}>看涨期权</span>}
+          key="Call"
+        >
+          {renderPositionsList('Call')}
+        </TabPane>
+        <TabPane
+          tab={<span style={{ color: '#52c41a' }}>看跌期权</span>}
+          key="Put"
+        >
+          {renderPositionsList('Put')}
+        </TabPane>
+        <TabPane tab="正股" key="Stock">
+          {renderStockPositions()}
+        </TabPane>
+      </Tabs>
+    </div >
   );
 };
 
