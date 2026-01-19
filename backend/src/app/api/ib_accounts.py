@@ -6,6 +6,7 @@ from datetime import datetime
 from ...core.database import get_db, IBKRAccountConfig
 from ...core.services.ib_account_service import IBAccountService
 from pydantic import BaseModel
+from .account import valid_account
 
 router = APIRouter(prefix="/api/ib-accounts", tags=["ib-accounts"])
 
@@ -27,13 +28,23 @@ class IBKRAccountSchema(BaseModel):
         from_attributes = True
 
 @router.get("", response_model=List[IBKRAccountSchema])
-async def list_ib_accounts(db: Session = Depends(get_db)):
-    return db.query(IBKRAccountConfig).all()
+async def list_ib_accounts(
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    return db.query(IBKRAccountConfig).filter(IBKRAccountConfig.account_id == account_id).all()
 
 @router.post("", response_model=IBKRAccountSchema)
-async def save_ib_account(config_data: IBKRAccountSchema, db: Session = Depends(get_db)):
+async def save_ib_account(
+    config_data: IBKRAccountSchema, 
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
     if config_data.id:
-        config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config_data.id).first()
+        config = db.query(IBKRAccountConfig).filter(
+            IBKRAccountConfig.id == config_data.id,
+            IBKRAccountConfig.account_id == account_id
+        ).first()
         if not config:
             raise HTTPException(status_code=404, detail="Account not found")
         
@@ -50,13 +61,14 @@ async def save_ib_account(config_data: IBKRAccountSchema, db: Session = Depends(
         config.relogin_after_twofa_timeout = config_data.relogin_after_twofa_timeout
         config.updated_at = datetime.now()
     else:
-        # 检查端口唯一性
+        # Check port uniqueness (within the system or globally? globally is safer for ports)
+        # But we should probably check if the port is used by ANY account.
         existing = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.ib_port == config_data.ib_port).first()
         if existing:
-            raise HTTPException(status_code=400, detail=f"Port {config_data.ib_port} is already used by {existing.name}")
+            raise HTTPException(status_code=400, detail=f"Port {config_data.ib_port} is already used")
             
         config = IBKRAccountConfig(
-            account_id="system", # 这里可以根据实际需求绑定用户
+            account_id=account_id,
             name=config_data.name,
             ib_host=config_data.ib_host,
             ib_port=config_data.ib_port,
@@ -75,9 +87,16 @@ async def save_ib_account(config_data: IBKRAccountSchema, db: Session = Depends(
     db.refresh(config)
     return config
 
-@router.delete("/{account_id}")
-async def delete_ib_account(account_id: int, db: Session = Depends(get_db)):
-    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+@router.delete("/{config_id}")
+async def delete_ib_account(
+    config_id: int, 
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config_id,
+        IBKRAccountConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Account not found")
     
@@ -85,9 +104,16 @@ async def delete_ib_account(account_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Deleted successfully"}
 
-@router.get("/{account_id}/status")
-async def get_ib_account_status(account_id: int, db: Session = Depends(get_db)):
-    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+@router.get("/{config_id}/status")
+async def get_ib_account_status(
+    config_id: int, 
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config_id,
+        IBKRAccountConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Account not found")
     
@@ -98,9 +124,16 @@ async def get_ib_account_status(account_id: int, db: Session = Depends(get_db)):
     )
     return status
 
-@router.post("/{account_id}/restart")
-async def restart_ib_gateway(account_id: int, db: Session = Depends(get_db)):
-    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+@router.post("/{config_id}/restart")
+async def restart_ib_gateway(
+    config_id: int, 
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config_id,
+        IBKRAccountConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Account not found")
     
@@ -114,9 +147,16 @@ async def restart_ib_gateway(account_id: int, db: Session = Depends(get_db)):
     return result
 
 
-@router.post("/{account_id}/deploy")
-async def deploy_ib_gateway(account_id: int, db: Session = Depends(get_db)):
-    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+@router.post("/{config_id}/deploy")
+async def deploy_ib_gateway(
+    config_id: int, 
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config_id,
+        IBKRAccountConfig.account_id == account_id
+    ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Account not found")
     
@@ -126,11 +166,19 @@ async def deploy_ib_gateway(account_id: int, db: Session = Depends(get_db)):
         
     return result
 
-@router.websocket("/{account_id}/logs")
-async def ws_ib_account_logs(websocket: WebSocket, account_id: int, db: Session = Depends(get_db)):
+@router.websocket("/{config_id}/logs")
+async def ws_ib_account_logs(
+    websocket: WebSocket, 
+    config_id: int, 
+    db: Session = Depends(get_db)
+):
+    # Note: Websockets are hard to auth with headers in browsers. 
+    # For now we won't strictly enforce account owner check via Depends(valid_account) directly in signature 
+    # unless we can extract it from query params.
+    # But to be safe, we should at least check existence.
     await websocket.accept()
     
-    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == account_id).first()
+    config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config_id).first()
     
     if not config or not config.container_name:
         await websocket.send_text("Error: Container not configured or account not found")

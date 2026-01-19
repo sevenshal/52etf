@@ -224,7 +224,7 @@ async def list_configs(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    configs = db.query(SnowballCopyConfig).all()
+    configs = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.account_id == account_id).all()
     result = []
     for c in configs:
         resp = SnowballConfigResponse.from_orm(c)
@@ -264,7 +264,10 @@ async def update_config(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    db_config = db.query(SnowballCopyConfig).filter_by(id=config_id).first()
+    db_config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id
+    ).first()
     if not db_config:
         raise HTTPException(status_code=404, detail="Config not found")
         
@@ -289,7 +292,15 @@ async def delete_config(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    db.query(SnowballCopyConfig).filter_by(id=config_id).delete()
+    db_config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id
+    ).first()
+    
+    if not db_config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    db.delete(db_config)
     db.commit()
     return {"message": "Deleted successfully"}
 
@@ -303,7 +314,7 @@ async def get_logs(
     symbol: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(SnowballCopyLog)
+    query = db.query(SnowballCopyLog).filter(SnowballCopyLog.account_id == account_id)
     
     if cli_id:
         query = query.filter(SnowballCopyLog.cli_id == cli_id)
@@ -341,7 +352,10 @@ async def update_log_status(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    log = db.query(SnowballCopyLog).filter_by(id=status_update.id).first()
+    log = db.query(SnowballCopyLog).filter(
+        SnowballCopyLog.id == status_update.id,
+        SnowballCopyLog.account_id == account_id
+    ).first()
     if not log:
         raise HTTPException(status_code=404, detail="Log entry not found")
     
@@ -381,7 +395,10 @@ async def get_snapshot(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
-    snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config_id).first()
+    snapshot = db.query(SnowballPortfolioSnapshot).filter(
+        SnowballPortfolioSnapshot.config_id == config_id,
+        SnowballPortfolioSnapshot.account_id == account_id
+    ).first()
     
     if not snapshot:
             return SnowballSnapshotResponse(
@@ -467,7 +484,11 @@ async def get_snowball_opportunities(
     cli_id = request.cli_id
 
     # 1. Fetch Configs
-    _configs_orm = db.query(SnowballCopyConfig).filter_by(cli_id=cli_id, enabled=True).all()
+    _configs_orm = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.cli_id == cli_id,
+        SnowballCopyConfig.enabled == True,
+        SnowballCopyConfig.account_id == account_id
+    ).all()
     if not _configs_orm:
         return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
         
