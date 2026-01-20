@@ -271,6 +271,8 @@ class SZDTUSTrader:
                 # 2. Get active configurations
                 with get_db_ctx() as db:
                     configs = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.enabled == True).all()
+                    for config in configs:
+                        db.expunge(config)
                 
                 # 3. Iterate and process
                 for config in configs:
