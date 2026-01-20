@@ -519,11 +519,22 @@ async def get_snowball_opportunities(
             all_symbols.add(pos.symbol)
 
     # B. From Config Targets (Fetch XQ Holdings)
+    valid_configs = []
     for config in configs:
-        weights = await fetch_xueqiu_holdings(config['combination_id'])
-        config_target_weights[config['id']] = weights
-        for w in weights:
-            all_symbols.add(w['symbol'])
+        try:
+            weights = await fetch_xueqiu_holdings(config['combination_id'])
+            config_target_weights[config['id']] = weights
+            for w in weights:
+                all_symbols.add(w['symbol'])
+            valid_configs.append(config)
+        except Exception as e:
+            if "组合不存在" in str(e):
+                logger.warning(f"Skipping config {config['id']} ({config['combination_id']}) because it does not exist: {e}")
+                continue
+            raise e # Create a crash for other errors as requested
+            
+    # Upgrade configs list to only include valid ones to prevent liquidation on error
+    configs = valid_configs
 
     # 2.2 Fetch Prices
     prices = await fetch_xueqiu_quotes(list(all_symbols))
