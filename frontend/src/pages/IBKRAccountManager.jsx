@@ -287,7 +287,7 @@ const IBKRAccountManager = () => {
                             </Form.Item>
                         </Col>
                         <Col span={12}>
-                            <Form.Item name="container_name" label="Docker 容器名称">
+                            <Form.Item name="container_name" label="Docker 容器名称" rules={[{ required: true, message: '请输入容器名称' }]}>
                                 <Input placeholder="例如: ib-gateway-paper" prefix={<ContainerOutlined />} />
                             </Form.Item>
                         </Col>
