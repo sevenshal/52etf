@@ -60,7 +60,25 @@ async def save_ib_account(
         config.auto_restart_time = config_data.auto_restart_time
         config.relogin_after_twofa_timeout = config_data.relogin_after_twofa_timeout
         config.updated_at = datetime.now()
+        
+        # Check container_name uniqueness for update
+        existing_container = db.query(IBKRAccountConfig).filter(
+            IBKRAccountConfig.container_name == config_data.container_name,
+            IBKRAccountConfig.id != config_data.id
+        ).first()
+        if existing_container:
+            raise HTTPException(status_code=400, detail=f"Container name '{config_data.container_name}' is already used")
+            
     else:
+        # Check if container name is provided
+        if not config_data.container_name:
+             raise HTTPException(status_code=400, detail="Container name is required")
+
+        # Check container_name uniqueness for new
+        existing_container = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.container_name == config_data.container_name).first()
+        if existing_container:
+            raise HTTPException(status_code=400, detail=f"Container name '{config_data.container_name}' is already used")
+
         # Check port uniqueness (within the system or globally? globally is safer for ports)
         # But we should probably check if the port is used by ANY account.
         existing = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.ib_port == config_data.ib_port).first()
