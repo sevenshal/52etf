@@ -890,6 +890,13 @@ const PortfolioCopyTrading = () => {
                     </Row>
                     <Row gutter={16}>
                         <Col span={24}>
+                            <Form.Item name="xueqiu_cookie" label="雪球 Cookie (可选)" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。支持 'xq_a_token=...' 或完整Cookie字符串。">
+                                <TextArea rows={2} placeholder="xq_a_token=..." />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
+                        <Col span={24}>
                             <Form.Item name="blacklisted_symbols" label="跟单黑名单 (不买入/若持有会卖出)">
                                 <Select mode="tags" style={{ width: '100%' }} placeholder="输入股票代码 (如 SH.600519), 回车确认" tokenSeparators={[',', ' ']} />
                             </Form.Item>
