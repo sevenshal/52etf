@@ -523,7 +523,6 @@ async def get_snowball_opportunities(
             "total_amount": c.total_amount,
             "tracking_error_pct": c.tracking_error_pct,
             "cli_id": c.cli_id,
-            "cli_id": c.cli_id,
             "xueqiu_cookie": c.xueqiu_cookie,
             "blacklisted_symbols": c.blacklisted_symbols or []
         })
