@@ -38,6 +38,7 @@ class SnowballConfigCreate(BaseModel):
     total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
+    xueqiu_cookie: Optional[str] = None
     blacklisted_symbols: List[str] = []
 
 class SnowballConfigUpdate(BaseModel):
@@ -48,6 +49,7 @@ class SnowballConfigUpdate(BaseModel):
     total_position_ratio: Optional[float] = None
     total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
+    xueqiu_cookie: Optional[str] = None
     blacklisted_symbols: Optional[List[str]] = None
 
 class SnowballConfigResponse(SnowballConfigCreate):
@@ -102,13 +104,24 @@ def normalize_symbol(symbol: str) -> str:
         return f"{symbol[:2]}.{symbol[2:]}"
     return symbol
 
-async def fetch_xueqiu_holdings(symbol: str) -> List[Dict]:
+async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
     url = f"https://api.xueqiu.com/cube/center/cube/holdSymbols.json?symbol={symbol}"
     
+    headers = XUEQIU_HEADERS.copy()
+    if cookie:
+        # If user provided a raw cookie string (key=value), use it. 
+        # If they provided just the token, we might need to format it, but let's assume raw cookie for simplicity or just replace xq_a_token.
+        # But safest is to treat it as the full Cookie header value if it contains '='
+        if "xq_a_token" in cookie:
+             headers["Cookie"] = cookie
+        else:
+             # Assume it's just the token value
+             headers["Cookie"] = f"xq_a_token={cookie};"
+    
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=XUEQIU_HEADERS)
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
             if data.get("result_code") == 0 and data.get("success"):
@@ -123,13 +136,20 @@ async def fetch_xueqiu_holdings(symbol: str) -> List[Dict]:
             logger.error(f"Failed to fetch Xueqiu holdings: {e}")
             raise e
 
-async def fetch_xueqiu_cube_info(symbol: str) -> Optional[Dict]:
+async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Dict]:
     """Fetch cube info including name from Xueqiu"""
     url = f"https://api.xueqiu.com/cubes/show.json?symbol={symbol}"
     
+    headers = XUEQIU_HEADERS.copy()
+    if cookie:
+        if "xq_a_token" in cookie:
+             headers["Cookie"] = cookie
+        else:
+             headers["Cookie"] = f"xq_a_token={cookie};"
+
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=XUEQIU_HEADERS)
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
             # Response format: {"id":..., "name": "...", "symbol": "...", ...}
@@ -245,7 +265,7 @@ async def create_config(
 ):
     # Auto-fetch name if not provided
     if not config.combination_name:
-        cube_info = await fetch_xueqiu_cube_info(config.combination_id)
+        cube_info = await fetch_xueqiu_cube_info(config.combination_id, config.xueqiu_cookie)
         if cube_info:
             config.combination_name = cube_info.get("name")
         
@@ -275,7 +295,8 @@ async def update_config(
     
     # If updating combination_id but not name, try to fetch name
     if "combination_id" in update_data and "combination_name" not in update_data:
-            cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"])
+            cookie = update_data.get("xueqiu_cookie", db_config.xueqiu_cookie)
+            cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"], cookie)
             if cube_info:
                 update_data["combination_name"] = cube_info.get("name")
                 
@@ -502,6 +523,8 @@ async def get_snowball_opportunities(
             "total_amount": c.total_amount,
             "tracking_error_pct": c.tracking_error_pct,
             "cli_id": c.cli_id,
+            "cli_id": c.cli_id,
+            "xueqiu_cookie": c.xueqiu_cookie,
             "blacklisted_symbols": c.blacklisted_symbols or []
         })
 
@@ -522,7 +545,7 @@ async def get_snowball_opportunities(
     valid_configs = []
     for config in configs:
         try:
-            weights = await fetch_xueqiu_holdings(config['combination_id'])
+            weights = await fetch_xueqiu_holdings(config['combination_id'], config.get('xueqiu_cookie'))
             config_target_weights[config['id']] = weights
             for w in weights:
                 all_symbols.add(w['symbol'])
