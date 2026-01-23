@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 XUEQIU_HEADERS = {
     "Host": "api.xueqiu.com",
-    "Cookie": "xq_a_token=814ff1069fad352c1e283f4306b012b1b44d3d42;",
+    "Cookie": "xq_a_token=91eabb39aba7af77c2b00d8f8ac5700ade3cf02b;",
     "accept": "application/json",
     "accept-language": "zh-Hans-CN;q=1, en-CN;q=0.9",
     "x-device-os": "iOS 26.1",
