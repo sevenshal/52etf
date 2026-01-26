@@ -110,6 +110,22 @@ const LongPortAccountManager = () => {
             }
         },
         {
+            title: '资金',
+            key: 'funds',
+            render: (_, record) => {
+                const status = statuses[record.id];
+                if (!status || !status.account_balance) return '-';
+                const bal = status.account_balance;
+                return (
+                    <Space direction="vertical" size={0}>
+                        <Text>可用: <Text strong>{bal.currency} {parseFloat(bal.available_balance).toLocaleString()}</Text></Text>
+                        <Text type="secondary" style={{ fontSize: '12px' }}>冻结: {parseFloat(bal.frozen_balance).toLocaleString()}</Text>
+                    </Space>
+                );
+            }
+        },
+
+        {
             title: 'App Key',
             dataIndex: 'app_key',
             key: 'app_key',
