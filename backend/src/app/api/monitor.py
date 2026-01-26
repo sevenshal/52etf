@@ -83,9 +83,17 @@ async def receive_notification(
         if pkg in futu_packages:
             logger.info("Checking Futu portfolio triggers...")
             trader = PortfolioCopyTrader()
-            triggered = await trader.trigger_rebalance_if_name_in_content(content)
+            triggered = await trader.trigger_rebalance_if_name_in_content(content, platform="futu")
             if triggered:
                 logger.info(f"Triggered rebalance for accounts: {triggered}")
+
+        # 1.5 Handle Star Wealth Notifications
+        if pkg == "com.fosunhani.stock":
+             logger.info("Checking StarWealth portfolio triggers...")
+             trader = PortfolioCopyTrader()
+             triggered = await trader.trigger_rebalance_if_name_in_content(content, platform="star_wealth")
+             if triggered:
+                 logger.info(f"Triggered rebalance for accounts: {triggered}")
 
         # 2. Handle Snowball Notifications (New Logic)
         snowball_packages = ["com.xueqiu.android"]

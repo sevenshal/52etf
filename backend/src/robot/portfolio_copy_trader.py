@@ -586,9 +586,10 @@ class PortfolioCopyTrader:
                 logger.error(f"Error in Cron check: {e}")
 
 
-    async def trigger_rebalance_if_name_in_content(self, content: str) -> List[str]:
+    async def trigger_rebalance_if_name_in_content(self, content: str, platform: str = None) -> List[str]:
         """
         Check if any active portfolio name exists in the content, and trigger rebalance if so.
+        If platform is provided, only triggers configs with matching platform.
         """
         triggered_accounts = []
         if not content:
@@ -601,7 +602,11 @@ class PortfolioCopyTrader:
         db = Session()
         try:
             # Get all active configs
-            configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
+            query = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True)
+            if platform:
+                 query = query.filter(PortfolioCopyConfig.platform == platform)
+            
+            configs = query.all()
 
             for config in configs:
                 # Check if portfolio name is valid and exists in content
