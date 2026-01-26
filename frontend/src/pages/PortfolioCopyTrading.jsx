@@ -101,12 +101,13 @@ const PortfolioCopyTrading = () => {
 
     const fetchPortfolioName = async () => {
         const id = form.getFieldValue('portfolio_id');
+        const platform = form.getFieldValue('platform') || 'futu';
         if (!id) {
             message.warning('请先输入投资组合 ID');
             return;
         }
         try {
-            const response = await request.get(`/api/ib-copy-trading/portfolio-info/${id}`);
+            const response = await request.get(`/api/ib-copy-trading/portfolio-info/${id}`, { params: { platform } });
             form.setFieldsValue({ portfolio_name: response.data.name });
             message.success('获取成功: ' + response.data.name);
         } catch (error) {
@@ -282,7 +283,10 @@ const PortfolioCopyTrading = () => {
             render: (_, record) => (
                 <Space direction="vertical" size={0}>
                     <Text strong>{record.portfolio_name || '未命名'}</Text>
-                    <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
+                    <Space size="small">
+                        <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
+                        {record.platform === 'star_wealth' && <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>}
+                    </Space>
                 </Space>
             )
         },
@@ -734,11 +738,12 @@ const PortfolioCopyTrading = () => {
                 <Form form={form} layout="vertical" onFinish={handleSave}
                     initialValues={{
                         enabled: true,
-                        cron_rule: '0 8 * * *',
+                        cron_rule: '* 9-15 * * 1-5',
                         timezone: 'America/New_York',
                         tracking_error_pct: 5,
                         total_position_ratio: 100,
-                        account_type: 'ib'
+                        account_type: 'ib',
+                        platform: 'futu'
                     }}
                 >
                     <Row gutter={16}>
@@ -753,19 +758,27 @@ const PortfolioCopyTrading = () => {
                     </Row>
 
                     <Row gutter={16}>
-                        <Col span={12}>
+                        <Col span={6}>
+                            <Form.Item name="platform" label="组合来源">
+                                <Select>
+                                    <Select.Option value="futu">富途牛牛</Select.Option>
+                                    <Select.Option value="star_wealth">星财富</Select.Option>
+                                </Select>
+                            </Form.Item>
+                        </Col>
+                        <Col span={10}>
                             <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
                                 <Space.Compact style={{ width: '100%' }}>
                                     <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
                                         <Input placeholder="例如: 158919" />
                                     </Form.Item>
-                                    <Button onClick={fetchPortfolioName}>获取名称</Button>
+                                    <Button onClick={fetchPortfolioName}>获取</Button>
                                 </Space.Compact>
                             </Form.Item>
                         </Col>
-                        <Col span={12}>
+                        <Col span={8}>
                             <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
-                                <Input placeholder="自动获取或手动输入" />
+                                <Input placeholder="自动获取" />
                             </Form.Item>
                         </Col>
                     </Row>
