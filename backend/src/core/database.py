@@ -332,6 +332,7 @@ class PortfolioCopyConfig(Base):
     # 新增字段以支持长桥
     account_type = Column(String, default="ib") # "ib" or "longport"
     longport_account_id = Column(String, nullable=True) # 关联的长桥账户 ID (lp_account_id)
+    platform = Column(String, default="futu") # "futu" or "star_wealth"
     
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 

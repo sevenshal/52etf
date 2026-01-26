@@ -68,8 +68,10 @@ class PortfolioCopyTrader:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
-    async def get_portfolio_info(self, portfolio_id: str, headers: dict) -> dict:
+    async def get_portfolio_info(self, portfolio_id: str, headers: dict, platform: str = 'futu') -> dict:
         """异步包装器：获取组合信息"""
+        if platform == 'star_wealth':
+             return await self._run_in_executor(self.get_starwealth_portfolio_info_sync, portfolio_id, headers)
         return await self._run_in_executor(self.get_portfolio_info_sync, portfolio_id, headers)
 
     def get_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
@@ -134,6 +136,100 @@ class PortfolioCopyTrader:
             logger.error(f"Failed to fetch Futu positions: {e}. Response: {error_details}")
             raise
 
+    def get_starwealth_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
+        """Fetch portfolio info from StarWealth (Fosun) API"""
+        # uin can be hardcoded or passed if available, using 2617074 as example from curl if needed, but trying without first or with default
+        url = f"https://tapi.fosunhanig.com/followInvest/v1/PortfolioBasicInfo?id={portfolio_id}&uin=2617074"
+        
+        default_headers = {
+             "accept": "application/json, text/plain, */*",
+             "content-type": "application/json",
+             "origin": "https://h5.fotechwealth.com",
+             "referer": "https://h5.fotechwealth.com/",
+             "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+             "x-device-info": "platform=Mac OS;osver=10.15.7;model=Macintosh;browser=Chrome;brover=144;lang=zhCn;channel=H5;",
+             "x-lang": "zhCn",
+             "x-product": "product=app-wealth;version=0.0.1",
+             "x-source": "102",
+             "priority": "u=1, i"
+        }
+        
+        if headers:
+            default_headers.update(headers)
+            
+        try:
+            response = requests.get(url, headers=default_headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            result = data.get("result", {})
+            if not result:
+                 raise Exception(f"StarWealth API error: No result in response: {data}")
+            
+            return {
+                "name": result.get("portfolioName", f"SW-{portfolio_id}"),
+                "id": result.get("portfolioId", portfolio_id),
+                "founder_name": result.get("creatorNick", ""),
+                "brief": result.get("portfolioBrief", ""),
+                "raw_data": result
+            }
+                 
+        except Exception as e:
+             logger.error(f"Failed to fetch StarWealth portfolio info: {e}")
+             raise
+
+    def get_starwealth_positions_sync(self, portfolio_id: str, headers: dict) -> List[dict]:
+        """Fetch positions from StarWealth (Fosun) API"""
+        url = f"https://tapi.fosunhanig.com/followInvest/v1/PortfolioHoldingAllocation?id={portfolio_id}&queryType=1"
+        
+        default_headers = {
+             "accept": "application/json, text/plain, */*",
+             "content-type": "application/json",
+             "origin": "https://h5.fotechwealth.com",
+             "referer": "https://h5.fotechwealth.com/",
+             "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+             "x-device-info": "platform=Mac OS;osver=10.15.7;model=Macintosh;browser=Chrome;brover=144;lang=zhCn;channel=H5;",
+             "x-lang": "zhCn",
+             "x-product": "product=app-wealth;version=0.0.1",
+             "x-source": "102",
+             "priority": "u=1, i"
+        }
+        
+        if headers:
+            default_headers.update(headers)
+            
+        try:
+            response = requests.get(url, headers=default_headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if "result" not in data:
+                 raise Exception(f"StarWealth API error: No result in response: {data}")
+                 
+            holdings = []
+            detail = data.get("result", {}).get("detail", {})
+            industry_holdings = detail.get("holding", [])
+            
+            for industry in industry_holdings:
+                for stock in industry.get("industryHolding", []):
+                    try:
+                        ratio_val = float(stock.get("ratio", 0))
+                    except:
+                        ratio_val = 0
+                        
+                    stock_item = {
+                        "symbol": stock.get("symbol"),
+                        "market": stock.get("market"),
+                        "ratio_pct": ratio_val,
+                        "price": float(stock.get("latestPrice", 0) or 0)
+                    }
+                    holdings.append(stock_item)
+            return holdings
+                 
+        except Exception as e:
+             logger.error(f"Failed to fetch StarWealth positions: {e}")
+             raise
+
     async def _ensure_ib_connected(self, port: int, client_id: int) -> IBKRService:
         """确保在当前线程(Worker)中连接到特定的 IB 账户，并返回该 service 实例"""
         key = f"{port}_{client_id}"
@@ -176,22 +272,30 @@ class PortfolioCopyTrader:
 
         plan = []
         try:
-            # 1. 获取 Futu 持仓占比 (Run in executor to avoid blocking loop)
-            futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
-            
-            # --- 符号归一化 + 价格提取 (Normalizing symbols + extracting prices) ---
-            # Normalized Futu map: symbol (clean) -> {target_ratio, price}
+            # 1. Fetch and Parse Positions based on Platform
             futu_positions_map = {}
             futu_price_map = {}
-            for r in futu_records:
-                symbol = r["stock_code"].replace('US.', '')
-                ratio = r["position_ratio"] / 1000000000.0
-                if ratio > 1.0: # 14.0 代表 14%
-                    ratio /= 100.0
-                futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
-                # 从 Futu 提取价格 (价格被放大了 10^9 倍，需要除以 1000000000)
-                if "current_price" in r and r["current_price"]:
-                    futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
+
+            if getattr(config, 'platform', 'futu') == 'star_wealth':
+                # StarWealth Logic
+                records = await self._run_in_executor(self.get_starwealth_positions_sync, config.portfolio_id, config.api_headers or {})
+                for r in records:
+                    symbol = r["symbol"]
+                    ratio = r["ratio_pct"] / 100.0 # 6.11 -> 0.0611
+                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                    if r["price"] > 0:
+                        futu_price_map[symbol] = r["price"]
+            else:
+                # Futu Logic (Snapshot of logic below)
+                futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
+                for r in futu_records:
+                    symbol = r["stock_code"].replace('US.', '')
+                    ratio = r["position_ratio"] / 1000000000.0
+                    if ratio > 1.0: # 14.0 represents 14%
+                        ratio /= 100.0
+                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                    if "current_price" in r and r["current_price"]:
+                        futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
 
             # 2. IB 状态已经在 _ensure_ib_connected 中准备好
             net_liq = ib.get_net_liquidation()

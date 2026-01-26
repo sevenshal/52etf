@@ -25,6 +25,7 @@ class PortfolioCopyConfigSchema(BaseModel):
     api_headers: Optional[dict] = None
     account_type: Optional[str] = "ib" 
     longport_account_id: Optional[str] = None
+    platform: Optional[str] = "futu"
 
     class Config:
         from_attributes = True
@@ -79,6 +80,7 @@ async def save_config(
         config.api_headers = config_data.api_headers
         config.account_type = config_data.account_type
         config.longport_account_id = config_data.longport_account_id
+        config.platform = config_data.platform
     else:
         config = PortfolioCopyConfig(
             account_id=account_id,
@@ -94,7 +96,8 @@ async def save_config(
             tracking_error_pct=config_data.tracking_error_pct,
             api_headers=config_data.api_headers,
             account_type=config_data.account_type,
-            longport_account_id=config_data.longport_account_id
+            longport_account_id=config_data.longport_account_id,
+            platform=config_data.platform
         )
         db.add(config)
     
@@ -134,14 +137,14 @@ async def list_logs(
     return query.order_by(PortfolioCopyLog.timestamp.desc()).limit(100).all()
 
 @router.get("/portfolio-info/{portfolio_id}")
-async def get_portfolio_info_proxy(portfolio_id: str):
+async def get_portfolio_info_proxy(portfolio_id: str, platform: str = "futu"):
     from ...robot.portfolio_copy_trader import PortfolioCopyTrader
     trader = PortfolioCopyTrader()
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
         }
-        info = await trader.get_portfolio_info(portfolio_id, headers)
+        info = await trader.get_portfolio_info(portfolio_id, headers, platform=platform)
         return info
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
