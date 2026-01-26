@@ -106,7 +106,15 @@ class LongPortService(QuoteProvider, TradeService):
         if not self.ctx:
              return {"status": "error", "message": "QuoteContext 未初始化"}
 
-        return {"status": "ok", "message": "运行正常"}
+        result = {"status": "ok", "message": "运行正常"}
+        
+        # Fetch Balance
+        try:
+            balance = self.account_balance()
+            result["account_balance"] = balance
+        except Exception as e:
+             logging.warning(f"Failed to fetch balance in status check: {e}")
+        return result
 
     def __load_config_from_db(self):
         session = Session()
