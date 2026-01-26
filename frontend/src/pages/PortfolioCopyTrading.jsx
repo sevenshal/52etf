@@ -285,7 +285,11 @@ const PortfolioCopyTrading = () => {
                     <Text strong>{record.portfolio_name || '未命名'}</Text>
                     <Space size="small">
                         <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
-                        {record.platform === 'star_wealth' && <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>}
+                        {record.platform === 'star_wealth' ? (
+                            <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>
+                        ) : (
+                            <Tag color="cyan" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>富途牛牛</Tag>
+                        )}
                     </Space>
                 </Space>
             )
