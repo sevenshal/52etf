@@ -200,7 +200,7 @@ class LongportCopyTrader:
                         side=side, 
                         symbol=symbol, 
                         order_type=OrderType.MO, # Market 
-                        submitted_price=0, # Market
+                        submitted_price=price, # Market order needs valid price for validation
                         submitted_quantity=qty
                     )
                     
