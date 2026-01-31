@@ -34,25 +34,43 @@ class LongportCopyTrader:
         
         service = await self._get_lp_service(lp_account_id)
         
-        # 1. 获取 Futu 目标组合 (Source) - Use parent's method
-        futu_records = await self.parent_trader._run_in_executor(
-            self.parent_trader.get_futu_positions_sync, 
-            config.portfolio_id, 
-            config.api_headers or {}
-        )
-        
-        # --- 符号归一化 + 价格提取 (Source) ---
-        futu_positions_map = {} # symbol -> target_ratio (0.0 - 1.0)
-        futu_price_map = {}
-        for r in futu_records:
-            symbol = r["stock_code"].replace('US.', '') # Remove US. prefix
-            ratio = r["position_ratio"] / 1000000000.0 # Futu returns 14.5% as 145000000
-            if ratio > 1.0: 
-                ratio /= 100.0
-            futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+        if getattr(config, 'platform', 'futu') == 'star_wealth':
+            # StarWealth Logic
+            records = await self.parent_trader._run_in_executor(
+                self.parent_trader.get_starwealth_positions_sync, 
+                config.portfolio_id, 
+                config.api_headers or {}
+            )
             
-            if "current_price" in r and r["current_price"]:
-                futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
+            futu_positions_map = {}
+            futu_price_map = {}
+            for r in records:
+                symbol = r["symbol"]
+                ratio = r["ratio_pct"] / 100.0
+                futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                if r["price"] > 0:
+                    futu_price_map[symbol] = r["price"]
+
+        else:
+            # Futu Logic
+            futu_records = await self.parent_trader._run_in_executor(
+                self.parent_trader.get_futu_positions_sync, 
+                config.portfolio_id, 
+                config.api_headers or {}
+            )
+            
+            # --- 符号归一化 + 价格提取 (Source) ---
+            futu_positions_map = {} # symbol -> target_ratio (0.0 - 1.0)
+            futu_price_map = {}
+            for r in futu_records:
+                symbol = r["stock_code"].replace('US.', '') # Remove US. prefix
+                ratio = r["position_ratio"] / 1000000000.0 # Futu returns 14.5% as 145000000
+                if ratio > 1.0: 
+                    ratio /= 100.0
+                futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                
+                if "current_price" in r and r["current_price"]:
+                    futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
 
         # 2. 获取 Longport 账户信息 (Destination)
         # 资金

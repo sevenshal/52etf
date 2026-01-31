@@ -47,7 +47,10 @@ async def create_longport_account(
     # Check if lp_account_id exists globally
     existing = db.query(LongPortAccount).filter(LongPortAccount.lp_account_id == account_data.lp_account_id).first()
     if existing:
-        raise HTTPException(status_code=400, detail="LongPort Account ID already exists")
+        if existing.account_id == account_id:
+            raise HTTPException(status_code=400, detail=f"Account {account_data.lp_account_id} is already in your list with name '{existing.name}'")
+        else:
+            raise HTTPException(status_code=400, detail=f"Account {account_data.lp_account_id} is already registered by another user")
 
     new_account = LongPortAccount(
         account_id=account_id,
