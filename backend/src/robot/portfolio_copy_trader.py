@@ -207,23 +207,32 @@ class PortfolioCopyTrader:
                  raise Exception(f"StarWealth API error: No result in response: {data}")
                  
             holdings = []
-            detail = data.get("result", {}).get("detail", {})
-            industry_holdings = detail.get("holding", [])
+            result_data = data.get("result", {})
+            detail = result_data.get("detail", {})
             
-            for industry in industry_holdings:
-                for stock in industry.get("industryHolding", []):
-                    try:
-                        ratio_val = float(stock.get("ratio", 0))
-                    except:
-                        ratio_val = 0
-                        
-                    stock_item = {
-                        "symbol": stock.get("symbol"),
-                        "market": stock.get("market"),
-                        "ratio_pct": ratio_val,
-                        "price": float(stock.get("latestPrice", 0) or 0)
-                    }
-                    holdings.append(stock_item)
+            # 优先从 marketHolding 中获取 stockUs 的持仓
+            # Calculate holdings from marketHearing (specifically stockUs as requested)
+            market_holdings = detail.get("marketHolding", [])
+            found_us_market = False
+            
+            for mh in market_holdings:
+                # 只取 stockUs，或者如果有 stockHk 也可以考虑，但用户明确指出了 stockUs
+                if mh.get("marketType") == "stockUs":
+                    found_us_market = True
+                    for stock in mh.get("holding", []):
+                        try:
+                            ratio_val = float(stock.get("ratio", 0))
+                        except:
+                            ratio_val = 0
+                            
+                        stock_item = {
+                            "symbol": stock.get("symbol"),
+                            "market": stock.get("market"),
+                            "ratio_pct": ratio_val,
+                            "price": float(stock.get("latestPrice", 0) or 0)
+                        }
+                        holdings.append(stock_item)
+                    break # Assuming only one stockUs entry
             return holdings
                  
         except Exception as e:
