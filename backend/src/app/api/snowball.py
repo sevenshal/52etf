@@ -5,6 +5,7 @@ from datetime import datetime
 import httpx
 import logging
 import collections
+import fnmatch
 from sqlalchemy.orm import Session
 from ...core.database import get_db, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
 from .account import valid_account
@@ -657,7 +658,11 @@ async def get_snowball_opportunities(
         target_weights_map = {}
         for item in weights:
             # Blacklist Check: Treat target weight as 0 if blacklisted
-            if item['symbol'] in config.get('blacklisted_symbols', []):
+            is_blacklisted = any(
+                fnmatch.fnmatch(item['symbol'], pattern) 
+                for pattern in config.get('blacklisted_symbols', [])
+            )
+            if is_blacklisted:
                 continue
                 
             all_snap_symbols.add(item['symbol'])
