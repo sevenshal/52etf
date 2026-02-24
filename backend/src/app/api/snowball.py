@@ -163,7 +163,7 @@ async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Di
             logger.error(f"Failed to fetch Xueqiu cube info: {e}")
             return None
 
-async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
+async def fetch_xueqiu_quotes(symbols: List[str], cookie: str = None) -> Dict[str, float]:
     """Fetch real-time quotes using the lightweight API (Price Only)"""
     if not symbols:
         return {}
@@ -175,9 +175,16 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
     
     url = f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={raw_symbol_str}"
     
+    headers = XUEQIU_STOCK_HEADERS.copy()
+    if cookie:
+        if "xq_a_token" in cookie:
+             headers["Cookie"] = cookie
+        else:
+             headers["Cookie"] = f"xq_a_token={cookie};"
+
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=XUEQIU_STOCK_HEADERS)
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
             # Format: {"data":[{"symbol":"SZ000858","current":107.46 ...}]}
@@ -193,7 +200,7 @@ async def fetch_xueqiu_quotes(symbols: List[str]) -> Dict[str, float]:
             logger.error(f"Failed to fetch Xueqiu quotes: {e}")
             return {}
 
-async def fetch_xueqiu_batch_quotes(symbols: List[str]) -> Dict[str, Dict]:
+async def fetch_xueqiu_batch_quotes(symbols: List[str], cookie: str = None) -> Dict[str, Dict]:
     """Fetch detailed quotes (Price + Name) using the batch API"""
     if not symbols:
         return {}
@@ -203,9 +210,16 @@ async def fetch_xueqiu_batch_quotes(symbols: List[str]) -> Dict[str, Dict]:
     
     url = f"https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol={raw_symbol_str}"
     
+    headers = XUEQIU_STOCK_HEADERS.copy()
+    if cookie:
+        if "xq_a_token" in cookie:
+             headers["Cookie"] = cookie
+        else:
+             headers["Cookie"] = f"xq_a_token={cookie};"
+             
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=XUEQIU_STOCK_HEADERS)
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
             # Format: {"data": {"items": [{"quote": {"symbol": "SH520830", "name": "沙特ETF", "current": 0.937 ...}}]}}
@@ -353,7 +367,11 @@ async def get_logs(
         
     # --- Fetch Stock Names ---
     unique_symbols = {log.symbol for log in logs if log.symbol}
-    quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols))
+    
+    config_for_cookie = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.account_id == account_id).order_by(SnowballCopyConfig.updated_at.desc()).first()
+    cookie = config_for_cookie.xueqiu_cookie if config_for_cookie else None
+    
+    quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols), cookie)
     
     items = []
     for log in logs:
@@ -438,7 +456,12 @@ async def get_snapshot(
     symbols = list(holdings_dict.keys())
     
     # 1. Fetch Real-time Prices
-    quotes = await fetch_xueqiu_batch_quotes(symbols)
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id
+    ).first()
+    cookie = config.xueqiu_cookie if config else None
+    quotes = await fetch_xueqiu_batch_quotes(symbols, cookie)
     
     # 2. Build Holding Details & Calc Total
     detailed_holdings = []
@@ -559,7 +582,8 @@ async def get_snowball_opportunities(
     configs = valid_configs
 
     # 2.2 Fetch Prices
-    prices = await fetch_xueqiu_quotes(list(all_symbols))
+    cookie_for_quotes = next((c.get('xueqiu_cookie') for c in configs if c.get('xueqiu_cookie')), None)
+    prices = await fetch_xueqiu_quotes(list(all_symbols), cookie_for_quotes)
     
     # Helper to get price
     def get_price(sym):
