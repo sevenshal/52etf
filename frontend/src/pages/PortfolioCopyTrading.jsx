@@ -107,7 +107,12 @@ const PortfolioCopyTrading = () => {
             return;
         }
         try {
-            const response = await request.get(`/api/ib-copy-trading/portfolio-info/${id}`, { params: { platform } });
+            const params = { platform };
+            if (platform === 'yingli') {
+                params.invest_id = form.getFieldValue('yingli_invest_id');
+                params.authorization = form.getFieldValue('yingli_auth');
+            }
+            const response = await request.get(`/api/ib-copy-trading/portfolio-info/${id}`, { params });
             form.setFieldsValue({ portfolio_name: response.data.name });
             message.success('获取成功: ' + response.data.name);
         } catch (error) {
@@ -193,6 +198,15 @@ const PortfolioCopyTrading = () => {
                 ...values,
                 id: editingConfig?.id
             };
+
+            // Process Yingli specific fields
+            if (values.platform === 'yingli') {
+                payload.api_headers = {
+                    ...(editingConfig?.api_headers || {}),
+                    investId: values.yingli_invest_id,
+                    Authorization: values.yingli_auth
+                };
+            }
 
             await request.post('/api/ib-copy-trading/configs', payload);
             message.success(editingConfig ? '更新成功' : '添加成功');
@@ -287,6 +301,8 @@ const PortfolioCopyTrading = () => {
                         <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
                         {record.platform === 'star_wealth' ? (
                             <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>
+                        ) : record.platform === 'yingli' ? (
+                            <Tag color="purple" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>盈立</Tag>
                         ) : (
                             <Tag color="cyan" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>富途牛牛</Tag>
                         )}
@@ -376,7 +392,12 @@ const PortfolioCopyTrading = () => {
                         icon={<EditOutlined />}
                         onClick={() => {
                             setEditingConfig(record);
-                            form.setFieldsValue(record);
+                            const formValues = { ...record };
+                            if (record.platform === 'yingli' && record.api_headers) {
+                                formValues.yingli_invest_id = record.api_headers.investId;
+                                formValues.yingli_auth = record.api_headers.Authorization;
+                            }
+                            form.setFieldsValue(formValues);
                             setModalVisible(true);
                         }}
                         size="small"
@@ -767,6 +788,7 @@ const PortfolioCopyTrading = () => {
                                 <Select>
                                     <Select.Option value="futu">富途牛牛</Select.Option>
                                     <Select.Option value="star_wealth">星财富</Select.Option>
+                                    <Select.Option value="yingli">盈立 (Yingli)</Select.Option>
                                 </Select>
                             </Form.Item>
                         </Col>
@@ -786,6 +808,28 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                     </Row>
+                    <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
+                        {() => {
+                            const platform = form.getFieldValue('platform');
+                            if (platform === 'yingli') {
+                                return (
+                                    <Row gutter={16}>
+                                        <Col span={6}>
+                                            <Form.Item name="yingli_invest_id" label="Invest ID" rules={[{ required: true }]}>
+                                                <Input placeholder="1543418964696301568" />
+                                            </Form.Item>
+                                        </Col>
+                                        <Col span={18}>
+                                            <Form.Item name="yingli_auth" label="Authorization (Headers)" rules={[{ required: true }]}>
+                                                <Input.Password placeholder="eyJh..." />
+                                            </Form.Item>
+                                        </Col>
+                                    </Row>
+                                );
+                            }
+                            return null;
+                        }}
+                    </Form.Item>
 
                     <Row gutter={16}>
                         <Col span={12}>
