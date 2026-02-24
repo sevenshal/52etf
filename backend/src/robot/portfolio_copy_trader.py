@@ -72,6 +72,8 @@ class PortfolioCopyTrader:
         """异步包装器：获取组合信息"""
         if platform == 'star_wealth':
              return await self._run_in_executor(self.get_starwealth_portfolio_info_sync, portfolio_id, headers)
+        elif platform == 'yingli':
+             return await self._run_in_executor(self.get_yingli_portfolio_info_sync, portfolio_id, headers)
         return await self._run_in_executor(self.get_portfolio_info_sync, portfolio_id, headers)
 
     def get_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
@@ -239,6 +241,82 @@ class PortfolioCopyTrader:
              logger.error(f"Failed to fetch StarWealth positions: {e}")
              raise
 
+    def get_yingli_portfolio_info_sync(self, portfolio_id: str, headers: dict) -> dict:
+        invest_id = headers.get("investId", "")
+        url = f"https://jy.yxzq.com/ams-center/api/v1/follow-invest-detail?strategyId={portfolio_id}&investId={invest_id}"
+        
+        default_headers = {
+            "Host": "jy.yxzq.com",
+            "X-Lang": "1",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+            "Accept": "application/json, text/plain, */*"
+        }
+        if headers:
+            for k, v in headers.items():
+                if k not in ["investId"]:
+                    default_headers[k] = v
+                    
+        try:
+            response = requests.get(url, headers=default_headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == 0 and "data" in data:
+                return {
+                    "name": data["data"].get("name", f"Yingli-{portfolio_id}"),
+                    "id": portfolio_id,
+                    "founder_name": data["data"].get("userName", ""),
+                    "brief": data["data"].get("description", ""),
+                    "raw_data": data["data"]
+                }
+            else:
+                 raise Exception(f"Yingli API error: {data.get('msg')}")
+        except Exception as e:
+            logger.error(f"Failed to fetch Yingli portfolio info: {e}")
+            raise
+
+    def get_yingli_positions_sync(self, portfolio_id: str, headers: dict) -> List[dict]:
+        invest_id = headers.get("investId", "")
+        url = f"https://jy.yxzq.com/ams-center/api/v1/follow-invest-detail?strategyId={portfolio_id}&investId={invest_id}"
+        
+        default_headers = {
+            "Host": "jy.yxzq.com",
+            "X-Lang": "1",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+            "Accept": "application/json, text/plain, */*"
+        }
+        if headers:
+            for k, v in headers.items():
+                if k not in ["investId"]:
+                    default_headers[k] = v
+                    
+        try:
+            response = requests.get(url, headers=default_headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == 0 and "data" in data:
+                positions_data = data["data"].get("position", [])
+                current_money = float(data["data"].get("currentMoney", 1))
+                if current_money <= 0:
+                    current_money = 1.0
+                
+                holdings = []
+                for p in positions_data:
+                    symbol = p.get("stockCode")
+                    market_val = float(p.get("marketValue", 0))
+                    ratio_pct = (market_val / current_money) * 100
+                    holdings.append({
+                        "symbol": symbol,
+                        "market": p.get("market"),
+                        "ratio_pct": ratio_pct,
+                        "price": float(p.get("curPrice", 0))
+                    })
+                return holdings
+            else:
+                 raise Exception(f"Yingli API error: {data.get('msg')}")
+        except Exception as e:
+            logger.error(f"Failed to fetch Yingli positions: {e}")
+            raise
+
     async def _ensure_ib_connected(self, port: int, client_id: int) -> IBKRService:
         """确保在当前线程(Worker)中连接到特定的 IB 账户，并返回该 service 实例"""
         key = f"{port}_{client_id}"
@@ -291,6 +369,15 @@ class PortfolioCopyTrader:
                 for r in records:
                     symbol = r["symbol"]
                     ratio = r["ratio_pct"] / 100.0 # 6.11 -> 0.0611
+                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                    if r["price"] > 0:
+                        futu_price_map[symbol] = r["price"]
+            elif getattr(config, 'platform', 'futu') == 'yingli':
+                # Yingli Logic
+                records = await self._run_in_executor(self.get_yingli_positions_sync, config.portfolio_id, config.api_headers or {})
+                for r in records:
+                    symbol = r["symbol"]
+                    ratio = r["ratio_pct"] / 100.0
                     futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
                     if r["price"] > 0:
                         futu_price_map[symbol] = r["price"]

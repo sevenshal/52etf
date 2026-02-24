@@ -51,6 +51,23 @@ class LongportCopyTrader:
                 if r["price"] > 0:
                     futu_price_map[symbol] = r["price"]
 
+        elif getattr(config, 'platform', 'futu') == 'yingli':
+            # Yingli Logic
+            records = await self.parent_trader._run_in_executor(
+                self.parent_trader.get_yingli_positions_sync, 
+                config.portfolio_id, 
+                config.api_headers or {}
+            )
+            
+            futu_positions_map = {}
+            futu_price_map = {}
+            for r in records:
+                symbol = r["symbol"]
+                ratio = r["ratio_pct"] / 100.0
+                futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
+                if r["price"] > 0:
+                    futu_price_map[symbol] = r["price"]
+
         else:
             # Futu Logic
             futu_records = await self.parent_trader._run_in_executor(

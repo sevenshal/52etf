@@ -137,13 +137,23 @@ async def list_logs(
     return query.order_by(PortfolioCopyLog.timestamp.desc()).limit(100).all()
 
 @router.get("/portfolio-info/{portfolio_id}")
-async def get_portfolio_info_proxy(portfolio_id: str, platform: str = "futu"):
+async def get_portfolio_info_proxy(
+    portfolio_id: str, 
+    platform: str = "futu",
+    invest_id: Optional[str] = None,
+    authorization: Optional[str] = None
+):
     from ...robot.portfolio_copy_trader import PortfolioCopyTrader
     trader = PortfolioCopyTrader()
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
         }
+        if invest_id:
+            headers["investId"] = invest_id
+        if authorization:
+            headers["Authorization"] = authorization
+            
         info = await trader.get_portfolio_info(portfolio_id, headers, platform=platform)
         return info
     except Exception as e:
