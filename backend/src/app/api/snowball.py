@@ -6,8 +6,10 @@ import httpx
 import logging
 import collections
 import fnmatch
+import asyncio
+import re
 from sqlalchemy.orm import Session
-from ...core.database import get_db, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
+from ...core.database import get_db, get_db_ctx, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -28,6 +30,63 @@ XUEQIU_HEADERS = {
 
 XUEQIU_STOCK_HEADERS = XUEQIU_HEADERS.copy()
 XUEQIU_STOCK_HEADERS["Host"] = "stock.xueqiu.com"
+
+# --- Globals for Token Refresh ---
+_last_token_refresh_time = None
+_is_refreshing_token = False
+
+async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str = None):
+    global _last_token_refresh_time, _is_refreshing_token, XUEQIU_HEADERS, XUEQIU_STOCK_HEADERS
+    
+    if _is_refreshing_token:
+        return
+        
+    now = datetime.now()
+    if _last_token_refresh_time and (now - _last_token_refresh_time).total_seconds() < 3600:
+        return
+
+    _is_refreshing_token = True
+    try:
+        logger.info("Starting background refresh of Xueqiu guest token...")
+        async with httpx.AsyncClient() as client:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            if cookie:
+                if "xq_a_token" in cookie:
+                    headers["Cookie"] = cookie
+                else:
+                    headers["Cookie"] = f"xq_a_token={cookie};"
+                    
+            response = await client.get("https://xueqiu.com/", headers=headers, timeout=10.0)
+            
+            for cookie in response.cookies.jar:
+                if cookie.name == "xq_a_token":
+                    new_token = cookie.value
+                    new_cookie_str = f"xq_a_token={new_token};"
+                    XUEQIU_HEADERS["Cookie"] = new_cookie_str
+                    XUEQIU_STOCK_HEADERS["Cookie"] = new_cookie_str
+                    _last_token_refresh_time = datetime.now()
+                    logger.info(f"Successfully refreshed Xueqiu guest token: {new_token[:10]}...")
+                    
+                    if account_id:
+                        with get_db_ctx() as db:
+                            configs = db.query(SnowballCopyConfig).filter(
+                                SnowballCopyConfig.account_id == account_id,
+                                SnowballCopyConfig.xueqiu_cookie != None,
+                                SnowballCopyConfig.xueqiu_cookie != ""
+                            ).all()
+                            for c in configs:
+                                old_c = c.xueqiu_cookie
+                                if "xq_a_token=" in old_c:
+                                    c.xueqiu_cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
+                                else:
+                                    c.xueqiu_cookie = f"xq_a_token={new_token}; {old_c}"
+                    break
+    except Exception as e:
+        logger.error(f"Failed to refresh Xueqiu guest token: {e}")
+    finally:
+        _is_refreshing_token = False
 
 # --- Models ---
 
@@ -550,6 +609,12 @@ async def get_snowball_opportunities(
             "xueqiu_cookie": c.xueqiu_cookie,
             "blacklisted_symbols": c.blacklisted_symbols or []
         })
+
+    # 0. Background Token Refresh
+    now = datetime.now()
+    if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
+        cookie_for_refresh = next((c.get('xueqiu_cookie') for c in configs if c.get('xueqiu_cookie')), None)
+        asyncio.create_task(_refresh_xueqiu_guest_token_task(account_id, cookie_for_refresh))
 
     # 2. Pre-fetch Data
     # 2.1 Gather all symbols (Held + Targets from all configs)
