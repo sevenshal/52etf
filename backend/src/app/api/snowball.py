@@ -198,9 +198,12 @@ async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
 
 async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Dict]:
     """Fetch cube info including name from Xueqiu"""
-    url = f"https://api.xueqiu.com/cubes/show.json?symbol={symbol}"
+    ts = int(datetime.now().timestamp() * 1000)
+    url = f"https://xueqiu.com/cubes/nav_daily/all.json?cube_symbol={symbol}&since={ts}&until={ts}"
     
     headers = XUEQIU_HEADERS.copy()
+    headers["Referer"] = f"https://xueqiu.com/P/{symbol}"
+    
     if cookie:
         if "xq_a_token" in cookie:
              headers["Cookie"] = cookie
@@ -212,9 +215,13 @@ async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Di
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
-            # Response format: {"id":..., "name": "...", "symbol": "...", ...}
-            # Or sometimes {"id":..., "name": "..."} at root level
-            if "name" in data:
+            
+            if isinstance(data, list) and len(data) > 0:
+                for item in data:
+                    if item.get("symbol") == symbol:
+                        return item
+                return data[0]
+            elif isinstance(data, dict) and "name" in data:
                 return data
             else:
                 logger.error(f"Xueqiu API Error (Info): {data}")
