@@ -43,6 +43,10 @@ const PortfolioCopyTrading = () => {
     const [snowballForm] = Form.useForm();
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
 
+    // Snowball Account Config State
+    const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
+    const [snowballAccountForm] = Form.useForm();
+
     const handlePreview = async (configId) => {
         setPreviewLoading(true);
         setPreviewVisible(true);
@@ -66,6 +70,25 @@ const PortfolioCopyTrading = () => {
             message.error('获取雪球配置失败');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchSnowballAccountConfig = async () => {
+        try {
+            const response = await request.get('/api/snowball/account-config');
+            snowballAccountForm.setFieldsValue({ xueqiu_cookie: response.data.xueqiu_cookie });
+        } catch (error) {
+            message.error('获取雪球账号配置失败');
+        }
+    };
+
+    const handleSnowballAccountSave = async (values) => {
+        try {
+            await request.post('/api/snowball/account-config', values);
+            message.success('保存雪球账号配置成功');
+            setSnowballAccountModalVisible(false);
+        } catch (error) {
+            message.error('保存失败');
         }
     };
 
@@ -636,12 +659,20 @@ const PortfolioCopyTrading = () => {
                                 }
                             ]}
                         />
-                        <div style={{ marginTop: 16 }}>
-                            <Button type="primary" icon={<PlusOutlined />} onClick={() => {
-                                setSnowballEditingConfig(null);
-                                snowballForm.resetFields();
-                                setSnowballModalVisible(true);
-                            }}>添加雪球跟单配置</Button>
+                        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                                <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+                                    setSnowballEditingConfig(null);
+                                    snowballForm.resetFields();
+                                    setSnowballModalVisible(true);
+                                }}>添加雪球跟单配置</Button>
+                            </div>
+                            <div>
+                                <Button icon={<SettingOutlined />} onClick={() => {
+                                    fetchSnowballAccountConfig();
+                                    setSnowballAccountModalVisible(true);
+                                }}>雪球账号全局Cookie配置</Button>
+                            </div>
                         </div>
                     </Tabs.TabPane>
 
@@ -949,13 +980,7 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                     </Row>
-                    <Row gutter={16}>
-                        <Col span={24}>
-                            <Form.Item name="xueqiu_cookie" label="雪球 Cookie (可选)" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。支持 'xq_a_token=...' 或完整Cookie字符串。">
-                                <TextArea rows={2} placeholder="xq_a_token=..." />
-                            </Form.Item>
-                        </Col>
-                    </Row>
+
                     <Row gutter={16}>
                         <Col span={24}>
                             <Form.Item name="blacklisted_symbols" label="跟单黑名单 (不买入/若持有会卖出)">
@@ -972,6 +997,25 @@ const PortfolioCopyTrading = () => {
                         <Col span={12}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                </Form>
+            </Modal>
+
+            {/* Snowball Account Config Modal */}
+            <Modal
+                title="雪球账号全局配置"
+                visible={snowballAccountModalVisible}
+                onCancel={() => setSnowballAccountModalVisible(false)}
+                onOk={() => snowballAccountForm.submit()}
+                width={700}
+            >
+                <Form form={snowballAccountForm} layout="vertical" onFinish={handleSnowballAccountSave}>
+                    <Row gutter={16}>
+                        <Col span={24}>
+                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。所有组合将共用此配置。支持 'xq_a_token=...' 或完整Cookie字符串。">
+                                <Input.TextArea rows={3} placeholder="xq_a_token=..." />
                             </Form.Item>
                         </Col>
                     </Row>
