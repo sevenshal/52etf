@@ -369,6 +369,14 @@ class SnowballCopyConfig(Base):
     blacklisted_symbols = Column(JSON, default=list) # 黑名单股票列表
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class SnowballAccountConfig(Base):
+    """雪球账户全局配置"""
+    __tablename__ = "snowball_account_configs"
+    
+    account_id = Column(String, primary_key=True) # 归属的 Web 账户 ID
+    xueqiu_cookie = Column(String, nullable=True) # 雪球全局Cookie
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class SnowballPortfolioSnapshot(Base):
     """雪球组合持仓快照"""
     __tablename__ = "snowball_portfolio_snapshots"

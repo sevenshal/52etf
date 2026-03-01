@@ -9,7 +9,7 @@ import fnmatch
 import asyncio
 import re
 from sqlalchemy.orm import Session
-from ...core.database import get_db, get_db_ctx, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot
+from ...core.database import get_db, get_db_ctx, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot, SnowballAccountConfig
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -71,17 +71,13 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
                     
                     if account_id:
                         with get_db_ctx() as db:
-                            configs = db.query(SnowballCopyConfig).filter(
-                                SnowballCopyConfig.account_id == account_id,
-                                SnowballCopyConfig.xueqiu_cookie != None,
-                                SnowballCopyConfig.xueqiu_cookie != ""
-                            ).all()
-                            for c in configs:
-                                old_c = c.xueqiu_cookie
+                            config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+                            if config and config.xueqiu_cookie:
+                                old_c = config.xueqiu_cookie
                                 if "xq_a_token=" in old_c:
-                                    c.xueqiu_cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
+                                    config.xueqiu_cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
                                 else:
-                                    c.xueqiu_cookie = f"xq_a_token={new_token}; {old_c}"
+                                    config.xueqiu_cookie = f"xq_a_token={new_token}; {old_c}"
                     break
     except Exception as e:
         logger.error(f"Failed to refresh Xueqiu guest token: {e}")
@@ -89,6 +85,9 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
         _is_refreshing_token = False
 
 # --- Models ---
+
+class SnowballAccountConfigModel(BaseModel):
+    xueqiu_cookie: Optional[str] = None
 
 class SnowballConfigCreate(BaseModel):
     cli_id: str
@@ -98,7 +97,7 @@ class SnowballConfigCreate(BaseModel):
     total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
-    xueqiu_cookie: Optional[str] = None
+    xueqiu_cookie: Optional[str] = None # Deprecated
     blacklisted_symbols: List[str] = []
 
 class SnowballConfigUpdate(BaseModel):
@@ -109,7 +108,7 @@ class SnowballConfigUpdate(BaseModel):
     total_position_ratio: Optional[float] = None
     total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
-    xueqiu_cookie: Optional[str] = None
+    xueqiu_cookie: Optional[str] = None # Deprecated
     blacklisted_symbols: Optional[List[str]] = None
 
 class SnowballConfigResponse(SnowballConfigCreate):
@@ -309,16 +308,43 @@ async def fetch_xueqiu_batch_quotes(symbols: List[str], cookie: str = None) -> D
 @router.get("/info/{symbol}")
 async def get_combination_info(
     symbol: str, 
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
 ):
     """Get combination info (name) from Xueqiu"""
-    info = await fetch_xueqiu_cube_info(symbol)
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    cookie = acc_config.xueqiu_cookie if acc_config else None
+    
+    info = await fetch_xueqiu_cube_info(symbol, cookie)
     if not info:
          raise HTTPException(status_code=404, detail="Combination not found or Xueqiu API error")
     return info
 
 
 # --- Endpoints ---
+
+@router.get("/account-config", response_model=SnowballAccountConfigModel)
+async def get_account_config(
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
+    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    return SnowballAccountConfigModel(xueqiu_cookie=config.xueqiu_cookie if config else None)
+
+@router.post("/account-config")
+async def update_account_config(
+    data: SnowballAccountConfigModel,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
+    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    if not config:
+        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=data.xueqiu_cookie)
+        db.add(config)
+    else:
+        config.xueqiu_cookie = data.xueqiu_cookie
+    db.commit()
+    return {"message": "Success"}
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
@@ -346,7 +372,10 @@ async def create_config(
 ):
     # Auto-fetch name if not provided
     if not config.combination_name:
-        cube_info = await fetch_xueqiu_cube_info(config.combination_id, config.xueqiu_cookie)
+        acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+        cookie = acc_config.xueqiu_cookie if acc_config else None
+        
+        cube_info = await fetch_xueqiu_cube_info(config.combination_id, cookie)
         if cube_info:
             config.combination_name = cube_info.get("name")
         
@@ -376,7 +405,9 @@ async def update_config(
     
     # If updating combination_id but not name, try to fetch name
     if "combination_id" in update_data and "combination_name" not in update_data:
-            cookie = update_data.get("xueqiu_cookie", db_config.xueqiu_cookie)
+            acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+            cookie = acc_config.xueqiu_cookie if acc_config else None
+            
             cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"], cookie)
             if cube_info:
                 update_data["combination_name"] = cube_info.get("name")
@@ -435,8 +466,8 @@ async def get_logs(
     # --- Fetch Stock Names ---
     unique_symbols = {log.symbol for log in logs if log.symbol}
     
-    config_for_cookie = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.account_id == account_id).order_by(SnowballCopyConfig.updated_at.desc()).first()
-    cookie = config_for_cookie.xueqiu_cookie if config_for_cookie else None
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    cookie = acc_config.xueqiu_cookie if acc_config else None
     
     quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols), cookie)
     
@@ -523,11 +554,8 @@ async def get_snapshot(
     symbols = list(holdings_dict.keys())
     
     # 1. Fetch Real-time Prices
-    config = db.query(SnowballCopyConfig).filter(
-        SnowballCopyConfig.id == config_id,
-        SnowballCopyConfig.account_id == account_id
-    ).first()
-    cookie = config.xueqiu_cookie if config else None
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    cookie = acc_config.xueqiu_cookie if acc_config else None
     quotes = await fetch_xueqiu_batch_quotes(symbols, cookie)
     
     # 2. Build Holding Details & Calc Total
@@ -613,15 +641,18 @@ async def get_snowball_opportunities(
             "total_amount": c.total_amount,
             "tracking_error_pct": c.tracking_error_pct,
             "cli_id": c.cli_id,
-            "xueqiu_cookie": c.xueqiu_cookie,
+            "xueqiu_cookie": c.xueqiu_cookie, # Keep for backwards compatibility
             "blacklisted_symbols": c.blacklisted_symbols or []
         })
+
+    # Fetch global account cookie
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    acc_cookie = acc_config.xueqiu_cookie if acc_config else None
 
     # 0. Background Token Refresh
     now = datetime.now()
     if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
-        cookie_for_refresh = next((c.get('xueqiu_cookie') for c in configs if c.get('xueqiu_cookie')), None)
-        asyncio.create_task(_refresh_xueqiu_guest_token_task(account_id, cookie_for_refresh))
+        asyncio.create_task(_refresh_xueqiu_guest_token_task(account_id, acc_cookie))
 
     # 2. Pre-fetch Data
     # 2.1 Gather all symbols (Held + Targets from all configs)
@@ -640,7 +671,7 @@ async def get_snowball_opportunities(
     valid_configs = []
     for config in configs:
         try:
-            weights = await fetch_xueqiu_holdings(config['combination_id'], config.get('xueqiu_cookie'))
+            weights = await fetch_xueqiu_holdings(config['combination_id'], acc_cookie)
             config_target_weights[config['id']] = weights
             for w in weights:
                 all_symbols.add(w['symbol'])
@@ -655,8 +686,7 @@ async def get_snowball_opportunities(
     configs = valid_configs
 
     # 2.2 Fetch Prices
-    cookie_for_quotes = next((c.get('xueqiu_cookie') for c in configs if c.get('xueqiu_cookie')), None)
-    prices = await fetch_xueqiu_quotes(list(all_symbols), cookie_for_quotes)
+    prices = await fetch_xueqiu_quotes(list(all_symbols), acc_cookie)
     
     # Helper to get price
     def get_price(sym):
