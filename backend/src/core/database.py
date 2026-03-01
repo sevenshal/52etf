@@ -365,7 +365,6 @@ class SnowballCopyConfig(Base):
     total_position_ratio = Column(Float, default=100.0) # 总仓位比例 (%)
     total_amount = Column(Float) # 总金额 (优先)
     tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
-    xueqiu_cookie = Column(String, nullable=True) # 雪球Cookie (可选)
     blacklisted_symbols = Column(JSON, default=list) # 黑名单股票列表
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 

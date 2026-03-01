@@ -97,7 +97,6 @@ class SnowballConfigCreate(BaseModel):
     total_position_ratio: Optional[float] = 100.0
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
-    xueqiu_cookie: Optional[str] = None # Deprecated
     blacklisted_symbols: List[str] = []
 
 class SnowballConfigUpdate(BaseModel):
@@ -108,7 +107,6 @@ class SnowballConfigUpdate(BaseModel):
     total_position_ratio: Optional[float] = None
     total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
-    xueqiu_cookie: Optional[str] = None # Deprecated
     blacklisted_symbols: Optional[List[str]] = None
 
 class SnowballConfigResponse(SnowballConfigCreate):
@@ -641,7 +639,6 @@ async def get_snowball_opportunities(
             "total_amount": c.total_amount,
             "tracking_error_pct": c.tracking_error_pct,
             "cli_id": c.cli_id,
-            "xueqiu_cookie": c.xueqiu_cookie, # Keep for backwards compatibility
             "blacklisted_symbols": c.blacklisted_symbols or []
         })
 
