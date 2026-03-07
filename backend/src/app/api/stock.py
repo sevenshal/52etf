@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
-from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db
+from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db, LongPortAccount
 from .account import valid_account
 from sqlalchemy import and_
 from ...core.services.longport import LongPortService
@@ -40,7 +40,9 @@ async def get_stock_klines(
     db: Session = Depends(get_db)
 ):
     """获取股票的K线数据"""
-    trade_service: LongPortService = LongPortService(account_id)
+    lp_account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
+    lp_account_id = lp_account.lp_account_id if lp_account else "LBPT10001248"
+    trade_service: LongPortService = LongPortService.get_instance(lp_account_id)
     quote_service = QuoteService(trade_service)
     
     # 解析日期
@@ -192,7 +194,9 @@ async def get_favorites(
     symbols = [stock.symbol for stock in latest_stocks]
     
     # 获取股票静态信息
-    quote_service = LongPortService(account_id)
+    lp_account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
+    lp_account_id = lp_account.lp_account_id if lp_account else "LBPT10001248"
+    quote_service = LongPortService.get_instance(lp_account_id)
     static_info_list = []
     if symbols:
         static_info_list = quote_service.get_static_info(symbols)
@@ -224,7 +228,7 @@ async def get_favorites(
     # 转换为字典列表
     return [{
         'symbol': stock.symbol,
-        'company': static_info_dict.get(stock.symbol, {})['name_cn'] or stock.company,
+        'company': static_info_dict.get(stock.symbol, {}).get('name_cn') or stock.company,
         'last_price': stock.last_price,
         'fair_value_lo': stock.fair_value_lo,
         'fair_value_hi': stock.fair_value_hi,

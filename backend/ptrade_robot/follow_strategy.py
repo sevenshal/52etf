@@ -174,6 +174,8 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
             
     # 如果深度不够（或超过5档仍不够），就用当前遍历到的最后一档价格
     log.info("%s 前5档深度不足以覆盖数量%d (累积%d), 使用最终价格 %s" % (symbol, quantity, accumulated_vol, target_price))
+    if target_price == 0:
+        raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
     return target_price
 
 
