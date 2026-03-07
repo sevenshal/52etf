@@ -22,7 +22,7 @@ class SZDTService:
         self.base_url = "https://szdt.tech/api"
         self.logger = logging.getLogger("SZDTService")
         self.secret_key = "X9XuQ89fjX4nq4FbdDM4LjVMYvDTsVVh"  # 从JS代码中提取的密钥
-        self.auth_code = 'meHTJgAi8hEausoh4ACj5FzMeOelDSIm:924bcbb718c7104b75ae545ba7ae5633cd253194'
+        self.auth_code = 'meHTJgAi8hEausoh4ACj5FzMeOelDSIm:34f95cf6f11365e8376344081b0c9d472257314f'
         self.partner_auth = 'meHTJgAi8hEausoh4ACj5FzMeOelDSIm'  # 合作伙伴认证码
         self.user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
         
