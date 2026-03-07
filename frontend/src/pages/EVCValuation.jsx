@@ -20,14 +20,14 @@ const EVCValuation = () => {
         if (!value || !marketPrice) return '';
         return ((value - marketPrice) / marketPrice * 100).toFixed(2) + '%';
     };
-    
+
     const handleSearch = async (values) => {
         try {
             // 如果输入了股票代码，转换为大写
             if (values.symbol) {
                 values.symbol = values.symbol.toUpperCase();
             }
-            
+
             const { data } = await request.post('/api/evc/valuation-search', values);
             setStocks(data);
         } catch (error) {
@@ -78,18 +78,18 @@ const EVCValuation = () => {
     }, []);
 
     const columns = [
-        { 
-            title: '股票代码', 
-            dataIndex: 'symbol', 
-            key: 'symbol', 
-            fixed: 'left', 
+        {
+            title: '股票代码',
+            dataIndex: 'symbol',
+            key: 'symbol',
+            fixed: 'left',
             width: 80,
             render: (text) => (
-                <a href={`#/stock/${text}`}>{text}</a>
+                <a href={`/stock/${text}`}>{text}</a>
             )
         },
         { title: '公司名称', dataIndex: 'company', key: 'company', width: 100 },
-        { 
+        {
             title: '贪恐指数',
             key: 'emotion_score',
             dataIndex: ['emotion_info', 'score'],
@@ -105,23 +105,23 @@ const EVCValuation = () => {
             },
             width: 80
         },
-        { 
-            title: '最新价格', 
-            dataIndex: 'last_price', 
+        {
+            title: '最新价格',
+            dataIndex: 'last_price',
             key: 'last_price',
             render: (text) => text.toFixed(2),
             width: 80
         },
         {
-            title: '估值下限', 
-            dataIndex: 'fair_value_lo', 
+            title: '估值下限',
+            dataIndex: 'fair_value_lo',
             key: 'fair_value_lo',
             render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
-        { 
+        {
             title: '估值上限',
-            dataIndex: 'fair_value_hi', 
+            dataIndex: 'fair_value_hi',
             key: 'fair_value_hi',
             render: (text) => text ? text.toFixed(2) : '-',
             width: 80
@@ -140,16 +140,16 @@ const EVCValuation = () => {
             render: (text) => text ? text.toFixed(2) : '-',
             width: 60
         },
-        { 
+        {
             title: '下财年估值下限',
-            dataIndex: 'forward_next_fy_lo', 
+            dataIndex: 'forward_next_fy_lo',
             key: 'forward_next_fy_lo',
             render: (text) => text ? text.toFixed(2) : '-',
             width: 80
         },
-        { 
+        {
             title: '下财年估值上限',
-            dataIndex: 'forward_next_fy_hi', 
+            dataIndex: 'forward_next_fy_hi',
             key: 'forward_next_fy_hi',
             render: (text) => text ? text.toFixed(2) : '-',
             width: 80
@@ -187,16 +187,16 @@ const EVCValuation = () => {
             width: 60
         },
         {
-            title: '估值日期(n天前)', 
-            dataIndex: 'fair_value_date', 
+            title: '估值日期(n天前)',
+            dataIndex: 'fair_value_date',
             key: 'fair_value_date',
             sorter: (a, b) => new Date(a.fair_value_date) - new Date(b.fair_value_date),
-            render: (text) => text + '(' + ((new Date()-new Date(text)) / (1000*60*60*24)).toFixed(0) + '天)',
+            render: (text) => text + '(' + ((new Date() - new Date(text)) / (1000 * 60 * 60 * 24)).toFixed(0) + '天)',
             width: 110
         },
-        { 
-            title: '更新时间', 
-            dataIndex: 'date', 
+        {
+            title: '更新时间',
+            dataIndex: 'date',
             key: 'date',
             render: (text) => text,
             width: 100
@@ -231,8 +231,8 @@ const EVCValuation = () => {
                                 <>
                                     <Form form={form} onFinish={handleSearch} layout="inline">
                                         <Form.Item label="股票代码" name="symbol">
-                                            <Input 
-                                                placeholder="输入股票代码" 
+                                            <Input
+                                                placeholder="输入股票代码"
                                                 style={{ width: 120 }}
                                                 maxLength={5}
                                                 onChange={(e) => {
