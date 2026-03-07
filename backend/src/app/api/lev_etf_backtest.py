@@ -330,7 +330,7 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
         JOBS[task_id]["progress"] = 0
 
         # Initialize Services
-        trade_service = LongPortService(account_id)
+        trade_service = LongPortService.get_instance()
         quote_service = QuoteService(trade_service)
 
         symbol = params.etf_code if params.etf_code.endswith('.US') else f"{params.etf_code}.US"
@@ -477,7 +477,7 @@ async def run_lev_etf_backtest(
 ):
     # Initialize Services
     try:
-        trade_service = LongPortService(account_id)
+        trade_service = LongPortService.get_instance()
         quote_service = QuoteService(trade_service)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize services: {str(e)}")

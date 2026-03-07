@@ -51,7 +51,7 @@ class EvcStrategy(QuoteObserver):
         self.emotion_service = SZDTService()
         
         # 初始化长桥接口，提供行情服务
-        long_port_service:QuoteProvider = LongPortService(account_id)
+        long_port_service:QuoteProvider = LongPortService.get_instance()
         self.quote_service = QuoteService(provider=long_port_service)
         self.quote_service.set_on_quote(self)
         # 初始化交易服务

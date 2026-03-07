@@ -31,7 +31,7 @@ class AllWeatherParams(BaseModel):
 
 @router.post("")
 async def run_all_weather_backtest(params: AllWeatherParams, account_id: str = Depends(valid_account)):
-    trade_service = LongPortService(account_id)
+    trade_service = LongPortService.get_instance()
     quote_service = QuoteService(trade_service)
     
     start_dt = datetime.strptime(params.start_date, "%Y-%m-%d").date()

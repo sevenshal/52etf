@@ -125,7 +125,7 @@ async def valuation_search(
         symbols = [stock.symbol for stock in stocks]
         
         # 获取股票静态信息
-        quote_service = LongPortService(account_id)
+        quote_service = LongPortService.get_instance()
         static_info_list = []
         if symbols:
             static_info_list = quote_service.get_static_info(symbols)
