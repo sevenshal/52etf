@@ -13,7 +13,7 @@ class PortfolioCopyConfigSchema(BaseModel):
     id: Optional[int] = None
     account_id: Optional[str] = None
     enabled: bool = False
-    portfolio_id: str
+    portfolio_id: Optional[str] = None
     portfolio_name: Optional[str] = None
     cron_rule: str = "0 8 * * *"
     timezone: str = "America/New_York"
@@ -26,6 +26,9 @@ class PortfolioCopyConfigSchema(BaseModel):
     account_type: Optional[str] = "ib" 
     longport_account_id: Optional[str] = None
     platform: Optional[str] = "futu"
+    symbol: Optional[str] = None
+    ma_short: Optional[int] = None
+    ma_long: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -81,6 +84,9 @@ async def save_config(
         config.account_type = config_data.account_type
         config.longport_account_id = config_data.longport_account_id
         config.platform = config_data.platform
+        config.symbol = config_data.symbol
+        config.ma_short = config_data.ma_short
+        config.ma_long = config_data.ma_long
     else:
         config = PortfolioCopyConfig(
             account_id=account_id,
@@ -97,7 +103,10 @@ async def save_config(
             api_headers=config_data.api_headers,
             account_type=config_data.account_type,
             longport_account_id=config_data.longport_account_id,
-            platform=config_data.platform
+            platform=config_data.platform,
+            symbol=config_data.symbol,
+            ma_short=config_data.ma_short,
+            ma_long=config_data.ma_long
         )
         db.add(config)
     

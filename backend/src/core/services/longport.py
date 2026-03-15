@@ -51,7 +51,17 @@ class LongPortService(QuoteProvider, TradeService):
             
         if lp_account_id not in cls._instances:
             cls._instances[lp_account_id] = cls(lp_account_id)
-        return cls._instances[lp_account_id]
+        
+        # If it failed to initialize previously, try to reload it
+        instance = cls._instances[lp_account_id]
+        if not getattr(instance, 'initialized', False):
+            try:
+                # Need to init again
+                instance.__init__(lp_account_id)
+            except Exception as e:
+                logging.error(f"Retry init failed for {lp_account_id}: {e}")
+                
+        return instance
 
     def __init__(self, lp_account_id: str):
         if hasattr(self, 'initialized') and self.initialized:

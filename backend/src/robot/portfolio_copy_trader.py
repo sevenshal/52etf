@@ -13,6 +13,8 @@ from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog, IBKR
 from ..core.utils import mask_account_id
 from ..core.services.ib_service import IBKRService
 from ..core.services.market import MarketService
+from ..core.services.longport import LongPortService
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +383,40 @@ class PortfolioCopyTrader:
                     futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
                     if r["price"] > 0:
                         futu_price_map[symbol] = r["price"]
+            elif getattr(config, 'platform', 'futu') == 'daily_ma':
+                # Daily MA Strategy Logic
+                symbol = config.symbol
+                if symbol:
+                    
+                    longport_svc = LongPortService.get_instance()
+                    ma_s = config.ma_short or 5
+                    ma_l = config.ma_long or 25
+                    required_count = max(ma_s, ma_l) + 10
+                    
+                    # Normalize symbol for Longport (usually expects SUFFIX .US like TQQQ.US)
+                    longport_sym = symbol.upper()
+                    if longport_sym.startswith('US.'):
+                        longport_sym = longport_sym.replace('US.', '') + '.US'
+                    elif not longport_sym.endswith('.US') and not longport_sym.endswith('.HK'):
+                        longport_sym = longport_sym + '.US'
+                    
+                    klines = await self._run_in_executor(longport_svc.get_candlesticks, longport_sym, required_count, 'd')
+                    
+                    if klines and len(klines) >= max(ma_s, ma_l):
+                        closes = np.array([float(k['close']) for k in klines])
+                        short_ma = np.mean(closes[-ma_s:])
+                        long_ma = np.mean(closes[-ma_l:])
+                        
+                        target_ratio = 1.0 if short_ma > long_ma else 0.0
+                        
+                        clean_symbol = symbol.upper().replace('US.', '').replace('.US', '')  # Convert to pure 'TQQQ' for IB compatibility
+                        
+                        # Set target based on MA
+                        futu_positions_map[clean_symbol] = target_ratio
+                        futu_price_map[clean_symbol] = float(klines[-1]['close'])
+                        logger.info(f"Daily MA Strategy for {clean_symbol}: short_ma={short_ma:.2f}, long_ma={long_ma:.2f}. target_ratio={target_ratio}")
+                    else:
+                        logger.error(f"Not enough K-lines to calculate MA for {symbol}")
             else:
                 # Futu Logic (Snapshot of logic below)
                 futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})

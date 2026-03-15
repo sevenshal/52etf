@@ -318,7 +318,7 @@ class PortfolioCopyConfig(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
     enabled = Column(Boolean, default=False)
-    portfolio_id = Column(String, nullable=False)
+    portfolio_id = Column(String, nullable=True)
     ib_account_id = Column(Integer, nullable=True) # 关联的 IB 账户 ID
     cron_rule = Column(String, default="0 8 * * *") # 默认每天 8 点
     timezone = Column(String, default="America/New_York") # 触发时区
@@ -332,7 +332,12 @@ class PortfolioCopyConfig(Base):
     # 新增字段以支持长桥
     account_type = Column(String, default="ib") # "ib" or "longport"
     longport_account_id = Column(String, nullable=True) # 关联的长桥账户 ID (lp_account_id)
-    platform = Column(String, default="futu") # "futu" or "star_wealth"
+    platform = Column(String, default="futu") # "futu", "star_wealth", "yingli", or "daily_ma"
+    
+    # 新增字段以支持日均线策略
+    symbol = Column(String, nullable=True) # 交易标
+    ma_short = Column(Integer, nullable=True) # 短周期
+    ma_long = Column(Integer, nullable=True)  # 长周期
     
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
