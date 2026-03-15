@@ -317,21 +317,34 @@ const PortfolioCopyTrading = () => {
         {
             title: '组合信息',
             key: 'portfolio',
-            render: (_, record) => (
-                <Space direction="vertical" size={0}>
-                    <Text strong>{record.portfolio_name || '未命名'}</Text>
-                    <Space size="small">
-                        <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
-                        {record.platform === 'star_wealth' ? (
-                            <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>
-                        ) : record.platform === 'yingli' ? (
-                            <Tag color="purple" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>盈立</Tag>
-                        ) : (
-                            <Tag color="cyan" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>富途牛牛</Tag>
-                        )}
+            render: (_, record) => {
+                if (record.platform === 'daily_ma') {
+                    return (
+                        <Space direction="vertical" size={0}>
+                            <Text strong>{record.portfolio_name || record.symbol || '未设置标的'}</Text>
+                            <Space size="small">
+                                <Text type="secondary" style={{ fontSize: '12px' }}>{record.symbol} {record.ma_short}日线 / {record.ma_long}日线</Text>
+                                <Tag color="green" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>日均线策略</Tag>
+                            </Space>
+                        </Space>
+                    );
+                }
+                return (
+                    <Space direction="vertical" size={0}>
+                        <Text strong>{record.portfolio_name || '未命名'}</Text>
+                        <Space size="small">
+                            <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
+                            {record.platform === 'star_wealth' ? (
+                                <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>
+                            ) : record.platform === 'yingli' ? (
+                                <Tag color="purple" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>盈立</Tag>
+                            ) : (
+                                <Tag color="cyan" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>富途牛牛</Tag>
+                            )}
+                        </Space>
                     </Space>
-                </Space>
-            )
+                );
+            }
         },
         {
             title: '触发规则',
@@ -390,7 +403,9 @@ const PortfolioCopyTrading = () => {
                     ) : (
                         <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {record.total_position_ratio}%</Text>
                     )}
-                    <Text type="secondary" style={{ fontSize: '12px' }}>跟踪误差: {record.tracking_error_pct}%</Text>
+                    {record.platform !== 'daily_ma' && (
+                        <Text type="secondary" style={{ fontSize: '12px' }}>跟踪误差: {record.tracking_error_pct}%</Text>
+                    )}
                 </Space>
             )
         },
@@ -551,7 +566,7 @@ const PortfolioCopyTrading = () => {
             <Card
                 title={
                     <Space>
-                        <Title level={4} style={{ margin: 0 }}>投资组合自动化跟单</Title>
+                        <Title level={4} style={{ margin: 0 }}>自动化策略配置</Title>
                     </Space>
                 }
                 extra={
@@ -820,23 +835,12 @@ const PortfolioCopyTrading = () => {
                                     <Select.Option value="futu">富途牛牛</Select.Option>
                                     <Select.Option value="star_wealth">星财富</Select.Option>
                                     <Select.Option value="yingli">盈立 (Yingli)</Select.Option>
+                                    <Select.Option value="daily_ma">日均线策略 (Daily MA)</Select.Option>
                                 </Select>
                             </Form.Item>
                         </Col>
-                        <Col span={10}>
-                            <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
-                                <Space.Compact style={{ width: '100%' }}>
-                                    <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
-                                        <Input placeholder="例如: 158919" />
-                                    </Form.Item>
-                                    <Button onClick={fetchPortfolioName}>获取</Button>
-                                </Space.Compact>
-                            </Form.Item>
-                        </Col>
                         <Col span={8}>
-                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
-                                <Input placeholder="自动获取" />
-                            </Form.Item>
+                            {/* Removed Portfolio fields from here, moved to dynamic render */}
                         </Col>
                     </Row>
                     <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
@@ -853,6 +857,60 @@ const PortfolioCopyTrading = () => {
                                         <Col span={18}>
                                             <Form.Item name="yingli_auth" label="Authorization (Headers)" rules={[{ required: true }]}>
                                                 <Input.Password placeholder="eyJh..." />
+                                            </Form.Item>
+                                        </Col>
+                                    </Row>
+                                );
+                            }
+                            if (platform === 'daily_ma') {
+                                return (
+                                    <Row gutter={16}>
+                                        <Col span={6}>
+                                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
+                                                <Input placeholder="输入策略名称" />
+                                            </Form.Item>
+                                        </Col>
+                                        <Col span={6}>
+                                            <Form.Item name="symbol" label="交易标的" rules={[{ required: true }]}>
+                                                <Input placeholder="如: US.TQQQ" />
+                                            </Form.Item>
+                                        </Col>
+                                        <Col span={6}>
+                                            <Form.Item name="ma_short" label="短周期(如 5)" rules={[{ required: true }]}>
+                                                <InputNumber style={{ width: '100%' }} min={1} />
+                                            </Form.Item>
+                                        </Col>
+                                        <Col span={6}>
+                                            <Form.Item name="ma_long" label="长周期(如 25)" rules={[{ required: true }]}>
+                                                <InputNumber style={{ width: '100%' }} min={1} />
+                                            </Form.Item>
+                                        </Col>
+                                    </Row>
+                                );
+                            }
+                            return null;
+                        }}
+                    </Form.Item>
+
+                    <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
+                        {() => {
+                            const platform = form.getFieldValue('platform');
+                            if (platform !== 'daily_ma') {
+                                return (
+                                    <Row gutter={16}>
+                                        <Col span={10}>
+                                            <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
+                                                <Space.Compact style={{ width: '100%' }}>
+                                                    <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
+                                                        <Input placeholder="例如: 158919" />
+                                                    </Form.Item>
+                                                    <Button onClick={fetchPortfolioName}>获取</Button>
+                                                </Space.Compact>
+                                            </Form.Item>
+                                        </Col>
+                                        <Col span={8}>
+                                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
+                                                <Input placeholder="自动获取" />
                                             </Form.Item>
                                         </Col>
                                     </Row>
@@ -936,8 +994,18 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={8}>
-                            <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
-                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
+                            <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
+                                {() => {
+                                    const platform = form.getFieldValue('platform');
+                                    if (platform !== 'daily_ma') {
+                                        return (
+                                            <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
+                                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
+                                            </Form.Item>
+                                        );
+                                    }
+                                    return null;
+                                }}
                             </Form.Item>
                         </Col>
                     </Row>
