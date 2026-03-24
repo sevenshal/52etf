@@ -727,11 +727,16 @@ async def get_snowball_opportunities(
         
         if abs(diff) > 1e-6: # Float epsilon
             if is_closing_window:
-                snapshot.cash += diff
+                if diff > 0:
+                    # 增资：将新增资金注入现金，等待下次 rebalance 买入
+                    snapshot.cash += diff
+                    snapshot.market_value += diff
+                    logger.info(f"Capital increased for Config {config['id']}: {synced_amt} -> {target_amt} (+{diff})")
+                else:
+                    # 减资：不注入负现金（否则 base_value 为负会算出负持仓）
+                    # 只更新 last_synced_amount，rebalance 逻辑会按新的 base_value 自然缩仓
+                    logger.info(f"Capital decreased for Config {config['id']}: {synced_amt} -> {target_amt} ({diff}), will rebalance down naturally")
                 snapshot.last_synced_amount = target_amt
-                logger.info(f"Adjusted capital for Config {config['id']}: {synced_amt} -> {target_amt} (Diff: {diff})")
-                # Force recalc of current value after injection
-                snapshot.market_value += diff 
             else:
                 # Pending adjustment
                 pass
@@ -742,7 +747,13 @@ async def get_snowball_opportunities(
         snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
         
         # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
-        base_value = snap_mv + snapshot.cash
+        # Note: cash can be negative if previous data is corrupted; clamp to 0 to avoid negative base_value
+        current_cash = max(snapshot.cash or 0.0, 0.0)
+        base_value = snap_mv + current_cash
+        
+        if base_value <= 0:
+            logger.warning(f"Config {config['id']} has zero/negative base_value ({base_value}), skipping rebalance")
+            continue
         
         # --- Calculate New Target State ---
         new_snap_holdings = {}
@@ -812,7 +823,7 @@ async def get_snowball_opportunities(
 
         # Update Snapshot
         snapshot.holdings = new_snap_holdings
-        snapshot.cash = base_value - used_cash
+        snapshot.cash = max(base_value - used_cash, 0.0)  # 防御性：cash 不存负数
         snapshot.market_value = base_value
 
         # Aggregate Targets
