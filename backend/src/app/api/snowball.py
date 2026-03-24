@@ -708,7 +708,6 @@ async def get_snowball_opportunities(
         
         # --- Initialize or Calculate Current Snapshot Value ---
         if not snapshot:
-            # Init with 0. Wait for adjustment logic to inject capital
             snapshot = SnowballPortfolioSnapshot(
                 config_id=config['id'],
                 holdings={},
@@ -718,43 +717,43 @@ async def get_snowball_opportunities(
                 account_id=account_id
             )
             db.add(snapshot)
-            db.flush() 
+            db.flush()
         
-        # --- Capital Adjustment Logic ---
+        # --- Determine Base Value for Rebalancing ---
+        # base_value 是本次 rebalance 的"目标总金额基准"
         target_amt = config['total_amount'] or 0.0
         synced_amt = snapshot.last_synced_amount or 0.0
-        diff = target_amt - synced_amt
-        
-        if abs(diff) > 1e-6: # Float epsilon
-            if is_closing_window:
-                if diff > 0:
-                    # 增资：将新增资金注入现金，等待下次 rebalance 买入
-                    snapshot.cash += diff
-                    snapshot.market_value += diff
-                    logger.info(f"Capital increased for Config {config['id']}: {synced_amt} -> {target_amt} (+{diff})")
-                else:
-                    # 减资：不注入负现金（否则 base_value 为负会算出负持仓）
-                    # 只更新 last_synced_amount，rebalance 逻辑会按新的 base_value 自然缩仓
-                    logger.info(f"Capital decreased for Config {config['id']}: {synced_amt} -> {target_amt} ({diff}), will rebalance down naturally")
-                snapshot.last_synced_amount = target_amt
-            else:
-                # Pending adjustment
-                pass
+        amt_changed = abs(target_amt - synced_amt) > 1e-6
 
-        # Calc Current Market Value of Snapshot
-        # Value = Sum(HoldingQty * Price) + Cash
         snap_holdings = snapshot.holdings or {}
         snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
-        
-        # Base Value for rebalancing is the current portfolio value (including any just-injected cash)
-        # Note: cash can be negative if previous data is corrupted; clamp to 0 to avoid negative base_value
-        current_cash = max(snapshot.cash or 0.0, 0.0)
-        base_value = snap_mv + current_cash
-        
+        snap_cash = max(snapshot.cash or 0.0, 0.0)  # 防止旧数据中存在负现金
+
+        if amt_changed and is_closing_window:
+            # ✅ 收盘窗口 + 金额有变化：以新配置金额作为基准（无论增资还是减资）
+            # 这样 rebalance 会自动计算 target_val = target_amt × weight，生成相应的买/卖信号
+            base_value = target_amt
+            snapshot.last_synced_amount = target_amt
+            logger.info(f"Config {config['id']} amount synced: {synced_amt} -> {target_amt}")
+        elif amt_changed and not is_closing_window:
+            # ⏳ 非收盘窗口 + 金额有变化：暂不生效，沿用当前快照市值
+            # 等到收盘窗口再统一处理，避免白天改配置立即触发大量信号
+            base_value = snap_mv + snap_cash
+            logger.info(f"Config {config['id']} amount change {synced_amt}->{target_amt} pending until closing window")
+        else:
+            # 金额未变化：正常用当前快照市值做 rebalance（处理权重调整、价格漂移等）
+            base_value = snap_mv + snap_cash
+
         if base_value <= 0:
-            logger.warning(f"Config {config['id']} has zero/negative base_value ({base_value}), skipping rebalance")
-            continue
-        
+            if target_amt > 0 and is_closing_window:
+                # 首次使用且在收盘窗口：直接用配置金额初始化
+                base_value = target_amt
+                snapshot.last_synced_amount = target_amt
+            else:
+                logger.warning(f"Config {config['id']} base_value={base_value}, skipping rebalance")
+                continue
+
+
         # --- Calculate New Target State ---
         new_snap_holdings = {}
         used_cash = 0.0
@@ -762,7 +761,7 @@ async def get_snowball_opportunities(
         weights = config_target_weights.get(config['id'], [])
         threshold_pct = config['tracking_error_pct'] or 1.0
         
-        # Combine all symbols (Current + Target)
+        # Combine all symbols (Current Snapshot Holdings + Target symbols from XQ)
         all_snap_symbols = set(snap_holdings.keys())
         target_weights_map = {}
         for item in weights:
@@ -781,23 +780,21 @@ async def get_snowball_opportunities(
             price = get_price(sym)
             if price <= 0: continue
             
-            # 1. Target Value
+            # 1. Target Value = 目标金额 × 权重%
             w = target_weights_map.get(sym, 0.0)
             target_val = base_value * (w / 100.0)
             
-            # 2. Current Value
+            # 2. Current Snapshot Value (按上次快照的股数 × 当前价)
             cur_q = snap_holdings.get(sym, 0)
             cur_val = cur_q * price
             
-            # 3. Deviation Check
+            # 3. Deviation Check vs target_amt
             diff_val = target_val - cur_val
             diff_pct_of_total = (abs(diff_val) / base_value) * 100 if base_value > 0 else 100
             
-            final_q = cur_q # Default: Keep
+            final_q = cur_q  # Default: Keep current quantity
             
-            # If deviation > threshold, rebalance to Target
-            # Special case: If base_value is basically just cash (fresh start), we likely want to buy.
-            # Force rebalance if target is 0 (Clearance) or deviation exceeds threshold
+            # If deviation > threshold OR need to clear (target=0), rebalance to target
             if diff_pct_of_total >= threshold_pct or (target_val == 0 and cur_q > 0):
                 raw_q = target_val / price
                 final_q = int(raw_q / 100) * 100
@@ -806,27 +803,25 @@ async def get_snowball_opportunities(
                 new_snap_holdings[sym] = final_q
                 used_cash += final_q * price
             
-            # Record Need & Reason per Combo
+            # Record Need & Reason for opportunity message
             snapshot_diff = final_q - cur_q
             if snapshot_diff != 0:
                 s_tgt_pct = (target_val / base_value) * 100 if base_value > 0 else 0
                 s_cur_pct = (cur_val / base_value) * 100 if base_value > 0 else 0
-                # s_diff_pct = ((target_val - cur_val) / base_value) * 100 if base_value > 0 else 0
                 
-                # Concise Reason: "ZH123: 10%->12%"
                 combo_name = config['combination_name'] or config['combination_id'] or str(config['id'])
-                short_name = combo_name[:10] # Truncate if too long
+                short_name = combo_name[:10]
                 need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
                 
                 symbol_needs[sym].append(need_reason)
                 symbol_contributors[sym].add(config['combination_id'])
 
-        # Update Snapshot
+        # Update Snapshot: holdings 记录目标股数，cash 记录账面剩余
         snapshot.holdings = new_snap_holdings
-        snapshot.cash = max(base_value - used_cash, 0.0)  # 防御性：cash 不存负数
+        snapshot.cash = max(base_value - used_cash, 0.0)
         snapshot.market_value = base_value
 
-        # Aggregate Targets
+        # Aggregate Targets across all configs for this cli_id
         for sym, qty in new_snap_holdings.items():
             aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
 
