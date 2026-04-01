@@ -13,13 +13,16 @@ logging.basicConfig(
 
 from contextlib import asynccontextmanager
 import threading
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import os  # 导入工具函数
 from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, market_signal, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, szdt_configs
 from ..robot.main import robot
+from ..core.utils import send_alert_email
+import traceback
 
 _robot_started = False
 _robot_lock = threading.Lock()
@@ -35,6 +38,13 @@ async def lifespan(app: FastAPI):
     # 清理工作（如果有）
 
 app = FastAPI(lifespan=lifespan)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_msg = f"API Interface Error:\nURL: {request.url}\nMethod: {request.method}\nException: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
+    logging.error(f"Global Exeption Handler: {error_msg}")
+    send_alert_email(f"API服务报错告警: {request.url.path}", error_msg)
+    return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 # 根据环境配置 CORS
 if ENV == "prod":

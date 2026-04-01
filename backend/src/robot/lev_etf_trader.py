@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 from ..core.database import get_db, Session, AutomatedTradingConfig
 from ..core.services.trading_strategy import is_market_closing_soon, execute_trading_strategy
 from ..core.services.market import MarketService
+from ..core.utils import send_alert_email
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class LevETFTrader:
                     
             except Exception as e:
                 logger.error(f"Error in LevETFTrader loop: {e}", exc_info=True)
+                send_alert_email("自动化跟单策略报错: LevETFTrader 主循环异常", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
                 await asyncio.sleep(60)
 
 def start_lev_etf_trader():

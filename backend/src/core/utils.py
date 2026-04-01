@@ -57,6 +57,17 @@ def sendmail(receiver_email: str, subject: str, body: str, Cc: str = None, mimeT
     except Exception as err:
         logging.error(err)
 
+def send_alert_email(subject: str, body: str):
+    """发送告警邮件"""
+    receiver_email = "405290618@qq.com"
+    try:
+        body_str = str(body)
+        if len(body_str) > 5000:
+            body_str = body_str[:5000] + "\n...[内容已截断]"
+        sendmail(receiver_email, subject, body_str)
+    except Exception as e:
+        logging.error(f"Failed to send alert email: {e}")
+
 def load_config_file(account_id: str, file_name: str, config_class: Type[T]) -> T:
     """
     通用配置文件加载方法

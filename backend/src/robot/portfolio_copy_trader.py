@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from croniter import croniter
 from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog, IBKRAccountConfig
-from ..core.utils import mask_account_id
+from ..core.utils import mask_account_id, send_alert_email
+import traceback
 from ..core.services.ib_service import IBKRService
 from ..core.services.market import MarketService
 from ..core.services.longport import LongPortService
@@ -595,6 +596,7 @@ class PortfolioCopyTrader:
         except Exception as e:
             logger.error(f"Rebalance process failed for {masked_account_id}: {e}")
             self._log(config.account_id, config.portfolio_id, "SYSTEM_ERROR", "FAILED", str(e), config_id=config.id)
+            send_alert_email(f"自动化跟单策略报错: Portfolio Copy Rebalance {masked_account_id}", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
 
     def _should_run(self, cron_rule: str, timezone_str: str = "America/New_York") -> bool:
         """使用 croniter 检查当前时间是否符合 cron 规则"""
@@ -662,6 +664,7 @@ class PortfolioCopyTrader:
                 await self.rebalance(config, client_id=cid)
             except Exception as e:
                 logger.error(f"Rebalance task error: {e}")
+                send_alert_email(f"自动化跟单策略报错: Rebalance task failed", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
             finally:
                 if key: self._processing_keys.discard(key)
 
@@ -682,6 +685,7 @@ class PortfolioCopyTrader:
                 pass
             except Exception as e:
                 logger.error(f"Error in worker loop task execution: {e}")
+                send_alert_email("自动化跟单策略报错: Portfolio Trader Queue", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
 
             # 2. 定时检查 Cron 规则并提交任务
             try:
@@ -716,6 +720,7 @@ class PortfolioCopyTrader:
                     db.close()
             except Exception as e:
                 logger.error(f"Error in Cron check: {e}")
+                send_alert_email("自动化跟单策略报错: Portfolio Trader Cron", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
 
 
     async def trigger_rebalance_if_name_in_content(self, content: str, platform: str = None) -> List[str]:

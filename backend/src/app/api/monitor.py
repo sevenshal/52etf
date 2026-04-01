@@ -24,6 +24,23 @@ class ConnectionManager:
         if cli_id in self.active_connections:
             del self.active_connections[cli_id]
             logger.info(f"PTrade Client {cli_id} disconnected")
+            
+            try:
+                from ...core.services.market import MarketService
+                from ...core.utils import send_alert_email
+                is_cn_open = MarketService.is_china_market_open()
+                
+                if is_cn_open:
+                    markets = []
+                    if is_cn_open: markets.append("A股")
+                    open_markets = "、".join(markets)
+                    
+                    send_alert_email(
+                        f"WebSocket 长连接断开告警: {cli_id}",
+                        f"Android/PTrade 客户端 {cli_id} 的 WebSocket 长连接已断开！\n\n当前处于 {open_markets} 开盘时间段，自动化跟单可能受影响，请及时检查客户端或手机 App 是否正常运行。"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send disconnect email: {e}")
 
     async def send_message(self, cli_id: str, message: str):
         if cli_id in self.active_connections:

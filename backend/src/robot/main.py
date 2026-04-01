@@ -58,6 +58,11 @@ def robot():
   start_portfolio_copy_trader()
 
   while True:
-    schedule.run_pending()
+    try:
+      schedule.run_pending()
+    except Exception as e:
+      import traceback
+      from ..core.utils import send_alert_email
+      send_alert_email("自动化业务报错: Schedule 主循序异常", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
     time.sleep(10)
 

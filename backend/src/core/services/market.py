@@ -112,6 +112,21 @@ class MarketService:
         return start <= now.time() <= end
 
     @classmethod
+    def is_china_market_open(cls) -> bool:
+        """判断当前A股是否可能处于交易时段（简单判断：周一至周五，9:30-11:30, 13:00-15:00）"""
+        now = datetime.now(ZoneInfo('Asia/Shanghai'))
+        if now.weekday() >= 5:
+            return False
+        
+        t = now.time()
+        morning_open = dtime(9, 30)
+        morning_close = dtime(11, 30)
+        afternoon_open = dtime(13, 0)
+        afternoon_close = dtime(15, 0)
+        
+        return (morning_open <= t <= morning_close) or (afternoon_open <= t <= afternoon_close)
+
+    @classmethod
     def is_market_closing_soon(cls, seconds_before_close: int = 10) -> bool:
         """判断是否接近美股收盘"""
         now = cls.get_eastern_now()
