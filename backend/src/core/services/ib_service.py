@@ -15,18 +15,33 @@ class IBKRService:
         self.ib = None
 
     async def connect(self, timeout: float = 15.0):
-        if self.ib is None:
-            self.ib = IB()
-            
-        if not self.ib.isConnected():
+        if self.ib is not None and self.ib.isConnected():
+            return  # 已连接，直接返回
+
+        # 清理旧的损坏实例：旧的 IB() 对象内部可能持有一个已取消的 apiStart future，
+        # 若不先 disconnect + 重建，再次 connectAsync 会立即被已取消的 future 触发 CancelledError/TimeoutError。
+        if self.ib is not None:
             try:
-                await self.ib.connectAsync(self.host, self.port, clientId=self.client_id, timeout=timeout)
-                logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
-                # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
-                self.ib.reqMarketDataType(3)
-            except Exception as e:
-                logger.error(f"Failed to connect to IB Gateway: {e}")
-                raise
+                self.ib.disconnect()
+            except Exception:
+                pass
+            self.ib = None
+
+        self.ib = IB()
+        try:
+            await self.ib.connectAsync(self.host, self.port, clientId=self.client_id, timeout=timeout)
+            logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
+            # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
+            self.ib.reqMarketDataType(3)
+        except Exception as e:
+            logger.error(f"Failed to connect to IB Gateway: {e}")
+            # 连接失败时也清理，避免下次复用损坏的实例
+            try:
+                self.ib.disconnect()
+            except Exception:
+                pass
+            self.ib = None
+            raise
 
     def disconnect(self):
         if self.ib and self.ib.isConnected():
