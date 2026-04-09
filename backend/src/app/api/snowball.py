@@ -59,6 +59,7 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
                     headers["Cookie"] = f"xq_a_token={cookie};"
                     
             response = await client.get("https://xueqiu.com/", headers=headers, timeout=10.0)
+            _last_token_refresh_time = datetime.now() # Record the attempt time to enforce the 1-hour limit
             
             for cookie in response.cookies.jar:
                 if cookie.name == "xq_a_token":
@@ -66,7 +67,6 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
                     new_cookie_str = f"xq_a_token={new_token};"
                     XUEQIU_HEADERS["Cookie"] = new_cookie_str
                     XUEQIU_STOCK_HEADERS["Cookie"] = new_cookie_str
-                    _last_token_refresh_time = datetime.now()
                     logger.info(f"Successfully refreshed Xueqiu guest token: {new_token[:10]}...")
                     
                     if account_id:
