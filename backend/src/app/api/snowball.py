@@ -42,7 +42,7 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
         return
         
     now = datetime.now()
-    if _last_token_refresh_time and (now - _last_token_refresh_time).total_seconds() < 3600:
+    if _last_token_refresh_time and (now - _last_token_refresh_time).total_seconds() < 43200:
         return
 
     _is_refreshing_token = True
