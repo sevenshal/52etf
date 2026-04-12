@@ -237,7 +237,7 @@ class ETFEmotionResponse(BaseModel):
 
 @router.get("/etf/emotion/{etf_type}", response_model=ETFEmotionResponse)
 async def get_etf_emotion(
-    etf_type: int = Path(..., ge=-1, le=8, description="ETF类型: -1:我的自选, 1:美股杠杆, 2:美股常规, 3:A股ETF, 4:全球ETF, 5:港股杠杆, 6:港股常规, 7:美股个股, 8:港股个股")
+    etf_type: int = Path(..., ge=-1, le=15, description="ETF类型: -1:我的自选, 1:美股杠杆, 2:美股常规, 3:A股ETF, 4:全球ETF, 5:港股杠杆, 6:港股常规, 7:美股个股, 8:港股个股")
 ):
     """获取ETF情绪指标
     
