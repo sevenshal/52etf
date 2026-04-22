@@ -138,6 +138,16 @@ class ScheduledTaskManager:
         self.ensure_task_configs()
         self.reload_jobs()
 
+    @staticmethod
+    def _mask_triggered_by(triggered_by: Optional[str]) -> Optional[str]:
+        if not triggered_by:
+            return triggered_by
+        if triggered_by == "system":
+            return triggered_by
+        if len(triggered_by) <= 8:
+            return f"{triggered_by[:2]}***"
+        return f"{triggered_by[:4]}***{triggered_by[-4:]}"
+
     def ensure_task_configs(self):
         with get_db_ctx() as db:
             for task in self.task_definitions.values():
@@ -307,12 +317,13 @@ class ScheduledTaskManager:
         started_at = datetime.now()
         status = "SUCCESS"
         message = "执行成功"
+        masked_triggered_by = self._mask_triggered_by(triggered_by)
 
         self.logger.info(
             "Starting scheduled task %s, source=%s, triggered_by=%s",
             task.task_key,
             trigger_source,
-            triggered_by,
+            masked_triggered_by,
         )
 
         try:
