@@ -190,9 +190,9 @@ class ETFManager:
             # 分析每个持仓
             for holding in holdings_data.holdings:
                 try:
-                    shares = holding.shares
-                    price = holding.price
-                    market_value = holding.market_value or (shares * price if price else 0)
+                    shares = int(holding.shares or 0)
+                    price = float(holding.price) if holding.price is not None else None
+                    market_value = float(holding.market_value) if holding.market_value is not None else (shares * price if price is not None else 0)
                     fair_value_lo = None
                     fair_value_hi = None
                     forward_next_fy_lo = None
@@ -201,8 +201,8 @@ class ETFManager:
                     evc_info = None
                     if holding.asset_class == 'Equity' and holding.symbol:
                         static_info = static_info_map.get(holding.symbol)
-                        eps_v2 = static_info.get('eps') if static_info else 0.0
-                        eps_ttm = static_info.get('eps_ttm') if static_info else 0.0
+                        eps_v2 = float(static_info.get('eps') or 0.0) if static_info else 0.0
+                        eps_ttm = float(static_info.get('eps_ttm') or 0.0) if static_info else 0.0
                         total_revenue_v2 += eps_v2 * shares
                         total_revenue_ttm += eps_ttm * shares
 
@@ -212,10 +212,11 @@ class ETFManager:
                             fair_value_hi = evc_info.fair_value_hi
                             forward_next_fy_lo = evc_info.forward_next_fy_lo
                             forward_next_fy_hi = evc_info.forward_next_fy_hi
-                            price = evc_info.last_price if evc_info.last_price else price
-                            market_value = shares * price
-                            eps = price / evc_info.pe_ratio if evc_info.pe_ratio else 0.0
-                            eps_forword = price / evc_info.forward_pe_ratio if evc_info.forward_pe_ratio else 0.0
+                            if evc_info.last_price is not None:
+                                price = float(evc_info.last_price)
+                            market_value = shares * price if price is not None else market_value
+                            eps = (price / evc_info.pe_ratio) if (price is not None and evc_info.pe_ratio) else 0.0
+                            eps_forword = (price / evc_info.forward_pe_ratio) if (price is not None and evc_info.forward_pe_ratio) else 0.0
                             total_revenue += eps * shares
                             total_forward_revenue += eps_forword * shares
                             if all([fair_value_lo, fair_value_hi, 

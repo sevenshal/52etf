@@ -68,6 +68,8 @@ class LongPortService(QuoteProvider, TradeService):
             return
 
         self.lp_account_id = lp_account_id
+        # 缓存已确认无效的标的，避免重复请求刷日志
+        self.invalid_kline_symbols = set()
         
         try:
             self.__load_config_from_db()
@@ -331,23 +333,45 @@ class LongPortService(QuoteProvider, TradeService):
     @limits(calls=10, period=1)
     def get_candlesticks(self, symbol: str, count: int, period = 'd') -> List[Dict]:
         """实现QuoteProvider接口"""
+        if symbol in self.invalid_kline_symbols:
+            return []
+
+        request_count = count if isinstance(count, int) and count > 0 else 1000
         try:
-            resp = self.ctx.candlesticks(
-                symbol=symbol,
-                period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
-                count=count if count > 0 else 1000,
-                adjust_type=AdjustType.ForwardAdjust
-            )
-            if resp:
-                return [{
-                    'timestamp': candle.timestamp.date(),
-                    'open': float(candle.open),
-                    'high': float(candle.high),
-                    'low': float(candle.low),
-                    'close': float(candle.close),
-                    'volume': candle.volume,
-                    'turnover': float(candle.turnover)
-                } for candle in resp]
+            while request_count > 0:
+                try:
+                    resp = self.ctx.candlesticks(
+                        symbol=symbol,
+                        period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
+                        count=request_count,
+                        adjust_type=AdjustType.ForwardAdjust
+                    )
+                    if resp:
+                        return [{
+                            'timestamp': candle.timestamp.date(),
+                            'open': float(candle.open),
+                            'high': float(candle.high),
+                            'low': float(candle.low),
+                            'close': float(candle.close),
+                            'volume': candle.volume,
+                            'turnover': float(candle.turnover)
+                        } for candle in resp]
+                    return []
+                except Exception as e:
+                    err = str(e)
+                    err_lower = err.lower()
+                    if "code=301600" in err or "invalid symbol" in err_lower:
+                        self.invalid_kline_symbols.add(symbol)
+                        logging.warning(f"跳过无效标的 {symbol}: {err}")
+                        return []
+                    if "code=301607" in err and request_count > 100:
+                        next_count = max(100, request_count // 2)
+                        if next_count == request_count:
+                            break
+                        logging.warning(f"获取{symbol} K线数量{request_count}超限，降级为{next_count}后重试")
+                        request_count = next_count
+                        continue
+                    raise
             return []
         except Exception as e:
             logging.error(f"获取{symbol} K线数据失败: {str(e)}")

@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 from typing import Dict
+from io import BytesIO
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
 
@@ -77,14 +78,16 @@ class SPDRDataFetcher(ETFDataFetcher):
             response.raise_for_status()
             
             # 读取Excel文件
-            df = pd.read_excel(response.content)
+            df = pd.read_excel(BytesIO(response.content))
             
             # 查找更新日期
             update_date = None
             for idx, row in df.iterrows():
-                if isinstance(row[0], str) and 'Holdings:' in row[0]:
+                first_col = row.iloc[0] if len(row) > 0 else None
+                second_col = row.iloc[1] if len(row) > 1 else None
+                if isinstance(first_col, str) and 'Holdings:' in first_col and isinstance(second_col, str):
                     # 格式如: "Holdings: As of 16-Jan-2025"
-                    date_str = row[1].split('As of ')[-1].strip()
+                    date_str = second_col.split('As of ')[-1].strip()
                     try:
                         update_date = datetime.strptime(date_str, "%d-%b-%Y").date()
                         break

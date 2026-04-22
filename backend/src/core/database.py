@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON
+from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship
 from contextlib import contextmanager
@@ -455,8 +455,77 @@ class LongPortAccount(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class EVCAccountConfig(Base):
+    """EVC 账户配置"""
+    __tablename__ = "evc_account_configs"
+
+    account_id = Column(String, primary_key=True)
+    evc_username = Column(String)
+    evc_password = Column(String)
+    evc_cookie = Column(String)
+    cookie_expires_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class ScheduledTaskConfig(Base):
+    """系统级定时任务配置"""
+    __tablename__ = "scheduled_task_configs"
+
+    task_key = Column(String(64), primary_key=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(255))
+    enabled = Column(Boolean, default=True, nullable=False)
+    schedule_time = Column(String(5), nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    last_trigger_source = Column(String(32))
+    last_run_started_at = Column(DateTime)
+    last_run_finished_at = Column(DateTime)
+    last_run_status = Column(String(16))
+    last_run_message = Column(String(500))
+    last_duration_seconds = Column(Float)
+    updated_by = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 # 创建所有表
 Base.metadata.create_all(engine)
+
+def ensure_performance_indexes():
+    """为高频查询补充索引（幂等执行，适配存量数据库）。"""
+    index_sqls = [
+        "CREATE INDEX IF NOT EXISTS idx_stock_evc_date_symbol ON stock_evc(date, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_stock_tags_tag_date_symbol ON stock_tags(tag_id, date, stock_symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
+    ]
+    with engine.begin() as conn:
+        for sql in index_sqls:
+            conn.execute(text(sql))
+
+ensure_performance_indexes()
+
+def ensure_table_columns():
+    """为存量表补充新增字段（幂等执行）。"""
+    table_columns = {
+        "evc_account_configs": {
+            "evc_username": "ALTER TABLE evc_account_configs ADD COLUMN evc_username VARCHAR",
+            "evc_password": "ALTER TABLE evc_account_configs ADD COLUMN evc_password VARCHAR",
+            "evc_cookie": "ALTER TABLE evc_account_configs ADD COLUMN evc_cookie VARCHAR",
+            "cookie_expires_at": "ALTER TABLE evc_account_configs ADD COLUMN cookie_expires_at DATETIME",
+        },
+    }
+
+    with engine.begin() as conn:
+        for table_name, columns in table_columns.items():
+            existing = {
+                row[1]
+                for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            }
+            for column_name, ddl in columns.items():
+                if column_name not in existing:
+                    conn.execute(text(ddl))
+
+ensure_table_columns()
 
 def get_db():
     """FastAPI dependency for database session"""

@@ -1,15 +1,14 @@
-import os
-import json
+import asyncio
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
-from typing import Optional, List, Dict
-from ...core.utils import get_data_file, read_json_file, write_json_file, load_config_file
-from ...core.models.account import AccountCfg
+from typing import Optional, List
+from ...core.utils import get_data_file, read_json_file, write_json_file
 from datetime import datetime
 from sqlalchemy.orm import Session
-from ...core.database import StockEVC, StockTag, stock_tags, get_db, EVCTradeLog, Session
+from ...core.database import StockEVC, stock_tags, get_db, EVCTradeLog, EVCAccountConfig
 from sqlalchemy import func, and_
 from ...core.services.longport import LongPortService
+from ...core.services.evc import EVCService
 
 router = APIRouter(prefix="/api/evc")
 
@@ -46,25 +45,20 @@ _default_strategy_config = {
 }
 
 @router.get("/config")
-async def get_config(account_id: str = Depends(get_account_id)):
-    try:
-        api_config = load_config_file(account_id, "evc_config.json", AccountCfg)
-        access_token_expired_at = (
-            datetime.fromtimestamp(api_config.access_token_expired_at).isoformat()
-            if api_config.access_token_expired_at
-            else None
-        )
-        try:
-            strategy_config = read_json_file(get_strategy_config_path(account_id))
-        except FileNotFoundError:
-            strategy_config = _default_strategy_config
-        return {
-            "activated": False,
-            "access_token_expired_at": access_token_expired_at,
-            **strategy_config
-        }
-    except FileNotFoundError:
-        return {"activated": False}
+async def get_config(
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
+    api_config = db.query(EVCAccountConfig).filter(
+        EVCAccountConfig.account_id == account_id
+    ).first()
+    strategy_config = read_json_file(get_strategy_config_path(account_id)) or _default_strategy_config
+    return {
+        "activated": False,
+        "evc_account_configured": bool(api_config and api_config.evc_username and api_config.evc_password),
+        "evc_cookie_configured": bool(api_config and api_config.evc_cookie),
+        **strategy_config
+    }
 
 @router.post("/update-strategy")
 async def update_strategy(
@@ -95,17 +89,26 @@ async def valuation_search(
 ):
     try:
         latest_date = db.query(func.max(StockEVC.date)).scalar()
+        if not latest_date:
+            return []
+
         tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
 
-        # 基础查询
+        # 基础查询：按 symbol + date 关联标签，避免跨历史日期产生大量重复行
         query = (
             db.query(StockEVC)
-            .join(stock_tags)
-            .join(StockTag)
+            .join(
+                stock_tags,
+                and_(
+                    stock_tags.c.stock_symbol == StockEVC.symbol,
+                    stock_tags.c.date == StockEVC.date
+                )
+            )
             .filter(
                 StockEVC.date == latest_date,
-                StockTag.id.in_(tag_ids)
+                stock_tags.c.tag_id.in_(tag_ids)
             )
+            .distinct()
         )
 
         # 如果提供了股票代码，只按股票代码过滤
@@ -121,14 +124,14 @@ async def valuation_search(
 
         stocks = query.all()
         
-        # 获取所有股票代码
-        symbols = [stock.symbol for stock in stocks]
+        # 获取所有股票代码（去重保持顺序）
+        symbols = list(dict.fromkeys(stock.symbol for stock in stocks))
         
         # 获取股票静态信息
         quote_service = LongPortService.get_instance()
         static_info_list = []
         if symbols:
-            static_info_list = quote_service.get_static_info(symbols)
+            static_info_list = await asyncio.to_thread(quote_service.get_static_info, symbols)
         
         # 将静态信息列表转换为以symbol为键的字典，方便查找
         static_info_dict = {}
@@ -138,10 +141,10 @@ async def valuation_search(
         
         result = []
         for stock in stocks:
-            static_info = static_info_dict[stock.symbol] or {}
+            static_info = static_info_dict.get(stock.symbol, {})
             stock_data = {
                 "symbol": stock.symbol,
-                "company": static_info['name_cn'] or stock.company,
+                "company": static_info.get('name_cn') or stock.company,
                 "last_price": stock.last_price,
                 "fair_value_lo": stock.fair_value_lo,
                 "fair_value_hi": stock.fair_value_hi,
@@ -193,39 +196,6 @@ async def get_trade_logs(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# 添加到文件开头的 imports 部分
-class TokenUpdateRequest(BaseModel):
-    access_token: str
-    access_token_expired_at: str
-
-# 添加到其他路由定义的位置
-@router.post("/update-token")
-async def update_token(
-    request: TokenUpdateRequest,
-    account_id: str = Depends(get_account_id)
-):
-    try:
-        # 先读取现有配置
-        try:
-            existing_config = load_config_file(account_id, "evc_config.json", AccountCfg)
-            config = existing_config.__dict__
-        except FileNotFoundError:
-            config = {}
-        
-        # 只更新 token 相关字段
-        config.update({
-            "access_token": request.access_token,
-            "access_token_expired_at": datetime.fromisoformat(request.access_token_expired_at).timestamp()
-        })
-        
-        write_json_file(get_data_file(account_id, "evc_config.json"), config)
-        return {
-            "access_token_expired_at": request.access_token_expired_at
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/stock-evc/history/{symbol}")
 def get_stock_evc_history(

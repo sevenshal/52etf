@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
+import asyncio
 from datetime import datetime, timedelta
 from ...core.database import Session, StockKline, StockFavorite, StockEVC, ETFAnalysis, get_db, LongPortAccount
 from .account import valid_account
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
@@ -173,22 +174,24 @@ async def get_favorites(
         
     if not favorite_symbols:
         return []
-    
-    # 从主数据库中获取这些股票的最新信息
+
+    latest_date = db.query(func.max(StockEVC.date)).scalar()
+    if not latest_date:
+        return []
+
+    # 从主数据库中获取收藏股票在最新日期的估值信息
     latest_stocks = (
         db.query(StockEVC)
         .filter(
-            and_(
-                StockEVC.symbol.in_(favorite_symbols),
-                StockEVC.date == db.query(StockEVC.date)
-                .filter(StockEVC.symbol == StockEVC.symbol)
-                .order_by(StockEVC.date.desc())
-                .limit(1)
-                .scalar_subquery()
-            )
+            StockEVC.symbol.in_(favorite_symbols),
+            StockEVC.date == latest_date
         )
         .all()
     )
+
+    # 按收藏顺序返回
+    stock_map = {stock.symbol: stock for stock in latest_stocks}
+    latest_stocks = [stock_map[s] for s in favorite_symbols if s in stock_map]
     
     # 获取所有股票代码
     symbols = [stock.symbol for stock in latest_stocks]
@@ -197,21 +200,30 @@ async def get_favorites(
     lp_account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
     lp_account_id = lp_account.lp_account_id if lp_account else "LBPT10001248"
     quote_service = LongPortService.get_instance(lp_account_id)
-    static_info_list = []
-    if symbols:
-        static_info_list = quote_service.get_static_info(symbols)
     
     # 将静态信息列表转换为以symbol为键的字典，方便查找
     static_info_dict = {}
+
+    # 初始化 SZDT 服务
+    szdt_service = SZDTService()
+
+    # 并发获取静态信息和情绪数据；情绪接口超时则降级为空，避免拖慢整个接口
+    static_info_task = asyncio.create_task(asyncio.to_thread(quote_service.get_static_info, symbols)) if symbols else None
+    try:
+        szdt_resp = await asyncio.wait_for(szdt_service.get_etf_emotion(etf_type=7), timeout=4.0)
+    except Exception:
+        szdt_resp = None
+
+    static_info_list = []
+    if static_info_task:
+        try:
+            static_info_list = await static_info_task
+        except Exception:
+            static_info_list = []
+
     for info in static_info_list:
         if 'symbol' in info:
             static_info_dict[info['symbol']] = info
-    
-    # 初始化 SZDT 服务
-    szdt_service = SZDTService()
-    
-    # 获取情绪数据
-    szdt_resp = await szdt_service.get_etf_emotion(etf_type=7)
     
     # 构建情绪数据字典
     emotion_dict = {}

@@ -208,7 +208,7 @@ class MarketSignalAnalyzer:
         self,
         quote_provider: QuoteProvider,
         etf_symbols=None,
-        min_market_cap=1e10,
+        min_market_cap=20_000_000_000,
         below_200ma_ratio_thresh=0.1,
         vol_5_std_thresh=1,
         today_vol_std_thresh=0.5,
@@ -327,7 +327,7 @@ class MarketSignalAnalyzer:
                 p = price_map.get(s)
                 sh = shares_map.get(s)
                 market_cap = (sh * p) if isinstance(p, (int, float)) and isinstance(sh, (int, float)) else 0
-                if market_cap >= 3_000_000_000:
+                if market_cap >= self.min_market_cap:
                     existing = self.db_session.query(MarketSignal).filter_by(
                         symbol=s, date=record.date
                     ).first()

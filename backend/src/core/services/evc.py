@@ -1,11 +1,13 @@
 import requests
-import json
-import os
 import logging
+import json
+import base64
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Optional, Tuple
 from dateutil import parser
+
+from ..database import EVCAccountConfig, Session
 
 @dataclass
 class TagData:
@@ -77,10 +79,10 @@ class EVCData:
 
 class EVCService:
     """EasyValueCheck API服务"""
-    
-    COOKIE_FILE = '/var/lib/quant_robot/data/evc_data.json'
-    
-    def __init__(self):
+
+    def __init__(self, account_id: Optional[str] = None):
+        self.account_id = account_id
+        self.login_url = 'https://easyvaluecheck.com/api/v1/auth/login'
         self.search_url = 'https://easyvaluecheck.com/api/v1/stock/search'
         self.tag_url = 'https://easyvaluecheck.com/api/v1/stocktag'
         self.headers = {
@@ -96,29 +98,161 @@ class EVCService:
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
             'sec-fetch-site':'same-origin',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'cookie': 'G_ENABLED_IDPS=google; G_AUTHUSER_H=0'
         }
-        self.headers['cookie'] = self._load_cookies()
+        cookie = self._load_cookie_from_db()
+        if cookie:
+            self.headers['cookie'] = cookie
 
-    def _load_cookies(self):
-        if not os.path.exists(self.COOKIE_FILE):
-            return None
-        with open(self.COOKIE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data.get('cookies')
+    def _get_config_record(self, session):
+        query = session.query(EVCAccountConfig)
+        if self.account_id:
+            query = query.filter(EVCAccountConfig.account_id == self.account_id)
+        else:
+            query = query.filter(EVCAccountConfig.evc_username.isnot(None))
+        return query.order_by(EVCAccountConfig.updated_at.desc()).first()
 
-    def _save_cookies(self):
-        data = {'cookies': self.headers['cookie']}
-        with open(self.COOKIE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+    def _load_cookie_from_db(self):
+        session = Session()
+        try:
+            config = self._get_config_record(session)
+            return config.evc_cookie if config else None
+        finally:
+            session.close()
 
     def set_cookies(self, cookies_str):
         self.headers['cookie'] = cookies_str
-        self._save_cookies()
+
+    def get_cookies(self):
+        return self.headers.get('cookie')
+
+    def _decode_cookie_expiry(self, cookie_value: Optional[str]) -> Optional[datetime]:
+        if not cookie_value:
+            return None
+        jwt_token = None
+        for segment in cookie_value.split(';'):
+            part = segment.strip()
+            if part.startswith('jwt='):
+                jwt_token = part[4:]
+                break
+        if not jwt_token:
+            return None
+        try:
+            payload = jwt_token.split('.')[1]
+            padding = len(payload) % 4
+            if padding:
+                payload += '=' * (4 - padding)
+            decoded = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+            expires_at = decoded.get('expires')
+            if expires_at:
+                return parser.parse(expires_at)
+            exp = decoded.get('exp')
+            if exp:
+                return datetime.fromtimestamp(exp, tz=timezone.utc)
+        except Exception as exc:
+            logging.warning(f"解析 EVC JWT 过期时间失败: {exc}")
+        return None
+
+    def _to_utc_naive(self, value: Optional[datetime]) -> Optional[datetime]:
+        if not value:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def _from_db_utc(self, value: Optional[datetime]) -> Optional[datetime]:
+        if not value:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _save_cookie_to_db(self, cookie_value: str, expires_at: Optional[datetime]):
+        session = Session()
+        try:
+            config = self._get_config_record(session)
+            if not config:
+                return
+            config.evc_cookie = cookie_value
+            config.cookie_expires_at = self._to_utc_naive(expires_at)
+            config.updated_at = datetime.now()
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def _is_cookie_valid(self, config: Optional[EVCAccountConfig]) -> bool:
+        if not config or not config.evc_cookie:
+            return False
+        if not config.cookie_expires_at:
+            return True
+        expires_at = self._from_db_utc(config.cookie_expires_at)
+        return datetime.now(timezone.utc) < expires_at - timedelta(minutes=3)
+
+    def login(self) -> dict:
+        session = Session()
+        try:
+            config = self._get_config_record(session)
+            if not config or not config.evc_username or not config.evc_password:
+                raise ValueError("未配置 EVC 账户，请先在“我的 -> 账户管理 -> EVC账户”中填写用户名和密码")
+
+            response = requests.post(
+                self.login_url,
+                headers=self.headers,
+                json={"name": config.evc_username, "password": config.evc_password},
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            jwt_value = response.cookies.get('jwt')
+            if not jwt_value:
+                set_cookie = response.headers.get('Set-Cookie', '')
+                for item in set_cookie.split(';'):
+                    part = item.strip()
+                    if part.startswith('jwt='):
+                        jwt_value = part[4:]
+                        break
+            if not jwt_value:
+                raise ValueError("登录成功但未获取到 jwt cookie")
+
+            cookie_value = f'G_ENABLED_IDPS=google; G_AUTHUSER_H=0; jwt={jwt_value}'
+            expires_at = self._decode_cookie_expiry(cookie_value)
+
+            config.evc_cookie = cookie_value
+            config.cookie_expires_at = self._to_utc_naive(expires_at)
+            config.updated_at = datetime.now()
+            session.commit()
+
+            self.headers['cookie'] = cookie_value
+            return {
+                "cookie": cookie_value,
+                "cookie_expires_at": self._from_db_utc(config.cookie_expires_at).isoformat() if config.cookie_expires_at else None
+            }
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def ensure_authenticated(self, force_login: bool = False):
+        session = Session()
+        try:
+            config = self._get_config_record(session)
+            has_valid_cookie = self._is_cookie_valid(config)
+            if not force_login and has_valid_cookie and config.evc_cookie:
+                self.headers['cookie'] = config.evc_cookie
+                return
+        finally:
+            session.close()
+        self.login()
 
     def get_stock_tags(self) -> List[TagData]:
         """获取股票标签列表"""
         try:
+            self.ensure_authenticated()
             response = requests.get(self.tag_url, headers=self.headers)
             response.raise_for_status()
             return [TagData.from_dict(item) for item in response.json()]
@@ -126,27 +260,56 @@ class EVCService:
             logging.error(f"获取股票标签失败: {str(e)}")
             return []
 
-    def search_stock(self, page: int = 1, size: int = 60, tags: List[str] = None, 
-                    underValued: bool = None, inValued: bool = None, overValued: bool = None) -> Tuple[List[EVCData], int, int]:
+    def search_stock(
+        self,
+        page: int = 1,
+        size: int = 60,
+        text: str = "",
+        tags: List[str] = None,
+        orderField: str = "createdAt",
+        orderDirection: str = "DESC",
+        underValued: bool = None,
+        inValued: bool = None,
+        overValued: bool = None
+    ) -> Tuple[List[EVCData], int, int]:
         """搜索股票"""
         try:
+            self.ensure_authenticated()
             params = {
                 'page': page,
                 'size': size,
-                'tags': tags or [],
-                'underValued': underValued,
-                'inValued': inValued,
-                'overValued': overValued
+                'text': text,
+                'orderField': orderField,
+                'orderDirection': orderDirection,
             }
-            response = requests.post(self.search_url, headers=self.headers, json=params)
+            if tags is not None:
+                params['tags'] = tags
+            if underValued is not None:
+                params['underValued'] = underValued
+            if inValued is not None:
+                params['inValued'] = inValued
+            if overValued is not None:
+                params['overValued'] = overValued
+            response = requests.post(self.search_url, headers=self.headers, json=params, timeout=30)
             response.raise_for_status()
             data = response.json()
+            if (
+                page == 1 and
+                data.get('count', 0) > len(data.get('data', [])) and
+                len(data.get('data', [])) <= 12
+            ):
+                # 未登录/过期时 upstream 常退化为预览数据，重登一次再重试。
+                self.login()
+                response = requests.post(self.search_url, headers=self.headers, json=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
             return list(map(EVCData.from_dict, data['data'])), data['page'], data['count']
         except Exception as e:
             logging.error(f"搜索股票失败: {str(e)}")
             return [], 0, 0
     
     def stock_evc_info(self, symbol) -> EVCData:
+        self.ensure_authenticated()
         symbol = symbol[:-3]
         url = f'https://easyvaluecheck.com/api/v1/stock/s/{symbol}/evc_info'
         headers = self.headers.copy()

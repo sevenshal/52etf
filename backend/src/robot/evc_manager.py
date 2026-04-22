@@ -70,14 +70,21 @@ class EVCManager:
                     stocks, ret_page, ret_total = self.evc_service.search_stock(
                         page=page, 
                         size=size, 
-                        tags=[], 
-                        underValued=True, 
-                        inValued=True, 
-                        overValued=True
+                        text="",
+                        orderField="createdAt",
+                        orderDirection="DESC"
                     )
 
                     if not stocks:
                         break
+
+                    if page == 1 and ret_total > len(stocks) and len(stocks) < size:
+                        self.logger.warning(
+                            "EVC search returned only %s rows for page 1 while count=%s. "
+                            "This usually means the cookie is missing/expired or the upstream API is preview-limiting the result.",
+                            len(stocks),
+                            ret_total,
+                        )
 
                     for stock_data in stocks:
                         try:

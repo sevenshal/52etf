@@ -1,69 +1,110 @@
-import os
-import finnhub
 from datetime import datetime
+
+import requests
+
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
 
+
 class QQQDataFetcher(ETFDataFetcher):
     """Invesco QQQ Trust (QQQ) 数据获取"""
-    
+
+    HOLDINGS_URL = (
+        "https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/"
+        "QQQ/holdings/fund?idType=ticker&interval=monthly&productType=ETF"
+    )
+
     def __init__(self):
         super().__init__()
-        self.name = '纳斯达克100ETF'
-        self.finnhub_client = finnhub.Client(api_key='cu2k231r01qh0l7hek80cu2k231r01qh0l7hek8g')
+        self.name = "纳斯达克100ETF"
+        self.headers.update(
+            {
+                "accept": "*/*",
+                "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                "origin": "https://www.invesco.com",
+                "referer": "https://www.invesco.com/",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/146.0.0.0 Safari/537.36"
+                ),
+            }
+        )
 
     def get_holdings(self, etf_symbol: str) -> ETFHoldingsData:
-        """获取QQQ持仓数据"""
-        try:
-            # This fetcher is specifically for QQQ
-            if etf_symbol.upper() != 'QQQ':
-                self.logger.warning(f"This fetcher is for QQQ, but it was called with '{etf_symbol}'. Proceeding with QQQ.")
-            
-            data = self.finnhub_client.etf_holdings('QQQ')
+        """获取 QQQ 持仓数据"""
+        normalized_symbol = etf_symbol.upper().replace(".US", "")
+        if normalized_symbol != "QQQ":
+            self.logger.warning(
+                "This fetcher is for QQQ, but it was called with '%s'. Proceeding with QQQ.",
+                etf_symbol,
+            )
 
-            if not data or 'holdings' not in data:
-                self.logger.error("Finnhub API did not return holdings data for QQQ.")
-                raise ValueError("Finnhub API did not return holdings data for QQQ")
-            
-            holdings = []
-            total_weight = 0
-            
-            update_date_str = data.get('atDate')
+        try:
+            response = requests.get(self.HOLDINGS_URL, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or "holdings" not in data:
+                raise ValueError("Invesco API did not return holdings data for QQQ")
+
+            update_date_str = data.get("effectiveBusinessDate") or data.get("effectiveDate")
             if not update_date_str:
-                raise ValueError("无法在Finnhub响应中找到更新日期 ('atDate')")
+                raise ValueError("无法在 Invesco 响应中找到更新日期")
             update_date = datetime.strptime(update_date_str, "%Y-%m-%d").date()
-            
-            # Process each holding data
-            for holding_data in data.get('holdings', []):
+
+            holdings = []
+            total_weight = 0.0
+
+            for holding_data in data.get("holdings", []):
                 try:
-                    shares = int(holding_data['share'])
-                    market_value = float(holding_data['value'])
-                    weight = float(holding_data['percent']) / 100
-                    
-                    holdings.append(ETFHolding(
-                        symbol=str(holding_data['symbol']).strip() + '.US',
-                        name=str(holding_data['name']).strip(),
-                        # Finnhub API doesn't provide 'asset_class', defaulting to 'Equity'
-                        # as QQQ primarily holds common stocks.
-                        asset_class="Equity",
-                        shares=shares,
-                        weight=weight,
-                        market_value=market_value,
-                        price=market_value / shares if shares > 0 else 0
-                    ))
+                    ticker = str(holding_data.get("ticker") or "").strip()
+                    issuer_name = str(holding_data.get("issuerName") or ticker).strip()
+                    shares = int(float(holding_data.get("units") or 0))
+                    weight = float(holding_data.get("percentageOfTotalNetAssets") or 0) / 100
+
+                    if not ticker:
+                        self.logger.warning("跳过无 ticker 的 QQQ 持仓行: %s", holding_data)
+                        continue
+
+                    holdings.append(
+                        ETFHolding(
+                            symbol=f"{ticker}.US",
+                            name=issuer_name,
+                            asset_class=self._map_asset_class(holding_data),
+                            shares=shares,
+                            weight=weight,
+                            # Invesco 这个接口未直接返回持仓市值和价格，交给上层分析阶段补齐。
+                            market_value=0.0,
+                            price=None,
+                        )
+                    )
                     total_weight += weight
-                except (ValueError, KeyError, TypeError) as e:
-                    self.logger.warning(f"处理QQQ持仓数据行时出错: {str(e)}, row: {holding_data}")
+                except (ValueError, KeyError, TypeError) as exc:
+                    self.logger.warning("处理 QQQ 持仓数据行时出错: %s, row: %s", exc, holding_data)
                     continue
-            
+
             return ETFHoldingsData(
                 holdings=holdings,
                 update_date=update_date,
-                total_shares=None,  # Not provided by Finnhub
-                total_weight=total_weight
+                total_shares=None,
+                total_weight=total_weight,
             )
-            
-        except Exception as e:
-            self.logger.error(f"通过Finnhub获取QQQ持仓数据失败: {str(e)}")
+        except Exception as exc:
+            self.logger.error("通过 Invesco 获取 QQQ 持仓数据失败: %s", exc)
             raise
- 
+
+    def _map_asset_class(self, holding_data: dict) -> str:
+        security_type_code = str(holding_data.get("securityTypeCode") or "").upper()
+        security_type_name = str(holding_data.get("securityTypeName") or "").lower()
+
+        if security_type_code in {"COM", "ADR", "ETF", "REIT"}:
+            return "Equity"
+        if security_type_code in {"CASH", "CUR"} or "cash" in security_type_name:
+            return "Cash"
+        if security_type_code in {"BND", "NOTE"} or "bond" in security_type_name:
+            return "Bond"
+        return "Equity"

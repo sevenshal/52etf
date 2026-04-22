@@ -12,7 +12,6 @@ schedule
 requests
 ratelimit
 longport
-finnhub-python
 openpyxl
 futu-api==9.0.5008
 watchdog

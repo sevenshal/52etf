@@ -200,12 +200,17 @@ class QuoteService:
         if not cache_only and (not db_klines or db_klines[-1].date < end_date):
             # 从接口获取数据
             if not db_klines:
-                # 如果没有历史数据，直接获取请求的数量
-                new_klines = self.provider.get_candlesticks(symbol, -1, period)
+                # 如果没有历史数据，直接获取请求的数量，避免一次性拉取过多K线触发限额
+                fetch_count = count if isinstance(count, int) and count > 0 else 1000
+                new_klines = self.provider.get_candlesticks(symbol, fetch_count, period)
             else:
-                # 计算需要补充最新的k线
+                # 计算需要补充最新的k线（不超过请求数量）
                 loss_count = (datetime.now().date() - db_klines[-1].date).days
-                new_klines = self.provider.get_candlesticks(symbol, loss_count + 1, period)
+                if isinstance(count, int) and count > 0:
+                    fetch_count = min(loss_count + 1, count)
+                else:
+                    fetch_count = loss_count + 1
+                new_klines = self.provider.get_candlesticks(symbol, fetch_count, period)
             
             # 保存到数据库
             for kline in new_klines:
