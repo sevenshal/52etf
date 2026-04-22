@@ -8,7 +8,7 @@ const EVCDashboard = () => {
 
     const items = [
         {
-            title: '自动化交易策略',
+            title: '自动化交易策略 / Cookie配置',
             onClick: () => navigate('/evc/strategy'),
             arrow: true
         },

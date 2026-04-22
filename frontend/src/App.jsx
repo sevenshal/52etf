@@ -25,6 +25,8 @@ import AllWeatherBacktest from './pages/AllWeatherBacktest';
 import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 import LongPortAccountManager from './pages/LongPortAccountManager';
 import SZDTAutoTrading from './pages/SZDTAutoTrading';
+import ScheduledTasks from './pages/ScheduledTasks';
+import EVCAccountManager from './pages/EVCAccountManager';
 
 function App() {
   return (
@@ -50,10 +52,12 @@ function App() {
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
           <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
+          <Route path="/evc-account-manager" element={<EVCAccountManager />} />
           <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
           <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
+          <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
         </Route>
       </Routes>
     </AccountProvider>

@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Form, InputNumber, Input, Button, Table, message, Layout, Tabs } from 'antd';
+import { Card, Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Space } from 'antd';
+import { SettingOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 
 const EVCValuation = () => {
@@ -8,6 +10,7 @@ const EVCValuation = () => {
     const [favoriteStocks, setFavoriteStocks] = useState([]);
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
+    const navigate = useNavigate();
 
     // 默认值
     const defaultValues = {
@@ -229,6 +232,19 @@ const EVCValuation = () => {
                             label: '所有股票',
                             children: (
                                 <>
+                                    <div style={{ marginBottom: 16 }}>
+                                        <Space>
+                                            <Button
+                                                icon={<SettingOutlined />}
+                                                onClick={() => navigate('/evc/strategy')}
+                                            >
+                                                策略 / Cookie配置
+                                            </Button>
+                                            <Button onClick={() => navigate('/evc')}>
+                                                返回EVC设置
+                                            </Button>
+                                        </Space>
+                                    </div>
                                     <Form form={form} onFinish={handleSearch} layout="inline">
                                         <Form.Item label="股票代码" name="symbol">
                                             <Input

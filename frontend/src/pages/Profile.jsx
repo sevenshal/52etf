@@ -83,6 +83,11 @@ const Profile = () => {
           onClick: () => navigate('/longport-account-manager'),
           arrow: true
         },
+        {
+          title: 'EVC账户',
+          onClick: () => navigate('/evc-account-manager'),
+          arrow: true
+        },
       ]
     },
     {
@@ -123,6 +128,11 @@ const Profile = () => {
     {
       title: '系统管理',
       items: [
+        {
+          title: '定时任务',
+          onClick: () => navigate('/scheduled-tasks'),
+          arrow: true
+        },
         {
           title: '系统日志',
           onClick: () => navigate('/system-log'),
