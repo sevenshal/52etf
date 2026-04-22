@@ -34,6 +34,7 @@ class ISharesETFFetcher(ETFDataFetcher):
 
     exchange_map = {
         "NASDAQ": ".US",
+        "NYSE": ".US",
         "New York Stock Exchange Inc.": ".US",
         "Nyse Mkt Llc": ".US"
     }

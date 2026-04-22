@@ -100,10 +100,21 @@ class ETFManager:
         """获取股票的估值信息"""
         try:
             today = date.today()
-            return self.db_session.query(StockEVC).filter(
+            evc_info = self.db_session.query(StockEVC).filter(
                 StockEVC.symbol == symbol,
                 StockEVC.date == today
             ).first()
+            if evc_info:
+                return evc_info
+
+            # iShares 部分持仓会返回裸代码（如 NYSE: BE），
+            # 而 EVC 侧通常存成 .US 后缀，这里做一次兼容回退。
+            if symbol and "." not in symbol:
+                return self.db_session.query(StockEVC).filter(
+                    StockEVC.symbol == f"{symbol}.US",
+                    StockEVC.date == today
+                ).first()
+            return None
         except Exception as e:
             self.logger.error(f"获取股票 {symbol} 的估值信息失败: {str(e)}")
             return None
