@@ -1,4 +1,5 @@
 import datetime
+import logging
 import numpy as np
 from typing import List, Dict, Any
 from sqlalchemy import func
@@ -220,6 +221,7 @@ class MarketSignalAnalyzer:
     ):
         self.quote_service = QuoteService(quote_provider)
         self.db_session = Session()
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.etf_symbols = etf_symbols or ['SPY.US', 'QQQ.US']
         self.min_market_cap = min_market_cap
 
@@ -245,13 +247,100 @@ class MarketSignalAnalyzer:
         symbols = {r.symbol for r in rows}
         return list(symbols)
 
+    def _persist_records(self, records: List[MarketSignal], stats: Dict[str, int]) -> int:
+        if not records:
+            return 0
+
+        unique_symbols = list({r.symbol for r in records})
+        static_infos = self.quote_service.get_static_info(unique_symbols)
+        shares_map = {}
+        for info in static_infos:
+            sym = info.get('symbol') or info.get('code')
+            shares = info.get('total_shares')
+            if sym is not None and isinstance(shares, (int, float)) and shares > 0:
+                shares_map[sym] = float(shares)
+
+        quotes = self.quote_service.get_quote_batch(unique_symbols)
+        price_map = {q.get('symbol') or q.get('code'): q.get('price') for q in quotes}
+
+        persisted = 0
+        for record in records:
+            symbol = record.symbol
+            price = price_map.get(symbol)
+            shares = shares_map.get(symbol)
+            market_cap = (shares * price) if isinstance(price, (int, float)) and isinstance(shares, (int, float)) else 0
+
+            if market_cap < self.min_market_cap:
+                stats["market_cap_filtered"] = stats.get("market_cap_filtered", 0) + 1
+                if market_cap == 0:
+                    stats["market_cap_missing_data"] = stats.get("market_cap_missing_data", 0) + 1
+                continue
+
+            existing = self.db_session.query(MarketSignal).filter_by(
+                symbol=symbol,
+                date=record.date,
+                ver=record.ver,
+            ).first()
+            if existing:
+                for key, value in record.__dict__.items():
+                    if not key.startswith('_') and key != 'id':
+                        setattr(existing, key, value)
+                stats["updated"] = stats.get("updated", 0) + 1
+            else:
+                self.db_session.add(record)
+                stats["inserted"] = stats.get("inserted", 0) + 1
+            persisted += 1
+
+        self.db_session.commit()
+        return persisted
+
+    def _flush_records(self, pending_records: List[MarketSignal], stats: Dict[str, int], reason: str) -> int:
+        if not pending_records:
+            return 0
+        flushed = self._persist_records(pending_records, stats)
+        self.logger.info(
+            "Market signal flush reason=%s, candidates=%s, persisted=%s, inserted=%s, updated=%s, filtered_by_market_cap=%s, missing_market_cap_data=%s",
+            reason,
+            len(pending_records),
+            flushed,
+            stats.get("inserted", 0),
+            stats.get("updated", 0),
+            stats.get("market_cap_filtered", 0),
+            stats.get("market_cap_missing_data", 0),
+        )
+        pending_records.clear()
+        return flushed
+
     def analyze(self):
         symbols = self.get_holdings()
-        to_insert = []
+        pending_records = []
         results = []
-        for symbol in symbols:
+        stats = {
+            "symbols_total": len(symbols),
+            "symbols_scanned": 0,
+            "skip_klines": 0,
+            "v1_candidates": 0,
+            "v2_buy_candidates": 0,
+            "v2_sell_candidates": 0,
+            "v3_buy_candidates": 0,
+            "inserted": 0,
+            "updated": 0,
+            "market_cap_filtered": 0,
+            "market_cap_missing_data": 0,
+        }
+        flush_every = 500
+
+        self.logger.info(
+            "Start analyzing market signals for %s symbols with min_market_cap=%s",
+            len(symbols),
+            self.min_market_cap,
+        )
+
+        for index, symbol in enumerate(symbols, 1):
+            stats["symbols_scanned"] += 1
             klines = self.quote_service.get_klines(symbol, 200)
             if not klines or len(klines) < 200:
+                stats["skip_klines"] += 1
                 continue
 
             processed_klines = preprocess_klines_volume(
@@ -266,6 +355,7 @@ class MarketSignalAnalyzer:
 
             # 市场信号买点（延后入库，统一批量过滤市值）
             if signal_result and signal_result.get("direction") == "BUY":
+                stats["v1_candidates"] += 1
                 record = MarketSignal(
                     ver='v1',
                     symbol=symbol,
@@ -278,10 +368,14 @@ class MarketSignalAnalyzer:
                     date=signal_result["date"],
                     direction='BUY'
                 )
-                to_insert.append(record)
+                pending_records.append(record)
 
             # 只存最新一根K线的买卖点（延后入库）
             if buy_sell_result:
+                if buy_sell_result["type"] == "BUY":
+                    stats["v2_buy_candidates"] += 1
+                else:
+                    stats["v2_sell_candidates"] += 1
                 record = MarketSignal(
                     ver='v2',
                     symbol=symbol,
@@ -291,9 +385,10 @@ class MarketSignalAnalyzer:
                     v2_price_change_ratio=self.buy_sell_analyzer.price_change_ratio,
                     v2_stabilization_period=self.buy_sell_analyzer.stabilization_period
                 )
-                to_insert.append(record)
+                pending_records.append(record)
 
             if volume_trend_result:
+                stats["v3_buy_candidates"] += 1
                 record = MarketSignal(
                     ver='v3',
                     symbol=symbol,
@@ -301,7 +396,7 @@ class MarketSignalAnalyzer:
                     date=volume_trend_result["timestamp"].date() if hasattr(volume_trend_result["timestamp"], "date") else volume_trend_result["timestamp"],
                     direction=volume_trend_result["type"],
                 )
-                to_insert.append(record)
+                pending_records.append(record)
 
             results.append({
                 "symbol": symbol,
@@ -310,33 +405,34 @@ class MarketSignalAnalyzer:
                 "volume_trend": volume_trend_result
             })
 
-        # 批量计算市值，仅对准备入库的标的做一次报价与静态信息查询
-        insert_symbols = list({r.symbol for r in to_insert})
-        if insert_symbols:
-            static_infos = self.quote_service.get_static_info(insert_symbols)
-            shares_map = {}
-            for info in static_infos:
-                sym = info.get('symbol') or info.get('code')
-                shares = info.get('total_shares')
-                if sym is not None and isinstance(shares, (int, float)) and shares > 0:
-                    shares_map[sym] = float(shares)
-            quotes = self.quote_service.get_quote_batch(insert_symbols)
-            price_map = {q.get('symbol') or q.get('code'): q.get('price') for q in quotes}
-            for record in to_insert:
-                s = record.symbol
-                p = price_map.get(s)
-                sh = shares_map.get(s)
-                market_cap = (sh * p) if isinstance(p, (int, float)) and isinstance(sh, (int, float)) else 0
-                if market_cap >= self.min_market_cap:
-                    existing = self.db_session.query(MarketSignal).filter_by(
-                        symbol=s, date=record.date
-                    ).first()
-                    if existing:
-                        for k, v in record.__dict__.items():
-                            if not k.startswith('_') and k != 'id':
-                                setattr(existing, k, v)
-                    else:
-                        self.db_session.add(record)
-            self.db_session.commit()
+            if index % flush_every == 0:
+                self.logger.info(
+                    "Market signal progress %s/%s, candidates so far: v1=%s, v2_buy=%s, v2_sell=%s, v3_buy=%s, pending=%s, skipped_klines=%s",
+                    index,
+                    len(symbols),
+                    stats["v1_candidates"],
+                    stats["v2_buy_candidates"],
+                    stats["v2_sell_candidates"],
+                    stats["v3_buy_candidates"],
+                    len(pending_records),
+                    stats["skip_klines"],
+                )
+                self._flush_records(pending_records, stats, reason=f"progress-{index}")
+
+        self._flush_records(pending_records, stats, reason="final")
+        self.logger.info(
+            "Market signal analyze finished: total_symbols=%s, scanned=%s, skipped_klines=%s, v1_candidates=%s, v2_buy_candidates=%s, v2_sell_candidates=%s, v3_buy_candidates=%s, inserted=%s, updated=%s, filtered_by_market_cap=%s, missing_market_cap_data=%s",
+            stats["symbols_total"],
+            stats["symbols_scanned"],
+            stats["skip_klines"],
+            stats["v1_candidates"],
+            stats["v2_buy_candidates"],
+            stats["v2_sell_candidates"],
+            stats["v3_buy_candidates"],
+            stats["inserted"],
+            stats["updated"],
+            stats["market_cap_filtered"],
+            stats["market_cap_missing_data"],
+        )
 
         return results

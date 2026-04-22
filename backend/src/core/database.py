@@ -22,7 +22,7 @@ class MarketSignal(Base):
     __tablename__ = 'market_signal'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    ver = Column(String(8), default='v1')
+    ver = Column(String(8), default='v1', nullable=False)
     symbol = Column(String(16), nullable=False)
     close_price = Column(Float, nullable=False)
     direction = Column(String(8), nullable=False)  # 'BUY'或'SELL'
@@ -35,7 +35,7 @@ class MarketSignal(Base):
     v2_price_change_ratio = Column(Float, nullable=True)
     v2_stabilization_period = Column(Integer, nullable=True)
     __table_args__ = (
-        UniqueConstraint('symbol', 'date', name='uniq_symbol_date'),
+        UniqueConstraint('symbol', 'date', 'ver', name='uniq_market_signal_symbol_date_ver'),
     )
 
 # 股票-标签关联表
@@ -155,6 +155,16 @@ class StockKline(Base):
     close = Column(Float, nullable=False)
     volume = Column(Integer, nullable=False)
     turnover = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+class InvalidSymbolCache(Base):
+    """持久化缓存外部行情源返回的无效标的。"""
+    __tablename__ = 'invalid_symbol_cache'
+
+    source = Column(String(32), primary_key=True)
+    symbol = Column(String(32), primary_key=True)
+    reason = Column(String(255))
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
@@ -497,6 +507,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_tag_date_symbol ON stock_tags(tag_id, date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_cache_source_updated ON invalid_symbol_cache(source, updated_at)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:
@@ -526,6 +537,65 @@ def ensure_table_columns():
                     conn.execute(text(ddl))
 
 ensure_table_columns()
+
+def ensure_market_signal_unique_constraint():
+    """将 market_signal 唯一约束迁移为 (symbol, date, ver)。"""
+    with engine.begin() as conn:
+        table_sql = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='market_signal'")
+        ).scalar()
+
+        if not table_sql:
+            return
+
+        normalized_sql = table_sql.replace(" ", "").lower()
+        if "unique(symbol,date,ver)" in normalized_sql:
+            return
+
+        conn.execute(text("ALTER TABLE market_signal RENAME TO market_signal_old"))
+        conn.execute(text("""
+            CREATE TABLE market_signal (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                ver VARCHAR(8) NOT NULL DEFAULT 'v1',
+                symbol VARCHAR(16) NOT NULL,
+                close_price FLOAT NOT NULL,
+                direction VARCHAR(8) NOT NULL,
+                date DATE NOT NULL,
+                below_200ma_ratio FLOAT,
+                vol_5_std FLOAT,
+                today_vol_std FLOAT,
+                low_50 FLOAT,
+                close_vs_low_50 FLOAT,
+                v2_price_change_ratio FLOAT,
+                v2_stabilization_period INTEGER,
+                CONSTRAINT uniq_market_signal_symbol_date_ver UNIQUE (symbol, date, ver)
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO market_signal (
+                id, ver, symbol, close_price, direction, date,
+                below_200ma_ratio, vol_5_std, today_vol_std, low_50,
+                close_vs_low_50, v2_price_change_ratio, v2_stabilization_period
+            )
+            SELECT
+                id,
+                COALESCE(ver, 'v1'),
+                symbol,
+                close_price,
+                direction,
+                date,
+                below_200ma_ratio,
+                vol_5_std,
+                today_vol_std,
+                low_50,
+                close_vs_low_50,
+                v2_price_change_ratio,
+                v2_stabilization_period
+            FROM market_signal_old
+        """))
+        conn.execute(text("DROP TABLE market_signal_old"))
+
+ensure_market_signal_unique_constraint()
 
 def get_db():
     """FastAPI dependency for database session"""

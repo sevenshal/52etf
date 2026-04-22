@@ -9,7 +9,7 @@ from longport.openapi import (
     Period, AdjustType, PushOrderChanged, OrderStatus, SubType as LPSubType, PushQuote
 )
 from ..utils import mask_account_id
-from ..database import Session, LongPortAccount
+from ..database import Session, LongPortAccount, InvalidSymbolCache
 from .trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideRTH
 from .quote import QuoteProvider, SubType, QuoteObserver, QuoteEvent
 
@@ -42,6 +42,7 @@ sub_type_map = {
 
 class LongPortService(QuoteProvider, TradeService):
     """长桥接口服务"""
+    INVALID_KLINE_SOURCE = "longport_kline"
     
     _instances = {}
 
@@ -69,7 +70,7 @@ class LongPortService(QuoteProvider, TradeService):
 
         self.lp_account_id = lp_account_id
         # 缓存已确认无效的标的，避免重复请求刷日志
-        self.invalid_kline_symbols = set()
+        self.invalid_kline_symbols = self._load_invalid_kline_symbols_from_db()
         
         try:
             self.__load_config_from_db()
@@ -83,6 +84,46 @@ class LongPortService(QuoteProvider, TradeService):
         except Exception as e:
             logging.error(f"Failed to initialize LongPortService for {lp_account_id}: {str(e)}")
             # Do not set initialized=True, so next attempt will try again.
+
+    def _load_invalid_kline_symbols_from_db(self) -> set:
+        try:
+            db = Session()
+            try:
+                rows = db.query(InvalidSymbolCache.symbol).filter(
+                    InvalidSymbolCache.source == self.INVALID_KLINE_SOURCE
+                ).all()
+                return {row[0] for row in rows}
+            finally:
+                Session.remove()
+        except Exception as e:
+            logging.error(f"加载无效K线标的缓存失败: {str(e)}")
+            return set()
+
+    def _remember_invalid_kline_symbol(self, symbol: str, reason: str):
+        self.invalid_kline_symbols.add(symbol)
+        try:
+            db = Session()
+            try:
+                cached = db.query(InvalidSymbolCache).filter(
+                    InvalidSymbolCache.source == self.INVALID_KLINE_SOURCE,
+                    InvalidSymbolCache.symbol == symbol
+                ).first()
+                if cached:
+                    cached.reason = reason[:255]
+                    cached.updated_at = datetime.now()
+                else:
+                    db.add(InvalidSymbolCache(
+                        source=self.INVALID_KLINE_SOURCE,
+                        symbol=symbol,
+                        reason=reason[:255],
+                        created_at=datetime.now(),
+                        updated_at=datetime.now(),
+                    ))
+                db.commit()
+            finally:
+                Session.remove()
+        except Exception as e:
+            logging.error(f"持久化无效K线标的 {symbol} 失败: {str(e)}")
 
     def reload(self):
         """重新加载配置 (用于更新账户信息后)"""
@@ -361,7 +402,7 @@ class LongPortService(QuoteProvider, TradeService):
                     err = str(e)
                     err_lower = err.lower()
                     if "code=301600" in err or "invalid symbol" in err_lower:
-                        self.invalid_kline_symbols.add(symbol)
+                        self._remember_invalid_kline_symbol(symbol, err)
                         logging.warning(f"跳过无效标的 {symbol}: {err}")
                         return []
                     if "code=301607" in err and request_count > 100:
@@ -381,6 +422,9 @@ class LongPortService(QuoteProvider, TradeService):
     @limits(calls=10, period=1)
     def get_candlesticks_by_date(self, symbol: str, start: datetime.date, end: datetime.date, period = 'd') -> List[Dict]:
         """根据日期范围获取K线数据(自动分页, 从后向前获取)"""
+        if symbol in self.invalid_kline_symbols:
+            return []
+
         all_candlesticks = []
         current_end = end
         
@@ -431,7 +475,13 @@ class LongPortService(QuoteProvider, TradeService):
             return all_candlesticks
             
         except Exception as e:
-            logging.error(f"获取{symbol}历史K线数据失败: {str(e)}")
+            err = str(e)
+            err_lower = err.lower()
+            if "code=301600" in err or "invalid symbol" in err_lower:
+                self._remember_invalid_kline_symbol(symbol, err)
+                logging.warning(f"跳过无效标的 {symbol}: {err}")
+                return []
+            logging.error(f"获取{symbol}历史K线数据失败: {err}")
             return []
 
     @sleep_and_retry
