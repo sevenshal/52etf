@@ -493,10 +493,10 @@ const SoxlFearBacktest = () => {
             eval_workers: 4,
             fit_rebalance_threshold_pct: 5,
             date_range: [dayjs('2021-01-01'), dayjs()],
-            buy_threshold_values: '30,40,50',
-            greed_threshold_values: '30,40,50',
-            volume_ratio_threshold_values: '1.2,1.4,1.6',
-            buy_position_pct_values: '40,50,60',
+            buy_threshold_values: '35,40,45',
+            greed_threshold_values: '40,41,42',
+            volume_ratio_threshold_values: '1.3,1.38,1.45',
+            buy_position_pct_values: '50,60,70',
             cooldown_days_values: '5,10,15',
             trailing_stop_pct_values: '3,5,7',
             sell_position_pct_values: '40,50,60',
@@ -538,12 +538,12 @@ const SoxlFearBacktest = () => {
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name="buy_threshold_values" label="买入阈值(<=)候选">
-                <Input placeholder="例如 30,40,50" />
+                <Input placeholder="例如 35,40,45" />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name="greed_threshold_values" label="进入止盈区阈值(>=) 候选">
-                <Input placeholder="例如 30,40,50" />
+                <Input placeholder="例如 40,41,42" />
               </Form.Item>
             </Col>
           </Row>
@@ -551,12 +551,12 @@ const SoxlFearBacktest = () => {
           <Row gutter={16}>
             <Col xs={24} md={8}>
               <Form.Item name="volume_ratio_threshold_values" label="量比阈值候选">
-                <Input placeholder="例如 1.3,1.6" />
+                <Input placeholder="例如 1.3,1.38,1.45" />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name="buy_position_pct_values" label="每次买入仓位% 候选">
-                <Input placeholder="例如 10,20" />
+                <Input placeholder="例如 50,60,70" />
               </Form.Item>
             </Col>
           </Row>
