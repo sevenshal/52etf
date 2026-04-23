@@ -35,7 +35,6 @@ CNN_HEADERS = {
     "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
 }
 CNN_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_PROXY_BASE_URL = "https://api.52etf.vip/fred/series/observations"
 
 
@@ -49,11 +48,27 @@ class SOXLFearStrategyParams(BaseModel):
     cooldown_days: int = 5
     trailing_stop_pct: float = 8.0
     sell_position_pct: float = 50.0
+    sell_reduction_basis: str = "portfolio"
+    max_take_profit_sells_per_cycle: int = 3
+    min_position_pct_after_take_profit: float = 10.0
+    rebalance_threshold_pct: float = 5.0
 
     @validator("buy_position_pct", "trailing_stop_pct", "sell_position_pct")
-    def validate_percent(cls, value):
+    def validate_positive_percent(cls, value):
         if value <= 0 or value > 100:
             raise ValueError("百分比参数必须在 0 到 100 之间")
+        return value
+
+    @validator("min_position_pct_after_take_profit")
+    def validate_min_position_pct_after_take_profit(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("百分比参数必须在 0 到 100 之间")
+        return value
+
+    @validator("rebalance_threshold_pct")
+    def validate_rebalance_threshold_pct(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("调仓阈值必须在 0 到 100 之间")
         return value
 
     @validator("cooldown_days")
@@ -65,16 +80,20 @@ class SOXLFearStrategyParams(BaseModel):
     @validator("buy_threshold")
     def validate_buy_threshold(cls, value):
         if value <= 0:
-            raise ValueError("恐慌阈值必须大于 0")
+            raise ValueError("买入触发阈值必须大于 0")
         return value
 
-    @validator("greed_threshold")
-    def validate_greed_threshold(cls, value, values):
-        buy_threshold = values.get("buy_threshold")
-        if buy_threshold is not None and value >= buy_threshold:
-            raise ValueError("贪婪阈值必须小于恐慌阈值")
+    @validator("max_take_profit_sells_per_cycle")
+    def validate_max_take_profit_sells_per_cycle(cls, value):
+        if value < 1 or value > 20:
+            raise ValueError("同轮止盈最多卖出次数必须在 1 到 20 之间")
         return value
 
+    @validator("sell_reduction_basis")
+    def validate_sell_reduction_basis(cls, value):
+        if value not in {"portfolio", "holdings"}:
+            raise ValueError("止盈减仓口径仅支持 portfolio 或 holdings")
+        return value
 
 class SOXLFearSearchParams(BaseModel):
     symbol: str = "SOXL.US"
@@ -84,20 +103,24 @@ class SOXLFearSearchParams(BaseModel):
     top_n: int = 20
     objective: str = "annualized_return"
     eval_workers: Optional[int] = None
-    a_values: List[float] = Field(default_factory=lambda: [0.8, 1.2])
-    b_values: List[float] = Field(default_factory=lambda: [0.8, 1.2])
-    buy_threshold_values: List[float] = Field(default_factory=lambda: [85.0, 95.0])
-    greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0, 50.0])
-    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3, 1.6])
-    buy_position_pct_values: List[float] = Field(default_factory=lambda: [10.0, 20.0])
-    cooldown_days_values: List[int] = Field(default_factory=lambda: [3, 5])
-    trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [6.0, 10.0])
-    sell_position_pct_values: List[float] = Field(default_factory=lambda: [25.0, 50.0])
+    rebalance_threshold_pct: float = 5.0
+    a_values: List[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0])
+    b_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
+    buy_threshold_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
+    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.2, 1.4, 1.6])
+    buy_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
+    cooldown_days_values: List[int] = Field(default_factory=lambda: [5, 10, 15])
+    trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [3.0, 5.0, 7.0])
+    sell_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
+    sell_reduction_basis_values: List[str] = Field(default_factory=lambda: ["portfolio", "holdings"])
+    max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [1, 2, 3])
+    min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [5.0, 10.0, 15.0])
 
     @validator("top_n")
     def validate_top_n(cls, value):
-        if value <= 0 or value > 100:
-            raise ValueError("top_n 必须在 1 到 100 之间")
+        if value <= 0 or value > 500:
+            raise ValueError("top_n 必须在 1 到 500 之间")
         return value
 
     @validator("objective")
@@ -112,6 +135,12 @@ class SOXLFearSearchParams(BaseModel):
             return value
         if value < 1 or value > 16:
             raise ValueError("eval_workers 必须在 1 到 16 之间")
+        return value
+
+    @validator("rebalance_threshold_pct")
+    def validate_search_rebalance_threshold_pct(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("调仓阈值必须在 0 到 100 之间")
         return value
 
 
@@ -154,6 +183,24 @@ def _round_or_none(value, digits: int = 4):
     if numeric is None:
         return None
     return round(numeric, digits)
+
+
+def _floor_share_count(value: float) -> int:
+    if value <= 0:
+        return 0
+    return int(np.floor(value))
+
+
+def _ceil_share_count(value: float) -> int:
+    if value <= 0:
+        return 0
+    return int(np.ceil(value))
+
+
+def _describe_df_range(df: pd.DataFrame, date_col: str = "date") -> str:
+    if df is None or df.empty or date_col not in df.columns:
+        return "0 rows"
+    return f"{len(df)} rows, {df.iloc[0][date_col]} ~ {df.iloc[-1][date_col]}"
 
 
 def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
@@ -244,21 +291,35 @@ def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tu
     cnn_df = _fetch_cnn_history(start_date, end_date)
     vix_df = _fetch_vix_history(start_date, end_date)
 
-    base_df = price_df.merge(cnn_df, on="date", how="left").merge(vix_df, on="date", how="left")
-    base_df = base_df.sort_values("date").reset_index(drop=True)
-    base_df["cnn_fear_greed"] = base_df["cnn_fear_greed"].ffill()
-    base_df["vix"] = base_df["vix"].ffill()
-    base_df["ma20"] = base_df["close"].rolling(20).mean()
-    base_df["volume_ma20"] = base_df["volume"].rolling(20).mean()
-    base_df["volume_ratio"] = np.where(
-        base_df["volume_ma20"] > 0,
-        base_df["volume"] / base_df["volume_ma20"],
+    merged_df = price_df.merge(cnn_df, on="date", how="left").merge(vix_df, on="date", how="left")
+    merged_df = merged_df.sort_values("date").reset_index(drop=True)
+    merged_df["cnn_fear_greed"] = merged_df["cnn_fear_greed"].ffill()
+    merged_df["vix"] = merged_df["vix"].ffill()
+    merged_df["ma20"] = merged_df["close"].rolling(20).mean()
+    merged_df["volume_ma20"] = merged_df["volume"].rolling(20).mean()
+    merged_df["volume_ratio"] = np.where(
+        merged_df["volume_ma20"] > 0,
+        merged_df["volume"] / merged_df["volume_ma20"],
         np.nan,
     )
-    base_df = base_df.dropna(subset=["cnn_fear_greed", "vix", "ma20", "volume_ma20"]).reset_index(drop=True)
+    base_df = merged_df.dropna(subset=["cnn_fear_greed", "vix", "ma20", "volume_ma20"]).reset_index(drop=True)
 
     if base_df.empty:
-        raise ValueError("SOXL、VIX、CNN 恐贪三者没有足够重叠的数据区间")
+        diagnostics = (
+            f"price={_describe_df_range(price_df)}; "
+            f"cnn={_describe_df_range(cnn_df)}; "
+            f"vix={_describe_df_range(vix_df)}; "
+            f"merged={_describe_df_range(merged_df)}; "
+            f"merged_non_null_cnn={int(merged_df['cnn_fear_greed'].notna().sum()) if 'cnn_fear_greed' in merged_df else 0}; "
+            f"merged_non_null_vix={int(merged_df['vix'].notna().sum()) if 'vix' in merged_df else 0}; "
+            f"merged_non_null_ma20={int(merged_df['ma20'].notna().sum()) if 'ma20' in merged_df else 0}; "
+            f"merged_non_null_volume_ma20={int(merged_df['volume_ma20'].notna().sum()) if 'volume_ma20' in merged_df else 0}"
+        )
+        raise ValueError(
+            f"{symbol}、VIX、CNN 恐贪三者没有足够重叠的数据区间。"
+            f" 请求区间: {start_date} ~ {end_date}。"
+            f" 诊断: {diagnostics}"
+        )
 
     meta = {
         "requested_symbol": symbol,
@@ -335,10 +396,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         low_prices = base_df["low"].to_numpy(dtype=float, copy=False)
 
     cash = float(initial_capital)
-    shares = 0.0
+    shares = 0
     avg_cost = 0.0
     cooldown_remaining = 0
     greed_peak_price = None
+    take_profit_sell_count_in_cycle = 0
     trades: List[Dict] = []
     equity_curve: List[Dict] = []
     daily_data: List[Dict] = []
@@ -347,7 +409,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     equity_values = np.empty(len(close_prices), dtype=float)
     benchmark_values = np.empty(len(close_prices), dtype=float)
 
-    benchmark_shares = initial_capital / float(close_prices[0]) if float(close_prices[0]) > 0 else 0.0
+    benchmark_shares = _floor_share_count(initial_capital / float(close_prices[0])) if float(close_prices[0]) > 0 else 0
+    benchmark_cash = initial_capital - benchmark_shares * float(close_prices[0]) if float(close_prices[0]) > 0 else initial_capital
 
     for index in range(len(close_prices)):
         current_date = date_strings[index]
@@ -369,77 +432,135 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 greed_peak_price = max(greed_peak_price or close_price, close_price)
             else:
                 greed_peak_price = None
+                take_profit_sell_count_in_cycle = 0
         else:
             greed_peak_price = None
+            take_profit_sell_count_in_cycle = 0
 
-        if shares > 0 and is_greedy and can_trade and greed_peak_price:
+        if (
+            shares > 0
+            and is_greedy
+            and can_trade
+            and greed_peak_price
+            and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
+        ):
             drawdown_from_peak = ((greed_peak_price - close_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
             if drawdown_from_peak >= params.trailing_stop_pct and close_price > avg_cost:
-                sell_shares = min(shares, shares * (params.sell_position_pct / 100.0))
-                sell_amount = sell_shares * close_price
-                cost_amount = sell_shares * avg_cost
-                profit = sell_amount - cost_amount
-                profit_pct = ((close_price / avg_cost) - 1) * 100 if avg_cost > 0 else 0.0
+                portfolio_value = cash + shares * close_price
+                current_position_pct = (shares * close_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                min_hold_shares = (
+                    portfolio_value * (params.min_position_pct_after_take_profit / 100.0) / close_price
+                    if portfolio_value > 0 and close_price > 0
+                    else 0.0
+                )
+                max_sell_shares = max(0, shares - _floor_share_count(min_hold_shares))
+                if params.sell_reduction_basis == "holdings":
+                    requested_sell_shares = _floor_share_count(shares * (params.sell_position_pct / 100.0))
+                else:
+                    requested_sell_shares = _floor_share_count(
+                        portfolio_value * (params.sell_position_pct / 100.0) / close_price
+                    )
+                sell_shares = min(shares, requested_sell_shares, max_sell_shares)
 
-                cash += sell_amount
-                shares -= sell_shares
-                if shares <= 1e-8:
-                    shares = 0.0
-                    avg_cost = 0.0
-                    greed_peak_price = None
+                if current_position_pct > params.min_position_pct_after_take_profit and sell_shares >= 1:
+                    sell_amount = sell_shares * close_price
+                    sell_adjustment_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                    if sell_adjustment_pct <= params.rebalance_threshold_pct:
+                        sell_shares = 0
 
-                cooldown_remaining = params.cooldown_days
-                action_taken = True
-                closed_trade_count += 1
-                if profit > 0:
-                    winning_trade_count += 1
+                if current_position_pct > params.min_position_pct_after_take_profit and sell_shares >= 1:
+                    sell_amount = sell_shares * close_price
+                    cost_amount = sell_shares * avg_cost
+                    profit = sell_amount - cost_amount
+                    profit_pct = ((close_price / avg_cost) - 1) * 100 if avg_cost > 0 else 0.0
 
-                trades.append({
-                    "date": current_date,
-                    "action": "SELL",
-                    "price": close_price,
-                    "shares": sell_shares,
-                    "amount": sell_amount,
-                    "cash_after": cash,
-                    "position_after": shares,
-                    "avg_cost_after": avg_cost,
-                    "profit": profit,
-                    "profit_pct": profit_pct,
-                    "reason": f"贪婪区回撤 {drawdown_from_peak:.2f}% 触发移动止盈",
-                    "composite_fear": composite_fear,
-                    "volume_ratio": volume_ratio,
-                })
+                    cash += sell_amount
+                    shares -= sell_shares
+                    holdings_value_after = shares * close_price
+                    net_value_after = cash + holdings_value_after
+                    if shares <= 0:
+                        shares = 0
+                        avg_cost = 0.0
+                        greed_peak_price = None
+                        take_profit_sell_count_in_cycle = 0
+                    else:
+                        # Reset the trailing-stop anchor after a partial take-profit.
+                        # This avoids repeatedly selling against the same historical peak
+                        # without a fresh rebound/new high inside the take-profit regime.
+                        greed_peak_price = close_price
+                        take_profit_sell_count_in_cycle += 1
+
+                    cooldown_remaining = params.cooldown_days
+                    action_taken = True
+                    closed_trade_count += 1
+                    if profit > 0:
+                        winning_trade_count += 1
+
+                    trades.append({
+                        "date": current_date,
+                        "action": "SELL",
+                        "price": close_price,
+                        "shares": sell_shares,
+                        "amount": sell_amount,
+                        "cash_after": cash,
+                        "position_after": shares,
+                        "holdings_value_after": holdings_value_after,
+                        "net_value_after": net_value_after,
+                        "position_pct_after": (holdings_value_after / net_value_after * 100) if net_value_after > 0 else 0.0,
+                        "avg_cost_after": avg_cost,
+                        "profit": profit,
+                        "profit_pct": profit_pct,
+                        "reason": (
+                            f"止盈触发区回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+                            f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
+                        ),
+                        "composite_fear": composite_fear,
+                        "volume_ratio": volume_ratio,
+                    })
 
         if not action_taken and is_fear and volume_ratio >= params.volume_ratio_threshold and can_trade:
             portfolio_value = cash + shares * close_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
             if buy_amount > 0:
-                buy_shares = buy_amount / close_price
-                total_cost = shares * avg_cost + buy_amount
-                shares += buy_shares
-                avg_cost = total_cost / shares if shares > 0 else 0.0
-                cash -= buy_amount
-                cooldown_remaining = params.cooldown_days
-                greed_peak_price = None
+                buy_shares = min(_floor_share_count(buy_amount / close_price), _floor_share_count(cash / close_price))
+                if buy_shares >= 1:
+                    actual_buy_amount = buy_shares * close_price
+                    buy_adjustment_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                    if buy_adjustment_pct <= params.rebalance_threshold_pct:
+                        buy_shares = 0
+                if buy_shares >= 1:
+                    actual_buy_amount = buy_shares * close_price
+                    total_cost = shares * avg_cost + actual_buy_amount
+                    shares += buy_shares
+                    avg_cost = total_cost / shares if shares > 0 else 0.0
+                    cash -= actual_buy_amount
+                    cooldown_remaining = params.cooldown_days
+                    greed_peak_price = None
+                    take_profit_sell_count_in_cycle = 0
+                    holdings_value_after = shares * close_price
+                    net_value_after = cash + holdings_value_after
 
-                trades.append({
-                    "date": current_date,
-                    "action": "BUY",
-                    "price": close_price,
-                    "shares": buy_shares,
-                    "amount": buy_amount,
-                    "cash_after": cash,
-                    "position_after": shares,
-                    "avg_cost_after": avg_cost,
-                    "profit": 0.0,
-                    "profit_pct": 0.0,
-                    "reason": f"恐慌指数 {composite_fear:.2f} + 成交量放大 {volume_ratio:.2f}",
-                    "composite_fear": composite_fear,
-                    "volume_ratio": volume_ratio,
-                })
+                    trades.append({
+                        "date": current_date,
+                        "action": "BUY",
+                        "price": close_price,
+                        "shares": buy_shares,
+                        "amount": actual_buy_amount,
+                        "cash_after": cash,
+                        "position_after": shares,
+                        "holdings_value_after": holdings_value_after,
+                        "net_value_after": net_value_after,
+                        "position_pct_after": (holdings_value_after / net_value_after * 100) if net_value_after > 0 else 0.0,
+                        "avg_cost_after": avg_cost,
+                        "profit": 0.0,
+                        "profit_pct": 0.0,
+                        "reason": f"买入分数 {composite_fear:.2f} + 成交量放大 {volume_ratio:.2f}",
+                        "composite_fear": composite_fear,
+                        "volume_ratio": volume_ratio,
+                    })
 
         equity_value = cash + shares * close_price
-        benchmark_value = benchmark_shares * close_price
+        benchmark_value = benchmark_cash + benchmark_shares * close_price
         equity_values[index] = equity_value
         benchmark_values[index] = benchmark_value
 
@@ -520,6 +641,9 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.cooldown_days_values,
         payload.trailing_stop_pct_values,
         payload.sell_position_pct_values,
+        payload.sell_reduction_basis_values,
+        payload.max_take_profit_sells_per_cycle_values,
+        payload.min_position_pct_after_take_profit_values,
     ]
     total = 1
     for values in value_groups:
@@ -540,6 +664,9 @@ def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrat
         payload.cooldown_days_values,
         payload.trailing_stop_pct_values,
         payload.sell_position_pct_values,
+        payload.sell_reduction_basis_values,
+        payload.max_take_profit_sells_per_cycle_values,
+        payload.min_position_pct_after_take_profit_values,
     ):
         yield SOXLFearStrategyParams(
             a=float(values[0]),
@@ -551,6 +678,10 @@ def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrat
             cooldown_days=int(values[6]),
             trailing_stop_pct=float(values[7]),
             sell_position_pct=float(values[8]),
+            sell_reduction_basis=str(values[9]),
+            max_take_profit_sells_per_cycle=int(values[10]),
+            min_position_pct_after_take_profit=float(values[11]),
+            rebalance_threshold_pct=float(payload.rebalance_threshold_pct),
         )
 
 
@@ -595,6 +726,9 @@ def _evaluate_search_candidates(
                 payload.cooldown_days_values,
                 payload.trailing_stop_pct_values,
                 payload.sell_position_pct_values,
+                payload.sell_reduction_basis_values,
+                payload.max_take_profit_sells_per_cycle_values,
+                payload.min_position_pct_after_take_profit_values,
             ),
             start=1,
         ):
@@ -646,6 +780,7 @@ def _evaluate_search_candidates(
                 base_df,
                 payload.initial_capital,
                 payload.objective,
+                payload.rebalance_threshold_pct,
                 batch,
             )
             futures_map[future] = {
@@ -688,6 +823,7 @@ def _evaluate_search_batch(
     base_df: pd.DataFrame,
     initial_capital: float,
     objective: str,
+    rebalance_threshold_pct: float,
     batch_items: List[Tuple[int, Tuple]],
 ) -> Dict:
     results = []
@@ -706,6 +842,10 @@ def _evaluate_search_batch(
                 cooldown_days=int(values[6]),
                 trailing_stop_pct=float(values[7]),
                 sell_position_pct=float(values[8]),
+                sell_reduction_basis=str(values[9]),
+                max_take_profit_sells_per_cycle=int(values[10]),
+                min_position_pct_after_take_profit=float(values[11]),
+                rebalance_threshold_pct=float(rebalance_threshold_pct),
             )
         except ValidationError as exc:
             skipped_combinations += 1
@@ -841,6 +981,16 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             processed_combinations=0,
             skipped_combinations=0,
             message="正在准备回测数据",
+        )
+
+        logger.info(
+            "Starting SOXL fear parameter search job, task_id=%s, symbol=%s, start_date=%s, end_date=%s, combinations=%s, top_n=%s",
+            task_id,
+            payload.symbol,
+            start_date,
+            end_date,
+            total_combinations,
+            payload.top_n,
         )
 
         base_df, meta = _prepare_base_dataframe(payload.symbol, start_date, end_date)
