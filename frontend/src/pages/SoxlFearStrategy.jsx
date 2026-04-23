@@ -241,12 +241,6 @@ const SoxlFearStrategy = () => {
                     <Switch checkedChildren="开启" unCheckedChildren="关闭" />
                   </Form.Item>
 
-                  <div style={{ marginBottom: 16 }}>
-                    <Text type="secondary">
-                      默认参数来自你当前回测效果最好的那组。当前只交易 <Text code>SOXL.US</Text>，不再使用 VIX 因子，直接使用 CNN 恐贪分数判断：CNN 越低越偏买入区，CNN 越高越偏止盈区。
-                    </Text>
-                  </div>
-
                   <Row gutter={16}>
                     <Col xs={24} md={8}>
                       <Form.Item name="symbol" label="交易标的">
