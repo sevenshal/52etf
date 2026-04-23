@@ -68,6 +68,11 @@ const Profile = () => {
           onClick: () => navigate('/portfolio-copy-trading'),
           arrow: true
         },
+        {
+          title: 'SOXL情绪量能自动交易',
+          onClick: () => navigate('/soxl-fear-strategy'),
+          arrow: true
+        },
       ]
     },
     {

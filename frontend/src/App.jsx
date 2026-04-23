@@ -28,6 +28,7 @@ import SZDTAutoTrading from './pages/SZDTAutoTrading';
 import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
+import SoxlFearStrategy from './pages/SoxlFearStrategy';
 
 function App() {
   return (
@@ -60,6 +61,7 @@ function App() {
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
+          <Route path="/soxl-fear-strategy" element={<SoxlFearStrategy />} />
         </Route>
       </Routes>
     </AccountProvider>
