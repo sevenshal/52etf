@@ -43,10 +43,23 @@ const objectiveOptions = [
   { label: '按夏普最大', value: 'sharpe_ratio' },
 ];
 
+const symbolOptions = [
+  { label: 'SOXL.US', value: 'SOXL.US' },
+  { label: 'TQQQ.US', value: 'TQQQ.US' },
+  { label: 'UPRO.US', value: 'UPRO.US' },
+];
+
+const sellReductionBasisOptions = [
+  { label: '按总资产', value: 'portfolio' },
+  { label: '按持仓股票', value: 'holdings' },
+];
+
 const getObjectiveLabel = (value) => objectiveOptions.find(item => item.value === value)?.label || value;
+const getSellReductionBasisLabel = (value) => sellReductionBasisOptions.find(item => item.value === value)?.label || value;
 
 const SoxlFearBacktest = () => {
   const [form] = Form.useForm();
+  const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
   const [loading, setLoading] = useState(false);
   const [searchMeta, setSearchMeta] = useState(null);
   const [searchResults, setSearchResults] = useState([]);
@@ -61,13 +74,14 @@ const SoxlFearBacktest = () => {
   const pollingTimerRef = useRef(null);
 
   const buildPayload = (values) => ({
-    symbol: 'SOXL.US',
+    symbol: values.symbol || 'SOXL.US',
     initial_capital: values.initial_capital,
     start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
     end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
     top_n: values.top_n,
     objective: values.objective,
     eval_workers: values.eval_workers,
+    rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
     a_values: parseNumberList(values.a_values),
     b_values: parseNumberList(values.b_values),
     buy_threshold_values: parseNumberList(values.buy_threshold_values),
@@ -77,6 +91,9 @@ const SoxlFearBacktest = () => {
     cooldown_days_values: parseNumberList(values.cooldown_days_values, true),
     trailing_stop_pct_values: parseNumberList(values.trailing_stop_pct_values),
     sell_position_pct_values: parseNumberList(values.sell_position_pct_values),
+    sell_reduction_basis_values: values.sell_reduction_basis_values,
+    max_take_profit_sells_per_cycle_values: parseNumberList(values.max_take_profit_sells_per_cycle_values, true),
+    min_position_pct_after_take_profit_values: parseNumberList(values.min_position_pct_after_take_profit_values),
   });
 
   const buildParamsFromRecord = (record) => ({
@@ -89,6 +106,10 @@ const SoxlFearBacktest = () => {
     cooldown_days: record.cooldown_days,
     trailing_stop_pct: record.trailing_stop_pct,
     sell_position_pct: record.sell_position_pct,
+    sell_reduction_basis: record.sell_reduction_basis,
+    max_take_profit_sells_per_cycle: record.max_take_profit_sells_per_cycle,
+    min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
+    rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
 
   const stopPolling = () => {
@@ -177,7 +198,7 @@ const SoxlFearBacktest = () => {
     try {
       const values = form.getFieldsValue();
       const payload = {
-        symbol: 'SOXL.US',
+        symbol: values.symbol || 'SOXL.US',
         initial_capital: values.initial_capital,
         start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
@@ -198,13 +219,21 @@ const SoxlFearBacktest = () => {
   const resultColumns = [
     { title: 'a', dataIndex: 'a', width: 70 },
     { title: 'b', dataIndex: 'b', width: 70 },
-    { title: '恐慌阈值', dataIndex: 'buy_threshold', width: 90 },
-    { title: '贪婪阈值', dataIndex: 'greed_threshold', width: 90 },
+    { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
+    { title: '进入止盈区阈值(<=)', dataIndex: 'greed_threshold', width: 130 },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
     { title: '买入仓位%', dataIndex: 'buy_position_pct', width: 90 },
     { title: '冷却天数', dataIndex: 'cooldown_days', width: 90 },
     { title: '止盈回撤%', dataIndex: 'trailing_stop_pct', width: 100 },
-    { title: '止盈卖出%', dataIndex: 'sell_position_pct', width: 100 },
+    { title: '止盈减仓%', dataIndex: 'sell_position_pct', width: 100 },
+    {
+      title: '止盈减仓口径',
+      dataIndex: 'sell_reduction_basis',
+      width: 110,
+      render: value => getSellReductionBasisLabel(value),
+    },
+    { title: '单轮止盈次数', dataIndex: 'max_take_profit_sells_per_cycle', width: 110 },
+    { title: '保留仓位%', dataIndex: 'min_position_pct_after_take_profit', width: 100 },
     {
       title: '年化收益',
       dataIndex: 'annualized_return',
@@ -262,8 +291,13 @@ const SoxlFearBacktest = () => {
       render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
     },
     { title: '价格', dataIndex: 'price', width: 90, render: value => Number(value || 0).toFixed(2) },
-    { title: '股数', dataIndex: 'shares', width: 100, render: value => Number(value || 0).toFixed(2) },
+    { title: '交易股数', dataIndex: 'shares', width: 90, render: value => Number(value || 0).toFixed(0) },
     { title: '金额', dataIndex: 'amount', width: 110, render: value => Number(value || 0).toFixed(2) },
+    { title: '持仓股数', dataIndex: 'position_after', width: 100, render: value => Number(value || 0).toFixed(0) },
+    { title: '交易后仓位%', dataIndex: 'position_pct_after', width: 110, render: value => formatPercent(value) },
+    { title: '现金', dataIndex: 'cash_after', width: 110, render: value => Number(value || 0).toFixed(2) },
+    { title: '持仓市值', dataIndex: 'holdings_value_after', width: 120, render: value => Number(value || 0).toFixed(2) },
+    { title: '净值', dataIndex: 'net_value_after', width: 120, render: value => Number(value || 0).toFixed(2) },
     {
       title: '收益',
       dataIndex: 'profit',
@@ -296,7 +330,7 @@ const SoxlFearBacktest = () => {
     const benchmark = detailedResult.equity_curve.map(item => item.benchmark_value);
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['策略净值', 'SOXL买入持有'] },
+      legend: { data: ['策略净值', `${selectedSymbol}买入持有`] },
       xAxis: { type: 'category', data: dates },
       yAxis: { type: 'value', scale: true },
       dataZoom: [{ type: 'inside', start: 50, end: 100 }, { type: 'slider' }],
@@ -311,7 +345,7 @@ const SoxlFearBacktest = () => {
           areaStyle: { opacity: 0.12, color: '#cf1322' },
         },
         {
-          name: 'SOXL买入持有',
+          name: `${selectedSymbol}买入持有`,
           type: 'line',
           data: benchmark,
           smooth: true,
@@ -320,7 +354,7 @@ const SoxlFearBacktest = () => {
         },
       ],
     };
-  }, [detailedResult]);
+  }, [detailedResult, selectedSymbol]);
 
   const priceVolumeOption = useMemo(() => {
     if (!detailedResult?.daily_data?.length) {
@@ -357,7 +391,7 @@ const SoxlFearBacktest = () => {
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: ['SOXL K线', 'MA20', '成交量', '成交量MA20'] },
+      legend: { data: [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'] },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
         { left: '8%', right: '8%', top: 40, height: '54%' },
@@ -377,7 +411,7 @@ const SoxlFearBacktest = () => {
       ],
       series: [
         {
-          name: 'SOXL K线',
+          name: `${selectedSymbol} K线`,
           type: 'candlestick',
           data: klineData,
           itemStyle: {
@@ -418,7 +452,7 @@ const SoxlFearBacktest = () => {
         },
       ],
     };
-  }, [detailedResult]);
+  }, [detailedResult, selectedSymbol]);
 
   const sentimentOption = useMemo(() => {
     if (!detailedResult?.daily_data?.length) {
@@ -427,13 +461,13 @@ const SoxlFearBacktest = () => {
     const dates = detailedResult.daily_data.map(item => item.date);
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['复合恐贪', 'VIX', 'CNN恐贪'] },
+      legend: { data: ['复合情绪分数', 'VIX', 'CNN恐贪'] },
       xAxis: { type: 'category', data: dates },
       yAxis: { type: 'value', scale: true },
       dataZoom: [{ type: 'inside', start: 60, end: 100 }, { type: 'slider', start: 60, end: 100 }],
       series: [
         {
-          name: '复合恐贪',
+          name: '复合情绪分数',
           type: 'line',
           data: detailedResult.daily_data.map(item => item.composite_fear),
           showSymbol: false,
@@ -459,33 +493,38 @@ const SoxlFearBacktest = () => {
 
   return (
     <div style={{ padding: 24 }}>
-      <Card title="SOXL 情绪 + 量能 超参数回测" style={{ marginBottom: 24 }}>
+      <Card title={`${selectedSymbol} 情绪 + 量能 超参数回测`} style={{ marginBottom: 24 }}>
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description="用 a * VIX + b * (100 - CNN恐贪) 构造复合恐贪指数；恐慌且 SOXL 成交量 / 20日均量 放大时分批买入；贪婪区触发移动止盈且卖价高于当前持仓均价时卖出；买卖后按交易日冷却 n 天。"
+          description={`用 a * VIX + b * (100 - CNN恐贪) 构造复合情绪分数；分数高于买入触发阈值且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；分数低于进入止盈区阈值(<=)后，若价格再从区内高点回撤，则按回撤规则移动止盈，且卖价高于当前持仓均价才卖出；止盈减仓口径可选按总资产或按持仓股票，两种都支持搜索对比；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
         />
         <Form
           form={form}
           layout="vertical"
           onFinish={handleSearch}
           initialValues={{
+            symbol: 'SOXL.US',
             initial_capital: 100000,
             top_n: 20,
             objective: 'annualized_return',
             eval_workers: 4,
+            fit_rebalance_threshold_pct: 5,
             date_range: [dayjs('2021-01-01'), dayjs()],
-            a_values: '0.8,1.2',
-            b_values: '0.8,1.2',
-            buy_threshold_values: '85,95',
-            greed_threshold_values: '40,50',
-            volume_ratio_threshold_values: '1.3,1.6',
-            buy_position_pct_values: '10,20',
-            cooldown_days_values: '3,5',
-            trailing_stop_pct_values: '6,10',
-            sell_position_pct_values: '25,50',
+            a_values: '0',
+            b_values: '1',
+            buy_threshold_values: '50,60,70',
+            greed_threshold_values: '50,60,70',
+            volume_ratio_threshold_values: '1.2,1.4,1.6',
+            buy_position_pct_values: '40,50,60',
+            cooldown_days_values: '5,10,15',
+            trailing_stop_pct_values: '3,5,7',
+            sell_position_pct_values: '40,50,60',
+            sell_reduction_basis_values: ['portfolio', 'holdings'],
+            max_take_profit_sells_per_cycle_values: '1,2,3',
+            min_position_pct_after_take_profit_values: '5,10,15',
           }}
         >
           <Row gutter={16}>
@@ -501,7 +540,7 @@ const SoxlFearBacktest = () => {
             </Col>
             <Col xs={24} md={4}>
               <Form.Item name="top_n" label="返回前N组">
-                <InputNumber min={1} max={100} style={{ width: '100%' }} />
+                <InputNumber min={1} max={500} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -515,8 +554,8 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item label="标的">
-                <Input value="SOXL.US" disabled />
+              <Form.Item name="symbol" label="标的">
+                <Select options={symbolOptions} />
               </Form.Item>
             </Col>
           </Row>
@@ -533,7 +572,7 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
-              <Form.Item name="buy_threshold_values" label="恐慌阈值候选">
+              <Form.Item name="buy_threshold_values" label="买入阈值候选">
                 <Input placeholder="例如 85,95" />
               </Form.Item>
             </Col>
@@ -541,7 +580,7 @@ const SoxlFearBacktest = () => {
 
           <Row gutter={16}>
             <Col xs={24} md={8}>
-              <Form.Item name="greed_threshold_values" label="贪婪阈值候选">
+              <Form.Item name="greed_threshold_values" label="进入止盈区阈值(<=) 候选">
                 <Input placeholder="例如 40,50" />
               </Form.Item>
             </Col>
@@ -569,8 +608,31 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
-              <Form.Item name="sell_position_pct_values" label="止盈卖出仓位% 候选">
+              <Form.Item name="sell_position_pct_values" label="止盈减仓% 候选">
                 <Input placeholder="例如 25,50" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="sell_reduction_basis_values" label="止盈减仓口径候选">
+                <Select mode="multiple" options={sellReductionBasisOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="max_take_profit_sells_per_cycle_values" label="单轮止盈次数候选">
+                <Input placeholder="例如 2,3" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item name="min_position_pct_after_take_profit_values" label="保留仓位% 候选">
+                <Input placeholder="例如 10,20" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="fit_rebalance_threshold_pct" label="调仓阈值%">
+                <InputNumber min={0.1} max={100} step={0.1} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
@@ -579,9 +641,6 @@ const SoxlFearBacktest = () => {
             <Button type="primary" htmlType="submit" loading={loading}>
               搜索最佳参数
             </Button>
-            <span style={{ color: '#8c8c8c' }}>
-              默认组合数约 512 组，支持按年化收益率或夏普排序。
-            </span>
           </Space>
         </Form>
       </Card>
@@ -625,7 +684,7 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.a}-${record.b}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}`}
+            rowKey={(record) => `${record.a}-${record.b}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
             pagination={{ pageSize: 10 }}
             scroll={{ x: 1500 }}
             onRow={(record) => ({
@@ -688,13 +747,17 @@ const SoxlFearBacktest = () => {
             <Descriptions column={{ xs: 1, md: 2, lg: 3 }} bordered size="small">
               <Descriptions.Item label="a">{detailedResult.params?.a}</Descriptions.Item>
               <Descriptions.Item label="b">{detailedResult.params?.b}</Descriptions.Item>
-              <Descriptions.Item label="恐慌阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
-              <Descriptions.Item label="贪婪阈值">{detailedResult.params?.greed_threshold}</Descriptions.Item>
+              <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
+              <Descriptions.Item label="进入止盈区阈值(<=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
               <Descriptions.Item label="每次买入仓位%">{detailedResult.params?.buy_position_pct}</Descriptions.Item>
               <Descriptions.Item label="冷却天数">{detailedResult.params?.cooldown_days}</Descriptions.Item>
               <Descriptions.Item label="移动止盈回撤%">{detailedResult.params?.trailing_stop_pct}</Descriptions.Item>
-              <Descriptions.Item label="止盈卖出仓位%">{detailedResult.params?.sell_position_pct}</Descriptions.Item>
+              <Descriptions.Item label="止盈减仓%">{detailedResult.params?.sell_position_pct}</Descriptions.Item>
+              <Descriptions.Item label="止盈减仓口径">{getSellReductionBasisLabel(detailedResult.params?.sell_reduction_basis)}</Descriptions.Item>
+              <Descriptions.Item label="同轮止盈最多卖出次数">{detailedResult.params?.max_take_profit_sells_per_cycle}</Descriptions.Item>
+              <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
+              <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
               <Descriptions.Item label="有效区间">{detailedResult.meta?.effective_start_date} ~ {detailedResult.meta?.effective_end_date}</Descriptions.Item>
               <Descriptions.Item label="交易日数">{detailedResult.meta?.trading_days}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital}</Descriptions.Item>
@@ -705,11 +768,11 @@ const SoxlFearBacktest = () => {
             <ReactECharts option={equityOption} style={{ height: 360 }} />
           </Card>
 
-          <Card title="SOXL K线 / 买卖点 / 成交量 / MA20" style={{ marginBottom: 24 }} loading={detailLoading}>
+          <Card title={`${selectedSymbol} K线 / 买卖点 / 成交量 / MA20`} style={{ marginBottom: 24 }} loading={detailLoading}>
             <ReactECharts option={priceVolumeOption} style={{ height: 680 }} />
           </Card>
 
-          <Card title="VIX / CNN / 复合恐贪指数" style={{ marginBottom: 24 }} loading={detailLoading}>
+          <Card title="VIX / CNN / 复合情绪分数" style={{ marginBottom: 24 }} loading={detailLoading}>
             <ReactECharts option={sentimentOption} style={{ height: 320 }} />
           </Card>
 
@@ -719,7 +782,7 @@ const SoxlFearBacktest = () => {
               columns={tradeColumns}
               rowKey={(record, index) => `${record.date}-${record.action}-${index}`}
               pagination={{ pageSize: 12 }}
-              scroll={{ x: 1200 }}
+              scroll={{ x: 1800 }}
             />
           </Card>
         </div>
