@@ -39,15 +39,15 @@ CNN_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 
 class SOXLFearStrategyParams(BaseModel):
     buy_threshold: float = 40.0
-    greed_threshold: float = 40.0
-    volume_ratio_threshold: float = 1.4
-    buy_position_pct: float = 10.0
-    cooldown_days: int = 5
-    trailing_stop_pct: float = 8.0
+    greed_threshold: float = 41.0
+    volume_ratio_threshold: float = 1.38
+    buy_position_pct: float = 60.0
+    cooldown_days: int = 10
+    trailing_stop_pct: float = 5.0
     sell_position_pct: float = 50.0
     sell_reduction_basis: str = "portfolio"
-    max_take_profit_sells_per_cycle: int = 3
-    min_position_pct_after_take_profit: float = 10.0
+    max_take_profit_sells_per_cycle: int = 2
+    min_position_pct_after_take_profit: float = 5.0
     rebalance_threshold_pct: float = 5.0
 
     @validator("buy_position_pct", "trailing_stop_pct", "sell_position_pct")
@@ -101,10 +101,10 @@ class SOXLFearSearchParams(BaseModel):
     objective: str = "annualized_return"
     eval_workers: Optional[int] = None
     rebalance_threshold_pct: float = 5.0
-    buy_threshold_values: List[float] = Field(default_factory=lambda: [30.0, 40.0, 50.0])
-    greed_threshold_values: List[float] = Field(default_factory=lambda: [30.0, 40.0, 50.0])
-    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.2, 1.4, 1.6])
-    buy_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
+    buy_threshold_values: List[float] = Field(default_factory=lambda: [35.0, 40.0, 45.0])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0, 41.0, 42.0])
+    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3, 1.38, 1.45])
+    buy_position_pct_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
     cooldown_days_values: List[int] = Field(default_factory=lambda: [5, 10, 15])
     trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [3.0, 5.0, 7.0])
     sell_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
