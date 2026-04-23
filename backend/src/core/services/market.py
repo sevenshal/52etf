@@ -76,6 +76,14 @@ class MarketService:
         return d in holidays
 
     @classmethod
+    def get_previous_us_trading_day(cls, d: date) -> date:
+        """获取给定日期之前最近一个美股交易日"""
+        current = d - timedelta(days=1)
+        while current.weekday() >= 5 or cls.is_us_market_holiday(current):
+            current -= timedelta(days=1)
+        return current
+
+    @classmethod
     def get_us_market_close_time(cls, d: date) -> dtime:
         """获取美股权益市场收盘时间 (通常为 16:00，感恩节后一天及平安夜为 13:00)"""
         y = d.year

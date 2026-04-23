@@ -4,6 +4,7 @@ import time
 from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
+from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
 from .scheduled_tasks import scheduled_task_manager, run_startup_tasks
 
 pd.set_option("display.max_rows", None)
@@ -20,6 +21,8 @@ def robot():
 
   # 启动 Portfolio Copy Trader Worker
   start_portfolio_copy_trader()
+  # 启动 SOXL 情绪量能自动交易
+  start_soxl_fear_strategy_trader()
 
   while True:
     try:

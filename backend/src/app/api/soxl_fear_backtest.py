@@ -35,14 +35,11 @@ CNN_HEADERS = {
     "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
 }
 CNN_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-FRED_PROXY_BASE_URL = "https://api.52etf.vip/fred/series/observations"
 
 
 class SOXLFearStrategyParams(BaseModel):
-    a: float = 1.0
-    b: float = 1.0
-    buy_threshold: float = 90.0
-    greed_threshold: float = 45.0
+    buy_threshold: float = 40.0
+    greed_threshold: float = 40.0
     volume_ratio_threshold: float = 1.4
     buy_position_pct: float = 10.0
     cooldown_days: int = 5
@@ -77,10 +74,10 @@ class SOXLFearStrategyParams(BaseModel):
             raise ValueError("冷却天数不能小于 0")
         return value
 
-    @validator("buy_threshold")
-    def validate_buy_threshold(cls, value):
-        if value <= 0:
-            raise ValueError("买入触发阈值必须大于 0")
+    @validator("buy_threshold", "greed_threshold")
+    def validate_threshold(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("阈值必须在 0 到 100 之间")
         return value
 
     @validator("max_take_profit_sells_per_cycle")
@@ -104,10 +101,8 @@ class SOXLFearSearchParams(BaseModel):
     objective: str = "annualized_return"
     eval_workers: Optional[int] = None
     rebalance_threshold_pct: float = 5.0
-    a_values: List[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0])
-    b_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
-    buy_threshold_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
-    greed_threshold_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
+    buy_threshold_values: List[float] = Field(default_factory=lambda: [30.0, 40.0, 50.0])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [30.0, 40.0, 50.0])
     volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.2, 1.4, 1.6])
     buy_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
     cooldown_days_values: List[int] = Field(default_factory=lambda: [5, 10, 15])
@@ -230,35 +225,6 @@ def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
     return df
 
 
-def _fetch_vix_history(start_date: date, end_date: date) -> pd.DataFrame:
-    response = requests.get(
-        FRED_PROXY_BASE_URL,
-        params={
-            "series_id": "VIXCLS",
-            "file_type": "json",
-            "observation_start": start_date.isoformat(),
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    rows = []
-    for item in payload.get("observations", []):
-        raw_value = item.get("value")
-        if raw_value in (None, ".", ""):
-            continue
-        rows.append({
-            "date": datetime.strptime(item["date"], "%Y-%m-%d").date(),
-            "vix": float(raw_value),
-        })
-
-    df = pd.DataFrame(rows).sort_values("date")
-    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
-    if df.empty:
-        raise ValueError("指定区间内没有 VIX 数据")
-    return df
-
-
 def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
     quote_service = QuoteService(LongPortService.get_instance())
     klines = quote_service.get_klines(
@@ -289,12 +255,10 @@ def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.Da
 def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tuple[pd.DataFrame, Dict]:
     price_df = _fetch_price_history(symbol, start_date, end_date)
     cnn_df = _fetch_cnn_history(start_date, end_date)
-    vix_df = _fetch_vix_history(start_date, end_date)
 
-    merged_df = price_df.merge(cnn_df, on="date", how="left").merge(vix_df, on="date", how="left")
+    merged_df = price_df.merge(cnn_df, on="date", how="left")
     merged_df = merged_df.sort_values("date").reset_index(drop=True)
     merged_df["cnn_fear_greed"] = merged_df["cnn_fear_greed"].ffill()
-    merged_df["vix"] = merged_df["vix"].ffill()
     merged_df["ma20"] = merged_df["close"].rolling(20).mean()
     merged_df["volume_ma20"] = merged_df["volume"].rolling(20).mean()
     merged_df["volume_ratio"] = np.where(
@@ -302,21 +266,19 @@ def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tu
         merged_df["volume"] / merged_df["volume_ma20"],
         np.nan,
     )
-    base_df = merged_df.dropna(subset=["cnn_fear_greed", "vix", "ma20", "volume_ma20"]).reset_index(drop=True)
+    base_df = merged_df.dropna(subset=["cnn_fear_greed", "ma20", "volume_ma20"]).reset_index(drop=True)
 
     if base_df.empty:
         diagnostics = (
             f"price={_describe_df_range(price_df)}; "
             f"cnn={_describe_df_range(cnn_df)}; "
-            f"vix={_describe_df_range(vix_df)}; "
             f"merged={_describe_df_range(merged_df)}; "
             f"merged_non_null_cnn={int(merged_df['cnn_fear_greed'].notna().sum()) if 'cnn_fear_greed' in merged_df else 0}; "
-            f"merged_non_null_vix={int(merged_df['vix'].notna().sum()) if 'vix' in merged_df else 0}; "
             f"merged_non_null_ma20={int(merged_df['ma20'].notna().sum()) if 'ma20' in merged_df else 0}; "
             f"merged_non_null_volume_ma20={int(merged_df['volume_ma20'].notna().sum()) if 'volume_ma20' in merged_df else 0}"
         )
         raise ValueError(
-            f"{symbol}、VIX、CNN 恐贪三者没有足够重叠的数据区间。"
+            f"{symbol} 与 CNN 恐贪没有足够重叠的数据区间。"
             f" 请求区间: {start_date} ~ {end_date}。"
             f" 诊断: {diagnostics}"
         )
@@ -329,7 +291,6 @@ def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tu
         "effective_end_date": base_df.iloc[-1]["date"].isoformat(),
         "trading_days": int(len(base_df)),
         "cnn_points": int(len(cnn_df)),
-        "vix_points": int(len(vix_df)),
         "price_points": int(len(price_df)),
     }
     return base_df, meta
@@ -387,8 +348,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     volume_ma20_values = base_df["volume_ma20"].to_numpy(dtype=float, copy=False)
     volume_ratios = base_df["volume_ratio"].to_numpy(dtype=float, copy=False)
     cnn_values = base_df["cnn_fear_greed"].to_numpy(dtype=float, copy=False)
-    vix_values = base_df["vix"].to_numpy(dtype=float, copy=False)
-    composite_fear_values = params.a * vix_values + params.b * (100 - cnn_values)
 
     if detailed:
         open_prices = base_df["open"].to_numpy(dtype=float, copy=False)
@@ -415,7 +374,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     for index in range(len(close_prices)):
         current_date = date_strings[index]
         close_price = float(close_prices[index])
-        composite_fear = float(composite_fear_values[index])
+        cnn_score = float(cnn_values[index])
         volume_ratio = float(volume_ratios[index])
         can_trade = cooldown_remaining == 0
         action_taken = False
@@ -424,8 +383,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             cooldown_remaining -= 1
             can_trade = False
 
-        is_fear = composite_fear >= params.buy_threshold
-        is_greedy = composite_fear <= params.greed_threshold
+        is_fear = cnn_score <= params.buy_threshold
+        is_greedy = cnn_score >= params.greed_threshold
 
         if shares > 0:
             if is_greedy:
@@ -511,10 +470,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "profit": profit,
                         "profit_pct": profit_pct,
                         "reason": (
-                            f"止盈触发区回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+                            f"CNN {cnn_score:.2f} 进入止盈区后回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
                         ),
-                        "composite_fear": composite_fear,
+                        "cnn_score": cnn_score,
                         "volume_ratio": volume_ratio,
                     })
 
@@ -554,8 +513,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "avg_cost_after": avg_cost,
                         "profit": 0.0,
                         "profit_pct": 0.0,
-                        "reason": f"买入分数 {composite_fear:.2f} + 成交量放大 {volume_ratio:.2f}",
-                        "composite_fear": composite_fear,
+                        "reason": f"CNN {cnn_score:.2f} 进入买入区 + 成交量放大 {volume_ratio:.2f}",
+                        "cnn_score": cnn_score,
                         "volume_ratio": volume_ratio,
                     })
 
@@ -581,8 +540,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "volume_ma20": float(volume_ma20_values[index]),
                 "volume_ratio": volume_ratio,
                 "cnn_fear_greed": float(cnn_values[index]),
-                "vix": float(vix_values[index]),
-                "composite_fear": composite_fear,
                 "equity": equity_value,
                 "cash": cash,
                 "shares": shares,
@@ -632,8 +589,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
 def _count_search_params(payload: SOXLFearSearchParams) -> int:
     value_groups = [
-        payload.a_values,
-        payload.b_values,
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
@@ -655,8 +610,6 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
 
 def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrategyParams]:
     for values in product(
-        payload.a_values,
-        payload.b_values,
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
@@ -669,18 +622,16 @@ def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrat
         payload.min_position_pct_after_take_profit_values,
     ):
         yield SOXLFearStrategyParams(
-            a=float(values[0]),
-            b=float(values[1]),
-            buy_threshold=float(values[2]),
-            greed_threshold=float(values[3]),
-            volume_ratio_threshold=float(values[4]),
-            buy_position_pct=float(values[5]),
-            cooldown_days=int(values[6]),
-            trailing_stop_pct=float(values[7]),
-            sell_position_pct=float(values[8]),
-            sell_reduction_basis=str(values[9]),
-            max_take_profit_sells_per_cycle=int(values[10]),
-            min_position_pct_after_take_profit=float(values[11]),
+            buy_threshold=float(values[0]),
+            greed_threshold=float(values[1]),
+            volume_ratio_threshold=float(values[2]),
+            buy_position_pct=float(values[3]),
+            cooldown_days=int(values[4]),
+            trailing_stop_pct=float(values[5]),
+            sell_position_pct=float(values[6]),
+            sell_reduction_basis=str(values[7]),
+            max_take_profit_sells_per_cycle=int(values[8]),
+            min_position_pct_after_take_profit=float(values[9]),
             rebalance_threshold_pct=float(payload.rebalance_threshold_pct),
         )
 
@@ -717,8 +668,6 @@ def _evaluate_search_candidates(
         batch = []
         for index, values in enumerate(
             product(
-                payload.a_values,
-                payload.b_values,
                 payload.buy_threshold_values,
                 payload.greed_threshold_values,
                 payload.volume_ratio_threshold_values,
@@ -833,18 +782,16 @@ def _evaluate_search_batch(
     for index, values in batch_items:
         try:
             params = SOXLFearStrategyParams(
-                a=float(values[0]),
-                b=float(values[1]),
-                buy_threshold=float(values[2]),
-                greed_threshold=float(values[3]),
-                volume_ratio_threshold=float(values[4]),
-                buy_position_pct=float(values[5]),
-                cooldown_days=int(values[6]),
-                trailing_stop_pct=float(values[7]),
-                sell_position_pct=float(values[8]),
-                sell_reduction_basis=str(values[9]),
-                max_take_profit_sells_per_cycle=int(values[10]),
-                min_position_pct_after_take_profit=float(values[11]),
+                buy_threshold=float(values[0]),
+                greed_threshold=float(values[1]),
+                volume_ratio_threshold=float(values[2]),
+                buy_position_pct=float(values[3]),
+                cooldown_days=int(values[4]),
+                trailing_stop_pct=float(values[5]),
+                sell_position_pct=float(values[6]),
+                sell_reduction_basis=str(values[7]),
+                max_take_profit_sells_per_cycle=int(values[8]),
+                min_position_pct_after_take_profit=float(values[9]),
                 rebalance_threshold_pct=float(rebalance_threshold_pct),
             )
         except ValidationError as exc:

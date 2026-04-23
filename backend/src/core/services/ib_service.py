@@ -73,17 +73,20 @@ class IBKRService:
             symbol = p.contract.symbol
             qty = float(p.position)
             price = float(p.marketPrice) if hasattr(p, 'marketPrice') and p.marketPrice and not math.isnan(p.marketPrice) else None
+            avg_cost = float(p.avgCost) if hasattr(p, 'avgCost') and p.avgCost and not math.isnan(p.avgCost) else None
             
             if symbol in pos_map:
                 pos_map[symbol]['qty'] += qty
+                if pos_map[symbol].get('avg_cost') is None and avg_cost is not None:
+                    pos_map[symbol]['avg_cost'] = avg_cost
             else:
-                pos_map[symbol] = {'qty': qty, 'price': price}
+                pos_map[symbol] = {'qty': qty, 'price': price, 'avg_cost': avg_cost}
         return pos_map
 
     def get_position(self, symbol: str) -> dict:
-        """获取指定代码的实时持仓数据 {qty, price}"""
+        """获取指定代码的实时持仓数据 {qty, price, avg_cost}"""
         pos_data = self.get_positions_dict().get(symbol.replace('US.', ''))
-        return pos_data if pos_data else {'qty': 0, 'price': None}
+        return pos_data if pos_data else {'qty': 0, 'price': None, 'avg_cost': None}
 
     def get_all_pending_qtys(self) -> Dict[str, float]:
         """批量获取所有代码的待成交订单数量字典"""

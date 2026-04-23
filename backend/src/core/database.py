@@ -321,6 +321,68 @@ class AutomatedTradeLog(Base):
     status = Column(String)  # 'SUCCESS' or 'FAILED'
     message = Column(String)
 
+
+class SoxlFearStrategyConfig(Base):
+    """SOXL 情绪量能自动交易配置"""
+    __tablename__ = "soxl_fear_strategy_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, unique=True)
+    enabled = Column(Boolean, default=False)
+    symbol = Column(String, nullable=False, default="SOXL.US")
+    account_type = Column(String, default="ib")
+    ib_account_id = Column(Integer, nullable=True)
+    longport_account_id = Column(String, nullable=True)
+    buy_threshold = Column(Float, nullable=False, default=60.0)
+    greed_threshold = Column(Float, nullable=False, default=60.0)
+    volume_ratio_threshold = Column(Float, nullable=False, default=1.4)
+    buy_position_pct = Column(Float, nullable=False, default=50.0)
+    cooldown_days = Column(Integer, nullable=False, default=10)
+    trailing_stop_pct = Column(Float, nullable=False, default=5.0)
+    sell_position_pct = Column(Float, nullable=False, default=50.0)
+    sell_reduction_basis = Column(String, nullable=False, default="portfolio")
+    max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
+    min_position_pct_after_take_profit = Column(Float, nullable=False, default=10.0)
+    rebalance_threshold_pct = Column(Float, nullable=False, default=5.0)
+    last_run_at = Column(DateTime)
+    last_run_status = Column(String(16))
+    last_run_message = Column(String(500))
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class SoxlFearStrategyState(Base):
+    """SOXL 情绪量能自动交易运行状态"""
+    __tablename__ = "soxl_fear_strategy_states"
+
+    account_id = Column(String, primary_key=True)
+    symbol = Column(String, nullable=False, default="SOXL.US")
+    last_processed_date = Column(Date)
+    cooldown_remaining_days = Column(Integer, nullable=False, default=0)
+    greed_peak_price = Column(Float)
+    take_profit_cycle_sell_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class SoxlFearStrategyLog(Base):
+    """SOXL 情绪量能自动交易日志"""
+    __tablename__ = "soxl_fear_strategy_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    symbol = Column(String, nullable=False, default="SOXL.US")
+    trigger_source = Column(String(16), nullable=False, default="auto")
+    action = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False)
+    price = Column(Float)
+    quantity = Column(Integer)
+    cnn_index_value = Column(Float)
+    fear_score = Column(Float)
+    volume_ratio = Column(Float)
+    position_ratio_before = Column(Float)
+    position_ratio_after = Column(Float)
+    message = Column(String(1000))
+
 class PortfolioCopyConfig(Base):
     """投资组合跟单配置"""
     __tablename__ = "portfolio_copy_configs"

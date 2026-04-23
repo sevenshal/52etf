@@ -56,6 +56,7 @@ class CNNFearGreedIndexScraper:
     def fetch_data_and_save(self):
         data = self.fetch_data()
         self.__save_to_db(data)
+        return data
 
 if __name__ == "__main__":
     scraper = CNNFearGreedIndexScraper()
