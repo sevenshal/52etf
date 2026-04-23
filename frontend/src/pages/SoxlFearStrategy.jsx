@@ -18,6 +18,7 @@ import {
 } from 'antd';
 import { HistoryOutlined, PlayCircleOutlined, SaveOutlined, SettingOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 
 const { Title, Text } = Typography;
@@ -51,6 +52,7 @@ const defaultValues = {
 
 const SoxlFearStrategy = () => {
   const [form] = Form.useForm();
+  const navigate = useNavigate();
   const [configLoading, setConfigLoading] = useState(false);
   const [logLoading, setLogLoading] = useState(false);
   const [manualLoading, setManualLoading] = useState(false);
@@ -136,6 +138,40 @@ const SoxlFearStrategy = () => {
     } finally {
       setManualLoading(false);
     }
+  };
+
+  const handleBacktest = () => {
+    const values = {
+      ...defaultValues,
+      ...form.getFieldsValue(),
+    };
+    navigate('/soxl-fear-backtest', {
+      state: {
+        autoRunBacktest: true,
+        presetValues: {
+          symbol: values.symbol || 'SOXL.US',
+          initial_capital: 100000,
+          top_n: 1,
+          objective: 'annualized_return',
+          eval_workers: 1,
+          fit_rebalance_threshold_pct: values.rebalance_threshold_pct,
+          buy_threshold_values: String(values.buy_threshold ?? defaultValues.buy_threshold),
+          greed_threshold_values: String(values.greed_threshold ?? defaultValues.greed_threshold),
+          volume_ratio_threshold_values: String(values.volume_ratio_threshold ?? defaultValues.volume_ratio_threshold),
+          buy_position_pct_values: String(values.buy_position_pct ?? defaultValues.buy_position_pct),
+          cooldown_days_values: String(values.cooldown_days ?? defaultValues.cooldown_days),
+          trailing_stop_pct_values: String(values.trailing_stop_pct ?? defaultValues.trailing_stop_pct),
+          sell_position_pct_values: String(values.sell_position_pct ?? defaultValues.sell_position_pct),
+          sell_reduction_basis_values: [values.sell_reduction_basis || defaultValues.sell_reduction_basis],
+          max_take_profit_sells_per_cycle_values: String(
+            values.max_take_profit_sells_per_cycle ?? defaultValues.max_take_profit_sells_per_cycle
+          ),
+          min_position_pct_after_take_profit_values: String(
+            values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
+          ),
+        },
+      },
+    });
   };
 
   const logColumns = [
@@ -368,6 +404,9 @@ const SoxlFearStrategy = () => {
                     <Space>
                       <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={configLoading}>
                         保存配置
+                      </Button>
+                      <Button onClick={handleBacktest}>
+                        回测
                       </Button>
                       <Button icon={<PlayCircleOutlined />} onClick={handleManualRun} loading={manualLoading}>
                         立即执行一次

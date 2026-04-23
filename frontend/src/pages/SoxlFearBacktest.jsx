@@ -20,6 +20,7 @@ import {
 } from 'antd';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 
 const { RangePicker } = DatePicker;
@@ -59,6 +60,8 @@ const getSellReductionBasisLabel = (value) => sellReductionBasisOptions.find(ite
 
 const SoxlFearBacktest = () => {
   const [form] = Form.useForm();
+  const location = useLocation();
+  const navigate = useNavigate();
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
   const [loading, setLoading] = useState(false);
   const [searchMeta, setSearchMeta] = useState(null);
@@ -72,6 +75,7 @@ const SoxlFearBacktest = () => {
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchStatus, setSearchStatus] = useState(null);
   const pollingTimerRef = useRef(null);
+  const hasAutoRunRef = useRef(false);
 
   const buildPayload = (values) => ({
     symbol: values.symbol || 'SOXL.US',
@@ -188,6 +192,31 @@ const SoxlFearBacktest = () => {
   useEffect(() => () => {
     stopPolling();
   }, []);
+
+  useEffect(() => {
+    const autoRunBacktest = location.state?.autoRunBacktest;
+    const presetValues = location.state?.presetValues;
+    if (!autoRunBacktest || !presetValues || hasAutoRunRef.current) {
+      return;
+    }
+
+    hasAutoRunRef.current = true;
+    const mergedValues = {
+      ...form.getFieldsValue(),
+      ...presetValues,
+    };
+
+    if (!mergedValues.date_range) {
+      mergedValues.date_range = [dayjs('2021-01-01'), dayjs()];
+    }
+
+    form.setFieldsValue(mergedValues);
+    setTimeout(() => {
+      handleSearch(mergedValues);
+    }, 0);
+
+    navigate(location.pathname, { replace: true, state: null });
+  }, [form, location.pathname, location.state, navigate]);
 
   const loadDetail = async (record) => {
     setDetailLoading(true);
