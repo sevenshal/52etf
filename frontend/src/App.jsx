@@ -27,6 +27,7 @@ import LongPortAccountManager from './pages/LongPortAccountManager';
 import SZDTAutoTrading from './pages/SZDTAutoTrading';
 import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
+import SoxlFearBacktest from './pages/SoxlFearBacktest';
 
 function App() {
   return (
@@ -58,6 +59,7 @@ function App() {
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
+          <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
         </Route>
       </Routes>
     </AccountProvider>
