@@ -291,7 +291,7 @@ const SoxlFearStrategy = () => {
 
                   <Row gutter={16}>
                     <Col xs={24} md={8}>
-                      <Form.Item name="buy_threshold" label="买入触发阈值" rules={[{ required: true }]}>
+                      <Form.Item name="buy_threshold" label="买入触发阈值(<=)" rules={[{ required: true }]}>
                         <InputNumber min={0} max={100} style={{ width: '100%' }} />
                       </Form.Item>
                     </Col>
