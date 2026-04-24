@@ -339,6 +339,59 @@ def _compute_yearly_returns_from_arrays(date_strings: List[str], equity_values: 
     return yearly
 
 
+def _merge_yearly_returns(
+    strategy_yearly_returns: List[Dict],
+    benchmark_yearly_returns: List[Dict],
+) -> List[Dict]:
+    yearly_map: Dict[str, Dict] = {}
+
+    for item in strategy_yearly_returns:
+        year = str(item["year"])
+        strategy_return = float(item["return"])
+        yearly_map[year] = {
+            "year": year,
+            "strategy_return": strategy_return,
+            "benchmark_return": 0.0,
+            "excess_return": strategy_return,
+        }
+
+    for item in benchmark_yearly_returns:
+        year = str(item["year"])
+        benchmark_return = float(item["return"])
+        if year not in yearly_map:
+            yearly_map[year] = {
+                "year": year,
+                "strategy_return": 0.0,
+                "benchmark_return": benchmark_return,
+                "excess_return": -benchmark_return,
+            }
+        else:
+            yearly_map[year]["benchmark_return"] = benchmark_return
+            yearly_map[year]["excess_return"] = float(yearly_map[year]["strategy_return"]) - benchmark_return
+
+    return [yearly_map[year] for year in sorted(yearly_map.keys())]
+
+
+def _compute_yearly_trade_stats(trades: List[Dict]) -> Dict[str, Dict]:
+    yearly_trade_stats: Dict[str, Dict] = {}
+    for trade in trades:
+        year = str(trade.get("date", ""))[:4]
+        if len(year) != 4:
+            continue
+        if year not in yearly_trade_stats:
+            yearly_trade_stats[year] = {
+                "trade_count": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+            }
+        yearly_trade_stats[year]["trade_count"] += 1
+        if trade.get("action") == "BUY":
+            yearly_trade_stats[year]["buy_count"] += 1
+        elif trade.get("action") == "SELL":
+            yearly_trade_stats[year]["sell_count"] += 1
+    return yearly_trade_stats
+
+
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
     dates = base_df["date"].tolist()
     date_strings = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
@@ -556,6 +609,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
     cumulative_peaks = np.maximum.accumulate(equity_values)
     drawdowns = (equity_values / cumulative_peaks) - 1
+    benchmark_cumulative_peaks = np.maximum.accumulate(benchmark_values)
+    benchmark_drawdowns = (benchmark_values / benchmark_cumulative_peaks) - 1
     max_drawdown = abs(float(drawdowns.min())) * 100 if len(drawdowns) > 0 else 0.0
     returns = np.diff(equity_values) / equity_values[:-1] if len(equity_values) > 1 else np.array([])
     sharpe_ratio = 0.0
@@ -563,6 +618,16 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         sharpe_ratio = float((float(np.mean(returns)) / float(np.std(returns))) * np.sqrt(252))
     calmar_ratio = float(annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
     win_rate = (winning_trade_count / closed_trade_count * 100) if closed_trade_count > 0 else 0.0
+    yearly_returns = _merge_yearly_returns(
+        _compute_yearly_returns_from_arrays(date_strings, equity_values),
+        _compute_yearly_returns_from_arrays(date_strings, benchmark_values),
+    )
+    yearly_trade_stats = _compute_yearly_trade_stats(trades)
+    for item in yearly_returns:
+        stats = yearly_trade_stats.get(str(item["year"]), {})
+        item["trade_count"] = int(stats.get("trade_count", 0))
+        item["buy_count"] = int(stats.get("buy_count", 0))
+        item["sell_count"] = int(stats.get("sell_count", 0))
 
     result = {
         "params": params.dict(),
@@ -578,9 +643,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         "ending_value": end_value,
         "ending_cash": cash,
         "ending_shares": shares,
-        "yearly_returns": _compute_yearly_returns_from_arrays(date_strings, equity_values),
+        "yearly_returns": yearly_returns,
     }
     if detailed:
+        for index, item in enumerate(equity_curve):
+            item["drawdown"] = float(drawdowns[index]) * 100 if len(drawdowns) > index else 0.0
+            item["benchmark_drawdown"] = (
+                float(benchmark_drawdowns[index]) * 100 if len(benchmark_drawdowns) > index else 0.0
+            )
         result["trades"] = trades
         result["equity_curve"] = equity_curve
         result["daily_data"] = daily_data
