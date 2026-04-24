@@ -344,6 +344,43 @@ const SoxlFearBacktest = () => {
     { title: '原因', dataIndex: 'reason' },
   ];
 
+  const yearlyReturnColumns = [
+    { title: '年份', dataIndex: 'year', width: 100 },
+    {
+      title: '策略收益',
+      dataIndex: 'strategy_return',
+      width: 120,
+      render: value => (
+        <span style={{ color: Number(value || 0) >= 0 ? '#cf1322' : '#1677ff' }}>
+          {formatPercent(value)}
+        </span>
+      ),
+    },
+    {
+      title: `${selectedSymbol}买入持有`,
+      dataIndex: 'benchmark_return',
+      width: 140,
+      render: value => (
+        <span style={{ color: Number(value || 0) >= 0 ? '#cf1322' : '#1677ff' }}>
+          {formatPercent(value)}
+        </span>
+      ),
+    },
+    {
+      title: '超额收益',
+      dataIndex: 'excess_return',
+      width: 120,
+      render: value => (
+        <span style={{ color: Number(value || 0) >= 0 ? '#cf1322' : '#1677ff' }}>
+          {formatPercent(value)}
+        </span>
+      ),
+    },
+    { title: '总交易', dataIndex: 'trade_count', width: 90 },
+    { title: '买入', dataIndex: 'buy_count', width: 80 },
+    { title: '卖出', dataIndex: 'sell_count', width: 80 },
+  ];
+
   const equityOption = useMemo(() => {
     if (!detailedResult?.equity_curve?.length) {
       return {};
@@ -374,6 +411,49 @@ const SoxlFearBacktest = () => {
           smooth: true,
           showSymbol: false,
           lineStyle: { width: 2, color: '#1677ff' },
+        },
+      ],
+    };
+  }, [detailedResult, selectedSymbol]);
+
+  const drawdownOption = useMemo(() => {
+    if (!detailedResult?.equity_curve?.length) {
+      return {};
+    }
+    const dates = detailedResult.equity_curve.map(item => item.date);
+    return {
+      tooltip: {
+        trigger: 'axis',
+        valueFormatter: value => `${Number(value || 0).toFixed(2)}%`,
+      },
+      legend: { data: ['策略回撤', `${selectedSymbol}买入持有回撤`] },
+      xAxis: { type: 'category', data: dates },
+      yAxis: {
+        type: 'value',
+        max: 0,
+        axisLabel: {
+          formatter: value => `${value}%`,
+        },
+      },
+      dataZoom: [{ type: 'inside', start: 50, end: 100 }, { type: 'slider' }],
+      series: [
+        {
+          name: '策略回撤',
+          type: 'line',
+          data: detailedResult.equity_curve.map(item => item.drawdown),
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: '#cf1322' },
+          areaStyle: { opacity: 0.12, color: '#cf1322' },
+        },
+        {
+          name: `${selectedSymbol}买入持有回撤`,
+          type: 'line',
+          data: detailedResult.equity_curve.map(item => item.benchmark_drawdown),
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: '#1677ff' },
+          areaStyle: { opacity: 0.08, color: '#1677ff' },
         },
       ],
     };
@@ -759,6 +839,26 @@ const SoxlFearBacktest = () => {
           <Card title="回测资金曲线" style={{ marginBottom: 24 }} loading={detailLoading}>
             <ReactECharts option={equityOption} style={{ height: 360 }} />
           </Card>
+
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            <Col xs={24} lg={12}>
+              <Card title="年度收益" loading={detailLoading} style={{ height: '100%' }}>
+                <Table
+                  dataSource={detailedResult.yearly_returns || []}
+                  columns={yearlyReturnColumns}
+                  rowKey={(record) => record.year}
+                  pagination={false}
+                  size="small"
+                  scroll={{ x: 480 }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} lg={12}>
+              <Card title="回撤曲线对比" loading={detailLoading} style={{ height: '100%' }}>
+                <ReactECharts option={drawdownOption} style={{ height: 320 }} />
+              </Card>
+            </Col>
+          </Row>
 
           <Card title={`${selectedSymbol} K线 / 买卖点 / 成交量 / MA20`} style={{ marginBottom: 24 }} loading={detailLoading}>
             <ReactECharts option={priceVolumeOption} style={{ height: 680 }} />
