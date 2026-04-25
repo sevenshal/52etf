@@ -48,6 +48,9 @@ const symbolOptions = [
   { label: 'SOXL.US', value: 'SOXL.US' },
   { label: 'TQQQ.US', value: 'TQQQ.US' },
   { label: 'UPRO.US', value: 'UPRO.US' },
+  { label: 'SOXX.US', value: 'SOXX.US' },
+  { label: 'QQQ.US', value: 'QQQ.US' },
+  { label: 'SPY.US', value: 'SPY.US' },
 ];
 
 const sellReductionBasisOptions = [
