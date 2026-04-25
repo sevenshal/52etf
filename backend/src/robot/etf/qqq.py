@@ -1,6 +1,7 @@
 from datetime import datetime
+import os
 
-import requests
+import httpx
 
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
@@ -13,6 +14,7 @@ class QQQDataFetcher(ETFDataFetcher):
         "https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/"
         "QQQ/holdings/fund?idType=ticker&interval=monthly&productType=ETF"
     )
+    PROXY = os.getenv("ETF_QQQ_PROXY", "socks5://127.0.0.1:7891")
 
     def __init__(self):
         super().__init__()
@@ -44,8 +46,7 @@ class QQQDataFetcher(ETFDataFetcher):
             )
 
         try:
-            response = requests.get(self.HOLDINGS_URL, headers=self.headers, timeout=30)
-            response.raise_for_status()
+            response = self._get_holdings_response()
             data = response.json()
 
             if not data or "holdings" not in data:
@@ -96,6 +97,20 @@ class QQQDataFetcher(ETFDataFetcher):
         except Exception as exc:
             self.logger.error("通过 Invesco 获取 QQQ 持仓数据失败: %s", exc)
             raise
+
+    def _get_holdings_response(self) -> httpx.Response:
+        try:
+            with httpx.Client(proxy=self.PROXY, timeout=30) as client:
+                response = client.get(self.HOLDINGS_URL, headers=self.headers)
+                response.raise_for_status()
+                return response
+        except (httpx.ConnectError, httpx.ProxyError) as exc:
+            self.logger.warning("通过代理获取 QQQ 持仓失败，尝试直连: %s", exc)
+
+        with httpx.Client(timeout=30) as client:
+            response = client.get(self.HOLDINGS_URL, headers=self.headers)
+            response.raise_for_status()
+            return response
 
     def _map_asset_class(self, holding_data: dict) -> str:
         security_type_code = str(holding_data.get("securityTypeCode") or "").upper()
