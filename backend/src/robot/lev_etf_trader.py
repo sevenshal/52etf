@@ -4,7 +4,7 @@ import time
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from ..core.database import get_db, Session, AutomatedTradingConfig
+from ..core.database import AutomatedTradingConfig, get_db_ctx
 from ..core.services.trading_strategy import is_market_closing_soon, execute_trading_strategy
 from ..core.services.market import MarketService
 from ..core.utils import send_alert_email
@@ -42,8 +42,7 @@ class LevETFTrader:
                     logger.info(f"Market is closing in {delta:.2f}s, Triggering Lev ETF Strategies...")
                     
                     # 获取所有开启了自动化交易的账户
-                    db = get_db()
-                    try:
+                    with get_db_ctx() as db:
                         configs = db.query(AutomatedTradingConfig).filter(
                             AutomatedTradingConfig.enabled == True
                         ).all()
@@ -55,8 +54,6 @@ class LevETFTrader:
                             count += 1
                         
                         logger.info(f"Triggered strategies for {count} configs.")
-                    finally:
-                        db.close()
                     
                     # Wait long enough to pass the close time to avoid double trigger
                     await asyncio.sleep(120)

@@ -513,7 +513,7 @@ class SoxlFearStrategyTrader:
                     continue
 
                 close_time = MarketService.get_us_market_close_time(now.date())
-                target_time = datetime.combine(now.date(), close_time, tzinfo=now.tzinfo) - timedelta(minutes=5)
+                target_time = datetime.combine(now.date(), close_time, tzinfo=now.tzinfo) - timedelta(minutes=2)
                 seconds_to_trigger = (target_time - now).total_seconds()
 
                 if 0 <= seconds_to_trigger <= 30 and self._last_auto_trigger_date != now.date():
