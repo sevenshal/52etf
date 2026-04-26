@@ -58,18 +58,34 @@ const sellReductionBasisOptions = [
   { label: '按持仓股票', value: 'holdings' },
 ];
 
+const fearSourceOptions = [
+  { label: 'CNN贪恐', value: 'cnn' },
+  { label: 'SOXX自算贪恐', value: 'soxx_clone' },
+];
+
 const getObjectiveLabel = (value) => objectiveOptions.find(item => item.value === value)?.label || value;
 const getSellReductionBasisLabel = (value) => sellReductionBasisOptions.find(item => item.value === value)?.label || value;
+const getFearSourceLabel = (value) => fearSourceOptions.find(item => item.value === value)?.label || value;
+const formatFearSourceLabels = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(item => getFearSourceLabel(item)).join('、');
+  }
+  return getFearSourceLabel(value);
+};
 
 const SoxlFearBacktest = () => {
   const [form] = Form.useForm();
   const location = useLocation();
   const navigate = useNavigate();
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
+  const selectedFearSources = Form.useWatch('fear_source_values', form) || ['cnn'];
+  const selectedFearSourceLabel = formatFearSourceLabels(selectedFearSources);
   const [loading, setLoading] = useState(false);
   const [searchMeta, setSearchMeta] = useState(null);
   const [searchResults, setSearchResults] = useState([]);
   const [detailedResult, setDetailedResult] = useState(null);
+  const detailFearSourceLabel = detailedResult?.meta?.fear_source_label || selectedFearSourceLabel;
+  const isComparingFearSources = (detailedResult?.fear_series?.sources?.length || 0) > 1;
   const [detailLoading, setDetailLoading] = useState(false);
   const [searchTaskId, setSearchTaskId] = useState(null);
   const [searchProgress, setSearchProgress] = useState(0);
@@ -82,6 +98,7 @@ const SoxlFearBacktest = () => {
 
   const buildPayload = (values) => ({
     symbol: values.symbol || 'SOXL.US',
+    fear_source_values: values.fear_source_values?.length ? values.fear_source_values : ['cnn'],
     initial_capital: values.initial_capital,
     start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
     end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
@@ -209,6 +226,10 @@ const SoxlFearBacktest = () => {
       ...presetValues,
     };
 
+    if (mergedValues.fear_source && !mergedValues.fear_source_values) {
+      mergedValues.fear_source_values = [mergedValues.fear_source];
+    }
+
     if (!mergedValues.date_range) {
       mergedValues.date_range = [dayjs('2021-01-01'), dayjs()];
     }
@@ -227,6 +248,8 @@ const SoxlFearBacktest = () => {
       const values = form.getFieldsValue();
       const payload = {
         symbol: values.symbol || 'SOXL.US',
+        fear_source: record.fear_source || values.fear_source_values?.[0] || 'cnn',
+        compare_fear_sources: values.fear_source_values?.length ? values.fear_source_values : [record.fear_source || 'cnn'],
         initial_capital: values.initial_capital,
         start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
@@ -245,6 +268,19 @@ const SoxlFearBacktest = () => {
   };
 
   const resultColumns = [
+    {
+      title: '贪恐来源',
+      dataIndex: 'fear_source_label',
+      width: 120,
+      fixed: 'left',
+      render: (value, record) => (
+        <Tag color={record.fear_source === 'soxx_clone' ? 'cyan' : 'blue'}>
+          {value || getFearSourceLabel(record.fear_source)}
+        </Tag>
+      ),
+      filters: fearSourceOptions.map(item => ({ text: item.label, value: item.value })),
+      onFilter: (value, record) => record.fear_source === value,
+    },
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
     { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
@@ -564,24 +600,42 @@ const SoxlFearBacktest = () => {
     if (!detailedResult?.daily_data?.length) {
       return {};
     }
-    const dates = detailedResult.daily_data.map(item => item.date);
+    const compareSeries = detailedResult.fear_series;
+    const hasCompareSeries = compareSeries?.data?.length && compareSeries?.sources?.length;
+    const dates = hasCompareSeries
+      ? compareSeries.data.map(item => item.date)
+      : detailedResult.daily_data.map(item => item.date);
+    const sources = hasCompareSeries
+      ? compareSeries.sources
+      : [{ key: 'selected', label: detailFearSourceLabel }];
+    const colorMap = {
+      cnn: '#1677ff',
+      soxx_clone: '#13c2c2',
+      selected: '#13c2c2',
+    };
+    const series = sources.map(source => ({
+      name: source.label,
+      type: 'line',
+      data: hasCompareSeries
+        ? compareSeries.data.map(item => item[source.key] ?? null)
+        : detailedResult.daily_data.map(item => item.fear_greed ?? item.cnn_fear_greed),
+      showSymbol: false,
+      connectNulls: true,
+      lineStyle: {
+        width: source.label === detailFearSourceLabel ? 3 : 2,
+        color: colorMap[source.key] || '#13c2c2',
+      },
+    }));
+
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['CNN恐贪'] },
+      legend: { data: sources.map(item => item.label) },
       xAxis: { type: 'category', data: dates },
       yAxis: { type: 'value', scale: true },
       dataZoom: [{ type: 'inside', start: 60, end: 100 }, { type: 'slider', start: 60, end: 100 }],
-      series: [
-        {
-          name: 'CNN恐贪',
-          type: 'line',
-          data: detailedResult.daily_data.map(item => item.cnn_fear_greed),
-          showSymbol: false,
-          lineStyle: { width: 2, color: '#13c2c2' },
-        },
-      ],
+      series,
     };
-  }, [detailedResult]);
+  }, [detailedResult, detailFearSourceLabel]);
 
   return (
     <div style={{ padding: 24 }}>
@@ -591,7 +645,7 @@ const SoxlFearBacktest = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description={`直接使用 CNN 恐贪分数；当 CNN 低于等于买入触发阈值，且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；当 CNN 高于等于进入止盈区阈值后，若价格再从区内高点回撤，则按回撤规则移动止盈，且卖价高于当前持仓均价才卖出；止盈减仓口径可选按总资产或按持仓股票，两种都支持搜索对比；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
+          description={`使用所选贪恐来源（${selectedFearSourceLabel}）；当贪恐分数低于等于买入触发阈值，且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；当贪恐分数高于等于进入止盈区阈值后，若价格再从区内高点回撤，则按回撤规则移动止盈，且卖价高于当前持仓均价才卖出；止盈减仓口径可选按总资产或按持仓股票，两种都支持搜索对比；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
         />
         <Form
           form={form}
@@ -599,6 +653,7 @@ const SoxlFearBacktest = () => {
           onFinish={handleSearch}
           initialValues={{
             symbol: 'SOXL.US',
+            fear_source_values: ['cnn'],
             initial_capital: 100000,
             top_n: 20,
             objective: 'annualized_return',
@@ -646,6 +701,11 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={4}>
               <Form.Item name="symbol" label="标的">
                 <Select options={symbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="fear_source_values" label="贪恐来源候选">
+                <Select mode="multiple" options={fearSourceOptions} />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
@@ -749,6 +809,8 @@ const SoxlFearBacktest = () => {
             <Descriptions.Item label="交易日数">{searchMeta.trading_days}</Descriptions.Item>
             <Descriptions.Item label="搜索组合数">{searchMeta.searched_combinations}</Descriptions.Item>
             <Descriptions.Item label="搜索目标">{getObjectiveLabel(searchMeta.objective)}</Descriptions.Item>
+            <Descriptions.Item label="贪恐来源">{searchMeta.fear_source_labels || formatFearSourceLabels(searchMeta.fear_sources || searchMeta.fear_source)}</Descriptions.Item>
+            <Descriptions.Item label="贪恐数据点">{searchMeta.fear_points}</Descriptions.Item>
             <Descriptions.Item label="并发进程数">{searchMeta.eval_workers}</Descriptions.Item>
             <Descriptions.Item label="有效组合数">{searchMeta.valid_combinations}</Descriptions.Item>
             <Descriptions.Item label="跳过组合数">{searchMeta.skipped_combinations}</Descriptions.Item>
@@ -761,9 +823,9 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
             pagination={{ pageSize: 10 }}
-            scroll={{ x: 1360 }}
+            scroll={{ x: 1480 }}
             onRow={(record) => ({
               onClick: () => loadDetail(record),
               style: { cursor: 'pointer' },
@@ -833,6 +895,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="同轮止盈最多卖出次数">{detailedResult.params?.max_take_profit_sells_per_cycle}</Descriptions.Item>
               <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
+              <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="有效区间">{detailedResult.meta?.effective_start_date} ~ {detailedResult.meta?.effective_end_date}</Descriptions.Item>
               <Descriptions.Item label="交易日数">{detailedResult.meta?.trading_days}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital}</Descriptions.Item>
@@ -867,7 +930,7 @@ const SoxlFearBacktest = () => {
             <ReactECharts option={priceVolumeOption} style={{ height: 680 }} />
           </Card>
 
-          <Card title="CNN恐贪分数" style={{ marginBottom: 24 }} loading={detailLoading}>
+          <Card title={isComparingFearSources ? '贪恐分数对比' : `${detailFearSourceLabel} 分数`} style={{ marginBottom: 24 }} loading={detailLoading}>
             <ReactECharts option={sentimentOption} style={{ height: 320 }} />
           </Card>
 

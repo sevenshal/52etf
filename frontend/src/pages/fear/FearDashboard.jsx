@@ -52,6 +52,8 @@ const FearDashboard = () => {
         </Tabs>
       </Card>
 
+      <SOXXFearGreed />
+
       <Card title='美债贪恐指数及联邦概率预测' style={{ marginBottom: 16 }}>
         <BondFearGreed
           bondFearGreed={bondFearGreed}
@@ -64,7 +66,6 @@ const FearDashboard = () => {
         />
       </Card>
 
-      <SOXXFearGreed />
     </>
   );
 };
