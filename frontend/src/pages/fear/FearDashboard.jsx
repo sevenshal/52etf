@@ -8,6 +8,7 @@ import FearGreedHistorical from './components/FearGreedHistorical';
 import FearGreedYearlyAverage from './components/FearGreedYearlyAverage';
 import FearGreedAiae from './components/FearGreedAiae';
 import BondFearGreed from './components/BondFearGreed';
+import SOXXFearGreed from './components/SOXXFearGreed';
 
 const FearDashboard = () => {
   const [activeTab, setActiveTab] = useState('current');
@@ -62,6 +63,8 @@ const FearDashboard = () => {
           forwardTable={forwardTable}
         />
       </Card>
+
+      <SOXXFearGreed />
     </>
   );
 };
