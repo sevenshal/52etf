@@ -72,7 +72,7 @@ def _run_soxx_fear_greed_backfill(start_date: Optional[str] = None):
     else:
         # Daily runs only need to refresh the recent tail, but still need a
         # long calculation window for rolling z-score and 52-week components.
-        output_start_date = end_date - timedelta(days=14)
+        output_start_date = end_date - timedelta(days=3)
 
     calculation_start_date = output_start_date - timedelta(days=700)
     calculator = ETFFearGreedCloneCalculator()

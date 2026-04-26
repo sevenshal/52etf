@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -19,6 +22,7 @@ from .fear_greed_clone_service import (
     FearGreedCloneError,
 )
 from .longport import LongPortService
+from .market import MarketService
 from .quote import QuoteService
 from ..database import ETFFearGreedCloneHistory, ETFFearGreedCloneHolding, Session
 from ..models.etf import ETFHolding
@@ -103,6 +107,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
     current ETF holdings where possible, and scores each raw signal with the
     same rolling z-score/CDF method used by FearGreedCloneCalculator.
     """
+
+    REALTIME_CACHE_TTL_SECONDS = 300
+    _realtime_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+    _realtime_cache_lock = threading.Lock()
 
     def __init__(self, cache_dir: Optional[str] = None, timeout: float = 30.0):
         default_cache_dir = "/var/lib/quant_robot/cache/fear_greed_clone"
@@ -297,6 +305,227 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "latest_holdings_count": len(latest_holdings),
             "records": records,
             "warnings": warnings,
+        }
+
+    def calculate_realtime_cached(
+        self,
+        symbol: str = "SOXX.US",
+        history_days: int = 550,
+        score_window: int = 252,
+        min_periods: int = 120,
+        max_holdings: int = 40,
+        include_extended: bool = True,
+        include_holdings_quotes: bool = True,
+        cache_ttl_seconds: int = REALTIME_CACHE_TTL_SECONDS,
+    ) -> Dict[str, Any]:
+        etf_symbol = self._normalize_etf_symbol(symbol)
+        cache_key = (
+            etf_symbol,
+            int(history_days),
+            int(score_window),
+            int(min_periods),
+            int(max_holdings),
+            bool(include_extended),
+            bool(include_holdings_quotes),
+        )
+        now = time.monotonic()
+        with self._realtime_cache_lock:
+            cached = self._realtime_cache.get(cache_key)
+            if cached:
+                cached_at, payload = cached
+                age_seconds = now - cached_at
+                if age_seconds < cache_ttl_seconds:
+                    response = copy.deepcopy(payload)
+                    response["cache"] = self._cache_payload(
+                        hit=True,
+                        age_seconds=age_seconds,
+                        ttl_seconds=cache_ttl_seconds,
+                    )
+                    return response
+
+            response = self.calculate_realtime(
+                symbol=etf_symbol,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
+                max_holdings=max_holdings,
+                include_extended=include_extended,
+                include_holdings_quotes=include_holdings_quotes,
+            )
+            self._realtime_cache[cache_key] = (time.monotonic(), copy.deepcopy(response))
+            response["cache"] = self._cache_payload(
+                hit=False,
+                age_seconds=0.0,
+                ttl_seconds=cache_ttl_seconds,
+            )
+            return response
+
+    def calculate_realtime(
+        self,
+        symbol: str = "SOXX.US",
+        history_days: int = 550,
+        score_window: int = 252,
+        min_periods: int = 120,
+        max_holdings: int = 40,
+        include_extended: bool = True,
+        include_holdings_quotes: bool = True,
+    ) -> Dict[str, Any]:
+        """Calculate a price-driven intraday ETF Fear & Greed clone.
+
+        The scoring baseline comes from the SQLite daily backfill. The current
+        row is rebuilt from LongPort realtime quotes for SOXX, TLT and the
+        current iShares holdings. Daily-only components are carried forward
+        from the latest stored row and are marked in the response.
+        """
+        etf_symbol = self._normalize_etf_symbol(symbol)
+        if min_periods > score_window:
+            raise FearGreedCloneError("min_periods cannot exceed score_window")
+
+        holdings, holdings_as_of, holdings_weight_used = self._get_current_holdings(
+            etf_symbol, max_holdings=max_holdings
+        )
+        quote_symbols = [etf_symbol, "TLT.US"] + [holding.symbol for holding in holdings]
+        quote_map = self._fetch_realtime_quote_map(quote_symbols)
+        etf_quote = quote_map.get(etf_symbol)
+        if not etf_quote or not self._quote_price(etf_quote):
+            raise FearGreedCloneError(f"{etf_symbol} 实时行情为空")
+
+        realtime_date = self._quote_market_date(etf_quote)
+        previous_trading_day = MarketService.get_previous_us_trading_day(realtime_date)
+        history_start = realtime_date - timedelta(days=history_days)
+
+        raw_history = self._load_component_raw_history_from_db(
+            etf_symbol,
+            start_date=history_start,
+            end_date=previous_trading_day,
+        )
+        if raw_history.empty or len(raw_history.dropna()) < min_periods:
+            raise FearGreedCloneError(
+                f"{etf_symbol} SQLite 历史组件不足，请先执行 ETF 恐贪回跑"
+            )
+
+        current_timestamp = pd.Timestamp(realtime_date)
+        current_raw, etf_price = self._build_realtime_raw_row(
+            etf_symbol=etf_symbol,
+            holdings=holdings,
+            quote_map=quote_map,
+            current_date=realtime_date,
+            previous_trading_day=previous_trading_day,
+            price_history_count=max(history_days, 320),
+        )
+
+        latest_daily = raw_history.iloc[-1]
+        stale_components = {
+            "put_call_options": "latest stored Cboe ETP put/call component",
+            "junk_bond_demand": "latest stored FRED credit-spread component",
+        }
+        for key in stale_components:
+            if pd.isna(current_raw.get(key)):
+                current_raw[key] = float(latest_daily[key])
+
+        raw_for_score = raw_history.copy()
+        raw_for_score = raw_for_score[raw_for_score.index < current_timestamp]
+        raw_for_score.loc[current_timestamp, list(ETF_COMPONENTS.keys())] = [
+            current_raw[key] for key in ETF_COMPONENTS
+        ]
+        score_df = self._score_etf_raw_signals(
+            raw_for_score,
+            score_window=score_window,
+            min_periods=min_periods,
+        )
+        score_columns = [f"{key}_score" for key in ETF_COMPONENTS]
+        score_df["fear_greed_clone"] = score_df[score_columns].mean(axis=1)
+        latest_row = score_df.loc[current_timestamp]
+        if pd.isna(latest_row["fear_greed_clone"]):
+            raise FearGreedCloneError("not enough realtime data to calculate the ETF clone index")
+
+        score = float(latest_row["fear_greed_clone"])
+        components = self._component_payload(raw_for_score, score_df, current_timestamp)
+        realtime_component_flags = {
+            "market_momentum": True,
+            "stock_price_strength": True,
+            "stock_price_breadth": True,
+            "put_call_options": False,
+            "market_volatility": True,
+            "safe_haven_demand": True,
+            "junk_bond_demand": False,
+        }
+        for key, payload in components.items():
+            is_realtime = realtime_component_flags[key]
+            payload["is_realtime"] = is_realtime
+            payload["freshness"] = (
+                "LongPort realtime quote"
+                if is_realtime
+                else stale_components.get(key, "latest stored daily component")
+            )
+
+        requested_quotes = list(dict.fromkeys(quote_symbols))
+        missing_quotes = [item for item in requested_quotes if item not in quote_map]
+        quote_timestamp = self._quote_timestamp(etf_quote)
+        warnings = self._warnings(use_historical_holdings=True) + [
+            (
+                "Realtime mode is price-driven: SOXX, TLT and holding price "
+                "components use LongPort realtime quotes."
+            ),
+            (
+                "Put/call and junk-bond-demand components are daily data and "
+                "are carried forward from the latest SQLite backfill row."
+            ),
+            (
+                "Current-row holdings use the latest iShares holdings snapshot; "
+                "the historical scoring baseline comes from stored daily backfills."
+            ),
+        ]
+
+        response: Dict[str, Any] = {
+            "fear_and_greed_clone": {
+                "symbol": etf_symbol,
+                "score": round(score, 2),
+                "rating": self.rating(score),
+                "date": realtime_date.isoformat(),
+                "timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
+                "method": "equal-weighted rolling z-score normal CDF",
+                "mode": "intraday price-driven",
+                "history_days": history_days,
+                "score_window": score_window,
+                "min_periods": min_periods,
+                "history_rows_used": int(len(raw_for_score)),
+                "market_open": MarketService.is_us_market_open(
+                    include_extended=include_extended
+                ),
+                "include_extended": include_extended,
+                "holdings_as_of": holdings_as_of.isoformat(),
+                "holdings_count": len(holdings),
+                "holdings_weight_used": round(holdings_weight_used, 6),
+            },
+            "components": components,
+            "etf_price": etf_price,
+            "quote_coverage": {
+                "requested": len(requested_quotes),
+                "received": len(quote_map),
+                "missing": missing_quotes,
+            },
+            "holdings": (
+                self._realtime_holdings_payload(holdings, quote_map)
+                if include_holdings_quotes
+                else self._holdings_payload(holdings)
+            ),
+            "option_chain_snapshot": self._safe_option_chain_snapshot(etf_symbol),
+            "warnings": warnings,
+        }
+        return response
+
+    @staticmethod
+    def _cache_payload(
+        hit: bool,
+        age_seconds: float,
+        ttl_seconds: int,
+    ) -> Dict[str, Any]:
+        return {
+            "hit": hit,
+            "ttl_seconds": ttl_seconds,
+            "age_seconds": round(max(age_seconds, 0.0), 3),
+            "expires_in_seconds": round(max(ttl_seconds - age_seconds, 0.0), 3),
         }
 
     def backfill_to_db(
@@ -824,6 +1053,230 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         self.price_cache[cache_key] = frame.sort_index()
         return self.price_cache[cache_key]
 
+    def _fetch_recent_price_history(
+        self,
+        symbol: str,
+        count: int,
+        end_date: date,
+    ) -> pd.DataFrame:
+        klines = self.quote_service.get_klines(
+            symbol=symbol,
+            count=count,
+            end_date=end_date,
+        )
+        if not klines:
+            raise FearGreedCloneError(f"{symbol} 在指定区间内没有 K 线数据")
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "date": (
+                        item["timestamp"].date()
+                        if hasattr(item["timestamp"], "date")
+                        else item["timestamp"]
+                    ),
+                    "open": float(item["open"]),
+                    "high": float(item["high"]),
+                    "low": float(item["low"]),
+                    "close": float(item["close"]),
+                    "volume": float(item["volume"]),
+                    "turnover": float(item.get("turnover", 0.0)),
+                }
+                for item in klines
+            ]
+        ).sort_values("date")
+        if frame.empty:
+            raise FearGreedCloneError(f"{symbol} 在指定区间内没有可用 K 线")
+
+        frame["date"] = pd.to_datetime(frame["date"])
+        return frame.drop_duplicates(subset=["date"], keep="last").set_index("date").sort_index()
+
+    def _load_component_raw_history_from_db(
+        self,
+        etf_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        db = Session()
+        try:
+            rows = (
+                db.query(ETFFearGreedCloneHistory)
+                .filter(
+                    ETFFearGreedCloneHistory.symbol == etf_symbol,
+                    ETFFearGreedCloneHistory.date >= start_date,
+                    ETFFearGreedCloneHistory.date <= end_date,
+                )
+                .order_by(ETFFearGreedCloneHistory.date.asc())
+                .all()
+            )
+            records = [
+                {
+                    "date": row.date,
+                    "market_momentum": row.market_momentum_raw,
+                    "stock_price_strength": row.stock_price_strength_raw,
+                    "stock_price_breadth": row.stock_price_breadth_raw,
+                    "put_call_options": row.put_call_options_raw,
+                    "market_volatility": row.market_volatility_raw,
+                    "safe_haven_demand": row.safe_haven_demand_raw,
+                    "junk_bond_demand": row.junk_bond_demand_raw,
+                }
+                for row in rows
+            ]
+        finally:
+            Session.remove()
+
+        if not records:
+            return pd.DataFrame(columns=list(ETF_COMPONENTS.keys()))
+
+        frame = pd.DataFrame(records)
+        frame["date"] = pd.to_datetime(frame["date"])
+        return frame.set_index("date").sort_index().replace([np.inf, -np.inf], np.nan)
+
+    def _build_realtime_raw_row(
+        self,
+        etf_symbol: str,
+        holdings: List[ETFHolding],
+        quote_map: Dict[str, Dict[str, Any]],
+        current_date: date,
+        previous_trading_day: date,
+        price_history_count: int,
+    ) -> Tuple[Dict[str, float], Dict[str, Optional[float]]]:
+        index = pd.bdate_range(
+            previous_trading_day - timedelta(days=max(price_history_count * 2, 420)),
+            current_date,
+            name="date",
+        )
+        current_timestamp = pd.Timestamp(current_date)
+
+        etf_prices = self._append_realtime_quote(
+            self._fetch_recent_price_history(
+                etf_symbol,
+                count=price_history_count,
+                end_date=previous_trading_day,
+            ),
+            current_date,
+            quote_map.get(etf_symbol),
+        ).reindex(index).ffill()
+        tlt_prices = self._append_realtime_quote(
+            self._fetch_recent_price_history(
+                "TLT.US",
+                count=price_history_count,
+                end_date=previous_trading_day,
+            ),
+            current_date,
+            quote_map.get("TLT.US"),
+        ).reindex(index).ffill()
+
+        holding_frames: Dict[str, pd.DataFrame] = {}
+        for holding in holdings:
+            try:
+                frame = self._fetch_recent_price_history(
+                    holding.symbol,
+                    count=price_history_count,
+                    end_date=previous_trading_day,
+                )
+                frame = self._append_realtime_quote(
+                    frame,
+                    current_date,
+                    quote_map.get(holding.symbol),
+                ).reindex(index).ffill()
+            except Exception:
+                continue
+            if frame["close"].notna().sum() >= 120:
+                holding_frames[holding.symbol] = frame
+
+        if not holding_frames:
+            raise FearGreedCloneError(f"LongPort returned no usable holding history for {etf_symbol}")
+
+        holdings_by_date = {timestamp: holdings for timestamp in index}
+        etf_close = etf_prices["close"]
+        etf_returns = etf_close.pct_change()
+        realized_vol = etf_returns.rolling(20).std() * np.sqrt(252)
+
+        raw = pd.DataFrame(index=index)
+        raw["market_momentum"] = etf_close / etf_close.rolling(125).mean() - 1.0
+        raw["stock_price_strength"] = self._weighted_range_position(
+            holding_frames, holdings_by_date, index
+        )
+        raw["stock_price_breadth"] = self._weighted_advancing_volume_ratio(
+            holding_frames, holdings_by_date, index
+        )
+        raw["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
+        raw["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
+
+        latest_daily = self._latest_stored_component_raw(etf_symbol)
+        raw["put_call_options"] = np.nan
+        raw["junk_bond_demand"] = np.nan
+        if latest_daily:
+            raw.loc[current_timestamp, "put_call_options"] = latest_daily.get("put_call_options")
+            raw.loc[current_timestamp, "junk_bond_demand"] = latest_daily.get("junk_bond_demand")
+
+        current = raw.loc[current_timestamp].replace([np.inf, -np.inf], np.nan)
+        raw_values = {
+            key: float(current[key]) if pd.notna(current[key]) else np.nan
+            for key in ETF_COMPONENTS
+        }
+        price_payload = self._realtime_price_payload(etf_prices.loc[current_timestamp], quote_map.get(etf_symbol))
+        return raw_values, price_payload
+
+    def _latest_stored_component_raw(self, etf_symbol: str) -> Dict[str, Optional[float]]:
+        db = Session()
+        try:
+            row = (
+                db.query(ETFFearGreedCloneHistory)
+                .filter(ETFFearGreedCloneHistory.symbol == etf_symbol)
+                .order_by(ETFFearGreedCloneHistory.date.desc())
+                .first()
+            )
+            if not row:
+                return {}
+            return {
+                "put_call_options": row.put_call_options_raw,
+                "junk_bond_demand": row.junk_bond_demand_raw,
+            }
+        finally:
+            Session.remove()
+
+    def _append_realtime_quote(
+        self,
+        frame: pd.DataFrame,
+        current_date: date,
+        quote: Optional[Dict[str, Any]],
+    ) -> pd.DataFrame:
+        if quote is None or not self._quote_price(quote):
+            return frame
+
+        price = float(self._quote_price(quote))
+        open_price = self._quote_float(quote, "open", price)
+        high = self._quote_float(quote, "high", price)
+        low = self._quote_float(quote, "low", price)
+        volume = self._quote_float(quote, "volume", 0.0)
+        turnover = self._quote_float(quote, "turnover", 0.0)
+        current_ts = pd.Timestamp(current_date)
+        next_frame = frame.copy()
+        next_frame.loc[current_ts, ["open", "high", "low", "close", "volume", "turnover"]] = [
+            open_price,
+            max(high, price),
+            min(low, price),
+            price,
+            volume,
+            turnover,
+        ]
+        return next_frame.sort_index()
+
+    def _fetch_realtime_quote_map(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        quote_map: Dict[str, Dict[str, Any]] = {}
+        unique_symbols = list(dict.fromkeys(symbols))
+        batch_size = 100
+        for start in range(0, len(unique_symbols), batch_size):
+            batch = unique_symbols[start : start + batch_size]
+            quotes = self.quote_service.get_quote_batch(batch)
+            for quote in quotes or []:
+                symbol = quote.get("symbol")
+                if symbol:
+                    quote_map[symbol] = quote
+        return quote_map
+
     def _fetch_cboe_ratio(
         self,
         start_date: date,
@@ -1068,6 +1521,96 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "price": row.price,
             "holdings_as_of": row.holdings_as_of.isoformat() if row.holdings_as_of else None,
         }
+
+    def _realtime_holdings_payload(
+        self,
+        holdings: List[ETFHolding],
+        quote_map: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        payload = []
+        for holding in holdings:
+            item = self._holdings_payload([holding])[0]
+            quote = quote_map.get(holding.symbol)
+            item["realtime_quote"] = self._quote_payload(quote) if quote else None
+            payload.append(item)
+        return payload
+
+    def _realtime_price_payload(
+        self,
+        row: pd.Series,
+        quote: Optional[Dict[str, Any]],
+    ) -> Dict[str, Optional[float]]:
+        payload = self._price_payload(
+            pd.Series({f"etf_{key}": row.get(key) for key in ("open", "high", "low", "close", "volume", "turnover")})
+        )
+        payload["quote"] = self._quote_payload(quote) if quote else None
+        return payload
+
+    def _quote_payload(self, quote: Dict[str, Any]) -> Dict[str, Any]:
+        timestamp = self._quote_timestamp(quote)
+        return {
+            "symbol": quote.get("symbol"),
+            "price": self._quote_float(quote, "price"),
+            "open": self._quote_float(quote, "open"),
+            "high": self._quote_float(quote, "high"),
+            "low": self._quote_float(quote, "low"),
+            "prev_close": self._quote_float(quote, "prev_close"),
+            "change": self._quote_float(quote, "change"),
+            "percent_change": self._quote_float(quote, "percent_change"),
+            "volume": self._quote_float(quote, "volume"),
+            "turnover": self._quote_float(quote, "turnover"),
+            "timestamp": timestamp.isoformat() if timestamp else None,
+        }
+
+    @staticmethod
+    def _quote_price(quote: Dict[str, Any]) -> Optional[float]:
+        value = quote.get("price")
+        if value is None:
+            return None
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return price if price > 0 else None
+
+    @staticmethod
+    def _quote_float(
+        quote: Dict[str, Any],
+        key: str,
+        default: Optional[float] = None,
+    ) -> Optional[float]:
+        value = quote.get(key)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _quote_market_date(self, quote: Dict[str, Any]) -> date:
+        timestamp = self._quote_timestamp(quote)
+        if timestamp:
+            return self._latest_trading_day_on_or_before(timestamp.date())
+
+        day = MarketService.get_eastern_now().date()
+        return self._latest_trading_day_on_or_before(day)
+
+    @staticmethod
+    def _latest_trading_day_on_or_before(day: date) -> date:
+        while day.weekday() >= 5 or MarketService.is_us_market_holiday(day):
+            day -= timedelta(days=1)
+        return day
+
+    @staticmethod
+    def _quote_timestamp(quote: Dict[str, Any]) -> Optional[datetime]:
+        timestamp = quote.get("timestamp")
+        if isinstance(timestamp, pd.Timestamp):
+            timestamp = timestamp.to_pydatetime()
+        if isinstance(timestamp, datetime):
+            if timestamp.tzinfo is not None:
+                return timestamp.astimezone(ZoneInfo("US/Eastern"))
+            return timestamp
+        return None
 
     @staticmethod
     def _normalize_etf_symbol(symbol: str) -> str:

@@ -88,6 +88,39 @@ async def get_etf_fear_greed_clone(
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪指数失败: {str(e)}")
 
 
+@router.get("/etf-fear-greed-clone/realtime")
+async def get_etf_fear_greed_clone_realtime(
+    symbol: str = "SOXX.US",
+    history_days: int = 550,
+    score_window: int = 252,
+    min_periods: int = 120,
+    max_holdings: int = 40,
+    include_extended: bool = True,
+    include_holdings_quotes: bool = True,
+):
+    """获取 ETF 盘中实时版恐贪复刻指数。
+
+    这个接口使用 SQLite 中已回跑的日频组件作为评分基准，再用 LongPort
+    实时行情更新 SOXX、TLT 和当前持仓相关的价格驱动组件。期权 put/call
+    与信用利差仍是日频数据，会沿用最近已入库值并在响应中标记。
+    """
+    try:
+        calculator = ETFFearGreedCloneCalculator()
+        return await run_in_threadpool(
+            lambda: calculator.calculate_realtime_cached(
+                symbol=symbol,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
+                max_holdings=max_holdings,
+                include_extended=include_extended,
+                include_holdings_quotes=include_holdings_quotes,
+            )
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取ETF实时恐贪指数失败: {str(e)}")
+
+
 @router.get("/etf-fear-greed-clone/history")
 async def get_etf_fear_greed_clone_history(
     symbol: str = "SOXX.US",
