@@ -16,6 +16,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
 
 class ScheduledTaskRunRequest(BaseModel):
     force_fetch: bool = False
+    start_date: Optional[str] = None
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -26,6 +27,7 @@ class ScheduledTaskResponse(BaseModel):
     schedule_time: str
     sort_order: int
     supports_force_fetch: bool = False
+    supports_start_date: bool = False
     is_running: bool
     next_run_at: Optional[str] = None
     last_trigger_source: Optional[str] = None
@@ -73,6 +75,8 @@ def run_scheduled_task_now(
         runner_kwargs = {}
         if task_key == "evc_stock_fetch":
             runner_kwargs["force_fetch"] = bool(payload.force_fetch) if payload else False
+        if task_key == "soxx_fear_greed_backfill" and payload and payload.start_date:
+            runner_kwargs["start_date"] = payload.start_date
         scheduled_task_manager.trigger_task(
             task_key=task_key,
             trigger_source="manual",

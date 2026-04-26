@@ -225,6 +225,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         symbol: str = "SOXX.US",
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        output_start_date: Optional[date] = None,
         history_days: int = 1200,
         score_window: int = 252,
         min_periods: int = 120,
@@ -261,6 +262,8 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         warnings = self._warnings(use_historical_holdings)
         records: List[Dict[str, Any]] = []
         for timestamp, row in valid.iterrows():
+            if output_start_date and timestamp.date() < output_start_date:
+                continue
             holdings = holdings_by_date.get(timestamp, [])
             holdings_as_of = holdings_as_of_by_date.get(timestamp)
             score = float(row["fear_greed_clone"])
@@ -301,6 +304,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         symbol: str = "SOXX.US",
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        output_start_date: Optional[date] = None,
         history_days: int = 1200,
         score_window: int = 252,
         min_periods: int = 120,
@@ -311,6 +315,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             symbol=symbol,
             start_date=start_date,
             end_date=end_date,
+            output_start_date=output_start_date,
             history_days=history_days,
             score_window=score_window,
             min_periods=min_periods,

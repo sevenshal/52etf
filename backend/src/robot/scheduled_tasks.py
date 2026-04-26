@@ -3,7 +3,7 @@ import re
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Callable, Dict, List, Optional
 
 import schedule
@@ -61,6 +61,38 @@ def _run_cnn_fear_greed_fetch():
         scraper.fetch_data_and_save()
     finally:
         scraper.db_session.close()
+
+
+def _run_soxx_fear_greed_backfill(start_date: Optional[str] = None):
+    from ..core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
+
+    end_date = date.today()
+    if start_date:
+        output_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    else:
+        # Daily runs only need to refresh the recent tail, but still need a
+        # long calculation window for rolling z-score and 52-week components.
+        output_start_date = end_date - timedelta(days=14)
+
+    calculation_start_date = output_start_date - timedelta(days=700)
+    calculator = ETFFearGreedCloneCalculator()
+    result = calculator.backfill_to_db(
+        symbol="SOXX.US",
+        start_date=calculation_start_date,
+        end_date=end_date,
+        output_start_date=output_start_date,
+        history_days=1200,
+        score_window=252,
+        min_periods=120,
+        max_holdings=40,
+        use_historical_holdings=True,
+    )
+    logging.getLogger("ScheduledTaskManager").info(
+        "SOXX fear greed backfill saved %s rows, range=%s~%s",
+        result.get("saved"),
+        result.get("start_date"),
+        result.get("end_date"),
+    )
 
 
 @dataclass(frozen=True)
@@ -127,6 +159,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=50,
                 runner=_run_cnn_fear_greed_fetch,
+            ),
+            "soxx_fear_greed_backfill": TaskDefinition(
+                task_key="soxx_fear_greed_backfill",
+                name="SOXX贪恐回跑入库",
+                description="计算 SOXX 贪恐复刻指数并保存历史、价格和持仓明细。",
+                default_time="06:00",
+                default_enabled=True,
+                sort_order=60,
+                runner=_run_soxx_fear_greed_backfill,
             ),
         }
 
@@ -377,6 +418,7 @@ class ScheduledTaskManager:
             "schedule_time": config["schedule_time"],
             "sort_order": config["sort_order"],
             "supports_force_fetch": config["task_key"] == "evc_stock_fetch",
+            "supports_start_date": config["task_key"] == "soxx_fear_greed_backfill",
             "is_running": is_running,
             "next_run_at": job.next_run.isoformat() if job and job.next_run else None,
             "last_trigger_source": config["last_trigger_source"],
