@@ -197,6 +197,68 @@ class ETFEmotion(Base):
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 
+class ETFFearGreedCloneHistory(Base):
+    """ETF恐贪复刻指数历史记录"""
+    __tablename__ = 'etf_fear_greed_clone_history'
+
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    score = Column(Float, nullable=False)
+    rating = Column(String(32))
+    method = Column(String(128))
+    history_days = Column(Integer)
+    score_window = Column(Integer)
+    min_periods = Column(Integer)
+    use_historical_holdings = Column(Boolean)
+
+    etf_open = Column(Float)
+    etf_high = Column(Float)
+    etf_low = Column(Float)
+    etf_close = Column(Float)
+    etf_volume = Column(Float)
+    etf_turnover = Column(Float)
+
+    holdings_as_of = Column(Date)
+    holdings_count = Column(Integer)
+    holdings_weight_used = Column(Float)
+
+    market_momentum_score = Column(Float)
+    market_momentum_raw = Column(Float)
+    stock_price_strength_score = Column(Float)
+    stock_price_strength_raw = Column(Float)
+    stock_price_breadth_score = Column(Float)
+    stock_price_breadth_raw = Column(Float)
+    put_call_options_score = Column(Float)
+    put_call_options_raw = Column(Float)
+    market_volatility_score = Column(Float)
+    market_volatility_raw = Column(Float)
+    safe_haven_demand_score = Column(Float)
+    safe_haven_demand_raw = Column(Float)
+    junk_bond_demand_score = Column(Float)
+    junk_bond_demand_raw = Column(Float)
+
+    components = Column(JSON)
+    warnings = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class ETFFearGreedCloneHolding(Base):
+    """ETF恐贪复刻指数使用的每日持仓快照"""
+    __tablename__ = 'etf_fear_greed_clone_holdings'
+
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    holding_symbol = Column(String(32), primary_key=True)
+    holdings_as_of = Column(Date)
+    name = Column(String)
+    asset_class = Column(String)
+    shares = Column(Integer)
+    market_value = Column(Float)
+    weight = Column(Float)
+    price = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class EVCTradeLog(Base):
     __tablename__ = "evc_trade_logs"
     
