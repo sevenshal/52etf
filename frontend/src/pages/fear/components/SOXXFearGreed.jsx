@@ -7,13 +7,16 @@ import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
 const SOXXFearGreed = () => {
   const [data, setData] = useState([]);
   const [latest, setLatest] = useState(null);
+  const [realtime, setRealtime] = useState(null);
   const [latestHoldings, setLatestHoldings] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [realtimeLoading, setRealtimeLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [realtimeError, setRealtimeError] = useState(null);
   const [timeRange, setTimeRange] = useState(3);
 
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchHistory = async () => {
       setLoading(true);
       setError(null);
       try {
@@ -34,7 +37,31 @@ const SOXXFearGreed = () => {
       }
     };
 
-    fetchData();
+    const fetchRealtime = async () => {
+      setRealtimeLoading(true);
+      setRealtimeError(null);
+      try {
+        const response = await request.get('/api/cnn/etf-fear-greed-clone/realtime', {
+          params: {
+            symbol: 'SOXX.US',
+            include_holdings_quotes: false,
+          },
+        });
+        setRealtime(response.data || null);
+      } catch (err) {
+        setRealtime(null);
+        setRealtimeError(
+          err?.response?.data?.detail
+            || err?.message
+            || '获取 SOXX 实时贪恐失败'
+        );
+      } finally {
+        setRealtimeLoading(false);
+      }
+    };
+
+    fetchHistory();
+    fetchRealtime();
   }, []);
 
   const filteredData = useMemo(() => {
@@ -119,8 +146,15 @@ const SOXXFearGreed = () => {
     };
   }, [filteredData]);
 
+  const realtimeMeta = realtime?.fear_and_greed_clone;
+  const realtimeScore = realtimeMeta?.score;
+  const realtimePrice = realtime?.etf_price?.close ?? realtime?.etf_price?.quote?.price;
+  const realtimeTimestamp = realtimeMeta?.timestamp
+    ? new Date(realtimeMeta.timestamp).toLocaleString()
+    : null;
   const latestScore = latest?.score;
   const latestPrice = latest?.etf_price?.close;
+  const displayPrice = realtimePrice ?? latestPrice;
   const topHoldings = latestHoldings.slice(0, 6);
 
   return (
@@ -135,28 +169,56 @@ const SOXXFearGreed = () => {
         />
       )}
 
+      {!error && realtimeError && (
+        <Alert
+          type="info"
+          showIcon
+          message="SOXX 实时贪恐暂不可用，当前显示最新入库日线值"
+          description={realtimeError}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       {!error && latest && (
         <>
           <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={4}>
               <Statistic
-                title="最新贪恐"
+                title={
+                  <Space size={6}>
+                    <span>实时贪恐</span>
+                    {realtimeScore !== undefined && <Tag color="processing">实时值</Tag>}
+                    {realtimeScore === undefined && realtimeLoading && <Tag color="processing">加载中</Tag>}
+                  </Space>
+                }
+                value={realtimeScore ?? latestScore}
+                precision={1}
+                valueStyle={{ color: getFearGreedColor(realtimeScore ?? latestScore) }}
+                suffix="/100"
+              />
+              <Tag color={getFearGreedColor(realtimeScore ?? latestScore)} style={{ marginTop: 8 }}>
+                {getFearGreedStatus(realtimeScore ?? latestScore)}
+              </Tag>
+            </Col>
+            <Col xs={12} md={6} xl={4}>
+              <Statistic
+                title="最新入库日线"
                 value={latestScore}
                 precision={1}
                 valueStyle={{ color: getFearGreedColor(latestScore) }}
                 suffix="/100"
               />
-              <Tag color={getFearGreedColor(latestScore)} style={{ marginTop: 8 }}>
-                {getFearGreedStatus(latestScore)}
-              </Tag>
             </Col>
-            <Col xs={12} md={6}>
-              <Statistic title="SOXX价格" value={latestPrice} precision={2} prefix="$" />
+            <Col xs={12} md={6} xl={4}>
+              <Statistic title="SOXX价格" value={displayPrice} precision={2} prefix="$" />
             </Col>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={4}>
+              <Statistic title="报价时间" value={realtimeTimestamp || '-'} />
+            </Col>
+            <Col xs={12} md={6} xl={4}>
               <Statistic title="数据日期" value={latest.date} />
             </Col>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={4}>
               <Statistic title="持仓快照" value={latest.holdings_as_of || '-'} />
             </Col>
           </Row>
