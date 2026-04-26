@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Checkbox,
+  DatePicker,
   Empty,
   List,
   Modal,
@@ -61,6 +62,7 @@ const ScheduledTasks = () => {
   const [runningTaskKey, setRunningTaskKey] = useState(null);
   const [runModalTask, setRunModalTask] = useState(null);
   const [forceFetch, setForceFetch] = useState(false);
+  const [runStartDate, setRunStartDate] = useState(dayjs('2023-12-08'));
 
   const fetchTasks = async (showLoading = true) => {
     if (showLoading) {
@@ -120,9 +122,10 @@ const ScheduledTasks = () => {
   };
 
   const handleRunButtonClick = (task) => {
-    if (task.supports_force_fetch) {
+    if (task.supports_force_fetch || task.supports_start_date) {
       setRunModalTask(task);
       setForceFetch(false);
+      setRunStartDate(dayjs('2023-12-08'));
       return;
     }
     handleRunNow(task);
@@ -133,9 +136,17 @@ const ScheduledTasks = () => {
       return;
     }
     const currentTask = runModalTask;
+    const payload = {};
+    if (currentTask.supports_force_fetch) {
+      payload.force_fetch = forceFetch;
+    }
+    if (currentTask.supports_start_date && runStartDate) {
+      payload.start_date = runStartDate.format('YYYY-MM-DD');
+    }
     setRunModalTask(null);
-    await handleRunNow(currentTask, { force_fetch: forceFetch });
+    await handleRunNow(currentTask, payload);
     setForceFetch(false);
+    setRunStartDate(dayjs('2023-12-08'));
   };
 
   return (
@@ -248,11 +259,12 @@ const ScheduledTasks = () => {
         </Spin>
       </Card>
       <Modal
-        title="立即执行股票估值数据抓取"
+        title={runModalTask ? `立即执行${runModalTask.name}` : '立即执行任务'}
         open={!!runModalTask}
         onCancel={() => {
           setRunModalTask(null);
           setForceFetch(false);
+          setRunStartDate(dayjs('2023-12-08'));
         }}
         onOk={handleConfirmRun}
         confirmLoading={runModalTask ? runningTaskKey === runModalTask.task_key : false}
@@ -260,16 +272,35 @@ const ScheduledTasks = () => {
         cancelText="取消"
       >
         <Space direction="vertical" size={12}>
-          <Text>这次手动执行时，可以选择是否强制拉取当日数据。</Text>
-          <Checkbox
-            checked={forceFetch}
-            onChange={(event) => setForceFetch(event.target.checked)}
-          >
-            强制拉取
-          </Checkbox>
-          <Text type="secondary">
-            勾选后会忽略“今日已抓取”的检查，重新执行一次 EVC 数据抓取。
-          </Text>
+          {runModalTask?.supports_force_fetch ? (
+            <>
+              <Text>这次手动执行时，可以选择是否强制拉取当日数据。</Text>
+              <Checkbox
+                checked={forceFetch}
+                onChange={(event) => setForceFetch(event.target.checked)}
+              >
+                强制拉取
+              </Checkbox>
+              <Text type="secondary">
+                勾选后会忽略“今日已抓取”的检查，重新执行一次 EVC 数据抓取。
+              </Text>
+            </>
+          ) : null}
+          {runModalTask?.supports_start_date ? (
+            <>
+              <Text>选择回跑开始日期，系统会从该日期起重新计算并写入历史记录。</Text>
+              <DatePicker
+                value={runStartDate}
+                onChange={(value) => setRunStartDate(value)}
+                allowClear={false}
+                format="YYYY-MM-DD"
+                style={{ width: 180 }}
+              />
+              <Text type="secondary">
+                计算时会自动向前取足滚动窗口数据，但只保存所选日期之后的结果。
+              </Text>
+            </>
+          ) : null}
         </Space>
       </Modal>
     </div>
