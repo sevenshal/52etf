@@ -61,6 +61,7 @@ const sellReductionBasisOptions = [
 const fearSourceOptions = [
   { label: 'CNN贪恐', value: 'cnn' },
   { label: 'SOXX自算贪恐', value: 'soxx_clone' },
+  { label: 'CNN和SOXX等权平均', value: 'cnn_soxx_equal_weight' },
 ];
 
 const getObjectiveLabel = (value) => objectiveOptions.find(item => item.value === value)?.label || value;
@@ -611,6 +612,7 @@ const SoxlFearBacktest = () => {
     const colorMap = {
       cnn: '#1677ff',
       soxx_clone: '#13c2c2',
+      cnn_soxx_equal_weight: '#fa8c16',
       selected: '#13c2c2',
     };
     const series = sources.map(source => ({
@@ -867,7 +869,7 @@ const SoxlFearBacktest = () => {
             </Col>
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
-                <Statistic title="胜率" value={detailedResult.win_rate} precision={2} suffix="%" />
+                <Statistic title="最大回撤修复天数" value={detailedResult.max_drawdown_recovery_days ?? 0} suffix="天" />
               </Card>
             </Col>
             <Col xs={12} md={6}>
