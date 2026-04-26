@@ -12,8 +12,9 @@ import numpy as np
 import pandas as pd
 import requests
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field, ValidationError, root_validator, validator
 
+from ...core.database import ETFFearGreedCloneHistory, Session
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from .account import valid_account
@@ -35,6 +36,16 @@ CNN_HEADERS = {
     "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
 }
 CNN_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+FEAR_SOURCE_OPTIONS = {
+    "cnn": {
+        "label": "CNN贪恐",
+        "column": "cnn_fear_greed",
+    },
+    "soxx_clone": {
+        "label": "SOXX自算贪恐",
+        "column": "soxx_fear_greed",
+    },
+}
 
 
 class SOXLFearStrategyParams(BaseModel):
@@ -94,6 +105,8 @@ class SOXLFearStrategyParams(BaseModel):
 
 class SOXLFearSearchParams(BaseModel):
     symbol: str = "SOXL.US"
+    fear_source: Optional[str] = None
+    fear_source_values: List[str] = Field(default_factory=lambda: ["cnn"])
     initial_capital: float = 100000.0
     start_date: str = "2021-01-01"
     end_date: Optional[str] = None
@@ -123,6 +136,28 @@ class SOXLFearSearchParams(BaseModel):
         if value not in {"annualized_return", "sharpe_ratio"}:
             raise ValueError("objective 仅支持 annualized_return 或 sharpe_ratio")
         return value
+
+    @root_validator(pre=True)
+    def normalize_legacy_fear_source(cls, values):
+        if not values.get("fear_source_values") and values.get("fear_source"):
+            values["fear_source_values"] = [values["fear_source"]]
+        return values
+
+    @validator("fear_source")
+    def validate_fear_source(cls, value):
+        if value is not None and value not in FEAR_SOURCE_OPTIONS:
+            raise ValueError("fear_source 仅支持 cnn 或 soxx_clone")
+        return value
+
+    @validator("fear_source_values")
+    def validate_fear_source_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("至少选择一个贪恐来源")
+        invalid = [item for item in normalized if item not in FEAR_SOURCE_OPTIONS]
+        if invalid:
+            raise ValueError("fear_source_values 仅支持 cnn 或 soxx_clone")
+        return normalized
 
     @validator("eval_workers")
     def validate_eval_workers(cls, value):
@@ -225,6 +260,64 @@ def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
     return df
 
 
+def _fetch_soxx_clone_history(start_date: date, end_date: date) -> pd.DataFrame:
+    db = Session()
+    try:
+        rows = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(
+                ETFFearGreedCloneHistory.symbol == "SOXX.US",
+                ETFFearGreedCloneHistory.date >= start_date,
+                ETFFearGreedCloneHistory.date <= end_date,
+            )
+            .order_by(ETFFearGreedCloneHistory.date.asc())
+            .all()
+        )
+        records = [
+            {
+                "date": row.date,
+                "soxx_fear_greed": float(row.score),
+            }
+            for row in rows
+            if row.score is not None
+        ]
+    finally:
+        Session.remove()
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        raise ValueError(
+            "指定区间内没有 SOXX 自算贪恐数据，请先执行 SOXX 贪恐回跑入库"
+        )
+    return df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+
+
+def _fetch_fear_history(
+    fear_source: str,
+    start_date: date,
+    end_date: date,
+) -> Tuple[pd.DataFrame, Dict]:
+    if fear_source == "soxx_clone":
+        df = _fetch_soxx_clone_history(start_date, end_date)
+    else:
+        fear_source = "cnn"
+        df = _fetch_cnn_history(start_date, end_date)
+
+    source_config = FEAR_SOURCE_OPTIONS[fear_source]
+    score_column = source_config["column"]
+    df = df.rename(columns={score_column: "fear_greed"})
+    df["fear_greed"] = pd.to_numeric(df["fear_greed"], errors="coerce")
+    df = df.dropna(subset=["fear_greed"]).sort_values("date")
+    if df.empty:
+        raise ValueError(f"{source_config['label']} 在指定区间内没有可用数据")
+
+    return df[["date", "fear_greed"]], {
+        "fear_source": fear_source,
+        "fear_source_label": source_config["label"],
+        "fear_points": int(len(df)),
+    }
+
+
 def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
     quote_service = QuoteService(LongPortService.get_instance())
     klines = quote_service.get_klines(
@@ -252,13 +345,19 @@ def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.Da
     return df
 
 
-def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tuple[pd.DataFrame, Dict]:
+def _prepare_base_dataframe(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    fear_source: str = "cnn",
+) -> Tuple[pd.DataFrame, Dict]:
     price_df = _fetch_price_history(symbol, start_date, end_date)
-    cnn_df = _fetch_cnn_history(start_date, end_date)
+    fear_df, fear_meta = _fetch_fear_history(fear_source, start_date, end_date)
 
-    merged_df = price_df.merge(cnn_df, on="date", how="left")
+    merged_df = price_df.merge(fear_df, on="date", how="left")
     merged_df = merged_df.sort_values("date").reset_index(drop=True)
-    merged_df["cnn_fear_greed"] = merged_df["cnn_fear_greed"].ffill()
+    merged_df["fear_greed"] = merged_df["fear_greed"].ffill()
+    merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
     merged_df["ma20"] = merged_df["close"].rolling(20).mean()
     merged_df["volume_ma20"] = merged_df["volume"].rolling(20).mean()
     merged_df["volume_ratio"] = np.where(
@@ -266,19 +365,19 @@ def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tu
         merged_df["volume"] / merged_df["volume_ma20"],
         np.nan,
     )
-    base_df = merged_df.dropna(subset=["cnn_fear_greed", "ma20", "volume_ma20"]).reset_index(drop=True)
+    base_df = merged_df.dropna(subset=["fear_greed", "ma20", "volume_ma20"]).reset_index(drop=True)
 
     if base_df.empty:
         diagnostics = (
             f"price={_describe_df_range(price_df)}; "
-            f"cnn={_describe_df_range(cnn_df)}; "
+            f"fear={_describe_df_range(fear_df)}; "
             f"merged={_describe_df_range(merged_df)}; "
-            f"merged_non_null_cnn={int(merged_df['cnn_fear_greed'].notna().sum()) if 'cnn_fear_greed' in merged_df else 0}; "
+            f"merged_non_null_fear={int(merged_df['fear_greed'].notna().sum()) if 'fear_greed' in merged_df else 0}; "
             f"merged_non_null_ma20={int(merged_df['ma20'].notna().sum()) if 'ma20' in merged_df else 0}; "
             f"merged_non_null_volume_ma20={int(merged_df['volume_ma20'].notna().sum()) if 'volume_ma20' in merged_df else 0}"
         )
         raise ValueError(
-            f"{symbol} 与 CNN 恐贪没有足够重叠的数据区间。"
+            f"{symbol} 与 {fear_meta['fear_source_label']} 没有足够重叠的数据区间。"
             f" 请求区间: {start_date} ~ {end_date}。"
             f" 诊断: {diagnostics}"
         )
@@ -290,10 +389,66 @@ def _prepare_base_dataframe(symbol: str, start_date: date, end_date: date) -> Tu
         "effective_start_date": base_df.iloc[0]["date"].isoformat(),
         "effective_end_date": base_df.iloc[-1]["date"].isoformat(),
         "trading_days": int(len(base_df)),
-        "cnn_points": int(len(cnn_df)),
+        "cnn_points": int(fear_meta["fear_points"]) if fear_meta["fear_source"] == "cnn" else 0,
+        "fear_points": int(fear_meta["fear_points"]),
+        "fear_source": fear_meta["fear_source"],
+        "fear_source_label": fear_meta["fear_source_label"],
         "price_points": int(len(price_df)),
     }
+    base_df.attrs["fear_source"] = fear_meta["fear_source"]
+    base_df.attrs["fear_source_label"] = fear_meta["fear_source_label"]
     return base_df, meta
+
+
+def _prepare_search_dataframes(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    fear_sources: List[str],
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict], Dict]:
+    base_dfs: Dict[str, pd.DataFrame] = {}
+    source_metas: Dict[str, Dict] = {}
+    for fear_source in fear_sources:
+        base_df, meta = _prepare_base_dataframe(symbol, start_date, end_date, fear_source)
+        base_dfs[fear_source] = base_df
+        source_metas[fear_source] = meta
+
+    meta_items = list(source_metas.values())
+    total_trading_days = sum(int(item["trading_days"]) for item in meta_items)
+    total_fear_points = sum(int(item["fear_points"]) for item in meta_items)
+    return base_dfs, source_metas, {
+        "requested_symbol": symbol,
+        "requested_start_date": start_date.isoformat(),
+        "requested_end_date": end_date.isoformat(),
+        "effective_start_date": min(item["effective_start_date"] for item in meta_items),
+        "effective_end_date": max(item["effective_end_date"] for item in meta_items),
+        "trading_days": total_trading_days,
+        "price_points": max(int(item["price_points"]) for item in meta_items),
+        "cnn_points": sum(int(item.get("cnn_points") or 0) for item in meta_items),
+        "fear_points": total_fear_points,
+        "fear_sources": fear_sources,
+        "fear_source_labels": "、".join(item["fear_source_label"] for item in meta_items),
+        "fear_source_details": meta_items,
+    }
+
+
+def _build_fear_series_payload(base_dfs: Dict[str, pd.DataFrame]) -> Dict:
+    records_by_date: Dict[str, Dict] = {}
+    sources = []
+    for fear_source, frame in base_dfs.items():
+        label = FEAR_SOURCE_OPTIONS[fear_source]["label"]
+        sources.append({"key": fear_source, "label": label})
+        for _, row in frame.iterrows():
+            day = row["date"]
+            day_text = day.isoformat() if hasattr(day, "isoformat") else str(day)
+            if day_text not in records_by_date:
+                records_by_date[day_text] = {"date": day_text}
+            records_by_date[day_text][fear_source] = _round_or_none(row.get("fear_greed"), 4)
+
+    return {
+        "sources": sources,
+        "data": [records_by_date[key] for key in sorted(records_by_date.keys())],
+    }
 
 
 def _compute_yearly_returns(equity_df: pd.DataFrame) -> List[Dict]:
@@ -400,7 +555,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     ma20_values = base_df["ma20"].to_numpy(dtype=float, copy=False)
     volume_ma20_values = base_df["volume_ma20"].to_numpy(dtype=float, copy=False)
     volume_ratios = base_df["volume_ratio"].to_numpy(dtype=float, copy=False)
-    cnn_values = base_df["cnn_fear_greed"].to_numpy(dtype=float, copy=False)
+    fear_values = base_df["fear_greed"].to_numpy(dtype=float, copy=False)
+    fear_source_label = str(base_df.attrs.get("fear_source_label") or "贪恐")
 
     if detailed:
         open_prices = base_df["open"].to_numpy(dtype=float, copy=False)
@@ -427,7 +583,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     for index in range(len(close_prices)):
         current_date = date_strings[index]
         close_price = float(close_prices[index])
-        cnn_score = float(cnn_values[index])
+        fear_score = float(fear_values[index])
         volume_ratio = float(volume_ratios[index])
         can_trade = cooldown_remaining == 0
         action_taken = False
@@ -436,8 +592,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             cooldown_remaining -= 1
             can_trade = False
 
-        is_fear = cnn_score <= params.buy_threshold
-        is_greedy = cnn_score >= params.greed_threshold
+        is_fear = fear_score <= params.buy_threshold
+        is_greedy = fear_score >= params.greed_threshold
 
         if shares > 0:
             if is_greedy:
@@ -523,10 +679,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "profit": profit,
                         "profit_pct": profit_pct,
                         "reason": (
-                            f"CNN {cnn_score:.2f} 进入止盈区后回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+                            f"{fear_source_label} {fear_score:.2f} 进入止盈区后回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
                         ),
-                        "cnn_score": cnn_score,
+                        "fear_score": fear_score,
+                        "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,
                     })
 
@@ -566,8 +723,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "avg_cost_after": avg_cost,
                         "profit": 0.0,
                         "profit_pct": 0.0,
-                        "reason": f"CNN {cnn_score:.2f} 进入买入区 + 成交量放大 {volume_ratio:.2f}",
-                        "cnn_score": cnn_score,
+                        "reason": f"{fear_source_label} {fear_score:.2f} 进入买入区 + 成交量放大 {volume_ratio:.2f}",
+                        "fear_score": fear_score,
+                        "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,
                     })
 
@@ -592,7 +750,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "ma20": float(ma20_values[index]),
                 "volume_ma20": float(volume_ma20_values[index]),
                 "volume_ratio": volume_ratio,
-                "cnn_fear_greed": float(cnn_values[index]),
+                "fear_greed": float(fear_values[index]),
+                "cnn_fear_greed": float(fear_values[index]),
                 "equity": equity_value,
                 "cash": cash,
                 "shares": shares,
@@ -659,6 +818,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
 def _count_search_params(payload: SOXLFearSearchParams) -> int:
     value_groups = [
+        payload.fear_source_values,
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
@@ -678,8 +838,9 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
     return total
 
 
-def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrategyParams]:
+def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[Tuple[str, SOXLFearStrategyParams]]:
     for values in product(
+        payload.fear_source_values,
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
@@ -691,24 +852,27 @@ def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[SOXLFearStrat
         payload.max_take_profit_sells_per_cycle_values,
         payload.min_position_pct_after_take_profit_values,
     ):
-        yield SOXLFearStrategyParams(
-            buy_threshold=float(values[0]),
-            greed_threshold=float(values[1]),
-            volume_ratio_threshold=float(values[2]),
-            buy_position_pct=float(values[3]),
-            cooldown_days=int(values[4]),
-            trailing_stop_pct=float(values[5]),
-            sell_position_pct=float(values[6]),
-            sell_reduction_basis=str(values[7]),
-            max_take_profit_sells_per_cycle=int(values[8]),
-            min_position_pct_after_take_profit=float(values[9]),
-            rebalance_threshold_pct=float(payload.rebalance_threshold_pct),
+        yield (
+            str(values[0]),
+            SOXLFearStrategyParams(
+                buy_threshold=float(values[1]),
+                greed_threshold=float(values[2]),
+                volume_ratio_threshold=float(values[3]),
+                buy_position_pct=float(values[4]),
+                cooldown_days=int(values[5]),
+                trailing_stop_pct=float(values[6]),
+                sell_position_pct=float(values[7]),
+                sell_reduction_basis=str(values[8]),
+                max_take_profit_sells_per_cycle=int(values[9]),
+                min_position_pct_after_take_profit=float(values[10]),
+                rebalance_threshold_pct=float(payload.rebalance_threshold_pct),
+            ),
         )
 
 
 def _evaluate_search_candidates(
     payload: SOXLFearSearchParams,
-    base_df: pd.DataFrame,
+    base_dfs: Dict[str, pd.DataFrame],
     progress_callback=None,
 ) -> Tuple[List[Dict], Dict, int]:
     total_combinations = _count_search_params(payload)
@@ -734,10 +898,11 @@ def _evaluate_search_candidates(
         elif sort_key > top_results_heap[0][0]:
             heapreplace(top_results_heap, heap_entry)
 
-    def iter_value_batches() -> Iterator[List[Tuple[int, Tuple]]]:
-        batch = []
-        for index, values in enumerate(
-            product(
+    def iter_value_batches() -> Iterator[Tuple[str, List[Tuple[int, Tuple]]]]:
+        index = 0
+        for fear_source in payload.fear_source_values:
+            batch = []
+            for values in product(
                 payload.buy_threshold_values,
                 payload.greed_threshold_values,
                 payload.volume_ratio_threshold_values,
@@ -748,15 +913,14 @@ def _evaluate_search_candidates(
                 payload.sell_reduction_basis_values,
                 payload.max_take_profit_sells_per_cycle_values,
                 payload.min_position_pct_after_take_profit_values,
-            ),
-            start=1,
-        ):
-            batch.append((index, values))
-            if len(batch) >= eval_batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+            ):
+                index += 1
+                batch.append((index, values))
+                if len(batch) >= eval_batch_size:
+                    yield fear_source, batch
+                    batch = []
+            if batch:
+                yield fear_source, batch
 
     def flush_futures(futures_map):
         nonlocal processed_combinations
@@ -793,10 +957,12 @@ def _evaluate_search_candidates(
         futures_map = {}
         max_pending_batches = max(eval_workers * 2, 2)
 
-        for batch in iter_value_batches():
+        for fear_source, batch in iter_value_batches():
             future = executor.submit(
                 _evaluate_search_batch,
-                base_df,
+                base_dfs[fear_source],
+                fear_source,
+                FEAR_SOURCE_OPTIONS[fear_source]["label"],
                 payload.initial_capital,
                 payload.objective,
                 payload.rebalance_threshold_pct,
@@ -806,6 +972,7 @@ def _evaluate_search_candidates(
                 "start_index": batch[0][0],
                 "end_index": batch[-1][0],
                 "batch_size": len(batch),
+                "fear_source": fear_source,
             }
 
             if len(futures_map) >= max_pending_batches:
@@ -840,6 +1007,8 @@ def _result_sort_key(result: Dict, objective: str = "annualized_return") -> Tupl
 
 def _evaluate_search_batch(
     base_df: pd.DataFrame,
+    fear_source: str,
+    fear_source_label: str,
     initial_capital: float,
     objective: str,
     rebalance_threshold_pct: float,
@@ -871,6 +1040,8 @@ def _evaluate_search_batch(
             continue
 
         result = _run_backtest(base_df, params, initial_capital, detailed=False)
+        result["fear_source"] = fear_source
+        result["fear_source_label"] = fear_source_label
         sort_key = _result_sort_key(result, objective)
         results.append((index, sort_key, result))
 
@@ -884,6 +1055,8 @@ def _evaluate_search_batch(
 
 def _serialize_summary(result: Dict) -> Dict:
     serialized = {
+        "fear_source": result.get("fear_source") or "cnn",
+        "fear_source_label": result.get("fear_source_label") or FEAR_SOURCE_OPTIONS["cnn"]["label"],
         "annualized_return": _round_or_none(result["annualized_return"], 4),
         "total_return": _round_or_none(result["total_return"], 4),
         "max_drawdown": _round_or_none(result["max_drawdown"], 4),
@@ -908,10 +1081,16 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
     if total_combinations <= 0:
         raise ValueError("至少需要提供一组有效的超参数候选值")
 
-    base_df, meta = _prepare_base_dataframe(payload.symbol, start_date, end_date)
-    logger.info(
-        "Starting SOXL fear parameter search, symbol=%s, combinations=%s, top_n=%s",
+    base_dfs, source_metas, meta = _prepare_search_dataframes(
         payload.symbol,
+        start_date,
+        end_date,
+        payload.fear_source_values,
+    )
+    logger.info(
+        "Starting SOXL fear parameter search, symbol=%s, fear_sources=%s, combinations=%s, top_n=%s",
+        payload.symbol,
+        payload.fear_source_values,
         total_combinations,
         payload.top_n,
     )
@@ -928,16 +1107,19 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
 
     results, best_summary, skipped_combinations = _evaluate_search_candidates(
         payload,
-        base_df,
+        base_dfs,
         progress_callback=progress_callback,
     )
 
+    best_fear_source = best_summary.get("fear_source") or payload.fear_source_values[0]
+    best_meta = source_metas[best_fear_source]
     best_result = _run_backtest(
-        base_df,
+        base_dfs[best_fear_source],
         SOXLFearStrategyParams(**best_summary["params"]),
         payload.initial_capital,
         detailed=True,
     )
+    fear_series = _build_fear_series_payload(base_dfs)
 
     return {
         "meta": {
@@ -954,6 +1136,11 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         "best_result": {
             **best_result,
             "params": best_result["params"],
+            "fear_series": fear_series,
+            "meta": {
+                **best_meta,
+                "initial_capital": payload.initial_capital,
+            },
         },
     }
 
@@ -1001,16 +1188,22 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         )
 
         logger.info(
-            "Starting SOXL fear parameter search job, task_id=%s, symbol=%s, start_date=%s, end_date=%s, combinations=%s, top_n=%s",
+            "Starting SOXL fear parameter search job, task_id=%s, symbol=%s, fear_sources=%s, start_date=%s, end_date=%s, combinations=%s, top_n=%s",
             task_id,
             payload.symbol,
+            payload.fear_source_values,
             start_date,
             end_date,
             total_combinations,
             payload.top_n,
         )
 
-        base_df, meta = _prepare_base_dataframe(payload.symbol, start_date, end_date)
+        base_dfs, source_metas, meta = _prepare_search_dataframes(
+            payload.symbol,
+            start_date,
+            end_date,
+            payload.fear_source_values,
+        )
 
         def progress_callback(index: int, total: int, skipped: int):
             if index == 1 or index % 100 == 0 or index == total:
@@ -1036,7 +1229,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
 
         results, best_summary, skipped_combinations = _evaluate_search_candidates(
             payload,
-            base_df,
+            base_dfs,
             progress_callback=progress_callback,
         )
 
@@ -1049,12 +1242,15 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             message="正在生成最优参数的详细回测结果",
         )
 
+        best_fear_source = best_summary.get("fear_source") or payload.fear_source_values[0]
+        best_meta = source_metas[best_fear_source]
         best_result = _run_backtest(
-            base_df,
+            base_dfs[best_fear_source],
             SOXLFearStrategyParams(**best_summary["params"]),
             payload.initial_capital,
             detailed=True,
         )
+        fear_series = _build_fear_series_payload(base_dfs)
 
         result_payload = {
             "meta": {
@@ -1071,6 +1267,11 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             "best_result": {
                 **best_result,
                 "params": best_result["params"],
+                "fear_series": fear_series,
+                "meta": {
+                    **best_meta,
+                    "initial_capital": payload.initial_capital,
+                },
             },
         }
 
@@ -1160,10 +1361,28 @@ def get_soxl_fear_search_job_status(
 
 class SOXLFearRunParams(BaseModel):
     symbol: str = "SOXL.US"
+    fear_source: str = "cnn"
+    compare_fear_sources: Optional[List[str]] = None
     initial_capital: float = 100000.0
     start_date: str = "2021-01-01"
     end_date: Optional[str] = None
     params: SOXLFearStrategyParams
+
+    @validator("fear_source")
+    def validate_fear_source(cls, value):
+        if value not in FEAR_SOURCE_OPTIONS:
+            raise ValueError("fear_source 仅支持 cnn 或 soxx_clone")
+        return value
+
+    @validator("compare_fear_sources")
+    def validate_compare_fear_sources(cls, value):
+        if value is None:
+            return value
+        normalized = list(dict.fromkeys(value or []))
+        invalid = [item for item in normalized if item not in FEAR_SOURCE_OPTIONS]
+        if invalid:
+            raise ValueError("compare_fear_sources 仅支持 cnn 或 soxx_clone")
+        return normalized
 
 
 @router.post("/run")
@@ -1177,12 +1396,24 @@ def run_soxl_fear_backtest(
         if start_date >= end_date:
             raise ValueError("开始日期必须早于结束日期")
 
-        base_df, meta = _prepare_base_dataframe(payload.symbol, start_date, end_date)
+        compare_sources = list(dict.fromkeys(payload.compare_fear_sources or [payload.fear_source]))
+        if payload.fear_source not in compare_sources:
+            compare_sources.insert(0, payload.fear_source)
+
+        base_dfs, source_metas, _ = _prepare_search_dataframes(
+            payload.symbol,
+            start_date,
+            end_date,
+            compare_sources,
+        )
+        base_df = base_dfs[payload.fear_source]
+        meta = source_metas[payload.fear_source]
         result = _run_backtest(base_df, payload.params, payload.initial_capital, detailed=True)
         result["meta"] = {
             **meta,
             "initial_capital": payload.initial_capital,
         }
+        result["fear_series"] = _build_fear_series_payload(base_dfs)
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
