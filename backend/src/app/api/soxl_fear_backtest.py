@@ -45,6 +45,10 @@ FEAR_SOURCE_OPTIONS = {
         "label": "SOXX自算贪恐",
         "column": "soxx_fear_greed",
     },
+    "cnn_soxx_equal_weight": {
+        "label": "CNN和SOXX等权平均",
+        "column": "cnn_soxx_equal_weight",
+    },
 }
 
 
@@ -146,7 +150,7 @@ class SOXLFearSearchParams(BaseModel):
     @validator("fear_source")
     def validate_fear_source(cls, value):
         if value is not None and value not in FEAR_SOURCE_OPTIONS:
-            raise ValueError("fear_source 仅支持 cnn 或 soxx_clone")
+            raise ValueError("fear_source 包含不支持的来源")
         return value
 
     @validator("fear_source_values")
@@ -156,7 +160,7 @@ class SOXLFearSearchParams(BaseModel):
             raise ValueError("至少选择一个贪恐来源")
         invalid = [item for item in normalized if item not in FEAR_SOURCE_OPTIONS]
         if invalid:
-            raise ValueError("fear_source_values 仅支持 cnn 或 soxx_clone")
+            raise ValueError("fear_source_values 包含不支持的来源")
         return normalized
 
     @validator("eval_workers")
@@ -292,12 +296,34 @@ def _fetch_soxx_clone_history(start_date: date, end_date: date) -> pd.DataFrame:
     return df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
 
 
+def _fetch_cnn_soxx_equal_weight_history(start_date: date, end_date: date) -> pd.DataFrame:
+    cnn_df = _fetch_cnn_history(start_date, end_date)
+    soxx_df = _fetch_soxx_clone_history(start_date, end_date)
+    merged = (
+        cnn_df.merge(soxx_df, on="date", how="outer")
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    merged["cnn_fear_greed"] = pd.to_numeric(merged["cnn_fear_greed"], errors="coerce").ffill()
+    merged["soxx_fear_greed"] = pd.to_numeric(merged["soxx_fear_greed"], errors="coerce").ffill()
+    merged = merged.dropna(subset=["cnn_fear_greed", "soxx_fear_greed"])
+    merged["cnn_soxx_equal_weight"] = (
+        merged["cnn_fear_greed"] + merged["soxx_fear_greed"]
+    ) / 2.0
+    merged = merged[(merged["date"] >= start_date) & (merged["date"] <= end_date)]
+    if merged.empty:
+        raise ValueError("指定区间内没有 CNN 和 SOXX 可等权平均的贪恐数据")
+    return merged[["date", "cnn_soxx_equal_weight"]].sort_values("date")
+
+
 def _fetch_fear_history(
     fear_source: str,
     start_date: date,
     end_date: date,
 ) -> Tuple[pd.DataFrame, Dict]:
-    if fear_source == "soxx_clone":
+    if fear_source == "cnn_soxx_equal_weight":
+        df = _fetch_cnn_soxx_equal_weight_history(start_date, end_date)
+    elif fear_source == "soxx_clone":
         df = _fetch_soxx_clone_history(start_date, end_date)
     else:
         fear_source = "cnn"
@@ -547,6 +573,39 @@ def _compute_yearly_trade_stats(trades: List[Dict]) -> Dict[str, Dict]:
     return yearly_trade_stats
 
 
+def _to_date(value) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)[:10]).date()
+
+
+def _compute_max_drawdown_recovery_days(date_values: List, equity_values: np.ndarray) -> int:
+    if len(date_values) == 0 or len(equity_values) == 0:
+        return 0
+
+    values = np.asarray(equity_values, dtype=float)
+    cumulative_peaks = np.maximum.accumulate(values)
+    drawdowns = (values / cumulative_peaks) - 1
+    trough_index = int(np.argmin(drawdowns))
+    tolerance = 1e-10
+
+    if float(drawdowns[trough_index]) >= -tolerance:
+        return 0
+
+    peak_value = float(cumulative_peaks[trough_index])
+    recovery_index = len(values) - 1
+    for index in range(trough_index + 1, len(values)):
+        if float(values[index]) >= peak_value * (1 - tolerance):
+            recovery_index = index
+            break
+
+    trough_date = _to_date(date_values[trough_index])
+    recovery_date = _to_date(date_values[recovery_index])
+    return int(max(0, (recovery_date - trough_date).days))
+
+
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
     dates = base_df["date"].tolist()
     date_strings = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
@@ -771,6 +830,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     benchmark_cumulative_peaks = np.maximum.accumulate(benchmark_values)
     benchmark_drawdowns = (benchmark_values / benchmark_cumulative_peaks) - 1
     max_drawdown = abs(float(drawdowns.min())) * 100 if len(drawdowns) > 0 else 0.0
+    max_drawdown_recovery_days = _compute_max_drawdown_recovery_days(dates, equity_values)
     returns = np.diff(equity_values) / equity_values[:-1] if len(equity_values) > 1 else np.array([])
     sharpe_ratio = 0.0
     if len(returns) > 1 and float(np.std(returns)) > 0:
@@ -793,6 +853,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         "total_return": total_return,
         "annualized_return": annualized_return,
         "max_drawdown": max_drawdown,
+        "max_drawdown_recovery_days": max_drawdown_recovery_days,
         "sharpe_ratio": sharpe_ratio,
         "calmar_ratio": calmar_ratio,
         "win_rate": win_rate,
@@ -1371,7 +1432,7 @@ class SOXLFearRunParams(BaseModel):
     @validator("fear_source")
     def validate_fear_source(cls, value):
         if value not in FEAR_SOURCE_OPTIONS:
-            raise ValueError("fear_source 仅支持 cnn 或 soxx_clone")
+            raise ValueError("fear_source 包含不支持的来源")
         return value
 
     @validator("compare_fear_sources")
@@ -1381,7 +1442,7 @@ class SOXLFearRunParams(BaseModel):
         normalized = list(dict.fromkeys(value or []))
         invalid = [item for item in normalized if item not in FEAR_SOURCE_OPTIONS]
         if invalid:
-            raise ValueError("compare_fear_sources 仅支持 cnn 或 soxx_clone")
+            raise ValueError("compare_fear_sources 包含不支持的来源")
         return normalized
 
 
