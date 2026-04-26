@@ -42,17 +42,6 @@ def _run_market_signal_analysis():
         analyzer.db_session.close()
 
 
-def _run_etf_emotion_calculation():
-    from ..core.services.longport import LongPortService
-    from .etf_manager import ETFManager
-
-    manager = ETFManager(LongPortService.get_instance())
-    try:
-        manager.calculate_all_emotions()
-    finally:
-        manager.db_session.close()
-
-
 def _run_cnn_fear_greed_fetch():
     from .cnn_fear_index import CNNFearGreedIndexScraper
 
@@ -142,15 +131,6 @@ class ScheduledTaskManager:
                 sort_order=30,
                 runner=_run_market_signal_analysis,
             ),
-            "etf_emotion_calculation": TaskDefinition(
-                task_key="etf_emotion_calculation",
-                name="ETF 情绪指标计算",
-                description="计算所有 ETF 的情绪指标。",
-                default_time="11:00",
-                default_enabled=False,
-                sort_order=40,
-                runner=_run_etf_emotion_calculation,
-            ),
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
                 name="CNN Fear & Greed 抓取",
@@ -191,6 +171,9 @@ class ScheduledTaskManager:
 
     def ensure_task_configs(self):
         with get_db_ctx() as db:
+            db.query(ScheduledTaskConfig).filter(
+                ScheduledTaskConfig.task_key == "etf_emotion_calculation"
+            ).delete(synchronize_session=False)
             for task in self.task_definitions.values():
                 config = db.query(ScheduledTaskConfig).filter(
                     ScheduledTaskConfig.task_key == task.task_key
