@@ -5,10 +5,11 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, time as dtime
 from math import ceil, floor
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 from ..core.database import (
     CNNFearGreedIndex,
@@ -30,6 +31,16 @@ from .cnn_fear_index import CNNFearGreedIndexScraper
 
 logger = logging.getLogger(__name__)
 CNN_THRESHOLD_LOGIC_SWITCH_AT = datetime(2026, 4, 24)
+CNN_HISTORY_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+CNN_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "cache-control": "no-cache",
+    "origin": "https://www.cnn.com",
+    "pragma": "no-cache",
+    "referer": "https://www.cnn.com/",
+    "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+}
 
 
 @dataclass
@@ -210,6 +221,145 @@ class SoxlFearStrategyTrader:
         close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
         seconds_from_close = abs((now_et - close_at).total_seconds())
         return seconds_from_close <= self.MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES * 60
+
+    def _fetch_cnn_score_map(self, db, start_date: date, end_date: date) -> Dict[date, float]:
+        if start_date > end_date:
+            return {}
+
+        scores: Dict[date, float] = {}
+        rows = (
+            db.query(CNNFearGreedIndex)
+            .filter(
+                CNNFearGreedIndex.date >= start_date,
+                CNNFearGreedIndex.date <= end_date,
+            )
+            .order_by(CNNFearGreedIndex.date.asc())
+            .all()
+        )
+        for row in rows:
+            if row.index_value is not None:
+                scores[row.date] = float(row.index_value)
+
+        try:
+            response = requests.get(
+                f"{CNN_HISTORY_BASE_URL}/{start_date.isoformat()}",
+                headers=CNN_HEADERS,
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            for item in payload.get("fear_and_greed_historical", {}).get("data", []):
+                if item.get("x") is None or item.get("y") is None:
+                    continue
+                item_date = datetime.utcfromtimestamp(item["x"] / 1000).date()
+                if start_date <= item_date <= end_date:
+                    scores[item_date] = float(item["y"])
+        except Exception as exc:
+            logger.info("Failed to fetch CNN history for SOXL greed state backfill: %s", exc)
+
+        return scores
+
+    def _fetch_daily_close_rows(
+        self,
+        account_id: str,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        preferred_longport_account_id: Optional[str] = None,
+    ) -> List[Tuple[date, float]]:
+        if start_date > end_date:
+            return []
+
+        market_data_service = self._get_market_data_service(account_id, preferred_longport_account_id)
+        quote_service = QuoteService(market_data_service)
+        klines = quote_service.get_klines(symbol, start_date=start_date, end_date=end_date)
+        rows: List[Tuple[date, float]] = []
+        for item in klines or []:
+            item_date = item.get("timestamp")
+            if hasattr(item_date, "date"):
+                item_date = item_date.date()
+            if not isinstance(item_date, date) or item_date < start_date or item_date > end_date:
+                continue
+            close_price = float(item.get("close") or 0)
+            if close_price > 0:
+                rows.append((item_date, close_price))
+        return sorted(rows, key=lambda value: value[0])
+
+    def _backfill_missing_greed_state(
+        self,
+        db,
+        state: SoxlFearStrategyState,
+        config: SoxlFearStrategyConfig,
+        symbol: str,
+        market_date: date,
+        shares: int,
+    ) -> Optional[date]:
+        if shares <= 0 or not state.last_processed_date:
+            return None
+
+        backfill_end = MarketService.get_previous_us_trading_day(market_date)
+        if state.last_processed_date > backfill_end:
+            return None
+
+        # Re-read the last processed day as well. This lets a prior intraday manual
+        # check be corrected by the final daily close without making the strategy
+        # more aggressive than the close-based backtest.
+        price_start = state.last_processed_date
+        fear_start = max(date(2020, 1, 1), price_start - timedelta(days=14))
+        preferred_longport_account_id = config.longport_account_id if config.account_type == "longport" else None
+        try:
+            close_rows = self._fetch_daily_close_rows(
+                config.account_id,
+                symbol,
+                price_start,
+                backfill_end,
+                preferred_longport_account_id=preferred_longport_account_id,
+            )
+        except Exception as exc:
+            logger.info("Failed to fetch SOXL daily close for greed state backfill: %s", exc)
+            return None
+        if not close_rows:
+            return None
+
+        score_map = self._fetch_cnn_score_map(db, fear_start, backfill_end)
+        if not score_map:
+            return None
+
+        original_processed_date = state.last_processed_date
+        sorted_scores = sorted(score_map.items(), key=lambda value: value[0])
+        score_index = 0
+        last_score: Optional[float] = None
+        processed_dates = []
+
+        for price_date, close_price in close_rows:
+            while score_index < len(sorted_scores) and sorted_scores[score_index][0] <= price_date:
+                last_score = sorted_scores[score_index][1]
+                score_index += 1
+            if last_score is None:
+                continue
+
+            if last_score >= float(config.greed_threshold):
+                state.greed_peak_price = max(float(state.greed_peak_price or close_price), close_price)
+            else:
+                state.greed_peak_price = None
+                state.take_profit_cycle_sell_count = 0
+            processed_dates.append(price_date)
+
+        if not processed_dates:
+            return None
+
+        cooldown_days_to_decrement = sum(1 for item_date in processed_dates if item_date > original_processed_date)
+        if cooldown_days_to_decrement > 0 and state.cooldown_remaining_days > 0:
+            state.cooldown_remaining_days = max(0, state.cooldown_remaining_days - cooldown_days_to_decrement)
+
+        state.last_processed_date = processed_dates[-1]
+        logger.info(
+            "Backfilled SOXL greed state for %s from %s to %s using daily close",
+            mask_account_id(config.account_id),
+            processed_dates[0],
+            processed_dates[-1],
+        )
+        return processed_dates[-1]
 
     def _estimate_intraday_volume_completion_ratio(
         self,
@@ -510,10 +660,6 @@ class SoxlFearStrategyTrader:
                     db.add(state)
                     db.flush()
 
-                if state.last_processed_date and state.last_processed_date != market_date and state.cooldown_remaining_days > 0:
-                    state.cooldown_remaining_days = max(0, state.cooldown_remaining_days - 1)
-                state.last_processed_date = market_date
-
                 shares = int(broker_snapshot.shares)
                 available_shares = int(broker_snapshot.available_shares)
                 avg_cost = float(broker_snapshot.avg_cost or 0)
@@ -522,10 +668,18 @@ class SoxlFearStrategyTrader:
                 position_value = shares * current_price
                 position_ratio_before = (position_value / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
+                allow_greed_state_update = self._should_update_greed_state(trigger_source, now_et, market_date)
+                if shares > 0:
+                    self._backfill_missing_greed_state(db, state, config, symbol, market_date, shares)
+
+                if allow_greed_state_update and state.last_processed_date != market_date:
+                    if state.last_processed_date and state.cooldown_remaining_days > 0:
+                        state.cooldown_remaining_days = max(0, state.cooldown_remaining_days - 1)
+                    state.last_processed_date = market_date
+
                 is_fear = float(cnn_score) <= float(config.buy_threshold)
                 is_greedy = float(cnn_score) >= float(config.greed_threshold)
                 can_trade = state.cooldown_remaining_days <= 0
-                allow_greed_state_update = self._should_update_greed_state(trigger_source, now_et, market_date)
 
                 if shares <= 0:
                     state.greed_peak_price = None
