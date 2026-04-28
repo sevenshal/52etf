@@ -161,7 +161,7 @@ class SoxlFearStrategyTrader:
         eastern = ZoneInfo("US/Eastern")
         if value.tzinfo is not None:
             return value.astimezone(eastern)
-        return value.replace(tzinfo=eastern)
+        return value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(eastern)
 
     def _fallback_volume_completion_ratio(self, now_et: datetime, market_date: date) -> Tuple[float, str]:
         close_time = MarketService.get_us_market_close_time(market_date)
@@ -176,12 +176,14 @@ class SoxlFearStrategyTrader:
         if minutes_remaining > 30:
             return 1.0, "raw_not_near_close"
 
+        # Median SOXL.US intraday volume completion over the latest 20 full
+        # sessions sampled on 2026-04-28 ET: 2026-03-30..2026-04-27.
         points = [
             (0.0, 1.0),
-            (2.0, 0.96),
-            (5.0, 0.935),
-            (10.0, 0.90),
-            (30.0, 0.80),
+            (2.0, 0.9910),
+            (5.0, 0.9778),
+            (10.0, 0.9549),
+            (30.0, 0.9067),
         ]
         for index in range(1, len(points)):
             prev_minutes, prev_completion = points[index - 1]
@@ -379,17 +381,37 @@ class SoxlFearStrategyTrader:
                 MarketService.get_us_market_close_time(timestamp.date()),
                 tzinfo=timestamp.tzinfo,
             )
-            if timestamp < day_open_at or timestamp > day_close_at:
+            if timestamp < day_open_at or timestamp >= day_close_at:
                 continue
 
-            volume = float(item.get("volume") or 0)
-            if volume <= 0:
+            raw_volume = item.get("volume")
+            if raw_volume is None:
+                continue
+            volume = float(raw_volume)
+            if volume < 0:
                 continue
             elapsed_seconds = (timestamp - day_open_at).total_seconds()
             grouped.setdefault(timestamp.date(), []).append((elapsed_seconds, volume))
 
         completion_ratios = []
-        for values in grouped.values():
+        for volume_date, values in grouped.items():
+            values = sorted(values, key=lambda value: value[0])
+            day_close_time = MarketService.get_us_market_close_time(volume_date)
+            session_seconds = (
+                datetime.combine(volume_date, day_close_time)
+                - datetime.combine(volume_date, self.MARKET_OPEN_TIME)
+            ).total_seconds()
+            expected_minutes = max(1, int(session_seconds // 60))
+            observed_minutes = len({int(elapsed // 60) for elapsed, _ in values})
+            first_elapsed = values[0][0]
+            last_elapsed = values[-1][0]
+            if (
+                first_elapsed > 60
+                or last_elapsed < session_seconds - 120
+                or observed_minutes < expected_minutes * 0.95
+            ):
+                continue
+
             total_volume = sum(volume for _, volume in values)
             if total_volume <= 0:
                 continue
