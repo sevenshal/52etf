@@ -675,7 +675,12 @@ const SoxlFearBacktest = () => {
           }}
         >
           <Row gutter={16}>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
+              <Form.Item name="symbol" label="标的">
+                <Select options={symbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
               <Form.Item name="date_range" label="回测区间" rules={[{ required: true, message: '请选择回测区间' }]}>
                 <RangePicker style={{ width: '100%' }} />
               </Form.Item>
@@ -701,70 +706,56 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="symbol" label="标的">
-                <Select options={symbolOptions} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
               <Form.Item name="fear_source_values" label="贪恐来源候选">
                 <Select mode="multiple" options={fearSourceOptions} />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="buy_threshold_values" label="买入阈值(<=)候选">
+            <Col xs={24} md={4}>
+              <Form.Item name="buy_threshold_values" label="买入贪恐阈值(<=)候选">
                 <Input placeholder="例如 35,40,45" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="greed_threshold_values" label="进入止盈区阈值(>=) 候选">
-                <Input placeholder="例如 40,41,42" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col xs={24} md={8}>
-              <Form.Item name="volume_ratio_threshold_values" label="量比阈值候选">
-                <Input placeholder="例如 1.3,1.38,1.45" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
               <Form.Item name="buy_position_pct_values" label="每次买入仓位% 候选">
                 <Input placeholder="例如 50,60,70" />
               </Form.Item>
             </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col xs={24} md={8}>
-              <Form.Item name="cooldown_days_values" label="冷却天数候选">
-                <Input placeholder="例如 3,5" />
+            <Col xs={24} md={4}>
+              <Form.Item name="greed_threshold_values" label="止盈区贪恐阈值(>=) 候选">
+                <Input placeholder="例如 40,41,42" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="trailing_stop_pct_values" label="移动止盈回撤% 候选">
-                <Input placeholder="例如 6,10" />
+            <Col xs={24} md={4}>
+              <Form.Item name="volume_ratio_threshold_values" label="止盈量比阈值(>=)候选">
+                <Input placeholder="例如 1.3,1.38,1.45" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
               <Form.Item name="sell_position_pct_values" label="止盈减仓% 候选">
                 <Input placeholder="例如 25,50" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
+              <Form.Item name="trailing_stop_pct_values" label="移动止盈回撤% 候选">
+                <Input placeholder="例如 6,10" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
               <Form.Item name="sell_reduction_basis_values" label="止盈减仓口径候选">
                 <Select mode="multiple" options={sellReductionBasisOptions} />
               </Form.Item>
             </Col>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
               <Form.Item name="max_take_profit_sells_per_cycle_values" label="单轮止盈次数候选">
                 <Input placeholder="例如 2,3" />
               </Form.Item>
             </Col>
-          </Row>
-
-          <Row gutter={16}>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={4}>
+              <Form.Item name="cooldown_days_values" label="冷却天数候选">
+                <Input placeholder="例如 3,5" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
               <Form.Item name="min_position_pct_after_take_profit_values" label="保留仓位% 候选">
                 <Input placeholder="例如 10,20" />
               </Form.Item>
