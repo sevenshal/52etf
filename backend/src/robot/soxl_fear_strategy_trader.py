@@ -60,6 +60,10 @@ class SoxlFearStrategyTrader:
     MARKET_OPEN_TIME = dtime(9, 30)
     VOLUME_PROFILE_MINUTE_COUNT = 1000
     MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
+    VOLUME_PROJECTION_WINDOW_MINUTES = 30
+    MIN_VOLUME_PROFILE_DAY_COVERAGE = 0.95
+    VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS = 60
+    VOLUME_PROFILE_CLOSE_TOLERANCE_SECONDS = 120
 
     def __new__(cls):
         with cls._lock:
@@ -173,7 +177,7 @@ class SoxlFearStrategyTrader:
             return 1.0, "raw_pre_open"
 
         minutes_remaining = max(0.0, (close_at - now_et).total_seconds() / 60.0)
-        if minutes_remaining > 30:
+        if minutes_remaining > self.VOLUME_PROJECTION_WINDOW_MINUTES:
             return 1.0, "raw_not_near_close"
 
         # Median SOXL.US intraday volume completion over the latest 20 full
@@ -406,9 +410,9 @@ class SoxlFearStrategyTrader:
             first_elapsed = values[0][0]
             last_elapsed = values[-1][0]
             if (
-                first_elapsed > 60
-                or last_elapsed < session_seconds - 120
-                or observed_minutes < expected_minutes * 0.95
+                first_elapsed > self.VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS
+                or last_elapsed < session_seconds - self.VOLUME_PROFILE_CLOSE_TOLERANCE_SECONDS
+                or observed_minutes < expected_minutes * self.MIN_VOLUME_PROFILE_DAY_COVERAGE
             ):
                 continue
 
@@ -441,15 +445,17 @@ class SoxlFearStrategyTrader:
                 "projection_source": "empty_volume",
             }
 
-        completion_ratio = self._estimate_intraday_volume_completion_ratio(
-            market_data_service,
-            symbol,
-            now_et,
-            market_date,
-        )
-        projection_source = "intraday_profile"
-        if completion_ratio is None:
-            completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
+        completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
+        if projection_source == "fallback_close_curve":
+            intraday_completion_ratio = self._estimate_intraday_volume_completion_ratio(
+                market_data_service,
+                symbol,
+                now_et,
+                market_date,
+            )
+            if intraday_completion_ratio is not None:
+                completion_ratio = intraday_completion_ratio
+                projection_source = "intraday_profile"
 
         completion_ratio = max(0.50, min(1.0, float(completion_ratio or 1.0)))
         projection_factor = 1.0 / completion_ratio if completion_ratio > 0 else 1.0
@@ -649,6 +655,7 @@ class SoxlFearStrategyTrader:
             current_price = float(market_snapshot["current_price"])
             volume_ratio = float(market_snapshot["volume_ratio"])
             raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
+            quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
 
@@ -672,7 +679,7 @@ class SoxlFearStrategyTrader:
                 position_value = shares * current_price
                 position_ratio_before = (position_value / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
-                allow_greed_state_update = self._should_update_greed_state(trigger_source, now_et, market_date)
+                allow_greed_state_update = self._should_update_greed_state(trigger_source, quote_timestamp, market_date)
                 if shares > 0:
                     self._backfill_missing_greed_state(db, state, config, symbol, market_date, shares)
 
