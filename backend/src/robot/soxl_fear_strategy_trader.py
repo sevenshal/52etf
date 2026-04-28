@@ -482,12 +482,14 @@ class SoxlFearStrategyTrader:
         previous_trading_day = MarketService.get_previous_us_trading_day(current_market_date)
         history = quote_service.get_klines(symbol, count=25, end_date=previous_trading_day)
         quote = market_data_service.get_quote(symbol)
-        now_et = MarketService.get_eastern_now()
 
         if not history:
             raise ValueError(f"{symbol} 历史日线为空")
         if not quote or not quote.get("price"):
             raise ValueError(f"{symbol} 实时行情为空")
+
+        quote_time_et = self._to_eastern_datetime(quote.get("timestamp"))
+        now_et = quote_time_et if quote_time_et and quote_time_et.date() == current_market_date else MarketService.get_eastern_now()
 
         rows = [
             {
@@ -539,6 +541,7 @@ class SoxlFearStrategyTrader:
             "volume_completion_ratio": float(projection["completion_ratio"]),
             "volume_projection_factor": float(projection["projection_factor"]),
             "volume_projection_source": projection["projection_source"],
+            "quote_timestamp": now_et,
         }
 
     async def _build_ib_snapshot(self, config: SoxlFearStrategyConfig, current_price: float) -> BrokerSnapshot:
