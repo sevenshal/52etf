@@ -1,4 +1,3 @@
-import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,8 +10,6 @@ from ...robot.soxl_fear_strategy_trader import SoxlFearStrategyTrader
 from .account import valid_account
 
 router = APIRouter(prefix="/api/soxl-fear-strategy", tags=["soxl-fear-strategy"])
-logger = logging.getLogger(__name__)
-CNN_THRESHOLD_LOGIC_SWITCH_AT = datetime(2026, 4, 24)
 
 
 class SoxlFearStrategyConfigSchema(BaseModel):
@@ -99,25 +96,6 @@ class SoxlFearStrategyLogSchema(BaseModel):
         from_attributes = True
 
 
-def _migrate_legacy_thresholds_if_needed(config: SoxlFearStrategyConfig, db: Session) -> SoxlFearStrategyConfig:
-    if not config:
-        return config
-    updated_at = config.updated_at or datetime.min
-    if updated_at >= CNN_THRESHOLD_LOGIC_SWITCH_AT:
-        return config
-
-    config.buy_threshold = max(0.0, min(100.0, 100.0 - float(config.buy_threshold or 0.0)))
-    config.greed_threshold = max(0.0, min(100.0, 100.0 - float(config.greed_threshold or 0.0)))
-    config.updated_at = datetime.now()
-    db.commit()
-    db.refresh(config)
-    logger.info(
-        "Migrated legacy SOXL fear strategy thresholds for account_id=%s to raw CNN logic",
-        config.account_id,
-    )
-    return config
-
-
 @router.get("/config", response_model=SoxlFearStrategyConfigSchema)
 def get_soxl_fear_strategy_config(
     account_id: str = Depends(valid_account),
@@ -125,7 +103,6 @@ def get_soxl_fear_strategy_config(
 ):
     config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == account_id).first()
     if config:
-        config = _migrate_legacy_thresholds_if_needed(config, db)
         return config
     return SoxlFearStrategyConfigSchema()
 

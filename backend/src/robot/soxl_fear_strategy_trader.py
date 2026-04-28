@@ -30,7 +30,6 @@ from ..core.utils import mask_account_id, send_alert_email
 from .cnn_fear_index import CNNFearGreedIndexScraper
 
 logger = logging.getLogger(__name__)
-CNN_THRESHOLD_LOGIC_SWITCH_AT = datetime(2026, 4, 24)
 CNN_HISTORY_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 CNN_HEADERS = {
     "accept": "*/*",
@@ -137,23 +136,6 @@ class SoxlFearStrategyTrader:
                 config.last_run_at = datetime.now()
                 config.last_run_status = status
                 config.last_run_message = message[:500]
-
-    def _migrate_legacy_thresholds_if_needed(self, db, config: SoxlFearStrategyConfig):
-        if not config:
-            return config
-        updated_at = config.updated_at or datetime.min
-        if updated_at >= CNN_THRESHOLD_LOGIC_SWITCH_AT:
-            return config
-
-        config.buy_threshold = max(0.0, min(100.0, 100.0 - float(config.buy_threshold or 0.0)))
-        config.greed_threshold = max(0.0, min(100.0, 100.0 - float(config.greed_threshold or 0.0)))
-        config.updated_at = datetime.now()
-        db.flush()
-        logger.info(
-            "Migrated legacy SOXL fear strategy thresholds for %s to raw CNN logic",
-            mask_account_id(config.account_id),
-        )
-        return config
 
     def _fetch_latest_cnn_score(self) -> Tuple[float, datetime]:
         scraper = CNNFearGreedIndexScraper()
@@ -650,7 +632,6 @@ class SoxlFearStrategyTrader:
             with get_db_ctx() as db:
                 persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == config.account_id).first()
                 if persisted_config:
-                    self._migrate_legacy_thresholds_if_needed(db, persisted_config)
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
 
