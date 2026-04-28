@@ -370,6 +370,21 @@ class LongPortService(QuoteProvider, TradeService):
             logging.error(f"获取期权{symbols}实时行情失败: {str(e)}")
             return []
 
+    def _resolve_candlestick_period(self, period):
+        normalized = str(period or 'd').lower()
+        if normalized in {'d', 'day', 'daily'}:
+            return Period.Day, True
+        if normalized in {'w', 'week', 'weekly'}:
+            return Period.Week, True
+        if normalized in {'m', 'month', 'monthly'}:
+            return Period.Month, True
+        if normalized in {'1m', '1min', 'min1', 'minute', 'minute1'}:
+            for name in ('Min_1', 'Min1', 'OneMinute', 'Minute', 'Minute1'):
+                value = getattr(Period, name, None)
+                if value is not None:
+                    return value, False
+        raise ValueError(f"Unsupported candlestick period: {period}")
+
     @sleep_and_retry
     @limits(calls=10, period=1)
     def get_candlesticks(self, symbol: str, count: int, period = 'd') -> List[Dict]:
@@ -381,15 +396,16 @@ class LongPortService(QuoteProvider, TradeService):
         try:
             while request_count > 0:
                 try:
+                    resolved_period, is_daily_like = self._resolve_candlestick_period(period)
                     resp = self.ctx.candlesticks(
                         symbol=symbol,
-                        period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
+                        period=resolved_period,
                         count=request_count,
                         adjust_type=AdjustType.ForwardAdjust
                     )
                     if resp:
                         return [{
-                            'timestamp': candle.timestamp.date(),
+                            'timestamp': candle.timestamp.date() if is_daily_like else candle.timestamp,
                             'open': float(candle.open),
                             'high': float(candle.high),
                             'low': float(candle.low),
@@ -430,9 +446,10 @@ class LongPortService(QuoteProvider, TradeService):
         
         try:
             while start <= current_end:
+                resolved_period, is_daily_like = self._resolve_candlestick_period(period)
                 resp = self.ctx.history_candlesticks_by_date(
                     symbol=symbol,
-                    period=Period.Day if period == 'd' else Period.Week if period == 'w' else Period.Month if period == 'm' else Period.Day,
+                    period=resolved_period,
                     start=start,
                     end=current_end,
                     adjust_type=AdjustType.ForwardAdjust
@@ -440,9 +457,9 @@ class LongPortService(QuoteProvider, TradeService):
                 
                 if not resp:
                     break
-                    
+
                 processed_resp = [{
-                    'timestamp': candle.timestamp.date(),
+                    'timestamp': candle.timestamp.date() if is_daily_like else candle.timestamp,
                     'open': float(candle.open),
                     'high': float(candle.high),
                     'low': float(candle.low),

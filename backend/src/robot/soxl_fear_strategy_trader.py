@@ -3,9 +3,10 @@ import logging
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dtime
 from math import ceil, floor
 from typing import Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -46,6 +47,8 @@ class BrokerSnapshot:
 class SoxlFearStrategyTrader:
     _instance = None
     _lock = threading.Lock()
+    MARKET_OPEN_TIME = dtime(9, 30)
+    VOLUME_PROFILE_MINUTE_COUNT = 1000
 
     def __new__(cls):
         with cls._lock:
@@ -160,6 +163,151 @@ class SoxlFearStrategyTrader:
         finally:
             scraper.db_session.close()
 
+    def _to_eastern_datetime(self, value) -> Optional[datetime]:
+        if not isinstance(value, datetime):
+            return None
+        eastern = ZoneInfo("US/Eastern")
+        if value.tzinfo is not None:
+            return value.astimezone(eastern)
+        return value.replace(tzinfo=eastern)
+
+    def _fallback_volume_completion_ratio(self, now_et: datetime, market_date: date) -> Tuple[float, str]:
+        close_time = MarketService.get_us_market_close_time(market_date)
+        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
+        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
+        if now_et >= close_at:
+            return 1.0, "complete"
+        if now_et <= open_at:
+            return 1.0, "raw_pre_open"
+
+        minutes_remaining = max(0.0, (close_at - now_et).total_seconds() / 60.0)
+        if minutes_remaining > 30:
+            return 1.0, "raw_not_near_close"
+
+        points = [
+            (0.0, 1.0),
+            (2.0, 0.96),
+            (5.0, 0.935),
+            (10.0, 0.90),
+            (30.0, 0.80),
+        ]
+        for index in range(1, len(points)):
+            prev_minutes, prev_completion = points[index - 1]
+            next_minutes, next_completion = points[index]
+            if minutes_remaining <= next_minutes:
+                span = next_minutes - prev_minutes
+                weight = (minutes_remaining - prev_minutes) / span if span > 0 else 0.0
+                completion = prev_completion + (next_completion - prev_completion) * weight
+                return completion, "fallback_close_curve"
+        return points[-1][1], "fallback_close_curve"
+
+    def _estimate_intraday_volume_completion_ratio(
+        self,
+        market_data_service: LongPortService,
+        symbol: str,
+        now_et: datetime,
+        market_date: date,
+    ) -> Optional[float]:
+        close_time = MarketService.get_us_market_close_time(market_date)
+        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
+        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
+        if now_et <= open_at or now_et >= close_at:
+            return None
+
+        cutoff_elapsed_seconds = max(0.0, (now_et - open_at).total_seconds())
+        try:
+            minute_bars = market_data_service.get_candlesticks(
+                symbol,
+                self.VOLUME_PROFILE_MINUTE_COUNT,
+                period="1m",
+            )
+        except Exception as exc:
+            logger.info("Failed to fetch intraday volume profile for %s: %s", symbol, exc)
+            return None
+
+        grouped: Dict[date, list] = {}
+        for item in minute_bars or []:
+            timestamp = self._to_eastern_datetime(item.get("timestamp"))
+            if not timestamp or timestamp.date() >= market_date:
+                continue
+            if timestamp.weekday() >= 5 or MarketService.is_us_market_holiday(timestamp.date()):
+                continue
+
+            day_open_at = datetime.combine(timestamp.date(), self.MARKET_OPEN_TIME, tzinfo=timestamp.tzinfo)
+            day_close_at = datetime.combine(
+                timestamp.date(),
+                MarketService.get_us_market_close_time(timestamp.date()),
+                tzinfo=timestamp.tzinfo,
+            )
+            if timestamp < day_open_at or timestamp > day_close_at:
+                continue
+
+            volume = float(item.get("volume") or 0)
+            if volume <= 0:
+                continue
+            elapsed_seconds = (timestamp - day_open_at).total_seconds()
+            grouped.setdefault(timestamp.date(), []).append((elapsed_seconds, volume))
+
+        completion_ratios = []
+        for values in grouped.values():
+            total_volume = sum(volume for _, volume in values)
+            if total_volume <= 0:
+                continue
+            cumulative_volume = sum(volume for elapsed, volume in values if elapsed <= cutoff_elapsed_seconds)
+            if cumulative_volume <= 0:
+                continue
+            completion_ratios.append(cumulative_volume / total_volume)
+
+        if len(completion_ratios) < 2:
+            return None
+
+        return float(pd.Series(completion_ratios).median())
+
+    def _project_current_volume(
+        self,
+        market_data_service: LongPortService,
+        symbol: str,
+        current_volume: float,
+        now_et: datetime,
+        market_date: date,
+    ) -> Dict[str, float]:
+        if current_volume <= 0:
+            return {
+                "projected_volume": 0.0,
+                "completion_ratio": 1.0,
+                "projection_factor": 1.0,
+                "projection_source": "empty_volume",
+            }
+
+        completion_ratio = self._estimate_intraday_volume_completion_ratio(
+            market_data_service,
+            symbol,
+            now_et,
+            market_date,
+        )
+        projection_source = "intraday_profile"
+        if completion_ratio is None:
+            completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
+
+        completion_ratio = max(0.50, min(1.0, float(completion_ratio or 1.0)))
+        projection_factor = 1.0 / completion_ratio if completion_ratio > 0 else 1.0
+        projected_volume = max(current_volume, current_volume * projection_factor)
+        return {
+            "projected_volume": projected_volume,
+            "completion_ratio": completion_ratio,
+            "projection_factor": projection_factor,
+            "projection_source": projection_source,
+        }
+
+    def _format_volume_projection_message(self, market_snapshot: dict) -> str:
+        return (
+            f"量比 {float(market_snapshot.get('volume_ratio') or 0):.2f}"
+            f"（原始 {float(market_snapshot.get('raw_volume_ratio') or 0):.2f}"
+            f"，预计全天量 {float(market_snapshot.get('projected_volume') or 0):.0f}"
+            f"，完成率 {float(market_snapshot.get('volume_completion_ratio') or 1) * 100:.1f}%"
+            f"，{market_snapshot.get('volume_projection_source') or 'raw'}）"
+        )
+
     def _build_realtime_dataframe(
         self,
         account_id: str,
@@ -172,6 +320,7 @@ class SoxlFearStrategyTrader:
         previous_trading_day = MarketService.get_previous_us_trading_day(current_market_date)
         history = quote_service.get_klines(symbol, count=25, end_date=previous_trading_day)
         quote = market_data_service.get_quote(symbol)
+        now_et = MarketService.get_eastern_now()
 
         if not history:
             raise ValueError(f"{symbol} 历史日线为空")
@@ -189,6 +338,14 @@ class SoxlFearStrategyTrader:
             }
             for item in history
         ]
+        current_volume = float(quote.get("volume") or 0)
+        projection = self._project_current_volume(
+            market_data_service,
+            symbol,
+            current_volume,
+            now_et,
+            current_market_date,
+        )
         rows.append(
             {
                 "date": current_market_date,
@@ -196,24 +353,30 @@ class SoxlFearStrategyTrader:
                 "high": float(quote.get("high") or quote["price"]),
                 "low": float(quote.get("low") or quote["price"]),
                 "close": float(quote["price"]),
-                "volume": float(quote.get("volume") or 0),
+                "volume": float(projection["projected_volume"]),
             }
         )
         df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
         df["ma20"] = df["close"].rolling(20).mean()
-        df["volume_ma20"] = df["volume"].rolling(20).mean()
+        df["volume_ma20"] = df["volume"].shift(1).rolling(20).mean()
         df["volume_ratio"] = df["volume"] / df["volume_ma20"]
         latest = df.iloc[-1]
 
         if pd.isna(latest["ma20"]) or pd.isna(latest["volume_ma20"]):
             raise ValueError(f"{symbol} 可用历史数据不足 20 天")
 
+        raw_volume_ratio = current_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
         return df, {
             "current_price": float(latest["close"]),
-            "current_volume": float(latest["volume"]),
+            "current_volume": current_volume,
+            "projected_volume": float(projection["projected_volume"]),
             "ma20": float(latest["ma20"]),
             "volume_ma20": float(latest["volume_ma20"]),
+            "raw_volume_ratio": raw_volume_ratio,
             "volume_ratio": float(latest["volume_ratio"]) if pd.notna(latest["volume_ratio"]) else 0.0,
+            "volume_completion_ratio": float(projection["completion_ratio"]),
+            "volume_projection_factor": float(projection["projection_factor"]),
+            "volume_projection_source": projection["projection_source"],
         }
 
     async def _build_ib_snapshot(self, config: SoxlFearStrategyConfig, current_price: float) -> BrokerSnapshot:
@@ -320,6 +483,8 @@ class SoxlFearStrategyTrader:
             )
             current_price = float(market_snapshot["current_price"])
             volume_ratio = float(market_snapshot["volume_ratio"])
+            raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
+            volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
 
             with get_db_ctx() as db:
@@ -437,7 +602,7 @@ class SoxlFearStrategyTrader:
                         state.greed_peak_price = None
                         state.take_profit_cycle_sell_count = 0
                         position_ratio_after = ((shares + trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
-                        trade_message = f"CNN={cnn_score:.2f} 进入买入区，量比 {volume_ratio:.2f} 放大，订单ID={order_id}"
+                        trade_message = f"CNN={cnn_score:.2f} 进入买入区，{volume_detail} 放大，订单ID={order_id}"
                     else:
                         trade_message = "买入信号成立，但可买数量过小或未达到调仓阈值"
 
@@ -445,7 +610,10 @@ class SoxlFearStrategyTrader:
                     if not can_trade:
                         trade_message = f"处于冷却期，剩余 {state.cooldown_remaining_days} 个交易日"
                     elif is_fear and volume_ratio < float(config.volume_ratio_threshold):
-                        trade_message = f"CNN 进入买入区，但量比 {volume_ratio:.2f} 低于阈值 {float(config.volume_ratio_threshold):.2f}"
+                        trade_message = (
+                            f"CNN 进入买入区，但{volume_detail}低于阈值 "
+                            f"{float(config.volume_ratio_threshold):.2f}"
+                        )
                     elif is_greedy:
                         trade_message = "处于止盈区，但尚未触发移动止盈"
                     else:
@@ -458,7 +626,12 @@ class SoxlFearStrategyTrader:
                     trigger_source,
                     trade_action or "CHECK",
                     status,
-                    f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}",
+                    (
+                        f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
+                        f" | raw_volume_ratio={raw_volume_ratio:.4f}"
+                        f" | projected_volume_ratio={volume_ratio:.4f}"
+                        f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
+                    ),
                     price=current_price,
                     quantity=trade_quantity if trade_action else None,
                     cnn_index_value=cnn_score,
