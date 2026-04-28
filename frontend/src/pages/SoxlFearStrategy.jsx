@@ -225,13 +225,6 @@ const SoxlFearStrategy = () => {
       render: (value) => value || '-',
     },
     {
-      title: 'CNN',
-      dataIndex: 'cnn_index_value',
-      key: 'cnn_index_value',
-      width: 80,
-      render: (value) => (value !== null && value !== undefined ? Number(value).toFixed(2) : '-'),
-    },
-    {
       title: '信号分(CNN)',
       dataIndex: 'fear_score',
       key: 'fear_score',
