@@ -239,7 +239,7 @@ const SoxlFearStrategy = () => {
       render: (value) => (value !== null && value !== undefined ? Number(value).toFixed(2) : '-'),
     },
     {
-      title: '量比',
+      title: '投影量比',
       dataIndex: 'volume_ratio',
       key: 'volume_ratio',
       width: 80,
@@ -256,7 +256,7 @@ const SoxlFearStrategy = () => {
     <div style={{ padding: 24 }}>
       <Title level={4} style={{ marginTop: 0 }}>SOXL 情绪量能自动交易</Title>
       <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
-        每个美股交易日收盘前 5 分钟自动执行一次。系统会抓取最新 CNN 恐贪指数，结合 SOXL 最近日线与当日实时行情判断是否买卖。
+        每个美股交易日收盘前自动执行一次。系统会抓取最新 CNN 恐贪指数，结合 SOXL 最近日线与当日实时行情判断是否买卖；临近收盘时量比会按预计全天成交量校正。
       </Text>
 
       <Tabs
@@ -337,7 +337,7 @@ const SoxlFearStrategy = () => {
                       </Form.Item>
                     </Col>
                     <Col xs={24} md={8}>
-                      <Form.Item name="volume_ratio_threshold" label="量比阈值" rules={[{ required: true }]}>
+                      <Form.Item name="volume_ratio_threshold" label="投影量比阈值" rules={[{ required: true }]}>
                         <InputNumber min={0} step={0.1} style={{ width: '100%' }} />
                       </Form.Item>
                     </Col>
