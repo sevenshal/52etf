@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -10,6 +11,7 @@ from ...robot.soxl_fear_strategy_trader import SoxlFearStrategyTrader
 from .account import valid_account
 
 router = APIRouter(prefix="/api/soxl-fear-strategy", tags=["soxl-fear-strategy"])
+logger = logging.getLogger(__name__)
 
 
 class SoxlFearStrategyConfigSchema(BaseModel):
@@ -85,7 +87,6 @@ class SoxlFearStrategyLogSchema(BaseModel):
     status: str
     price: Optional[float] = None
     quantity: Optional[int] = None
-    cnn_index_value: Optional[float] = None
     fear_score: Optional[float] = None
     volume_ratio: Optional[float] = None
     position_ratio_before: Optional[float] = None
