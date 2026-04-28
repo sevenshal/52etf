@@ -49,6 +49,7 @@ class SoxlFearStrategyTrader:
     _lock = threading.Lock()
     MARKET_OPEN_TIME = dtime(9, 30)
     VOLUME_PROFILE_MINUTE_COUNT = 1000
+    MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
 
     def __new__(cls):
         with cls._lock:
@@ -200,6 +201,15 @@ class SoxlFearStrategyTrader:
                 completion = prev_completion + (next_completion - prev_completion) * weight
                 return completion, "fallback_close_curve"
         return points[-1][1], "fallback_close_curve"
+
+    def _should_update_greed_state(self, trigger_source: str, now_et: datetime, market_date: date) -> bool:
+        if str(trigger_source or "").lower() == "auto":
+            return True
+
+        close_time = MarketService.get_us_market_close_time(market_date)
+        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
+        seconds_from_close = abs((now_et - close_at).total_seconds())
+        return seconds_from_close <= self.MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES * 60
 
     def _estimate_intraday_volume_completion_ratio(
         self,
@@ -515,15 +525,17 @@ class SoxlFearStrategyTrader:
                 is_fear = float(cnn_score) <= float(config.buy_threshold)
                 is_greedy = float(cnn_score) >= float(config.greed_threshold)
                 can_trade = state.cooldown_remaining_days <= 0
+                allow_greed_state_update = self._should_update_greed_state(trigger_source, now_et, market_date)
 
                 if shares <= 0:
                     state.greed_peak_price = None
                     state.take_profit_cycle_sell_count = 0
-                elif not is_greedy:
-                    state.greed_peak_price = None
-                    state.take_profit_cycle_sell_count = 0
-                else:
-                    state.greed_peak_price = max(float(state.greed_peak_price or current_price), current_price)
+                elif allow_greed_state_update:
+                    if not is_greedy:
+                        state.greed_peak_price = None
+                        state.take_profit_cycle_sell_count = 0
+                    else:
+                        state.greed_peak_price = max(float(state.greed_peak_price or current_price), current_price)
 
                 if broker_snapshot.has_today_order:
                     message = "今日已存在订单，跳过重复执行"
@@ -615,7 +627,14 @@ class SoxlFearStrategyTrader:
                             f"{float(config.volume_ratio_threshold):.2f}"
                         )
                     elif is_greedy:
-                        trade_message = "处于止盈区，但尚未触发移动止盈"
+                        if shares <= 0:
+                            trade_message = "处于止盈区，但未持有标的，跳过止盈"
+                        elif not allow_greed_state_update and not state.greed_peak_price:
+                            trade_message = "处于止盈区，但非收盘附近手动运行，未初始化移动止盈峰值"
+                        elif state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
+                            trade_message = "处于止盈区，但本轮止盈次数已达上限"
+                        else:
+                            trade_message = "处于止盈区，但尚未触发移动止盈"
                     else:
                         trade_message = "当前无买卖信号"
 
