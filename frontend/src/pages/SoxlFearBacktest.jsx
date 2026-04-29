@@ -119,6 +119,7 @@ const SoxlFearBacktest = () => {
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchStatus, setSearchStatus] = useState(null);
   const pollingTimerRef = useRef(null);
+  const detailLoadingRef = useRef(false);
   const hasAutoRunRef = useRef(false);
 
   const buildPayload = (values) => ({
@@ -268,6 +269,11 @@ const SoxlFearBacktest = () => {
   }, [form, location.pathname, location.state, navigate]);
 
   const loadDetail = async (record) => {
+    if (detailLoadingRef.current) {
+      return;
+    }
+
+    detailLoadingRef.current = true;
     setDetailLoading(true);
     try {
       const values = form.getFieldsValue();
@@ -288,6 +294,7 @@ const SoxlFearBacktest = () => {
     } catch (error) {
       message.error(error.response?.data?.detail || '加载详细回测失败');
     } finally {
+      detailLoadingRef.current = false;
       setDetailLoading(false);
     }
   };
@@ -390,7 +397,15 @@ const SoxlFearBacktest = () => {
       width: 80,
       fixed: 'right',
       render: (_, record) => (
-        <Button type="link" size="small" onClick={() => loadDetail(record)}>
+        <Button
+          type="link"
+          size="small"
+          disabled={detailLoading}
+          onClick={(event) => {
+            event.stopPropagation();
+            loadDetail(record);
+          }}
+        >
           详情
         </Button>
       ),
