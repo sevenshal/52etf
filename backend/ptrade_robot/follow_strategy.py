@@ -148,7 +148,7 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
     accumulated_vol = 0
     target_price = 0.0
     
-    # 遍历档位 1-5
+    # 遍历档位 1-3
     sorted_levels = [1, 2, 3]
     
     # 初始化为第1档价格，防止返回0
