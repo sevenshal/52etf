@@ -38,6 +38,30 @@ const parseNumberList = (value, integer = false) => {
 };
 
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
+const formatNumber = (value, digits = 2) => (
+  value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
+);
+const formatProfitLossRatio = (value) => formatNumber(value);
+const formatMetricValue = (value, { precision = 2, suffix = '', formatter } = {}) => {
+  if (formatter) {
+    return formatter(value);
+  }
+  if (value === null || value === undefined) {
+    return '-';
+  }
+  return `${Number(value || 0).toFixed(precision)}${suffix}`;
+};
+const formatSignedMetricValue = (value, { precision = 2, suffix = '' } = {}) => {
+  const numericValue = Number(value || 0);
+  const sign = numericValue > 0 ? '+' : '';
+  return `${sign}${numericValue.toFixed(precision)}${suffix}`;
+};
+const getProfitLossRatioSortValue = (record) => {
+  if (record.profit_loss_ratio === null || record.profit_loss_ratio === undefined) {
+    return 0;
+  }
+  return Number(record.profit_loss_ratio || 0);
+};
 
 const objectiveOptions = [
   { label: '按年化收益最大', value: 'annualized_return' },
@@ -306,11 +330,25 @@ const SoxlFearBacktest = () => {
       defaultSortOrder: 'descend',
     },
     {
+      title: '年化波动率',
+      dataIndex: 'annualized_volatility',
+      width: 120,
+      render: value => formatPercent(value),
+      sorter: (a, b) => Number(a.annualized_volatility || 0) - Number(b.annualized_volatility || 0),
+    },
+    {
       title: 'Sharpe',
       dataIndex: 'sharpe_ratio',
       width: 90,
       render: value => Number(value || 0).toFixed(2),
       sorter: (a, b) => a.sharpe_ratio - b.sharpe_ratio,
+    },
+    {
+      title: '所提诺比率',
+      dataIndex: 'sortino_ratio',
+      width: 110,
+      render: value => formatNumber(value),
+      sorter: (a, b) => Number(a.sortino_ratio || 0) - Number(b.sortino_ratio || 0),
     },
     {
       title: 'Calmar',
@@ -325,6 +363,20 @@ const SoxlFearBacktest = () => {
       width: 100,
       render: value => formatPercent(value),
       sorter: (a, b) => a.max_drawdown - b.max_drawdown,
+    },
+    {
+      title: '最大回撤持续天数',
+      dataIndex: 'max_drawdown_duration_days',
+      width: 150,
+      render: value => `${Number(value || 0)}天`,
+      sorter: (a, b) => Number(a.max_drawdown_duration_days || 0) - Number(b.max_drawdown_duration_days || 0),
+    },
+    {
+      title: '日盈亏比',
+      dataIndex: 'profit_loss_ratio',
+      width: 90,
+      render: value => formatProfitLossRatio(value),
+      sorter: (a, b) => getProfitLossRatioSortValue(a) - getProfitLossRatioSortValue(b),
     },
     {
       title: '交易数',
@@ -639,6 +691,48 @@ const SoxlFearBacktest = () => {
     };
   }, [detailedResult, detailFearSourceLabel]);
 
+  const renderComparedMetric = ({
+    title,
+    dataIndex,
+    precision = 2,
+    suffix = '',
+    formatter,
+    higherIsBetter = true,
+  }) => {
+    const strategyValue = detailedResult?.[dataIndex];
+    const benchmarkValue = detailedResult?.benchmark_metrics?.[dataIndex];
+    const hasNumericDiff = (
+      typeof strategyValue === 'number'
+      && typeof benchmarkValue === 'number'
+      && Number.isFinite(strategyValue)
+      && Number.isFinite(benchmarkValue)
+    );
+    const diffValue = hasNumericDiff ? strategyValue - benchmarkValue : null;
+    const isBetter = hasNumericDiff && (higherIsBetter ? diffValue >= 0 : diffValue <= 0);
+
+    return (
+      <Col xs={12} md={6} key={dataIndex}>
+        <Card loading={detailLoading}>
+          <Statistic
+            title={title}
+            value={strategyValue}
+            precision={precision}
+            suffix={suffix}
+            formatter={formatter ? () => formatter(strategyValue) : undefined}
+          />
+          <div style={{ marginTop: 8, fontSize: 12, color: '#666', lineHeight: 1.6 }}>
+            <span>基准 {formatMetricValue(benchmarkValue, { precision, suffix, formatter })}</span>
+            {hasNumericDiff && (
+              <span style={{ marginLeft: 12, color: isBetter ? '#cf1322' : '#1677ff' }}>
+                差值 {formatSignedMetricValue(diffValue, { precision, suffix })}
+              </span>
+            )}
+          </div>
+        </Card>
+      </Col>
+    );
+  };
+
   return (
     <div style={{ padding: 24 }}>
       <Card title={`${selectedSymbol} 情绪 + 量能 超参数回测`} style={{ marginBottom: 24 }}>
@@ -818,7 +912,7 @@ const SoxlFearBacktest = () => {
             columns={resultColumns}
             rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
             pagination={{ pageSize: 10 }}
-            scroll={{ x: 1480 }}
+            scroll={{ x: 1900 }}
             onRow={(record) => ({
               onClick: () => loadDetail(record),
               style: { cursor: 'pointer' },
@@ -830,39 +924,22 @@ const SoxlFearBacktest = () => {
       {detailedResult && (
         <div id="soxl-fear-detail">
           <Row gutter={16} style={{ marginBottom: 24 }}>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="总收益率" value={detailedResult.total_return} precision={2} suffix="%" />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="年化收益率" value={detailedResult.annualized_return} precision={2} suffix="%" />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="Sharpe" value={detailedResult.sharpe_ratio} precision={2} />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="Calmar" value={detailedResult.calmar_ratio} precision={2} />
-              </Card>
-            </Col>
+            {renderComparedMetric({ title: '总收益率', dataIndex: 'total_return', suffix: '%' })}
+            {renderComparedMetric({ title: '年化收益率', dataIndex: 'annualized_return', suffix: '%' })}
+            {renderComparedMetric({ title: '年化波动率', dataIndex: 'annualized_volatility', suffix: '%', higherIsBetter: false })}
+            {renderComparedMetric({ title: '最大回撤', dataIndex: 'max_drawdown', suffix: '%', higherIsBetter: false })}
           </Row>
 
           <Row gutter={16} style={{ marginBottom: 24 }}>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="最大回撤" value={detailedResult.max_drawdown} precision={2} suffix="%" />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card loading={detailLoading}>
-                <Statistic title="最大回撤修复天数" value={detailedResult.max_drawdown_recovery_days ?? 0} suffix="天" />
-              </Card>
-            </Col>
+            {renderComparedMetric({ title: 'Sharpe', dataIndex: 'sharpe_ratio' })}
+            {renderComparedMetric({ title: '所提诺比率', dataIndex: 'sortino_ratio' })}
+            {renderComparedMetric({ title: 'Calmar', dataIndex: 'calmar_ratio' })}
+            {renderComparedMetric({ title: '最大回撤持续天数', dataIndex: 'max_drawdown_duration_days', precision: 0, suffix: '天', higherIsBetter: false })}
+          </Row>
+
+          <Row gutter={16} style={{ marginBottom: 24 }}>
+            {renderComparedMetric({ title: '日胜率', dataIndex: 'win_rate', suffix: '%' })}
+            {renderComparedMetric({ title: '日盈亏比', dataIndex: 'profit_loss_ratio', formatter: formatProfitLossRatio })}
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
                 <Statistic title="买入次数" value={detailedResult.buy_count} />
