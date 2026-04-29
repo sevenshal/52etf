@@ -14,10 +14,10 @@ from ..core.utils import send_alert_email
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
-def _run_evc_stock_fetch(force_fetch: bool = False):
+def _run_evc_stock_fetch():
     from .evc_manager import EVCManager
 
-    EVCManager().fetch_and_stocks(force_fetch=force_fetch)
+    EVCManager().fetch_and_stocks()
 
 
 def _run_etf_fair_value_analysis():
@@ -275,8 +275,26 @@ class ScheduledTaskManager:
         target_date = target_date or date.today()
         return last_run_started_at.date() == target_date
 
-    def should_run_on_startup(self, task_key: str, target_date: Optional[date] = None) -> bool:
-        return self.is_task_enabled(task_key) and not self.has_run_today(task_key, target_date=target_date)
+    def has_missed_schedule_today(self, task_key: str, now: Optional[datetime] = None) -> bool:
+        self.bootstrap()
+        self._require_task(task_key)
+        task_snapshot = self._get_task_snapshot(task_key)
+        schedule_time = task_snapshot.get("schedule_time")
+        if not self.is_valid_time(schedule_time):
+            return False
+
+        now = now or datetime.now()
+        hour, minute = [int(part) for part in schedule_time.split(":")]
+        scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return now >= scheduled_at
+
+    def should_run_on_startup(self, task_key: str, now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now()
+        return (
+            self.is_task_enabled(task_key)
+            and not self.has_run_today(task_key, target_date=now.date())
+            and self.has_missed_schedule_today(task_key, now=now)
+        )
 
     def update_task(self, task_key: str, enabled: bool, schedule_time: str, updated_by: Optional[str] = None) -> dict:
         self.bootstrap()
@@ -400,7 +418,6 @@ class ScheduledTaskManager:
             "enabled": config["enabled"],
             "schedule_time": config["schedule_time"],
             "sort_order": config["sort_order"],
-            "supports_force_fetch": config["task_key"] == "evc_stock_fetch",
             "supports_start_date": config["task_key"] == "soxx_fear_greed_backfill",
             "is_running": is_running,
             "next_run_at": job.next_run.isoformat() if job and job.next_run else None,
@@ -462,18 +479,17 @@ scheduled_task_manager = ScheduledTaskManager()
 
 def run_startup_tasks():
     scheduled_task_manager.bootstrap()
-    if scheduled_task_manager.should_run_on_startup("evc_stock_fetch"):
+    tasks = sorted(
+        scheduled_task_manager.task_definitions.values(),
+        key=lambda task: task.sort_order,
+    )
+    for task in tasks:
+        if not scheduled_task_manager.should_run_on_startup(task.task_key):
+            continue
         scheduled_task_manager.trigger_task(
-            "evc_stock_fetch",
+            task.task_key,
             trigger_source="startup",
             triggered_by="system",
-            background=False,
-            force_fetch=True,
-        )
-    if scheduled_task_manager.should_run_on_startup("etf_fair_value_analysis"):
-        scheduled_task_manager.trigger_task(
-            "etf_fair_value_analysis",
-            trigger_source="startup",
-            triggered_by="system",
-            background=False,
+            background=True,
+            raise_if_running=False,
         )

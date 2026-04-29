@@ -19,19 +19,10 @@ class EVCManager:
         self.db_session = Session()
         self.evc_service = EVCService()
     
-    def fetch_and_stocks(self, force_fetch=False):
+    def fetch_and_stocks(self):
         """分页抓取所有股票数据并存储到数据库"""
         try:
             today = date.today()
-
-            # 检查是否已经拉取过数据
-            fetch_log = self.db_session.query(FetchLog).filter(
-                FetchLog.date == today,
-                FetchLog.total_stocks_fetched > 0
-            ).first()
-            if fetch_log and not force_fetch:
-                self.logger.info(f"数据已在 {today} 拉取过，跳过拉取")
-                return
 
             total_tags_fetched = 0
             total_stocks_fetched = 0
