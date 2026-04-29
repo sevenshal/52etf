@@ -4,7 +4,6 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   DatePicker,
   Empty,
   List,
@@ -61,7 +60,6 @@ const ScheduledTasks = () => {
   const [savingTaskKey, setSavingTaskKey] = useState(null);
   const [runningTaskKey, setRunningTaskKey] = useState(null);
   const [runModalTask, setRunModalTask] = useState(null);
-  const [forceFetch, setForceFetch] = useState(false);
   const [runStartDate, setRunStartDate] = useState(dayjs('2023-12-08'));
 
   const fetchTasks = async (showLoading = true) => {
@@ -122,9 +120,8 @@ const ScheduledTasks = () => {
   };
 
   const handleRunButtonClick = (task) => {
-    if (task.supports_force_fetch || task.supports_start_date) {
+    if (task.supports_start_date) {
       setRunModalTask(task);
-      setForceFetch(false);
       setRunStartDate(dayjs('2023-12-08'));
       return;
     }
@@ -137,15 +134,11 @@ const ScheduledTasks = () => {
     }
     const currentTask = runModalTask;
     const payload = {};
-    if (currentTask.supports_force_fetch) {
-      payload.force_fetch = forceFetch;
-    }
     if (currentTask.supports_start_date && runStartDate) {
       payload.start_date = runStartDate.format('YYYY-MM-DD');
     }
     setRunModalTask(null);
     await handleRunNow(currentTask, payload);
-    setForceFetch(false);
     setRunStartDate(dayjs('2023-12-08'));
   };
 
@@ -168,7 +161,7 @@ const ScheduledTasks = () => {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="任务按服务器本地时间执行。修改保存后会立即重载调度，手动执行不受启用状态限制。"
+          message="任务按服务器本地时间执行。修改保存后会立即重载调度；服务启动时只会补执行当天未执行且已错过计划时间的任务。"
         />
 
         <Spin spinning={loading}>
@@ -263,7 +256,6 @@ const ScheduledTasks = () => {
         open={!!runModalTask}
         onCancel={() => {
           setRunModalTask(null);
-          setForceFetch(false);
           setRunStartDate(dayjs('2023-12-08'));
         }}
         onOk={handleConfirmRun}
@@ -272,20 +264,6 @@ const ScheduledTasks = () => {
         cancelText="取消"
       >
         <Space direction="vertical" size={12}>
-          {runModalTask?.supports_force_fetch ? (
-            <>
-              <Text>这次手动执行时，可以选择是否强制拉取当日数据。</Text>
-              <Checkbox
-                checked={forceFetch}
-                onChange={(event) => setForceFetch(event.target.checked)}
-              >
-                强制拉取
-              </Checkbox>
-              <Text type="secondary">
-                勾选后会忽略“今日已抓取”的检查，重新执行一次 EVC 数据抓取。
-              </Text>
-            </>
-          ) : null}
           {runModalTask?.supports_start_date ? (
             <>
               <Text>选择回跑开始日期，系统会从该日期起重新计算并写入历史记录。</Text>
