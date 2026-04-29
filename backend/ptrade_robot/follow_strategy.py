@@ -20,7 +20,7 @@ def run_ws_client():
         return
         
     cli_id = g.cli_id
-    ws_url = "wss://api.framework.cn/api/monitor/ws/%s" % cli_id
+    ws_url = "wss://api.52etf.vip/api/monitor/ws/%s" % cli_id
     
     async def msg_handler(msg):
         if not msg: return
@@ -81,7 +81,7 @@ def run_ws_client():
 
 def initialize(context):
     # 全局变量初始化
-    g.api_base_url = "https://api.framework.cn/api/snowball"
+    g.api_base_url = "https://api.52etf.vip/api/snowball"
     g.account_id = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
     g.headers = {"x-account-id": g.account_id}
     
@@ -149,7 +149,7 @@ def get_limit_price(symbol: str, side: str, quantity: int) -> float:
     target_price = 0.0
     
     # 遍历档位 1-5
-    sorted_levels = [1, 2, 3, 4, 5]
+    sorted_levels = [1, 2, 3]
     
     # 初始化为第1档价格，防止返回0
     # 先检查是否有第1档
