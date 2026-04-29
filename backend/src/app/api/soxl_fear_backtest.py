@@ -581,29 +581,104 @@ def _to_date(value) -> date:
     return datetime.fromisoformat(str(value)[:10]).date()
 
 
-def _compute_max_drawdown_recovery_days(date_values: List, equity_values: np.ndarray) -> int:
+def _compute_max_drawdown_duration_days(date_values: List, equity_values: np.ndarray) -> int:
     if len(date_values) == 0 or len(equity_values) == 0:
         return 0
 
     values = np.asarray(equity_values, dtype=float)
-    cumulative_peaks = np.maximum.accumulate(values)
-    drawdowns = (values / cumulative_peaks) - 1
-    trough_index = int(np.argmin(drawdowns))
+    peak_index = 0
+    peak_value = float(values[0])
+    drawdown_start_index = None
+    max_duration_days = 0
     tolerance = 1e-10
 
-    if float(drawdowns[trough_index]) >= -tolerance:
-        return 0
+    for index in range(1, len(values)):
+        value = float(values[index])
+        if value >= peak_value * (1 - tolerance):
+            if drawdown_start_index is not None:
+                duration_days = (_to_date(date_values[index]) - _to_date(date_values[drawdown_start_index])).days
+                max_duration_days = max(max_duration_days, int(max(0, duration_days)))
+                drawdown_start_index = None
+            if value >= peak_value:
+                peak_value = value
+            peak_index = index
+            continue
 
-    peak_value = float(cumulative_peaks[trough_index])
-    recovery_index = len(values) - 1
-    for index in range(trough_index + 1, len(values)):
-        if float(values[index]) >= peak_value * (1 - tolerance):
-            recovery_index = index
-            break
+        if drawdown_start_index is None:
+            drawdown_start_index = peak_index
+        duration_days = (_to_date(date_values[index]) - _to_date(date_values[drawdown_start_index])).days
+        max_duration_days = max(max_duration_days, int(max(0, duration_days)))
 
-    trough_date = _to_date(date_values[trough_index])
-    recovery_date = _to_date(date_values[recovery_index])
-    return int(max(0, (recovery_date - trough_date).days))
+    return max_duration_days
+
+
+def _compute_equity_metrics(date_values: List, equity_values: np.ndarray) -> Tuple[Dict, np.ndarray]:
+    values = np.asarray(equity_values, dtype=float)
+    if len(values) == 0:
+        return {
+            "total_return": 0.0,
+            "annualized_return": 0.0,
+            "annualized_volatility": 0.0,
+            "max_drawdown": 0.0,
+            "max_drawdown_duration_days": 0,
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "calmar_ratio": 0.0,
+            "win_rate": 0.0,
+            "profit_loss_ratio": None,
+            "ending_value": 0.0,
+        }, np.array([])
+
+    start_value = float(values[0])
+    end_value = float(values[-1])
+    total_return = ((end_value / start_value) - 1) * 100 if start_value > 0 else 0.0
+    annualized_return = 0.0
+    if start_value > 0 and len(values) > 1:
+        annualized_return = ((end_value / start_value) ** (252 / len(values)) - 1) * 100
+
+    cumulative_peaks = np.maximum.accumulate(values)
+    drawdowns = (values / cumulative_peaks) - 1
+    max_drawdown = abs(float(drawdowns.min())) * 100 if len(drawdowns) > 0 else 0.0
+    max_drawdown_duration_days = _compute_max_drawdown_duration_days(date_values, values)
+    returns = np.diff(values) / values[:-1] if len(values) > 1 else np.array([])
+    return_std = float(np.std(returns)) if len(returns) > 1 else 0.0
+    annualized_volatility = return_std * float(np.sqrt(252)) * 100
+
+    sharpe_ratio = 0.0
+    if len(returns) > 1 and return_std > 0:
+        sharpe_ratio = float((float(np.mean(returns)) / return_std) * np.sqrt(252))
+
+    sortino_ratio = 0.0
+    if len(returns) > 1:
+        downside_returns = np.minimum(returns, 0.0)
+        downside_deviation = float(np.sqrt(np.mean(np.square(downside_returns))))
+        if downside_deviation > 0:
+            sortino_ratio = float((float(np.mean(returns)) / downside_deviation) * np.sqrt(252))
+
+    calmar_ratio = float(annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
+    nonzero_returns = returns[np.abs(returns) > 1e-12] if len(returns) > 0 else np.array([])
+    positive_returns = nonzero_returns[nonzero_returns > 0] if len(nonzero_returns) > 0 else np.array([])
+    negative_returns = nonzero_returns[nonzero_returns < 0] if len(nonzero_returns) > 0 else np.array([])
+    daily_win_rate = (len(positive_returns) / len(nonzero_returns) * 100) if len(nonzero_returns) > 0 else 0.0
+    daily_profit_loss_ratio = None
+    if len(positive_returns) > 0 and len(negative_returns) > 0:
+        avg_daily_profit = float(np.mean(positive_returns))
+        avg_daily_loss = abs(float(np.mean(negative_returns)))
+        daily_profit_loss_ratio = float(avg_daily_profit / avg_daily_loss) if avg_daily_loss > 0 else None
+
+    return {
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "annualized_volatility": annualized_volatility,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_duration_days": max_drawdown_duration_days,
+        "sharpe_ratio": sharpe_ratio,
+        "sortino_ratio": sortino_ratio,
+        "calmar_ratio": calmar_ratio,
+        "win_rate": daily_win_rate,
+        "profit_loss_ratio": daily_profit_loss_ratio,
+        "ending_value": end_value,
+    }, drawdowns
 
 
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
@@ -818,25 +893,18 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "benchmark_value": benchmark_value,
             })
 
-    start_value = float(equity_values[0])
-    end_value = float(equity_values[-1])
-    total_return = ((end_value / start_value) - 1) * 100 if start_value > 0 else 0.0
-    annualized_return = 0.0
-    if start_value > 0 and len(equity_values) > 1:
-        annualized_return = ((end_value / start_value) ** (252 / len(equity_values)) - 1) * 100
-
-    cumulative_peaks = np.maximum.accumulate(equity_values)
-    drawdowns = (equity_values / cumulative_peaks) - 1
-    benchmark_cumulative_peaks = np.maximum.accumulate(benchmark_values)
-    benchmark_drawdowns = (benchmark_values / benchmark_cumulative_peaks) - 1
-    max_drawdown = abs(float(drawdowns.min())) * 100 if len(drawdowns) > 0 else 0.0
-    max_drawdown_recovery_days = _compute_max_drawdown_recovery_days(dates, equity_values)
-    returns = np.diff(equity_values) / equity_values[:-1] if len(equity_values) > 1 else np.array([])
-    sharpe_ratio = 0.0
-    if len(returns) > 1 and float(np.std(returns)) > 0:
-        sharpe_ratio = float((float(np.mean(returns)) / float(np.std(returns))) * np.sqrt(252))
-    calmar_ratio = float(annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
-    win_rate = (winning_trade_count / closed_trade_count * 100) if closed_trade_count > 0 else 0.0
+    strategy_metrics, drawdowns = _compute_equity_metrics(dates, equity_values)
+    benchmark_metrics, benchmark_drawdowns = _compute_equity_metrics(dates, benchmark_values)
+    end_value = float(strategy_metrics["ending_value"])
+    trade_win_rate = (winning_trade_count / closed_trade_count * 100) if closed_trade_count > 0 else 0.0
+    closed_profits = [float(item.get("profit") or 0.0) for item in trades if item.get("action") == "SELL"]
+    winning_profits = [item for item in closed_profits if item > 0]
+    losing_profits = [item for item in closed_profits if item < 0]
+    trade_profit_loss_ratio = None
+    if winning_profits and losing_profits:
+        avg_profit = sum(winning_profits) / len(winning_profits)
+        avg_loss = abs(sum(losing_profits) / len(losing_profits))
+        trade_profit_loss_ratio = float(avg_profit / avg_loss) if avg_loss > 0 else None
     yearly_returns = _merge_yearly_returns(
         _compute_yearly_returns_from_arrays(date_strings, equity_values),
         _compute_yearly_returns_from_arrays(date_strings, benchmark_values),
@@ -850,19 +918,15 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
     result = {
         "params": params.dict(),
-        "total_return": total_return,
-        "annualized_return": annualized_return,
-        "max_drawdown": max_drawdown,
-        "max_drawdown_recovery_days": max_drawdown_recovery_days,
-        "sharpe_ratio": sharpe_ratio,
-        "calmar_ratio": calmar_ratio,
-        "win_rate": win_rate,
+        **strategy_metrics,
+        "trade_win_rate": trade_win_rate,
+        "trade_profit_loss_ratio": trade_profit_loss_ratio,
         "trade_count": len(trades),
         "buy_count": sum(1 for item in trades if item["action"] == "BUY"),
         "sell_count": sum(1 for item in trades if item["action"] == "SELL"),
-        "ending_value": end_value,
         "ending_cash": cash,
         "ending_shares": shares,
+        "benchmark_metrics": benchmark_metrics,
         "yearly_returns": yearly_returns,
     }
     if detailed:
@@ -1119,11 +1183,17 @@ def _serialize_summary(result: Dict) -> Dict:
         "fear_source": result.get("fear_source") or "cnn",
         "fear_source_label": result.get("fear_source_label") or FEAR_SOURCE_OPTIONS["cnn"]["label"],
         "annualized_return": _round_or_none(result["annualized_return"], 4),
+        "annualized_volatility": _round_or_none(result["annualized_volatility"], 4),
         "total_return": _round_or_none(result["total_return"], 4),
         "max_drawdown": _round_or_none(result["max_drawdown"], 4),
+        "max_drawdown_duration_days": int(result["max_drawdown_duration_days"]),
         "sharpe_ratio": _round_or_none(result["sharpe_ratio"], 4),
+        "sortino_ratio": _round_or_none(result["sortino_ratio"], 4),
         "calmar_ratio": _round_or_none(result["calmar_ratio"], 4),
         "win_rate": _round_or_none(result["win_rate"], 4),
+        "profit_loss_ratio": _round_or_none(result["profit_loss_ratio"], 4),
+        "trade_win_rate": _round_or_none(result["trade_win_rate"], 4),
+        "trade_profit_loss_ratio": _round_or_none(result["trade_profit_loss_ratio"], 4),
         "trade_count": int(result["trade_count"]),
         "buy_count": int(result["buy_count"]),
         "sell_count": int(result["sell_count"]),
