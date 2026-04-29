@@ -64,6 +64,8 @@ class SoxlFearStrategyTrader:
     MIN_VOLUME_PROFILE_DAY_COVERAGE = 0.95
     VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS = 60
     VOLUME_PROFILE_CLOSE_TOLERANCE_SECONDS = 120
+    TODAY_MINUTE_VOLUME_MAX_STALENESS_SECONDS = 90
+    TODAY_MINUTE_VOLUME_FUTURE_TOLERANCE_SECONDS = 60
 
     def __new__(cls):
         with cls._lock:
@@ -349,8 +351,7 @@ class SoxlFearStrategyTrader:
 
     def _estimate_intraday_volume_completion_ratio(
         self,
-        market_data_service: LongPortService,
-        symbol: str,
+        minute_bars: List[dict],
         now_et: datetime,
         market_date: date,
     ) -> Optional[float]:
@@ -361,16 +362,6 @@ class SoxlFearStrategyTrader:
             return None
 
         cutoff_elapsed_seconds = max(0.0, (now_et - open_at).total_seconds())
-        try:
-            minute_bars = market_data_service.get_candlesticks(
-                symbol,
-                self.VOLUME_PROFILE_MINUTE_COUNT,
-                period="1m",
-            )
-        except Exception as exc:
-            logger.info("Failed to fetch intraday volume profile for %s: %s", symbol, exc)
-            return None
-
         grouped: Dict[date, list] = {}
         for item in minute_bars or []:
             timestamp = self._to_eastern_datetime(item.get("timestamp"))
@@ -429,6 +420,57 @@ class SoxlFearStrategyTrader:
 
         return float(pd.Series(completion_ratios).median())
 
+    def _estimate_today_minute_volume(
+        self,
+        minute_bars: List[dict],
+        now_et: datetime,
+        market_date: date,
+    ) -> Tuple[Optional[float], Optional[datetime]]:
+        close_time = MarketService.get_us_market_close_time(market_date)
+        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
+        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
+        values = []
+        for item in minute_bars or []:
+            timestamp = self._to_eastern_datetime(item.get("timestamp"))
+            if not timestamp or timestamp.date() != market_date:
+                continue
+            if timestamp < open_at or timestamp >= close_at:
+                continue
+            if timestamp > now_et + timedelta(seconds=self.TODAY_MINUTE_VOLUME_FUTURE_TOLERANCE_SECONDS):
+                continue
+
+            raw_volume = item.get("volume")
+            if raw_volume is None:
+                continue
+            volume = float(raw_volume)
+            if volume < 0:
+                continue
+            values.append((timestamp, volume))
+
+        if not values:
+            return None, None
+
+        values = sorted(values, key=lambda value: value[0])
+        latest_timestamp = values[-1][0]
+        first_elapsed = (values[0][0] - open_at).total_seconds()
+        latest_elapsed = max(0.0, (latest_timestamp - open_at).total_seconds())
+        expected_minutes = max(1, int(latest_elapsed // 60) + 1)
+        observed_minutes = len({int((timestamp - open_at).total_seconds() // 60) for timestamp, _ in values})
+        if (
+            first_elapsed > self.VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS
+            or observed_minutes < expected_minutes * self.MIN_VOLUME_PROFILE_DAY_COVERAGE
+        ):
+            return None, latest_timestamp
+
+        staleness_seconds = max(0.0, (now_et - latest_timestamp).total_seconds())
+        if staleness_seconds > self.TODAY_MINUTE_VOLUME_MAX_STALENESS_SECONDS:
+            return None, latest_timestamp
+
+        total_volume = sum(volume for _, volume in values)
+        if total_volume <= 0:
+            return None, latest_timestamp
+        return total_volume, latest_timestamp
+
     def _project_current_volume(
         self,
         market_data_service: LongPortService,
@@ -436,31 +478,60 @@ class SoxlFearStrategyTrader:
         current_volume: float,
         now_et: datetime,
         market_date: date,
-    ) -> Dict[str, float]:
-        if current_volume <= 0:
-            return {
-                "projected_volume": 0.0,
-                "completion_ratio": 1.0,
-                "projection_factor": 1.0,
-                "projection_source": "empty_volume",
-            }
-
+    ) -> Dict[str, object]:
+        effective_current_volume = max(0.0, float(current_volume or 0.0))
+        current_volume_source = "quote"
+        projection_time = now_et
         completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
         if projection_source == "fallback_close_curve":
-            intraday_completion_ratio = self._estimate_intraday_volume_completion_ratio(
-                market_data_service,
-                symbol,
+            try:
+                minute_bars = market_data_service.get_candlesticks(
+                    symbol,
+                    self.VOLUME_PROFILE_MINUTE_COUNT,
+                    period="1m",
+                )
+            except Exception as exc:
+                logger.info("Failed to fetch intraday volume profile for %s: %s", symbol, exc)
+                minute_bars = []
+
+            today_minute_volume, today_volume_timestamp = self._estimate_today_minute_volume(
+                minute_bars,
                 now_et,
+                market_date,
+            )
+            if today_minute_volume is not None and today_volume_timestamp is not None:
+                effective_current_volume = today_minute_volume
+                current_volume_source = "today_minute_bars"
+                projection_time = today_volume_timestamp
+                completion_ratio, projection_source = self._fallback_volume_completion_ratio(projection_time, market_date)
+
+            intraday_completion_ratio = self._estimate_intraday_volume_completion_ratio(
+                minute_bars,
+                projection_time,
                 market_date,
             )
             if intraday_completion_ratio is not None:
                 completion_ratio = intraday_completion_ratio
                 projection_source = "intraday_profile"
 
+        if effective_current_volume <= 0:
+            return {
+                "current_volume": 0.0,
+                "current_volume_source": current_volume_source,
+                "current_volume_timestamp": projection_time,
+                "projected_volume": 0.0,
+                "completion_ratio": 1.0,
+                "projection_factor": 1.0,
+                "projection_source": "empty_volume",
+            }
+
         completion_ratio = max(0.50, min(1.0, float(completion_ratio or 1.0)))
         projection_factor = 1.0 / completion_ratio if completion_ratio > 0 else 1.0
-        projected_volume = max(current_volume, current_volume * projection_factor)
+        projected_volume = max(effective_current_volume, effective_current_volume * projection_factor)
         return {
+            "current_volume": effective_current_volume,
+            "current_volume_source": current_volume_source,
+            "current_volume_timestamp": projection_time,
             "projected_volume": projected_volume,
             "completion_ratio": completion_ratio,
             "projection_factor": projection_factor,
@@ -468,12 +539,15 @@ class SoxlFearStrategyTrader:
         }
 
     def _format_volume_projection_message(self, market_snapshot: dict) -> str:
+        current_volume_source = market_snapshot.get("current_volume_source") or "quote"
+        current_volume_source_text = "" if current_volume_source == "quote" else f"，当前量源 {current_volume_source}"
         return (
             f"量比 {float(market_snapshot.get('volume_ratio') or 0):.2f}"
             f"（原始 {float(market_snapshot.get('raw_volume_ratio') or 0):.2f}"
             f"，预计全天量 {float(market_snapshot.get('projected_volume') or 0):.0f}"
             f"，完成率 {float(market_snapshot.get('volume_completion_ratio') or 1) * 100:.1f}%"
-            f"，{market_snapshot.get('volume_projection_source') or 'raw'}）"
+            f"，{market_snapshot.get('volume_projection_source') or 'raw'}"
+            f"{current_volume_source_text}）"
         )
 
     def _build_realtime_dataframe(
@@ -508,14 +582,15 @@ class SoxlFearStrategyTrader:
             }
             for item in history
         ]
-        current_volume = float(quote.get("volume") or 0)
+        quote_volume = float(quote.get("volume") or 0)
         projection = self._project_current_volume(
             market_data_service,
             symbol,
-            current_volume,
+            quote_volume,
             now_et,
             current_market_date,
         )
+        current_volume = float(projection.get("current_volume") or quote_volume)
         rows.append(
             {
                 "date": current_market_date,
@@ -536,13 +611,18 @@ class SoxlFearStrategyTrader:
             raise ValueError(f"{symbol} 可用历史数据不足 20 天")
 
         raw_volume_ratio = current_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
+        quote_volume_ratio = quote_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
         return df, {
             "current_price": float(latest["close"]),
             "current_volume": current_volume,
+            "current_volume_source": projection.get("current_volume_source") or "quote",
+            "current_volume_timestamp": projection.get("current_volume_timestamp") or now_et,
+            "quote_volume": quote_volume,
             "projected_volume": float(projection["projected_volume"]),
             "ma20": float(latest["ma20"]),
             "volume_ma20": float(latest["volume_ma20"]),
             "raw_volume_ratio": raw_volume_ratio,
+            "quote_volume_ratio": quote_volume_ratio,
             "volume_ratio": float(latest["volume_ratio"]) if pd.notna(latest["volume_ratio"]) else 0.0,
             "volume_completion_ratio": float(projection["completion_ratio"]),
             "volume_projection_factor": float(projection["projection_factor"]),
@@ -655,6 +735,7 @@ class SoxlFearStrategyTrader:
             current_price = float(market_snapshot["current_price"])
             volume_ratio = float(market_snapshot["volume_ratio"])
             raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
+            quote_volume_ratio = float(market_snapshot.get("quote_volume_ratio") or 0.0)
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
@@ -812,8 +893,10 @@ class SoxlFearStrategyTrader:
                     (
                         f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
                         f" | raw_volume_ratio={raw_volume_ratio:.4f}"
+                        f" | quote_volume_ratio={quote_volume_ratio:.4f}"
                         f" | projected_volume_ratio={volume_ratio:.4f}"
                         f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
+                        f" | current_volume_source={market_snapshot.get('current_volume_source')}"
                     ),
                     price=current_price,
                     quantity=trade_quantity if trade_action else None,
