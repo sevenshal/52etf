@@ -387,15 +387,19 @@ class SoxlFearStrategyTrader:
         }
 
     def _format_volume_projection_message(self, market_snapshot: dict) -> str:
-        current_volume_source = market_snapshot.get("current_volume_source") or "quote"
-        current_volume_source_text = "" if current_volume_source == "quote" else f"，当前量源 {current_volume_source}"
+        volume_ratio = float(market_snapshot.get("volume_ratio") or 0)
+        raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0)
+        detail_parts = []
+        if abs(volume_ratio - raw_volume_ratio) >= 0.0005:
+            detail_parts.append(f"原始 {raw_volume_ratio:.2f}")
+        detail_parts.extend([
+            f"预计全天量 {float(market_snapshot.get('projected_volume') or 0):.0f}",
+            f"完成率 {float(market_snapshot.get('volume_completion_ratio') or 1) * 100:.1f}%",
+            str(market_snapshot.get("volume_projection_source") or "raw"),
+        ])
         return (
-            f"量比 {float(market_snapshot.get('volume_ratio') or 0):.2f}"
-            f"（原始 {float(market_snapshot.get('raw_volume_ratio') or 0):.2f}"
-            f"，预计全天量 {float(market_snapshot.get('projected_volume') or 0):.0f}"
-            f"，完成率 {float(market_snapshot.get('volume_completion_ratio') or 1) * 100:.1f}%"
-            f"，{market_snapshot.get('volume_projection_source') or 'raw'}"
-            f"{current_volume_source_text}）"
+            f"量比 {volume_ratio:.2f}"
+            f"（{'，'.join(detail_parts)}）"
         )
 
     def _build_realtime_dataframe(
@@ -457,7 +461,6 @@ class SoxlFearStrategyTrader:
             raise ValueError(f"{symbol} 可用历史数据不足 20 天")
 
         raw_volume_ratio = current_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
-        quote_volume_ratio = quote_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
         return df, {
             "current_price": float(latest["close"]),
             "current_volume": current_volume,
@@ -468,7 +471,6 @@ class SoxlFearStrategyTrader:
             "ma20": float(latest["ma20"]),
             "volume_ma20": float(latest["volume_ma20"]),
             "raw_volume_ratio": raw_volume_ratio,
-            "quote_volume_ratio": quote_volume_ratio,
             "volume_ratio": float(latest["volume_ratio"]) if pd.notna(latest["volume_ratio"]) else 0.0,
             "volume_completion_ratio": float(projection["completion_ratio"]),
             "volume_projection_factor": float(projection["projection_factor"]),
@@ -588,7 +590,6 @@ class SoxlFearStrategyTrader:
             current_price = float(market_snapshot["current_price"])
             volume_ratio = float(market_snapshot["volume_ratio"])
             raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
-            quote_volume_ratio = float(market_snapshot.get("quote_volume_ratio") or 0.0)
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
@@ -738,6 +739,9 @@ class SoxlFearStrategyTrader:
                         trade_message = "当前无买卖信号"
 
                 status = "SUCCESS" if trade_action else "INFO"
+                volume_ratio_detail = f" | volume_ratio={volume_ratio:.4f}"
+                if abs(volume_ratio - raw_volume_ratio) >= 0.00005:
+                    volume_ratio_detail += f" | raw_volume_ratio={raw_volume_ratio:.4f}"
                 self._append_log(
                     config_id,
                     config.account_id,
@@ -747,11 +751,8 @@ class SoxlFearStrategyTrader:
                     status,
                     (
                         f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
-                        f" | raw_volume_ratio={raw_volume_ratio:.4f}"
-                        f" | quote_volume_ratio={quote_volume_ratio:.4f}"
-                        f" | projected_volume_ratio={volume_ratio:.4f}"
+                        f"{volume_ratio_detail}"
                         f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
-                        f" | current_volume_source={market_snapshot.get('current_volume_source')}"
                     ),
                     price=current_price,
                     quantity=trade_quantity if trade_action else None,
