@@ -389,12 +389,13 @@ class SoxlFearStrategyConfig(Base):
     __tablename__ = "soxl_fear_strategy_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, unique=True)
+    account_id = Column(String, index=True)
     enabled = Column(Boolean, default=False)
     symbol = Column(String, nullable=False, default="SOXL.US")
     account_type = Column(String, default="ib")
     ib_account_id = Column(Integer, nullable=True)
     longport_account_id = Column(String, nullable=True)
+    trading_account_id = Column(String, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=60.0)
     greed_threshold = Column(Float, nullable=False, default=60.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.4)
@@ -409,14 +410,19 @@ class SoxlFearStrategyConfig(Base):
     last_run_at = Column(DateTime)
     last_run_status = Column(String(16))
     last_run_message = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    __table_args__ = (
+        UniqueConstraint('symbol', 'account_type', 'trading_account_id', name='uniq_soxl_fear_strategy_target_account'),
+    )
 
 
 class SoxlFearStrategyState(Base):
     """SOXL 情绪量能自动交易运行状态"""
     __tablename__ = "soxl_fear_strategy_states"
 
-    account_id = Column(String, primary_key=True)
+    config_id = Column(Integer, ForeignKey("soxl_fear_strategy_configs.id"), primary_key=True)
+    account_id = Column(String, index=True)
     symbol = Column(String, nullable=False, default="SOXL.US")
     last_processed_date = Column(Date)
     cooldown_remaining_days = Column(Integer, nullable=False, default=0)
@@ -430,6 +436,7 @@ class SoxlFearStrategyLog(Base):
     __tablename__ = "soxl_fear_strategy_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("soxl_fear_strategy_configs.id"), index=True, nullable=True)
     account_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.now, index=True)
     symbol = Column(String, nullable=False, default="SOXL.US")
@@ -720,6 +727,230 @@ def ensure_market_signal_unique_constraint():
         conn.execute(text("DROP TABLE market_signal_old"))
 
 ensure_market_signal_unique_constraint()
+
+def ensure_soxl_fear_strategy_multi_config_schema():
+    """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""
+
+    def get_columns(conn, table_name):
+        return {
+            row[1]
+            for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+        }
+
+    def get_table_sql(conn, table_name):
+        return conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name=:table_name"),
+            {"table_name": table_name},
+        ).scalar()
+
+    with engine.begin() as conn:
+        config_sql = get_table_sql(conn, "soxl_fear_strategy_configs")
+        if not config_sql:
+            return
+
+        config_columns = get_columns(conn, "soxl_fear_strategy_configs")
+        normalized_config_sql = "".join(config_sql.lower().split())
+        needs_config_rebuild = (
+            "trading_account_id" not in config_columns
+            or "created_at" not in config_columns
+            or "unique(account_id)" in normalized_config_sql
+        )
+
+        if needs_config_rebuild:
+            conn.execute(text("ALTER TABLE soxl_fear_strategy_configs RENAME TO soxl_fear_strategy_configs_old"))
+            conn.execute(text("""
+                CREATE TABLE soxl_fear_strategy_configs (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    account_id VARCHAR,
+                    enabled BOOLEAN,
+                    symbol VARCHAR NOT NULL DEFAULT 'SOXL.US',
+                    account_type VARCHAR,
+                    ib_account_id INTEGER,
+                    longport_account_id VARCHAR,
+                    trading_account_id VARCHAR,
+                    buy_threshold FLOAT NOT NULL DEFAULT 60.0,
+                    greed_threshold FLOAT NOT NULL DEFAULT 60.0,
+                    volume_ratio_threshold FLOAT NOT NULL DEFAULT 1.4,
+                    buy_position_pct FLOAT NOT NULL DEFAULT 50.0,
+                    cooldown_days INTEGER NOT NULL DEFAULT 10,
+                    trailing_stop_pct FLOAT NOT NULL DEFAULT 5.0,
+                    sell_position_pct FLOAT NOT NULL DEFAULT 50.0,
+                    sell_reduction_basis VARCHAR NOT NULL DEFAULT 'portfolio',
+                    max_take_profit_sells_per_cycle INTEGER NOT NULL DEFAULT 2,
+                    min_position_pct_after_take_profit FLOAT NOT NULL DEFAULT 10.0,
+                    rebalance_threshold_pct FLOAT NOT NULL DEFAULT 5.0,
+                    last_run_at DATETIME,
+                    last_run_status VARCHAR(16),
+                    last_run_message VARCHAR(500),
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    CONSTRAINT uniq_soxl_fear_strategy_target_account UNIQUE (symbol, account_type, trading_account_id)
+                )
+            """))
+
+            def old_column(column_name, fallback):
+                return column_name if column_name in config_columns else fallback
+
+            trading_account_expr = (
+                "trading_account_id"
+                if "trading_account_id" in config_columns
+                else """
+                    CASE
+                        WHEN account_type = 'longport' THEN longport_account_id
+                        WHEN ib_account_id IS NOT NULL THEN CAST(ib_account_id AS VARCHAR)
+                        ELSE NULL
+                    END
+                """
+            )
+            updated_at_expr = old_column("updated_at", "CURRENT_TIMESTAMP")
+            created_at_expr = old_column("created_at", f"COALESCE({updated_at_expr}, CURRENT_TIMESTAMP)")
+            conn.execute(text(f"""
+                INSERT OR IGNORE INTO soxl_fear_strategy_configs (
+                    id, account_id, enabled, symbol, account_type, ib_account_id, longport_account_id,
+                    trading_account_id, buy_threshold, greed_threshold, volume_ratio_threshold,
+                    buy_position_pct, cooldown_days, trailing_stop_pct, sell_position_pct,
+                    sell_reduction_basis, max_take_profit_sells_per_cycle,
+                    min_position_pct_after_take_profit, rebalance_threshold_pct,
+                    last_run_at, last_run_status, last_run_message, created_at, updated_at
+                )
+                SELECT
+                    {old_column("id", "NULL")},
+                    {old_column("account_id", "NULL")},
+                    COALESCE({old_column("enabled", "0")}, 0),
+                    COALESCE({old_column("symbol", "'SOXL.US'")}, 'SOXL.US'),
+                    COALESCE({old_column("account_type", "'ib'")}, 'ib'),
+                    {old_column("ib_account_id", "NULL")},
+                    {old_column("longport_account_id", "NULL")},
+                    {trading_account_expr},
+                    COALESCE({old_column("buy_threshold", "60.0")}, 60.0),
+                    COALESCE({old_column("greed_threshold", "60.0")}, 60.0),
+                    COALESCE({old_column("volume_ratio_threshold", "1.4")}, 1.4),
+                    COALESCE({old_column("buy_position_pct", "50.0")}, 50.0),
+                    COALESCE({old_column("cooldown_days", "10")}, 10),
+                    COALESCE({old_column("trailing_stop_pct", "5.0")}, 5.0),
+                    COALESCE({old_column("sell_position_pct", "50.0")}, 50.0),
+                    COALESCE({old_column("sell_reduction_basis", "'portfolio'")}, 'portfolio'),
+                    COALESCE({old_column("max_take_profit_sells_per_cycle", "2")}, 2),
+                    COALESCE({old_column("min_position_pct_after_take_profit", "10.0")}, 10.0),
+                    COALESCE({old_column("rebalance_threshold_pct", "5.0")}, 5.0),
+                    {old_column("last_run_at", "NULL")},
+                    {old_column("last_run_status", "NULL")},
+                    {old_column("last_run_message", "NULL")},
+                    {created_at_expr},
+                    {updated_at_expr}
+                FROM soxl_fear_strategy_configs_old
+            """))
+            conn.execute(text("DROP TABLE soxl_fear_strategy_configs_old"))
+
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_configs_account_id "
+            "ON soxl_fear_strategy_configs(account_id)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_soxl_fear_strategy_unique_target_account "
+            "ON soxl_fear_strategy_configs(symbol, account_type, trading_account_id) "
+            "WHERE trading_account_id IS NOT NULL"
+        ))
+
+        state_sql = get_table_sql(conn, "soxl_fear_strategy_states")
+        if state_sql:
+            state_columns = get_columns(conn, "soxl_fear_strategy_states")
+            normalized_state_sql = "".join(state_sql.lower().split())
+            needs_state_rebuild = (
+                "config_id" not in state_columns
+                or "primarykey(account_id)" in normalized_state_sql
+                or "account_idvarcharnotnull" in normalized_state_sql
+            )
+            if needs_state_rebuild:
+                conn.execute(text("ALTER TABLE soxl_fear_strategy_states RENAME TO soxl_fear_strategy_states_old"))
+                conn.execute(text("""
+                    CREATE TABLE soxl_fear_strategy_states (
+                        config_id INTEGER NOT NULL PRIMARY KEY,
+                        account_id VARCHAR,
+                        symbol VARCHAR NOT NULL DEFAULT 'SOXL.US',
+                        last_processed_date DATE,
+                        cooldown_remaining_days INTEGER NOT NULL DEFAULT 0,
+                        greed_peak_price FLOAT,
+                        take_profit_cycle_sell_count INTEGER NOT NULL DEFAULT 0,
+                        updated_at DATETIME,
+                        FOREIGN KEY(config_id) REFERENCES soxl_fear_strategy_configs (id)
+                    )
+                """))
+
+                def old_state_column(column_name, fallback):
+                    return f"s.{column_name}" if column_name in state_columns else fallback
+
+                if "config_id" in state_columns:
+                    config_id_expr = "s.config_id"
+                    join_expr = "LEFT JOIN soxl_fear_strategy_configs c ON c.id = s.config_id"
+                    account_id_expr = (
+                        "COALESCE(s.account_id, c.account_id)"
+                        if "account_id" in state_columns
+                        else "c.account_id"
+                    )
+                else:
+                    config_id_expr = "c.id"
+                    join_expr = """
+                        JOIN soxl_fear_strategy_configs c
+                            ON c.id = (
+                                SELECT c2.id
+                                FROM soxl_fear_strategy_configs c2
+                                WHERE c2.account_id = s.account_id
+                                ORDER BY c2.id
+                                LIMIT 1
+                            )
+                    """
+                    account_id_expr = old_state_column("account_id", "c.account_id")
+
+                state_updated_at_expr = old_state_column("updated_at", "CURRENT_TIMESTAMP")
+                conn.execute(text(f"""
+                    INSERT OR IGNORE INTO soxl_fear_strategy_states (
+                        config_id, account_id, symbol, last_processed_date,
+                        cooldown_remaining_days, greed_peak_price,
+                        take_profit_cycle_sell_count, updated_at
+                    )
+                    SELECT
+                        {config_id_expr},
+                        {account_id_expr},
+                        COALESCE({old_state_column("symbol", "c.symbol")}, COALESCE(c.symbol, 'SOXL.US')),
+                        {old_state_column("last_processed_date", "NULL")},
+                        COALESCE({old_state_column("cooldown_remaining_days", "0")}, 0),
+                        {old_state_column("greed_peak_price", "NULL")},
+                        COALESCE({old_state_column("take_profit_cycle_sell_count", "0")}, 0),
+                        {state_updated_at_expr}
+                    FROM soxl_fear_strategy_states_old s
+                    {join_expr}
+                    WHERE {config_id_expr} IS NOT NULL
+                """))
+                conn.execute(text("DROP TABLE soxl_fear_strategy_states_old"))
+
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_states_account_id "
+            "ON soxl_fear_strategy_states(account_id)"
+        ))
+
+        log_columns = get_columns(conn, "soxl_fear_strategy_logs")
+        if "config_id" not in log_columns:
+            conn.execute(text("ALTER TABLE soxl_fear_strategy_logs ADD COLUMN config_id INTEGER"))
+
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_logs_config_id "
+            "ON soxl_fear_strategy_logs(config_id)"
+        ))
+        conn.execute(text("""
+            UPDATE soxl_fear_strategy_logs
+            SET config_id = (
+                SELECT c.id
+                FROM soxl_fear_strategy_configs c
+                WHERE c.account_id = soxl_fear_strategy_logs.account_id
+                  AND c.symbol = soxl_fear_strategy_logs.symbol
+                ORDER BY c.id
+                LIMIT 1
+            )
+            WHERE config_id IS NULL
+        """))
+
+ensure_soxl_fear_strategy_multi_config_schema()
 
 def get_db():
     """FastAPI dependency for database session"""

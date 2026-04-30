@@ -4,9 +4,17 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ...core.database import SoxlFearStrategyConfig, SoxlFearStrategyLog, get_db
+from ...core.database import (
+    IBKRAccountConfig,
+    LongPortAccount,
+    SoxlFearStrategyConfig,
+    SoxlFearStrategyLog,
+    SoxlFearStrategyState,
+    get_db,
+)
 from ...robot.soxl_fear_strategy_trader import SoxlFearStrategyTrader
 from .account import valid_account
 
@@ -14,7 +22,7 @@ router = APIRouter(prefix="/api/soxl-fear-strategy", tags=["soxl-fear-strategy"]
 logger = logging.getLogger(__name__)
 
 
-class SoxlFearStrategyConfigSchema(BaseModel):
+class SoxlFearStrategyConfigPayload(BaseModel):
     enabled: bool = False
     symbol: str = "SOXL.US"
     account_type: str = "ib"
@@ -31,9 +39,13 @@ class SoxlFearStrategyConfigSchema(BaseModel):
     max_take_profit_sells_per_cycle: int = 2
     min_position_pct_after_take_profit: float = 5.0
     rebalance_threshold_pct: float = 5.0
-    last_run_at: Optional[datetime] = None
-    last_run_status: Optional[str] = None
-    last_run_message: Optional[str] = None
+
+    @validator("symbol")
+    def validate_symbol(cls, value):
+        value = (value or "").strip().upper()
+        if not value:
+            raise ValueError("交易标的不能为空")
+        return value
 
     @validator("account_type")
     def validate_account_type(cls, value):
@@ -74,12 +86,24 @@ class SoxlFearStrategyConfigSchema(BaseModel):
             raise ValueError("max_take_profit_sells_per_cycle 必须在 1 到 20 之间")
         return value
 
+
+class SoxlFearStrategyConfigSchema(SoxlFearStrategyConfigPayload):
+    id: Optional[int] = None
+    account_id: Optional[str] = None
+    trading_account_id: Optional[str] = None
+    last_run_at: Optional[datetime] = None
+    last_run_status: Optional[str] = None
+    last_run_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
 
 class SoxlFearStrategyLogSchema(BaseModel):
     id: int
+    config_id: Optional[int] = None
     timestamp: datetime
     symbol: str
     trigger_source: str
@@ -97,40 +121,245 @@ class SoxlFearStrategyLogSchema(BaseModel):
         from_attributes = True
 
 
+CONFIG_FIELDS = [
+    "enabled",
+    "symbol",
+    "account_type",
+    "ib_account_id",
+    "longport_account_id",
+    "buy_threshold",
+    "greed_threshold",
+    "volume_ratio_threshold",
+    "buy_position_pct",
+    "cooldown_days",
+    "trailing_stop_pct",
+    "sell_position_pct",
+    "sell_reduction_basis",
+    "max_take_profit_sells_per_cycle",
+    "min_position_pct_after_take_profit",
+    "rebalance_threshold_pct",
+]
+
+
+def _get_config_or_404(db: Session, account_id: str, config_id: int) -> SoxlFearStrategyConfig:
+    config = db.query(SoxlFearStrategyConfig).filter(
+        SoxlFearStrategyConfig.id == config_id,
+        SoxlFearStrategyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="未找到 SOXL 情绪量能策略配置")
+    return config
+
+
+def _resolve_trading_account_id(
+    payload: SoxlFearStrategyConfigPayload,
+    account_id: str,
+    db: Session,
+) -> str:
+    if payload.account_type == "ib":
+        if not payload.ib_account_id:
+            raise HTTPException(status_code=400, detail="必须选择 IB 账户")
+        ib_account = db.query(IBKRAccountConfig).filter(
+            IBKRAccountConfig.id == payload.ib_account_id,
+            IBKRAccountConfig.account_id == account_id,
+        ).first()
+        if not ib_account:
+            raise HTTPException(status_code=400, detail="IB 账户不存在或不属于当前账户")
+        return str(payload.ib_account_id)
+
+    longport_account_id = (payload.longport_account_id or "").strip()
+    if not longport_account_id:
+        raise HTTPException(status_code=400, detail="必须选择长桥账户")
+    longport_account = db.query(LongPortAccount).filter(
+        LongPortAccount.lp_account_id == longport_account_id,
+        LongPortAccount.account_id == account_id,
+    ).first()
+    if not longport_account:
+        raise HTTPException(status_code=400, detail="长桥账户不存在或不属于当前账户")
+    return longport_account_id
+
+
+def _assert_unique_target_account(
+    db: Session,
+    symbol: str,
+    account_type: str,
+    trading_account_id: str,
+    exclude_config_id: Optional[int] = None,
+):
+    query = db.query(SoxlFearStrategyConfig).filter(
+        SoxlFearStrategyConfig.symbol == symbol,
+        SoxlFearStrategyConfig.account_type == account_type,
+        SoxlFearStrategyConfig.trading_account_id == trading_account_id,
+    )
+    if exclude_config_id:
+        query = query.filter(SoxlFearStrategyConfig.id != exclude_config_id)
+    if query.first():
+        raise HTTPException(status_code=400, detail="交易标的、账户类型、账户ID 已存在相同配置")
+
+
+def _apply_payload_to_config(
+    config: SoxlFearStrategyConfig,
+    payload: SoxlFearStrategyConfigPayload,
+    trading_account_id: str,
+):
+    payload_data = payload.dict()
+    if payload.account_type == "ib":
+        payload_data["longport_account_id"] = None
+    else:
+        payload_data["ib_account_id"] = None
+
+    for field in CONFIG_FIELDS:
+        setattr(config, field, payload_data[field])
+    config.trading_account_id = trading_account_id
+    config.updated_at = datetime.now()
+
+
+@router.get("/configs", response_model=List[SoxlFearStrategyConfigSchema])
+def list_soxl_fear_strategy_configs(
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(SoxlFearStrategyConfig)
+        .filter(SoxlFearStrategyConfig.account_id == account_id)
+        .order_by(SoxlFearStrategyConfig.updated_at.desc(), SoxlFearStrategyConfig.id.desc())
+        .all()
+    )
+
+
+@router.post("/configs", response_model=SoxlFearStrategyConfigSchema)
+def create_soxl_fear_strategy_config(
+    payload: SoxlFearStrategyConfigPayload,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    trading_account_id = _resolve_trading_account_id(payload, account_id, db)
+    _assert_unique_target_account(db, payload.symbol, payload.account_type, trading_account_id)
+
+    config = SoxlFearStrategyConfig(account_id=account_id, created_at=datetime.now())
+    _apply_payload_to_config(config, payload, trading_account_id)
+    db.add(config)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="交易标的、账户类型、账户ID 已存在相同配置")
+
+    db.refresh(config)
+    return config
+
+
+@router.get("/configs/{config_id}", response_model=SoxlFearStrategyConfigSchema)
+def get_soxl_fear_strategy_config_by_id(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    return _get_config_or_404(db, account_id, config_id)
+
+
+@router.put("/configs/{config_id}", response_model=SoxlFearStrategyConfigSchema)
+def update_soxl_fear_strategy_config(
+    config_id: int,
+    payload: SoxlFearStrategyConfigPayload,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    trading_account_id = _resolve_trading_account_id(payload, account_id, db)
+    _assert_unique_target_account(db, payload.symbol, payload.account_type, trading_account_id, exclude_config_id=config.id)
+    _apply_payload_to_config(config, payload, trading_account_id)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="交易标的、账户类型、账户ID 已存在相同配置")
+
+    db.refresh(config)
+    return config
+
+
+@router.delete("/configs/{config_id}")
+def delete_soxl_fear_strategy_config(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config.id).delete()
+    db.query(SoxlFearStrategyLog).filter(SoxlFearStrategyLog.config_id == config.id).delete()
+    db.delete(config)
+    db.commit()
+    return {"message": "配置已删除"}
+
+
+@router.get("/configs/{config_id}/logs", response_model=List[SoxlFearStrategyLogSchema])
+def get_soxl_fear_strategy_logs_by_config(
+    config_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    return (
+        db.query(SoxlFearStrategyLog)
+        .filter(SoxlFearStrategyLog.config_id == config.id)
+        .order_by(SoxlFearStrategyLog.timestamp.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+
+@router.post("/configs/{config_id}/manual-check")
+def manual_check_soxl_fear_strategy_by_config(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    try:
+        SoxlFearStrategyTrader().trigger_manual_run(config.id, account_id)
+        return {"message": "已在后台触发一次 SOXL 情绪量能策略检查"}
+    except Exception as exc:
+        logger.error("Failed to trigger SOXL fear strategy manually: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/config", response_model=SoxlFearStrategyConfigSchema)
 def get_soxl_fear_strategy_config(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
 ):
-    config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == account_id).first()
+    config = (
+        db.query(SoxlFearStrategyConfig)
+        .filter(SoxlFearStrategyConfig.account_id == account_id)
+        .order_by(SoxlFearStrategyConfig.id.asc())
+        .first()
+    )
     if config:
         return config
     return SoxlFearStrategyConfigSchema()
 
 
-@router.post("/config")
+@router.post("/config", response_model=SoxlFearStrategyConfigSchema)
 def save_soxl_fear_strategy_config(
-    payload: SoxlFearStrategyConfigSchema,
+    payload: SoxlFearStrategyConfigPayload,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
 ):
-    if payload.enabled:
-        if payload.account_type == "ib" and not payload.ib_account_id:
-            raise HTTPException(status_code=400, detail="开启策略时必须选择 IB 账户")
-        if payload.account_type == "longport" and not payload.longport_account_id:
-            raise HTTPException(status_code=400, detail="开启策略时必须选择长桥账户")
-
-    config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == account_id).first()
-    if not config:
-        config = SoxlFearStrategyConfig(account_id=account_id)
-        db.add(config)
-
-    for field, value in payload.dict(exclude={"last_run_at", "last_run_status", "last_run_message"}).items():
-        setattr(config, field, value)
-
-    config.updated_at = datetime.now()
-    db.commit()
-    return {"message": "配置已保存"}
+    config = (
+        db.query(SoxlFearStrategyConfig)
+        .filter(SoxlFearStrategyConfig.account_id == account_id)
+        .order_by(SoxlFearStrategyConfig.id.asc())
+        .first()
+    )
+    if config:
+        return update_soxl_fear_strategy_config(config.id, payload, account_id, db)
+    return create_soxl_fear_strategy_config(payload, account_id, db)
 
 
 @router.get("/logs", response_model=List[SoxlFearStrategyLogSchema])
@@ -140,9 +369,17 @@ def get_soxl_fear_strategy_logs(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
 ):
+    config = (
+        db.query(SoxlFearStrategyConfig)
+        .filter(SoxlFearStrategyConfig.account_id == account_id)
+        .order_by(SoxlFearStrategyConfig.id.asc())
+        .first()
+    )
+    if not config:
+        return []
     return (
         db.query(SoxlFearStrategyLog)
-        .filter(SoxlFearStrategyLog.account_id == account_id)
+        .filter(SoxlFearStrategyLog.config_id == config.id)
         .order_by(SoxlFearStrategyLog.timestamp.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -153,9 +390,18 @@ def get_soxl_fear_strategy_logs(
 @router.post("/manual-check")
 def manual_check_soxl_fear_strategy(
     account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
 ):
+    config = (
+        db.query(SoxlFearStrategyConfig)
+        .filter(SoxlFearStrategyConfig.account_id == account_id)
+        .order_by(SoxlFearStrategyConfig.id.asc())
+        .first()
+    )
+    if not config:
+        raise HTTPException(status_code=404, detail="未找到 SOXL 情绪量能策略配置")
     try:
-        SoxlFearStrategyTrader().trigger_manual_run(account_id)
+        SoxlFearStrategyTrader().trigger_manual_run(config.id, account_id)
         return {"message": "已在后台触发一次 SOXL 情绪量能策略检查"}
     except Exception as exc:
         logger.error("Failed to trigger SOXL fear strategy manually: %s", exc, exc_info=True)

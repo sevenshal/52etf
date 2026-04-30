@@ -102,6 +102,7 @@ class SoxlFearStrategyTrader:
 
     def _append_log(
         self,
+        config_id: Optional[int],
         account_id: str,
         symbol: str,
         trigger_source: str,
@@ -118,6 +119,7 @@ class SoxlFearStrategyTrader:
         with get_db_ctx() as db:
             db.add(
                 SoxlFearStrategyLog(
+                    config_id=config_id,
                     account_id=account_id,
                     symbol=symbol,
                     trigger_source=trigger_source,
@@ -133,9 +135,11 @@ class SoxlFearStrategyTrader:
                 )
             )
 
-    def _update_run_status(self, account_id: str, status: str, message: str):
+    def _update_run_status(self, config_id: Optional[int], status: str, message: str):
+        if not config_id:
+            return
         with get_db_ctx() as db:
-            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == account_id).first()
+            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
             if config:
                 config.last_run_at = datetime.now()
                 config.last_run_status = status
@@ -632,7 +636,10 @@ class SoxlFearStrategyTrader:
 
     async def _build_ib_snapshot(self, config: SoxlFearStrategyConfig, current_price: float) -> BrokerSnapshot:
         with get_db_ctx() as db:
-            ib_config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config.ib_account_id).first()
+            ib_config = db.query(IBKRAccountConfig).filter(
+                IBKRAccountConfig.id == config.ib_account_id,
+                IBKRAccountConfig.account_id == config.account_id,
+            ).first()
             if not ib_config:
                 raise ValueError("未找到对应的 IB 账户配置")
             ib_port = ib_config.ib_port
@@ -714,16 +721,20 @@ class SoxlFearStrategyTrader:
         return str(getattr(getattr(trade, "order", None), "orderId", ""))
 
     async def run_config_once(self, config: SoxlFearStrategyConfig, trigger_source: str = "auto", ignore_enabled: bool = False):
+        config_id = config.id
         masked_account_id = mask_account_id(config.account_id)
         if not config.enabled and not ignore_enabled:
             return
 
-        logger.info("Running SOXL fear strategy for %s source=%s", masked_account_id, trigger_source)
+        logger.info("Running SOXL fear strategy for %s config=%s source=%s", masked_account_id, config_id, trigger_source)
         symbol = config.symbol or "SOXL.US"
         now_et = MarketService.get_eastern_now()
         market_date = now_et.date()
 
         try:
+            if not config_id:
+                raise ValueError("策略配置缺少配置ID")
+
             cnn_score, cnn_timestamp = self._fetch_latest_cnn_score()
 
             _, market_snapshot = self._build_realtime_dataframe(
@@ -741,14 +752,14 @@ class SoxlFearStrategyTrader:
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
 
             with get_db_ctx() as db:
-                persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == config.account_id).first()
+                persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
                 if persisted_config:
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
 
-                state = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.account_id == config.account_id).first()
+                state = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config_id).first()
                 if not state:
-                    state = SoxlFearStrategyState(account_id=config.account_id, symbol=symbol)
+                    state = SoxlFearStrategyState(config_id=config_id, account_id=config.account_id, symbol=symbol)
                     db.add(state)
                     db.flush()
 
@@ -786,6 +797,7 @@ class SoxlFearStrategyTrader:
                 if broker_snapshot.has_today_order:
                     message = "今日已存在订单，跳过重复执行"
                     self._append_log(
+                        config_id,
                         config.account_id,
                         symbol,
                         trigger_source,
@@ -798,7 +810,7 @@ class SoxlFearStrategyTrader:
                         position_ratio_before=position_ratio_before,
                         position_ratio_after=position_ratio_before,
                     )
-                    self._update_run_status(config.account_id, "SKIPPED", message)
+                    self._update_run_status(config_id, "SKIPPED", message)
                     return
 
                 trade_action = None
@@ -885,6 +897,7 @@ class SoxlFearStrategyTrader:
 
                 status = "SUCCESS" if trade_action else "INFO"
                 self._append_log(
+                    config_id,
                     config.account_id,
                     symbol,
                     trigger_source,
@@ -905,12 +918,13 @@ class SoxlFearStrategyTrader:
                     position_ratio_before=position_ratio_before,
                     position_ratio_after=position_ratio_after,
                 )
-                self._update_run_status(config.account_id, status, trade_message)
-                logger.info("SOXL fear strategy %s result=%s msg=%s", masked_account_id, trade_action or "CHECK", trade_message)
+                self._update_run_status(config_id, status, trade_message)
+                logger.info("SOXL fear strategy %s config=%s result=%s msg=%s", masked_account_id, config_id, trade_action or "CHECK", trade_message)
         except Exception as exc:
-            logger.error("SOXL fear strategy failed for %s: %s", masked_account_id, exc, exc_info=True)
+            logger.error("SOXL fear strategy failed for %s config=%s: %s", masked_account_id, config_id, exc, exc_info=True)
             error_message = f"执行失败: {exc}"
             self._append_log(
+                config_id,
                 config.account_id,
                 symbol,
                 trigger_source,
@@ -918,19 +932,41 @@ class SoxlFearStrategyTrader:
                 "ERROR",
                 error_message,
             )
-            self._update_run_status(config.account_id, "ERROR", error_message)
+            self._update_run_status(config_id, "ERROR", error_message)
             send_alert_email(
-                f"SOXL情绪量能自动交易报错: {masked_account_id}",
+                f"SOXL情绪量能自动交易报错: {masked_account_id}#{config_id}",
                 f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
             )
 
-    async def run_account_once(self, account_id: str, trigger_source: str = "manual", ignore_enabled: bool = True):
+    async def run_config_id_once(
+        self,
+        config_id: int,
+        account_id: Optional[str] = None,
+        trigger_source: str = "manual",
+        ignore_enabled: bool = True,
+    ):
         with get_db_ctx() as db:
-            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.account_id == account_id).first()
+            query = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id)
+            if account_id:
+                query = query.filter(SoxlFearStrategyConfig.account_id == account_id)
+            config = query.first()
             if not config:
                 raise ValueError("未找到 SOXL 情绪量能策略配置")
             db.expunge(config)
         await self.run_config_once(config, trigger_source=trigger_source, ignore_enabled=ignore_enabled)
+
+    async def run_account_once(self, account_id: str, trigger_source: str = "manual", ignore_enabled: bool = True):
+        with get_db_ctx() as db:
+            config = (
+                db.query(SoxlFearStrategyConfig)
+                .filter(SoxlFearStrategyConfig.account_id == account_id)
+                .order_by(SoxlFearStrategyConfig.id.asc())
+                .first()
+            )
+            if not config:
+                raise ValueError("未找到 SOXL 情绪量能策略配置")
+            config_id = config.id
+        await self.run_config_id_once(config_id, account_id, trigger_source=trigger_source, ignore_enabled=ignore_enabled)
 
     async def run_all_enabled_once(self, trigger_source: str = "auto"):
         with get_db_ctx() as db:
@@ -976,16 +1012,19 @@ class SoxlFearStrategyTrader:
                 )
                 await asyncio.sleep(60)
 
-    def trigger_manual_run(self, account_id: str):
+    def trigger_manual_run(self, config_id: int, account_id: Optional[str] = None):
         def runner():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self.run_account_once(account_id, trigger_source="manual", ignore_enabled=True))
+                loop.run_until_complete(
+                    self.run_config_id_once(config_id, account_id, trigger_source="manual", ignore_enabled=True)
+                )
             finally:
                 loop.close()
 
-        thread = threading.Thread(target=runner, daemon=True, name=f"SOXLFearManual-{mask_account_id(account_id)}")
+        thread_label = f"{mask_account_id(account_id)}#{config_id}" if account_id else f"config-{config_id}"
+        thread = threading.Thread(target=runner, daemon=True, name=f"SOXLFearManual-{thread_label}")
         thread.start()
 
 
