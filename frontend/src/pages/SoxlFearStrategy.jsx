@@ -1,11 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
   Col,
+  Divider,
+  Empty,
   Form,
   Input,
   InputNumber,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -16,7 +19,18 @@ import {
   Typography,
   message,
 } from 'antd';
-import { HistoryOutlined, PlayCircleOutlined, SaveOutlined, SettingOutlined } from '@ant-design/icons';
+import {
+  ArrowLeftOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  FileSearchOutlined,
+  HistoryOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SaveOutlined,
+  SettingOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
@@ -33,10 +47,17 @@ const accountTypeOptions = [
   { label: '长桥证券 (Longport)', value: 'longport' },
 ];
 
+const accountTypeLabels = {
+  ib: 'IB',
+  longport: '长桥',
+};
+
 const defaultValues = {
   enabled: false,
   symbol: 'SOXL.US',
   account_type: 'ib',
+  ib_account_id: undefined,
+  longport_account_id: undefined,
   buy_threshold: 40,
   greed_threshold: 41,
   volume_ratio_threshold: 1.38,
@@ -50,43 +71,78 @@ const defaultValues = {
   rebalance_threshold_pct: 5,
 };
 
+const normalizeConfig = (config) => ({
+  ...defaultValues,
+  ...config,
+  ib_account_id: config?.ib_account_id ?? undefined,
+  longport_account_id: config?.longport_account_id ?? undefined,
+});
+
 const SoxlFearStrategy = () => {
   const [form] = Form.useForm();
   const navigate = useNavigate();
+  const [viewMode, setViewMode] = useState('list');
+  const [activeTab, setActiveTab] = useState('config');
+  const [configs, setConfigs] = useState([]);
+  const [selectedConfig, setSelectedConfig] = useState(null);
+  const [listLoading, setListLoading] = useState(false);
   const [configLoading, setConfigLoading] = useState(false);
   const [logLoading, setLogLoading] = useState(false);
-  const [manualLoading, setManualLoading] = useState(false);
+  const [manualLoadingId, setManualLoadingId] = useState(null);
   const [ibAccounts, setIbAccounts] = useState([]);
   const [longportAccounts, setLongportAccounts] = useState([]);
   const [logs, setLogs] = useState([]);
-  const [config, setConfig] = useState(defaultValues);
 
   useEffect(() => {
     fetchInitialData();
   }, []);
 
+  const accountMaps = useMemo(() => {
+    const ibMap = new Map(ibAccounts.map((account) => [account.id, account]));
+    const longportMap = new Map(longportAccounts.map((account) => [account.lp_account_id, account]));
+    return { ibMap, longportMap };
+  }, [ibAccounts, longportAccounts]);
+
   const fetchInitialData = async () => {
-    await Promise.all([fetchConfig(), fetchLogs(), fetchIbAccounts(), fetchLongportAccounts()]);
+    await Promise.all([fetchConfigs(), fetchIbAccounts(), fetchLongportAccounts()]);
   };
 
-  const fetchConfig = async () => {
+  const fetchConfigs = async () => {
+    setListLoading(true);
+    try {
+      const { data } = await request.get('/api/soxl-fear-strategy/configs');
+      setConfigs(data.map(normalizeConfig));
+    } catch (error) {
+      message.error(error.response?.data?.detail || '加载策略配置列表失败');
+    } finally {
+      setListLoading(false);
+    }
+  };
+
+  const fetchConfigDetail = async (configId) => {
     setConfigLoading(true);
     try {
-      const { data } = await request.get('/api/soxl-fear-strategy/config');
-      const merged = { ...defaultValues, ...data };
-      setConfig(merged);
+      const { data } = await request.get(`/api/soxl-fear-strategy/configs/${configId}`);
+      const merged = normalizeConfig(data);
+      setSelectedConfig(merged);
       form.setFieldsValue(merged);
+      return merged;
     } catch (error) {
       message.error(error.response?.data?.detail || '加载策略配置失败');
+      return null;
     } finally {
       setConfigLoading(false);
     }
   };
 
-  const fetchLogs = async () => {
+  const fetchLogs = async (configId = selectedConfig?.id) => {
+    if (!configId) {
+      setLogs([]);
+      return;
+    }
     setLogLoading(true);
     try {
-      const { data } = await request.get('/api/soxl-fear-strategy/logs');
+      const { data } = await request.get(`/api/soxl-fear-strategy/configs/${configId}/logs`);
       setLogs(data);
     } catch (error) {
       message.error(error.response?.data?.detail || '加载运行日志失败');
@@ -113,12 +169,63 @@ const SoxlFearStrategy = () => {
     }
   };
 
+  const getAccountLabel = (record) => {
+    if (!record) return '-';
+    if (record.account_type === 'longport') {
+      const account = accountMaps.longportMap.get(record.longport_account_id || record.trading_account_id);
+      return account ? `${account.name} (ID: ${account.lp_account_id})` : (record.longport_account_id || record.trading_account_id || '-');
+    }
+
+    const accountId = record.ib_account_id ?? Number(record.trading_account_id);
+    const account = accountMaps.ibMap.get(accountId);
+    return account ? `${account.name} (ID: ${account.id}, Port: ${account.ib_port})` : (record.ib_account_id || record.trading_account_id || '-');
+  };
+
+  const openCreate = () => {
+    setSelectedConfig(null);
+    setLogs([]);
+    form.resetFields();
+    form.setFieldsValue(defaultValues);
+    setActiveTab('config');
+    setViewMode('detail');
+  };
+
+  const openConfig = async (record, tabKey = 'config') => {
+    setViewMode('detail');
+    setActiveTab(tabKey);
+    setLogs([]);
+    const config = await fetchConfigDetail(record.id);
+    if (tabKey === 'logs' && config?.id) {
+      await fetchLogs(config.id);
+    }
+  };
+
+  const returnToList = async () => {
+    setViewMode('list');
+    setSelectedConfig(null);
+    setLogs([]);
+    form.resetFields();
+    await fetchConfigs();
+  };
+
+  const buildPayload = (values) => ({
+    ...values,
+    symbol: (values.symbol || 'SOXL.US').trim().toUpperCase(),
+  });
+
   const handleSave = async (values) => {
     setConfigLoading(true);
     try {
-      await request.post('/api/soxl-fear-strategy/config', values);
+      const payload = buildPayload(values);
+      const requestAction = selectedConfig?.id
+        ? request.put(`/api/soxl-fear-strategy/configs/${selectedConfig.id}`, payload)
+        : request.post('/api/soxl-fear-strategy/configs', payload);
+      const { data } = await requestAction;
+      const merged = normalizeConfig(data);
+      setSelectedConfig(merged);
+      form.setFieldsValue(merged);
       message.success('策略配置已保存');
-      fetchConfig();
+      await fetchConfigs();
     } catch (error) {
       message.error(error.response?.data?.detail || '保存策略配置失败');
     } finally {
@@ -126,17 +233,45 @@ const SoxlFearStrategy = () => {
     }
   };
 
-  const handleManualRun = async () => {
-    setManualLoading(true);
+  const handleManualRun = async (record = selectedConfig) => {
+    if (!record?.id) {
+      message.warning('请先保存配置');
+      return;
+    }
+
+    setManualLoadingId(record.id);
     try {
-      await request.post('/api/soxl-fear-strategy/manual-check');
+      await request.post(`/api/soxl-fear-strategy/configs/${record.id}/manual-check`);
       message.success('已触发一次后台检查，请稍后刷新日志');
-      setTimeout(fetchLogs, 3000);
-      setTimeout(fetchConfig, 3000);
+      setTimeout(async () => {
+        await fetchConfigs();
+        if (selectedConfig?.id === record.id) {
+          await fetchConfigDetail(record.id);
+          if (activeTab === 'logs') {
+            await fetchLogs(record.id);
+          }
+        }
+      }, 3000);
     } catch (error) {
       message.error(error.response?.data?.detail || '手动执行失败');
     } finally {
-      setManualLoading(false);
+      setManualLoadingId(null);
+    }
+  };
+
+  const handleDelete = async (record) => {
+    try {
+      await request.delete(`/api/soxl-fear-strategy/configs/${record.id}`);
+      message.success('配置已删除');
+      if (selectedConfig?.id === record.id) {
+        setSelectedConfig(null);
+        setViewMode('list');
+        setLogs([]);
+        form.resetFields();
+      }
+      await fetchConfigs();
+    } catch (error) {
+      message.error(error.response?.data?.detail || '删除配置失败');
     }
   };
 
@@ -173,6 +308,116 @@ const SoxlFearStrategy = () => {
       },
     });
   };
+
+  const renderActionButton = (eventHandler) => (event) => {
+    event.stopPropagation();
+    eventHandler();
+  };
+
+  const configColumns = [
+    {
+      title: '交易标的',
+      dataIndex: 'symbol',
+      key: 'symbol',
+      width: 120,
+      render: (value) => <Text strong>{value}</Text>,
+    },
+    {
+      title: '账户类型',
+      dataIndex: 'account_type',
+      key: 'account_type',
+      width: 110,
+      render: (value) => <Tag color={value === 'longport' ? 'purple' : 'blue'}>{accountTypeLabels[value] || value}</Tag>,
+    },
+    {
+      title: '账户ID',
+      key: 'trading_account_id',
+      width: 220,
+      render: (_, record) => getAccountLabel(record),
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      key: 'enabled',
+      width: 90,
+      render: (value) => <Tag color={value ? 'success' : 'default'}>{value ? '开启' : '关闭'}</Tag>,
+    },
+    {
+      title: '买入阈值',
+      dataIndex: 'buy_threshold',
+      key: 'buy_threshold',
+      width: 100,
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: '止盈区阈值',
+      dataIndex: 'greed_threshold',
+      key: 'greed_threshold',
+      width: 110,
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: '投影量比',
+      dataIndex: 'volume_ratio_threshold',
+      key: 'volume_ratio_threshold',
+      width: 100,
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: '最近执行',
+      dataIndex: 'last_run_at',
+      key: 'last_run_at',
+      width: 160,
+      render: (value) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-'),
+    },
+    {
+      title: '最近状态',
+      dataIndex: 'last_run_status',
+      key: 'last_run_status',
+      width: 100,
+      render: (value) => {
+        if (!value) return '-';
+        const color = value === 'ERROR' ? 'error' : value === 'SUCCESS' ? 'success' : 'blue';
+        return <Tag color={color}>{value}</Tag>;
+      },
+    },
+    {
+      title: '操作',
+      key: 'action',
+      fixed: 'right',
+      width: 280,
+      render: (_, record) => (
+        <Space size={8}>
+          <Button icon={<EditOutlined />} size="small" onClick={renderActionButton(() => openConfig(record))}>
+            编辑
+          </Button>
+          <Button icon={<HistoryOutlined />} size="small" onClick={renderActionButton(() => openConfig(record, 'logs'))}>
+            日志
+          </Button>
+          <Button
+            icon={<PlayCircleOutlined />}
+            size="small"
+            loading={manualLoadingId === record.id}
+            onClick={renderActionButton(() => handleManualRun(record))}
+          >
+            执行
+          </Button>
+          <Popconfirm
+            title="删除配置"
+            description="确认删除这条策略配置和对应日志吗？"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={(event) => {
+              event?.stopPropagation?.();
+              handleDelete(record);
+            }}
+          >
+            <Button icon={<DeleteOutlined />} size="small" danger onClick={(event) => event.stopPropagation()} />
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
 
   const logColumns = [
     {
@@ -228,14 +473,14 @@ const SoxlFearStrategy = () => {
       title: '信号分(CNN)',
       dataIndex: 'fear_score',
       key: 'fear_score',
-      width: 90,
+      width: 100,
       render: (value) => (value !== null && value !== undefined ? Number(value).toFixed(2) : '-'),
     },
     {
       title: '投影量比',
       dataIndex: 'volume_ratio',
       key: 'volume_ratio',
-      width: 80,
+      width: 90,
       render: (value) => (value !== null && value !== undefined ? Number(value).toFixed(2) : '-'),
     },
     {
@@ -245,192 +490,265 @@ const SoxlFearStrategy = () => {
     },
   ];
 
+  const renderConfigForm = () => (
+    <Form
+      form={form}
+      layout="vertical"
+      initialValues={defaultValues}
+      onFinish={handleSave}
+    >
+      <Form.Item name="enabled" label="启用策略" valuePropName="checked">
+        <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+      </Form.Item>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="symbol" label="交易标的" rules={[{ required: true, message: '请输入交易标的' }]}>
+            <Input placeholder="SOXL.US" />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="account_type" label="账户类型" rules={[{ required: true, message: '请选择账户类型' }]}>
+            <Select
+              options={accountTypeOptions}
+              onChange={() => form.setFieldsValue({ ib_account_id: undefined, longport_account_id: undefined })}
+            />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item noStyle shouldUpdate={(prev, curr) => prev.account_type !== curr.account_type}>
+            {() => {
+              const accountType = form.getFieldValue('account_type');
+              if (accountType === 'longport') {
+                return (
+                  <Form.Item name="longport_account_id" label="长桥账户" rules={[{ required: true, message: '请选择长桥账户' }]}>
+                    <Select placeholder="选择长桥账户">
+                      {longportAccounts.map((account) => (
+                        <Select.Option key={account.lp_account_id} value={account.lp_account_id}>
+                          {account.name} (ID: {account.lp_account_id})
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                );
+              }
+              return (
+                <Form.Item name="ib_account_id" label="IB 账户" rules={[{ required: true, message: '请选择 IB 账户' }]}>
+                  <Select placeholder="选择 IB 账户">
+                    {ibAccounts.map((account) => (
+                      <Select.Option key={account.id} value={account.id}>
+                        {account.name} (ID: {account.id}, Port: {account.ib_port})
+                      </Select.Option>
+                    ))}
+                  </Select>
+                </Form.Item>
+              );
+            }}
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="buy_threshold" label="买入触发阈值(<=)" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="greed_threshold" label="进入止盈区阈值(>=)" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="volume_ratio_threshold" label="投影量比阈值" rules={[{ required: true }]}>
+            <InputNumber min={0} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="buy_position_pct" label="每次买入仓位%" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="cooldown_days" label="冷却天数" rules={[{ required: true }]}>
+            <InputNumber min={0} max={60} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="trailing_stop_pct" label="移动止盈回撤%" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="sell_position_pct" label="止盈减仓%" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="sell_reduction_basis" label="止盈减仓口径" rules={[{ required: true }]}>
+            <Select options={sellReductionBasisOptions} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="max_take_profit_sells_per_cycle" label="同轮止盈最多卖出次数" rules={[{ required: true }]}>
+            <InputNumber min={1} max={20} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="min_position_pct_after_take_profit" label="止盈后最低保留仓位%" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="rebalance_threshold_pct" label="调仓阈值%" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Divider />
+      <Row gutter={[16, 8]} style={{ marginBottom: 16 }}>
+        <Col xs={24} md={8}>
+          <Text type="secondary">最近执行时间</Text>
+          <div>{selectedConfig?.last_run_at ? dayjs(selectedConfig.last_run_at).format('YYYY-MM-DD HH:mm:ss') : '-'}</div>
+        </Col>
+        <Col xs={24} md={8}>
+          <Text type="secondary">最近执行状态</Text>
+          <div>{selectedConfig?.last_run_status || '-'}</div>
+        </Col>
+        <Col xs={24} md={8}>
+          <Text type="secondary">最近执行说明</Text>
+          <div>{selectedConfig?.last_run_message || '-'}</div>
+        </Col>
+      </Row>
+
+      <Form.Item>
+        <Space wrap>
+          <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={configLoading}>
+            保存配置
+          </Button>
+          <Button icon={<FileSearchOutlined />} onClick={handleBacktest}>
+            回测
+          </Button>
+          <Button
+            icon={<PlayCircleOutlined />}
+            onClick={() => handleManualRun(selectedConfig)}
+            loading={manualLoadingId === selectedConfig?.id}
+            disabled={!selectedConfig?.id}
+          >
+            立即执行一次
+          </Button>
+        </Space>
+      </Form.Item>
+    </Form>
+  );
+
+  const renderLogs = () => {
+    if (!selectedConfig?.id) {
+      return <Empty description="保存配置后查看日志" />;
+    }
+
+    return (
+      <>
+        <Table
+          columns={logColumns}
+          dataSource={logs}
+          rowKey="id"
+          loading={logLoading}
+          pagination={{ pageSize: 10 }}
+          scroll={{ x: 1400 }}
+        />
+        <Button style={{ marginTop: 16 }} icon={<ReloadOutlined />} onClick={() => fetchLogs()} loading={logLoading}>
+          刷新日志
+        </Button>
+      </>
+    );
+  };
+
+  const renderList = () => (
+    <Card>
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
+        <Title level={4} style={{ margin: 0 }}>SOXL 情绪量能自动交易</Title>
+        <Space>
+          <Button icon={<ReloadOutlined />} onClick={fetchConfigs} loading={listLoading}>
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            新增配置
+          </Button>
+        </Space>
+      </Space>
+      <Table
+        columns={configColumns}
+        dataSource={configs}
+        rowKey="id"
+        loading={listLoading}
+        pagination={{ pageSize: 10 }}
+        scroll={{ x: 1500 }}
+        onRow={(record) => ({
+          onClick: () => openConfig(record),
+          style: { cursor: 'pointer' },
+        })}
+      />
+    </Card>
+  );
+
+  const renderDetail = () => (
+    <>
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
+        <Space>
+          <Button icon={<ArrowLeftOutlined />} onClick={returnToList}>
+            返回列表
+          </Button>
+          <Title level={4} style={{ margin: 0 }}>
+            {selectedConfig?.id ? `${selectedConfig.symbol} 策略配置` : '新增策略配置'}
+          </Title>
+        </Space>
+        {selectedConfig?.id && (
+          <Text type="secondary">
+            {accountTypeLabels[selectedConfig.account_type] || selectedConfig.account_type} / {getAccountLabel(selectedConfig)}
+          </Text>
+        )}
+      </Space>
+      <Card loading={configLoading && activeTab === 'config'}>
+        <Tabs
+          activeKey={activeTab}
+          onChange={(key) => {
+            setActiveTab(key);
+            if (key === 'logs') {
+              fetchLogs();
+            }
+          }}
+          items={[
+            {
+              key: 'config',
+              label: <span><SettingOutlined />策略配置</span>,
+              children: renderConfigForm(),
+            },
+            {
+              key: 'logs',
+              label: <span><HistoryOutlined />运行日志</span>,
+              disabled: !selectedConfig?.id,
+              children: renderLogs(),
+            },
+          ]}
+        />
+      </Card>
+    </>
+  );
+
   return (
     <div style={{ padding: 24 }}>
-      <Title level={4} style={{ marginTop: 0 }}>SOXL 情绪量能自动交易</Title>
-      <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
-        每个美股交易日收盘前自动执行一次。系统会抓取最新 CNN 恐贪指数，结合 SOXL 最近日线与当日实时行情判断是否买卖；临近收盘时量比会按预计全天成交量校正。
-      </Text>
-
-      <Tabs
-        defaultActiveKey="config"
-        items={[
-          {
-            key: 'config',
-            label: <span><SettingOutlined />策略配置</span>,
-            children: (
-              <Card loading={configLoading}>
-                <Form
-                  form={form}
-                  layout="vertical"
-                  initialValues={defaultValues}
-                  onFinish={handleSave}
-                >
-                  <Form.Item name="enabled" label="启用策略" valuePropName="checked">
-                    <Switch checkedChildren="开启" unCheckedChildren="关闭" />
-                  </Form.Item>
-
-                  <Row gutter={16}>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="symbol" label="交易标的">
-                        <Input disabled />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="account_type" label="账户类型" rules={[{ required: true, message: '请选择账户类型' }]}>
-                        <Select
-                          options={accountTypeOptions}
-                          onChange={() => form.setFieldsValue({ ib_account_id: undefined, longport_account_id: undefined })}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item shouldUpdate={(prev, curr) => prev.account_type !== curr.account_type || prev.enabled !== curr.enabled}>
-                        {() => {
-                          const accountType = form.getFieldValue('account_type');
-                          const enabled = form.getFieldValue('enabled');
-                          if (accountType === 'longport') {
-                            return (
-                              <Form.Item name="longport_account_id" label="长桥账户" rules={enabled ? [{ required: true, message: '请选择长桥账户' }] : []}>
-                                <Select placeholder="选择长桥账户">
-                                  {longportAccounts.map((account) => (
-                                    <Select.Option key={account.lp_account_id} value={account.lp_account_id}>
-                                      {account.name} (ID: {account.lp_account_id})
-                                    </Select.Option>
-                                  ))}
-                                </Select>
-                              </Form.Item>
-                            );
-                          }
-                          return (
-                            <Form.Item name="ib_account_id" label="IB 账户" rules={enabled ? [{ required: true, message: '请选择 IB 账户' }] : []}>
-                              <Select placeholder="选择 IB 账户">
-                                {ibAccounts.map((account) => (
-                                  <Select.Option key={account.id} value={account.id}>
-                                    {account.name} (Port: {account.ib_port})
-                                  </Select.Option>
-                                ))}
-                              </Select>
-                            </Form.Item>
-                          );
-                        }}
-                      </Form.Item>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={16}>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="buy_threshold" label="买入触发阈值(<=)" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="greed_threshold" label="进入止盈区阈值(>=)" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="volume_ratio_threshold" label="投影量比阈值" rules={[{ required: true }]}>
-                        <InputNumber min={0} step={0.1} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={16}>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="buy_position_pct" label="每次买入仓位%" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="cooldown_days" label="冷却天数" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={60} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="trailing_stop_pct" label="移动止盈回撤%" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={16}>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="sell_position_pct" label="止盈减仓%" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="sell_reduction_basis" label="止盈减仓口径" rules={[{ required: true }]}>
-                        <Select options={sellReductionBasisOptions} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="max_take_profit_sells_per_cycle" label="同轮止盈最多卖出次数" rules={[{ required: true }]}>
-                        <InputNumber min={1} max={20} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={16}>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="min_position_pct_after_take_profit" label="止盈后最低保留仓位%" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={8}>
-                      <Form.Item name="rebalance_threshold_pct" label="调仓阈值%" rules={[{ required: true }]}>
-                        <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-
-                  <Card size="small" style={{ marginBottom: 16 }}>
-                    <Space direction="vertical" size={4}>
-                      <Text>最近执行时间: {config.last_run_at ? dayjs(config.last_run_at).format('YYYY-MM-DD HH:mm:ss') : '-'}</Text>
-                      <Text>最近执行状态: {config.last_run_status || '-'}</Text>
-                      <Text type="secondary">最近执行说明: {config.last_run_message || '-'}</Text>
-                    </Space>
-                  </Card>
-
-                  <Form.Item>
-                    <Space>
-                      <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={configLoading}>
-                        保存配置
-                      </Button>
-                      <Button onClick={handleBacktest}>
-                        回测
-                      </Button>
-                      <Button icon={<PlayCircleOutlined />} onClick={handleManualRun} loading={manualLoading}>
-                        立即执行一次
-                      </Button>
-                    </Space>
-                  </Form.Item>
-                </Form>
-              </Card>
-            ),
-          },
-          {
-            key: 'logs',
-            label: <span><HistoryOutlined />运行日志</span>,
-            children: (
-              <Card>
-                <Table
-                  columns={logColumns}
-                  dataSource={logs}
-                  rowKey="id"
-                  loading={logLoading}
-                  pagination={{ pageSize: 10 }}
-                  scroll={{ x: 1400 }}
-                />
-                <Button style={{ marginTop: 16 }} onClick={fetchLogs} loading={logLoading}>
-                  刷新日志
-                </Button>
-              </Card>
-            ),
-          },
-        ]}
-      />
+      {viewMode === 'list' ? renderList() : renderDetail()}
     </div>
   );
 };
