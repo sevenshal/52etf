@@ -58,14 +58,8 @@ class SoxlFearStrategyTrader:
     _instance = None
     _lock = threading.Lock()
     MARKET_OPEN_TIME = dtime(9, 30)
-    VOLUME_PROFILE_MINUTE_COUNT = 1000
     MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
     VOLUME_PROJECTION_WINDOW_MINUTES = 30
-    MIN_VOLUME_PROFILE_DAY_COVERAGE = 0.95
-    VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS = 60
-    VOLUME_PROFILE_CLOSE_TOLERANCE_SECONDS = 120
-    TODAY_MINUTE_VOLUME_MAX_STALENESS_SECONDS = 90
-    TODAY_MINUTE_VOLUME_FUTURE_TOLERANCE_SECONDS = 60
 
     def __new__(cls):
         with cls._lock:
@@ -186,14 +180,18 @@ class SoxlFearStrategyTrader:
         if minutes_remaining > self.VOLUME_PROJECTION_WINDOW_MINUTES:
             return 1.0, "raw_not_near_close"
 
-        # Median SOXL.US intraday volume completion over the latest 20 full
-        # sessions sampled on 2026-04-28 ET: 2026-03-30..2026-04-27.
+        # Median SOXL.US 09:30-16:00 ET minute-volume completion over the
+        # latest 20 complete sessions sampled on 2026-04-30 ET:
+        # 2026-04-01..2026-04-29, skipping 2026-04-03 (no minute data).
         points = [
             (0.0, 1.0),
-            (2.0, 0.9910),
-            (5.0, 0.9778),
-            (10.0, 0.9549),
-            (30.0, 0.9067),
+            (1.0, 0.9910),
+            (2.0, 0.9858),
+            (3.0, 0.9821),
+            (4.0, 0.9781),
+            (5.0, 0.9726),
+            (10.0, 0.9495),
+            (30.0, 0.9043),
         ]
         for index in range(1, len(points)):
             prev_minutes, prev_completion = points[index - 1]
@@ -353,176 +351,21 @@ class SoxlFearStrategyTrader:
         )
         return processed_dates[-1]
 
-    def _estimate_intraday_volume_completion_ratio(
-        self,
-        minute_bars: List[dict],
-        now_et: datetime,
-        market_date: date,
-    ) -> Optional[float]:
-        close_time = MarketService.get_us_market_close_time(market_date)
-        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
-        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
-        if now_et <= open_at or now_et >= close_at:
-            return None
-
-        cutoff_elapsed_seconds = max(0.0, (now_et - open_at).total_seconds())
-        grouped: Dict[date, list] = {}
-        for item in minute_bars or []:
-            timestamp = self._to_eastern_datetime(item.get("timestamp"))
-            if not timestamp or timestamp.date() >= market_date:
-                continue
-            if timestamp.weekday() >= 5 or MarketService.is_us_market_holiday(timestamp.date()):
-                continue
-
-            day_open_at = datetime.combine(timestamp.date(), self.MARKET_OPEN_TIME, tzinfo=timestamp.tzinfo)
-            day_close_at = datetime.combine(
-                timestamp.date(),
-                MarketService.get_us_market_close_time(timestamp.date()),
-                tzinfo=timestamp.tzinfo,
-            )
-            if timestamp < day_open_at or timestamp >= day_close_at:
-                continue
-
-            raw_volume = item.get("volume")
-            if raw_volume is None:
-                continue
-            volume = float(raw_volume)
-            if volume < 0:
-                continue
-            elapsed_seconds = (timestamp - day_open_at).total_seconds()
-            grouped.setdefault(timestamp.date(), []).append((elapsed_seconds, volume))
-
-        completion_ratios = []
-        for volume_date, values in grouped.items():
-            values = sorted(values, key=lambda value: value[0])
-            day_close_time = MarketService.get_us_market_close_time(volume_date)
-            session_seconds = (
-                datetime.combine(volume_date, day_close_time)
-                - datetime.combine(volume_date, self.MARKET_OPEN_TIME)
-            ).total_seconds()
-            expected_minutes = max(1, int(session_seconds // 60))
-            observed_minutes = len({int(elapsed // 60) for elapsed, _ in values})
-            first_elapsed = values[0][0]
-            last_elapsed = values[-1][0]
-            if (
-                first_elapsed > self.VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS
-                or last_elapsed < session_seconds - self.VOLUME_PROFILE_CLOSE_TOLERANCE_SECONDS
-                or observed_minutes < expected_minutes * self.MIN_VOLUME_PROFILE_DAY_COVERAGE
-            ):
-                continue
-
-            total_volume = sum(volume for _, volume in values)
-            if total_volume <= 0:
-                continue
-            cumulative_volume = sum(volume for elapsed, volume in values if elapsed <= cutoff_elapsed_seconds)
-            if cumulative_volume <= 0:
-                continue
-            completion_ratios.append(cumulative_volume / total_volume)
-
-        if len(completion_ratios) < 2:
-            return None
-
-        return float(pd.Series(completion_ratios).median())
-
-    def _estimate_today_minute_volume(
-        self,
-        minute_bars: List[dict],
-        now_et: datetime,
-        market_date: date,
-    ) -> Tuple[Optional[float], Optional[datetime]]:
-        close_time = MarketService.get_us_market_close_time(market_date)
-        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
-        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
-        values = []
-        for item in minute_bars or []:
-            timestamp = self._to_eastern_datetime(item.get("timestamp"))
-            if not timestamp or timestamp.date() != market_date:
-                continue
-            if timestamp < open_at or timestamp >= close_at:
-                continue
-            if timestamp > now_et + timedelta(seconds=self.TODAY_MINUTE_VOLUME_FUTURE_TOLERANCE_SECONDS):
-                continue
-
-            raw_volume = item.get("volume")
-            if raw_volume is None:
-                continue
-            volume = float(raw_volume)
-            if volume < 0:
-                continue
-            values.append((timestamp, volume))
-
-        if not values:
-            return None, None
-
-        values = sorted(values, key=lambda value: value[0])
-        latest_timestamp = values[-1][0]
-        first_elapsed = (values[0][0] - open_at).total_seconds()
-        latest_elapsed = max(0.0, (latest_timestamp - open_at).total_seconds())
-        expected_minutes = max(1, int(latest_elapsed // 60) + 1)
-        observed_minutes = len({int((timestamp - open_at).total_seconds() // 60) for timestamp, _ in values})
-        if (
-            first_elapsed > self.VOLUME_PROFILE_OPEN_TOLERANCE_SECONDS
-            or observed_minutes < expected_minutes * self.MIN_VOLUME_PROFILE_DAY_COVERAGE
-        ):
-            return None, latest_timestamp
-
-        staleness_seconds = max(0.0, (now_et - latest_timestamp).total_seconds())
-        if staleness_seconds > self.TODAY_MINUTE_VOLUME_MAX_STALENESS_SECONDS:
-            return None, latest_timestamp
-
-        total_volume = sum(volume for _, volume in values)
-        if total_volume <= 0:
-            return None, latest_timestamp
-        return total_volume, latest_timestamp
-
     def _project_current_volume(
         self,
-        market_data_service: LongPortService,
-        symbol: str,
         current_volume: float,
         now_et: datetime,
         market_date: date,
     ) -> Dict[str, object]:
-        effective_current_volume = max(0.0, float(current_volume or 0.0))
-        current_volume_source = "quote"
-        projection_time = now_et
+        quote_volume = max(0.0, float(current_volume or 0.0))
         completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
-        if projection_source == "fallback_close_curve":
-            try:
-                minute_bars = market_data_service.get_candlesticks(
-                    symbol,
-                    self.VOLUME_PROFILE_MINUTE_COUNT,
-                    period="1m",
-                )
-            except Exception as exc:
-                logger.info("Failed to fetch intraday volume profile for %s: %s", symbol, exc)
-                minute_bars = []
 
-            today_minute_volume, today_volume_timestamp = self._estimate_today_minute_volume(
-                minute_bars,
-                now_et,
-                market_date,
-            )
-            if today_minute_volume is not None and today_volume_timestamp is not None:
-                effective_current_volume = today_minute_volume
-                current_volume_source = "today_minute_bars"
-                projection_time = today_volume_timestamp
-                completion_ratio, projection_source = self._fallback_volume_completion_ratio(projection_time, market_date)
-
-            intraday_completion_ratio = self._estimate_intraday_volume_completion_ratio(
-                minute_bars,
-                projection_time,
-                market_date,
-            )
-            if intraday_completion_ratio is not None:
-                completion_ratio = intraday_completion_ratio
-                projection_source = "intraday_profile"
-
-        if effective_current_volume <= 0:
+        if quote_volume <= 0:
             return {
                 "current_volume": 0.0,
-                "current_volume_source": current_volume_source,
-                "current_volume_timestamp": projection_time,
+                "current_volume_source": "quote",
+                "current_volume_timestamp": now_et,
+                "quote_volume": quote_volume,
                 "projected_volume": 0.0,
                 "completion_ratio": 1.0,
                 "projection_factor": 1.0,
@@ -531,11 +374,12 @@ class SoxlFearStrategyTrader:
 
         completion_ratio = max(0.50, min(1.0, float(completion_ratio or 1.0)))
         projection_factor = 1.0 / completion_ratio if completion_ratio > 0 else 1.0
-        projected_volume = max(effective_current_volume, effective_current_volume * projection_factor)
+        projected_volume = max(quote_volume, quote_volume * projection_factor)
         return {
-            "current_volume": effective_current_volume,
-            "current_volume_source": current_volume_source,
-            "current_volume_timestamp": projection_time,
+            "current_volume": quote_volume,
+            "current_volume_source": "quote",
+            "current_volume_timestamp": now_et,
+            "quote_volume": quote_volume,
             "projected_volume": projected_volume,
             "completion_ratio": completion_ratio,
             "projection_factor": projection_factor,
@@ -588,8 +432,6 @@ class SoxlFearStrategyTrader:
         ]
         quote_volume = float(quote.get("volume") or 0)
         projection = self._project_current_volume(
-            market_data_service,
-            symbol,
             quote_volume,
             now_et,
             current_market_date,
