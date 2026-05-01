@@ -852,6 +852,10 @@ def _simulate_equal_weight_benchmark(
                 last_close_prices[symbol] = close_price
             close_prices[symbol] = close_price if close_price > 0 else float(last_close_prices.get(symbol, 0.0))
 
+        if current_date < start_date:
+            last_close_prices = close_prices
+            continue
+
         if pending_orders:
             sells = [order for order in pending_orders if order["action"] == "SELL"]
             buys = [order for order in pending_orders if order["action"] == "BUY"]
@@ -1258,6 +1262,10 @@ class W20MomentumBacktestEngine:
                 )
 
             should_rebalance_today = _is_rebalance_day(dates, idx, params.rebalance_frequency)
+            if current_date < start_dt:
+                self._report_progress(25 + int(65 * (idx + 1) / max(1, total_steps)), f"预热中 {idx + 1}/{total_steps}")
+                last_close_prices = current_close_prices
+                continue
 
             # Rank and select ETFs only on rebalance dates. Orders are still executed
             # at the next open, so today's close signal never trades on the same close.

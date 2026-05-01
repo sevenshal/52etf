@@ -84,6 +84,17 @@ def _run_soxx_fear_greed_backfill(start_date: Optional[str] = None):
     )
 
 
+def _run_w20_momentum_live_sync():
+    from ..app.api.w20_momentum_live import sync_all_enabled_w20_momentum_live_configs_for_scheduler
+
+    result = sync_all_enabled_w20_momentum_live_configs_for_scheduler()
+    logging.getLogger("ScheduledTaskManager").info(
+        "W20 momentum virtual strategies synced: success=%s, errors=%s",
+        len(result.get("synced") or []),
+        len(result.get("errors") or []),
+    )
+
+
 @dataclass(frozen=True)
 class TaskDefinition:
     task_key: str
@@ -148,6 +159,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=60,
                 runner=_run_soxx_fear_greed_backfill,
+            ),
+            "w20_momentum_live_sync": TaskDefinition(
+                task_key="w20_momentum_live_sync",
+                name="W20动量虚拟盘同步",
+                description="同步所有启用的 W20 风险调整 ETF 动量虚拟盘，生成信号、模拟成交、刷新净值和持仓。",
+                default_time="09:35",
+                default_enabled=True,
+                sort_order=70,
+                runner=_run_w20_momentum_live_sync,
             ),
         }
 

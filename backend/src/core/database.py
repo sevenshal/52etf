@@ -628,6 +628,99 @@ class ScheduledTaskConfig(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class W20MomentumLiveConfig(Base):
+    """W20 风险调整 ETF 动量虚拟盘配置"""
+    __tablename__ = "w20_momentum_live_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    name = Column(String(100), nullable=False, default="W20 风险调整 ETF 动量")
+    enabled = Column(Boolean, default=True, nullable=False)
+    symbols = Column(JSON, nullable=False)
+    benchmark_symbols = Column(JSON)
+    initial_capital = Column(Float, nullable=False, default=1_000_000.0)
+    start_date = Column(Date, nullable=False)
+    window = Column(Integer, nullable=False, default=20)
+    top_weights = Column(JSON, nullable=False)
+    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
+    drift_threshold_pct = Column(Float, nullable=False, default=100.0)
+    commission_pct = Column(Float, nullable=False, default=0.03)
+    slippage_pct = Column(Float, nullable=False, default=0.02)
+    lot_size = Column(Integer, nullable=False, default=100)
+    last_sync_at = Column(DateTime)
+    last_sync_status = Column(String(16))
+    last_sync_message = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class W20MomentumLiveEquity(Base):
+    """W20 虚拟盘每日净值"""
+    __tablename__ = "w20_momentum_live_equity"
+
+    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
+    date = Column(Date, primary_key=True)
+    account_id = Column(String, index=True)
+    value = Column(Float, nullable=False)
+    benchmark_value = Column(Float)
+    drawdown = Column(Float)
+    benchmark_drawdown = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class W20MomentumLiveTrade(Base):
+    """W20 虚拟盘模拟成交记录"""
+    __tablename__ = "w20_momentum_live_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    date = Column(Date, index=True)
+    signal_date = Column(Date)
+    action = Column(String(8), nullable=False)
+    symbol = Column(String(32), index=True)
+    price = Column(Float)
+    open_price = Column(Float)
+    quantity = Column(Integer)
+    amount = Column(Float)
+    commission = Column(Float)
+    reason = Column(String(64))
+    reason_detail = Column(String(1000))
+    cash_after = Column(Float)
+    portfolio_value_after = Column(Float)
+    symbol_market_value_after = Column(Float)
+    symbol_weight_pct_after = Column(Float)
+    target_symbols = Column(JSON)
+    target_weights_pct = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now)
+
+class W20MomentumLiveHolding(Base):
+    """W20 虚拟盘最新持仓快照"""
+    __tablename__ = "w20_momentum_live_holdings"
+
+    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
+    symbol = Column(String(32), primary_key=True)
+    account_id = Column(String, index=True)
+    shares = Column(Integer, nullable=False, default=0)
+    price = Column(Float)
+    market_value = Column(Float)
+    actual_weight_pct = Column(Float)
+    target_weight_pct = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class W20MomentumLiveLog(Base):
+    """W20 虚拟盘运行/信号日志"""
+    __tablename__ = "w20_momentum_live_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    date = Column(Date, index=True)
+    level = Column(String(16), default="INFO")
+    action = Column(String(32), nullable=False)
+    message = Column(String(1000))
+    payload = Column(JSON)
+
 # 创建所有表
 Base.metadata.create_all(engine)
 
@@ -639,6 +732,9 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_cache_source_updated ON invalid_symbol_cache(source, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:
