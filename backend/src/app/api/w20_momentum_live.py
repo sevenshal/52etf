@@ -1,8 +1,10 @@
 import logging
-from datetime import date, datetime
-from typing import Dict, List, Optional
+from datetime import date, datetime, time as dtime, timedelta
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+import pandas as pd
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 
@@ -21,7 +23,9 @@ from .w20_momentum_backtest import (
     DEFAULT_SYMBOLS,
     W20MomentumBacktestEngine,
     W20MomentumBacktestParams,
+    _build_price_frame,
     _get_quote_service,
+    _is_valid_price,
     _normalize_frequency,
     _parse_float_list,
     _parse_symbol_list,
@@ -29,6 +33,9 @@ from .w20_momentum_backtest import (
 
 router = APIRouter(prefix="/api/w20-momentum-live", tags=["W20 Momentum Live"])
 logger = logging.getLogger(__name__)
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+LIVE_EXECUTION_START_TIME = dtime(9, 30)
+LIVE_PRICE_SOURCE = "realtime_quote"
 
 
 class W20MomentumLiveConfigPayload(BaseModel):
@@ -178,6 +185,177 @@ def _build_backtest_params(config: W20MomentumLiveConfig) -> W20MomentumBacktest
     )
 
 
+def _parse_param_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _quote_local_datetime(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            timestamp = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if timestamp.tzinfo:
+        return timestamp.astimezone(CHINA_TZ)
+    return timestamp.replace(tzinfo=CHINA_TZ)
+
+
+def _load_existing_realtime_execution_overrides(
+    db: Session,
+    config: W20MomentumLiveConfig,
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    price_overrides: Dict[str, Dict[str, float]] = {}
+    source_overrides: Dict[str, Dict[str, str]] = {}
+    timestamp_overrides: Dict[str, Dict[str, str]] = {}
+    rows = (
+        db.query(W20MomentumLiveTrade)
+        .filter(
+            W20MomentumLiveTrade.config_id == config.id,
+            W20MomentumLiveTrade.price_source == LIVE_PRICE_SOURCE,
+        )
+        .all()
+    )
+    for row in rows:
+        if not row.date or not row.symbol or not _is_valid_price(row.open_price):
+            continue
+        date_key = row.date.isoformat()
+        price_overrides.setdefault(date_key, {})[row.symbol] = float(row.open_price)
+        source_overrides.setdefault(date_key, {})[row.symbol] = LIVE_PRICE_SOURCE
+        if row.quote_timestamp:
+            timestamp_overrides.setdefault(date_key, {})[row.symbol] = row.quote_timestamp.isoformat()
+    return price_overrides, source_overrides, timestamp_overrides
+
+
+def _merge_execution_override(
+    price_overrides: Dict[str, Dict[str, float]],
+    source_overrides: Dict[str, Dict[str, str]],
+    timestamp_overrides: Dict[str, Dict[str, str]],
+    date_key: str,
+    symbol: str,
+    price: float,
+    source: str,
+    quote_timestamp: Optional[datetime],
+    overwrite: bool = False,
+):
+    if not _is_valid_price(price):
+        return
+    if not overwrite and symbol in price_overrides.get(date_key, {}):
+        return
+    price_overrides.setdefault(date_key, {})[symbol] = float(price)
+    source_overrides.setdefault(date_key, {})[symbol] = source
+    if quote_timestamp:
+        timestamp_overrides.setdefault(date_key, {})[symbol] = quote_timestamp.isoformat()
+
+
+def _fetch_frames_for_params(quote_service, params: W20MomentumBacktestParams):
+    start_dt = _parse_param_date(params.start_date)
+    end_dt = _parse_param_date(params.end_date) if params.end_date else date.today()
+    fetch_start = start_dt - timedelta(days=max(60, params.window * 3))
+    universe_frames = {
+        symbol: _build_price_frame(quote_service, symbol, fetch_start, end_dt)
+        for symbol in params.symbols
+    }
+    benchmark_frames = {
+        symbol: _build_price_frame(quote_service, symbol, fetch_start, end_dt)
+        for symbol in params.benchmark_symbols
+    }
+    return universe_frames, benchmark_frames
+
+
+def _latest_frame_date_before(frames: Dict[str, pd.DataFrame], cutoff: date) -> Optional[date]:
+    candidates = []
+    for frame in frames.values():
+        if frame is None or frame.empty:
+            continue
+        candidates.extend([item for item in frame.index if item < cutoff])
+    return max(candidates) if candidates else None
+
+
+def _append_live_quote_row(frame: pd.DataFrame, live_date: date, quote: Dict) -> pd.DataFrame:
+    next_frame = frame.copy() if frame is not None else pd.DataFrame()
+    if not next_frame.empty:
+        next_frame = next_frame[next_frame.index < live_date].copy()
+    price = float(quote.get("price"))
+    next_frame.loc[live_date, ["open", "high", "low", "close", "volume", "turnover"]] = [
+        price,
+        price,
+        price,
+        price,
+        float(quote.get("volume") or 0),
+        float(quote.get("turnover") or 0),
+    ]
+    return next_frame.sort_index()
+
+
+def _prepare_live_execution_context(
+    quote_service,
+    params: W20MomentumBacktestParams,
+    price_overrides: Dict[str, Dict[str, float]],
+    source_overrides: Dict[str, Dict[str, str]],
+    timestamp_overrides: Dict[str, Dict[str, str]],
+):
+    all_symbols = list(dict.fromkeys((params.symbols or []) + (params.benchmark_symbols or [])))
+    quotes = quote_service.get_quote_batch(all_symbols) or []
+    usable_quotes: Dict[str, Dict] = {}
+    quote_dates = []
+    today_cn = datetime.now(CHINA_TZ).date()
+
+    for quote in quotes:
+        symbol = quote.get("symbol")
+        price = quote.get("price")
+        quote_dt = _quote_local_datetime(quote.get("timestamp"))
+        if not symbol or not quote_dt or not _is_valid_price(price):
+            continue
+        if quote_dt.date() != today_cn or quote_dt.time() < LIVE_EXECUTION_START_TIME:
+            continue
+        usable_quotes[symbol] = quote
+        quote_dates.append(quote_dt.date())
+
+    if not usable_quotes or not quote_dates:
+        return None, None, None
+
+    live_date = max(quote_dates)
+    universe_frames, benchmark_frames = _fetch_frames_for_params(quote_service, params)
+    signal_cutoff_date = _latest_frame_date_before(universe_frames, live_date)
+    if not signal_cutoff_date:
+        return None, None, None
+
+    live_date_key = live_date.isoformat()
+    for symbol, quote in usable_quotes.items():
+        quote_dt = _quote_local_datetime(quote.get("timestamp"))
+        _merge_execution_override(
+            price_overrides,
+            source_overrides,
+            timestamp_overrides,
+            live_date_key,
+            symbol,
+            float(quote.get("price")),
+            LIVE_PRICE_SOURCE,
+            quote_dt,
+            overwrite=False,
+        )
+
+    for symbol in params.symbols:
+        quote = usable_quotes.get(symbol)
+        if quote:
+            universe_frames[symbol] = _append_live_quote_row(universe_frames.get(symbol), live_date, quote)
+    for symbol in params.benchmark_symbols:
+        quote = usable_quotes.get(symbol)
+        if quote:
+            benchmark_frames[symbol] = _append_live_quote_row(benchmark_frames.get(symbol), live_date, quote)
+
+    return universe_frames, benchmark_frames, signal_cutoff_date
+
+
 def _replace_config_runtime_state(
     db: Session,
     config: W20MomentumLiveConfig,
@@ -222,6 +400,8 @@ def _replace_config_runtime_state(
             portfolio_value_after=item.get("portfolio_value_after"),
             symbol_market_value_after=item.get("symbol_market_value_after"),
             symbol_weight_pct_after=item.get("symbol_weight_pct_after"),
+            price_source=item.get("price_source"),
+            quote_timestamp=datetime.fromisoformat(item["quote_timestamp"]) if item.get("quote_timestamp") else None,
             target_symbols=item.get("target_symbols"),
             target_weights_pct=item.get("target_weights_pct"),
             created_at=now,
@@ -288,7 +468,24 @@ def _replace_config_runtime_state(
 def _sync_config_now(db: Session, config: W20MomentumLiveConfig, trigger_source: str = "manual") -> Dict:
     quote_service = _get_quote_service(config.account_id)
     params = _build_backtest_params(config)
-    result = W20MomentumBacktestEngine(quote_service, params).run()
+    price_overrides, source_overrides, timestamp_overrides = _load_existing_realtime_execution_overrides(db, config)
+    universe_frames, benchmark_frames, signal_cutoff_date = _prepare_live_execution_context(
+        quote_service,
+        params,
+        price_overrides,
+        source_overrides,
+        timestamp_overrides,
+    )
+    result = W20MomentumBacktestEngine(
+        quote_service,
+        params,
+        universe_frames=universe_frames,
+        benchmark_frames=benchmark_frames,
+        execution_price_overrides=price_overrides,
+        execution_price_source_overrides=source_overrides,
+        execution_quote_timestamp_overrides=timestamp_overrides,
+        signal_cutoff_date=signal_cutoff_date,
+    ).run()
     _replace_config_runtime_state(db, config, result, trigger_source=trigger_source)
     return result
 
@@ -620,6 +817,8 @@ def get_w20_momentum_live_detail(
                 "portfolio_value_after": item.portfolio_value_after,
                 "symbol_market_value_after": item.symbol_market_value_after,
                 "symbol_weight_pct_after": item.symbol_weight_pct_after,
+                "price_source": item.price_source,
+                "quote_timestamp": item.quote_timestamp.isoformat() if item.quote_timestamp else None,
                 "target_symbols": item.target_symbols,
                 "target_weights_pct": item.target_weights_pct,
             }

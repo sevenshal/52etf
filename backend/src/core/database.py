@@ -689,6 +689,8 @@ class W20MomentumLiveTrade(Base):
     portfolio_value_after = Column(Float)
     symbol_market_value_after = Column(Float)
     symbol_weight_pct_after = Column(Float)
+    price_source = Column(String(32))
+    quote_timestamp = Column(DateTime)
     target_symbols = Column(JSON)
     target_weights_pct = Column(JSON)
     created_at = Column(DateTime, default=datetime.now)
@@ -750,6 +752,10 @@ def ensure_table_columns():
             "evc_password": "ALTER TABLE evc_account_configs ADD COLUMN evc_password VARCHAR",
             "evc_cookie": "ALTER TABLE evc_account_configs ADD COLUMN evc_cookie VARCHAR",
             "cookie_expires_at": "ALTER TABLE evc_account_configs ADD COLUMN cookie_expires_at DATETIME",
+        },
+        "w20_momentum_live_trades": {
+            "price_source": "ALTER TABLE w20_momentum_live_trades ADD COLUMN price_source VARCHAR(32)",
+            "quote_timestamp": "ALTER TABLE w20_momentum_live_trades ADD COLUMN quote_timestamp DATETIME",
         },
     }
 

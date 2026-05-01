@@ -825,6 +825,7 @@ def _simulate_equal_weight_benchmark(
     lot_size: int,
     commission_pct: float,
     slippage_pct: float,
+    signal_cutoff_date: Optional[date] = None,
 ) -> Tuple[List[Dict], Dict]:
     if close_matrix.empty:
         return [], {"trade_count": 0, "buy_trade_count": 0, "sell_trade_count": 0}
@@ -905,6 +906,8 @@ def _simulate_equal_weight_benchmark(
         if current_date >= start_date:
             curve.append({"date": current_date.isoformat(), "value": _round_or_none(portfolio_value, 4)})
 
+        if signal_cutoff_date and current_date > signal_cutoff_date:
+            continue
         if idx >= len(dates) - 1:
             continue
 
@@ -1079,12 +1082,20 @@ class W20MomentumBacktestEngine:
         progress_callback: Optional[Callable[[int, str], None]] = None,
         universe_frames: Optional[Dict[str, pd.DataFrame]] = None,
         benchmark_frames: Optional[Dict[str, pd.DataFrame]] = None,
+        execution_price_overrides: Optional[Dict[str, Dict[str, float]]] = None,
+        execution_price_source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        execution_quote_timestamp_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        signal_cutoff_date: Optional[date] = None,
     ):
         self.quote_service = quote_service
         self.params = params
         self.progress_callback = progress_callback
         self.universe_frames = universe_frames
         self.benchmark_frames = benchmark_frames
+        self.execution_price_overrides = execution_price_overrides or {}
+        self.execution_price_source_overrides = execution_price_source_overrides or {}
+        self.execution_quote_timestamp_overrides = execution_quote_timestamp_overrides or {}
+        self.signal_cutoff_date = signal_cutoff_date
 
     def _report_progress(self, progress: int, message: str):
         if self.progress_callback:
@@ -1153,6 +1164,10 @@ class W20MomentumBacktestEngine:
                     last_close_prices[symbol] = close_price
                 current_close_prices[symbol] = close_price if close_price > 0 else float(last_close_prices.get(symbol, 0.0))
                 current_open_prices[symbol] = open_price
+            current_date_key = current_date.isoformat()
+            execution_price_override_map = self.execution_price_overrides.get(current_date_key, {})
+            execution_price_source_map = self.execution_price_source_overrides.get(current_date_key, {})
+            execution_quote_timestamp_map = self.execution_quote_timestamp_overrides.get(current_date_key, {})
 
             # execute orders at today's open
             if pending_orders:
@@ -1163,7 +1178,14 @@ class W20MomentumBacktestEngine:
                     quantity = int(order["quantity"])
                     if quantity <= 0:
                         continue
-                    open_price = _price_or_zero(current_open_prices.get(symbol, 0.0))
+                    override_price = execution_price_override_map.get(symbol)
+                    price_source = execution_price_source_map.get(symbol)
+                    quote_timestamp = execution_quote_timestamp_map.get(symbol)
+                    open_price = _price_or_zero(override_price)
+                    if open_price <= 0:
+                        price_source = None
+                        quote_timestamp = None
+                        open_price = _price_or_zero(current_open_prices.get(symbol, 0.0))
                     if open_price <= 0:
                         continue
 
@@ -1192,7 +1214,8 @@ class W20MomentumBacktestEngine:
 
                     total_market_value_after = sum(
                         int(positions.get(position_symbol, 0)) * (
-                            _price_or_zero(current_open_prices.get(position_symbol, 0.0))
+                            _price_or_zero(execution_price_override_map.get(position_symbol))
+                            or _price_or_zero(current_open_prices.get(position_symbol, 0.0))
                             or _price_or_zero(current_close_prices.get(position_symbol, 0.0))
                         )
                         for position_symbol in positions
@@ -1221,6 +1244,10 @@ class W20MomentumBacktestEngine:
                             "symbol_weight_pct_after": _round_or_none(symbol_weight_pct_after, 4),
                             "portfolio_value_after": _round_or_none(portfolio_value_after, 4),
                         }
+                        if price_source:
+                            trade_record["price_source"] = price_source
+                        if quote_timestamp:
+                            trade_record["quote_timestamp"] = quote_timestamp
                         for metadata_key in (
                             "reason_detail",
                             "trigger_type",
@@ -1264,6 +1291,10 @@ class W20MomentumBacktestEngine:
             should_rebalance_today = _is_rebalance_day(dates, idx, params.rebalance_frequency)
             if current_date < start_dt:
                 self._report_progress(25 + int(65 * (idx + 1) / max(1, total_steps)), f"预热中 {idx + 1}/{total_steps}")
+                last_close_prices = current_close_prices
+                continue
+            if self.signal_cutoff_date and current_date > self.signal_cutoff_date:
+                self._report_progress(25 + int(65 * (idx + 1) / max(1, total_steps)), f"实时执行日 {idx + 1}/{total_steps}")
                 last_close_prices = current_close_prices
                 continue
 
@@ -1452,6 +1483,7 @@ class W20MomentumBacktestEngine:
             lot_size=params.lot_size,
             commission_pct=params.commission_pct,
             slippage_pct=params.slippage_pct,
+            signal_cutoff_date=self.signal_cutoff_date,
         )
         equal_weight_metrics = _compute_benchmark_metrics_from_curve(equal_weight_curve)
         equal_weight_value_map = {item["date"]: item["value"] for item in equal_weight_curve}
