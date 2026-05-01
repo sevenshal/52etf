@@ -524,6 +524,14 @@ const W20MomentumLive = () => {
     },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 180, render: formatSymbolLabel },
     { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatNumber(value, 4) },
+    {
+      title: '价格来源',
+      dataIndex: 'price_source',
+      key: 'price_source',
+      width: 120,
+      render: value => <Tag color={value === 'realtime_quote' ? 'blue' : 'default'}>{value === 'realtime_quote' ? '实时价' : '日K'}</Tag>,
+    },
+    { title: '行情时间', dataIndex: 'quote_timestamp', key: 'quote_timestamp', width: 170, render: formatDateTime },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatMoney(value, 0) },
     { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatMoney(value, 2) },
     { title: '佣金', dataIndex: 'commission', key: 'commission', width: 90, render: value => formatMoney(value, 2) },
@@ -780,7 +788,7 @@ const W20MomentumLive = () => {
         columns={tradeColumns}
         dataSource={detail?.trades || []}
         pagination={{ pageSize: 10 }}
-        scroll={{ x: 1900 }}
+        scroll={{ x: 2200 }}
       />
     </Space>
   );
