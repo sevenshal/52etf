@@ -1112,7 +1112,7 @@ class W20MomentumBacktestEngine:
         all_dates = [d for d in all_dates if fetch_start <= d <= end_dt]
         if not all_dates:
             raise ValueError("标的池在请求区间内没有可用交易日")
-        if len([d for d in all_dates if d >= start_dt]) < 2:
+        if len([d for d in all_dates if d >= start_dt]) < 1:
             raise ValueError("回测区间内可用交易日不足")
 
         close_matrix = pd.DataFrame({symbol: universe_frames[symbol].reindex(all_dates)["close"].astype(float) for symbol in params.symbols}, index=all_dates)
