@@ -385,23 +385,17 @@ const SoxlFearStrategy = () => {
       title: '操作',
       key: 'action',
       fixed: 'right',
-      width: 280,
+      width: 110,
       render: (_, record) => (
         <Space size={8}>
-          <Button icon={<EditOutlined />} size="small" onClick={renderActionButton(() => openConfig(record))}>
-            编辑
-          </Button>
-          <Button icon={<HistoryOutlined />} size="small" onClick={renderActionButton(() => openConfig(record, 'logs'))}>
-            日志
-          </Button>
+          <Button icon={<EditOutlined />} size="small" onClick={renderActionButton(() => openConfig(record))}/>
+          <Button icon={<HistoryOutlined />} size="small" onClick={renderActionButton(() => openConfig(record, 'logs'))}/> 
           <Button
             icon={<PlayCircleOutlined />}
             size="small"
             loading={manualLoadingId === record.id}
             onClick={renderActionButton(() => handleManualRun(record))}
-          >
-            执行
-          </Button>
+          />
           <Popconfirm
             title="删除配置"
             description="确认删除这条策略配置和对应日志吗？"
