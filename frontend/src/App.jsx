@@ -29,6 +29,7 @@ import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import SoxlFearStrategy from './pages/SoxlFearStrategy';
+import W20MomentumBacktest from './pages/W20MomentumBacktest';
 
 function App() {
   return (
@@ -62,6 +63,7 @@ function App() {
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
           <Route path="/soxl-fear-strategy" element={<SoxlFearStrategy />} />
+          <Route path="/w20-momentum-backtest" element={<W20MomentumBacktest />} />
         </Route>
       </Routes>
     </AccountProvider>
