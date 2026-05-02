@@ -142,7 +142,7 @@ class BarchartService:
     def get_options_expirations(
         self,
         symbol: str,
-        page_limit: int = 100,
+        page_limit: int = 1000,
         sleep_seconds: float = 0.2,
     ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
@@ -163,7 +163,7 @@ class BarchartService:
 
         return rows
 
-    def get_options_expirations_page(self, symbol: str, page: int = 1, limit: int = 100) -> Dict[str, Any]:
+    def get_options_expirations_page(self, symbol: str, page: int = 1, limit: int = 1000) -> Dict[str, Any]:
         return self._get_json(
             url=OPTIONS_EXPIRATIONS_URL,
             symbol=symbol,

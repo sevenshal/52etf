@@ -22,12 +22,19 @@ from .fear_greed_clone_service import (
     FearGreedCloneCalculator,
     FearGreedCloneError,
 )
+from .barchat import BarchartService
 from .evc import EVCService
 from .longport import LongPortService
 from .market import MarketService
 from .quote import QuoteService
 from ..database import ETFHolding as DBETFHolding
-from ..database import ETFFearGreedCloneHistory, ETFFearGreedCloneHolding, ETFPutCallRatio, Session
+from ..database import (
+    ETFFearGreedCloneHistory,
+    ETFFearGreedCloneHolding,
+    ETFOptionExpiration,
+    ETFPutCallRatio,
+    Session,
+)
 from ..models.etf import ETFHolding
 from ..utils import normalize_us_equity_symbol
 from ...robot.etf.ishares import ISharesETFFetcher
@@ -470,9 +477,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "components use LongPort realtime quotes."
             ),
             (
-                "Put/call uses EVC's current option snapshot when available; "
-                "junk-bond-demand is daily data and is carried forward from "
-                "the latest SQLite backfill row."
+                "Put/call uses Barchart's live expiration snapshot first, then "
+                "today's local Barchart expiration snapshot if the live request "
+                "fails; junk-bond-demand is daily data and is carried forward "
+                "from the latest SQLite backfill row."
             ),
             (
                 "Current-row holdings use the latest DB holdings snapshot on or before "
@@ -1334,14 +1342,25 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "market_volatility": "LongPort realtime quote",
             "safe_haven_demand": "LongPort realtime quote",
         }
-        realtime_put_call = self._fetch_realtime_evc_put_call_raw(
+        (
+            realtime_put_call,
+            put_call_snapshot_date,
+            put_call_source,
+        ) = self._fetch_realtime_barchart_put_call_raw(
             etf_symbol=etf_symbol,
             current_date=current_date,
             previous_trading_day=previous_trading_day,
         )
         if pd.notna(realtime_put_call):
             raw.loc[current_timestamp, "put_call_options"] = realtime_put_call
-            raw_freshness["put_call_options"] = "EVC current option put/call snapshot"
+            snapshot_detail = (
+                f" ({put_call_snapshot_date.isoformat()})"
+                if put_call_snapshot_date
+                else ""
+            )
+            raw_freshness["put_call_options"] = (
+                f"{put_call_source or 'Barchart expiration snapshot'}{snapshot_detail}"
+            )
         if latest_daily:
             raw.loc[current_timestamp, "junk_bond_demand"] = latest_daily.get("junk_bond_demand")
             raw_freshness["junk_bond_demand"] = "latest stored FRED credit-spread component"
@@ -1354,29 +1373,31 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         price_payload = self._realtime_price_payload(etf_prices.loc[current_timestamp], quote_map.get(etf_symbol))
         return raw_values, price_payload, raw_freshness
 
-    def _fetch_realtime_evc_put_call_raw(
+    def _fetch_realtime_barchart_put_call_raw(
         self,
         etf_symbol: str,
         current_date: date,
         previous_trading_day: date,
-    ) -> float:
+    ) -> Tuple[float, Optional[date], Optional[str]]:
         try:
-            ticker = self._nasdaq_symbol(etf_symbol)
-            snapshot = EVCService().current_option_put_call(ticker)
-            if not snapshot or snapshot.put_call_vol is None or not snapshot.date:
-                return np.nan
-            if snapshot.date != current_date:
-                logging.getLogger(__name__).info(
-                    "Skip EVC current option put/call for %s because snapshot date %s != market date %s",
-                    etf_symbol,
-                    snapshot.date,
-                    current_date,
-                )
-                return np.nan
+            snapshot = self._fetch_live_barchart_expiration_put_call_snapshot(etf_symbol)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to fetch live Barchart option expiration snapshot for %s: %s",
+                etf_symbol,
+                exc,
+            )
+            snapshot = self._today_db_barchart_expiration_put_call_snapshot(etf_symbol)
 
-            current_ratio = float(snapshot.put_call_vol)
-            if not np.isfinite(current_ratio):
-                return np.nan
+        try:
+            if not snapshot:
+                return np.nan, None, None
+
+            current_ratio = snapshot.get("put_call_volume_ratio")
+            snapshot_date = snapshot.get("snapshot_date")
+            source = snapshot.get("source")
+            if current_ratio is None or not np.isfinite(float(current_ratio)):
+                return np.nan, snapshot_date, source
 
             history = self._fetch_db_put_call_ratio(
                 etf_symbol,
@@ -1388,17 +1409,96 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 for value in history.sort_index().tail(4).tolist()
                 if np.isfinite(float(value))
             ]
-            recent_values.append(current_ratio)
+            recent_values.append(float(current_ratio))
             if len(recent_values) < 3:
-                return np.nan
-            return -float(np.mean(recent_values))
+                return np.nan, snapshot_date, source
+            return -float(np.mean(recent_values)), snapshot_date, source
         except Exception as exc:
             logging.getLogger(__name__).warning(
-                "Failed to build realtime EVC option put/call raw for %s: %s",
+                "Failed to build realtime Barchart option put/call raw for %s: %s",
                 etf_symbol,
                 exc,
             )
-            return np.nan
+            return np.nan, None, None
+
+    def _fetch_live_barchart_expiration_put_call_snapshot(
+        self,
+        etf_symbol: str,
+    ) -> Optional[Dict[str, Any]]:
+        ticker = self._nasdaq_symbol(etf_symbol)
+        barchart = BarchartService(timeout=self.timeout)
+        try:
+            rows = barchart.get_options_expirations(
+                ticker,
+                page_limit=1000,
+                sleep_seconds=0,
+            )
+            return self._build_barchart_expiration_put_call_snapshot(
+                etf_symbol=etf_symbol,
+                rows=rows,
+                snapshot_date=date.today(),
+                source="Barchart live expiration snapshot",
+            )
+        finally:
+            barchart.close()
+
+    def _today_db_barchart_expiration_put_call_snapshot(
+        self,
+        etf_symbol: str,
+    ) -> Optional[Dict[str, Any]]:
+        ticker = self._nasdaq_symbol(etf_symbol)
+        today = date.today()
+        db = Session()
+        try:
+            rows = (
+                db.query(ETFOptionExpiration)
+                .filter(
+                    ETFOptionExpiration.symbol == ticker,
+                    ETFOptionExpiration.snapshot_date == today,
+                )
+                .all()
+            )
+            return self._build_barchart_expiration_put_call_snapshot(
+                etf_symbol=etf_symbol,
+                rows=rows,
+                snapshot_date=today,
+                source="today's local Barchart expiration snapshot",
+            )
+        finally:
+            Session.remove()
+
+    def _build_barchart_expiration_put_call_snapshot(
+        self,
+        etf_symbol: str,
+        rows: List[Any],
+        snapshot_date: date,
+        source: str,
+    ) -> Optional[Dict[str, Any]]:
+        put_volume = 0.0
+        call_volume = 0.0
+        total_volume = 0.0
+        row_count = 0
+
+        for row in rows or []:
+            getter = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
+            put_volume += self._number(getter("putVolume", getter("put_volume")), default=0.0)
+            call_volume += self._number(getter("callVolume", getter("call_volume")), default=0.0)
+            total_volume += self._number(getter("totalVolume", getter("total_volume")), default=0.0)
+            row_count += 1
+
+        if row_count == 0 or call_volume <= 0:
+            return None
+
+        return {
+            "symbol": etf_symbol,
+            "source": source,
+            "snapshot_date": snapshot_date,
+            "expiration_count": row_count,
+            "put_volume": put_volume,
+            "call_volume": call_volume,
+            "total_volume": total_volume,
+            "put_call_volume_ratio": put_volume / call_volume,
+        }
 
     def _latest_stored_component_raw(self, etf_symbol: str) -> Dict[str, Optional[float]]:
         db = Session()

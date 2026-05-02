@@ -102,7 +102,8 @@ async def get_etf_fear_greed_clone_realtime(
 
     这个接口使用 SQLite 中已回跑的日频组件作为评分基准，再用 LongPort
     实时行情更新 ETF、TLT 和 DB 持仓相关的价格驱动组件。期权 put/call
-    与信用利差仍是日频数据，会沿用最近已入库值并在响应中标记。
+    优先使用 Barchart 实时到期日快照接口，接口失败时才读本地当天
+    Barchart 快照；信用利差仍是日频数据，会沿用最近已入库值并标记。
     """
     try:
         calculator = ETFFearGreedCloneCalculator()
