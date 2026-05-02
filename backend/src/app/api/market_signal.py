@@ -59,6 +59,8 @@ REALTIME_PRICE_SOURCE = "realtime_quote"
 DEFAULT_SIGNAL_SYMBOL_LIMIT = 700
 DEFAULT_AUTO_SYNC_TIME = "15:58"
 AUTO_SYNC_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+US_STOCK_SYMBOL_PATTERN = re.compile(r"^[A-Z]{1,5}(?:[.-][A-Z])?$")
+NON_STOCK_HOLDING_NAME_KEYWORDS = ("CASH", "EQUIVALENT", "FUTURE", "FUTURES", "TREASURY BILL", "T-BILL")
 BACKTEST_JOBS: Dict[str, Dict] = {}
 BACKTEST_JOBS_LOCK = threading.Lock()
 
@@ -107,6 +109,24 @@ def _normalize_symbol(symbol: str) -> str:
     if "." not in raw and raw.isalpha():
         return f"{raw}.US"
     return raw
+
+
+def _is_likely_us_stock_holding(symbol: str, name: Optional[str] = None, asset_class: Optional[str] = None) -> bool:
+    if str(asset_class or "").strip().upper() != "EQUITY":
+        return False
+
+    normalized = _normalize_symbol(symbol)
+    if not normalized.endswith(".US"):
+        return False
+
+    base_symbol = normalized[:-3]
+    if base_symbol in {"USD", "CASH"}:
+        return False
+    if not US_STOCK_SYMBOL_PATTERN.match(base_symbol):
+        return False
+
+    upper_name = str(name or "").upper()
+    return not any(keyword in upper_name for keyword in NON_STOCK_HOLDING_NAME_KEYWORDS)
 
 
 def _parse_symbol_list(value) -> List[str]:
@@ -233,7 +253,11 @@ def _get_default_symbols(db: ORMSession, limit: int = 50) -> List[str]:
     return DEFAULT_SIGNAL_SYMBOLS[:limit]
 
 
-def _get_latest_etf_equity_symbols(db: ORMSession, etf_symbol: str) -> Tuple[Optional[date], List[str]]:
+def _get_latest_etf_equity_symbols(
+    db: ORMSession,
+    etf_symbol: str,
+    stock_only: bool = True,
+) -> Tuple[Optional[date], List[str]]:
     latest_date = (
         db.query(func.max(ETFHolding.date))
         .filter(ETFHolding.etf_symbol == etf_symbol)
@@ -243,7 +267,7 @@ def _get_latest_etf_equity_symbols(db: ORMSession, etf_symbol: str) -> Tuple[Opt
         return None, []
 
     rows = (
-        db.query(ETFHolding.symbol, ETFHolding.weight)
+        db.query(ETFHolding.symbol, ETFHolding.name, ETFHolding.asset_class, ETFHolding.weight)
         .filter(
             ETFHolding.etf_symbol == etf_symbol,
             ETFHolding.date == latest_date,
@@ -252,13 +276,17 @@ def _get_latest_etf_equity_symbols(db: ORMSession, etf_symbol: str) -> Tuple[Opt
         .order_by(ETFHolding.weight.desc())
         .all()
     )
-    symbols = [_normalize_symbol(row[0]) for row in rows if row[0]]
+    symbols = [
+        _normalize_symbol(row[0])
+        for row in rows
+        if row[0] and (not stock_only or _is_likely_us_stock_holding(row[0], row[1], row[2]))
+    ]
     return latest_date, list(dict.fromkeys([item for item in symbols if item and item.endswith(".US")]))
 
 
-def _get_spy_qqq_intersection_symbols(db: ORMSession) -> List[str]:
-    spy_date, spy_symbols = _get_latest_etf_equity_symbols(db, "SPY.US")
-    qqq_date, qqq_symbols = _get_latest_etf_equity_symbols(db, "QQQ.US")
+def _get_spy_qqq_intersection_symbols(db: ORMSession, stock_only: bool = True) -> List[str]:
+    spy_date, spy_symbols = _get_latest_etf_equity_symbols(db, "SPY.US", stock_only=stock_only)
+    qqq_date, qqq_symbols = _get_latest_etf_equity_symbols(db, "QQQ.US", stock_only=stock_only)
     if not spy_date or not qqq_date:
         return []
 
@@ -266,9 +294,9 @@ def _get_spy_qqq_intersection_symbols(db: ORMSession) -> List[str]:
     return [symbol for symbol in qqq_symbols if symbol in spy_set]
 
 
-def _get_spy_qqq_union_symbols(db: ORMSession) -> List[str]:
-    spy_date, spy_symbols = _get_latest_etf_equity_symbols(db, "SPY.US")
-    qqq_date, qqq_symbols = _get_latest_etf_equity_symbols(db, "QQQ.US")
+def _get_spy_qqq_union_symbols(db: ORMSession, stock_only: bool = True) -> List[str]:
+    spy_date, spy_symbols = _get_latest_etf_equity_symbols(db, "SPY.US", stock_only=stock_only)
+    qqq_date, qqq_symbols = _get_latest_etf_equity_symbols(db, "QQQ.US", stock_only=stock_only)
     if not spy_date and not qqq_date:
         return []
 
@@ -327,7 +355,8 @@ def _ensure_default_configs(db: ORMSession, account_id: str) -> None:
     legacy_default_pools = [
         DEFAULT_SIGNAL_SYMBOLS,
         _get_stock_evc_default_symbols(db, limit=120),
-        _get_spy_qqq_intersection_symbols(db),
+        _get_spy_qqq_intersection_symbols(db, stock_only=False),
+        _get_spy_qqq_union_symbols(db, stock_only=False),
     ]
     existing = {
         row[0]
@@ -1185,7 +1214,7 @@ def get_market_signal_default_symbols(
     if symbols:
         return {
             "symbols": symbols,
-            "source": "SPY.US ∪ QQQ.US",
+            "source": "SPY.US ∪ QQQ.US 股票持仓",
             "spy_holding_date": spy_date.isoformat() if spy_date else None,
             "qqq_holding_date": qqq_date.isoformat() if qqq_date else None,
             "count": len(symbols),

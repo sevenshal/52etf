@@ -71,11 +71,13 @@ class QQQDataFetcher(ETFDataFetcher):
                         self.logger.warning("跳过无 ticker 的 QQQ 持仓行: %s", holding_data)
                         continue
 
+                    asset_class = self._map_asset_class(holding_data)
+                    symbol = f"{ticker}.US" if asset_class == "Equity" else ticker
                     holdings.append(
                         ETFHolding(
-                            symbol=f"{ticker}.US",
+                            symbol=symbol,
                             name=issuer_name,
-                            asset_class=self._map_asset_class(holding_data),
+                            asset_class=asset_class,
                             shares=shares,
                             weight=weight,
                             # Invesco 这个接口未直接返回持仓市值和价格，交给上层分析阶段补齐。
@@ -113,9 +115,21 @@ class QQQDataFetcher(ETFDataFetcher):
             return response
 
     def _map_asset_class(self, holding_data: dict) -> str:
+        ticker = str(holding_data.get("ticker") or "").strip().upper()
+        issuer_name = str(holding_data.get("issuerName") or "").strip()
+        issuer_name_lower = issuer_name.lower()
         security_type_code = str(holding_data.get("securityTypeCode") or "").upper()
         security_type_name = str(holding_data.get("securityTypeName") or "").lower()
 
+        if ticker in {"USD", "CASH"} or "cash" in issuer_name_lower or "equivalent" in issuer_name_lower:
+            return "Cash"
+        if (
+            security_type_code in {"FUT", "FUTURE"}
+            or any(char.isdigit() or char == "-" for char in ticker)
+            or "future" in issuer_name_lower
+            or "future" in security_type_name
+        ):
+            return "Other"
         if security_type_code in {"COM", "ADR", "ETF", "REIT"}:
             return "Equity"
         if security_type_code in {"CASH", "CUR"} or "cash" in security_type_name:
