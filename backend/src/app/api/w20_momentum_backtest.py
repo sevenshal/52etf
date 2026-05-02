@@ -1537,6 +1537,16 @@ class W20MomentumBacktestEngine:
             symbol_trades = [item for item in filtered_trades if item.get("symbol") == symbol]
             buy_trades = [item for item in symbol_trades if item.get("action") == "BUY"]
             sell_trades = [item for item in symbol_trades if item.get("action") == "SELL"]
+            buy_cost = sum(
+                float(item.get("amount") or 0.0) + float(item.get("commission") or 0.0)
+                for item in buy_trades
+            )
+            sell_proceeds = sum(
+                float(item.get("amount") or 0.0) - float(item.get("commission") or 0.0)
+                for item in sell_trades
+            )
+            ending_market_value = int(positions.get(symbol, 0)) * float(last_close_prices.get(symbol, 0.0) or 0.0)
+            profit_amount = sell_proceeds + ending_market_value - buy_cost
             eligible_dates = [
                 current_date
                 for current_date in dates
@@ -1553,6 +1563,7 @@ class W20MomentumBacktestEngine:
                     "buy_count": len(buy_trades),
                     "sell_count": len(sell_trades),
                     "trade_count": len(symbol_trades),
+                    "profit_amount": _round_or_none(profit_amount, 4),
                 }
             )
 
