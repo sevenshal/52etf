@@ -1,23 +1,22 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
 import {
   Alert,
   Button,
-  Card,
   DatePicker,
-  Empty,
-  List,
   Modal,
   Space,
-  Spin,
   Switch,
+  Table,
   TimePicker,
+  Tooltip,
   Typography,
   message,
   Tag,
 } from 'antd';
 import {
   ClockCircleOutlined,
+  ExpandAltOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SaveOutlined,
@@ -25,6 +24,7 @@ import {
 import request from '../utils/request';
 
 const { Title, Text } = Typography;
+const RESULT_PREVIEW_LENGTH = 96;
 
 const parseTimeValue = (time) => {
   if (!time) {
@@ -41,6 +41,17 @@ const formatDateTime = (value) => {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss');
 };
 
+const getScheduleSortValue = (time) => {
+  if (!time || typeof time !== 'string') {
+    return Number.POSITIVE_INFINITY;
+  }
+  const [hour, minute] = time.split(':').map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return hour * 60 + minute;
+};
+
 const buildStatusTag = (task) => {
   if (task.is_running) {
     return <Tag color="processing">执行中</Tag>;
@@ -52,6 +63,85 @@ const buildStatusTag = (task) => {
     return <Tag color="error">最近失败</Tag>;
   }
   return <Tag>未执行</Tag>;
+};
+
+const getMessagePreview = (messageText) => {
+  if (!messageText || messageText.length <= RESULT_PREVIEW_LENGTH) {
+    return messageText;
+  }
+  return `${messageText.slice(0, RESULT_PREVIEW_LENGTH)}...`;
+};
+
+const showFullResultMessage = (task) => {
+  Modal.info({
+    title: `${task.name}完整执行结果`,
+    width: 820,
+    okText: '关闭',
+    content: (
+      <pre
+        style={{
+          margin: 0,
+          maxHeight: '60vh',
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          fontSize: 12,
+          lineHeight: 1.6,
+        }}
+      >
+        {task.last_run_message}
+      </pre>
+    ),
+  });
+};
+
+const TaskResultMessage = ({ task }) => {
+  const messageText = task.last_run_message;
+  if (!messageText) {
+    return null;
+  }
+
+  const isLong = messageText.length > RESULT_PREVIEW_LENGTH;
+  const content = (
+    <Text
+      type={task.last_run_status === 'FAILED' ? 'danger' : 'secondary'}
+      style={{
+        cursor: isLong ? 'pointer' : 'default',
+        wordBreak: 'break-word',
+        lineHeight: 1.6,
+      }}
+      onClick={() => {
+        if (isLong) {
+          showFullResultMessage(task);
+        }
+      }}
+    >
+      结果：{getMessagePreview(messageText)}
+    </Text>
+  );
+
+  return (
+    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      {isLong ? (
+        <Tooltip title={messageText} overlayStyle={{ maxWidth: 720 }}>
+          {content}
+        </Tooltip>
+      ) : (
+        content
+      )}
+      {isLong ? (
+        <Button
+          type="link"
+          size="small"
+          icon={<ExpandAltOutlined />}
+          style={{ padding: 0, height: 20, alignSelf: 'flex-start' }}
+          onClick={() => showFullResultMessage(task)}
+        >
+          查看完整结果
+        </Button>
+      ) : null}
+    </Space>
+  );
 };
 
 const ScheduledTasks = () => {
@@ -142,115 +232,183 @@ const ScheduledTasks = () => {
     setRunStartDate(dayjs('2023-12-08'));
   };
 
-  return (
-    <div style={{ padding: '24px' }}>
-      <Card
-        title={
-          <Space direction="vertical" size={0}>
-            <Title level={4} style={{ margin: 0 }}>定时任务</Title>
-            <Text type="secondary">统一管理系统级定时任务，时间精确到时分。</Text>
+  const sortedTasks = useMemo(() => {
+    return [...tasks].sort((left, right) => {
+      const leftTime = getScheduleSortValue(left.schedule_time);
+      const rightTime = getScheduleSortValue(right.schedule_time);
+      if (leftTime !== rightTime) {
+        return leftTime - rightTime;
+      }
+      const leftOrder = Number.isFinite(left.sort_order) ? left.sort_order : Number.MAX_SAFE_INTEGER;
+      const rightOrder = Number.isFinite(right.sort_order) ? right.sort_order : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      return String(left.name || '').localeCompare(String(right.name || ''), 'zh-Hans-CN');
+    });
+  }, [tasks]);
+
+  const columns = [
+    {
+      title: '任务',
+      dataIndex: 'name',
+      width: 280,
+      render: (_, task) => (
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Space size={8} wrap>
+            <Text strong>{task.name}</Text>
+            {buildStatusTag(task)}
           </Space>
-        }
-        extra={
-          <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()}>
-            刷新
-          </Button>
-        }
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="任务按服务器本地时间执行。修改保存后会立即重载调度；服务启动时只会补执行当天未执行且已错过计划时间的任务。"
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }}>
+            {task.description}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 82,
+      align: 'center',
+      render: (_, task) => (
+        <Switch
+          checked={task.enabled}
+          onChange={(checked) => updateTaskField(task.task_key, { enabled: checked })}
         />
-
-        <Spin spinning={loading}>
-          {tasks.length === 0 ? (
-            <Empty description="暂无定时任务" />
-          ) : (
-            <List
-              grid={{ gutter: 16, xs: 1, sm: 1, md: 2, lg: 2, xl: 2 }}
-              dataSource={tasks}
-              renderItem={(task) => (
-                <List.Item key={task.task_key}>
-                  <Card
-                    size="small"
-                    title={
-                      <Space>
-                        <span>{task.name}</span>
-                        {buildStatusTag(task)}
-                      </Space>
-                    }
-                  >
-                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                      <Text type="secondary">{task.description}</Text>
-
-                      <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                        <Text>启用任务</Text>
-                        <Switch
-                          checked={task.enabled}
-                          onChange={(checked) => updateTaskField(task.task_key, { enabled: checked })}
-                        />
-                      </Space>
-
-                      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
-                        <Space>
-                          <ClockCircleOutlined />
-                          <Text>执行时间</Text>
-                        </Space>
-                        <TimePicker
-                          value={parseTimeValue(task.schedule_time)}
-                          format="HH:mm"
-                          minuteStep={1}
-                          allowClear={false}
-                          onChange={(value) =>
-                            updateTaskField(task.task_key, {
-                              schedule_time: value ? value.format('HH:mm') : task.schedule_time,
-                            })
-                          }
-                        />
-                      </Space>
-
-                      <Space direction="vertical" size={4}>
-                        <Text type="secondary">下次执行：{task.next_run_at ? formatDateTime(task.next_run_at) : '未安排'}</Text>
-                        <Text type="secondary">最近开始：{formatDateTime(task.last_run_started_at)}</Text>
-                        <Text type="secondary">最近结束：{formatDateTime(task.last_run_finished_at)}</Text>
-                        <Text type="secondary">
-                          最近来源：{task.last_trigger_source || '暂无'}
-                          {typeof task.last_duration_seconds === 'number' ? ` · ${task.last_duration_seconds.toFixed(3)}s` : ''}
-                        </Text>
-                        {task.last_run_message ? (
-                          <Text type={task.last_run_status === 'FAILED' ? 'danger' : 'secondary'}>
-                            结果：{task.last_run_message}
-                          </Text>
-                        ) : null}
-                      </Space>
-
-                      <Space wrap>
-                        <Button
-                          type="primary"
-                          icon={<SaveOutlined />}
-                          loading={savingTaskKey === task.task_key}
-                          onClick={() => handleSave(task)}
-                        >
-                          保存配置
-                        </Button>
-                        <Button
-                          icon={<PlayCircleOutlined />}
-                          loading={runningTaskKey === task.task_key}
-                          onClick={() => handleRunButtonClick(task)}
-                        >
-                          立即执行一次
-                        </Button>
-                      </Space>
-                    </Space>
-                  </Card>
-                </List.Item>
-              )}
+      ),
+    },
+    {
+      title: '执行时间',
+      dataIndex: 'schedule_time',
+      width: 132,
+      render: (_, task) => (
+        <Space size={8} align="center">
+          <ClockCircleOutlined />
+          <TimePicker
+            value={parseTimeValue(task.schedule_time)}
+            format="HH:mm"
+            minuteStep={1}
+            allowClear={false}
+            size="small"
+            style={{ width: 88 }}
+            onChange={(value) =>
+              updateTaskField(task.task_key, {
+                schedule_time: value ? value.format('HH:mm') : task.schedule_time,
+              })
+            }
+          />
+        </Space>
+      ),
+    },
+    {
+      title: '下次执行',
+      dataIndex: 'next_run_at',
+      width: 168,
+      render: (value) => (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {value ? formatDateTime(value) : '未安排'}
+        </Text>
+      ),
+    },
+    {
+      title: '最近运行',
+      dataIndex: 'last_run_started_at',
+      width: 260,
+      render: (_, task) => (
+        <Space direction="vertical" size={2}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            开始：{formatDateTime(task.last_run_started_at)}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            结束：{formatDateTime(task.last_run_finished_at)}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            来源：{task.last_trigger_source || '暂无'}
+            {typeof task.last_duration_seconds === 'number'
+              ? ` · ${task.last_duration_seconds.toFixed(3)}s`
+              : ''}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '结果',
+      dataIndex: 'last_run_message',
+      width: 300,
+      render: (_, task) => task.last_run_message ? (
+        <TaskResultMessage task={task} />
+      ) : (
+        <Text type="secondary">暂无</Text>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 120,
+      fixed: 'right',
+      align: 'center',
+      render: (_, task) => (
+        <Space size={8}>
+          <Tooltip title="保存配置">
+            <Button
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={savingTaskKey === task.task_key}
+              onClick={() => handleSave(task)}
+              aria-label="保存配置"
             />
-          )}
-        </Spin>
-      </Card>
+          </Tooltip>
+          <Tooltip title="立即执行一次">
+            <Button
+              icon={<PlayCircleOutlined />}
+              loading={runningTaskKey === task.task_key}
+              onClick={() => handleRunButtonClick(task)}
+              aria-label="立即执行一次"
+            />
+          </Tooltip>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ padding: '24px', maxWidth: 1440, margin: '0 auto' }}>
+      <Space
+        align="start"
+        style={{
+          width: '100%',
+          justifyContent: 'space-between',
+          marginBottom: 16,
+          gap: 16,
+        }}
+      >
+        <Space direction="vertical" size={2}>
+          <Title level={4} style={{ margin: 0 }}>定时任务</Title>
+          <Text type="secondary">统一管理系统级定时任务，时间精确到时分。</Text>
+        </Space>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()}>
+          刷新
+        </Button>
+      </Space>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="任务按服务器本地时间执行。修改保存后会立即重载调度；服务启动时只会补执行当天未执行且已错过计划时间的任务。"
+      />
+
+      <Table
+        rowKey="task_key"
+        columns={columns}
+        dataSource={sortedTasks}
+        loading={loading}
+        pagination={false}
+        size="middle"
+        tableLayout="fixed"
+        scroll={{ x: 1260 }}
+        locale={{ emptyText: '暂无定时任务' }}
+      />
       <Modal
         title={runModalTask ? `立即执行${runModalTask.name}` : '立即执行任务'}
         open={!!runModalTask}
