@@ -253,30 +253,27 @@ class ETFHistoricalHoldingsBackfill(ETFHoldingsDBWriter):
         skipped = 0
         errors = []
 
-        try:
-            for symbol in symbols:
-                for trading_day in trading_dates:
-                    try:
-                        payload = self.calculator._fetch_ishares_holdings_json(symbol, trading_day)
-                        holdings = self.calculator._parse_ishares_holdings_json(payload)
-                        saved += self._save_holdings(symbol, trading_day, holdings)
-                    except Exception as exc:
-                        errors.append({
-                            "symbol": symbol,
-                            "date": trading_day.isoformat(),
-                            "error": str(exc),
-                        })
-                        skipped += 1
-                        self.logger.error(
-                            "Failed to backfill iShares holdings for %s on %s: %s",
-                            symbol,
-                            trading_day,
-                            exc,
-                        )
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
+        for symbol in symbols:
+            for trading_day in trading_dates:
+                try:
+                    payload = self.calculator._fetch_ishares_holdings_json(symbol, trading_day)
+                    holdings = self.calculator._parse_ishares_holdings_json(payload)
+                    saved += self._save_holdings(symbol, trading_day, holdings)
+                    self.db.commit()
+                except Exception as exc:
+                    self.db.rollback()
+                    errors.append({
+                        "symbol": symbol,
+                        "date": trading_day.isoformat(),
+                        "error": str(exc),
+                    })
+                    skipped += 1
+                    self.logger.error(
+                        "Failed to backfill iShares holdings for %s on %s: %s",
+                        symbol,
+                        trading_day,
+                        exc,
+                    )
 
         return {
             "symbols": symbols,
