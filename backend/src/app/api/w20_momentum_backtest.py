@@ -26,13 +26,13 @@ JOBS_LOCK = threading.Lock()
 
 DEFAULT_SYMBOLS = [
     "513100.SH",
-    "159934.SZ",
-    "563360.SH",
     "159915.SZ",
+    "563360.SH",
     "588230.SH",
     "510500.SH",
     "510880.SH",
     "515220.SH",
+    "518880.SH",
 ]
 
 DEFAULT_BENCHMARKS = [
