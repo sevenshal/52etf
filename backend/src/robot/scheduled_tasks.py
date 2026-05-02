@@ -110,8 +110,16 @@ def _run_etf_historical_holdings_backfill(start_date: Optional[str] = None):
             lambda item: f"{item.get('symbol')} {item.get('date')}: {item.get('error')}",
         )
         raise RuntimeError(
-            f"ETF historical holdings backfill finished with {len(errors)} errors: {preview}"
+            "ETF historical holdings backfill "
+            f"range={result.get('start_date')}~{result.get('end_date')} "
+            f"saved={result.get('saved')} skipped={result.get('skipped')} "
+            f"finished with {len(errors)} errors: {preview}"
         )
+    return (
+        "ETF historical holdings backfill "
+        f"range={result.get('start_date')}~{result.get('end_date')} "
+        f"saved={result.get('saved')} skipped={result.get('skipped')}"
+    )
 
 
 def _run_etf_put_call_ratio_sync(full: bool = False):
@@ -519,14 +527,17 @@ class ScheduledTaskManager:
         masked_triggered_by = self._mask_triggered_by(triggered_by)
 
         self.logger.info(
-            "Starting scheduled task %s, source=%s, triggered_by=%s",
+            "Starting scheduled task %s, source=%s, triggered_by=%s, kwargs=%s",
             task.task_key,
             trigger_source,
             masked_triggered_by,
+            runner_kwargs,
         )
 
         try:
-            task.runner(**runner_kwargs)
+            result_message = task.runner(**runner_kwargs)
+            if result_message:
+                message = str(result_message)
         except Exception as exc:
             status = "FAILED"
             message = str(exc)
