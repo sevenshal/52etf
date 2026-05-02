@@ -9,6 +9,21 @@ from dateutil import parser
 
 from ..database import EVCAccountConfig, Session
 
+def _to_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    return float(str(value))
+
+def _to_date(value) -> Optional[date]:
+    if not value:
+        return None
+    return parser.parse(value).date()
+
+def _to_datetime(value) -> Optional[datetime]:
+    if not value:
+        return None
+    return parser.parse(value)
+
 @dataclass
 class TagData:
     id: str
@@ -31,6 +46,76 @@ class TagData:
             includes_option_put_call=data['includesOptionPutCall'],
             option_put_call_fetch_tag_ordinal=data['optionPutCallFetchTagOrdinal'],
             sort_group=data['sortGroup']
+        )
+
+@dataclass
+class EVCOptionPutCallData:
+    symbol: str
+    date: Optional[date]
+    name: Optional[str]
+    asset_type: Optional[str]
+    sort_group: Optional[int]
+    tag_id: Optional[str]
+    ordinal: Optional[int]
+    put_call_vol: Optional[float]
+    today_option_vol: Optional[float]
+    put_call_oi_ratio: Optional[float]
+    total_open_interest: Optional[float]
+    today_percent_put_vol: Optional[float]
+    today_percent_call_vol: Optional[float]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EVCOptionPutCallData':
+        return cls(
+            symbol=data['symbol'],
+            date=_to_date(data.get('date')),
+            name=data.get('name'),
+            asset_type=data.get('type'),
+            sort_group=data.get('sortGroup'),
+            tag_id=data.get('tagId'),
+            ordinal=data.get('ordinal'),
+            put_call_vol=_to_float(data.get('putCallVol')),
+            today_option_vol=_to_float(data.get('todayOptionVol')),
+            put_call_oi_ratio=_to_float(data.get('putCallOIRatio')),
+            total_open_interest=_to_float(data.get('totalOpenInterest')),
+            today_percent_put_vol=_to_float(data.get('todayPercentPutVol')),
+            today_percent_call_vol=_to_float(data.get('todayPercentCallVol'))
+        )
+
+@dataclass
+class EVCFairValuePoint:
+    date: Optional[date]
+    lo: Optional[float]
+    hi: Optional[float]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EVCFairValuePoint':
+        return cls(
+            date=_to_date(data.get('date')),
+            lo=_to_float(data.get('lo')),
+            hi=_to_float(data.get('hi'))
+        )
+
+@dataclass
+class EVCStockFairValueData:
+    symbol: str
+    company: Optional[str]
+    tags: List[str]
+    fair_values: List[EVCFairValuePoint]
+    last_price: Optional[float]
+    watched: Optional[datetime]
+    belled: Optional[bool]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EVCStockFairValueData':
+        return cls(
+            symbol=data['symbol'],
+            company=data.get('company'),
+            tags=data.get('tags', []) or [],
+            fair_values=[EVCFairValuePoint.from_dict(item) for item in data.get('fairValues', [])],
+            last_price=_to_float(data.get('lastPrice')),
+            watched=_to_datetime(data.get('watched')),
+            belled=data.get('belled')
         )
 
 @dataclass
@@ -104,6 +189,29 @@ class EVCService:
         cookie = self._load_cookie_from_db()
         if cookie:
             self.headers['cookie'] = cookie
+
+    def _normalize_evc_symbol(self, symbol: str) -> str:
+        normalized = symbol.strip().upper()
+        if normalized.endswith('.US'):
+            return normalized[:-3]
+        return normalized
+
+    def _authenticated_get_json(self, url: str, referer: Optional[str] = None):
+        self.ensure_authenticated()
+        headers = self.headers.copy()
+        if referer:
+            headers['referer'] = referer
+
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code in (401, 403):
+            self.login()
+            headers = self.headers.copy()
+            if referer:
+                headers['referer'] = referer
+            response = requests.get(url, headers=headers, timeout=30)
+
+        response.raise_for_status()
+        return response.json()
 
     def _get_config_record(self, session):
         query = session.query(EVCAccountConfig)
@@ -309,11 +417,31 @@ class EVCService:
             return [], 0, 0
     
     def stock_evc_info(self, symbol) -> EVCData:
-        self.ensure_authenticated()
-        symbol = symbol[:-3]
+        symbol = self._normalize_evc_symbol(symbol)
         url = f'https://easyvaluecheck.com/api/v1/stock/s/{symbol}/evc_info'
-        headers = self.headers.copy()
-        headers['referer'] = f'https://easyvaluecheck.com/stock/{symbol}'
-        headers['cookie'] = self.headers['cookie']
-        response = requests.get(url, headers = headers)
-        return EVCData.from_dict(response.json())
+        data = self._authenticated_get_json(url, referer=f'https://easyvaluecheck.com/stock/{symbol}')
+        return EVCData.from_dict(data)
+
+    def option_put_call_history(self, symbol: str) -> List[EVCOptionPutCallData]:
+        symbol = self._normalize_evc_symbol(symbol)
+        url = f'https://easyvaluecheck.com/api/v1/admin/data/opc/{symbol}/all'
+        data = self._authenticated_get_json(url, referer='https://easyvaluecheck.com/option_put_call')
+        return [EVCOptionPutCallData.from_dict(item) for item in data]
+
+    def option_put_call_snapshot(self) -> List[EVCOptionPutCallData]:
+        url = 'https://easyvaluecheck.com/api/v1/admin/data/opc'
+        data = self._authenticated_get_json(url, referer='https://easyvaluecheck.com/option_put_call')
+        return [EVCOptionPutCallData.from_dict(item) for item in data]
+
+    def current_option_put_call(self, symbol: str) -> Optional[EVCOptionPutCallData]:
+        symbol = self._normalize_evc_symbol(symbol)
+        for item in self.option_put_call_snapshot():
+            if item.symbol.upper() == symbol:
+                return item
+        return None
+
+    def stock_current_fy_fair_values(self, symbol: str) -> EVCStockFairValueData:
+        symbol = self._normalize_evc_symbol(symbol)
+        url = f'https://easyvaluecheck.com/api/v1/stock/s/{symbol}'
+        data = self._authenticated_get_json(url, referer=f'https://easyvaluecheck.com/stock/{symbol}')
+        return EVCStockFairValueData.from_dict(data)

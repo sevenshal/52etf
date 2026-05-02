@@ -5,6 +5,7 @@ from typing import Dict
 from dateutil.parser import parse
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
+from ...core.utils import normalize_us_equity_symbol
 
 class VanguardETFFetcher(ETFDataFetcher):
     """Vanguard ETF数据获取"""
@@ -71,7 +72,10 @@ class VanguardETFFetcher(ETFDataFetcher):
             
             for entity in data['fund']['entity']:
                 try:
-                    ticker = str(entity['ticker']) + '.US'
+                    ticker = normalize_us_equity_symbol(entity['ticker'])
+                    if not ticker:
+                        self.logger.warning(f"跳过无法规范化的 Vanguard 股票代码: {entity.get('ticker')}")
+                        continue
                     name = str(entity['longName'])
                     shares = int(entity['sharesHeld'])
                     weight = float(entity['percentWeight']) / 100

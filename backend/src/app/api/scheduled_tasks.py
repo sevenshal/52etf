@@ -71,8 +71,13 @@ def run_scheduled_task_now(
 ):
     try:
         runner_kwargs = {}
-        if task_key == "soxx_fear_greed_backfill" and payload and payload.start_date:
+        if task_key in {
+            "etf_historical_holdings_backfill",
+            "soxx_fear_greed_backfill",
+        } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
+        if task_key == "etf_put_call_ratio_sync":
+            runner_kwargs["full"] = True
         scheduled_task_manager.trigger_task(
             task_key=task_key,
             trigger_source="manual",

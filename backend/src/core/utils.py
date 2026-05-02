@@ -1,10 +1,11 @@
 import os
 import json
 import smtplib
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
-from typing import Dict, Any, TypeVar, Type, Generic
+from typing import Dict, Any, Optional, TypeVar, Type, Generic
 from dataclasses import dataclass
 from pathlib import Path
 from pydantic import BaseModel
@@ -12,6 +13,38 @@ from pydantic import BaseModel
 DATA_DIR = "/var/lib/quant_robot/account_data"
 
 T = TypeVar('T')
+
+US_EQUITY_MARKET_TOKENS = {"US", "UN", "UW", "UQ", "UA", "UP", "UR", "UV"}
+INVALID_EQUITY_SYMBOL_TOKENS = {"", "-", "N/A", "NA", "NONE", "NULL", "USD", "CASH", "US DOLLAR", "US"}
+
+def normalize_us_equity_symbol(value: Any) -> Optional[str]:
+    """Normalize issuer/Bloomberg-style US equity tickers to LongPort symbols."""
+    text = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    if text in INVALID_EQUITY_SYMBOL_TOKENS:
+        return None
+
+    text = text.replace("/", ".")
+    if text.startswith("US."):
+        text = text[3:]
+
+    if text.endswith(".US"):
+        base = text[:-3]
+        if " " not in base:
+            return text
+        # Repair already-imported values like "PM US.US".
+        text = base
+
+    parts = text.split(" ")
+    if len(parts) == 2 and parts[1] in US_EQUITY_MARKET_TOKENS:
+        text = parts[0]
+    elif len(parts) == 3 and parts[1] in US_EQUITY_MARKET_TOKENS and parts[2] == "EQUITY":
+        text = parts[0]
+    elif len(parts) != 1:
+        return None
+
+    if text in INVALID_EQUITY_SYMBOL_TOKENS or not re.fullmatch(r"[A-Z0-9.]+", text):
+        return None
+    return text if text.endswith(".US") else f"{text}.US"
 
 def ensure_data_dir(account_id: str, sub_dir: str = "") -> str:
     """确保数据目录存在并返回目录路径"""

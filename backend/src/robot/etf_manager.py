@@ -1,8 +1,10 @@
 from datetime import datetime, date
 from typing import Dict, Optional, List
 from sqlalchemy.orm import Session
-from ..core.database import ETFHolding, ETFAnalysis, StockEVC, Session, ETFEmotion
-from ..core.models.etf import ETFHoldingsData
+from ..core.database import ETFHolding as DBETFHolding
+from ..core.database import ETFAnalysis, StockEVC, Session, ETFEmotion
+from ..core.models.etf import ETFHolding, ETFHoldingsData
+from ..core.utils import normalize_us_equity_symbol
 from .etf.base import ETFDataFetcher
 from .etf.ishares import ISharesETFFetcher
 from .etf.qqq import QQQDataFetcher
@@ -23,6 +25,7 @@ LEVERAGED_ETF_MAP = {
     'ITB.US': ['NAIL.US', 3],   # 房屋建筑
     'ITA.US': ['DFEN.US', 3],   # 航空航天(军工)
     'SPY.US': ['UPRO.US', 3],   # 标普500
+    'DIA.US': ['UDOW.US', 3],   # 道琼斯工业平均
     'XBI.US': ['LABU.US', 3],   # 生物科技
     'KRE.US': ['DPST.US', 3],   # 地区银行
     'XLF.US': ['FAS.US', 3],    # 金融
@@ -69,6 +72,7 @@ class ETFManager:
             'ITB.US': ishares_fetcher,
             'ITA.US': ishares_fetcher,
             'SPY.US': spdr_fetcher,
+            'DIA.US': spdr_fetcher,
             'XBI.US': spdr_fetcher,
             'KRE.US': spdr_fetcher,
             'XLF.US': spdr_fetcher,
@@ -138,10 +142,13 @@ class ETFManager:
                 
             holdings_data = fetcher.get_holdings(etf_symbol)
 
-            self.db_session.query(ETFHolding).filter(ETFHolding.etf_symbol == etf_symbol and ETFHolding.date == holdings_data.update_date).delete()
+            self.db_session.query(DBETFHolding).filter(
+                DBETFHolding.etf_symbol == etf_symbol,
+                DBETFHolding.date == holdings_data.update_date
+            ).delete()
             # 保存到数据库
             for holding in holdings_data.holdings:
-                db_holding = ETFHolding(
+                db_holding = DBETFHolding(
                     etf_symbol=etf_symbol,
                     symbol=holding.symbol,
                     name=holding.name,
@@ -158,12 +165,70 @@ class ETFManager:
         except Exception as e:
             self.db_session.rollback()
             raise
+
+    def get_latest_trading_date(self) -> date:
+        klines = self.quote_service.get_klines('SPY.US', 1)
+        if not klines:
+            raise ValueError("无法通过 SPY 日K确认最近美股交易日")
+        timestamp = klines[-1]['timestamp']
+        return timestamp.date() if hasattr(timestamp, 'date') else timestamp
+
+    def load_holdings_from_db(self, etf_symbol: str, target_date: date) -> ETFHoldingsData:
+        rows = (
+            self.db_session.query(DBETFHolding)
+            .filter(
+                DBETFHolding.etf_symbol == etf_symbol,
+                DBETFHolding.date == target_date,
+            )
+            .order_by(DBETFHolding.weight.desc())
+            .all()
+        )
+        if not rows:
+            raise ValueError(
+                f"{etf_symbol} {target_date} 持仓不存在，请先执行 ETF历史持仓回跑"
+            )
+
+        holdings = []
+        for row in rows:
+            symbol = row.symbol
+            if row.asset_class == "Equity":
+                symbol = normalize_us_equity_symbol(symbol)
+                if not symbol:
+                    self.logger.warning(
+                        f"跳过无法规范化的 DB ETF 持仓股票代码: {row.etf_symbol} {row.date} {row.symbol}"
+                    )
+                    continue
+            holdings.append(
+                ETFHolding(
+                    symbol=symbol,
+                    name=row.name,
+                    asset_class=row.asset_class,
+                    shares=int(row.shares or 0),
+                    weight=float(row.weight or 0.0),
+                    market_value=float(row.shares or 0) if row.asset_class == "Cash" else 0.0,
+                    price=1.0 if row.asset_class == "Cash" else None,
+                )
+            )
+        return ETFHoldingsData(
+            holdings=holdings,
+            update_date=target_date,
+            total_shares=None,
+            total_weight=sum(float(row.weight or 0.0) for row in rows),
+        )
+
+    def get_etf_name(self, etf_symbol: str) -> str:
+        fetcher = self.fetchers.get(etf_symbol)
+        config = getattr(fetcher, "ETF_CONFIGS", {}).get(etf_symbol) if fetcher else None
+        if config and config.get("name"):
+            return config["name"]
+        return getattr(fetcher, "name", None) or etf_symbol
     
     def analyze_etf(self, etf_symbol: str):
         """分析ETF的估值情况"""
         try:
-            # 获取最新持仓数据
-            holdings_data = self.update_holdings(etf_symbol)
+            # 获取最近美股交易日已入库的持仓数据。持仓同步由独立任务负责。
+            holdings_date = self.get_latest_trading_date()
+            holdings_data = self.load_holdings_from_db(etf_symbol, holdings_date)
             
             # 使用 抓取的总股本数，没有则使用 LongPort API 获取总股数
             total_shares = self.get_total_shares(etf_symbol) if holdings_data.total_shares is None else holdings_data.total_shares
@@ -172,6 +237,14 @@ class ETFManager:
             equity_symbols = [holding.symbol for holding in holdings_data.holdings if holding.asset_class == 'Equity' and holding.symbol]
             static_infos = self.quote_service.get_static_info(equity_symbols) if equity_symbols else []
             static_info_map = {info.get('symbol'): info for info in static_infos}
+            holding_quotes = self.quote_service.get_quote_batch(equity_symbols) if equity_symbols else []
+            quote_price_map = {}
+            for quote in holding_quotes:
+                try:
+                    if quote.get('symbol') and quote.get('price') is not None:
+                        quote_price_map[quote.get('symbol')] = float(quote.get('price'))
+                except (TypeError, ValueError):
+                    continue
 
             # 初始化分析结果
             total_value = {
@@ -211,6 +284,8 @@ class ETFManager:
                     # 初始化估值信息
                     evc_info = None
                     if holding.asset_class == 'Equity' and holding.symbol:
+                        price = quote_price_map.get(holding.symbol, price)
+                        market_value = shares * price if price is not None else market_value
                         static_info = static_info_map.get(holding.symbol)
                         eps_v2 = float(static_info.get('eps') or 0.0) if static_info else 0.0
                         eps_ttm = float(static_info.get('eps_ttm') or 0.0) if static_info else 0.0
@@ -223,8 +298,6 @@ class ETFManager:
                             fair_value_hi = evc_info.fair_value_hi
                             forward_next_fy_lo = evc_info.forward_next_fy_lo
                             forward_next_fy_hi = evc_info.forward_next_fy_hi
-                            if evc_info.last_price is not None:
-                                price = float(evc_info.last_price)
                             market_value = shares * price if price is not None else market_value
                             eps = (price / evc_info.pe_ratio) if (price is not None and evc_info.pe_ratio) else 0.0
                             eps_forword = (price / evc_info.forward_pe_ratio) if (price is not None and evc_info.forward_pe_ratio) else 0.0
@@ -253,6 +326,11 @@ class ETFManager:
                     continue
 
             self.logger.info(f"{etf_symbol} total_value_info: {total_value}, forward_stocks_info: {forward_stocks}")
+
+            if not total_shares or total_value['market_value'] <= 0:
+                raise ValueError(
+                    f"{etf_symbol} 持仓市值或总股数无效，请检查 DB 持仓和 LongPort 行情"
+                )
 
             # 计算有下财年估值的股票的权重和估值
             forward_stocks_weight = forward_stocks['market_value'] / total_value['market_value']
@@ -290,7 +368,7 @@ class ETFManager:
             analysis = ETFAnalysis(
                 symbol=etf_symbol,
                 date=date.today(),
-                name=self.fetchers[etf_symbol].name,
+                name=self.get_etf_name(etf_symbol),
                 update_date=holdings_data.update_date.strftime('%Y-%m-%d'),
                 total_shares=total_shares,
                 total_market_value=total_value['market_value'],

@@ -5,6 +5,7 @@ from typing import Dict
 from io import BytesIO
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
+from ...core.utils import normalize_us_equity_symbol
 
 class SPDRDataFetcher(ETFDataFetcher):
     """SPDR ETF数据获取"""
@@ -13,6 +14,10 @@ class SPDRDataFetcher(ETFDataFetcher):
         'SPY.US': {
             'url': 'https://www.ssga.com/us/en/individual/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx',
             'name': '标普500ETF'
+        },
+        'DIA.US': {
+            'url': 'https://www.ssga.com/us/en/individual/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-dia.xlsx',
+            'name': '道琼斯工业平均ETF'
         },
         'XBI.US': {
             'url': 'https://www.ssga.com/us/en/individual/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-xbi.xlsx',
@@ -130,17 +135,19 @@ class SPDRDataFetcher(ETFDataFetcher):
                     shares = float(row[shares_col])
                     weight = float(row[weight_col]) / 100  # 转换为小数
                     
-                    total_weight += weight
-                    
-                    # 判断是否为股票类型
-                    ticker = str(row[ticker_col]).strip()
-                    is_equity = not any(char.isdigit() or char == '-' for char in ticker)
-                    ticker = ticker + '.US' if is_equity else ticker
+                    raw_ticker = str(row[ticker_col]).strip()
+                    name = str(row[name_col]).strip()
+                    is_usd = name.upper() == 'US DOLLAR' or raw_ticker.upper() in {'USD', 'CASH'}
+                    is_equity = not is_usd and not any(char.isdigit() or char == '-' for char in raw_ticker)
+                    ticker = normalize_us_equity_symbol(raw_ticker) if is_equity else raw_ticker
+                    if is_equity and not ticker:
+                        self.logger.warning(f"跳过无法规范化的 SPDR 股票代码: {raw_ticker}")
+                        continue
 
-                    is_usd = str(row[name_col]).strip().upper() == 'US DOLLAR'
+                    total_weight += weight
                     holdings.append(ETFHolding(
                         symbol=ticker,
-                        name=str(row[name_col]).strip(),
+                        name=name,
                         asset_class='Cash' if is_usd else ('Equity' if is_equity else 'Other'),
                         shares=int(shares),
                         weight=weight,

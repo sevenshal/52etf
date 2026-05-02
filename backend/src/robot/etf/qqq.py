@@ -5,6 +5,7 @@ import httpx
 
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
+from ...core.utils import normalize_us_equity_symbol
 
 
 class QQQDataFetcher(ETFDataFetcher):
@@ -72,7 +73,10 @@ class QQQDataFetcher(ETFDataFetcher):
                         continue
 
                     asset_class = self._map_asset_class(holding_data)
-                    symbol = f"{ticker}.US" if asset_class == "Equity" else ticker
+                    symbol = normalize_us_equity_symbol(ticker) if asset_class == "Equity" else ticker
+                    if asset_class == "Equity" and not symbol:
+                        self.logger.warning("跳过无法规范化的 QQQ 股票代码: %s", ticker)
+                        continue
                     holdings.append(
                         ETFHolding(
                             symbol=symbol,

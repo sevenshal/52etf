@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData
+from ...core.utils import normalize_us_equity_symbol
 
 class ISharesETFFetcher(ETFDataFetcher):
     """iShares ETF数据获取"""
@@ -108,7 +109,13 @@ class ISharesETFFetcher(ETFDataFetcher):
 
                     # 判断是否为股票类型
                     is_equity = asset_class == 'Equity' and not any(char.isdigit() or char == '-' for char in symbol)
-                    symbol = symbol + market_suffix if is_equity else symbol
+                    if is_equity and market_suffix == '.US':
+                        symbol = normalize_us_equity_symbol(symbol)
+                        if not symbol:
+                            self.logger.warning(f"跳过无法规范化的 iShares 股票代码: {holding['Ticker']}")
+                            continue
+                    elif is_equity:
+                        symbol = symbol + market_suffix
                     total_weight += weight
                     
                     holdings.append(ETFHolding(

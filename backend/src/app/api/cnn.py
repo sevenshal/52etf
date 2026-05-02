@@ -66,7 +66,7 @@ async def get_etf_fear_greed_clone(
 ):
     """获取ETF版本的独立复刻恐贪指数。
 
-    默认计算 SOXX.US。持仓复用工程里的 iShares ETF 持仓抓取逻辑；
+    默认计算 SOXX.US。持仓组件读取 etf_holdings 中的交易日快照；
     价格、期权和信用利差尽量使用免费数据源。
     """
     try:
@@ -101,7 +101,7 @@ async def get_etf_fear_greed_clone_realtime(
     """获取 ETF 盘中实时版恐贪复刻指数。
 
     这个接口使用 SQLite 中已回跑的日频组件作为评分基准，再用 LongPort
-    实时行情更新 SOXX、TLT 和当前持仓相关的价格驱动组件。期权 put/call
+    实时行情更新 ETF、TLT 和 DB 持仓相关的价格驱动组件。期权 put/call
     与信用利差仍是日频数据，会沿用最近已入库值并在响应中标记。
     """
     try:

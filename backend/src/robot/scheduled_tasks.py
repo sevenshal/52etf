@@ -31,6 +31,90 @@ def _run_etf_fair_value_analysis():
         manager.db_session.close()
 
 
+def _run_etf_holdings_ingest():
+    from .etf_holdings_backfill import ETFHoldingsLatestIngest
+
+    ingest = ETFHoldingsLatestIngest()
+    try:
+        result = ingest.sync_latest()
+    finally:
+        ingest.close()
+
+    logging.getLogger("ScheduledTaskManager").info(
+        "ETF latest holdings ingest saved=%s skipped=%s errors=%s dates=%s",
+        result.get("saved"),
+        result.get("skipped"),
+        len(result.get("errors") or []),
+        result.get("saved_dates"),
+    )
+    errors = result.get("errors") or []
+    if errors:
+        preview = "; ".join(
+            f"{item.get('symbol')}: {item.get('error')}"
+            for item in errors[:3]
+        )
+        raise RuntimeError(
+            f"ETF latest holdings ingest finished with {len(errors)} errors: {preview}"
+        )
+
+
+def _run_etf_historical_holdings_backfill(start_date: Optional[str] = None):
+    from .etf_holdings_backfill import ETFHistoricalHoldingsBackfill
+
+    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
+    backfill = ETFHistoricalHoldingsBackfill()
+    try:
+        result = backfill.backfill(start_date=parsed_start_date)
+    finally:
+        backfill.close()
+
+    logging.getLogger("ScheduledTaskManager").info(
+        "ETF historical holdings backfill saved=%s skipped=%s range=%s~%s errors=%s",
+        result.get("saved"),
+        result.get("skipped"),
+        result.get("start_date"),
+        result.get("end_date"),
+        len(result.get("errors") or []),
+    )
+    errors = result.get("errors") or []
+    if errors:
+        preview = "; ".join(
+            f"{item.get('symbol')} {item.get('date')}: {item.get('error')}"
+            for item in errors[:3]
+        )
+        raise RuntimeError(
+            f"ETF historical holdings backfill finished with {len(errors)} errors: {preview}"
+        )
+
+
+def _run_etf_put_call_ratio_sync(full: bool = False):
+    from .etf_putcallratio_sync import BarchartETFPutCallRatioSync
+
+    syncer = BarchartETFPutCallRatioSync()
+    try:
+        result = syncer.sync_all(full=full)
+    finally:
+        syncer.close()
+
+    logging.getLogger("ScheduledTaskManager").info(
+        "ETF option data sync mode=%s symbols=%s history_saved=%s expirations_saved=%s errors=%s",
+        result.get("mode"),
+        result.get("symbols"),
+        result.get("saved_history"),
+        result.get("saved_expirations"),
+        len(result.get("errors") or []),
+    )
+    errors = result.get("errors") or []
+    if errors:
+        preview = "; ".join(
+            f"{item.get('symbol')}: {item.get('error')}"
+            for item in errors[:3]
+        )
+        raise RuntimeError(
+            f"ETF put/call ratio sync finished with {len(errors)} errors: {preview}"
+        )
+
+
 def _run_cnn_fear_greed_fetch():
     from .cnn_fear_index import CNNFearGreedIndexScraper
 
@@ -41,8 +125,11 @@ def _run_cnn_fear_greed_fetch():
         scraper.db_session.close()
 
 
-def _run_soxx_fear_greed_backfill(start_date: Optional[str] = None):
-    from ..core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
+def _run_etf_fear_greed_backfill(start_date: Optional[str] = None):
+    from ..core.services.etf_fear_greed_clone_service import (
+        DEFAULT_ETF_FEAR_GREED_SYMBOLS,
+        ETFFearGreedCloneCalculator,
+    )
 
     end_date = date.today()
     if start_date:
@@ -52,25 +139,31 @@ def _run_soxx_fear_greed_backfill(start_date: Optional[str] = None):
         # long calculation window for rolling z-score and 52-week components.
         output_start_date = end_date - timedelta(days=3)
 
-    calculation_start_date = output_start_date - timedelta(days=700)
+    # The slowest component needs about 244 trading days to warm up
+    # (125-day momentum raw value + 120-point rolling score). 390 calendar
+    # days leaves a small buffer while still fitting the 2025+ holdings backfill.
+    calculation_start_date = output_start_date - timedelta(days=390)
     calculator = ETFFearGreedCloneCalculator()
-    result = calculator.backfill_to_db(
-        symbol="SOXX.US",
-        start_date=calculation_start_date,
-        end_date=end_date,
-        output_start_date=output_start_date,
-        history_days=1200,
-        score_window=252,
-        min_periods=120,
-        max_holdings=40,
-        use_historical_holdings=True,
-    )
-    logging.getLogger("ScheduledTaskManager").info(
-        "SOXX fear greed backfill saved %s rows, range=%s~%s",
-        result.get("saved"),
-        result.get("start_date"),
-        result.get("end_date"),
-    )
+    logger = logging.getLogger("ScheduledTaskManager")
+    for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS:
+        result = calculator.backfill_to_db(
+            symbol=symbol,
+            start_date=calculation_start_date,
+            end_date=end_date,
+            output_start_date=output_start_date,
+            history_days=390,
+            score_window=252,
+            min_periods=120,
+            max_holdings=40,
+            use_historical_holdings=True,
+        )
+        logger.info(
+            "%s fear greed backfill saved %s rows, range=%s~%s",
+            symbol,
+            result.get("saved"),
+            result.get("start_date"),
+            result.get("end_date"),
+        )
 
 
 def _run_w20_momentum_live_sync():
@@ -122,6 +215,33 @@ class ScheduledTaskManager:
                 sort_order=20,
                 runner=_run_etf_fair_value_analysis,
             ),
+            "etf_holdings_backfill": TaskDefinition(
+                task_key="etf_holdings_backfill",
+                name="ETF持仓抓取入库",
+                description="抓取全部 ETF 最新持仓，并按发行商返回的持仓日期覆盖入库。",
+                default_time="05:30",
+                default_enabled=True,
+                sort_order=15,
+                runner=_run_etf_holdings_ingest,
+            ),
+            "etf_put_call_ratio_sync": TaskDefinition(
+                task_key="etf_put_call_ratio_sync",
+                name="ETF期权数据刷新",
+                description="手动触发时全量抓取 Barchart ETF Put/Call Ratio；每天自动刷新最近 10 条并记录当前期权到期未平仓快照。",
+                default_time="06:00",
+                default_enabled=True,
+                sort_order=55,
+                runner=_run_etf_put_call_ratio_sync,
+            ),
+            "etf_historical_holdings_backfill": TaskDefinition(
+                task_key="etf_historical_holdings_backfill",
+                name="ETF历史持仓回刷",
+                description="手动回刷 iShares 历史 asOfDate 持仓和非 iShares 的 SEC N-PORT 历史持仓。",
+                default_time="05:00",
+                default_enabled=False,
+                sort_order=12,
+                runner=_run_etf_historical_holdings_backfill,
+            ),
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
                 name="CNN Fear & Greed 抓取",
@@ -133,12 +253,12 @@ class ScheduledTaskManager:
             ),
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
-                name="SOXX贪恐回跑入库",
-                description="计算 SOXX 贪恐复刻指数并保存历史、价格和持仓明细。",
+                name="ETF贪恐回跑入库",
+                description="计算 SOXX/SPY/QQQ/DIA 贪恐复刻指数并保存历史、价格和持仓明细。",
                 default_time="06:00",
                 default_enabled=True,
                 sort_order=60,
-                runner=_run_soxx_fear_greed_backfill,
+                runner=_run_etf_fear_greed_backfill,
             ),
             "w20_momentum_live_sync": TaskDefinition(
                 task_key="w20_momentum_live_sync",
@@ -178,6 +298,7 @@ class ScheduledTaskManager:
                 ScheduledTaskConfig.task_key.in_([
                     "us_market_signal_analysis",
                     "market_signal_live_sync",
+                    "etf_nport_holdings_import",
                 ])
             ).delete(synchronize_session=False)
             for task in self.task_definitions.values():
@@ -427,7 +548,10 @@ class ScheduledTaskManager:
             "enabled": config["enabled"],
             "schedule_time": config["schedule_time"],
             "sort_order": config["sort_order"],
-            "supports_start_date": config["task_key"] == "soxx_fear_greed_backfill",
+            "supports_start_date": config["task_key"] in {
+                "etf_historical_holdings_backfill",
+                "soxx_fear_greed_backfill",
+            },
             "is_running": is_running,
             "next_run_at": job.next_run.isoformat() if job and job.next_run else None,
             "last_trigger_source": config["last_trigger_source"],

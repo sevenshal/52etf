@@ -259,6 +259,46 @@ class ETFFearGreedCloneHolding(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class ETFPutCallRatio(Base):
+    """Barchart ETF Put/Call Ratio 历史数据"""
+    __tablename__ = 'etf_put_call_ratios'
+
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    put_volume = Column(Integer)
+    call_volume = Column(Integer)
+    total_volume = Column(Integer)
+    put_call_volume_ratio = Column(Float)
+    put_open_interest = Column(Integer)
+    call_open_interest = Column(Integer)
+    total_open_interest = Column(Integer)
+    put_call_open_interest_ratio = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class ETFOptionExpiration(Base):
+    """Barchart ETF 当前期权到期日未平仓快照"""
+    __tablename__ = 'etf_option_expirations'
+
+    symbol = Column(String(32), primary_key=True)
+    snapshot_date = Column(Date, primary_key=True)
+    expiration_date = Column(Date, primary_key=True)
+    expiration_type = Column(String(32))
+    days_to_expiration = Column(Integer)
+    put_volume = Column(Integer)
+    call_volume = Column(Integer)
+    total_volume = Column(Integer)
+    put_call_volume_ratio = Column(Float)
+    put_open_interest = Column(Integer)
+    call_open_interest = Column(Integer)
+    total_open_interest = Column(Integer)
+    put_call_open_interest_ratio = Column(Float)
+    average_volatility = Column(Float)
+    symbol_type = Column(String(32))
+    last_price = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class EVCTradeLog(Base):
     __tablename__ = "evc_trade_logs"
     
@@ -863,6 +903,9 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_market_signal_events_strategy_date ON market_signal_events(strategy_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_market_signal_trades_config_date ON market_signal_virtual_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_market_signal_logs_config_time ON market_signal_virtual_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:

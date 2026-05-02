@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import re
 import threading
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, func
 
 from .fear_greed_clone_service import (
     CBOE_OPTIONS_DAILY_URL,
@@ -21,15 +22,21 @@ from .fear_greed_clone_service import (
     FearGreedCloneCalculator,
     FearGreedCloneError,
 )
+from .evc import EVCService
 from .longport import LongPortService
 from .market import MarketService
 from .quote import QuoteService
-from ..database import ETFFearGreedCloneHistory, ETFFearGreedCloneHolding, Session
+from ..database import ETFHolding as DBETFHolding
+from ..database import ETFFearGreedCloneHistory, ETFFearGreedCloneHolding, ETFPutCallRatio, Session
 from ..models.etf import ETFHolding
+from ..utils import normalize_us_equity_symbol
 from ...robot.etf.ishares import ISharesETFFetcher
+from ...robot.etf.qqq import QQQDataFetcher
+from ...robot.etf.spdr import SPDRDataFetcher
 
 
 NASDAQ_OPTION_CHAIN_URL = "https://api.nasdaq.com/api/quote/{symbol}/option-chain"
+DEFAULT_ETF_FEAR_GREED_SYMBOLS = ["SOXX.US", "SPY.US", "QQQ.US", "DIA.US"]
 
 
 ETF_COMPONENTS: Dict[str, ComponentSpec] = {
@@ -44,32 +51,32 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
         key="stock_price_strength",
         name="Holdings Price Strength",
         raw_label="Current-holdings weighted 52-week range position",
-        source="iShares holdings + LongPort stock history",
+        source="DB ETF holdings + LongPort stock history",
         proxy_note=(
-            "ETF-specific proxy for new highs/lows. It uses the latest free "
-            "iShares holdings, so historical scores include survivorship bias."
+            "ETF-specific proxy for new highs/lows. It uses the stored ETF "
+            "holding snapshot for each trading day."
         ),
     ),
     "stock_price_breadth": ComponentSpec(
         key="stock_price_breadth",
         name="Holdings Price Breadth",
         raw_label="5-day average weighted advancing dollar-volume ratio",
-        source="iShares holdings + LongPort stock history",
+        source="DB ETF holdings + LongPort stock history",
         proxy_note=(
             "ETF-specific proxy for breadth. Advancing/declining dollar volume "
-            "is computed across current ETF constituents."
+            "is computed across the stored ETF constituents for each trading day."
         ),
     ),
     "put_call_options": ComponentSpec(
         key="put_call_options",
         name="ETF Put/Call Options",
-        raw_label="-5-day average Cboe ETP put/call ratio",
-        source="Cboe daily options market statistics",
+        raw_label="-5-day average symbol-specific put/call volume ratio",
+        source="Local Barchart ETF put/call history table",
         proxy_note=(
-            "Historical SOXX option volume is not freely available in a stable "
-            "endpoint, so the scored history uses Cboe's exchange-traded "
-            "products put/call ratio. The response also includes the latest "
-            "Nasdaq SOXX option-chain snapshot when available."
+            "Uses symbol-specific Barchart putCallVolumeRatio rows saved in "
+            "etf_put_call_ratios. If the table has no usable rows for the "
+            "requested range, the calculator falls back to Cboe's "
+            "exchange-traded products put/call ratio."
         ),
     ),
     "market_volatility": ComponentSpec(
@@ -85,7 +92,7 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
         raw_label="20-day ETF return - 20-day TLT return",
         source="LongPort ETF history via QuoteService",
         proxy_note=(
-            "Same risk-on/risk-off idea as CNN, comparing SOXX to long-duration "
+            "Same risk-on/risk-off idea as CNN, comparing the ETF to long-duration "
             "Treasury ETF TLT."
         ),
     ),
@@ -120,8 +127,20 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             timeout=timeout,
         )
         self.ishares_fetcher = ISharesETFFetcher()
+        self.spdr_fetcher = SPDRDataFetcher()
+        self.qqq_fetcher = QQQDataFetcher()
+        self.holdings_fetchers = self._build_holdings_fetchers()
         self.quote_service = QuoteService(LongPortService.get_instance())
         self.price_cache: Dict[Tuple[str, date, date], pd.DataFrame] = {}
+
+    def _build_holdings_fetchers(self) -> Dict[str, Any]:
+        fetchers: Dict[str, Any] = {}
+        for symbol in self.ishares_fetcher.ETF_CONFIGS:
+            fetchers[symbol] = self.ishares_fetcher
+        for symbol in self.spdr_fetcher.ETF_CONFIGS:
+            fetchers[symbol] = self.spdr_fetcher
+        fetchers["QQQ.US"] = self.qqq_fetcher
+        return fetchers
 
     def calculate(
         self,
@@ -174,19 +193,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         warnings = [
             "This is an independent ETF-specific clone, not CNN's undisclosed calculation.",
             "Scores use rolling z-score/CDF and equal-weighted components.",
+            "Holdings-based components read the latest etf_holdings snapshot on or before each trading day; missing prior snapshots will raise an error.",
             (
-                "Holdings-based components use iShares historical holdings by "
-                "asOfDate; missing holiday/weekend snapshots carry forward the "
-                "latest valid holdings."
-                if use_historical_holdings
-                else (
-                    "Holdings-based history uses the latest free iShares holdings, "
-                    "so constituent history has survivorship bias."
-                )
-            ),
-            (
-                "SOXX-specific option history is not available from a stable free "
-                "source; the scored option component uses Cboe ETP put/call data."
+                "The option component uses local Barchart ETF put/call history "
+                "from etf_put_call_ratios, with Cboe ETP put/call as an outage fallback."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
@@ -267,7 +277,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         score_df["fear_greed_clone"] = component_scores.mean(axis=1)
         valid = score_df.dropna(subset=score_columns + ["fear_greed_clone"])
 
-        warnings = self._warnings(use_historical_holdings)
+        warnings = self._warnings(etf_symbol, use_historical_holdings)
         records: List[Dict[str, Any]] = []
         for timestamp, row in valid.iterrows():
             if output_start_date and timestamp.date() < output_start_date:
@@ -373,24 +383,27 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         """Calculate a price-driven intraday ETF Fear & Greed clone.
 
         The scoring baseline comes from the SQLite daily backfill. The current
-        row is rebuilt from LongPort realtime quotes for SOXX, TLT and the
-        current iShares holdings. Daily-only components are carried forward
+        row is rebuilt from LongPort realtime quotes for the ETF, TLT and the
+        latest DB holdings snapshot. Daily-only components are carried forward
         from the latest stored row and are marked in the response.
         """
         etf_symbol = self._normalize_etf_symbol(symbol)
         if min_periods > score_window:
             raise FearGreedCloneError("min_periods cannot exceed score_window")
 
-        holdings, holdings_as_of, holdings_weight_used = self._get_current_holdings(
-            etf_symbol, max_holdings=max_holdings
-        )
-        quote_symbols = [etf_symbol, "TLT.US"] + [holding.symbol for holding in holdings]
-        quote_map = self._fetch_realtime_quote_map(quote_symbols)
+        quote_map = self._fetch_realtime_quote_map([etf_symbol, "TLT.US"])
         etf_quote = quote_map.get(etf_symbol)
         if not etf_quote or not self._quote_price(etf_quote):
             raise FearGreedCloneError(f"{etf_symbol} 实时行情为空")
 
         realtime_date = self._quote_market_date(etf_quote)
+        holdings, holdings_as_of = self._load_latest_db_holdings_on_or_before(
+            etf_symbol, realtime_date, max_holdings=max_holdings
+        )
+        holdings_weight_used = sum(item.weight for item in holdings)
+        holding_quote_map = self._fetch_realtime_quote_map([holding.symbol for holding in holdings])
+        quote_map.update(holding_quote_map)
+        quote_symbols = [etf_symbol, "TLT.US"] + [holding.symbol for holding in holdings]
         previous_trading_day = MarketService.get_previous_us_trading_day(realtime_date)
         history_start = realtime_date - timedelta(days=history_days)
 
@@ -405,7 +418,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             )
 
         current_timestamp = pd.Timestamp(realtime_date)
-        current_raw, etf_price = self._build_realtime_raw_row(
+        current_raw, etf_price, raw_freshness = self._build_realtime_raw_row(
             etf_symbol=etf_symbol,
             holdings=holdings,
             quote_map=quote_map,
@@ -416,12 +429,13 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         latest_daily = raw_history.iloc[-1]
         stale_components = {
-            "put_call_options": "latest stored Cboe ETP put/call component",
+            "put_call_options": "latest stored option put/call component",
             "junk_bond_demand": "latest stored FRED credit-spread component",
         }
         for key in stale_components:
             if pd.isna(current_raw.get(key)):
                 current_raw[key] = float(latest_daily[key])
+                raw_freshness[key] = stale_components[key]
 
         raw_for_score = raw_history.copy()
         raw_for_score = raw_for_score[raw_for_score.index < current_timestamp]
@@ -441,38 +455,28 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         score = float(latest_row["fear_greed_clone"])
         components = self._component_payload(raw_for_score, score_df, current_timestamp)
-        realtime_component_flags = {
-            "market_momentum": True,
-            "stock_price_strength": True,
-            "stock_price_breadth": True,
-            "put_call_options": False,
-            "market_volatility": True,
-            "safe_haven_demand": True,
-            "junk_bond_demand": False,
-        }
         for key, payload in components.items():
-            is_realtime = realtime_component_flags[key]
+            freshness = raw_freshness.get(key) or "latest stored daily component"
+            is_realtime = freshness not in stale_components.values()
             payload["is_realtime"] = is_realtime
-            payload["freshness"] = (
-                "LongPort realtime quote"
-                if is_realtime
-                else stale_components.get(key, "latest stored daily component")
-            )
+            payload["freshness"] = freshness
 
         requested_quotes = list(dict.fromkeys(quote_symbols))
         missing_quotes = [item for item in requested_quotes if item not in quote_map]
         quote_timestamp = self._quote_timestamp(etf_quote)
-        warnings = self._warnings(use_historical_holdings=True) + [
+        warnings = self._warnings(etf_symbol, use_historical_holdings=True) + [
             (
-                "Realtime mode is price-driven: SOXX, TLT and holding price "
+                "Realtime mode is price-driven: the ETF, TLT and holding price "
                 "components use LongPort realtime quotes."
             ),
             (
-                "Put/call and junk-bond-demand components are daily data and "
-                "are carried forward from the latest SQLite backfill row."
+                "Put/call uses EVC's current option snapshot when available; "
+                "junk-bond-demand is daily data and is carried forward from "
+                "the latest SQLite backfill row."
             ),
             (
-                "Current-row holdings use the latest iShares holdings snapshot; "
+                "Current-row holdings use the latest DB holdings snapshot on or before "
+                "the quote date; "
                 "the historical scoring baseline comes from stored daily backfills."
             ),
         ]
@@ -699,18 +703,15 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         start_date: date,
         end_date: date,
     ) -> pd.DataFrame:
-        index = pd.bdate_range(start_date, end_date, name="date")
-        etf_prices = self._fetch_price_history(
-            etf_symbol, start_date, end_date
-        ).reindex(index).ffill()
+        etf_prices = self._fetch_price_history(etf_symbol, start_date, end_date)
+        index = pd.DatetimeIndex(etf_prices.index, name="date")
+        etf_prices = etf_prices.reindex(index).ffill()
         tlt_prices = self._fetch_price_history(
             "TLT.US", start_date, end_date
         ).reindex(index).ffill()
         fred = self._fetch_fred(["BAMLH0A0HYM2", "BAMLC0A0CM"]).reindex(index).ffill()
-        put_call = self._fetch_cboe_ratio(
-            start_date,
-            end_date,
-            ratio_name="EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+        put_call = self._fetch_symbol_put_call_ratio(
+            etf_symbol, start_date, end_date
         ).reindex(index).ffill(limit=3)
 
         unique_holdings = self._unique_holdings(holdings_by_date)
@@ -757,46 +758,152 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         max_holdings: int,
         use_historical_holdings: bool,
     ) -> Tuple[Dict[pd.Timestamp, List[ETFHolding]], Dict[pd.Timestamp, date], date, List[ETFHolding]]:
-        index = pd.bdate_range(start_date, end_date, name="date")
-        if not use_historical_holdings:
-            holdings, holdings_as_of, _ = self._get_current_holdings(
-                etf_symbol, max_holdings=max_holdings
-            )
-            return (
-                {timestamp: holdings for timestamp in index},
-                {timestamp: holdings_as_of for timestamp in index},
-                holdings_as_of,
-                holdings,
-            )
-
+        index = pd.DatetimeIndex(
+            self._fetch_price_history(etf_symbol, start_date, end_date).index,
+            name="date",
+        )
         holdings_by_date: Dict[pd.Timestamp, List[ETFHolding]] = {}
         holdings_as_of_by_date: Dict[pd.Timestamp, date] = {}
         latest_holdings: List[ETFHolding] = []
         holdings_as_of: Optional[date] = None
         for timestamp in index:
             day = timestamp.date()
-            holdings = self._get_historical_holdings_for_day(
+            holdings, holdings_as_of = self._load_latest_db_holdings_on_or_before(
                 etf_symbol, day, max_holdings=max_holdings
             )
-            if holdings:
-                latest_holdings = holdings
-                holdings_as_of = day
-            if latest_holdings:
-                holdings_by_date[timestamp] = latest_holdings
-                holdings_as_of_by_date[timestamp] = holdings_as_of
+            latest_holdings = holdings
+            holdings_by_date[timestamp] = holdings
+            holdings_as_of_by_date[timestamp] = holdings_as_of
 
         if not holdings_by_date or not latest_holdings or holdings_as_of is None:
-            raise FearGreedCloneError(f"no historical holdings found for {etf_symbol}")
+            raise FearGreedCloneError(f"no DB holdings found for {etf_symbol}")
 
         return holdings_by_date, holdings_as_of_by_date, holdings_as_of, latest_holdings
+
+    def _load_db_holdings_for_day(
+        self,
+        etf_symbol: str,
+        day: date,
+        max_holdings: int,
+    ) -> List[ETFHolding]:
+        db = Session()
+        try:
+            rows = (
+                db.query(DBETFHolding)
+                .filter(
+                    DBETFHolding.etf_symbol == etf_symbol,
+                    DBETFHolding.date == day,
+                )
+                .order_by(DBETFHolding.weight.desc())
+                .all()
+            )
+        finally:
+            Session.remove()
+
+        if max_holdings > 0:
+            rows = rows[:max_holdings]
+        holdings = []
+        for row in rows:
+            if not row.symbol or row.asset_class != "Equity" or (row.weight or 0) <= 0:
+                continue
+            symbol = normalize_us_equity_symbol(row.symbol)
+            if not symbol:
+                logging.warning(
+                    "跳过无法规范化的 DB ETF 持仓股票代码: %s %s %s",
+                    etf_symbol,
+                    day.isoformat(),
+                    row.symbol,
+                )
+                continue
+            holdings.append(
+                ETFHolding(
+                    symbol=symbol,
+                    name=row.name,
+                    asset_class=row.asset_class,
+                    shares=int(row.shares or 0),
+                    weight=float(row.weight or 0.0),
+                    market_value=0.0,
+                    price=None,
+                )
+            )
+        if not holdings:
+            raise FearGreedCloneError(
+                f"{etf_symbol} {day.isoformat()} holdings missing in etf_holdings; "
+                "please run ETF历史持仓回跑 first"
+            )
+        return holdings
+
+    def _load_latest_db_holdings_on_or_before(
+        self,
+        etf_symbol: str,
+        day: date,
+        max_holdings: int,
+    ) -> Tuple[List[ETFHolding], date]:
+        db = Session()
+        try:
+            latest_date = (
+                db.query(func.max(DBETFHolding.date))
+                .filter(
+                    DBETFHolding.etf_symbol == etf_symbol,
+                    DBETFHolding.date <= day,
+                )
+                .scalar()
+            )
+            if not latest_date:
+                raise FearGreedCloneError(
+                    f"{etf_symbol} has no holdings in etf_holdings on or before {day.isoformat()}; "
+                    "please run ETF历史持仓回跑 first"
+                )
+            rows = (
+                db.query(DBETFHolding)
+                .filter(
+                    DBETFHolding.etf_symbol == etf_symbol,
+                    DBETFHolding.date == latest_date,
+                )
+                .order_by(DBETFHolding.weight.desc())
+                .all()
+            )
+        finally:
+            Session.remove()
+
+        if max_holdings > 0:
+            rows = rows[:max_holdings]
+        holdings = []
+        for row in rows:
+            if not row.symbol or row.asset_class != "Equity" or (row.weight or 0) <= 0:
+                continue
+            symbol = normalize_us_equity_symbol(row.symbol)
+            if not symbol:
+                logging.warning(
+                    "跳过无法规范化的 DB ETF 持仓股票代码: %s %s %s",
+                    etf_symbol,
+                    latest_date.isoformat(),
+                    row.symbol,
+                )
+                continue
+            holdings.append(
+                ETFHolding(
+                    symbol=symbol,
+                    name=row.name,
+                    asset_class=row.asset_class,
+                    shares=int(row.shares or 0),
+                    weight=float(row.weight or 0.0),
+                    market_value=0.0,
+                    price=None,
+                )
+            )
+        if not holdings:
+            raise FearGreedCloneError(
+                f"{etf_symbol} {latest_date.isoformat()} holdings in etf_holdings have no usable equity rows"
+            )
+        return holdings, latest_date
 
     def _get_current_holdings(
         self, etf_symbol: str, max_holdings: int
     ) -> Tuple[List[ETFHolding], date, float]:
-        if etf_symbol not in self.ishares_fetcher.ETF_CONFIGS:
-            raise FearGreedCloneError(f"unsupported ETF for iShares holdings: {etf_symbol}")
+        fetcher = self._get_holdings_fetcher(etf_symbol)
 
-        holdings_data = self.ishares_fetcher.get_holdings(etf_symbol)
+        holdings_data = fetcher.get_holdings(etf_symbol)
         holdings = [
             holding
             for holding in holdings_data.holdings
@@ -812,6 +919,15 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         total_weight = sum(holding.weight for holding in holdings)
         return holdings, holdings_data.update_date, total_weight
+
+    def _get_holdings_fetcher(self, etf_symbol: str):
+        fetcher = self.holdings_fetchers.get(etf_symbol)
+        if not fetcher:
+            raise FearGreedCloneError(f"unsupported ETF for holdings: {etf_symbol}")
+        return fetcher
+
+    def _supports_historical_holdings(self, etf_symbol: str) -> bool:
+        return etf_symbol in self.ishares_fetcher.ETF_CONFIGS
 
     def _get_historical_holdings_for_day(
         self,
@@ -1140,7 +1256,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         current_date: date,
         previous_trading_day: date,
         price_history_count: int,
-    ) -> Tuple[Dict[str, float], Dict[str, Optional[float]]]:
+    ) -> Tuple[Dict[str, float], Dict[str, Optional[float]], Dict[str, str]]:
         index = pd.bdate_range(
             previous_trading_day - timedelta(days=max(price_history_count * 2, 420)),
             current_date,
@@ -1207,9 +1323,24 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         latest_daily = self._latest_stored_component_raw(etf_symbol)
         raw["put_call_options"] = np.nan
         raw["junk_bond_demand"] = np.nan
+        raw_freshness = {
+            "market_momentum": "LongPort realtime quote",
+            "stock_price_strength": "LongPort realtime holding quotes",
+            "stock_price_breadth": "LongPort realtime holding quotes",
+            "market_volatility": "LongPort realtime quote",
+            "safe_haven_demand": "LongPort realtime quote",
+        }
+        realtime_put_call = self._fetch_realtime_evc_put_call_raw(
+            etf_symbol=etf_symbol,
+            current_date=current_date,
+            previous_trading_day=previous_trading_day,
+        )
+        if pd.notna(realtime_put_call):
+            raw.loc[current_timestamp, "put_call_options"] = realtime_put_call
+            raw_freshness["put_call_options"] = "EVC current option put/call snapshot"
         if latest_daily:
-            raw.loc[current_timestamp, "put_call_options"] = latest_daily.get("put_call_options")
             raw.loc[current_timestamp, "junk_bond_demand"] = latest_daily.get("junk_bond_demand")
+            raw_freshness["junk_bond_demand"] = "latest stored FRED credit-spread component"
 
         current = raw.loc[current_timestamp].replace([np.inf, -np.inf], np.nan)
         raw_values = {
@@ -1217,7 +1348,53 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             for key in ETF_COMPONENTS
         }
         price_payload = self._realtime_price_payload(etf_prices.loc[current_timestamp], quote_map.get(etf_symbol))
-        return raw_values, price_payload
+        return raw_values, price_payload, raw_freshness
+
+    def _fetch_realtime_evc_put_call_raw(
+        self,
+        etf_symbol: str,
+        current_date: date,
+        previous_trading_day: date,
+    ) -> float:
+        try:
+            ticker = self._nasdaq_symbol(etf_symbol)
+            snapshot = EVCService().current_option_put_call(ticker)
+            if not snapshot or snapshot.put_call_vol is None or not snapshot.date:
+                return np.nan
+            if snapshot.date != current_date:
+                logging.getLogger(__name__).info(
+                    "Skip EVC current option put/call for %s because snapshot date %s != market date %s",
+                    etf_symbol,
+                    snapshot.date,
+                    current_date,
+                )
+                return np.nan
+
+            current_ratio = float(snapshot.put_call_vol)
+            if not np.isfinite(current_ratio):
+                return np.nan
+
+            history = self._fetch_db_put_call_ratio(
+                etf_symbol,
+                start_date=current_date - timedelta(days=14),
+                end_date=previous_trading_day,
+            )
+            recent_values = [
+                float(value)
+                for value in history.sort_index().tail(4).tolist()
+                if np.isfinite(float(value))
+            ]
+            recent_values.append(current_ratio)
+            if len(recent_values) < 3:
+                return np.nan
+            return -float(np.mean(recent_values))
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to build realtime EVC option put/call raw for %s: %s",
+                etf_symbol,
+                exc,
+            )
+            return np.nan
 
     def _latest_stored_component_raw(self, etf_symbol: str) -> Dict[str, Optional[float]]:
         db = Session()
@@ -1276,6 +1453,95 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 if symbol:
                     quote_map[symbol] = quote
         return quote_map
+
+    def _fetch_symbol_put_call_ratio(
+        self,
+        etf_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        try:
+            return self._fetch_db_put_call_ratio(etf_symbol, start_date, end_date)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to fetch DB option put/call for %s, fallback to Cboe ETP ratio: %s",
+                etf_symbol,
+                exc,
+            )
+            return self._fetch_cboe_ratio(
+                start_date,
+                end_date,
+                ratio_name="EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
+            )
+
+    def _fetch_db_put_call_ratio(
+        self,
+        etf_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        ticker = self._nasdaq_symbol(etf_symbol)
+        db = Session()
+        try:
+            rows = (
+                db.query(ETFPutCallRatio)
+                .filter(
+                    ETFPutCallRatio.symbol == ticker,
+                    ETFPutCallRatio.date >= start_date,
+                    ETFPutCallRatio.date <= end_date,
+                    ETFPutCallRatio.put_call_volume_ratio.isnot(None),
+                )
+                .order_by(ETFPutCallRatio.date.asc())
+                .all()
+            )
+            values: List[Dict[str, Any]] = []
+            for row in rows:
+                ratio = float(row.put_call_volume_ratio)
+                if not np.isfinite(ratio):
+                    continue
+                values.append({"date": pd.Timestamp(row.date), "put_call": ratio})
+
+            if not values:
+                raise FearGreedCloneError(f"DB returned no option put/call data for {etf_symbol}")
+
+            frame = (
+                pd.DataFrame(values)
+                .drop_duplicates(subset=["date"], keep="last")
+                .set_index("date")
+                .sort_index()
+            )
+            return frame["put_call"]
+        finally:
+            Session.remove()
+
+    def _fetch_evc_put_call_ratio(
+        self,
+        etf_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        rows = EVCService().option_put_call_history(self._nasdaq_symbol(etf_symbol))
+        values: List[Dict[str, Any]] = []
+        for item in rows:
+            if not item.date or item.put_call_vol is None:
+                continue
+            if item.date < start_date or item.date > end_date:
+                continue
+            ratio = float(item.put_call_vol)
+            if not np.isfinite(ratio):
+                continue
+            values.append({"date": pd.Timestamp(item.date), "put_call": ratio})
+
+        if not values:
+            raise FearGreedCloneError(f"EVC returned no option put/call data for {etf_symbol}")
+
+        frame = (
+            pd.DataFrame(values)
+            .drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+            .sort_index()
+        )
+        return frame["put_call"]
 
     def _fetch_cboe_ratio(
         self,
@@ -1415,23 +1681,17 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             }
         return payload
 
-    def _warnings(self, use_historical_holdings: bool) -> List[str]:
+    def _warnings(self, etf_symbol: str, use_historical_holdings: bool) -> List[str]:
         return [
             "This is an independent ETF-specific clone, not CNN's undisclosed calculation.",
             "Scores use rolling z-score/CDF and equal-weighted components.",
             (
-                "Holdings-based components use iShares historical holdings by "
-                "asOfDate; missing holiday/weekend snapshots carry forward the "
-                "latest valid holdings."
-                if use_historical_holdings
-                else (
-                    "Holdings-based history uses the latest free iShares holdings, "
-                    "so constituent history has survivorship bias."
-                )
+                "Holdings-based components read the latest etf_holdings snapshot "
+                "on or before each trading day; missing prior snapshots will raise an error."
             ),
             (
-                "SOXX-specific option history is not available from a stable free "
-                "source; the scored option component uses Cboe ETP put/call data."
+                "The option component uses local Barchart ETF put/call history "
+                "from etf_put_call_ratios, with Cboe ETP put/call as an outage fallback."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
