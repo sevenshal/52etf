@@ -3,8 +3,39 @@ import { Row, Col } from 'antd';
 import FearGreedCompass from './FearGreedCompass';
 import { getFearGreedColor, getFearGreedStatus } from '../utils';
 
+const formatDateTime = (value) => {
+  if (value === null || value === undefined) return null;
+
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp)) return null;
+
+  const date = new Date(timestamp < 10000000000 ? timestamp * 1000 : timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const pad = (num) => String(num).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-') + ' ' + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join(':');
+};
+
+const getDataTime = (fearGreedData) => {
+  return formatDateTime(
+    fearGreedData?.fear_and_greed_historical?.timestamp ??
+    fearGreedData?.fear_and_greed?.timestamp ??
+    fearGreedData?.timestamp
+  );
+};
+
 const FearGreedCurrent = ({ fearGreedData }) => {
   if (!fearGreedData) return null;
+
+  const dataTime = getDataTime(fearGreedData);
 
   return (
     <Row gutter={[16, 16]}>
@@ -13,6 +44,11 @@ const FearGreedCurrent = ({ fearGreedData }) => {
           score={fearGreedData.fear_and_greed.score}
           rating={getFearGreedStatus(fearGreedData.fear_and_greed.score)}
         />
+        {dataTime && (
+          <div style={{ marginTop: 8, textAlign: 'center', color: '#666', fontSize: 13 }}>
+            数据时间：{dataTime}
+          </div>
+        )}
       </Col>
       <Col xs={24} sm={24} md={16} lg={16} xl={16}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
