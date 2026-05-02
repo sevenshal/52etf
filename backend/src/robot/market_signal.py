@@ -1,10 +1,52 @@
-import datetime
 import logging
 import numpy as np
 from typing import List, Dict, Any
 from sqlalchemy import func
-from ..core.database import ETFHolding, MarketSignal, Session, StockEVC
+from ..core.database import MarketSignal, Session, StockEVC
 from ..core.services.quote import QuoteProvider, QuoteService
+
+MARKET_SIGNAL_STRATEGIES = [
+    {
+        "id": "v1",
+        "name": "200MA低位放量买点",
+        "directions": ["BUY"],
+        "summary": "低于200日均线、接近50日低点，并出现5日成交量抬升的低位买入信号。",
+        "params": [
+            {"key": "below_200ma_ratio_thresh", "label": "低于200MA", "default": 0.1, "min": 0, "max": 0.8, "step": 0.01, "precision": 3},
+            {"key": "vol_5_std_thresh", "label": "5日量Z", "default": 1.0, "min": -5, "max": 10, "step": 0.1, "precision": 2},
+            {"key": "today_vol_std_thresh", "label": "当日量Z上限", "default": 0.5, "min": -5, "max": 10, "step": 0.1, "precision": 2},
+            {"key": "close_vs_low_50_ratio", "label": "50日低点倍数", "default": 1.1, "min": 0.8, "max": 2.0, "step": 0.01, "precision": 3},
+        ],
+    },
+    {
+        "id": "v2",
+        "name": "涨跌幅企稳放量拐点",
+        "directions": ["BUY", "SELL"],
+        "summary": "先出现大幅上涨或下跌，再经过企稳期，最后用放量确认买点或卖点。",
+        "params": [
+            {"key": "price_change_ratio", "label": "涨跌幅%", "default": 30.0, "min": 1, "max": 200, "step": 1, "precision": 1},
+            {"key": "stabilization_period", "label": "企稳K数", "default": 10, "min": 1, "max": 120, "step": 1, "precision": 0},
+            {"key": "klines_volume_std_multiplier", "label": "放量倍数", "default": 2.0, "min": 0, "max": 10, "step": 0.1, "precision": 2},
+            {"key": "klines_volume_days", "label": "量能窗口", "default": 20, "min": 2, "max": 120, "step": 1, "precision": 0},
+        ],
+    },
+    {
+        "id": "v3",
+        "name": "成交量趋势突破买点",
+        "directions": ["BUY"],
+        "summary": "近期成交量逐级高于中期和长期成交量，且价格站上均线的趋势买入信号。",
+        "params": [
+            {"key": "recent_days", "label": "近期量天数", "default": 5, "min": 1, "max": 60, "step": 1, "precision": 0},
+            {"key": "mid_days", "label": "中期量天数", "default": 5, "min": 1, "max": 120, "step": 1, "precision": 0},
+            {"key": "long_days", "label": "长期量天数", "default": 100, "min": 5, "max": 300, "step": 1, "precision": 0},
+            {"key": "long_ratio_thresh", "label": "长期量倍数", "default": 2.0, "min": 0, "max": 10, "step": 0.1, "precision": 2},
+            {"key": "ma_days", "label": "价格均线", "default": 60, "min": 5, "max": 300, "step": 1, "precision": 0},
+        ],
+    },
+]
+
+MARKET_SIGNAL_STRATEGY_MAP = {item["id"]: item for item in MARKET_SIGNAL_STRATEGIES}
+MARKET_SIGNAL_MAX_LOOKBACK = 200
 
 def preprocess_klines_volume(
     klines: List[Dict[str, Any]],
@@ -201,9 +243,126 @@ class VolumeTrendBuyAnalyzer:
             }
         return None
 
+class MarketSignalStrategyEvaluator:
+    """
+    将各个市场信号策略统一包装，供入库和回测复用。
+    """
+    def __init__(
+        self,
+        below_200ma_ratio_thresh=0.1,
+        vol_5_std_thresh=1,
+        today_vol_std_thresh=0.5,
+        close_vs_low_50_ratio=1.1,
+        price_change_ratio=30,
+        stabilization_period=10,
+        klines_volume_std_multiplier=2.0,
+        klines_volume_days=20,
+        recent_days=5,
+        mid_days=5,
+        long_days=100,
+        long_ratio_thresh=2.0,
+        ma_days=60,
+    ):
+        self.signal_calculator = MarketSignalCalculator(
+            below_200ma_ratio_thresh=below_200ma_ratio_thresh,
+            vol_5_std_thresh=vol_5_std_thresh,
+            today_vol_std_thresh=today_vol_std_thresh,
+            close_vs_low_50_ratio=close_vs_low_50_ratio
+        )
+        self.buy_sell_analyzer = BuySellAnalyzer(
+            price_change_ratio=price_change_ratio,
+            stabilization_period=stabilization_period
+        )
+        self.volume_trend_buy_analyzer = VolumeTrendBuyAnalyzer(
+            recent_days=int(recent_days),
+            mid_days=int(mid_days),
+            long_days=int(long_days),
+            long_ratio_thresh=long_ratio_thresh,
+            ma_days=int(ma_days),
+        )
+        self.klines_volume_std_multiplier = klines_volume_std_multiplier
+        self.klines_volume_days = int(klines_volume_days)
+
+    def _date_from_timestamp(self, timestamp):
+        return timestamp.date() if hasattr(timestamp, "date") else timestamp
+
+    def analyze_all(self, klines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        if not klines:
+            return {}
+
+        processed_klines = preprocess_klines_volume(
+            klines,
+            std_dev_multiplier=self.klines_volume_std_multiplier,
+            days=self.klines_volume_days
+        )
+        return {
+            "v1": self.signal_calculator.analyze_signal(klines),
+            "v2": self.buy_sell_analyzer.analyze(processed_klines),
+            "v3": self.volume_trend_buy_analyzer.analyze(klines),
+        }
+
+    def analyze_strategy(self, strategy_id: str, klines: List[Dict[str, Any]]) -> Dict[str, Any] or None:
+        if strategy_id not in MARKET_SIGNAL_STRATEGY_MAP:
+            raise ValueError(f"Unsupported market signal strategy: {strategy_id}")
+        return self.analyze_all(klines).get(strategy_id)
+
+    def build_record(self, strategy_id: str, symbol: str, result: Dict[str, Any]) -> MarketSignal or None:
+        if not result:
+            return None
+
+        if strategy_id == "v1" and result.get("direction") == "BUY":
+            return MarketSignal(
+                ver="v1",
+                symbol=symbol,
+                close_price=round(result["close_today"], 2),
+                below_200ma_ratio=round(result["below_200ma_ratio"], 2),
+                vol_5_std=round(result["vol_5_std"], 2),
+                today_vol_std=round(result["today_vol_std"], 2),
+                low_50=round(result["low_50"], 2),
+                close_vs_low_50=round(result["close_vs_low_50"], 2),
+                date=result["date"],
+                direction="BUY"
+            )
+
+        if strategy_id == "v2" and result.get("type") in {"BUY", "SELL"}:
+            return MarketSignal(
+                ver="v2",
+                symbol=symbol,
+                close_price=round(result["price"], 2),
+                date=self._date_from_timestamp(result["timestamp"]),
+                direction=result["type"],
+                v2_price_change_ratio=self.buy_sell_analyzer.price_change_ratio,
+                v2_stabilization_period=self.buy_sell_analyzer.stabilization_period
+            )
+
+        if strategy_id == "v3" and result.get("type") == "BUY":
+            return MarketSignal(
+                ver="v3",
+                symbol=symbol,
+                close_price=round(result["price"], 2),
+                date=self._date_from_timestamp(result["timestamp"]),
+                direction="BUY",
+            )
+
+        return None
+
+    def build_signal_event(self, strategy_id: str, symbol: str, result: Dict[str, Any]) -> Dict[str, Any] or None:
+        record = self.build_record(strategy_id, symbol, result)
+        if not record:
+            return None
+        strategy = MARKET_SIGNAL_STRATEGY_MAP[strategy_id]
+        return {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy["name"],
+            "symbol": symbol,
+            "date": record.date,
+            "direction": record.direction,
+            "signal_price": record.close_price,
+        }
+
 class MarketSignalAnalyzer:
     """
-    主流程，结合两种算法
+    主流程，按策略分别生成信号
     """
     def __init__(
         self,
@@ -225,19 +384,16 @@ class MarketSignalAnalyzer:
         self.etf_symbols = etf_symbols or ['SPY.US', 'QQQ.US']
         self.min_market_cap = min_market_cap
 
-        self.signal_calculator = MarketSignalCalculator(
+        self.strategy_evaluator = MarketSignalStrategyEvaluator(
             below_200ma_ratio_thresh=below_200ma_ratio_thresh,
             vol_5_std_thresh=vol_5_std_thresh,
             today_vol_std_thresh=today_vol_std_thresh,
-            close_vs_low_50_ratio=close_vs_low_50_ratio
-        )
-        self.buy_sell_analyzer = BuySellAnalyzer(
+            close_vs_low_50_ratio=close_vs_low_50_ratio,
             price_change_ratio=price_change_ratio,
-            stabilization_period=stabilization_period
+            stabilization_period=stabilization_period,
+            klines_volume_std_multiplier=klines_volume_std_multiplier,
+            klines_volume_days=klines_volume_days
         )
-        self.volume_trend_buy_analyzer = VolumeTrendBuyAnalyzer()
-        self.klines_volume_std_multiplier = klines_volume_std_multiplier
-        self.klines_volume_days = klines_volume_days
 
     def get_holdings(self):
         latest_date = self.db_session.query(func.max(StockEVC.date)).scalar()
@@ -343,59 +499,29 @@ class MarketSignalAnalyzer:
                 stats["skip_klines"] += 1
                 continue
 
-            processed_klines = preprocess_klines_volume(
-                klines,
-                std_dev_multiplier=self.klines_volume_std_multiplier,
-                days=self.klines_volume_days
-            )
-
-            signal_result = self.signal_calculator.analyze_signal(klines)
-            buy_sell_result = self.buy_sell_analyzer.analyze(processed_klines)
-            volume_trend_result = self.volume_trend_buy_analyzer.analyze(klines)
+            strategy_results = self.strategy_evaluator.analyze_all(klines)
+            signal_result = strategy_results.get("v1")
+            buy_sell_result = strategy_results.get("v2")
+            volume_trend_result = strategy_results.get("v3")
 
             # 市场信号买点（延后入库，统一批量过滤市值）
-            if signal_result and signal_result.get("direction") == "BUY":
+            record = self.strategy_evaluator.build_record("v1", symbol, signal_result)
+            if record:
                 stats["v1_candidates"] += 1
-                record = MarketSignal(
-                    ver='v1',
-                    symbol=symbol,
-                    close_price=round(signal_result["close_today"], 2),
-                    below_200ma_ratio=round(signal_result["below_200ma_ratio"], 2),
-                    vol_5_std=round(signal_result["vol_5_std"], 2),
-                    today_vol_std=round(signal_result["today_vol_std"], 2),
-                    low_50=round(signal_result["low_50"], 2),
-                    close_vs_low_50=round(signal_result["close_vs_low_50"], 2),
-                    date=signal_result["date"],
-                    direction='BUY'
-                )
                 pending_records.append(record)
 
             # 只存最新一根K线的买卖点（延后入库）
-            if buy_sell_result:
-                if buy_sell_result["type"] == "BUY":
+            record = self.strategy_evaluator.build_record("v2", symbol, buy_sell_result)
+            if record:
+                if record.direction == "BUY":
                     stats["v2_buy_candidates"] += 1
                 else:
                     stats["v2_sell_candidates"] += 1
-                record = MarketSignal(
-                    ver='v2',
-                    symbol=symbol,
-                    close_price=round(buy_sell_result["price"], 2),
-                    date=buy_sell_result["timestamp"].date() if hasattr(buy_sell_result["timestamp"], "date") else buy_sell_result["timestamp"],
-                    direction=buy_sell_result["type"],
-                    v2_price_change_ratio=self.buy_sell_analyzer.price_change_ratio,
-                    v2_stabilization_period=self.buy_sell_analyzer.stabilization_period
-                )
                 pending_records.append(record)
 
-            if volume_trend_result:
+            record = self.strategy_evaluator.build_record("v3", symbol, volume_trend_result)
+            if record:
                 stats["v3_buy_candidates"] += 1
-                record = MarketSignal(
-                    ver='v3',
-                    symbol=symbol,
-                    close_price=round(volume_trend_result["price"], 2),
-                    date=volume_trend_result["timestamp"].date() if hasattr(volume_trend_result["timestamp"], "date") else volume_trend_result["timestamp"],
-                    direction=volume_trend_result["type"],
-                )
                 pending_records.append(record)
 
             results.append({

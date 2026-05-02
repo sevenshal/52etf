@@ -723,6 +723,127 @@ class W20MomentumLiveLog(Base):
     message = Column(String(1000))
     payload = Column(JSON)
 
+class MarketSignalStrategyConfig(Base):
+    """市场信号策略虚拟盘配置"""
+    __tablename__ = "market_signal_strategy_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    strategy_id = Column(String(32), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    symbols = Column(JSON, nullable=False)
+    initial_capital = Column(Float, nullable=False, default=100_000.0)
+    start_date = Column(Date, nullable=False)
+    holding_days = Column(Integer, nullable=False, default=20)
+    position_pct = Column(Float, nullable=False, default=10.0)
+    max_positions = Column(Integer, nullable=False, default=10)
+    min_cash_pct = Column(Float, nullable=False, default=0.0)
+    commission_pct = Column(Float, nullable=False, default=0.03)
+    slippage_pct = Column(Float, nullable=False, default=0.02)
+    lot_size = Column(Integer, nullable=False, default=1)
+    min_market_cap = Column(Float, nullable=False, default=20_000_000_000.0)
+    strategy_params = Column(JSON)
+    auto_sync_enabled = Column(Boolean, default=True, nullable=False)
+    auto_sync_time = Column(String(5), default="15:58", nullable=False)
+    last_auto_sync_at = Column(DateTime)
+    last_sync_at = Column(DateTime)
+    last_sync_status = Column(String(16))
+    last_sync_message = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class MarketSignalEvent(Base):
+    """市场信号事件。新结构用 strategy_id/config_id 明确归属策略。"""
+    __tablename__ = "market_signal_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    strategy_id = Column(String(32), nullable=False, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    direction = Column(String(8), nullable=False)
+    signal_price = Column(Float)
+    payload = Column(JSON)
+    price_source = Column(String(32), default="daily_close")
+    quote_timestamp = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    __table_args__ = (
+        UniqueConstraint("config_id", "strategy_id", "symbol", "date", "direction", name="uniq_market_signal_event"),
+    )
+
+class MarketSignalVirtualEquity(Base):
+    """市场信号策略虚拟盘每日净值"""
+    __tablename__ = "market_signal_virtual_equity"
+
+    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), primary_key=True)
+    date = Column(Date, primary_key=True)
+    account_id = Column(String, index=True)
+    value = Column(Float, nullable=False)
+    cash = Column(Float)
+    position_value = Column(Float)
+    drawdown = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class MarketSignalVirtualTrade(Base):
+    """市场信号策略虚拟盘模拟成交"""
+    __tablename__ = "market_signal_virtual_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    date = Column(Date, index=True)
+    signal_date = Column(Date)
+    strategy_id = Column(String(32), index=True)
+    action = Column(String(8), nullable=False)
+    symbol = Column(String(32), index=True)
+    price = Column(Float)
+    quantity = Column(Integer)
+    amount = Column(Float)
+    commission = Column(Float)
+    profit = Column(Float)
+    profit_pct = Column(Float)
+    reason = Column(String(64))
+    reason_detail = Column(String(1000))
+    cash_after = Column(Float)
+    portfolio_value_after = Column(Float)
+    symbol_market_value_after = Column(Float)
+    symbol_weight_pct_after = Column(Float)
+    price_source = Column(String(32))
+    quote_timestamp = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+
+class MarketSignalVirtualHolding(Base):
+    """市场信号策略虚拟盘最新持仓快照"""
+    __tablename__ = "market_signal_virtual_holdings"
+
+    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), primary_key=True)
+    symbol = Column(String(32), primary_key=True)
+    account_id = Column(String, index=True)
+    shares = Column(Integer, nullable=False, default=0)
+    price = Column(Float)
+    avg_cost = Column(Float)
+    entry_date = Column(Date)
+    market_value = Column(Float)
+    actual_weight_pct = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class MarketSignalVirtualLog(Base):
+    """市场信号策略虚拟盘运行日志"""
+    __tablename__ = "market_signal_virtual_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    date = Column(Date, index=True)
+    level = Column(String(16), default="INFO")
+    action = Column(String(32), nullable=False)
+    message = Column(String(1000))
+    payload = Column(JSON)
+
 # 创建所有表
 Base.metadata.create_all(engine)
 
@@ -737,6 +858,11 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_market_signal_configs_account_strategy ON market_signal_strategy_configs(account_id, strategy_id)",
+        "CREATE INDEX IF NOT EXISTS idx_market_signal_events_config_date ON market_signal_events(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_market_signal_events_strategy_date ON market_signal_events(strategy_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_market_signal_trades_config_date ON market_signal_virtual_trades(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_market_signal_logs_config_time ON market_signal_virtual_logs(config_id, timestamp)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:
@@ -756,6 +882,16 @@ def ensure_table_columns():
         "w20_momentum_live_trades": {
             "price_source": "ALTER TABLE w20_momentum_live_trades ADD COLUMN price_source VARCHAR(32)",
             "quote_timestamp": "ALTER TABLE w20_momentum_live_trades ADD COLUMN quote_timestamp DATETIME",
+        },
+        "market_signal_virtual_trades": {
+            "profit": "ALTER TABLE market_signal_virtual_trades ADD COLUMN profit FLOAT",
+            "profit_pct": "ALTER TABLE market_signal_virtual_trades ADD COLUMN profit_pct FLOAT",
+        },
+        "market_signal_strategy_configs": {
+            "strategy_params": "ALTER TABLE market_signal_strategy_configs ADD COLUMN strategy_params JSON",
+            "auto_sync_enabled": "ALTER TABLE market_signal_strategy_configs ADD COLUMN auto_sync_enabled BOOLEAN DEFAULT 1",
+            "auto_sync_time": "ALTER TABLE market_signal_strategy_configs ADD COLUMN auto_sync_time VARCHAR(5) DEFAULT '15:58'",
+            "last_auto_sync_at": "ALTER TABLE market_signal_strategy_configs ADD COLUMN last_auto_sync_at DATETIME",
         },
     }
 

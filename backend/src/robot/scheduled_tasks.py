@@ -31,17 +31,6 @@ def _run_etf_fair_value_analysis():
         manager.db_session.close()
 
 
-def _run_market_signal_analysis():
-    from ..core.services.longport import LongPortService
-    from .market_signal import MarketSignalAnalyzer
-
-    analyzer = MarketSignalAnalyzer(LongPortService.get_instance())
-    try:
-        analyzer.analyze()
-    finally:
-        analyzer.db_session.close()
-
-
 def _run_cnn_fear_greed_fetch():
     from .cnn_fear_index import CNNFearGreedIndexScraper
 
@@ -133,15 +122,6 @@ class ScheduledTaskManager:
                 sort_order=20,
                 runner=_run_etf_fair_value_analysis,
             ),
-            "us_market_signal_analysis": TaskDefinition(
-                task_key="us_market_signal_analysis",
-                name="美股信号分析",
-                description="计算市场信号并写入历史记录。",
-                default_time="09:30",
-                default_enabled=True,
-                sort_order=30,
-                runner=_run_market_signal_analysis,
-            ),
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
                 name="CNN Fear & Greed 抓取",
@@ -194,6 +174,12 @@ class ScheduledTaskManager:
             db.query(ScheduledTaskConfig).filter(
                 ScheduledTaskConfig.task_key == "etf_emotion_calculation"
             ).delete(synchronize_session=False)
+            db.query(ScheduledTaskConfig).filter(
+                ScheduledTaskConfig.task_key.in_([
+                    "us_market_signal_analysis",
+                    "market_signal_live_sync",
+                ])
+            ).delete(synchronize_session=False)
             for task in self.task_definitions.values():
                 config = db.query(ScheduledTaskConfig).filter(
                     ScheduledTaskConfig.task_key == task.task_key
@@ -229,6 +215,9 @@ class ScheduledTaskManager:
             self._jobs = {}
             for config in configs:
                 if not config["enabled"] or not self.is_valid_time(config["schedule_time"]):
+                    continue
+                task = self.task_definitions.get(config["task_key"])
+                if not task:
                     continue
                 job = self.scheduler.every().day.at(config["schedule_time"]).do(
                     self.trigger_task,
