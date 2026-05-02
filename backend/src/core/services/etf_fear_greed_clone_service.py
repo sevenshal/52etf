@@ -963,6 +963,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             try:
                 with cache_file.open("r", encoding="utf-8") as file:
                     payload = json.load(file)
+                if isinstance(payload, dict) and payload.get("aaData") == []:
+                    cache_file.unlink(missing_ok=True)
+                    payload = None
             except json.JSONDecodeError:
                 cache_file.unlink(missing_ok=True)
 
@@ -981,11 +984,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             )
             response.raise_for_status()
             payload = response.json()
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file = cache_file.with_suffix(".tmp")
-            with temp_file.open("w", encoding="utf-8") as file:
-                json.dump(payload, file)
-            temp_file.replace(cache_file)
+            if isinstance(payload, dict) and payload.get("aaData"):
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                temp_file = cache_file.with_suffix(".tmp")
+                with temp_file.open("w", encoding="utf-8") as file:
+                    json.dump(payload, file)
+                temp_file.replace(cache_file)
             time.sleep(0.03)
 
         return payload

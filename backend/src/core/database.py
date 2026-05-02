@@ -662,7 +662,7 @@ class ScheduledTaskConfig(Base):
     last_run_started_at = Column(DateTime)
     last_run_finished_at = Column(DateTime)
     last_run_status = Column(String(16))
-    last_run_message = Column(String(500))
+    last_run_message = Column(String(4000))
     last_duration_seconds = Column(Float)
     updated_by = Column(String(64))
     created_at = Column(DateTime, default=datetime.now)

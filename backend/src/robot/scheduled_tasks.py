@@ -12,6 +12,33 @@ from ..core.database import ScheduledTaskConfig, get_db_ctx
 from ..core.utils import send_alert_email
 
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+LAST_RUN_MESSAGE_MAX_LENGTH = 4000
+TASK_ERROR_PREVIEW_LIMIT = 20
+TASK_ERROR_PREVIEW_MAX_LENGTH = 3600
+
+
+def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
+    if not message:
+        return None
+    text = str(message)
+    if len(text) <= max_length:
+        return text
+    suffix = "...[已截断]"
+    return f"{text[:max_length - len(suffix)]}{suffix}"
+
+
+def _format_error_preview(
+    errors: List[dict],
+    formatter: Callable[[dict], str],
+    limit: int = TASK_ERROR_PREVIEW_LIMIT,
+    max_length: int = TASK_ERROR_PREVIEW_MAX_LENGTH,
+) -> str:
+    preview_items = [formatter(item) for item in errors[:limit]]
+    preview = "; ".join(preview_items)
+    remaining = len(errors) - len(preview_items)
+    if remaining > 0:
+        preview = f"{preview}; ... and {remaining} more"
+    return _truncate_task_message(preview, max_length) or ""
 
 
 def _run_evc_stock_fetch():
@@ -49,9 +76,9 @@ def _run_etf_holdings_ingest():
     )
     errors = result.get("errors") or []
     if errors:
-        preview = "; ".join(
-            f"{item.get('symbol')}: {item.get('error')}"
-            for item in errors[:3]
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('symbol')}: {item.get('error')}",
         )
         raise RuntimeError(
             f"ETF latest holdings ingest finished with {len(errors)} errors: {preview}"
@@ -78,9 +105,9 @@ def _run_etf_historical_holdings_backfill(start_date: Optional[str] = None):
     )
     errors = result.get("errors") or []
     if errors:
-        preview = "; ".join(
-            f"{item.get('symbol')} {item.get('date')}: {item.get('error')}"
-            for item in errors[:3]
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('symbol')} {item.get('date')}: {item.get('error')}",
         )
         raise RuntimeError(
             f"ETF historical holdings backfill finished with {len(errors)} errors: {preview}"
@@ -106,9 +133,9 @@ def _run_etf_put_call_ratio_sync(full: bool = False):
     )
     errors = result.get("errors") or []
     if errors:
-        preview = "; ".join(
-            f"{item.get('symbol')}: {item.get('error')}"
-            for item in errors[:3]
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('symbol')}: {item.get('error')}",
         )
         raise RuntimeError(
             f"ETF put/call ratio sync finished with {len(errors)} errors: {preview}"
@@ -525,7 +552,7 @@ class ScheduledTaskManager:
                     config.last_run_started_at = started_at
                     config.last_run_finished_at = finished_at
                     config.last_run_status = status
-                    config.last_run_message = message[:500] if message else None
+                    config.last_run_message = _truncate_task_message(message)
                     config.last_duration_seconds = duration_seconds
                     if triggered_by:
                         config.updated_by = triggered_by

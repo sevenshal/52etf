@@ -1,6 +1,11 @@
+import logging
+import os
+import random
 import time
 import warnings
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
@@ -52,8 +57,34 @@ DEFAULT_USER_AGENT = (
 class BarchartService:
     """Small Barchart Core API client with automatic public-page cookies."""
 
-    def __init__(self, timeout: float = 30.0, user_agent: str = DEFAULT_USER_AGENT):
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        user_agent: str = DEFAULT_USER_AGENT,
+        request_interval_seconds: float = None,
+        max_retries: int = None,
+        retry_base_seconds: float = None,
+        retry_max_seconds: float = None,
+    ):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.timeout = timeout
+        self.request_interval_seconds = self._env_float(
+            "BARCHART_REQUEST_INTERVAL_SECONDS",
+            request_interval_seconds,
+            1.5,
+        )
+        self.max_retries = self._env_int("BARCHART_MAX_RETRIES", max_retries, 5)
+        self.retry_base_seconds = self._env_float(
+            "BARCHART_RETRY_BASE_SECONDS",
+            retry_base_seconds,
+            8.0,
+        )
+        self.retry_max_seconds = self._env_float(
+            "BARCHART_RETRY_MAX_SECONDS",
+            retry_max_seconds,
+            120.0,
+        )
+        self._last_request_at = 0.0
         self._xsrf_token = None
         self.session = requests.Session()
         self.session.headers.update(
@@ -147,8 +178,10 @@ class BarchartService:
 
     def refresh_session(self, symbol: str, page_name: str = "put-call-ratios") -> str:
         page_url = QUOTE_PAGE_URL.format(symbol=symbol, page_name=page_name)
-        response = self.session.get(
+        response = self._request_with_retries(
+            "GET",
             page_url,
+            symbol=symbol,
             headers={
                 "Accept": (
                     "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -156,9 +189,7 @@ class BarchartService:
                 ),
                 "Referer": BASE_URL,
             },
-            timeout=self.timeout,
         )
-        response.raise_for_status()
 
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if not xsrf_token:
@@ -175,17 +206,99 @@ class BarchartService:
     ) -> Dict[str, Any]:
         xsrf_token = self._xsrf_token or self.refresh_session(symbol, page_name=page_name)
         headers = self._api_headers(symbol, page_name, xsrf_token)
-        response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+        response = self._request_with_retries(
+            "GET",
+            url,
+            symbol=symbol,
+            params=params,
+            headers=headers,
+            allowed_statuses={401, 403, 419},
+        )
 
         if response.status_code in {401, 403, 419}:
             headers = self._api_headers(symbol, page_name, self.refresh_session(symbol, page_name=page_name))
-            response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+            response = self._request_with_retries(
+                "GET",
+                url,
+                symbol=symbol,
+                params=params,
+                headers=headers,
+            )
 
-        response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
             raise RuntimeError(f"Unexpected Barchart response for {symbol}")
         return payload
+
+    def _request_with_retries(
+        self,
+        method: str,
+        url: str,
+        symbol: str,
+        allowed_statuses: Optional[set] = None,
+        **kwargs,
+    ) -> requests.Response:
+        allowed_statuses = allowed_statuses or set()
+        response = None
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            if response.status_code != 429:
+                if response.status_code not in allowed_statuses:
+                    response.raise_for_status()
+                return response
+
+            if attempt >= self.max_retries:
+                break
+
+            wait_seconds = self._retry_wait_seconds(response, attempt)
+            self.logger.warning(
+                "Barchart 429 for %s, retry %s/%s after %.1fs: %s",
+                symbol,
+                attempt + 1,
+                self.max_retries,
+                wait_seconds,
+                response.url,
+            )
+            time.sleep(wait_seconds)
+
+        response.raise_for_status()
+        return response
+
+    def _throttle(self):
+        if self.request_interval_seconds <= 0:
+            return
+        elapsed = time.monotonic() - self._last_request_at
+        wait_seconds = self.request_interval_seconds - elapsed
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        self._last_request_at = time.monotonic()
+
+    def _retry_wait_seconds(self, response: requests.Response, attempt: int) -> float:
+        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+        if retry_after is not None:
+            return min(max(retry_after, 1.0), self.retry_max_seconds)
+
+        exponential_wait = self.retry_base_seconds * (2 ** attempt)
+        jitter = random.uniform(0, min(3.0, exponential_wait * 0.2))
+        return min(exponential_wait + jitter, self.retry_max_seconds)
+
+    @staticmethod
+    def _parse_retry_after(value: Any) -> Optional[float]:
+        if not value:
+            return None
+        text = str(value).strip()
+        try:
+            return max(float(text), 0.0)
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(text)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     @staticmethod
     def _api_headers(symbol: str, page_name: str, xsrf_token: str) -> Dict[str, str]:
@@ -204,4 +317,28 @@ class BarchartService:
         try:
             return int(str(value).replace(",", ""))
         except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _env_float(name: str, value: Optional[float], default: float) -> float:
+        if value is not None:
+            return float(value)
+        env_value = os.getenv(name)
+        if env_value is None:
+            return default
+        try:
+            return float(env_value)
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _env_int(name: str, value: Optional[int], default: int) -> int:
+        if value is not None:
+            return int(value)
+        env_value = os.getenv(name)
+        if env_value is None:
+            return default
+        try:
+            return int(env_value)
+        except ValueError:
             return default
