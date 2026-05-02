@@ -1,10 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Radio, Row, Space, Statistic, Tag } from 'antd';
+import { Alert, Card, Col, Radio, Row, Space, Statistic, Tabs, Tag } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
 import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
 
+const ETF_OPTIONS = [
+  { symbol: 'SOXX.US', ticker: 'SOXX', label: '半导体' },
+  { symbol: 'SPY.US', ticker: 'SPY', label: '标普500' },
+  { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100' },
+  { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯' },
+];
+
 const SOXXFearGreed = () => {
+  const [activeSymbol, setActiveSymbol] = useState('SOXX.US');
   const [data, setData] = useState([]);
   const [latest, setLatest] = useState(null);
   const [realtime, setRealtime] = useState(null);
@@ -15,14 +23,22 @@ const SOXXFearGreed = () => {
   const [realtimeError, setRealtimeError] = useState(null);
   const [timeRange, setTimeRange] = useState(3);
 
+  const activeETF = useMemo(
+    () => ETF_OPTIONS.find(item => item.symbol === activeSymbol) || ETF_OPTIONS[0],
+    [activeSymbol]
+  );
+
   useEffect(() => {
     const fetchHistory = async () => {
       setLoading(true);
       setError(null);
+      setData([]);
+      setLatest(null);
+      setLatestHoldings([]);
       try {
         const response = await request.get('/api/cnn/etf-fear-greed-clone/history', {
           params: {
-            symbol: 'SOXX.US',
+            symbol: activeSymbol,
             include_components: false,
             include_latest_holdings: true,
           },
@@ -31,7 +47,7 @@ const SOXXFearGreed = () => {
         setLatest(response.data?.latest || null);
         setLatestHoldings(response.data?.latest_holdings || []);
       } catch (err) {
-        setError(err?.response?.data?.detail || err.message || '获取 SOXX 贪恐历史失败');
+        setError(err?.response?.data?.detail || err.message || `获取 ${activeETF.ticker} 贪恐历史失败`);
       } finally {
         setLoading(false);
       }
@@ -40,10 +56,11 @@ const SOXXFearGreed = () => {
     const fetchRealtime = async () => {
       setRealtimeLoading(true);
       setRealtimeError(null);
+      setRealtime(null);
       try {
         const response = await request.get('/api/cnn/etf-fear-greed-clone/realtime', {
           params: {
-            symbol: 'SOXX.US',
+            symbol: activeSymbol,
             include_holdings_quotes: false,
           },
         });
@@ -53,7 +70,7 @@ const SOXXFearGreed = () => {
         setRealtimeError(
           err?.response?.data?.detail
             || err?.message
-            || '获取 SOXX 实时贪恐失败'
+            || `获取 ${activeETF.ticker} 实时贪恐失败`
         );
       } finally {
         setRealtimeLoading(false);
@@ -62,7 +79,7 @@ const SOXXFearGreed = () => {
 
     fetchHistory();
     fetchRealtime();
-  }, []);
+  }, [activeSymbol, activeETF.ticker]);
 
   const filteredData = useMemo(() => {
     if (timeRange === -1) return data;
@@ -86,7 +103,7 @@ const SOXXFearGreed = () => {
         axisPointer: { type: 'cross' },
       },
       legend: {
-        data: ['SOXX贪恐', 'SOXX价格'],
+        data: [`${activeETF.ticker}贪恐`, `${activeETF.ticker}价格`],
         top: 0,
       },
       grid: {
@@ -124,7 +141,7 @@ const SOXXFearGreed = () => {
       ],
       series: [
         {
-          name: 'SOXX贪恐',
+          name: `${activeETF.ticker}贪恐`,
           type: 'line',
           smooth: true,
           showSymbol: false,
@@ -133,7 +150,7 @@ const SOXXFearGreed = () => {
           itemStyle: { color: '#13c2c2' },
         },
         {
-          name: 'SOXX价格',
+          name: `${activeETF.ticker}价格`,
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
@@ -144,7 +161,7 @@ const SOXXFearGreed = () => {
         },
       ],
     };
-  }, [filteredData]);
+  }, [filteredData, activeETF.ticker]);
 
   const realtimeMeta = realtime?.fear_and_greed_clone;
   const realtimeScore = realtimeMeta?.score;
@@ -158,12 +175,18 @@ const SOXXFearGreed = () => {
   const topHoldings = latestHoldings.slice(0, 6);
 
   return (
-    <Card title="SOXX贪恐" style={{ marginBottom: 16 }} loading={loading}>
+    <Card title="ETF自算贪恐" style={{ marginBottom: 16 }} loading={loading}>
+      <Tabs activeKey={activeSymbol} onChange={setActiveSymbol} style={{ marginBottom: 16 }}>
+        {ETF_OPTIONS.map(item => (
+          <Tabs.TabPane tab={`${item.ticker} ${item.label}`} key={item.symbol} />
+        ))}
+      </Tabs>
+
       {error && (
         <Alert
           type="warning"
           showIcon
-          message="SOXX贪恐数据暂不可用"
+          message={`${activeETF.ticker}贪恐数据暂不可用`}
           description={error}
           style={{ marginBottom: 16 }}
         />
@@ -173,7 +196,7 @@ const SOXXFearGreed = () => {
         <Alert
           type="info"
           showIcon
-          message="SOXX 实时贪恐暂不可用，当前显示最新入库日线值"
+          message={`${activeETF.ticker} 实时贪恐暂不可用，当前显示最新入库日线值`}
           description={realtimeError}
           style={{ marginBottom: 16 }}
         />
@@ -210,7 +233,7 @@ const SOXXFearGreed = () => {
               />
             </Col>
             <Col xs={12} md={6} xl={4}>
-              <Statistic title="SOXX价格" value={displayPrice} precision={2} prefix="$" />
+              <Statistic title={`${activeETF.ticker}价格`} value={displayPrice} precision={2} prefix="$" />
             </Col>
             <Col xs={12} md={6} xl={4}>
               <Statistic title="报价时间" value={realtimeTimestamp || '-'} />
