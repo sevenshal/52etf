@@ -30,6 +30,12 @@ const formatNullablePercent = (value, digits = 2) => (
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
 );
+const formatMoney = (value, digits = 2) => (
+  value === null || value === undefined ? '-' : Number(value || 0).toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })
+);
 const formatWeights = (value) => (value || []).join(' / ');
 const parseSemicolonItems = (value) => {
   if (Array.isArray(value)) {
@@ -497,6 +503,13 @@ const W20MomentumBacktest = () => {
     { title: '标的', dataIndex: 'symbol', width: 180, render: value => <Tag color="blue">{formatSymbolLabel(value)}</Tag> },
     { title: '有效区间', width: 210, render: (_, record) => `${record.effective_start_date || '-'} ~ ${record.effective_end_date || '-'}` },
     { title: '有效交易日', dataIndex: 'trading_days', width: 100, sorter: (a, b) => Number(a.trading_days || 0) - Number(b.trading_days || 0) },
+    {
+      title: '盈利金额',
+      dataIndex: 'profit_amount',
+      width: 120,
+      render: value => <span style={{ color: Number(value || 0) >= 0 ? '#3f8600' : '#cf1322' }}>{formatMoney(value, 2)}</span>,
+      sorter: (a, b) => Number(a.profit_amount || 0) - Number(b.profit_amount || 0),
+    },
     { title: '买入次数', dataIndex: 'buy_count', width: 100, sorter: (a, b) => Number(a.buy_count || 0) - Number(b.buy_count || 0) },
     { title: '卖出次数', dataIndex: 'sell_count', width: 100, sorter: (a, b) => Number(a.sell_count || 0) - Number(b.sell_count || 0) },
     { title: '合计次数', dataIndex: 'trade_count', width: 100, sorter: (a, b) => Number(a.trade_count || 0) - Number(b.trade_count || 0), defaultSortOrder: 'descend' },
@@ -929,7 +942,7 @@ const W20MomentumBacktest = () => {
             </Col>
           </Row>
 
-          <Card title="标的买卖次数" style={{ marginBottom: 24 }}>
+          <Card title="标的表现" style={{ marginBottom: 24 }}>
             <Table
               dataSource={result.symbol_trade_stats || []}
               columns={symbolTradeStatsColumns}

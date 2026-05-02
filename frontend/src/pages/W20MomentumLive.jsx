@@ -601,6 +601,14 @@ const W20MomentumLive = () => {
       width: 220,
       render: (_, record) => `${formatDate(record.effective_start_date)} ~ ${formatDate(record.effective_end_date)}`,
     },
+    {
+      title: '盈利金额',
+      dataIndex: 'profit_amount',
+      key: 'profit_amount',
+      width: 120,
+      render: value => <span style={{ color: Number(value || 0) >= 0 ? '#3f8600' : '#cf1322' }}>{formatMoney(value, 2)}</span>,
+      sorter: (a, b) => Number(a.profit_amount || 0) - Number(b.profit_amount || 0),
+    },
     { title: '买入次数', dataIndex: 'buy_count', key: 'buy_count', width: 100 },
     { title: '卖出次数', dataIndex: 'sell_count', key: 'sell_count', width: 100 },
     { title: '合计次数', dataIndex: 'trade_count', key: 'trade_count', width: 100 },
@@ -812,12 +820,12 @@ const W20MomentumLive = () => {
         scroll={{ x: 900 }}
       />
       <Table
-        title={() => '标的买卖次数'}
+        title={() => '标的表现'}
         rowKey="symbol"
         columns={symbolTradeColumns}
         dataSource={detail?.summary?.symbol_trade_stats || []}
         pagination={false}
-        scroll={{ x: 720 }}
+        scroll={{ x: 860 }}
       />
     </Space>
   );
