@@ -26,6 +26,19 @@ import request from '../utils/request';
 const { Title, Text } = Typography;
 const RESULT_PREVIEW_LENGTH = 96;
 
+const getRunStartDateHint = (taskKey) => {
+  if (taskKey === 'etf_historical_holdings_backfill') {
+    return {
+      title: '选择持仓抓取开始日期，系统会从该日期往后抓到今天，并按持仓日期写入数据库。',
+      detail: 'iShares 历史持仓和 SEC N-PORT 历史持仓都会覆盖已有的同 ETF 同日期数据。'
+    };
+  }
+  return {
+    title: '选择回跑开始日期，系统会从该日期起重新计算并写入历史记录。',
+    detail: '计算时会自动向前取足滚动窗口数据，但只保存所选日期之后的结果。'
+  };
+};
+
 const parseTimeValue = (time) => {
   if (!time) {
     return null;
@@ -424,7 +437,7 @@ const ScheduledTasks = () => {
         <Space direction="vertical" size={12}>
           {runModalTask?.supports_start_date ? (
             <>
-              <Text>选择回跑开始日期，系统会从该日期起重新计算并写入历史记录。</Text>
+              <Text>{getRunStartDateHint(runModalTask.task_key).title}</Text>
               <DatePicker
                 value={runStartDate}
                 onChange={(value) => setRunStartDate(value)}
@@ -433,7 +446,7 @@ const ScheduledTasks = () => {
                 style={{ width: 180 }}
               />
               <Text type="secondary">
-                计算时会自动向前取足滚动窗口数据，但只保存所选日期之后的结果。
+                {getRunStartDateHint(runModalTask.task_key).detail}
               </Text>
             </>
           ) : null}
