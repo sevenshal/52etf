@@ -16,11 +16,13 @@ const ETFDetail = () => {
   const [loading, setLoading] = useState(true);
   const [klines, setKlines] = useState([]);
   const [report, setReport] = useState(null);
+  const [reportHistory, setReportHistory] = useState([]);
   const [components, setComponents] = useState([]);
 
   useEffect(() => {
     fetchKlines();
     fetchReport();
+    fetchReportHistory();
     fetchComponents();
   }, [symbol]);
 
@@ -42,6 +44,15 @@ const ETFDetail = () => {
       console.error('获取K线数据失败:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchReportHistory = async () => {
+    try {
+      const { data } = await request.get(`/api/etf/reports/${symbol}/history?days=500`);
+      setReportHistory(data || []);
+    } catch (error) {
+      console.error('获取ETF历史估值失败:', error);
     }
   };
 
@@ -72,20 +83,49 @@ const ETFDetail = () => {
   // 4. 修改 getChartOption 函数
   const getChartOption = () => {
     const dates = klines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
+    const toFiniteNumber = (value) => {
+      if (value === null || value === undefined) return null;
+      const num = Number(value);
+      return Number.isFinite(num) ? num : null;
+    };
+    const sortedReportHistory = [...reportHistory]
+      .map(item => ({
+        ...item,
+        date: dayjs(item.date).format('YYYY-MM-DD'),
+        fair_value_lo: toFiniteNumber(item.fair_value_lo),
+        fair_value_hi: toFiniteNumber(item.fair_value_hi)
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const fairValueLoData = [];
+    const fairValueHiData = [];
+    let historyIndex = 0;
+    let latestHistory = null;
+
+    dates.forEach(dateStr => {
+      while (
+        historyIndex < sortedReportHistory.length &&
+        sortedReportHistory[historyIndex].date <= dateStr
+      ) {
+        latestHistory = sortedReportHistory[historyIndex];
+        historyIndex += 1;
+      }
+      fairValueLoData.push(latestHistory?.fair_value_lo ?? null);
+      fairValueHiData.push(latestHistory?.fair_value_hi ?? null);
+    });
+    const hasFairValueLo = fairValueLoData.some(value => value !== null);
+    const hasFairValueHi = fairValueHiData.some(value => value !== null);
     const klineData = klines.map(item => [
       item.open,
       item.close,
       item.low,
       item.high,
-      item.volume,
-      item.pe,        // 5
-      item.forward_pe // 6
+      item.volume
     ]);
 
     const series = [{
       name: 'K线',
       type: 'candlestick',
-      data: klineData.map((item, i) => [
+      data: klineData.map(item => [
         item[0],
         item[1],
         item[2],
@@ -109,28 +149,35 @@ const ETFDetail = () => {
           return kline[1] > kline[0] ? '#ef232a' : '#14b143';
         }
       }
-    }, {
-      name: 'PE',
-      type: 'line',
-      yAxisIndex: 2,
-      data: klineData.map(item => item[5]),
-      symbol: 'none',
-      lineStyle: {
-        width: 1,
-        color: '#1890ff'
-      }
-    }, {
-      name: '前瞻PE',
-      type: 'line',
-      yAxisIndex: 2,
-      data: klineData.map(item => item[6]),
-      symbol: 'none',
-      lineStyle: {
-        width: 1,
-        color: '#722ed1',
-        type: 'dashed'
-      }
     }];
+
+    if (hasFairValueLo) {
+      series.push({
+        name: '估值下限',
+        type: 'line',
+        data: fairValueLoData,
+        symbol: 'none',
+        lineStyle: {
+          width: 2,
+          color: '#0066FF',
+          type: 'dashed'
+        }
+      });
+    }
+
+    if (hasFairValueHi) {
+      series.push({
+        name: '估值上限',
+        type: 'line',
+        data: fairValueHiData,
+        symbol: 'none',
+        lineStyle: {
+          width: 2,
+          color: '#FF0000',
+          type: 'dashed'
+        }
+      });
+    }
 
     // 添加支撑位线
     supportLevels.forEach((level) => {
@@ -171,14 +218,16 @@ const ETFDetail = () => {
         }
       },
       legend: {
-        data: ['K线', '成交量', 'PE', '前瞻PE',
+        data: ['K线', '成交量',
+          ...(hasFairValueLo ? ['估值下限'] : []),
+          ...(hasFairValueHi ? ['估值上限'] : []),
           ...supportLevels.map(v => `支撑位${v}`),
           ...resistanceLevels.map(v => `压力位${v}`)
         ]
       },
       grid: [{
         left: '5%',
-        right: '5%', // Adjusted right margin to accommodate right Y-axis if needed, but using overlay for now might be safer
+        right: '5%',
         height: '60%'
       }, {
         left: '5%',
@@ -221,15 +270,6 @@ const ETFDetail = () => {
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false }
-      }, {
-        type: 'value',
-        name: 'PE',
-        scale: true,
-        position: 'right',
-        splitLine: { show: false },
-        axisLabel: {
-          formatter: '{value}'
-        }
       }],
       dataZoom: [{
         type: 'inside',
@@ -572,7 +612,13 @@ const ETFDetail = () => {
       >
         <ReactECharts
           option={getChartOption()}
-          key={supportLevels.join(',') + resistanceLevels.join(',')}
+          notMerge={true}
+          key={[
+            supportLevels.join(','),
+            resistanceLevels.join(','),
+            reportHistory.length,
+            reportHistory[reportHistory.length - 1]?.date ?? ''
+          ].join('|')}
           style={{ height: '400px' }}
         />
       </Card>
