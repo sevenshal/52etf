@@ -6,6 +6,7 @@ import {
   Col,
   DatePicker,
   Descriptions,
+  Empty,
   Form,
   Input,
   InputNumber,
@@ -186,6 +187,19 @@ const tradeReasonMeta = {
 const getTradeReasonMeta = (value) => (
   tradeReasonMeta[value] || { label: value || '-', color: 'default' }
 );
+
+const priceSeriesColors = [
+  '#cf1322',
+  '#1677ff',
+  '#fa8c16',
+  '#13c2c2',
+  '#722ed1',
+  '#52c41a',
+  '#eb2f96',
+  '#fa541c',
+  '#2f54eb',
+  '#a0d911',
+];
 
 const W20MomentumBacktest = () => {
   const [form] = Form.useForm();
@@ -438,6 +452,126 @@ const W20MomentumBacktest = () => {
           lineStyle: { width: 2, color: '#1677ff' },
         },
       ],
+    };
+  }, [result]);
+
+  const priceHistoryOption = useMemo(() => {
+    const priceHistory = result?.price_history;
+    const dates = priceHistory?.dates || result?.equity_curve?.map(item => item.date) || [];
+    const priceSeries = priceHistory?.series || [];
+    if (!dates.length || !priceSeries.length) {
+      return null;
+    }
+
+    const tradeGroups = (result?.trades || []).reduce((acc, trade) => {
+      if (!trade?.symbol || !trade?.date || !['BUY', 'SELL'].includes(trade.action)) {
+        return acc;
+      }
+      if (!acc[trade.symbol]) {
+        acc[trade.symbol] = [];
+      }
+      acc[trade.symbol].push(trade);
+      return acc;
+    }, {});
+
+    const series = priceSeries.map((item, index) => {
+      const symbol = item.symbol;
+      const color = priceSeriesColors[index % priceSeriesColors.length];
+      const markers = (tradeGroups[symbol] || [])
+        .map(trade => {
+          const tradePrice = Number(trade.price);
+          if (!Number.isFinite(tradePrice)) {
+            return null;
+          }
+          const isBuy = trade.action === 'BUY';
+          return {
+            name: isBuy ? 'B' : 'S',
+            value: tradePrice,
+            coord: [trade.date, tradePrice],
+            itemStyle: {
+              color: isBuy ? '#cf1322' : '#1677ff',
+            },
+          };
+        })
+        .filter(Boolean);
+
+      return {
+        name: formatSymbolLabel(symbol),
+        type: 'line',
+        data: item.data || [],
+        showSymbol: false,
+        connectNulls: true,
+        lineStyle: {
+          width: 2,
+          color,
+        },
+        emphasis: {
+          focus: 'series',
+        },
+        markPoint: markers.length ? {
+          data: markers,
+          symbol: 'circle',
+          symbolSize: 14,
+          label: {
+            show: true,
+            formatter: '{b}',
+            color: '#fff',
+            fontWeight: 'bold',
+            fontSize: 10,
+          },
+        } : undefined,
+      };
+    });
+
+    return {
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: (params) => {
+          if (!params?.length) {
+            return '';
+          }
+          const lines = [`<div style="font-weight: 600; margin-bottom: 6px;">${params[0].axisValue}</div>`];
+          params.forEach(item => {
+            if (item.value === null || item.value === undefined || Number.isNaN(Number(item.value))) {
+              return;
+            }
+            lines.push(`<div>${item.marker}${item.seriesName}: ${formatNumber(item.value, 4)}</div>`);
+          });
+          return lines.join('');
+        },
+      },
+      legend: {
+        type: 'scroll',
+        top: 0,
+        data: priceSeries.map(item => formatSymbolLabel(item.symbol)),
+      },
+      grid: {
+        left: 56,
+        right: 24,
+        top: 34,
+        bottom: 74,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        boundaryGap: false,
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLabel: {
+          formatter: value => formatNumber(value, 4),
+        },
+      },
+      dataZoom: [
+        { type: 'inside', start: 60, end: 100 },
+        { type: 'slider', start: 60, end: 100, height: 18, bottom: 18 },
+      ],
+      series,
     };
   }, [result]);
 
@@ -902,6 +1036,14 @@ const W20MomentumBacktest = () => {
               <Descriptions.Item label="目标权重">{(result.meta?.top_weights_pct || []).join(' / ')}%</Descriptions.Item>
               <Descriptions.Item label="基准标的">{(result.meta?.benchmark_symbols || []).map(formatSymbolLabel).join('、')}</Descriptions.Item>
             </Descriptions>
+          </Card>
+
+          <Card title="ETF 价格与买卖点" style={{ marginBottom: 24 }}>
+            {priceHistoryOption ? (
+              <ReactECharts option={priceHistoryOption} style={{ height: 460 }} />
+            ) : (
+              <Empty description="暂无价格数据" />
+            )}
           </Card>
 
           <Row gutter={16} style={{ marginBottom: 24 }}>
