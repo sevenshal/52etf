@@ -536,6 +536,28 @@ def _build_price_frame(quote_service: QuoteService, symbol: str, start_dt: date,
     return frame
 
 
+def _build_price_history(close_matrix: pd.DataFrame, symbols: List[str], dates: List[date]) -> Dict:
+    if close_matrix.empty or not symbols or not dates:
+        return {"dates": [], "series": []}
+
+    aligned_close_matrix = close_matrix.reindex(dates)
+    history_dates = [current_date.isoformat() for current_date in aligned_close_matrix.index]
+    series = []
+    for symbol in symbols:
+        if symbol not in aligned_close_matrix.columns:
+            continue
+        series.append(
+            {
+                "symbol": symbol,
+                "data": [
+                    _round_or_none(value, 4) if _is_valid_price(value) else None
+                    for value in aligned_close_matrix[symbol].tolist()
+                ],
+            }
+        )
+    return {"dates": history_dates, "series": series}
+
+
 def _compute_momentum_snapshot(close_series: pd.Series, as_of: date, window: int) -> Optional[Dict]:
     history = close_series.loc[:as_of].dropna().astype(float)
     if len(history) < window:
@@ -1457,8 +1479,10 @@ class W20MomentumBacktestEngine:
         filtered_trades = [item for item in trade_log if _parse_date(item["date"]) >= start_dt]
         if not filtered_curve:
             raise ValueError("回测区间内没有可用的净值曲线")
+        filtered_dates = [_parse_date(item["date"]) for item in filtered_curve]
         strategy_start_dt = _parse_date(filtered_curve[0]["date"])
         strategy_end_dt = _parse_date(filtered_curve[-1]["date"])
+        price_history = _build_price_history(close_matrix, params.symbols, filtered_dates)
 
         strategy_values = pd.Series([float(item["value"]) for item in filtered_curve])
         strategy_dates = [pd.to_datetime(item["date"]) for item in filtered_curve]
@@ -1670,6 +1694,7 @@ class W20MomentumBacktestEngine:
                 for item in equity_curve
             ],
             "benchmark_curve": equal_weight_curve,
+            "price_history": price_history,
             "annual_performance": annual_performance,
             "benchmark_metrics": [
                 {
