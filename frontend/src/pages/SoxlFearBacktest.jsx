@@ -84,9 +84,18 @@ const sellReductionBasisOptions = [
 
 const fearSourceOptions = [
   { label: 'CNN贪恐', value: 'cnn' },
-  { label: 'SOXX自算贪恐', value: 'soxx_clone' },
-  { label: 'CNN和SOXX等权平均', value: 'cnn_soxx_equal_weight' },
+  { label: 'SOXX 半导体自算贪恐', value: 'soxx_clone' },
+  { label: 'SPY 标普500自算贪恐', value: 'spy_clone' },
+  { label: 'QQQ 纳指100自算贪恐', value: 'qqq_clone' },
+  { label: 'DIA 道琼斯自算贪恐', value: 'dia_clone' },
 ];
+const fearSourceColorMap = {
+  cnn: 'blue',
+  soxx_clone: 'cyan',
+  spy_clone: 'green',
+  qqq_clone: 'purple',
+  dia_clone: 'geekblue',
+};
 
 const getObjectiveLabel = (value) => objectiveOptions.find(item => item.value === value)?.label || value;
 const getSellReductionBasisLabel = (value) => sellReductionBasisOptions.find(item => item.value === value)?.label || value;
@@ -303,10 +312,10 @@ const SoxlFearBacktest = () => {
     {
       title: '贪恐来源',
       dataIndex: 'fear_source_label',
-      width: 120,
+      width: 190,
       fixed: 'left',
       render: (value, record) => (
-        <Tag color={record.fear_source === 'soxx_clone' ? 'cyan' : 'blue'}>
+        <Tag color={fearSourceColorMap[record.fear_source] || 'blue'}>
           {value || getFearSourceLabel(record.fear_source)}
         </Tag>
       ),
@@ -679,7 +688,9 @@ const SoxlFearBacktest = () => {
     const colorMap = {
       cnn: '#1677ff',
       soxx_clone: '#13c2c2',
-      cnn_soxx_equal_weight: '#fa8c16',
+      spy_clone: '#52c41a',
+      qqq_clone: '#722ed1',
+      dia_clone: '#2f54eb',
       selected: '#13c2c2',
     };
     const series = sources.map(source => ({
@@ -816,7 +827,7 @@ const SoxlFearBacktest = () => {
             </Col>
             <Col xs={24} md={4}>
               <Form.Item name="fear_source_values" label="贪恐来源候选">
-                <Select mode="multiple" options={fearSourceOptions} />
+                <Select mode="multiple" maxTagCount="responsive" options={fearSourceOptions} />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -830,13 +841,13 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="greed_threshold_values" label="止盈区贪恐阈值(>=) 候选">
-                <Input placeholder="例如 40,41,42" />
+              <Form.Item name="volume_ratio_threshold_values" label="买入量比阈值(>=)候选">
+                <Input placeholder="例如 1.3,1.38,1.45" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="volume_ratio_threshold_values" label="止盈量比阈值(>=)候选">
-                <Input placeholder="例如 1.3,1.38,1.45" />
+              <Form.Item name="greed_threshold_values" label="止盈区贪恐阈值(>=) 候选">
+                <Input placeholder="例如 40,41,42" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
