@@ -151,6 +151,7 @@ class ETFHoldingsLatestIngest(ETFHoldingsDBWriter):
                         holdings_data.update_date,
                         holdings_data.holdings,
                     )
+                    self.db.commit()
                     saved += saved_count
                     saved_dates[symbol] = holdings_data.update_date.isoformat()
                     self.logger.info(
@@ -160,11 +161,10 @@ class ETFHoldingsLatestIngest(ETFHoldingsDBWriter):
                         holdings_data.update_date,
                     )
                 except Exception as exc:
+                    self.db.rollback()
                     errors.append({"symbol": symbol, "error": str(exc)})
                     skipped += 1
                     self.logger.error("Failed to sync latest holdings for %s: %s", symbol, exc)
-
-            self.db.commit()
         except Exception:
             self.db.rollback()
             raise

@@ -174,18 +174,40 @@ class ETFManager:
         return timestamp.date() if hasattr(timestamp, 'date') else timestamp
 
     def load_holdings_from_db(self, etf_symbol: str, target_date: date) -> ETFHoldingsData:
+        holding_date = (
+            self.db_session.query(DBETFHolding.date)
+            .filter(
+                DBETFHolding.etf_symbol == etf_symbol,
+                DBETFHolding.date <= target_date,
+            )
+            .order_by(DBETFHolding.date.desc())
+            .limit(1)
+            .scalar()
+        )
+        if not holding_date:
+            raise ValueError(
+                f"{etf_symbol} {target_date} 或之前持仓不存在，请先执行 ETF持仓抓取入库或 ETF历史持仓回跑"
+            )
+
         rows = (
             self.db_session.query(DBETFHolding)
             .filter(
                 DBETFHolding.etf_symbol == etf_symbol,
-                DBETFHolding.date == target_date,
+                DBETFHolding.date == holding_date,
             )
             .order_by(DBETFHolding.weight.desc())
             .all()
         )
         if not rows:
             raise ValueError(
-                f"{etf_symbol} {target_date} 持仓不存在，请先执行 ETF历史持仓回跑"
+                f"{etf_symbol} {holding_date} 持仓不存在，请先执行 ETF持仓抓取入库或 ETF历史持仓回跑"
+            )
+        if holding_date != target_date:
+            self.logger.info(
+                "%s %s 持仓不存在，使用最近持仓日期 %s",
+                etf_symbol,
+                target_date,
+                holding_date,
             )
 
         holdings = []
@@ -211,7 +233,7 @@ class ETFManager:
             )
         return ETFHoldingsData(
             holdings=holdings,
-            update_date=target_date,
+            update_date=holding_date,
             total_shares=None,
             total_weight=sum(float(row.weight or 0.0) for row in rows),
         )

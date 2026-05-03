@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON, text
+from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship
 from contextlib import contextmanager
@@ -11,7 +11,20 @@ DB_PATH = '/var/lib/quant_robot/evc_stocks.db'
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # 创建基础引擎和Base类
-engine = create_engine(f'sqlite:///{DB_PATH}')
+engine = create_engine(
+    f'sqlite:///{DB_PATH}',
+    connect_args={"timeout": 30},
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
+
 Base = declarative_base()
 
 # 创建EVC会话
