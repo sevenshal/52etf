@@ -378,7 +378,7 @@ def _prepare_base_dataframe(
     merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce").ffill()
     merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
     merged_df["ma20"] = merged_df["close"].rolling(20).mean()
-    merged_df["volume_ma20"] = merged_df["volume"].rolling(20).mean()
+    merged_df["volume_ma20"] = merged_df["volume"].shift(1).rolling(20).mean()
     merged_df["volume_ratio"] = np.where(
         merged_df["volume_ma20"] > 0,
         merged_df["volume"] / merged_df["volume_ma20"],
