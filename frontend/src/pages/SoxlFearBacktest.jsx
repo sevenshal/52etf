@@ -37,6 +37,13 @@ const parseNumberList = (value, integer = false) => {
     .filter(item => !Number.isNaN(item));
 };
 
+const parseBooleanList = (value) => {
+  if (!value) {
+    return [];
+  }
+  return Array.from(new Set(value.map(item => item === true || item === 'true')));
+};
+
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -80,6 +87,11 @@ const symbolOptions = [
 const sellReductionBasisOptions = [
   { label: '按总资产', value: 'portfolio' },
   { label: '按持仓股票', value: 'holdings' },
+];
+
+const sellPriceAboveAvgCostOptions = [
+  { label: '开启', value: 'true' },
+  { label: '关闭', value: 'false' },
 ];
 
 const fearSourceOptions = [
@@ -131,27 +143,31 @@ const SoxlFearBacktest = () => {
   const detailLoadingRef = useRef(false);
   const hasAutoRunRef = useRef(false);
 
-  const buildPayload = (values) => ({
-    symbol: values.symbol || 'SOXL.US',
-    fear_source_values: values.fear_source_values?.length ? values.fear_source_values : ['cnn'],
-    initial_capital: values.initial_capital,
-    start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
-    end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
-    top_n: values.top_n,
-    objective: values.objective,
-    eval_workers: values.eval_workers,
-    rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
-    buy_threshold_values: parseNumberList(values.buy_threshold_values),
-    greed_threshold_values: parseNumberList(values.greed_threshold_values),
-    volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
-    buy_position_pct_values: parseNumberList(values.buy_position_pct_values),
-    cooldown_days_values: parseNumberList(values.cooldown_days_values, true),
-    trailing_stop_pct_values: parseNumberList(values.trailing_stop_pct_values),
-    sell_position_pct_values: parseNumberList(values.sell_position_pct_values),
-    sell_reduction_basis_values: values.sell_reduction_basis_values,
-    max_take_profit_sells_per_cycle_values: parseNumberList(values.max_take_profit_sells_per_cycle_values, true),
-    min_position_pct_after_take_profit_values: parseNumberList(values.min_position_pct_after_take_profit_values),
-  });
+  const buildPayload = (values) => {
+    const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
+    return {
+      symbol: values.symbol || 'SOXL.US',
+      fear_source_values: values.fear_source_values?.length ? values.fear_source_values : ['cnn'],
+      initial_capital: values.initial_capital,
+      start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
+      end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
+      top_n: values.top_n,
+      objective: values.objective,
+      eval_workers: values.eval_workers,
+      rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
+      buy_threshold_values: parseNumberList(values.buy_threshold_values),
+      greed_threshold_values: parseNumberList(values.greed_threshold_values),
+      volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
+      buy_position_pct_values: parseNumberList(values.buy_position_pct_values),
+      cooldown_days_values: parseNumberList(values.cooldown_days_values, true),
+      trailing_stop_pct_values: parseNumberList(values.trailing_stop_pct_values),
+      sell_position_pct_values: parseNumberList(values.sell_position_pct_values),
+      sell_reduction_basis_values: values.sell_reduction_basis_values,
+      sell_price_above_avg_cost_values: sellPriceAboveAvgCostValues.length ? sellPriceAboveAvgCostValues : [true, false],
+      max_take_profit_sells_per_cycle_values: parseNumberList(values.max_take_profit_sells_per_cycle_values, true),
+      min_position_pct_after_take_profit_values: parseNumberList(values.min_position_pct_after_take_profit_values),
+    };
+  };
 
   const buildParamsFromRecord = (record) => ({
     buy_threshold: record.buy_threshold,
@@ -162,6 +178,7 @@ const SoxlFearBacktest = () => {
     trailing_stop_pct: record.trailing_stop_pct,
     sell_position_pct: record.sell_position_pct,
     sell_reduction_basis: record.sell_reduction_basis,
+    sell_price_above_avg_cost: record.sell_price_above_avg_cost,
     max_take_profit_sells_per_cycle: record.max_take_profit_sells_per_cycle,
     min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
@@ -261,10 +278,6 @@ const SoxlFearBacktest = () => {
       ...presetValues,
     };
 
-    if (mergedValues.fear_source && !mergedValues.fear_source_values) {
-      mergedValues.fear_source_values = [mergedValues.fear_source];
-    }
-
     if (!mergedValues.date_range) {
       mergedValues.date_range = [dayjs('2021-01-01'), dayjs()];
     }
@@ -334,6 +347,12 @@ const SoxlFearBacktest = () => {
       dataIndex: 'sell_reduction_basis',
       width: 110,
       render: value => getSellReductionBasisLabel(value),
+    },
+    {
+      title: '均价保护',
+      dataIndex: 'sell_price_above_avg_cost',
+      width: 100,
+      render: value => <Tag color={value ? 'green' : 'default'}>{value ? '开启' : '关闭'}</Tag>,
     },
     { title: '单轮止盈次数', dataIndex: 'max_take_profit_sells_per_cycle', width: 110 },
     { title: '保留仓位%', dataIndex: 'min_position_pct_after_take_profit', width: 100 },
@@ -767,7 +786,7 @@ const SoxlFearBacktest = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description={`使用所选贪恐来源（${selectedFearSourceLabel}）；当贪恐分数低于等于买入触发阈值，且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；当贪恐分数高于等于进入止盈区阈值后，若价格再从区内高点回撤，则按回撤规则移动止盈，且卖价高于当前持仓均价才卖出；止盈减仓口径可选按总资产或按持仓股票，两种都支持搜索对比；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
+          description={`使用所选贪恐来源（${selectedFearSourceLabel}）；当贪恐分数低于等于买入触发阈值，且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；当贪恐分数高于等于进入止盈区阈值后，若价格再从区内高点回撤，则按回撤规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
         />
         <Form
           form={form}
@@ -790,6 +809,7 @@ const SoxlFearBacktest = () => {
             trailing_stop_pct_values: '3,5,7',
             sell_position_pct_values: '40,50,60',
             sell_reduction_basis_values: ['portfolio', 'holdings'],
+            sell_price_above_avg_cost_values: ['true', 'false'],
             max_take_profit_sells_per_cycle_values: '1,2,3',
             min_position_pct_after_take_profit_values: '5,10,15',
           }}
@@ -866,6 +886,11 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
+              <Form.Item name="sell_price_above_avg_cost_values" label="均价保护开关候选">
+                <Select mode="multiple" options={sellPriceAboveAvgCostOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
               <Form.Item name="max_take_profit_sells_per_cycle_values" label="单轮止盈次数候选">
                 <Input placeholder="例如 2,3" />
               </Form.Item>
@@ -936,9 +961,9 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
             pagination={{ pageSize: 10 }}
-            scroll={{ x: 1900 }}
+            scroll={{ x: 1980 }}
             onRow={(record) => ({
               onClick: () => loadDetail(record),
               style: { cursor: 'pointer' },
@@ -988,6 +1013,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="移动止盈回撤%">{detailedResult.params?.trailing_stop_pct}</Descriptions.Item>
               <Descriptions.Item label="止盈减仓%">{detailedResult.params?.sell_position_pct}</Descriptions.Item>
               <Descriptions.Item label="止盈减仓口径">{getSellReductionBasisLabel(detailedResult.params?.sell_reduction_basis)}</Descriptions.Item>
+              <Descriptions.Item label="均价保护">{detailedResult.params?.sell_price_above_avg_cost ? '开启' : '关闭'}</Descriptions.Item>
               <Descriptions.Item label="同轮止盈最多卖出次数">{detailedResult.params?.max_take_profit_sells_per_cycle}</Descriptions.Item>
               <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
