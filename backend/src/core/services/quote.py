@@ -98,6 +98,8 @@ class QuoteProvider(ABC):
 
 class QuoteService:
     """行情数据服务"""
+
+    QUOTE_BATCH_SIZE = 500
     
     def __init__(self, provider: QuoteProvider):
         self.provider = provider
@@ -125,11 +127,19 @@ class QuoteService:
 
     def get_quote_batch(self, symbols: List[str]) -> List[Dict]:
         """批量获取实时行情数据"""
-        return self.provider.get_quote_batch(symbols)
+        result = []
+        for i in range(0, len(symbols), self.QUOTE_BATCH_SIZE):
+            batch_symbols = symbols[i:i + self.QUOTE_BATCH_SIZE]
+            result.extend(self.provider.get_quote_batch(batch_symbols) or [])
+        return result
 
     def get_option_quote_batch(self, symbols: List[str]) -> List[Dict]:
         """获取期权实时行情数据"""
-        return self.provider.get_option_quote_batch(symbols)
+        result = []
+        for i in range(0, len(symbols), self.QUOTE_BATCH_SIZE):
+            batch_symbols = symbols[i:i + self.QUOTE_BATCH_SIZE]
+            result.extend(self.provider.get_option_quote_batch(batch_symbols) or [])
+        return result
     
     def get_quote(self, symbol: str) -> Dict:
         """获取实时行情数据
