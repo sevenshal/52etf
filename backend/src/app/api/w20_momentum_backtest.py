@@ -13,9 +13,9 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, root_validator, validator
 
-from ...core.database import LongPortAccount, Session
-from ...core.services.longport import LongPortService
+from ...core.database import Session
 from ...core.services.quote import QuoteService
+from ...core.services.tushare import TushareService
 from .account import valid_account
 
 router = APIRouter(prefix="/api/w20-momentum-backtest", tags=["W20 Momentum Backtest"])
@@ -225,13 +225,24 @@ def _price_or_zero(value) -> float:
     return float(value) if _is_valid_price(value) else 0.0
 
 
-def _repair_split_like_price_jumps(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Repair obvious ETF split jumps when the provider returns unadjusted prices.
+def _integer_split_adjustment_factor(open_gap: float) -> Optional[float]:
+    if open_gap <= 0:
+        return None
+    if open_gap < 1:
+        multiple = int(round(1 / open_gap))
+        return 1 / multiple if multiple >= 2 else None
 
-    LongPort's date-range K-line API can return CN ETF history with split-like
-    discontinuities even when ForwardAdjust is requested. A real ETF overnight
-    move of 50%+ is extremely unlikely, so we only adjust when the open-to-prev
-    close gap is extreme while the same-day open-to-close move is ordinary.
+    multiple = int(round(open_gap))
+    return float(multiple) if multiple >= 2 else None
+
+
+def _repair_split_like_price_jumps(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Repair obvious split-like jumps when the provider returns unadjusted prices.
+
+    Some CN ETF history feeds can surface split-like discontinuities even when
+    adjusted prices are expected. A real ETF overnight move of 50%+ is very
+    unlikely, so we only adjust when the open-to-prev close gap is extreme
+    while the same-day open-to-close move is ordinary.
     """
     if frame.empty:
         return frame
@@ -256,13 +267,16 @@ def _repair_split_like_price_jumps(frame: pd.DataFrame, symbol: str) -> pd.DataF
         if intraday_move > 0.20 or not (split_down or split_up):
             continue
 
-        factor = open_gap
+        factor = _integer_split_adjustment_factor(open_gap)
+        if factor is None:
+            continue
         adjusted.iloc[:index, price_col_indexes] = adjusted.iloc[:index, price_col_indexes] * factor
         adjustments.append(
             {
                 "symbol": symbol,
                 "date": adjusted.index[index].isoformat(),
                 "factor": _round_or_none(factor, 8),
+                "raw_open_gap": _round_or_none(open_gap, 8),
                 "prev_close_before_adjustment": _round_or_none(prev_close, 6),
                 "current_open": _round_or_none(current_open, 6),
                 "current_close": _round_or_none(current_close, 6),
@@ -485,20 +499,8 @@ class W20MomentumBacktestJobStatus(BaseModel):
     eval_workers: int = 1
 
 
-def _get_longport_account_id(account_id: str) -> str:
-    db = Session()
-    try:
-        account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
-        if account and account.lp_account_id:
-            return account.lp_account_id
-    finally:
-        Session.remove()
-    return "LBPT10001248"
-
-
-def _get_quote_service(account_id: str) -> QuoteService:
-    lp_account_id = _get_longport_account_id(account_id)
-    return QuoteService(LongPortService.get_instance(lp_account_id))
+def _get_quote_service(_account_id: str) -> QuoteService:
+    return QuoteService(TushareService.getInstance())
 
 
 def _update_job(task_id: str, **kwargs) -> None:

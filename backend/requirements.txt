@@ -26,3 +26,4 @@ socksio
 ib-insync
 websockets
 croniter
+tushare
