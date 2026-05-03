@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import requests
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, ValidationError, root_validator, validator
+from pydantic import BaseModel, Field, ValidationError, validator
 
 from ...core.database import ETFFearGreedCloneHistory, Session
 from ...core.services.longport import LongPortService
@@ -73,6 +73,7 @@ class SOXLFearStrategyParams(BaseModel):
     trailing_stop_pct: float = 5.0
     sell_position_pct: float = 50.0
     sell_reduction_basis: str = "portfolio"
+    sell_price_above_avg_cost: bool = True
     max_take_profit_sells_per_cycle: int = 2
     min_position_pct_after_take_profit: float = 5.0
     rebalance_threshold_pct: float = 5.0
@@ -121,7 +122,6 @@ class SOXLFearStrategyParams(BaseModel):
 
 class SOXLFearSearchParams(BaseModel):
     symbol: str = "SOXL.US"
-    fear_source: Optional[str] = None
     fear_source_values: List[str] = Field(default_factory=lambda: ["cnn"])
     initial_capital: float = 100000.0
     start_date: str = "2021-01-01"
@@ -138,6 +138,7 @@ class SOXLFearSearchParams(BaseModel):
     trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [3.0, 5.0, 7.0])
     sell_position_pct_values: List[float] = Field(default_factory=lambda: [40.0, 50.0, 60.0])
     sell_reduction_basis_values: List[str] = Field(default_factory=lambda: ["portfolio", "holdings"])
+    sell_price_above_avg_cost_values: List[bool] = Field(default_factory=lambda: [True, False])
     max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [1, 2, 3])
     min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [5.0, 10.0, 15.0])
 
@@ -153,18 +154,6 @@ class SOXLFearSearchParams(BaseModel):
             raise ValueError("objective 仅支持 annualized_return 或 sharpe_ratio")
         return value
 
-    @root_validator(pre=True)
-    def normalize_legacy_fear_source(cls, values):
-        if not values.get("fear_source_values") and values.get("fear_source"):
-            values["fear_source_values"] = [values["fear_source"]]
-        return values
-
-    @validator("fear_source")
-    def validate_fear_source(cls, value):
-        if value is not None and value not in FEAR_SOURCE_OPTIONS:
-            raise ValueError("fear_source 包含不支持的来源")
-        return value
-
     @validator("fear_source_values")
     def validate_fear_source_values(cls, value):
         normalized = list(dict.fromkeys(value or []))
@@ -173,6 +162,13 @@ class SOXLFearSearchParams(BaseModel):
         invalid = [item for item in normalized if item not in FEAR_SOURCE_OPTIONS]
         if invalid:
             raise ValueError("fear_source_values 包含不支持的来源")
+        return normalized
+
+    @validator("sell_price_above_avg_cost_values")
+    def validate_sell_price_above_avg_cost_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("至少选择一个卖出价高于均价开关")
         return normalized
 
     @validator("eval_workers")
@@ -379,7 +375,7 @@ def _prepare_base_dataframe(
 
     merged_df = price_df.merge(fear_df, on="date", how="left")
     merged_df = merged_df.sort_values("date").reset_index(drop=True)
-    merged_df["fear_greed"] = merged_df["fear_greed"].ffill()
+    merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce").ffill()
     merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
     merged_df["ma20"] = merged_df["close"].rolling(20).mean()
     merged_df["volume_ma20"] = merged_df["volume"].rolling(20).mean()
@@ -431,26 +427,45 @@ def _prepare_search_dataframes(
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict], Dict]:
     base_dfs: Dict[str, pd.DataFrame] = {}
     source_metas: Dict[str, Dict] = {}
+    meta_items: List[Dict] = []
+
     for fear_source in fear_sources:
-        base_df, meta = _prepare_base_dataframe(symbol, start_date, end_date, fear_source)
+        base_df, meta = _prepare_base_dataframe(
+            symbol,
+            start_date,
+            end_date,
+            fear_source,
+        )
         base_dfs[fear_source] = base_df
         source_metas[fear_source] = meta
+        meta_items.append(meta)
 
-    meta_items = list(source_metas.values())
-    total_trading_days = sum(int(item["trading_days"]) for item in meta_items)
-    total_fear_points = sum(int(item["fear_points"]) for item in meta_items)
+    if not meta_items:
+        raise ValueError("没有可用的贪恐来源")
+
+    summary_meta_items: List[Dict] = []
+    unique_source_labels: List[str] = []
+    seen_sources = set()
+    for item in meta_items:
+        source_key = str(item["fear_source"])
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+        summary_meta_items.append(item)
+        unique_source_labels.append(str(item["fear_source_label"]))
+
     return base_dfs, source_metas, {
         "requested_symbol": symbol,
         "requested_start_date": start_date.isoformat(),
         "requested_end_date": end_date.isoformat(),
         "effective_start_date": min(item["effective_start_date"] for item in meta_items),
         "effective_end_date": max(item["effective_end_date"] for item in meta_items),
-        "trading_days": total_trading_days,
+        "trading_days": sum(int(item["trading_days"]) for item in summary_meta_items),
         "price_points": max(int(item["price_points"]) for item in meta_items),
-        "cnn_points": sum(int(item.get("cnn_points") or 0) for item in meta_items),
-        "fear_points": total_fear_points,
+        "cnn_points": sum(int(item.get("cnn_points") or 0) for item in summary_meta_items),
+        "fear_points": sum(int(item["fear_points"]) for item in summary_meta_items),
         "fear_sources": fear_sources,
-        "fear_source_labels": "、".join(item["fear_source_label"] for item in meta_items),
+        "fear_source_labels": "、".join(unique_source_labels),
         "fear_source_details": meta_items,
     }
 
@@ -744,7 +759,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
         ):
             drawdown_from_peak = ((greed_peak_price - close_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
-            if drawdown_from_peak >= params.trailing_stop_pct and close_price > avg_cost:
+            sell_price_guard_passed = (not params.sell_price_above_avg_cost) or close_price > float(avg_cost)
+            if drawdown_from_peak >= params.trailing_stop_pct and sell_price_guard_passed:
                 portfolio_value = cash + shares * close_price
                 current_position_pct = (shares * close_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
                 min_hold_shares = (
@@ -812,6 +828,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "reason": (
                             f"{fear_source_label} {fear_score:.2f} 进入止盈区后回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
+                            f"，均价保护{'开启' if params.sell_price_above_avg_cost else '关闭'}"
                         ),
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
@@ -949,6 +966,7 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.trailing_stop_pct_values,
         payload.sell_position_pct_values,
         payload.sell_reduction_basis_values,
+        payload.sell_price_above_avg_cost_values,
         payload.max_take_profit_sells_per_cycle_values,
         payload.min_position_pct_after_take_profit_values,
     ]
@@ -958,38 +976,6 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
             return 0
         total *= len(values)
     return total
-
-
-def _iter_search_params(payload: SOXLFearSearchParams) -> Iterator[Tuple[str, SOXLFearStrategyParams]]:
-    for values in product(
-        payload.fear_source_values,
-        payload.buy_threshold_values,
-        payload.greed_threshold_values,
-        payload.volume_ratio_threshold_values,
-        payload.buy_position_pct_values,
-        payload.cooldown_days_values,
-        payload.trailing_stop_pct_values,
-        payload.sell_position_pct_values,
-        payload.sell_reduction_basis_values,
-        payload.max_take_profit_sells_per_cycle_values,
-        payload.min_position_pct_after_take_profit_values,
-    ):
-        yield (
-            str(values[0]),
-            SOXLFearStrategyParams(
-                buy_threshold=float(values[1]),
-                greed_threshold=float(values[2]),
-                volume_ratio_threshold=float(values[3]),
-                buy_position_pct=float(values[4]),
-                cooldown_days=int(values[5]),
-                trailing_stop_pct=float(values[6]),
-                sell_position_pct=float(values[7]),
-                sell_reduction_basis=str(values[8]),
-                max_take_profit_sells_per_cycle=int(values[9]),
-                min_position_pct_after_take_profit=float(values[10]),
-                rebalance_threshold_pct=float(payload.rebalance_threshold_pct),
-            ),
-        )
 
 
 def _evaluate_search_candidates(
@@ -1033,6 +1019,7 @@ def _evaluate_search_candidates(
                 payload.trailing_stop_pct_values,
                 payload.sell_position_pct_values,
                 payload.sell_reduction_basis_values,
+                payload.sell_price_above_avg_cost_values,
                 payload.max_take_profit_sells_per_cycle_values,
                 payload.min_position_pct_after_take_profit_values,
             ):
@@ -1142,17 +1129,31 @@ def _evaluate_search_batch(
 
     for index, values in batch_items:
         try:
+            (
+                buy_threshold,
+                greed_threshold,
+                volume_ratio_threshold,
+                buy_position_pct,
+                cooldown_days,
+                trailing_stop_pct,
+                sell_position_pct,
+                sell_reduction_basis,
+                sell_price_above_avg_cost,
+                max_take_profit_sells_per_cycle,
+                min_position_pct_after_take_profit,
+            ) = values
             params = SOXLFearStrategyParams(
-                buy_threshold=float(values[0]),
-                greed_threshold=float(values[1]),
-                volume_ratio_threshold=float(values[2]),
-                buy_position_pct=float(values[3]),
-                cooldown_days=int(values[4]),
-                trailing_stop_pct=float(values[5]),
-                sell_position_pct=float(values[6]),
-                sell_reduction_basis=str(values[7]),
-                max_take_profit_sells_per_cycle=int(values[8]),
-                min_position_pct_after_take_profit=float(values[9]),
+                buy_threshold=float(buy_threshold),
+                greed_threshold=float(greed_threshold),
+                volume_ratio_threshold=float(volume_ratio_threshold),
+                buy_position_pct=float(buy_position_pct),
+                cooldown_days=int(cooldown_days),
+                trailing_stop_pct=float(trailing_stop_pct),
+                sell_position_pct=float(sell_position_pct),
+                sell_reduction_basis=str(sell_reduction_basis),
+                sell_price_above_avg_cost=bool(sell_price_above_avg_cost),
+                max_take_profit_sells_per_cycle=int(max_take_profit_sells_per_cycle),
+                min_position_pct_after_take_profit=float(min_position_pct_after_take_profit),
                 rebalance_threshold_pct=float(rebalance_threshold_pct),
             )
         except ValidationError as exc:
