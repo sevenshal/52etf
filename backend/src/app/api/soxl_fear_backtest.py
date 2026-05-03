@@ -42,12 +42,24 @@ FEAR_SOURCE_OPTIONS = {
         "column": "cnn_fear_greed",
     },
     "soxx_clone": {
-        "label": "SOXX自算贪恐",
-        "column": "soxx_fear_greed",
+        "label": "SOXX 半导体自算贪恐",
+        "column": "etf_fear_greed",
+        "symbol": "SOXX.US",
     },
-    "cnn_soxx_equal_weight": {
-        "label": "CNN和SOXX等权平均",
-        "column": "cnn_soxx_equal_weight",
+    "spy_clone": {
+        "label": "SPY 标普500自算贪恐",
+        "column": "etf_fear_greed",
+        "symbol": "SPY.US",
+    },
+    "qqq_clone": {
+        "label": "QQQ 纳指100自算贪恐",
+        "column": "etf_fear_greed",
+        "symbol": "QQQ.US",
+    },
+    "dia_clone": {
+        "label": "DIA 道琼斯自算贪恐",
+        "column": "etf_fear_greed",
+        "symbol": "DIA.US",
     },
 }
 
@@ -264,13 +276,18 @@ def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
     return df
 
 
-def _fetch_soxx_clone_history(start_date: date, end_date: date) -> pd.DataFrame:
+def _fetch_etf_clone_history(fear_source: str, start_date: date, end_date: date) -> pd.DataFrame:
+    source_config = FEAR_SOURCE_OPTIONS[fear_source]
+    symbol = source_config.get("symbol")
+    if not symbol:
+        raise ValueError(f"{source_config['label']} 未配置 ETF 标的")
+
     db = Session()
     try:
         rows = (
             db.query(ETFFearGreedCloneHistory)
             .filter(
-                ETFFearGreedCloneHistory.symbol == "SOXX.US",
+                ETFFearGreedCloneHistory.symbol == symbol,
                 ETFFearGreedCloneHistory.date >= start_date,
                 ETFFearGreedCloneHistory.date <= end_date,
             )
@@ -280,7 +297,7 @@ def _fetch_soxx_clone_history(start_date: date, end_date: date) -> pd.DataFrame:
         records = [
             {
                 "date": row.date,
-                "soxx_fear_greed": float(row.score),
+                "etf_fear_greed": float(row.score),
             }
             for row in rows
             if row.score is not None
@@ -291,29 +308,9 @@ def _fetch_soxx_clone_history(start_date: date, end_date: date) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if df.empty:
         raise ValueError(
-            "指定区间内没有 SOXX 自算贪恐数据，请先执行 SOXX 贪恐回跑入库"
+            f"指定区间内没有 {source_config['label']} 数据，请先执行 {symbol} 贪恐回跑入库"
         )
     return df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
-
-
-def _fetch_cnn_soxx_equal_weight_history(start_date: date, end_date: date) -> pd.DataFrame:
-    cnn_df = _fetch_cnn_history(start_date, end_date)
-    soxx_df = _fetch_soxx_clone_history(start_date, end_date)
-    merged = (
-        cnn_df.merge(soxx_df, on="date", how="outer")
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
-    merged["cnn_fear_greed"] = pd.to_numeric(merged["cnn_fear_greed"], errors="coerce").ffill()
-    merged["soxx_fear_greed"] = pd.to_numeric(merged["soxx_fear_greed"], errors="coerce").ffill()
-    merged = merged.dropna(subset=["cnn_fear_greed", "soxx_fear_greed"])
-    merged["cnn_soxx_equal_weight"] = (
-        merged["cnn_fear_greed"] + merged["soxx_fear_greed"]
-    ) / 2.0
-    merged = merged[(merged["date"] >= start_date) & (merged["date"] <= end_date)]
-    if merged.empty:
-        raise ValueError("指定区间内没有 CNN 和 SOXX 可等权平均的贪恐数据")
-    return merged[["date", "cnn_soxx_equal_weight"]].sort_values("date")
 
 
 def _fetch_fear_history(
@@ -321,15 +318,15 @@ def _fetch_fear_history(
     start_date: date,
     end_date: date,
 ) -> Tuple[pd.DataFrame, Dict]:
-    if fear_source == "cnn_soxx_equal_weight":
-        df = _fetch_cnn_soxx_equal_weight_history(start_date, end_date)
-    elif fear_source == "soxx_clone":
-        df = _fetch_soxx_clone_history(start_date, end_date)
-    else:
-        fear_source = "cnn"
-        df = _fetch_cnn_history(start_date, end_date)
+    if fear_source not in FEAR_SOURCE_OPTIONS:
+        raise ValueError("fear_source 包含不支持的来源")
 
     source_config = FEAR_SOURCE_OPTIONS[fear_source]
+    if fear_source == "cnn":
+        df = _fetch_cnn_history(start_date, end_date)
+    else:
+        df = _fetch_etf_clone_history(fear_source, start_date, end_date)
+
     score_column = source_config["column"]
     df = df.rename(columns={score_column: "fear_greed"})
     df["fear_greed"] = pd.to_numeric(df["fear_greed"], errors="coerce")
