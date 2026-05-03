@@ -62,6 +62,19 @@ class ETFReport(BaseModel):
     class Config:
         from_attributes = True
 
+class ETFReportHistory(BaseModel):
+    symbol: str
+    date: date
+    fair_value_lo: Optional[float]
+    fair_value_hi: Optional[float]
+    forward_next_fy_lo: Optional[float]
+    forward_next_fy_hi: Optional[float]
+    market_price: Optional[float]
+    current_price: Optional[float]
+
+    class Config:
+        from_attributes = True
+
 @router.get("/reports", response_model=List[ETFReport])
 async def get_etf_reports(
     account_id: str = Depends(valid_account),
@@ -125,6 +138,28 @@ async def get_etf_report(
         latest_report.market_price = quote_info['price']
     
     return latest_report
+
+@router.get("/reports/{symbol}/history", response_model=List[ETFReportHistory])
+async def get_etf_report_history(
+    symbol: str,
+    days: int = Query(500, ge=1, le=2000),
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
+    """获取指定ETF的历史估值报告"""
+    start_date = date.today() - timedelta(days=days)
+    reports = (
+        db.query(ETFAnalysis)
+        .filter(
+            ETFAnalysis.symbol == symbol,
+            ETFAnalysis.date >= start_date,
+            ETFAnalysis.total_weight >= 0.1
+        )
+        .order_by(ETFAnalysis.date.asc())
+        .all()
+    )
+
+    return reports
 
 class ETFEmotionHistory(BaseModel):
     """ETF历史情绪数据"""
@@ -273,4 +308,3 @@ async def get_etf_components(
     components.sort(key=lambda x: x.weight, reverse=True)
     
     return components
-
