@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Space } from 'antd';
+import { Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Space, Select } from 'antd';
 import { SettingOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
@@ -10,13 +10,15 @@ const EVCValuation = () => {
     const [favoriteStocks, setFavoriteStocks] = useState([]);
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
+    const [tagOptions, setTagOptions] = useState([]);
     const navigate = useNavigate();
 
     // 默认值
     const defaultValues = {
         undervalue_threshold: 0.9,
         next_fy_growth_threshold: 1.1,
-        symbol: ''
+        symbol: '',
+        tag_ids: []
     };
 
     const calculateChange = (value, marketPrice) => {
@@ -26,15 +28,31 @@ const EVCValuation = () => {
 
     const handleSearch = async (values) => {
         try {
+            const payload = { ...values };
             // 如果输入了股票代码，转换为大写
-            if (values.symbol) {
-                values.symbol = values.symbol.toUpperCase();
+            if (payload.symbol) {
+                payload.symbol = payload.symbol.toUpperCase();
+            }
+            if (!payload.tag_ids?.length) {
+                delete payload.tag_ids;
             }
 
-            const { data } = await request.post('/api/evc/valuation-search', values);
+            const { data } = await request.post('/api/evc/valuation-search', payload);
             setStocks(data);
         } catch (error) {
             message.error('查询失败');
+        }
+    };
+
+    const fetchTags = async () => {
+        try {
+            const { data } = await request.get('/api/evc/tags');
+            setTagOptions((data || []).map(tag => ({
+                label: tag.stock_count ? `${tag.name} (${tag.stock_count})` : tag.name,
+                value: tag.id
+            })));
+        } catch (error) {
+            message.error('获取标签列表失败');
         }
     };
 
@@ -76,6 +94,7 @@ const EVCValuation = () => {
 
     useEffect(() => {
         form.setFieldsValue(defaultValues);
+        fetchTags();
         handleSearch(defaultValues);
         fetchFavorites();
     }, []);
@@ -263,6 +282,18 @@ const EVCValuation = () => {
                                         </Form.Item>
                                         <Form.Item label="下财年增长阈值" name="next_fy_growth_threshold">
                                             <InputNumber min={1} step={0.01} />
+                                        </Form.Item>
+                                        <Form.Item label="标签" name="tag_ids">
+                                            <Select
+                                                mode="multiple"
+                                                allowClear
+                                                showSearch
+                                                placeholder="选择标签"
+                                                options={tagOptions}
+                                                maxTagCount="responsive"
+                                                optionFilterProp="label"
+                                                style={{ minWidth: 240 }}
+                                            />
                                         </Form.Item>
                                         <Form.Item>
                                             <Button type="primary" htmlType="submit">

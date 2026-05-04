@@ -89,6 +89,12 @@ const StockDetail = () => {
       render: value => formatNumber(value, 2),
     },
     {
+      title: 'ATR',
+      dataIndex: 'atr',
+      width: 100,
+      render: value => formatNumber(value, 2),
+    },
+    {
       title: 'ATRP',
       dataIndex: 'atrp',
       width: 110,
@@ -453,24 +459,34 @@ const StockDetail = () => {
         trigger: 'axis',
         axisPointer: { type: 'cross' },
         formatter: function(params) {
+          const fmtPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '--');
           const date = params[0].axisValue;
+          const klineParam = params.find(p => p.seriesType === 'candlestick' || p.seriesName === 'K线');
+          const dataIndex = klineParam?.dataIndex ?? params[0]?.dataIndex;
+          const rawKline = dataIndex !== undefined ? processedKlines[dataIndex] : null;
+          const open = rawKline?.open;
+          const close = rawKline?.close;
+          const high = rawKline?.high;
+          const low = rawKline?.low;
+          const isUp = Number.isFinite(open) && Number.isFinite(close) ? close >= open : null;
+          const directionLabel = isUp === null ? '--' : (isUp ? '阳线' : '阴线');
+          const directionColor = isUp === null ? '#999' : (isUp ? '#ef232a' : '#14b143');
           let result = `<div style="font-weight: bold; margin-bottom: 8px;">${date}</div>`;
-          const klineData = params.find(p => p.seriesName === 'K线');
-          if (klineData) {
-            const value = klineData.data.value || klineData.data;
-            const [open, close, low, high] = value;
+          if (rawKline) {
             result += `
               <div style="margin-bottom: 4px;">
-                <span style="color: #666;">开盘：</span><span style="color: #ef232a;">${open.toFixed(2)}</span>
-                <span style="color: #666; margin-left: 8px;">收盘：</span><span style="color: #ef232a;">${close.toFixed(2)}</span>
+                <span style="color: #666;">开盘：</span><span style="color: #ef232a;">${fmtPrice(open)}</span>
+                <span style="color: #666; margin-left: 8px;">收盘：</span><span style="color: #ef232a;">${fmtPrice(close)}</span>
               </div>
               <div style="margin-bottom: 4px;">
-                <span style="color: #666;">最高：</span><span style="color: #ef232a;">${high.toFixed(2)}</span>
-                <span style="color: #666; margin-left: 8px;">最低：</span><span style="color: #ef232a;">${low.toFixed(2)}</span>
+                <span style="color: #666;">最高：</span><span style="color: #ef232a;">${fmtPrice(high)}</span>
+                <span style="color: #666; margin-left: 8px;">最低：</span><span style="color: #ef232a;">${fmtPrice(low)}</span>
+              </div>
+              <div style="margin-bottom: 4px;">
+                <span style="color: #666;">方向：</span><span style="color: ${directionColor};">${directionLabel}</span>
               </div>
             `;
           }
-          const dataIndex = params[0].dataIndex;
           if (dataIndex !== undefined && processedKlines[dataIndex]) {
             const volume = processedKlines[dataIndex].volume;
             result += `

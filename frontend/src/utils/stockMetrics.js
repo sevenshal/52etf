@@ -1,4 +1,4 @@
-const DEFAULT_WINDOWS = [20, 60, 120, 252];
+const DEFAULT_WINDOWS = [14, 20, 60, 120];
 
 const toFiniteNumber = (value) => {
   const num = Number(value);
@@ -208,6 +208,7 @@ export const computeStockWindowMetrics = (klines, windows = DEFAULT_WINDOWS) => 
         window,
         annualizedVolatility: null,
         sharpeRatio: null,
+        atr: null,
         atrp: null,
         drawdownPercentile: null,
         riskAdjustedMomentum: null,
@@ -241,6 +242,7 @@ export const computeStockWindowMetrics = (klines, windows = DEFAULT_WINDOWS) => 
       window,
       annualizedVolatility,
       sharpeRatio,
+      atr: currentAtr,
       atrp,
       drawdownPercentile,
       riskAdjustedMomentum: currentRiskAdjustedMomentum,
