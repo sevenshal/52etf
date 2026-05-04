@@ -5,7 +5,7 @@ from typing import Optional, List
 from ...core.utils import get_data_file, read_json_file, write_json_file
 from datetime import datetime
 from sqlalchemy.orm import Session
-from ...core.database import StockEVC, stock_tags, get_db, EVCTradeLog, EVCAccountConfig
+from ...core.database import StockEVC, StockTag, stock_tags, get_db, EVCTradeLog, EVCAccountConfig
 from sqlalchemy import func, and_
 from ...core.services.longport import LongPortService
 from ...core.services.evc import EVCService
@@ -22,9 +22,10 @@ class StrategyConfig(BaseModel):
     next_fy_median_threshold: float
 
 class ValuationSearchRequest(BaseModel):
-    undervalue_threshold: float
-    next_fy_growth_threshold: float
+    undervalue_threshold: float = 0.9
+    next_fy_growth_threshold: float = 1.1
     symbol: Optional[str] = None
+    tag_ids: Optional[List[str]] = None
 
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
@@ -105,26 +106,23 @@ async def valuation_search(
             if not latest_date:
                 return []
 
-            tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
+            tag_ids = [tag_id for tag_id in (request.tag_ids or []) if tag_id]
 
-            # 基础查询：按 symbol + date 关联标签，避免跨历史日期产生大量重复行
-            query = (
-                db.query(StockEVC)
-                .join(
-                    stock_tags,
-                    and_(
-                        stock_tags.c.stock_symbol == StockEVC.symbol,
-                        stock_tags.c.date == StockEVC.date
+            query = db.query(StockEVC).filter(StockEVC.date == latest_date)
+            if tag_ids:
+                query = (
+                    query.join(
+                        stock_tags,
+                        and_(
+                            stock_tags.c.stock_symbol == StockEVC.symbol,
+                            stock_tags.c.date == StockEVC.date
+                        )
                     )
+                    .filter(stock_tags.c.tag_id.in_(tag_ids))
+                    .distinct()
                 )
-                .filter(
-                    StockEVC.date == latest_date,
-                    stock_tags.c.tag_id.in_(tag_ids)
-                )
-                .distinct()
-            )
 
-            # 否则使用阈值条件
+            # 否则使用阈值条件；标签为空时不做标签过滤
             query = query.filter(
                 (StockEVC.last_price / StockEVC.fair_value_lo < request.undervalue_threshold),
                 (StockEVC.forward_next_fy_lo / StockEVC.fair_value_lo > request.next_fy_growth_threshold),
@@ -169,6 +167,46 @@ async def valuation_search(
             result.append(stock_data)
         
         return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/tags")
+async def get_stock_tags(
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db)
+):
+    try:
+        latest_date = db.query(func.max(StockEVC.date)).scalar()
+        stock_count_map = {}
+        if latest_date:
+            rows = (
+                db.query(
+                    stock_tags.c.tag_id,
+                    func.count(func.distinct(stock_tags.c.stock_symbol)).label("stock_count")
+                )
+                .filter(stock_tags.c.date == latest_date)
+                .group_by(stock_tags.c.tag_id)
+                .all()
+            )
+            stock_count_map = {tag_id: stock_count for tag_id, stock_count in rows}
+
+        tags = db.query(StockTag).all()
+        tags = sorted(tags, key=lambda tag: (
+            tag.sort_group if tag.sort_group is not None else 999999,
+            tag.name or ""
+        ))
+
+        return [
+            {
+                "id": tag.id,
+                "name": tag.name,
+                "built_in": tag.built_in,
+                "official_only": tag.official_only,
+                "sort_group": tag.sort_group,
+                "stock_count": stock_count_map.get(tag.id, 0),
+            }
+            for tag in tags
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
