@@ -18,7 +18,9 @@ const EVCValuation = () => {
         undervalue_threshold: 0.9,
         next_fy_growth_threshold: 1.1,
         symbol: '',
-        tag_ids: []
+        tag_ids: [],
+        min_market_cap_100m: null,
+        max_market_cap_100m: null
     };
 
     const calculateChange = (value, marketPrice) => {
@@ -29,13 +31,21 @@ const EVCValuation = () => {
     const handleSearch = async (values) => {
         try {
             const payload = { ...values };
+            if (payload.min_market_cap_100m !== null && payload.min_market_cap_100m !== undefined &&
+                payload.max_market_cap_100m !== null && payload.max_market_cap_100m !== undefined &&
+                Number(payload.min_market_cap_100m) > Number(payload.max_market_cap_100m)) {
+                message.error('市值下限不能大于上限');
+                return;
+            }
             // 如果输入了股票代码，转换为大写
             if (payload.symbol) {
                 payload.symbol = payload.symbol.toUpperCase();
             }
-            if (!payload.tag_ids?.length) {
-                delete payload.tag_ids;
-            }
+            ['tag_ids', 'min_market_cap_100m', 'max_market_cap_100m'].forEach((key) => {
+                if (payload[key] === null || payload[key] === undefined || payload[key] === '') {
+                    delete payload[key];
+                }
+            });
 
             const { data } = await request.post('/api/evc/valuation-search', payload);
             setStocks(data);
@@ -163,6 +173,13 @@ const EVCValuation = () => {
             width: 60
         },
         {
+            title: '市值(亿美元)',
+            key: 'market_cap_100m',
+            dataIndex: 'market_cap_100m',
+            render: (text) => text === null || text === undefined ? '-' : text.toFixed(2),
+            width: 110
+        },
+        {
             title: '下财年估值下限',
             dataIndex: 'forward_next_fy_lo',
             key: 'forward_next_fy_lo',
@@ -239,6 +256,12 @@ const EVCValuation = () => {
         }
     ];
 
+    const allStockColumns = columns.filter(col => (
+        col.key !== 'emotion_score' &&
+        (col.key !== 'pb_ratio' || stocks.some(stock => stock.static_info?.bps)) &&
+        (col.key !== 'market_cap_100m' || stocks.some(stock => stock.market_cap_100m !== null && stock.market_cap_100m !== undefined))
+    ));
+
     return (
         <Layout>
             <Layout.Content style={{ background: '#fff', overflow: 'auto' }}>
@@ -283,6 +306,12 @@ const EVCValuation = () => {
                                         <Form.Item label="下财年增长阈值" name="next_fy_growth_threshold">
                                             <InputNumber min={1} step={0.01} />
                                         </Form.Item>
+                                        <Form.Item label="市值下限(亿美元)" name="min_market_cap_100m">
+                                            <InputNumber min={0} step={10} />
+                                        </Form.Item>
+                                        <Form.Item label="市值上限(亿美元)" name="max_market_cap_100m">
+                                            <InputNumber min={0} step={10} />
+                                        </Form.Item>
                                         <Form.Item label="标签" name="tag_ids">
                                             <Select
                                                 mode="multiple"
@@ -303,7 +332,7 @@ const EVCValuation = () => {
                                     </Form>
                                     <Table
                                         dataSource={stocks}
-                                        columns={columns.filter(col => col.key !== 'emotion_score')}
+                                        columns={allStockColumns}
                                         rowKey="symbol"
                                         scroll={{ x: 'max-content' }}
                                         size="small"
