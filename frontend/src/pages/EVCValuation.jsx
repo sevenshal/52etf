@@ -176,6 +176,13 @@ const EVCValuation = () => {
             title: '市值(亿美元)',
             key: 'market_cap_100m',
             dataIndex: 'market_cap_100m',
+            sorter: (a, b) => {
+                const aValue = a.market_cap_100m;
+                const bValue = b.market_cap_100m;
+                if (aValue === null || aValue === undefined) return 1;
+                if (bValue === null || bValue === undefined) return -1;
+                return aValue - bValue;
+            },
             render: (text) => text === null || text === undefined ? '-' : text.toFixed(2),
             width: 110
         },
