@@ -192,7 +192,15 @@ async def get_favorites(
     for info in static_info_list:
         if 'symbol' in info:
             static_info_dict[info['symbol']] = info
-    
+
+    def calculate_market_cap(stock: StockEVC, static_info: dict):
+        total_shares = static_info.get('total_shares') if static_info else None
+        if not isinstance(stock.last_price, (int, float)) or stock.last_price <= 0:
+            return None
+        if not isinstance(total_shares, (int, float)) or total_shares <= 0:
+            return None
+        return stock.last_price * total_shares
+
     # 构建情绪数据字典
     emotion_dict = {}
     if szdt_resp and szdt_resp['status'] == 1:
@@ -206,19 +214,27 @@ async def get_favorites(
                 }
     
     # 转换为字典列表
-    return [{
-        'symbol': stock.symbol,
-        'company': static_info_dict.get(stock.symbol, {}).get('name_cn') or stock.company,
-        'last_price': stock.last_price,
-        'fair_value_lo': stock.fair_value_lo,
-        'fair_value_hi': stock.fair_value_hi,
-        'fair_value_date': stock.fair_value_date,
-        'forward_next_fy_lo': stock.forward_next_fy_lo,
-        'forward_next_fy_hi': stock.forward_next_fy_hi,
-        'pe_ratio': stock.pe_ratio,
-        'forward_pe_ratio': stock.forward_pe_ratio,
-        'beta': stock.beta,
-        'date': stock.date,
-        'static_info': static_info_dict.get(stock.symbol, {}),
-        'emotion_info': emotion_dict.get(stock.symbol)
-    } for stock in latest_stocks]
+    result = []
+    for stock in latest_stocks:
+        static_info = static_info_dict.get(stock.symbol, {})
+        market_cap = calculate_market_cap(stock, static_info)
+        result.append({
+            'symbol': stock.symbol,
+            'company': static_info.get('name_cn') or stock.company,
+            'last_price': stock.last_price,
+            'fair_value_lo': stock.fair_value_lo,
+            'fair_value_hi': stock.fair_value_hi,
+            'fair_value_date': stock.fair_value_date,
+            'forward_next_fy_lo': stock.forward_next_fy_lo,
+            'forward_next_fy_hi': stock.forward_next_fy_hi,
+            'pe_ratio': stock.pe_ratio,
+            'forward_pe_ratio': stock.forward_pe_ratio,
+            'beta': stock.beta,
+            'date': stock.date,
+            'market_cap': market_cap,
+            'market_cap_100m': market_cap / 100_000_000 if market_cap is not None else None,
+            'static_info': static_info,
+            'emotion_info': emotion_dict.get(stock.symbol)
+        })
+
+    return result
