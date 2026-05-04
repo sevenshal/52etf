@@ -88,20 +88,23 @@ async def valuation_search(
     db: Session = Depends(get_db)
 ):
     try:
-        latest_date = db.query(func.max(StockEVC.date)).scalar()
-        if not latest_date:
-            return []
-
-        # 如果提供了股票代码，只按股票代码过滤，不再套标签/低估率/增长率等筛选条件
+        # 如果提供了股票代码，只按股票代码查该标的最新记录，不再套标签/日期/低估率/增长率等筛选条件
         if request.symbol:
             symbol = request.symbol.strip().upper()
             if "." not in symbol:
                 symbol = f"{symbol}.US"
-            query = db.query(StockEVC).filter(
-                StockEVC.date == latest_date,
-                StockEVC.symbol == symbol
+            query = (
+                db.query(StockEVC)
+                .filter(StockEVC.symbol == symbol)
+                .order_by(StockEVC.date.desc())
+                .limit(1)
             )
+            stocks = query.all()
         else:
+            latest_date = db.query(func.max(StockEVC.date)).scalar()
+            if not latest_date:
+                return []
+
             tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
 
             # 基础查询：按 symbol + date 关联标签，避免跨历史日期产生大量重复行
@@ -127,9 +130,8 @@ async def valuation_search(
                 (StockEVC.forward_next_fy_lo / StockEVC.fair_value_lo > request.next_fy_growth_threshold),
                 (StockEVC.forward_next_fy_hi / StockEVC.fair_value_hi > request.next_fy_growth_threshold)
             )
+            stocks = query.all()
 
-        stocks = query.all()
-        
         # 获取所有股票代码（去重保持顺序）
         symbols = list(dict.fromkeys(stock.symbol for stock in stocks))
         
