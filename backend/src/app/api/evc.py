@@ -92,29 +92,35 @@ async def valuation_search(
         if not latest_date:
             return []
 
-        tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
-
-        # 基础查询：按 symbol + date 关联标签，避免跨历史日期产生大量重复行
-        query = (
-            db.query(StockEVC)
-            .join(
-                stock_tags,
-                and_(
-                    stock_tags.c.stock_symbol == StockEVC.symbol,
-                    stock_tags.c.date == StockEVC.date
-                )
-            )
-            .filter(
-                StockEVC.date == latest_date,
-                stock_tags.c.tag_id.in_(tag_ids)
-            )
-            .distinct()
-        )
-
-        # 如果提供了股票代码，只按股票代码过滤
+        # 如果提供了股票代码，只按股票代码过滤，不再套标签/低估率/增长率等筛选条件
         if request.symbol:
-            query = query.filter(StockEVC.symbol == f'{request.symbol.upper()}.US')
+            symbol = request.symbol.strip().upper()
+            if "." not in symbol:
+                symbol = f"{symbol}.US"
+            query = db.query(StockEVC).filter(
+                StockEVC.date == latest_date,
+                StockEVC.symbol == symbol
+            )
         else:
+            tag_ids = ["97638d21-2feb-4e7c-b47f-1984ff71dda6", "fbef4442-9f95-45e6-9859-b95f34889a5e"]
+
+            # 基础查询：按 symbol + date 关联标签，避免跨历史日期产生大量重复行
+            query = (
+                db.query(StockEVC)
+                .join(
+                    stock_tags,
+                    and_(
+                        stock_tags.c.stock_symbol == StockEVC.symbol,
+                        stock_tags.c.date == StockEVC.date
+                    )
+                )
+                .filter(
+                    StockEVC.date == latest_date,
+                    stock_tags.c.tag_id.in_(tag_ids)
+                )
+                .distinct()
+            )
+
             # 否则使用阈值条件
             query = query.filter(
                 (StockEVC.last_price / StockEVC.fair_value_lo < request.undervalue_threshold),
