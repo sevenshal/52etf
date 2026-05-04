@@ -19,7 +19,7 @@ const EVCValuation = () => {
         next_fy_growth_threshold: 1.1,
         symbol: '',
         tag_ids: [],
-        min_market_cap_100m: null,
+        min_market_cap_100m: 100,
         max_market_cap_100m: null
     };
 
