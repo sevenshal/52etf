@@ -9,6 +9,7 @@ from sqlalchemy import func
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
+from ...core.static_info import get_static_info_snapshot_map
 
 # db_session removed, use dependency injection
 router = APIRouter(prefix="/api/stock")
@@ -163,35 +164,18 @@ async def get_favorites(
     
     # 获取所有股票代码
     symbols = [stock.symbol for stock in latest_stocks]
-    
-    # 获取股票静态信息
-    lp_account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
-    lp_account_id = lp_account.lp_account_id if lp_account else "LBPT10001248"
-    quote_service = LongPortService.get_instance(lp_account_id)
-    
-    # 将静态信息列表转换为以symbol为键的字典，方便查找
-    static_info_dict = {}
+
+    # 直接从数据库快照读取静态信息
+    static_info_dict = get_static_info_snapshot_map(db, symbols)
 
     # 初始化 SZDT 服务
     szdt_service = SZDTService()
 
-    # 并发获取静态信息和情绪数据；情绪接口超时则降级为空，避免拖慢整个接口
-    static_info_task = asyncio.create_task(asyncio.to_thread(quote_service.get_static_info, symbols)) if symbols else None
+    # 情绪接口超时则降级为空，避免拖慢整个接口
     try:
         szdt_resp = await asyncio.wait_for(szdt_service.get_etf_emotion(etf_type=7), timeout=4.0)
     except Exception:
         szdt_resp = None
-
-    static_info_list = []
-    if static_info_task:
-        try:
-            static_info_list = await static_info_task
-        except Exception:
-            static_info_list = []
-
-    for info in static_info_list:
-        if 'symbol' in info:
-            static_info_dict[info['symbol']] = info
 
     def calculate_market_cap(stock: StockEVC, static_info: dict):
         total_shares = static_info.get('total_shares') if static_info else None

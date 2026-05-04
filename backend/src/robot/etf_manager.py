@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from ..core.database import ETFHolding as DBETFHolding
 from ..core.database import ETFAnalysis, StockEVC, Session, ETFEmotion
 from ..core.models.etf import ETFHolding, ETFHoldingsData
+from ..core.static_info import get_static_info_snapshot, get_static_info_snapshot_map
 from ..core.utils import normalize_us_equity_symbol
 from .etf.base import ETFDataFetcher
 from .etf.ishares import ISharesETFFetcher
@@ -11,7 +12,6 @@ from .etf.qqq import QQQDataFetcher
 from .etf.spdr import SPDRDataFetcher
 from .etf.vanguard import VanguardETFFetcher
 import logging
-from ..core.services.longport import LongPortService
 from ..core.services.quote import QuoteService, QuoteProvider
 from ..core.services.szdt import SZDTService
 from ..emotion.etf_emotion import ETFEmotionCalculator
@@ -126,6 +126,11 @@ class ETFManager:
     def get_total_shares(self, etf_symbol: str) -> int:
         """获取ETF的总发行股数"""
         try:
+            snapshot_info = get_static_info_snapshot(self.db_session, etf_symbol)
+            snapshot_total_shares = snapshot_info.get('total_shares') if snapshot_info else None
+            if isinstance(snapshot_total_shares, (int, float)) and snapshot_total_shares > 0:
+                return int(snapshot_total_shares)
+
             static_info = self.quote_service.get_static_info([etf_symbol])[0]
             return static_info['total_shares']
         except Exception as e:
@@ -255,10 +260,9 @@ class ETFManager:
             # 使用 抓取的总股本数，没有则使用 LongPort API 获取总股数
             total_shares = self.get_total_shares(etf_symbol) if holdings_data.total_shares is None else holdings_data.total_shares
             
-            # 批量获取所有持仓股票的 static_info
+            # 批量从数据库快照读取所有持仓股票的 static_info
             equity_symbols = [holding.symbol for holding in holdings_data.holdings if holding.asset_class == 'Equity' and holding.symbol]
-            static_infos = self.quote_service.get_static_info(equity_symbols) if equity_symbols else []
-            static_info_map = {info.get('symbol'): info for info in static_infos}
+            static_info_map = get_static_info_snapshot_map(self.db_session, equity_symbols) if equity_symbols else {}
             holding_quotes = self.quote_service.get_quote_batch(equity_symbols) if equity_symbols else []
             quote_price_map = {}
             for quote in holding_quotes:

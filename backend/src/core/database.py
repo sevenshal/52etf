@@ -100,6 +100,42 @@ class StockEVC(Base):
     # 添加与标签的关系
     tags = relationship('StockTag', secondary=stock_tags, backref='stocks')
 
+class _StaticInfoColumnsMixin:
+    __abstract__ = True
+
+    name_cn = Column(String)
+    name_en = Column(String)
+    name_hk = Column(String)
+    exchange = Column(String)
+    currency = Column(String)
+    lot_size = Column(Integer)
+    total_shares = Column(Integer)
+    circulating_shares = Column(Integer)
+    hk_shares = Column(Integer)
+    eps = Column(Float)
+    eps_ttm = Column(Float)
+    bps = Column(Float)
+    dividend_yield = Column(Float)
+    stock_derivatives = Column(JSON)
+    board = Column(String)
+    raw_data = Column(JSON)
+
+class StockStaticInfoSnapshot(_StaticInfoColumnsMixin, Base):
+    __tablename__ = 'stock_static_info_snapshot'
+
+    symbol = Column(String, primary_key=True)
+    date = Column(Date, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+class StockStaticInfoHistory(_StaticInfoColumnsMixin, Base):
+    __tablename__ = 'stock_static_info_history'
+
+    symbol = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
 class ETFAnalysis(Base):
     __tablename__ = 'etf_analysis'
 

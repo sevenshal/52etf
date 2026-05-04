@@ -47,6 +47,27 @@ def _run_evc_stock_fetch():
     EVCManager().fetch_and_stocks()
 
 
+def _run_evc_static_info_sync():
+    from .evc_manager import EVCManager
+
+    manager = EVCManager()
+    try:
+        result = manager.sync_static_info_snapshots()
+    finally:
+        manager.db_session.close()
+
+    logging.getLogger("ScheduledTaskManager").info(
+        "EVC static info sync symbols=%s fetched=%s created=%s changed=%s refreshed=%s history=%s missing=%s",
+        result.get("symbols"),
+        result.get("fetched"),
+        result.get("created"),
+        result.get("changed"),
+        result.get("refreshed"),
+        result.get("history"),
+        result.get("missing"),
+    )
+
+
 def _run_etf_fair_value_analysis():
     from ..core.services.longport import LongPortService
     from .etf_manager import ETFManager
@@ -240,6 +261,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=10,
                 runner=_run_evc_stock_fetch,
+            ),
+            "evc_static_info_sync": TaskDefinition(
+                task_key="evc_static_info_sync",
+                name="股票静态信息同步",
+                description="批量获取 EVC 股票池的 LongPort static_info，维护快照与历史记录。",
+                default_time="07:15",
+                default_enabled=True,
+                sort_order=11,
+                runner=_run_evc_static_info_sync,
             ),
             "etf_fair_value_analysis": TaskDefinition(
                 task_key="etf_fair_value_analysis",

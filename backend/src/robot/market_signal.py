@@ -3,6 +3,7 @@ import numpy as np
 from typing import List, Dict, Any
 from sqlalchemy import func
 from ..core.database import MarketSignal, Session, StockEVC
+from ..core.static_info import get_static_info_snapshot_map
 from ..core.services.quote import QuoteProvider, QuoteService
 
 MARKET_SIGNAL_STRATEGIES = [
@@ -408,10 +409,9 @@ class MarketSignalAnalyzer:
             return 0
 
         unique_symbols = list({r.symbol for r in records})
-        static_infos = self.quote_service.get_static_info(unique_symbols)
+        static_infos = get_static_info_snapshot_map(self.db_session, unique_symbols)
         shares_map = {}
-        for info in static_infos:
-            sym = info.get('symbol') or info.get('code')
+        for sym, info in static_infos.items():
             shares = info.get('total_shares')
             if sym is not None and isinstance(shares, (int, float)) and shares > 0:
                 shares_map[sym] = float(shares)

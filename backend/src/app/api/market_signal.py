@@ -27,6 +27,7 @@ from ...core.database import (
     get_db_ctx,
     Session as DbSession,
 )
+from ...core.static_info import get_static_info_snapshot_map
 from ...core.services.longport import LongPortService
 from ...core.services.market import MarketService
 from ...core.services.quote import QuoteService
@@ -625,14 +626,18 @@ def _append_live_quote_row(klines: List[Dict], quote: Dict) -> Tuple[List[Dict],
     return sorted(filtered, key=_kline_date), live_date
 
 
-def _filter_symbols_by_market_cap(quote_service: QuoteService, symbols: List[str], min_market_cap: float) -> List[str]:
+def _filter_symbols_by_market_cap(
+    db_session: ORMSession,
+    quote_service: QuoteService,
+    symbols: List[str],
+    min_market_cap: float,
+) -> List[str]:
     if min_market_cap <= 0:
         return symbols
     try:
-        static_infos = quote_service.get_static_info(symbols)
+        static_infos = get_static_info_snapshot_map(db_session, symbols)
         shares_map = {}
-        for info in static_infos:
-            sym = info.get("symbol") or info.get("code")
+        for sym, info in static_infos.items():
             shares = info.get("total_shares")
             if sym and isinstance(shares, (int, float)) and shares > 0:
                 shares_map[sym] = float(shares)
@@ -657,12 +662,28 @@ def _run_virtual_engine(
     end_dt: Optional[date] = None,
     include_live_quote: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    db_session: Optional[ORMSession] = None,
 ) -> Dict:
     strategy = MARKET_SIGNAL_STRATEGY_MAP[config.strategy_id]
     start_dt = config.start_date
     end_dt = end_dt or date.today()
     fetch_start = start_dt - timedelta(days=430)
-    symbols = _filter_symbols_by_market_cap(quote_service, config.symbols or [], float(config.min_market_cap or 0))
+    min_market_cap = float(config.min_market_cap or 0)
+    if min_market_cap <= 0:
+        symbols = config.symbols or []
+    else:
+        owns_db_session = db_session is None
+        market_cap_db = db_session or DbSession()
+        try:
+            symbols = _filter_symbols_by_market_cap(
+                market_cap_db,
+                quote_service,
+                config.symbols or [],
+                min_market_cap,
+            )
+        finally:
+            if owns_db_session:
+                DbSession.remove()
     if not symbols:
         raise ValueError("没有可用于同步的标的")
 
@@ -1075,7 +1096,7 @@ def _sync_config_now(
     include_live_quote: bool = False,
 ) -> Dict:
     quote_service = _get_quote_service(config.account_id)
-    result = _run_virtual_engine(config, quote_service, include_live_quote=include_live_quote)
+    result = _run_virtual_engine(config, quote_service, include_live_quote=include_live_quote, db_session=db)
     _replace_config_runtime_state(db, config, result, trigger_source=trigger_source)
     return result
 
@@ -1191,6 +1212,7 @@ def _run_market_signal_backtest_job(task_id: str, payload: Dict, account_id: str
                 end_dt=end_dt,
                 include_live_quote=False,
                 progress_callback=progress_callback,
+                db_session=db,
             )
         _update_backtest_job(task_id, status="completed", progress=100, message="完成", result=result)
     except Exception as exc:

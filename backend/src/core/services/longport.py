@@ -13,6 +13,8 @@ from ..database import Session, LongPortAccount, InvalidSymbolCache
 from .trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideRTH
 from .quote import QuoteProvider, SubType, QuoteObserver, QuoteEvent
 
+logger = logging.getLogger(__name__)
+
 order_side_map = {
     OrderSide.Buy: LPOrderSide.Buy,
     OrderSide.Sell: LPOrderSide.Sell
@@ -39,6 +41,48 @@ sub_type_map = {
     SubType.OrderBook: LPSubType.Depth, #摆盘
     SubType.Ticker: LPSubType.Trade #逐笔
 }
+
+def _to_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+def _to_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def _enum_name(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    class_name = getattr(value, "__name__", None)
+    if isinstance(class_name, str) and class_name:
+        return class_name
+    return str(value)
+
+def _normalize_enum_list(values) -> List[str]:
+    if not values:
+        return []
+    result = []
+    for value in values:
+        name = _enum_name(value)
+        if name:
+            result.append(name)
+    return sorted(dict.fromkeys(result))
 
 class LongPortService(QuoteProvider, TradeService):
     """长桥接口服务"""
@@ -288,13 +332,20 @@ class LongPortService(QuoteProvider, TradeService):
                 return [{
                     'symbol': info.symbol,
                     'name_cn': info.name_cn,
-                    'total_shares': info.total_shares,
-                    'circulating_shares': info.circulating_shares,
-                    'lot_size': info.lot_size,
+                    'name_en': getattr(info, 'name_en', None),
+                    'name_hk': getattr(info, 'name_hk', None),
+                    'exchange': getattr(info, 'exchange', None),
                     'currency': info.currency,
-                    'eps': float(info.eps) if info.eps else None,
-                    'eps_ttm': float(info.eps_ttm) if info.eps_ttm else None, 
-                    'bps': float(info.bps) if info.bps else None
+                    'lot_size': _to_int(getattr(info, 'lot_size', None)),
+                    'total_shares': _to_int(getattr(info, 'total_shares', None)),
+                    'circulating_shares': _to_int(getattr(info, 'circulating_shares', None)),
+                    'hk_shares': _to_int(getattr(info, 'hk_shares', None)),
+                    'eps': _to_float(getattr(info, 'eps', None)),
+                    'eps_ttm': _to_float(getattr(info, 'eps_ttm', None)),
+                    'bps': _to_float(getattr(info, 'bps', None)),
+                    'dividend_yield': _to_float(getattr(info, 'dividend_yield', None)),
+                    'stock_derivatives': _normalize_enum_list(getattr(info, 'stock_derivatives', None)),
+                    'board': _enum_name(getattr(info, 'board', None)),
                 } for info in resp]
             return []
         except Exception as e:
