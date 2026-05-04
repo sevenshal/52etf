@@ -1,7 +1,9 @@
 import asyncio
+import logging
+import time
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 from ...core.utils import get_data_file, read_json_file, write_json_file
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -11,6 +13,14 @@ from ...core.services.longport import LongPortService
 from ...core.services.evc import EVCService
 
 router = APIRouter(prefix="/api/evc")
+logger = logging.getLogger(__name__)
+
+STATIC_INFO_CACHE_TTL_SECONDS = 24 * 60 * 60
+STATIC_INFO_FETCH_TIMEOUT_SECONDS = 2.0
+STATIC_INFO_FETCH_LIMIT = 80
+MARKET_CAP_FILTER_FETCH_TIMEOUT_SECONDS = 12.0
+ONE_HUNDRED_MILLION = 100_000_000
+_static_info_cache: Dict[str, Tuple[float, dict]] = {}
 
 class StrategyConfig(BaseModel):
     auto_trading_enabled: bool
@@ -26,11 +36,86 @@ class ValuationSearchRequest(BaseModel):
     next_fy_growth_threshold: float = 1.1
     symbol: Optional[str] = None
     tag_ids: Optional[List[str]] = None
+    include_static_info: Optional[bool] = None
+    min_market_cap_100m: Optional[float] = None
+    max_market_cap_100m: Optional[float] = None
 
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
         raise HTTPException(status_code=401, detail="Missing account ID")
     return x_account_id
+
+def _get_cached_static_info(symbols: List[str]) -> Dict[str, dict]:
+    now = time.time()
+    result = {}
+    expired_symbols = []
+    for symbol in symbols:
+        cached = _static_info_cache.get(symbol)
+        if not cached:
+            continue
+        cached_at, info = cached
+        if now - cached_at > STATIC_INFO_CACHE_TTL_SECONDS:
+            expired_symbols.append(symbol)
+            continue
+        result[symbol] = info
+    for symbol in expired_symbols:
+        _static_info_cache.pop(symbol, None)
+    return result
+
+def _cache_static_info(static_info_list: List[dict]) -> Dict[str, dict]:
+    now = time.time()
+    result = {}
+    for info in static_info_list:
+        symbol = info.get("symbol")
+        if not symbol:
+            continue
+        _static_info_cache[symbol] = (now, info)
+        result[symbol] = info
+    return result
+
+def _fetch_static_info_sync(symbols: List[str]) -> List[dict]:
+    quote_service = LongPortService.get_instance()
+    static_info_list = []
+    for i in range(0, len(symbols), 500):
+        batch_symbols = symbols[i:i + 500]
+        static_info_list.extend(quote_service.get_static_info(batch_symbols) or [])
+    return static_info_list
+
+async def _get_static_info_for_search(
+    symbols: List[str],
+    should_fetch_missing: bool,
+    fetch_limit: Optional[int] = STATIC_INFO_FETCH_LIMIT,
+    timeout_seconds: float = STATIC_INFO_FETCH_TIMEOUT_SECONDS
+) -> Dict[str, dict]:
+    static_info_dict = _get_cached_static_info(symbols)
+    missing_symbols = [symbol for symbol in symbols if symbol not in static_info_dict]
+    if not should_fetch_missing or not missing_symbols:
+        return static_info_dict
+
+    fetch_symbols = missing_symbols if fetch_limit is None else missing_symbols[:fetch_limit]
+    try:
+        fetched = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_static_info_sync, fetch_symbols),
+            timeout=timeout_seconds
+        )
+        static_info_dict.update(_cache_static_info(fetched))
+    except Exception as exc:
+        logger.warning("Fetch static info skipped/failed for valuation search: %s", exc)
+
+    return static_info_dict
+
+def _market_cap_threshold_to_usd(value: Optional[float]) -> Optional[float]:
+    if value is None or value <= 0:
+        return None
+    return value * ONE_HUNDRED_MILLION
+
+def _calculate_market_cap(stock: StockEVC, static_info: dict) -> Optional[float]:
+    shares = static_info.get("total_shares") if static_info else None
+    if not isinstance(stock.last_price, (int, float)) or stock.last_price <= 0:
+        return None
+    if not isinstance(shares, (int, float)) or shares <= 0:
+        return None
+    return stock.last_price * shares
 
 def get_strategy_config_path(account_id: str) -> str:
     return get_data_file(account_id, "evc_strategy.json")
@@ -89,9 +174,15 @@ async def valuation_search(
     db: Session = Depends(get_db)
 ):
     try:
+        search_symbol = request.symbol.strip().upper() if request.symbol else ""
+        tag_ids = [tag_id for tag_id in (request.tag_ids or []) if tag_id]
+        min_market_cap = _market_cap_threshold_to_usd(request.min_market_cap_100m)
+        max_market_cap = _market_cap_threshold_to_usd(request.max_market_cap_100m)
+        has_market_cap_filter = bool((min_market_cap or max_market_cap) and not search_symbol)
+
         # 如果提供了股票代码，只按股票代码查该标的最新记录，不再套标签/日期/低估率/增长率等筛选条件
-        if request.symbol:
-            symbol = request.symbol.strip().upper()
+        if search_symbol:
+            symbol = search_symbol
             if "." not in symbol:
                 symbol = f"{symbol}.US"
             query = (
@@ -105,8 +196,6 @@ async def valuation_search(
             latest_date = db.query(func.max(StockEVC.date)).scalar()
             if not latest_date:
                 return []
-
-            tag_ids = [tag_id for tag_id in (request.tag_ids or []) if tag_id]
 
             query = db.query(StockEVC).filter(StockEVC.date == latest_date)
             if tag_ids:
@@ -124,30 +213,46 @@ async def valuation_search(
 
             # 否则使用阈值条件；标签为空时不做标签过滤
             query = query.filter(
-                (StockEVC.last_price / StockEVC.fair_value_lo < request.undervalue_threshold),
-                (StockEVC.forward_next_fy_lo / StockEVC.fair_value_lo > request.next_fy_growth_threshold),
-                (StockEVC.forward_next_fy_hi / StockEVC.fair_value_hi > request.next_fy_growth_threshold)
+                StockEVC.fair_value_lo > 0,
+                StockEVC.fair_value_hi > 0,
+                StockEVC.last_price < request.undervalue_threshold * StockEVC.fair_value_lo,
+                StockEVC.forward_next_fy_lo > request.next_fy_growth_threshold * StockEVC.fair_value_lo,
+                StockEVC.forward_next_fy_hi > request.next_fy_growth_threshold * StockEVC.fair_value_hi
             )
             stocks = query.all()
 
         # 获取所有股票代码（去重保持顺序）
         symbols = list(dict.fromkeys(stock.symbol for stock in stocks))
-        
-        # 获取股票静态信息
-        quote_service = LongPortService.get_instance()
-        static_info_list = []
-        if symbols:
-            static_info_list = await asyncio.to_thread(quote_service.get_static_info, symbols)
-        
-        # 将静态信息列表转换为以symbol为键的字典，方便查找
-        static_info_dict = {}
-        for info in static_info_list:
-            if 'symbol' in info:
-                static_info_dict[info['symbol']] = info
+
+        should_fetch_static_info = True if has_market_cap_filter else (
+            bool(search_symbol or tag_ids)
+            if request.include_static_info is None
+            else request.include_static_info
+        )
+        static_info_dict = await _get_static_info_for_search(
+            symbols,
+            should_fetch_static_info,
+            fetch_limit=None if has_market_cap_filter else STATIC_INFO_FETCH_LIMIT,
+            timeout_seconds=MARKET_CAP_FILTER_FETCH_TIMEOUT_SECONDS if has_market_cap_filter else STATIC_INFO_FETCH_TIMEOUT_SECONDS
+        )
+
+        if has_market_cap_filter:
+            filtered_stocks = []
+            for stock in stocks:
+                market_cap = _calculate_market_cap(stock, static_info_dict.get(stock.symbol, {}))
+                if market_cap is None:
+                    continue
+                if min_market_cap is not None and market_cap < min_market_cap:
+                    continue
+                if max_market_cap is not None and market_cap > max_market_cap:
+                    continue
+                filtered_stocks.append(stock)
+            stocks = filtered_stocks
         
         result = []
         for stock in stocks:
             static_info = static_info_dict.get(stock.symbol, {})
+            market_cap = _calculate_market_cap(stock, static_info)
             stock_data = {
                 "symbol": stock.symbol,
                 "company": static_info.get('name_cn') or stock.company,
@@ -161,6 +266,8 @@ async def valuation_search(
                 "beta": stock.beta,
                 "forward_pe_ratio": stock.forward_pe_ratio,
                 "date": stock.date,
+                "market_cap": market_cap,
+                "market_cap_100m": market_cap / ONE_HUNDRED_MILLION if market_cap is not None else None,
                 "static_info": static_info
             }
             
