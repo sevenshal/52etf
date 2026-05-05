@@ -29,19 +29,16 @@ import request from '../utils/request';
 import { formatNumber } from '../utils/format';
 
 const { Text, Title } = Typography;
+const DEFAULT_MOMENTUM_WEIGHTS = { 20: 1, 60: 0, 120: 0 };
 
 const DEFAULT_FORM_VALUES = {
-  name: '美股成分股买卖点虚拟盘',
+  name: '美股风险调整混合动量虚拟盘',
   enabled: true,
   candidate_etfs: ['SPY.US', 'QQQ.US'],
   initial_capital: 100000,
   start_date: dayjs().subtract(3, 'year'),
-  window: 125,
-  stabilization_period: 10,
-  volatility_floor_pct: 15,
-  volatility_cap_pct: 45,
   min_listing_days: 365,
-  volume_std_multiplier: 1,
+  momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
   max_positions: 10,
   slippage_pct: 0.02,
   commission_pct: 0.03,
@@ -59,6 +56,11 @@ const formatMoney = value => {
   return Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+const formatScore = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toFixed(2);
+};
+
 const getErrorMessage = (error, fallback) => (
   error?.response?.data?.detail
   || error?.response?.data?.message
@@ -66,14 +68,24 @@ const getErrorMessage = (error, fallback) => (
   || fallback
 );
 
-const normalizeConfigForForm = config => ({
-  ...DEFAULT_FORM_VALUES,
-  ...config,
-  start_date: config?.start_date ? dayjs(config.start_date) : DEFAULT_FORM_VALUES.start_date,
+const normalizeMomentumWeights = weights => ({
+  ...DEFAULT_MOMENTUM_WEIGHTS,
+  ...(weights || {}),
 });
+
+const normalizeConfigForForm = config => {
+  const merged = {
+    ...DEFAULT_FORM_VALUES,
+    ...config,
+    start_date: config?.start_date ? dayjs(config.start_date) : DEFAULT_FORM_VALUES.start_date,
+  };
+  merged.momentum_weights = normalizeMomentumWeights(config?.momentum_weights);
+  return merged;
+};
 
 const buildPayload = values => ({
   ...values,
+  momentum_weights: normalizeMomentumWeights(values.momentum_weights),
   start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
 });
 
@@ -268,28 +280,38 @@ const USStockSignalLive = () => {
   const eventColumns = [
     { title: '日期', dataIndex: 'date', width: 110 },
     {
-      title: '信号',
+      title: '类型',
       dataIndex: 'direction',
       width: 80,
-      render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
+      render: value => <Tag color={value === 'RANK' ? 'blue' : value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
     },
     { title: '股票', dataIndex: 'symbol', width: 100 },
+    {
+      title: '排名',
+      dataIndex: ['payload', 'rank'],
+      width: 80,
+      align: 'right',
+    },
     { title: '价格', dataIndex: 'signal_price', width: 90, align: 'right', render: value => formatNumber(value, 2) },
     { title: '成交额', dataIndex: 'turnover', width: 130, align: 'right', render: formatMoney },
-    { title: '阈值', dataIndex: 'threshold_pct', width: 90, align: 'right', render: formatPercent },
-    { title: '年化波动', dataIndex: 'annualized_volatility_pct', width: 110, align: 'right', render: formatPercent },
+    { title: '混合分数', dataIndex: 'threshold_pct', width: 100, align: 'right', render: formatScore },
+    { title: '20日分数', dataIndex: ['payload', 'components', '20', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
+    { title: '60日分数', dataIndex: ['payload', 'components', '60', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
+    { title: '120日分数', dataIndex: ['payload', 'components', '120', 'risk_adjusted_score'], width: 110, align: 'right', render: formatScore },
+    { title: '混合波动', dataIndex: 'annualized_volatility_pct', width: 110, align: 'right', render: formatPercent },
     {
-      title: '波动幅度',
-      dataIndex: ['payload', 'move_pct'],
+      title: '混合涨跌',
+      dataIndex: ['payload', 'window_return_pct'],
       width: 100,
       align: 'right',
       render: formatPercent,
     },
     {
-      title: '企稳',
-      dataIndex: ['payload', 'bars_since_extreme'],
+      title: '混合R²',
+      dataIndex: ['payload', 'r_squared'],
       width: 80,
       align: 'right',
+      render: value => value === null || value === undefined ? '-' : Number(value).toFixed(3),
     },
   ];
 
@@ -307,7 +329,7 @@ const USStockSignalLive = () => {
     <div style={{ padding: 24 }}>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Col>
-          <Title level={4} style={{ margin: 0 }}>美股成分股买卖点虚拟盘</Title>
+          <Title level={4} style={{ margin: 0 }}>美股风险调整混合动量虚拟盘</Title>
         </Col>
         <Col>
           <Space>
@@ -372,6 +394,29 @@ const USStockSignalLive = () => {
                   ]).map(item => ({ label: `${item.label} (${item.value})`, value: item.value }))}
                 />
               </Form.Item>
+              <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
+                <Descriptions.Item label="策略">风险调整混合动量 Top N</Descriptions.Item>
+                <Descriptions.Item label="轮换规则">持仓跌出 Top N 才卖出</Descriptions.Item>
+                <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
+                <Descriptions.Item label="检查频率">每周最后一个交易日</Descriptions.Item>
+              </Descriptions>
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Form.Item name={['momentum_weights', '20']} label="20日权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['momentum_weights', '60']} label="60日权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['momentum_weights', '120']} label="120日权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
               <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
                 <DatePicker style={{ width: '100%' }} />
               </Form.Item>
@@ -389,41 +434,10 @@ const USStockSignalLive = () => {
               </Row>
               <Row gutter={12}>
                 <Col span={12}>
-                  <Form.Item name="window" label="窗口大小" rules={[{ required: true }]}>
-                    <InputNumber min={20} max={1000} step={1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="stabilization_period" label="企稳天数" rules={[{ required: true }]}>
-                    <InputNumber min={1} max={200} step={1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Row gutter={12}>
-                <Col span={12}>
-                  <Form.Item name="volatility_floor_pct" label="波动阈值下限(%)" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={300} step={1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="volatility_cap_pct" label="波动阈值上限(%)" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={300} step={1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Row gutter={12}>
-                <Col span={12}>
                   <Form.Item name="min_listing_days" label="最少上市天数" rules={[{ required: true }]}>
                     <InputNumber min={0} max={3650} step={30} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
-                <Col span={12}>
-                  <Form.Item name="volume_std_multiplier" label="成交量标准差倍数" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={20} step={0.1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Row gutter={12}>
                 <Col span={12}>
                   <Form.Item name="slippage_pct" label="滑点(%)" rules={[{ required: true }]}>
                     <InputNumber min={0} max={10} step={0.01} style={{ width: '100%' }} />
@@ -464,7 +478,8 @@ const USStockSignalLive = () => {
                     <Descriptions.Item label="总收益">{formatPercent(metrics.total_return ?? summary.total_return)}</Descriptions.Item>
                     <Descriptions.Item label="年化收益">{formatPercent(metrics.annualized_return)}</Descriptions.Item>
                     <Descriptions.Item label="最大回撤">{formatPercent(metrics.max_drawdown)}</Descriptions.Item>
-                    <Descriptions.Item label="信号数">{metrics.signal_count ?? summary.signal_count ?? '-'}</Descriptions.Item>
+                    <Descriptions.Item label="排名记录">{metrics.rank_signal_count ?? metrics.signal_count ?? summary.signal_count ?? '-'}</Descriptions.Item>
+                    <Descriptions.Item label="周度检查">{metrics.rebalance_count ?? '-'}</Descriptions.Item>
                     <Descriptions.Item label="交易数">{metrics.trade_count ?? summary.trade_count ?? '-'}</Descriptions.Item>
                     <Descriptions.Item label="持仓数">{summary.holding_count ?? '-'}</Descriptions.Item>
                   </Descriptions>
@@ -493,8 +508,8 @@ const USStockSignalLive = () => {
                       },
                       {
                         key: 'events',
-                        label: '信号',
-                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 1000 }} />,
+                        label: '排名',
+                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 1450 }} />,
                       },
                       {
                         key: 'logs',
