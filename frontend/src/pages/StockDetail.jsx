@@ -186,7 +186,7 @@ const StockDetail = () => {
     if (processedKlines.length > 0 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
       calculateBuySellPoints(processedKlines);
     }
-  }, [processedKlines, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
+  }, [processedKlines, supportResistanceWindow, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
 
   useEffect(() => {
     if (processedKlines.length > 0) {
@@ -225,64 +225,70 @@ const StockDetail = () => {
   const calculateBuySellPoints = (klines) => {
     const newBuyPoints = [];
     const newSellPoints = [];
+    const buyPointIndexes = new Set();
+    const sellPointIndexes = new Set();
+    const signalWindow = Math.max(1, Number(supportResistanceWindow) || 1);
+    const changeRatio = priceChangeRatio / 100;
+    const stableBars = Math.max(1, Number(stabilizationPeriod) || 1);
 
-    let highestPoint = { price: 0, index: -1 };
-    for (let i = 0; i < klines.length; i++) {
-      if (klines[i].high > highestPoint.price) {
-        highestPoint = { price: klines[i].high, index: i };
-      }
-    }
-
-    if (highestPoint.index !== -1) {
-      let lowestPointAfterHigh = { price: Infinity, index: -1 };
-      for (let i = highestPoint.index + 1; i < klines.length; i++) {
-        if (klines[i].low < lowestPointAfterHigh.price) {
-          lowestPointAfterHigh = { price: klines[i].low, index: i };
+    const findHighestPoint = (startIndex, endIndex) => {
+      let highestPoint = { price: 0, index: -1 };
+      for (let i = startIndex; i <= endIndex; i++) {
+        if (klines[i].high > highestPoint.price) {
+          highestPoint = { price: klines[i].high, index: i };
         }
       }
+      return highestPoint;
+    };
 
-      if (lowestPointAfterHigh.index !== -1 && highestPoint.price > 0 &&
-        (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > (priceChangeRatio / 100)) {
-        if (klines.length - 1 - lowestPointAfterHigh.index > stabilizationPeriod) {
-          for (let i = lowestPointAfterHigh.index + stabilizationPeriod; i < klines.length; i++) {
-            if (i >= 19 && klines[i].isVolumeSpike) {
-              newBuyPoints.push({
-                index: i,
-                price: klines[i].low
-              });
-              break;
-            }
+    const findLowestPoint = (startIndex, endIndex) => {
+      let lowestPoint = { price: Infinity, index: -1 };
+      for (let i = startIndex; i <= endIndex; i++) {
+        if (klines[i].low < lowestPoint.price) {
+          lowestPoint = { price: klines[i].low, index: i };
+        }
+      }
+      return lowestPoint;
+    };
+
+    const addFirstVolumeSpikePoint = (startIndex, endIndex, points, pointIndexes, priceKey) => {
+      for (let i = startIndex; i <= endIndex; i++) {
+        if (klines[i].isVolumeSpike) {
+          if (!pointIndexes.has(i)) {
+            pointIndexes.add(i);
+            points.push({
+              index: i,
+              price: klines[i][priceKey]
+            });
+          }
+          break;
+        }
+      }
+    };
+
+    for (let windowEnd = 0; windowEnd < klines.length; windowEnd++) {
+      const windowStart = Math.max(0, windowEnd - signalWindow + 1);
+
+      const highestPoint = findHighestPoint(windowStart, windowEnd);
+      if (highestPoint.index !== -1) {
+        const lowestPointAfterHigh = findLowestPoint(highestPoint.index + 1, windowEnd);
+        if (lowestPointAfterHigh.index !== -1 && highestPoint.price > 0 &&
+          (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > changeRatio) {
+          const volumeSearchStart = lowestPointAfterHigh.index + stableBars;
+          if (volumeSearchStart <= windowEnd) {
+            addFirstVolumeSpikePoint(volumeSearchStart, windowEnd, newBuyPoints, buyPointIndexes, 'low');
           }
         }
       }
-    }
 
-    let lowestPoint = { price: Infinity, index: -1 };
-    for (let i = 0; i < klines.length; i++) {
-      if (klines[i].low < lowestPoint.price) {
-        lowestPoint = { price: klines[i].low, index: i };
-      }
-    }
-
-    if (lowestPoint.index !== -1) {
-      let highestPointAfterLow = { price: 0, index: -1 };
-      for (let i = lowestPoint.index + 1; i < klines.length; i++) {
-        if (klines[i].high > highestPointAfterLow.price) {
-          highestPointAfterLow = { price: klines[i].high, index: i };
-        }
-      }
-
-      if (highestPointAfterLow.index !== -1 && lowestPoint.price > 0 &&
-        (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > (priceChangeRatio / 100)) {
-        if (klines.length - 1 - highestPointAfterLow.index > stabilizationPeriod) {
-          for (let i = highestPointAfterLow.index + stabilizationPeriod; i < klines.length; i++) {
-            if (i >= 19 && klines[i].isVolumeSpike) {
-              newSellPoints.push({
-                index: i,
-                price: klines[i].high
-              });
-              break;
-            }
+      const lowestPoint = findLowestPoint(windowStart, windowEnd);
+      if (lowestPoint.index !== -1) {
+        const highestPointAfterLow = findHighestPoint(lowestPoint.index + 1, windowEnd);
+        if (highestPointAfterLow.index !== -1 && lowestPoint.price > 0 &&
+          (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > changeRatio) {
+          const volumeSearchStart = highestPointAfterLow.index + stableBars;
+          if (volumeSearchStart <= windowEnd) {
+            addFirstVolumeSpikePoint(volumeSearchStart, windowEnd, newSellPoints, sellPointIndexes, 'high');
           }
         }
       }
