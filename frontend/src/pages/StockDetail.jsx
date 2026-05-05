@@ -1,13 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Card, Spin, Button, InputNumber, Form, Switch, Descriptions, Table, Tag, Popover } from 'antd';
+import { Card, Spin, Button, InputNumber, Form, Switch, Descriptions, Table, Tag, Popover, Segmented } from 'antd';
 import { LeftOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import dayjs from 'dayjs';
 import { formatNumber } from '../utils/format';
-import { calculateSupportResistanceValuesNew, preprocessKlinesVolume } from '../utils/klines';
+import { appendRollingPocSupportResistance, preprocessKlinesVolume } from '../utils/klines';
 import { computeStockWindowMetrics, STOCK_METRIC_WINDOWS } from '../utils/stockMetrics';
+
+const POC_WINDOW_OPTIONS = [
+  { label: '125', value: 125 },
+  { label: '250', value: 250 },
+  { label: '500', value: 500 },
+];
+
+const FIVE_YEAR_TRADING_BARS = 1260;
 
 const formatPercent = (value, digits = 2) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -18,6 +26,12 @@ const formatSignedPercent = (value, digits = 2) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   const num = Number(value);
   return `${num >= 0 ? '+' : ''}${num.toFixed(digits)}%`;
+};
+
+const toPositiveNumber = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : null;
 };
 
 const renderPercentileTag = (value, higherIsBetter = true) => {
@@ -49,19 +63,18 @@ const StockDetail = () => {
   const { symbol } = useParams();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
+  const [rawKlines, setRawKlines] = useState([]);
   const [klines, setKlines] = useState([]);
   const [processedKlines, setProcessedKlines] = useState([]);
-  const [supportLevels, setSupportLevels] = useState([]);
-  const [resistanceLevels, setResistanceLevels] = useState([]);
-  const [days, setDays] = useState(200);
+  const [supportResistanceWindow, setSupportResistanceWindow] = useState(125);
   const [priceChangeRatio, setPriceChangeRatio] = useState(30);
   const [stabilizationPeriod, setStabilizationPeriod] = useState(10);
-  const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(2);
+  const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(1);
   const [chartOption, setChartOption] = useState({});
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
   const [evcHistory, setEvcHistory] = useState([]);
-  const [showSupportResistance, setShowSupportResistance] = useState(false);
+  const [showSupportResistance, setShowSupportResistance] = useState(true);
   const stockMetrics = useMemo(() => computeStockWindowMetrics(klines, STOCK_METRIC_WINDOWS), [klines]);
   const latestSnapshot = stockMetrics.latest;
   const latestEvcSnapshot = useMemo(() => {
@@ -144,44 +157,55 @@ const StockDetail = () => {
 
   useEffect(() => {
     fetchKlines();
+  }, [symbol]);
+
+  useEffect(() => {
     fetchEvcHistory();
   }, [symbol]);
 
   useEffect(() => {
-    if (klines.length > 0) {
-      const processed = preprocessKlinesVolume(klines, volumeStdDevMultiplier);
-      setProcessedKlines(processed);
+    if (!rawKlines.length) {
+      setKlines([]);
+      setProcessedKlines([]);
+      return;
     }
-  }, [klines, volumeStdDevMultiplier]);
+
+    const enriched = appendRollingPocSupportResistance(rawKlines, {
+      window: supportResistanceWindow,
+      binCount: 48,
+      maxLevelsPerSide: 2,
+      minPeriods: supportResistanceWindow,
+      volumeStdDevMultiplier,
+    });
+    const processed = preprocessKlinesVolume(enriched, volumeStdDevMultiplier);
+    setKlines(processed);
+    setProcessedKlines(processed);
+  }, [rawKlines, supportResistanceWindow, volumeStdDevMultiplier]);
 
   useEffect(() => {
-    if (processedKlines.length > 0 && days > 1 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      if (showSupportResistance) {
-        const { supports, resistances } = calculateSupportResistanceValuesNew(processedKlines, days);
-        setSupportLevels(supports);
-        setResistanceLevels(resistances);
-      } else {
-        setSupportLevels([]);
-        setResistanceLevels([]);
-      }
+    if (processedKlines.length > 0 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
       calculateBuySellPoints(processedKlines);
     }
-  }, [processedKlines, days, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier, showSupportResistance]);
+  }, [processedKlines, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
 
   useEffect(() => {
     if (processedKlines.length > 0) {
       setChartOption(getChartOption());
     }
-  }, [processedKlines, supportLevels, resistanceLevels, buyPoints, sellPoints, volumeStdDevMultiplier, evcHistory, showSupportResistance]);
+  }, [processedKlines, buyPoints, sellPoints, volumeStdDevMultiplier, evcHistory, showSupportResistance]);
 
   const fetchKlines = async () => {
     setLoading(true);
+    setRawKlines([]);
     try {
-      const { data } = await request.get(`/api/stock/klines/${symbol}?days=500`);
+      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
+        params: {
+          start_date: dayjs().subtract(5, 'year').format('YYYY-MM-DD'),
+          end_date: dayjs().format('YYYY-MM-DD')
+        }
+      });
       const normalized = [...(data || [])].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-      setKlines(normalized);
-      const processed = preprocessKlinesVolume(normalized, volumeStdDevMultiplier);
-      setProcessedKlines(processed);
+      setRawKlines(normalized);
     } catch (error) {
       console.error('获取K线数据失败:', error);
     } finally {
@@ -191,7 +215,7 @@ const StockDetail = () => {
 
   const fetchEvcHistory = async () => {
     try {
-      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=365`);
+      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=${FIVE_YEAR_TRADING_BARS}`);
       setEvcHistory(data || []);
     } catch (error) {
       console.error('获取估值历史失败:', error);
@@ -270,6 +294,13 @@ const StockDetail = () => {
 
   const getChartOption = () => {
     const dates = processedKlines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
+    const latestChartDate = dates.length ? dayjs(dates[dates.length - 1]) : null;
+    const defaultZoomStartDate = latestChartDate ? latestChartDate.subtract(6, 'month') : null;
+    const defaultZoomStartIndex = defaultZoomStartDate
+      ? Math.max(0, dates.findIndex(dateStr => dayjs(dateStr).valueOf() >= defaultZoomStartDate.valueOf()))
+      : 0;
+    const defaultZoomStartValue = dates[defaultZoomStartIndex] || dates[0];
+    const defaultZoomEndValue = dates[dates.length - 1];
 
     // 估值线：和日期对齐
     const fairValueHi = [];
@@ -393,25 +424,112 @@ const StockDetail = () => {
       }
     ];
 
-    // 支撑压力位（只在开关为true时显示）
-    if (showSupportResistance) {
-      supportLevels.forEach(level => {
-        series.push({
-          name: `支撑位${level}`,
-          type: 'line',
-          data: Array(dates.length).fill(level),
-          lineStyle: { color: '#00FF00', type: 'dashed' },
-          symbol: 'none'
-        });
+    const indicatorLegendNames = [];
+    const getSegmentPrice = value => (value && typeof value === 'object' ? value.price : value);
+    const hasLevelData = data => data.some(value => toPositiveNumber(getSegmentPrice(value)) !== null);
+    const addRollingSegmentSeries = (name, data, color, lineWidth = 4) => {
+      if (!hasLevelData(data)) return;
+      indicatorLegendNames.push(name);
+      series.push({
+        name,
+        type: 'custom',
+        data: data
+          .map((item, index) => {
+            const positivePrice = toPositiveNumber(getSegmentPrice(item));
+            if (positivePrice === null) return null;
+            const itemLineWidth = Number(item?.lineWidth);
+            const resolvedLineWidth = Number.isFinite(itemLineWidth) && itemLineWidth > 0
+              ? itemLineWidth
+              : lineWidth;
+            return [index, positivePrice, resolvedLineWidth];
+          })
+          .filter(Boolean),
+        encode: { x: 0, y: 1 },
+        renderItem: (params, api) => {
+          const point = api.coord([api.value(0), api.value(1)]);
+          const dayWidth = Math.max(2, api.size([1, 0])[0] * 0.88);
+          const segmentLineWidth = Number(api.value(2));
+          return {
+            type: 'line',
+            shape: {
+              x1: point[0] - dayWidth / 2,
+              y1: point[1],
+              x2: point[0] + dayWidth / 2,
+              y2: point[1],
+            },
+            style: {
+              stroke: color,
+              lineWidth: Number.isFinite(segmentLineWidth) && segmentLineWidth > 0 ? segmentLineWidth : lineWidth,
+              lineCap: 'butt',
+              opacity: 0.85,
+            },
+          };
+        },
+        z: 8,
+        emphasis: {
+          itemStyle: {
+            opacity: 1,
+          },
+        }
       });
-      resistanceLevels.forEach(level => {
-        series.push({
-          name: `压力位${level}`,
-          type: 'line',
-          data: Array(dates.length).fill(level),
-          lineStyle: { color: '#FF0000', type: 'dashed' },
-          symbol: 'none'
-        });
+    };
+
+    // 滚动 POC 支撑压力位（只在开关为true时显示）
+    if (showSupportResistance) {
+      const findLevel = (supportResistance, side, role) => {
+        const levels = side === 'support'
+          ? supportResistance?.supports || []
+          : supportResistance?.resistances || [];
+        return levels.find(level => Array.isArray(level.roles) && level.roles.includes(role));
+      };
+      const getStrongestLineWidth = (supportResistance, side) => {
+        const support = findLevel(supportResistance, 'support', 'strongest');
+        const resistance = findLevel(supportResistance, 'resistance', 'strongest');
+        if (!support && !resistance) return 2;
+        if (!support) return side === 'resistance' ? 3 : 2;
+        if (!resistance) return side === 'support' ? 3 : 2;
+
+        const supportVolume = Number(support.volume);
+        const resistanceVolume = Number(resistance.volume);
+        if (supportVolume > resistanceVolume) return side === 'support' ? 3 : 2;
+        if (resistanceVolume > supportVolume) return side === 'resistance' ? 3 : 2;
+
+        const supportDistance = Number(support.distance_pct);
+        const resistanceDistance = Number(resistance.distance_pct);
+        if (Number.isFinite(supportDistance) && Number.isFinite(resistanceDistance)) {
+          if (supportDistance < resistanceDistance) return side === 'support' ? 3 : 2;
+          if (resistanceDistance < supportDistance) return side === 'resistance' ? 3 : 2;
+        }
+
+        return 2;
+      };
+      const getSelectedLevelData = (side, role, baseLineWidth) => processedKlines.map(item => {
+        const supportResistance = item.support_resistance;
+        const level = findLevel(supportResistance, side, role);
+        const price = toPositiveNumber(level?.price);
+        if (price === null) return null;
+        if (role === 'nearest') {
+          const strongest = findLevel(supportResistance, side, 'strongest');
+          if (strongest && toPositiveNumber(strongest.price) === price) return null;
+        }
+        const lineWidth = role === 'strongest'
+          ? getStrongestLineWidth(supportResistance, side)
+          : baseLineWidth;
+        return { price, lineWidth };
+      });
+
+      [
+        { name: '最强支撑', side: 'support', role: 'strongest', color: '#00a854', lineWidth: 2 },
+        { name: '最近支撑', side: 'support', role: 'nearest', color: '#52c41a', lineWidth: 1 },
+        { name: '最强压力', side: 'resistance', role: 'strongest', color: '#f5222d', lineWidth: 2 },
+        { name: '最近压力', side: 'resistance', role: 'nearest', color: '#ff7875', lineWidth: 1 },
+      ].forEach(config => {
+        addRollingSegmentSeries(
+          config.name,
+          getSelectedLevelData(config.side, config.role, config.lineWidth),
+          config.color,
+          config.lineWidth
+        );
       });
     }
 
@@ -494,6 +612,29 @@ const StockDetail = () => {
                 <span style="color: #666;">成交量：</span><span style="color: #1890ff;">${volume.toLocaleString()}</span>
               </div>
             `;
+            const supportResistance = processedKlines[dataIndex].support_resistance;
+            if (showSupportResistance && supportResistance) {
+              const roleLabelMap = { strongest: '最强', nearest: '最近' };
+              const appendLevels = (levels, color, label) => {
+                (levels || []).forEach(level => {
+                  const price = toPositiveNumber(level.price);
+                  if (price === null) return;
+                  const roles = (level.roles || [])
+                    .map(role => roleLabelMap[role] || role)
+                    .join('/');
+                  const levelLabel = roles ? `${roles}${label}` : label;
+                  result += `
+                    <div style="margin-bottom: 4px;">
+                      <span style="color:${color};">${levelLabel}：</span>${fmtPrice(price)}
+                      <span style="color:#999;margin-left:8px;">覆盖量 ${formatNumber(level.volume, 0)}</span>
+                      <span style="color:#999;margin-left:8px;">Z ${formatNumber(level.volume_zscore, 2)}</span>
+                    </div>
+                  `;
+                });
+              };
+              appendLevels(supportResistance.supports, '#00a854', '支撑');
+              appendLevels(supportResistance.resistances, '#f5222d', '压力');
+            }
           }
           // 估值信息
           if (evcHistory.length > 0 && dataIndex !== undefined && evcHistory.length > 0) {
@@ -525,13 +666,18 @@ const StockDetail = () => {
           '成交量N日均线',
           '买点',
           '卖点',
-          ...(showSupportResistance ? supportLevels.map((v) => `支撑位${v}`) : []),
-          ...(showSupportResistance ? resistanceLevels.map((v) => `压力位${v}`) : []),
+          ...indicatorLegendNames,
           '估值上限',
           '估值下限',
           '下财年估值上限',
           '下财年估值下限'
-        ]
+        ],
+        selected: {
+          '最近支撑': false,
+          '最近压力': false,
+          '下财年估值上限': false,
+          '下财年估值下限': false,
+        }
       },
       grid: [
         { left: '10%', right: '8%', height: '60%' },
@@ -577,8 +723,20 @@ const StockDetail = () => {
         }
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
-        { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }
+        {
+          type: 'inside',
+          xAxisIndex: [0, 1],
+          startValue: defaultZoomStartValue,
+          endValue: defaultZoomEndValue,
+        },
+        {
+          show: true,
+          xAxisIndex: [0, 1],
+          type: 'slider',
+          top: '90%',
+          startValue: defaultZoomStartValue,
+          endValue: defaultZoomEndValue,
+        }
       ],
       series: series
     };
@@ -646,12 +804,21 @@ const StockDetail = () => {
           style={{ marginBottom: 16 }}
         />
         <Form layout="inline" style={{ marginBottom: '16px' }}>
-          <Form.Item label="天数">
-            <InputNumber
-              min={1}
-              max={500}
-              value={days}
-              onChange={value => setDays(value)}
+          <Form.Item
+            label={renderMetricTitle(
+              'POC窗口(K线数)',
+              <>
+                <div>每一天只用它之前的 N 根 K 线计算，不包含当天 K 线。</div>
+                <div style={{ marginTop: 6 }}>
+                  筹码分布粒度固定为 48 个价格桶：<code>桶宽 = (窗口最高价 - 窗口最低价) / 48</code>。
+                </div>
+              </>
+            )}
+          >
+            <Segmented
+              options={POC_WINDOW_OPTIONS}
+              value={supportResistanceWindow}
+              onChange={value => setSupportResistanceWindow(value)}
             />
           </Form.Item>
           <Form.Item label="涨跌幅(%)">
@@ -672,16 +839,29 @@ const StockDetail = () => {
               onChange={value => setStabilizationPeriod(value)}
             />
           </Form.Item>
-          <Form.Item label="成交量标准差倍数">
+          <Form.Item
+            label={renderMetricTitle(
+              '成交量标准差倍数',
+              <>
+                <div>先把窗口价格区间切成价格桶，K 线只要穿过某个桶，就把整根 K 线成交量计入该桶。</div>
+                <div style={{ marginTop: 6 }}>
+                  再计算所有价格桶覆盖量的均值和标准差。
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  POC 桶需要满足：<code>覆盖量 &gt; 平均覆盖量 + 覆盖量标准差 * 倍数</code>。
+                </div>
+              </>
+            )}
+          >
             <InputNumber
-              min={0.1}
-              max={5}
+              min={0}
+              max={100}
               step={0.1}
               value={volumeStdDevMultiplier}
               onChange={value => setVolumeStdDevMultiplier(value)}
             />
           </Form.Item>
-          <Form.Item label="显示支撑压力线">
+          <Form.Item label="显示POC支撑压力线">
             <Switch
               checked={showSupportResistance}
               onChange={setShowSupportResistance}
@@ -689,7 +869,7 @@ const StockDetail = () => {
           </Form.Item>
         </Form>
         <ReactECharts
-          key={`${days}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${supportLevels.join(',')}-${resistanceLevels.join(',')}-${buyPoints.length}-${sellPoints.length}-${evcHistory.length}`}
+          key={`${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${buyPoints.length}-${sellPoints.length}-${evcHistory.length}`}
           option={chartOption}
           style={{ height: '600px' }}
         />
