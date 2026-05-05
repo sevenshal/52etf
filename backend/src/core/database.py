@@ -967,7 +967,7 @@ def ensure_table_columns():
             }
             for column_name, ddl in columns.items():
                 if column_name not in existing:
-                    conn.execute(text(ddl))
+                    conn.exec_driver_sql(ddl)
 
 ensure_table_columns()
 
