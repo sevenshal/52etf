@@ -5,7 +5,7 @@ from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
-from .market_signal_live_sync import start_market_signal_live_sync
+from .us_stock_signal_live_sync import start_us_stock_signal_live_sync
 from .scheduled_tasks import scheduled_task_manager, run_startup_tasks
 
 pd.set_option("display.max_rows", None)
@@ -24,8 +24,8 @@ def robot():
   start_portfolio_copy_trader()
   # 启动 SOXL 情绪量能自动交易
   start_soxl_fear_strategy_trader()
-  # 启动市场信号模块自己的自动同步（按美东时间轮询各策略配置）
-  start_market_signal_live_sync()
+  # 启动美股成分股买卖点虚拟盘自动同步（美股收盘后轮询配置）
+  start_us_stock_signal_live_sync()
 
   while True:
     try:

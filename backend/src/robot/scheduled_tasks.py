@@ -361,8 +361,6 @@ class ScheduledTaskManager:
             ).delete(synchronize_session=False)
             db.query(ScheduledTaskConfig).filter(
                 ScheduledTaskConfig.task_key.in_([
-                    "us_market_signal_analysis",
-                    "market_signal_live_sync",
                     "etf_nport_holdings_import",
                 ])
             ).delete(synchronize_session=False)

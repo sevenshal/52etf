@@ -30,27 +30,6 @@ Base = declarative_base()
 # 创建EVC会话
 Session = scoped_session(sessionmaker(bind=engine))
 
-# 潜在市场信号
-class MarketSignal(Base):
-    __tablename__ = 'market_signal'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    ver = Column(String(8), default='v1', nullable=False)
-    symbol = Column(String(16), nullable=False)
-    close_price = Column(Float, nullable=False)
-    direction = Column(String(8), nullable=False)  # 'BUY'或'SELL'
-    date = Column(Date, nullable=False)
-    below_200ma_ratio = Column(Float, nullable=True)
-    vol_5_std = Column(Float, nullable=True)
-    today_vol_std = Column(Float, nullable=True)
-    low_50 = Column(Float, nullable=True)
-    close_vs_low_50 = Column(Float, nullable=True)
-    v2_price_change_ratio = Column(Float, nullable=True)
-    v2_stabilization_period = Column(Integer, nullable=True)
-    __table_args__ = (
-        UniqueConstraint('symbol', 'date', 'ver', name='uniq_market_signal_symbol_date_ver'),
-    )
-
 # 股票-标签关联表
 stock_tags = Table(
     'stock_tags',
@@ -812,29 +791,29 @@ class W20MomentumLiveLog(Base):
     message = Column(String(1000))
     payload = Column(JSON)
 
-class MarketSignalStrategyConfig(Base):
-    """市场信号策略虚拟盘配置"""
-    __tablename__ = "market_signal_strategy_configs"
+class USStockSignalVirtualConfig(Base):
+    """美股成分股买卖点策略虚拟盘配置"""
+    __tablename__ = "us_stock_signal_virtual_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    strategy_id = Column(String(32), nullable=False, index=True)
-    name = Column(String(100), nullable=False)
+    name = Column(String(100), nullable=False, default="美股成分股买卖点虚拟盘")
     enabled = Column(Boolean, default=True, nullable=False)
-    symbols = Column(JSON, nullable=False)
+    candidate_etfs = Column(JSON, nullable=False)
     initial_capital = Column(Float, nullable=False, default=100_000.0)
     start_date = Column(Date, nullable=False)
-    holding_days = Column(Integer, nullable=False, default=20)
-    position_pct = Column(Float, nullable=False, default=10.0)
+    window = Column(Integer, nullable=False, default=125)
+    stabilization_period = Column(Integer, nullable=False, default=10)
+    volatility_floor_pct = Column(Float, nullable=False, default=15.0)
+    volatility_cap_pct = Column(Float, nullable=False, default=45.0)
+    min_listing_days = Column(Integer, nullable=False, default=365)
+    volume_std_multiplier = Column(Float, nullable=False, default=1.0)
     max_positions = Column(Integer, nullable=False, default=10)
-    min_cash_pct = Column(Float, nullable=False, default=0.0)
     commission_pct = Column(Float, nullable=False, default=0.03)
     slippage_pct = Column(Float, nullable=False, default=0.02)
     lot_size = Column(Integer, nullable=False, default=1)
-    min_market_cap = Column(Float, nullable=False, default=20_000_000_000.0)
-    strategy_params = Column(JSON)
     auto_sync_enabled = Column(Boolean, default=True, nullable=False)
-    auto_sync_time = Column(String(5), default="15:58", nullable=False)
+    auto_sync_time = Column(String(5), default="16:15", nullable=False)
     last_auto_sync_at = Column(DateTime)
     last_sync_at = Column(DateTime)
     last_sync_status = Column(String(16))
@@ -842,31 +821,32 @@ class MarketSignalStrategyConfig(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class MarketSignalEvent(Base):
-    """市场信号事件。新结构用 strategy_id/config_id 明确归属策略。"""
-    __tablename__ = "market_signal_events"
+class USStockSignalVirtualEvent(Base):
+    """美股成分股买卖点策略每日信号事件"""
+    __tablename__ = "us_stock_signal_virtual_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
     account_id = Column(String, index=True)
-    strategy_id = Column(String(32), nullable=False, index=True)
     symbol = Column(String(32), nullable=False, index=True)
     date = Column(Date, nullable=False, index=True)
     direction = Column(String(8), nullable=False)
     signal_price = Column(Float)
+    turnover = Column(Float)
+    annualized_volatility_pct = Column(Float)
+    threshold_pct = Column(Float)
     payload = Column(JSON)
     price_source = Column(String(32), default="daily_close")
-    quote_timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
     __table_args__ = (
-        UniqueConstraint("config_id", "strategy_id", "symbol", "date", "direction", name="uniq_market_signal_event"),
+        UniqueConstraint("config_id", "symbol", "date", "direction", name="uniq_us_stock_signal_virtual_event"),
     )
 
-class MarketSignalVirtualEquity(Base):
-    """市场信号策略虚拟盘每日净值"""
-    __tablename__ = "market_signal_virtual_equity"
+class USStockSignalVirtualEquity(Base):
+    """美股成分股买卖点策略虚拟盘每日净值"""
+    __tablename__ = "us_stock_signal_virtual_equity"
 
-    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), primary_key=True)
+    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
     date = Column(Date, primary_key=True)
     account_id = Column(String, index=True)
     value = Column(Float, nullable=False)
@@ -876,16 +856,15 @@ class MarketSignalVirtualEquity(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class MarketSignalVirtualTrade(Base):
-    """市场信号策略虚拟盘模拟成交"""
-    __tablename__ = "market_signal_virtual_trades"
+class USStockSignalVirtualTrade(Base):
+    """美股成分股买卖点策略虚拟盘模拟成交"""
+    __tablename__ = "us_stock_signal_virtual_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
     account_id = Column(String, index=True)
     date = Column(Date, index=True)
     signal_date = Column(Date)
-    strategy_id = Column(String(32), index=True)
     action = Column(String(8), nullable=False)
     symbol = Column(String(32), index=True)
     price = Column(Float)
@@ -901,14 +880,13 @@ class MarketSignalVirtualTrade(Base):
     symbol_market_value_after = Column(Float)
     symbol_weight_pct_after = Column(Float)
     price_source = Column(String(32))
-    quote_timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
 
-class MarketSignalVirtualHolding(Base):
-    """市场信号策略虚拟盘最新持仓快照"""
-    __tablename__ = "market_signal_virtual_holdings"
+class USStockSignalVirtualHolding(Base):
+    """美股成分股买卖点策略虚拟盘最新持仓快照"""
+    __tablename__ = "us_stock_signal_virtual_holdings"
 
-    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), primary_key=True)
+    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
     symbol = Column(String(32), primary_key=True)
     account_id = Column(String, index=True)
     shares = Column(Integer, nullable=False, default=0)
@@ -919,12 +897,12 @@ class MarketSignalVirtualHolding(Base):
     actual_weight_pct = Column(Float)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class MarketSignalVirtualLog(Base):
-    """市场信号策略虚拟盘运行日志"""
-    __tablename__ = "market_signal_virtual_logs"
+class USStockSignalVirtualLog(Base):
+    """美股成分股买卖点策略虚拟盘运行日志"""
+    __tablename__ = "us_stock_signal_virtual_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("market_signal_strategy_configs.id"), index=True)
+    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
     account_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.now, index=True)
     date = Column(Date, index=True)
@@ -947,11 +925,10 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS idx_market_signal_configs_account_strategy ON market_signal_strategy_configs(account_id, strategy_id)",
-        "CREATE INDEX IF NOT EXISTS idx_market_signal_events_config_date ON market_signal_events(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_market_signal_events_strategy_date ON market_signal_events(strategy_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_market_signal_trades_config_date ON market_signal_virtual_trades(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_market_signal_logs_config_time ON market_signal_virtual_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_configs_account ON us_stock_signal_virtual_configs(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_events_config_date ON us_stock_signal_virtual_events(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_trades_config_date ON us_stock_signal_virtual_trades(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_logs_config_time ON us_stock_signal_virtual_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
@@ -975,15 +952,8 @@ def ensure_table_columns():
             "price_source": "ALTER TABLE w20_momentum_live_trades ADD COLUMN price_source VARCHAR(32)",
             "quote_timestamp": "ALTER TABLE w20_momentum_live_trades ADD COLUMN quote_timestamp DATETIME",
         },
-        "market_signal_virtual_trades": {
-            "profit": "ALTER TABLE market_signal_virtual_trades ADD COLUMN profit FLOAT",
-            "profit_pct": "ALTER TABLE market_signal_virtual_trades ADD COLUMN profit_pct FLOAT",
-        },
-        "market_signal_strategy_configs": {
-            "strategy_params": "ALTER TABLE market_signal_strategy_configs ADD COLUMN strategy_params JSON",
-            "auto_sync_enabled": "ALTER TABLE market_signal_strategy_configs ADD COLUMN auto_sync_enabled BOOLEAN DEFAULT 1",
-            "auto_sync_time": "ALTER TABLE market_signal_strategy_configs ADD COLUMN auto_sync_time VARCHAR(5) DEFAULT '15:58'",
-            "last_auto_sync_at": "ALTER TABLE market_signal_strategy_configs ADD COLUMN last_auto_sync_at DATETIME",
+        "us_stock_signal_virtual_configs": {
+            "min_listing_days": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN min_listing_days INTEGER NOT NULL DEFAULT 365",
         },
     }
 
@@ -998,65 +968,6 @@ def ensure_table_columns():
                     conn.execute(text(ddl))
 
 ensure_table_columns()
-
-def ensure_market_signal_unique_constraint():
-    """将 market_signal 唯一约束迁移为 (symbol, date, ver)。"""
-    with engine.begin() as conn:
-        table_sql = conn.execute(
-            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='market_signal'")
-        ).scalar()
-
-        if not table_sql:
-            return
-
-        normalized_sql = table_sql.replace(" ", "").lower()
-        if "unique(symbol,date,ver)" in normalized_sql:
-            return
-
-        conn.execute(text("ALTER TABLE market_signal RENAME TO market_signal_old"))
-        conn.execute(text("""
-            CREATE TABLE market_signal (
-                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                ver VARCHAR(8) NOT NULL DEFAULT 'v1',
-                symbol VARCHAR(16) NOT NULL,
-                close_price FLOAT NOT NULL,
-                direction VARCHAR(8) NOT NULL,
-                date DATE NOT NULL,
-                below_200ma_ratio FLOAT,
-                vol_5_std FLOAT,
-                today_vol_std FLOAT,
-                low_50 FLOAT,
-                close_vs_low_50 FLOAT,
-                v2_price_change_ratio FLOAT,
-                v2_stabilization_period INTEGER,
-                CONSTRAINT uniq_market_signal_symbol_date_ver UNIQUE (symbol, date, ver)
-            )
-        """))
-        conn.execute(text("""
-            INSERT INTO market_signal (
-                id, ver, symbol, close_price, direction, date,
-                below_200ma_ratio, vol_5_std, today_vol_std, low_50,
-                close_vs_low_50, v2_price_change_ratio, v2_stabilization_period
-            )
-            SELECT
-                id,
-                COALESCE(ver, 'v1'),
-                symbol,
-                close_price,
-                direction,
-                date,
-                below_200ma_ratio,
-                vol_5_std,
-                today_vol_std,
-                low_50,
-                close_vs_low_50,
-                v2_price_change_ratio,
-                v2_stabilization_period
-            FROM market_signal_old
-        """))
-        conn.execute(text("DROP TABLE market_signal_old"))
-
-ensure_market_signal_unique_constraint()
 
 def ensure_soxl_fear_strategy_multi_config_schema():
     """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""
