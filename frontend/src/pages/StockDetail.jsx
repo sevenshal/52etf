@@ -806,7 +806,7 @@ const StockDetail = () => {
         <Form layout="inline" style={{ marginBottom: '16px' }}>
           <Form.Item
             label={renderMetricTitle(
-              'POC窗口(K线数)',
+              '支持压力位窗口(K线数)',
               <>
                 <div>每一天只用它之前的 N 根 K 线计算，不包含当天 K 线。</div>
                 <div style={{ marginTop: 6 }}>
@@ -848,7 +848,7 @@ const StockDetail = () => {
                   再计算所有价格桶覆盖量的均值和标准差。
                 </div>
                 <div style={{ marginTop: 6 }}>
-                  POC 桶需要满足：<code>覆盖量 &gt; 平均覆盖量 + 覆盖量标准差 * 倍数</code>。
+                  价格桶需要满足：<code>覆盖量 &gt; 平均覆盖量 + 覆盖量标准差 * 倍数</code>。
                 </div>
               </>
             )}
@@ -861,7 +861,7 @@ const StockDetail = () => {
               onChange={value => setVolumeStdDevMultiplier(value)}
             />
           </Form.Item>
-          <Form.Item label="显示POC支撑压力线">
+          <Form.Item label="显示支撑压力线">
             <Switch
               checked={showSupportResistance}
               onChange={setShowSupportResistance}
