@@ -26,11 +26,13 @@ from ...robot.us_stock_signal_virtual import (
     CANDIDATE_ETF_OPTIONS,
     DAILY_PRICE_SOURCE,
     DEFAULT_CANDIDATE_ETFS,
+    DEFAULT_MOMENTUM_WEIGHTS,
+    SUPPORTED_MOMENTUM_WINDOWS,
     USStockSignalVirtualEngine,
 )
 from .account import valid_account
 
-router = APIRouter(prefix="/api/us-stock-signal-live", tags=["US Stock Signal Live"])
+router = APIRouter(prefix="/api/us-stock-signal-live", tags=["US Stock Momentum Live"])
 logger = logging.getLogger(__name__)
 EASTERN_TZ = ZoneInfo("US/Eastern")
 DEFAULT_AUTO_SYNC_TIME = "16:15"
@@ -38,16 +40,17 @@ AUTO_SYNC_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 class USStockSignalConfigPayload(BaseModel):
-    name: str = "美股成分股买卖点虚拟盘"
+    name: str = "美股风险调整混合动量虚拟盘"
     enabled: bool = True
     candidate_etfs: List[str] = Field(default_factory=lambda: DEFAULT_CANDIDATE_ETFS.copy())
     initial_capital: float = 100_000.0
     start_date: date = date(2020, 1, 2)
-    window: int = 125
+    window: int = 20
     stabilization_period: int = 10
     volatility_floor_pct: float = 15.0
     volatility_cap_pct: float = 45.0
     min_listing_days: int = 365
+    momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
     volume_std_multiplier: float = 1.0
     max_positions: int = 10
     commission_pct: float = 0.03
@@ -86,13 +89,13 @@ class USStockSignalConfigPayload(BaseModel):
     @validator("window")
     def validate_window(cls, value):
         if value < 20:
-            raise ValueError("窗口大小不能小于20")
+            raise ValueError("动量窗口不能小于20")
         return value
 
     @validator("stabilization_period")
     def validate_stabilization_period(cls, value):
         if value < 1:
-            raise ValueError("企稳天数不能小于1")
+            raise ValueError("历史兼容参数不能小于1")
         return value
 
     @validator("max_positions")
@@ -100,6 +103,23 @@ class USStockSignalConfigPayload(BaseModel):
         if value < 1:
             raise ValueError("最大持仓数不能小于1")
         return value
+
+    @validator("momentum_weights", pre=True)
+    def validate_momentum_weights(cls, value):
+        raw_weights = value if isinstance(value, dict) else DEFAULT_MOMENTUM_WEIGHTS
+        normalized = {}
+        for window in SUPPORTED_MOMENTUM_WINDOWS:
+            raw_value = raw_weights.get(str(window), raw_weights.get(window, 0))
+            try:
+                weight = float(raw_value or 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"{window}日动量权重必须是数字")
+            if weight < 0:
+                raise ValueError(f"{window}日动量权重不能为负数")
+            normalized[str(window)] = weight
+        if sum(normalized.values()) <= 0:
+            raise ValueError("至少设置一个大于0的动量权重")
+        return normalized
 
     @validator("min_listing_days")
     def validate_min_listing_days(cls, value):
@@ -123,7 +143,7 @@ class USStockSignalConfigPayload(BaseModel):
     def validate_volatility_cap(cls, value, values):
         lower = values.get("volatility_floor_pct")
         if lower is not None and value < lower:
-            raise ValueError("波动阈值上限不能小于下限")
+            raise ValueError("历史兼容波动参数上限不能小于下限")
         return value
 
     @validator("auto_sync_time")
@@ -148,6 +168,7 @@ def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
         "volatility_floor_pct": config.volatility_floor_pct,
         "volatility_cap_pct": config.volatility_cap_pct,
         "min_listing_days": getattr(config, "min_listing_days", 365),
+        "momentum_weights": getattr(config, "momentum_weights", None) or DEFAULT_MOMENTUM_WEIGHTS.copy(),
         "volume_std_multiplier": config.volume_std_multiplier,
         "max_positions": config.max_positions,
         "commission_pct": config.commission_pct,
@@ -169,7 +190,7 @@ def _get_config_or_404(db: ORMSession, account_id: str, config_id: int) -> USSto
         USStockSignalVirtualConfig.account_id == account_id,
     ).first()
     if not config:
-        raise HTTPException(status_code=404, detail="未找到美股买卖点虚拟盘配置")
+        raise HTTPException(status_code=404, detail="未找到美股风险调整混合动量虚拟盘配置")
     return config
 
 
@@ -277,7 +298,7 @@ def _replace_config_runtime_state(
         timestamp=now,
         level="INFO",
         action="SYNC",
-        message="美股买卖点虚拟盘已同步到最新状态",
+        message="美股风险调整混合动量虚拟盘已同步到最新状态",
         payload={
             "trigger_source": trigger_source,
             "metrics": result.get("metrics"),
@@ -438,7 +459,7 @@ def delete_config(
     db.query(USStockSignalVirtualLog).filter(USStockSignalVirtualLog.config_id == config.id).delete()
     db.delete(config)
     db.commit()
-    return {"message": "已删除美股买卖点虚拟盘配置"}
+    return {"message": "已删除美股风险调整混合动量虚拟盘配置"}
 
 
 @router.post("/configs/{config_id}/sync")

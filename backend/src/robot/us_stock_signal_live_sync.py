@@ -43,7 +43,7 @@ class USStockSignalLiveSync:
             except Exception as exc:
                 logger.error("Error in USStockSignalLiveSync loop: %s", exc, exc_info=True)
                 send_alert_email(
-                    "美股买卖点虚拟盘自动同步异常",
+                    "美股风险调整混合动量虚拟盘自动同步异常",
                     f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
                 )
                 await asyncio.sleep(60)

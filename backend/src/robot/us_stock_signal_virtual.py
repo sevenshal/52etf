@@ -17,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 DAILY_PRICE_SOURCE = "daily_close"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
+SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
+DEFAULT_MOMENTUM_WEIGHTS = {"20": 1.0, "60": 0.0, "120": 0.0}
 CANDIDATE_ETF_OPTIONS = [
     {"label": "标普500", "value": "SPY.US", "description": "SPDR S&P 500 ETF Trust 成分股"},
     {"label": "纳指100", "value": "QQQ.US", "description": "Invesco QQQ Trust 成分股"},
 ]
-VOLUME_WINDOW = 60
 TRADING_DAYS_PER_YEAR = 252
 
 
@@ -89,34 +90,36 @@ def _portfolio_value(cash: float, positions: Dict[str, Dict], last_prices: Dict[
     return value
 
 
-def _annualized_volatility_pct(rows: List[Dict]) -> float:
-    closes = [float(item["close"]) for item in rows if _is_positive_number(item.get("close"))]
-    if len(closes) < 2:
-        return 0.0
-    returns = []
-    for index in range(1, len(closes)):
-        prev_close = closes[index - 1]
-        close = closes[index]
-        if prev_close <= 0 or close <= 0:
-            continue
-        returns.append(math.log(close / prev_close))
-    if len(returns) < 2:
-        return 0.0
-    return float(np.std(returns, ddof=0) * math.sqrt(TRADING_DAYS_PER_YEAR) * 100)
+def _normalize_momentum_weights(raw_weights) -> Dict[int, float]:
+    raw_weights = raw_weights if isinstance(raw_weights, dict) else DEFAULT_MOMENTUM_WEIGHTS
+    weights: Dict[int, float] = {}
+    for window in SUPPORTED_MOMENTUM_WINDOWS:
+        raw_value = raw_weights.get(str(window), raw_weights.get(window, 0.0))
+        try:
+            value = float(raw_value or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        weights[window] = max(0.0, value)
 
-
-def _dynamic_threshold_pct(rows: List[Dict], floor_pct: float, cap_pct: float) -> Dict:
-    lower = max(0.0, float(floor_pct or 0))
-    upper = max(lower, float(cap_pct or lower))
-    annualized_volatility_pct = _annualized_volatility_pct(rows)
-    threshold_pct = min(upper, max(lower, annualized_volatility_pct))
+    total = sum(weights.values())
+    if total <= 0:
+        weights = {20: 1.0, 60: 0.0, 120: 0.0}
+        total = 1.0
     return {
-        "annualized_volatility_pct": annualized_volatility_pct,
-        "threshold_pct": threshold_pct,
+        window: weight / total
+        for window, weight in weights.items()
+        if weight > 0
     }
 
 
-def _prepare_klines(raw_klines: List[Dict], volume_std_multiplier: float) -> List[Dict]:
+def _format_momentum_weights(weights: Dict[int, float]) -> Dict[str, float]:
+    return {
+        str(window): _round_or_none(weights.get(window, 0.0), 6) or 0.0
+        for window in SUPPORTED_MOMENTUM_WINDOWS
+    }
+
+
+def _prepare_klines(raw_klines: List[Dict]) -> List[Dict]:
     normalized = []
     for item in raw_klines or []:
         item_date = _to_date(item.get("timestamp"))
@@ -132,23 +135,9 @@ def _prepare_klines(raw_klines: List[Dict], volume_std_multiplier: float) -> Lis
             "close": float(item.get("close")),
             "volume": float(item.get("volume") or 0),
             "turnover": float(item.get("turnover") or 0),
-            "is_volume_spike": False,
-            "volume_ma": None,
-            "volume_std": None,
         })
 
     normalized.sort(key=lambda item: item["date"])
-    multiplier = max(0.0, float(volume_std_multiplier or 0))
-    for index, item in enumerate(normalized):
-        if index < VOLUME_WINDOW - 1:
-            continue
-        volumes = [row["volume"] for row in normalized[index - VOLUME_WINDOW + 1:index + 1]]
-        mean = sum(volumes) / VOLUME_WINDOW
-        variance = sum((volume - mean) ** 2 for volume in volumes) / VOLUME_WINDOW
-        std = math.sqrt(variance)
-        item["volume_ma"] = mean
-        item["volume_std"] = std
-        item["is_volume_spike"] = item["volume"] > mean + std * multiplier
     return normalized
 
 
@@ -192,99 +181,93 @@ def _build_benchmark_curve(
     return benchmark_curve
 
 
-def _find_highest(rows: List[Dict], start_index: int, end_index: int) -> Dict:
-    best = {"price": 0.0, "index": -1}
-    for index in range(start_index, end_index + 1):
-        price = float(rows[index]["high"])
-        if price > best["price"]:
-            best = {"price": price, "index": index}
-    return best
-
-
-def _find_lowest(rows: List[Dict], start_index: int, end_index: int) -> Dict:
-    best = {"price": math.inf, "index": -1}
-    for index in range(start_index, end_index + 1):
-        price = float(rows[index]["low"])
-        if price < best["price"]:
-            best = {"price": price, "index": index}
-    return best
-
-
-def detect_signal_for_day(
-    rows: List[Dict],
-    index: int,
-    direction: str,
-    window: int,
-    stabilization_period: int,
-    volatility_floor_pct: float,
-    volatility_cap_pct: float,
-) -> Optional[Dict]:
+def _compute_risk_adjusted_momentum_snapshot(rows: List[Dict], index: int, window: int = 20) -> Optional[Dict]:
     if index < 0 or index >= len(rows):
         return None
-    current = rows[index]
-    if not current.get("is_volume_spike"):
+    lookback = max(2, int(window or 20))
+    history = [row for row in rows[:index + 1] if _is_positive_number(row.get("close"))]
+    if len(history) < lookback:
         return None
 
-    lookback = max(2, int(window or 2))
-    stable_bars = max(1, int(stabilization_period or 1))
-    window_start = max(0, index - lookback + 1)
-    if index - window_start + 1 < stable_bars + 2:
+    window_rows = history[-lookback:]
+    closes = np.array([float(row["close"]) for row in window_rows], dtype=float)
+    if np.any(closes <= 0):
         return None
 
-    window_rows = rows[window_start:index + 1]
-    threshold_info = _dynamic_threshold_pct(window_rows, volatility_floor_pct, volatility_cap_pct)
-    threshold_pct = threshold_info["threshold_pct"]
+    x = np.arange(lookback, dtype=float)
+    y = np.log(closes)
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    ss_res = float(np.sum((y - fitted) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = 0.0 if ss_tot <= 0 else max(0.0, 1.0 - (ss_res / ss_tot))
 
-    if direction == "BUY":
-        highest = _find_highest(rows, window_start, index)
-        if highest["index"] < 0 or highest["index"] >= index or highest["price"] <= 0:
+    daily_returns = np.diff(closes) / closes[:-1]
+    annualized_vol_pct = float(np.std(daily_returns, ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR) * 100) if len(daily_returns) > 1 else 0.0
+    annualized_slope_pct = float(slope * TRADING_DAYS_PER_YEAR * 100)
+    raw_score = float(annualized_slope_pct * r_squared)
+    risk_adjusted_score = float(raw_score / annualized_vol_pct * 100) if annualized_vol_pct > 0 else None
+    window_return_pct = float((closes[-1] / closes[0] - 1) * 100)
+
+    return {
+        "as_of": rows[index]["date"].isoformat(),
+        "window": lookback,
+        "window_return_pct": _round_or_none(window_return_pct, 4),
+        "annualized_slope_pct": _round_or_none(annualized_slope_pct, 4),
+        "r_squared": _round_or_none(r_squared, 6),
+        "raw_score": _round_or_none(raw_score, 4),
+        "annualized_volatility_pct": _round_or_none(annualized_vol_pct, 4),
+        "risk_adjusted_score": _round_or_none(risk_adjusted_score, 4),
+    }
+
+
+def _compute_mixed_risk_adjusted_momentum_snapshot(
+    rows: List[Dict],
+    index: int,
+    weights: Dict[int, float],
+) -> Optional[Dict]:
+    components: Dict[str, Dict] = {}
+    weighted_score = 0.0
+    weighted_return = 0.0
+    weighted_slope = 0.0
+    weighted_r_squared = 0.0
+    weighted_raw_score = 0.0
+    weighted_volatility = 0.0
+
+    for window, weight in sorted(weights.items()):
+        snapshot = _compute_risk_adjusted_momentum_snapshot(rows, index, window)
+        if not snapshot or snapshot.get("risk_adjusted_score") is None:
             return None
-        lowest_after_high = _find_lowest(rows, highest["index"] + 1, index)
-        if lowest_after_high["index"] < 0 or index - lowest_after_high["index"] < stable_bars:
-            return None
-        move_pct = (highest["price"] - lowest_after_high["price"]) / highest["price"] * 100
-        if move_pct < threshold_pct:
-            return None
-        pivot = highest
-        extreme = lowest_after_high
-        extreme_label = "low"
-        signal_price = current["close"]
-    elif direction == "SELL":
-        lowest = _find_lowest(rows, window_start, index)
-        if lowest["index"] < 0 or lowest["index"] >= index or lowest["price"] <= 0:
-            return None
-        highest_after_low = _find_highest(rows, lowest["index"] + 1, index)
-        if highest_after_low["index"] < 0 or index - highest_after_low["index"] < stable_bars:
-            return None
-        move_pct = (highest_after_low["price"] - lowest["price"]) / lowest["price"] * 100
-        if move_pct < threshold_pct:
-            return None
-        pivot = lowest
-        extreme = highest_after_low
-        extreme_label = "high"
-        signal_price = current["close"]
-    else:
+        components[str(window)] = snapshot
+        weighted_score += float(snapshot.get("risk_adjusted_score") or 0) * weight
+        weighted_return += float(snapshot.get("window_return_pct") or 0) * weight
+        weighted_slope += float(snapshot.get("annualized_slope_pct") or 0) * weight
+        weighted_r_squared += float(snapshot.get("r_squared") or 0) * weight
+        weighted_raw_score += float(snapshot.get("raw_score") or 0) * weight
+        weighted_volatility += float(snapshot.get("annualized_volatility_pct") or 0) * weight
+
+    if not components:
         return None
 
     return {
-        "date": current["date"].isoformat(),
-        "direction": direction,
-        "signal_price": signal_price,
-        "turnover": current.get("turnover") or 0,
-        "volume": current.get("volume") or 0,
-        "volume_ma": _round_or_none(current.get("volume_ma"), 2),
-        "volume_std": _round_or_none(current.get("volume_std"), 2),
-        "is_volume_spike": True,
-        "move_pct": move_pct,
-        "annualized_volatility_pct": threshold_info["annualized_volatility_pct"],
-        "threshold_pct": threshold_pct,
-        "window_start_date": rows[window_start]["date"].isoformat(),
-        "pivot_date": rows[pivot["index"]]["date"].isoformat(),
-        "pivot_price": pivot["price"],
-        f"{extreme_label}_date": rows[extreme["index"]]["date"].isoformat(),
-        f"{extreme_label}_price": extreme["price"],
-        "bars_since_extreme": index - extreme["index"],
+        "as_of": rows[index]["date"].isoformat(),
+        "window": "+".join(str(window) for window in sorted(weights)),
+        "active_windows": sorted(weights),
+        "momentum_weights": _format_momentum_weights(weights),
+        "window_return_pct": _round_or_none(weighted_return, 4),
+        "annualized_slope_pct": _round_or_none(weighted_slope, 4),
+        "r_squared": _round_or_none(weighted_r_squared, 6),
+        "raw_score": _round_or_none(weighted_raw_score, 4),
+        "annualized_volatility_pct": _round_or_none(weighted_volatility, 4),
+        "risk_adjusted_score": _round_or_none(weighted_score, 4),
+        "components": components,
     }
+
+
+def _is_weekly_rebalance_day(dates: List[date], index: int) -> bool:
+    if index >= len(dates) - 1:
+        return True
+    return dates[index].isocalendar()[:2] != dates[index + 1].isocalendar()[:2]
 
 
 def load_universe_history(
@@ -371,12 +354,11 @@ class USStockSignalVirtualEngine:
         klines_by_symbol: Dict[str, List[Dict]] = {}
         errors = []
         total = len(symbols)
-        multiplier = float(self.config.volume_std_multiplier or 0)
         for index, symbol in enumerate(symbols, start=1):
             self.report(5 + int(35 * (index - 1) / max(1, total)), f"获取K线 {index}/{total}: {symbol}")
             try:
                 raw_klines = self.quote_service.get_klines(symbol, start_date=fetch_start, end_date=end_date, period="d")
-                rows = _prepare_klines(raw_klines, multiplier)
+                rows = _prepare_klines(raw_klines)
                 if rows:
                     klines_by_symbol[symbol] = rows
                 else:
@@ -389,8 +371,11 @@ class USStockSignalVirtualEngine:
     def run(self) -> Dict:
         start_date = self.config.start_date
         end_date = self.end_date
-        window = max(2, int(self.config.window or 2))
-        stabilization_period = max(1, int(self.config.stabilization_period or 1))
+        momentum_weights = _normalize_momentum_weights(getattr(self.config, "momentum_weights", None))
+        momentum_weights_payload = _format_momentum_weights(momentum_weights)
+        momentum_windows = sorted(momentum_weights)
+        max_momentum_window = max(momentum_windows)
+        momentum_label = "+".join(str(window) for window in momentum_windows)
         min_listing_days = max(0, int(getattr(self.config, "min_listing_days", 365) or 0))
         max_positions = max(1, int(self.config.max_positions or 1))
         lot_size = max(1, int(self.config.lot_size or 1))
@@ -403,11 +388,7 @@ class USStockSignalVirtualEngine:
         if not universe_history.all_symbols:
             raise ValueError("没有找到候选ETF的历史成分股，请先同步 ETF 持仓历史")
 
-        fetch_padding_days = max(
-            370,
-            min_listing_days + 30,
-            int((window + stabilization_period + VOLUME_WINDOW) * 2.2),
-        )
+        fetch_padding_days = max(370, min_listing_days + 30, int(max_momentum_window * 3))
         fetch_start = start_date - timedelta(days=fetch_padding_days)
         self.report(4, f"准备获取 {len(universe_history.all_symbols)} 个候选股票K线")
         klines_by_symbol, errors = self._fetch_klines(universe_history.all_symbols, fetch_start, end_date)
@@ -453,31 +434,7 @@ class USStockSignalVirtualEngine:
         closed_profits = []
         peak_value = cash
         universe_size_by_date = {}
-
-        def build_event(symbol: str, current_date: date, signal: Dict) -> Dict:
-            row = row_by_symbol_date[symbol][current_date]
-            payload = {
-                **signal,
-                "window": window,
-                "stabilization_period": stabilization_period,
-                "volatility_floor_pct": float(self.config.volatility_floor_pct or 0),
-                "volatility_cap_pct": float(self.config.volatility_cap_pct or 0),
-                "min_listing_days": min_listing_days,
-                "volume_std_multiplier": float(self.config.volume_std_multiplier or 0),
-            }
-            return {
-                "config_id": self.config.id,
-                "account_id": self.config.account_id,
-                "symbol": symbol,
-                "date": current_date.isoformat(),
-                "direction": signal["direction"],
-                "signal_price": _round_or_none(signal.get("signal_price"), 4),
-                "turnover": _round_or_none(row.get("turnover"), 2),
-                "annualized_volatility_pct": _round_or_none(signal.get("annualized_volatility_pct"), 4),
-                "threshold_pct": _round_or_none(signal.get("threshold_pct"), 4),
-                "payload": payload,
-                "price_source": DAILY_PRICE_SOURCE,
-            }
+        rebalance_count = 0
 
         def append_trade(
             current_date: date,
@@ -516,6 +473,86 @@ class USStockSignalVirtualEngine:
                 "price_source": DAILY_PRICE_SOURCE,
             })
 
+        def sell_position(current_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
+            nonlocal cash
+            if symbol not in positions:
+                return
+            position = positions[symbol]
+            old_shares = int(position.get("shares") or 0)
+            quantity = min(old_shares, int(quantity or 0))
+            if quantity <= 0:
+                return
+
+            sell_price = price * (1 - slippage_rate)
+            amount = sell_price * quantity
+            commission = amount * commission_rate
+            old_cost_basis = float(position.get("cost_basis") or 0)
+            cost_basis_sold = old_cost_basis * quantity / old_shares if old_shares > 0 else 0.0
+            cash += amount - commission
+            profit = amount - commission - cost_basis_sold
+            profit_pct = profit / cost_basis_sold * 100 if cost_basis_sold > 0 else None
+            closed_profits.append(profit)
+
+            remaining_shares = old_shares - quantity
+            if remaining_shares <= 0:
+                del positions[symbol]
+            else:
+                position["shares"] = remaining_shares
+                position["cost_basis"] = max(0.0, old_cost_basis - cost_basis_sold)
+                position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
+                position["last_price"] = price
+
+            append_trade(
+                current_date,
+                "SELL",
+                symbol,
+                sell_price,
+                quantity,
+                commission,
+                "weekly_rebalance",
+                reason_detail,
+                profit=profit,
+                profit_pct=profit_pct,
+            )
+
+        def buy_position(current_date: date, symbol: str, budget: float, price: float, reason_detail: str):
+            nonlocal cash
+            buy_price = price * (1 + slippage_rate)
+            quantity = _floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
+            if quantity <= 0:
+                return
+            amount = buy_price * quantity
+            commission = amount * commission_rate
+            if amount + commission > cash + 1e-9:
+                return
+
+            cash -= amount + commission
+            if symbol not in positions:
+                positions[symbol] = {
+                    "shares": quantity,
+                    "avg_cost": (amount + commission) / quantity,
+                    "cost_basis": amount + commission,
+                    "entry_date": current_date,
+                    "last_price": price,
+                }
+            else:
+                position = positions[symbol]
+                position["shares"] = int(position.get("shares") or 0) + quantity
+                position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
+                position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
+                position["last_price"] = price
+
+            append_trade(
+                current_date,
+                "BUY",
+                symbol,
+                buy_price,
+                quantity,
+                commission,
+                "weekly_rebalance",
+                reason_detail,
+            )
+
         for date_index, current_date in enumerate(dates):
             if date_index % max(1, len(dates) // 100) == 0:
                 self.report(42 + int(53 * date_index / max(1, len(dates))), f"模拟交易日 {date_index + 1}/{len(dates)}")
@@ -538,120 +575,103 @@ class USStockSignalVirtualEngine:
 
             current_universe = set(universe_history.symbols_for_date(current_date))
             universe_size_by_date[current_date.isoformat()] = len(current_universe)
-            symbols_to_scan = sorted(current_universe | set(positions.keys()))
-            signal_events = []
-            for symbol in symbols_to_scan:
-                symbol_index = index_by_symbol_date.get(symbol, {}).get(current_date)
-                if symbol_index is None:
-                    continue
 
-                rows = klines_by_symbol[symbol]
-                first_kline_date = rows[0]["date"] if rows else None
-                if first_kline_date and min_listing_days > 0 and (current_date - first_kline_date).days < min_listing_days:
-                    continue
-                if symbol in positions:
-                    sell_signal = detect_signal_for_day(
-                        rows,
-                        symbol_index,
-                        "SELL",
-                        window,
-                        stabilization_period,
-                        self.config.volatility_floor_pct,
-                        self.config.volatility_cap_pct,
-                    )
-                    if sell_signal:
-                        event = build_event(symbol, current_date, sell_signal)
-                        signal_events.append(event)
-                        events.append(event)
+            if _is_weekly_rebalance_day(dates, date_index):
+                rebalance_count += 1
+                ranked = []
+                for symbol in sorted(current_universe):
+                    symbol_index = index_by_symbol_date.get(symbol, {}).get(current_date)
+                    if symbol_index is None or symbol not in price_map:
+                        continue
+                    rows = klines_by_symbol[symbol]
+                    first_kline_date = rows[0]["date"] if rows else None
+                    if first_kline_date and min_listing_days > 0 and (current_date - first_kline_date).days < min_listing_days:
+                        continue
+                    snapshot = _compute_mixed_risk_adjusted_momentum_snapshot(rows, symbol_index, momentum_weights)
+                    if not snapshot or snapshot.get("risk_adjusted_score") is None:
+                        continue
+                    row = row_by_symbol_date[symbol][current_date]
+                    ranked.append({
+                        "symbol": symbol,
+                        "price": price_map[symbol],
+                        "turnover": float(row.get("turnover") or 0),
+                        "snapshot": snapshot,
+                    })
 
-                if symbol in current_universe:
-                    buy_signal = detect_signal_for_day(
-                        rows,
-                        symbol_index,
-                        "BUY",
-                        window,
-                        stabilization_period,
-                        self.config.volatility_floor_pct,
-                        self.config.volatility_cap_pct,
-                    )
-                    if buy_signal:
-                        event = build_event(symbol, current_date, buy_signal)
-                        signal_events.append(event)
-                        events.append(event)
-
-            sold_today = set()
-            for event in [item for item in signal_events if item["direction"] == "SELL"]:
-                symbol = event["symbol"]
-                if symbol not in positions or symbol not in price_map:
-                    continue
-                position = positions[symbol]
-                quantity = int(position.get("shares") or 0)
-                if quantity <= 0:
-                    continue
-                sell_price = price_map[symbol] * (1 - slippage_rate)
-                amount = sell_price * quantity
-                commission = amount * commission_rate
-                cash += amount - commission
-                cost_basis = float(position.get("cost_basis") or 0)
-                profit = amount - commission - cost_basis
-                profit_pct = profit / cost_basis * 100 if cost_basis > 0 else None
-                closed_profits.append(profit)
-                del positions[symbol]
-                sold_today.add(symbol)
-                append_trade(
-                    current_date,
-                    "SELL",
-                    symbol,
-                    sell_price,
-                    quantity,
-                    commission,
-                    "sell_signal",
-                    "持仓股票当天产生卖点",
-                    profit=profit,
-                    profit_pct=profit_pct,
+                ranked.sort(
+                    key=lambda item: (
+                        float(item["snapshot"].get("risk_adjusted_score") or -1e18),
+                        float(item.get("turnover") or 0),
+                        item["symbol"],
+                    ),
+                    reverse=True,
                 )
+                selected = ranked[:max_positions]
+                selected_symbols = [item["symbol"] for item in selected]
+                selected_set = set(selected_symbols)
 
-            buy_events = [
-                item for item in signal_events
-                if item["direction"] == "BUY"
-                and item["symbol"] not in positions
-                and item["symbol"] not in sold_today
-                and item["symbol"] in price_map
-            ]
-            buy_events.sort(key=lambda item: (float(item.get("turnover") or 0), item["symbol"]), reverse=True)
-            for event in buy_events:
-                if len(positions) >= max_positions:
-                    break
-                symbol = event["symbol"]
-                portfolio_before = _portfolio_value(cash, positions, last_prices)
-                target_amount = portfolio_before / max_positions
-                buy_budget = min(cash, target_amount)
-                buy_price = price_map[symbol] * (1 + slippage_rate)
-                quantity = _floor_lot(buy_budget / (buy_price * (1 + commission_rate)), lot_size)
-                if quantity <= 0:
-                    continue
-                amount = buy_price * quantity
-                commission = amount * commission_rate
-                if amount + commission > cash + 1e-9:
-                    continue
-                cash -= amount + commission
-                positions[symbol] = {
-                    "shares": quantity,
-                    "avg_cost": (amount + commission) / quantity,
-                    "cost_basis": amount + commission,
-                    "entry_date": current_date,
-                    "last_price": price_map[symbol],
-                }
-                append_trade(
-                    current_date,
-                    "BUY",
-                    symbol,
-                    buy_price,
-                    quantity,
-                    commission,
-                    "buy_signal",
-                    f"当日买点按成交额排序补位，成交额 {float(event.get('turnover') or 0):.0f}",
-                )
+                for rank, item in enumerate(selected, start=1):
+                    snapshot = item["snapshot"]
+                    events.append({
+                        "config_id": self.config.id,
+                        "account_id": self.config.account_id,
+                        "symbol": item["symbol"],
+                        "date": current_date.isoformat(),
+                        "direction": "RANK",
+                        "signal_price": _round_or_none(item["price"], 4),
+                        "turnover": _round_or_none(item.get("turnover"), 2),
+                        "annualized_volatility_pct": snapshot.get("annualized_volatility_pct"),
+                        "threshold_pct": snapshot.get("risk_adjusted_score"),
+                        "payload": {
+                            **snapshot,
+                            "rank": rank,
+                            "selected_symbols": selected_symbols,
+                            "max_positions": max_positions,
+                            "min_listing_days": min_listing_days,
+                            "momentum_windows": momentum_windows,
+                            "momentum_weights": momentum_weights_payload,
+                            "rebalance_frequency": "weekly",
+                            "rotation_rule": "hold_until_out_of_top_n",
+                            "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
+                        },
+                        "price_source": DAILY_PRICE_SOURCE,
+                    })
+
+                for symbol in list(positions.keys()):
+                    if symbol in selected_set:
+                        continue
+                    price = price_map.get(symbol)
+                    if price is None or price <= 0:
+                        continue
+                    shares = int(positions[symbol].get("shares") or 0)
+                    sell_position(
+                        current_date,
+                        symbol,
+                        shares,
+                        price,
+                        f"跌出风险调整{momentum_label}日混合动量Top{max_positions}: {', '.join(selected_symbols)}",
+                    )
+
+                buy_candidates = [item for item in selected if item["symbol"] not in positions]
+                if buy_candidates:
+                    budget_per_symbol = cash / len(buy_candidates)
+                else:
+                    budget_per_symbol = 0.0
+                for item in buy_candidates:
+                    symbol = item["symbol"]
+                    price = price_map.get(symbol)
+                    if price is None or price <= 0:
+                        continue
+                    buy_budget = min(cash, budget_per_symbol)
+                    if buy_budget <= 0:
+                        continue
+                    buy_position(
+                        current_date,
+                        symbol,
+                        buy_budget,
+                        price,
+                        f"补位买入风险调整{momentum_label}日混合动量Top{max_positions}",
+                    )
 
             value = _portfolio_value(cash, positions, last_prices)
             peak_value = max(peak_value, value)
@@ -699,8 +719,10 @@ class USStockSignalVirtualEngine:
             "annualized_return": _round_or_none(annualized_return, 2),
             "max_drawdown": _round_or_none(min([item["drawdown"] for item in equity_curve] or [0]), 2),
             "signal_count": len(events),
-            "buy_signal_count": sum(1 for item in events if item["direction"] == "BUY"),
-            "sell_signal_count": sum(1 for item in events if item["direction"] == "SELL"),
+            "rank_signal_count": len(events),
+            "rebalance_count": rebalance_count,
+            "buy_signal_count": sum(1 for item in trades if item["action"] == "BUY"),
+            "sell_signal_count": sum(1 for item in trades if item["action"] == "SELL"),
             "trade_count": len(trades),
             "closed_trade_count": len(closed_profits),
             "win_count": win_count,
@@ -724,8 +746,13 @@ class USStockSignalVirtualEngine:
                 "symbol_count": len(klines_by_symbol),
                 "holdings_date_count": universe_history.holdings_date_count,
                 "universe_size_by_date": universe_size_by_date,
-                "volume_window": VOLUME_WINDOW,
                 "min_listing_days": min_listing_days,
+                "momentum_window": max_momentum_window,
+                "momentum_windows": momentum_windows,
+                "momentum_weights": momentum_weights_payload,
+                "rebalance_frequency": "weekly",
+                "rotation_rule": "hold_until_out_of_top_n",
+                "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
                 "price_source": DAILY_PRICE_SOURCE,
             },
         }

@@ -792,21 +792,22 @@ class W20MomentumLiveLog(Base):
     payload = Column(JSON)
 
 class USStockSignalVirtualConfig(Base):
-    """美股成分股买卖点策略虚拟盘配置"""
+    """美股成分股风险调整混合动量虚拟盘配置"""
     __tablename__ = "us_stock_signal_virtual_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="美股成分股买卖点虚拟盘")
+    name = Column(String(100), nullable=False, default="美股风险调整混合动量虚拟盘")
     enabled = Column(Boolean, default=True, nullable=False)
     candidate_etfs = Column(JSON, nullable=False)
     initial_capital = Column(Float, nullable=False, default=100_000.0)
     start_date = Column(Date, nullable=False)
-    window = Column(Integer, nullable=False, default=125)
+    window = Column(Integer, nullable=False, default=20)
     stabilization_period = Column(Integer, nullable=False, default=10)
     volatility_floor_pct = Column(Float, nullable=False, default=15.0)
     volatility_cap_pct = Column(Float, nullable=False, default=45.0)
     min_listing_days = Column(Integer, nullable=False, default=365)
+    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 1.0, "60": 0.0, "120": 0.0})
     volume_std_multiplier = Column(Float, nullable=False, default=1.0)
     max_positions = Column(Integer, nullable=False, default=10)
     commission_pct = Column(Float, nullable=False, default=0.03)
@@ -822,7 +823,7 @@ class USStockSignalVirtualConfig(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualEvent(Base):
-    """美股成分股买卖点策略每日信号事件"""
+    """美股成分股风险调整混合动量排名事件"""
     __tablename__ = "us_stock_signal_virtual_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -843,7 +844,7 @@ class USStockSignalVirtualEvent(Base):
     )
 
 class USStockSignalVirtualEquity(Base):
-    """美股成分股买卖点策略虚拟盘每日净值"""
+    """美股成分股风险调整混合动量虚拟盘每日净值"""
     __tablename__ = "us_stock_signal_virtual_equity"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -857,7 +858,7 @@ class USStockSignalVirtualEquity(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualTrade(Base):
-    """美股成分股买卖点策略虚拟盘模拟成交"""
+    """美股成分股风险调整混合动量虚拟盘模拟成交"""
     __tablename__ = "us_stock_signal_virtual_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -883,7 +884,7 @@ class USStockSignalVirtualTrade(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class USStockSignalVirtualHolding(Base):
-    """美股成分股买卖点策略虚拟盘最新持仓快照"""
+    """美股成分股风险调整混合动量虚拟盘最新持仓快照"""
     __tablename__ = "us_stock_signal_virtual_holdings"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -898,7 +899,7 @@ class USStockSignalVirtualHolding(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualLog(Base):
-    """美股成分股买卖点策略虚拟盘运行日志"""
+    """美股成分股风险调整混合动量虚拟盘运行日志"""
     __tablename__ = "us_stock_signal_virtual_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -954,6 +955,7 @@ def ensure_table_columns():
         },
         "us_stock_signal_virtual_configs": {
             "min_listing_days": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN min_listing_days INTEGER NOT NULL DEFAULT 365",
+            "momentum_weights": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN momentum_weights JSON NOT NULL DEFAULT '{\"20\":1.0,\"60\":0.0,\"120\":0.0}'",
         },
     }
 
