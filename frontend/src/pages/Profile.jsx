@@ -78,6 +78,11 @@ const Profile = () => {
           onClick: () => navigate('/w20-momentum-live'),
           arrow: true
         },
+        {
+          title: '美股成分股买卖点虚拟盘',
+          onClick: () => navigate('/us-stock-signal-live'),
+          arrow: true
+        },
       ]
     },
     {
@@ -136,11 +141,6 @@ const Profile = () => {
         {
           title: '历史每月分析',
           onClick: () => navigate('/monthly-analysis'),
-          arrow: true
-        },
-        {
-          title: '个股买卖信号',
-          onClick: () => navigate('/market-signal-history'),
           arrow: true
         },
       ]

@@ -15,7 +15,6 @@ import EVCTradeLogs from './pages/EVCTradeLogs';
 import StockDetail from './pages/StockDetail';
 import OptionsPositions from './pages/OptionsPositions';
 import MonthlyAnalysis from './pages/MonthlyAnalysis';
-import MarketSignalHistory from './pages/MarketSignalHistory';
 import SystemLog from './pages/SystemLog';
 import FearBacktest from './pages/fear/FearBacktest';
 import LevETFBacktest from './pages/LevETFBacktest';
@@ -31,6 +30,7 @@ import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import SoxlFearStrategy from './pages/SoxlFearStrategy';
 import W20MomentumBacktest from './pages/W20MomentumBacktest';
 import W20MomentumLive from './pages/W20MomentumLive';
+import USStockSignalLive from './pages/USStockSignalLive';
 
 function App() {
   return (
@@ -51,7 +51,6 @@ function App() {
           <Route path="/evc/trade-logs" element={<EVCTradeLogs />} />
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
-          <Route path="/market-signal-history" element={<MarketSignalHistory />} />
           <Route path="/system-log" element={<SystemLog />} />
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
@@ -66,6 +65,7 @@ function App() {
           <Route path="/soxl-fear-strategy" element={<SoxlFearStrategy />} />
           <Route path="/w20-momentum-backtest" element={<W20MomentumBacktest />} />
           <Route path="/w20-momentum-live" element={<W20MomentumLive />} />
+          <Route path="/us-stock-signal-live" element={<USStockSignalLive />} />
         </Route>
       </Routes>
     </AccountProvider>
