@@ -31,6 +31,7 @@ import SoxlFearStrategy from './pages/SoxlFearStrategy';
 import W20MomentumBacktest from './pages/W20MomentumBacktest';
 import W20MomentumLive from './pages/W20MomentumLive';
 import USStockSignalLive from './pages/USStockSignalLive';
+import AStockInnovation100 from './pages/AStockInnovation100';
 
 function App() {
   return (
@@ -42,6 +43,7 @@ function App() {
           <Route path="/fear/stocks" element={<FearStockList />} />
           <Route path="/evc" element={<EVCValuation />} />
           <Route path="/options" element={<OptionsPositions />} />
+          <Route path="/a-stock-innovation100" element={<AStockInnovation100 />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />

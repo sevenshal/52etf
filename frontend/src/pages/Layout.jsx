@@ -32,6 +32,11 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
+      key: '/a-stock-innovation100',
+      label: 'A创100',
+      disabled: !accountId
+    },
+    {
       key: '/profile',
       label: '我的'
     }
