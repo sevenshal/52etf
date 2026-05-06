@@ -807,9 +807,11 @@ class USStockSignalVirtualConfig(Base):
     volatility_floor_pct = Column(Float, nullable=False, default=15.0)
     volatility_cap_pct = Column(Float, nullable=False, default=45.0)
     min_listing_days = Column(Integer, nullable=False, default=365)
-    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 1.0, "60": 0.0, "120": 0.0})
+    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 0.05, "60": 0.20, "120": 0.75})
     volume_std_multiplier = Column(Float, nullable=False, default=1.0)
-    max_positions = Column(Integer, nullable=False, default=10)
+    max_positions = Column(Integer, nullable=False, default=7)
+    sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
+    index_weight_blend = Column(Float, nullable=False, default=0.4)
     commission_pct = Column(Float, nullable=False, default=0.03)
     slippage_pct = Column(Float, nullable=False, default=0.02)
     lot_size = Column(Integer, nullable=False, default=1)
@@ -955,7 +957,9 @@ def ensure_table_columns():
         },
         "us_stock_signal_virtual_configs": {
             "min_listing_days": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN min_listing_days INTEGER NOT NULL DEFAULT 365",
-            "momentum_weights": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN momentum_weights JSON NOT NULL DEFAULT '{\"20\":1.0,\"60\":0.0,\"120\":0.0}'",
+            "momentum_weights": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN momentum_weights JSON NOT NULL DEFAULT '{\"20\":0.05,\"60\":0.20,\"120\":0.75}'",
+            "sell_rank_multiplier": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN sell_rank_multiplier FLOAT NOT NULL DEFAULT 2.0",
+            "index_weight_blend": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN index_weight_blend FLOAT NOT NULL DEFAULT 0.4",
         },
     }
 
@@ -970,6 +974,39 @@ def ensure_table_columns():
                     conn.exec_driver_sql(ddl)
 
 ensure_table_columns()
+
+def ensure_us_stock_signal_virtual_recommended_defaults():
+    """把旧的 20 日 Top10 默认配置迁移到当前推荐的混合动量参数。"""
+    with engine.begin() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(us_stock_signal_virtual_configs)")).fetchall()
+        }
+        required = {"name", "momentum_weights", "max_positions", "sell_rank_multiplier", "index_weight_blend", "updated_at"}
+        if not required.issubset(existing):
+            return
+        conn.exec_driver_sql("""
+            UPDATE us_stock_signal_virtual_configs
+            SET
+                name = CASE
+                    WHEN name LIKE '%20日动量Top10%' THEN '美股风险调整混合动量虚拟盘'
+                    ELSE name
+                END,
+                momentum_weights = '{"20":0.05,"60":0.20,"120":0.75}',
+                max_positions = 7,
+                sell_rank_multiplier = 2.0,
+                index_weight_blend = 0.4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE max_positions = 10
+              AND (name LIKE '%20日动量Top10%' OR name LIKE '%风险调整20日动量Top10%')
+              AND (
+                  momentum_weights = '{"20":1.0,"60":0.0,"120":0.0}'
+                  OR momentum_weights = '{"20": 1.0, "60": 0.0, "120": 0.0}'
+                  OR momentum_weights = '{"20": 1, "60": 0, "120": 0}'
+              )
+        """)
+
+ensure_us_stock_signal_virtual_recommended_defaults()
 
 def ensure_soxl_fear_strategy_multi_config_schema():
     """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""

@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 DAILY_PRICE_SOURCE = "daily_close"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
-DEFAULT_MOMENTUM_WEIGHTS = {"20": 1.0, "60": 0.0, "120": 0.0}
+DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
+DEFAULT_INDEX_WEIGHT_BLEND = 0.40
+DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 CANDIDATE_ETF_OPTIONS = [
     {"label": "标普500", "value": "SPY.US", "description": "SPDR S&P 500 ETF Trust 成分股"},
     {"label": "纳指100", "value": "QQQ.US", "description": "Invesco QQQ Trust 成分股"},
@@ -331,6 +333,126 @@ def load_universe_history(
     )
 
 
+def load_universe_weight_history(
+    db: ORMSession,
+    candidate_etfs: List[str],
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Dict[date, Dict[str, float]]]:
+    candidate_etfs = list(dict.fromkeys(candidate_etfs or DEFAULT_CANDIDATE_ETFS))
+    weight_history: Dict[str, Dict[date, Dict[str, float]]] = {}
+    for etf_symbol in candidate_etfs:
+        all_dates = [
+            row[0]
+            for row in (
+                db.query(distinct(ETFHolding.date))
+                .filter(ETFHolding.etf_symbol == etf_symbol, ETFHolding.date <= end_date)
+                .order_by(ETFHolding.date.asc())
+                .all()
+            )
+        ]
+        pre_start_dates = [item for item in all_dates if item < start_date]
+        selected_dates = {item for item in all_dates if start_date <= item <= end_date}
+        if pre_start_dates:
+            selected_dates.add(pre_start_dates[-1])
+        if not selected_dates:
+            continue
+
+        weight_history[etf_symbol] = {}
+        rows = (
+            db.query(ETFHolding)
+            .filter(
+                ETFHolding.etf_symbol == etf_symbol,
+                ETFHolding.date.in_(selected_dates),
+                or_(ETFHolding.asset_class == "Equity", ETFHolding.asset_class == "EQUITY"),
+            )
+            .order_by(ETFHolding.date.asc(), ETFHolding.weight.desc())
+            .all()
+        )
+        for row in rows:
+            symbol = normalize_us_equity_symbol(row.symbol)
+            if not symbol or not symbol.endswith(".US"):
+                continue
+            weight_history[etf_symbol].setdefault(row.date, {})
+            weight_history[etf_symbol][row.date][symbol] = float(row.weight or 0)
+    return weight_history
+
+
+def _weights_for_date(
+    universe_history: UniverseHistory,
+    weight_history: Dict[str, Dict[date, Dict[str, float]]],
+    current_date: date,
+) -> Dict[str, float]:
+    weights: Dict[str, float] = {}
+    for etf_symbol, snapshot_dates in universe_history.snapshot_dates_by_etf.items():
+        if not snapshot_dates:
+            continue
+        index = bisect.bisect_right(snapshot_dates, current_date) - 1
+        if index < 0:
+            continue
+        snapshot_date = snapshot_dates[index]
+        for symbol, weight in weight_history.get(etf_symbol, {}).get(snapshot_date, {}).items():
+            weights[symbol] = weights.get(symbol, 0.0) + float(weight or 0)
+    return weights
+
+
+def _apply_index_weight_blend(ranked: List[Dict], index_weight_blend: float) -> List[Dict]:
+    blend = max(0.0, min(1.0, float(index_weight_blend or 0.0)))
+    if not ranked:
+        return ranked
+
+    ranked_by_momentum = sorted(
+        ranked,
+        key=lambda item: (
+            float(item.get("momentum_score") or -1e18),
+            float(item.get("turnover") or 0),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
+    ranked_by_weight = sorted(
+        ranked,
+        key=lambda item: (
+            float(item.get("index_weight") or 0),
+            float(item.get("turnover") or 0),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
+    denominator = max(1, len(ranked) - 1)
+    momentum_percentile = {
+        item["symbol"]: 1 - index / denominator
+        for index, item in enumerate(ranked_by_momentum)
+    }
+    weight_percentile = {
+        item["symbol"]: 1 - index / denominator
+        for index, item in enumerate(ranked_by_weight)
+    }
+
+    for item in ranked:
+        symbol = item["symbol"]
+        item["momentum_percentile"] = momentum_percentile.get(symbol, 0.0)
+        item["index_weight_percentile"] = weight_percentile.get(symbol, 0.0)
+        item["rank_score"] = (
+            (1 - blend) * item["momentum_percentile"]
+            + blend * item["index_weight_percentile"]
+            if blend > 0
+            else float(item.get("momentum_score") or -1e18)
+        )
+
+    return sorted(
+        ranked,
+        key=lambda item: (
+            float(item.get("rank_score") or -1e18),
+            float(item.get("momentum_score") or -1e18),
+            float(item.get("index_weight") or 0),
+            float(item.get("turnover") or 0),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
+
+
 class USStockSignalVirtualEngine:
     def __init__(
         self,
@@ -376,8 +498,11 @@ class USStockSignalVirtualEngine:
         momentum_windows = sorted(momentum_weights)
         max_momentum_window = max(momentum_windows)
         momentum_label = "+".join(str(window) for window in momentum_windows)
+        index_weight_blend = max(0.0, min(1.0, float(getattr(self.config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND) or 0.0)))
         min_listing_days = max(0, int(getattr(self.config, "min_listing_days", 365) or 0))
         max_positions = max(1, int(self.config.max_positions or 1))
+        sell_rank_multiplier = max(1.0, float(getattr(self.config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER) or 1.0))
+        sell_rank_threshold = max(max_positions, int(round(max_positions * sell_rank_multiplier)))
         lot_size = max(1, int(self.config.lot_size or 1))
         commission_rate = max(0.0, float(self.config.commission_pct or 0)) / 100
         slippage_rate = max(0.0, float(self.config.slippage_pct or 0)) / 100
@@ -385,6 +510,7 @@ class USStockSignalVirtualEngine:
 
         self.report(1, "读取历史成分股")
         universe_history = load_universe_history(self.db, candidate_etfs, start_date, end_date)
+        weight_history = load_universe_weight_history(self.db, candidate_etfs, start_date, end_date)
         if not universe_history.all_symbols:
             raise ValueError("没有找到候选ETF的历史成分股，请先同步 ETF 持仓历史")
 
@@ -574,6 +700,7 @@ class USStockSignalVirtualEngine:
                 continue
 
             current_universe = set(universe_history.symbols_for_date(current_date))
+            current_index_weights = _weights_for_date(universe_history, weight_history, current_date)
             universe_size_by_date[current_date.isoformat()] = len(current_universe)
 
             if _is_weekly_rebalance_day(dates, date_index):
@@ -591,24 +718,21 @@ class USStockSignalVirtualEngine:
                     if not snapshot or snapshot.get("risk_adjusted_score") is None:
                         continue
                     row = row_by_symbol_date[symbol][current_date]
+                    momentum_score = snapshot.get("risk_adjusted_score")
                     ranked.append({
                         "symbol": symbol,
                         "price": price_map[symbol],
                         "turnover": float(row.get("turnover") or 0),
+                        "index_weight": float(current_index_weights.get(symbol) or 0),
+                        "momentum_score": momentum_score,
                         "snapshot": snapshot,
                     })
 
-                ranked.sort(
-                    key=lambda item: (
-                        float(item["snapshot"].get("risk_adjusted_score") or -1e18),
-                        float(item.get("turnover") or 0),
-                        item["symbol"],
-                    ),
-                    reverse=True,
-                )
+                ranked = _apply_index_weight_blend(ranked, index_weight_blend)
                 selected = ranked[:max_positions]
                 selected_symbols = [item["symbol"] for item in selected]
-                selected_set = set(selected_symbols)
+                sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
+                rank_by_symbol = {item["symbol"]: rank for rank, item in enumerate(ranked, start=1)}
 
                 for rank, item in enumerate(selected, start=1):
                     snapshot = item["snapshot"]
@@ -625,20 +749,30 @@ class USStockSignalVirtualEngine:
                         "payload": {
                             **snapshot,
                             "rank": rank,
+                            "rank_score": _round_or_none(item.get("rank_score"), 6),
+                            "momentum_score": item.get("momentum_score"),
+                            "momentum_percentile": _round_or_none(item.get("momentum_percentile"), 6),
+                            "index_weight": _round_or_none(item.get("index_weight"), 8),
+                            "index_weight_pct": _round_or_none((item.get("index_weight") or 0) * 100, 4),
+                            "index_weight_percentile": _round_or_none(item.get("index_weight_percentile"), 6),
+                            "index_weight_blend": index_weight_blend,
                             "selected_symbols": selected_symbols,
+                            "sell_rank_symbols": sell_rank_symbols,
                             "max_positions": max_positions,
+                            "sell_rank_threshold": sell_rank_threshold,
+                            "sell_rank_multiplier": sell_rank_multiplier,
                             "min_listing_days": min_listing_days,
                             "momentum_windows": momentum_windows,
                             "momentum_weights": momentum_weights_payload,
                             "rebalance_frequency": "weekly",
-                            "rotation_rule": "hold_until_out_of_top_n",
+                            "rotation_rule": "hold_until_out_of_sell_rank",
                             "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
                         },
                         "price_source": DAILY_PRICE_SOURCE,
                     })
 
                 for symbol in list(positions.keys()):
-                    if symbol in selected_set:
+                    if rank_by_symbol.get(symbol, 10**9) <= sell_rank_threshold:
                         continue
                     price = price_map.get(symbol)
                     if price is None or price <= 0:
@@ -649,10 +783,11 @@ class USStockSignalVirtualEngine:
                         symbol,
                         shares,
                         price,
-                        f"跌出风险调整{momentum_label}日混合动量Top{max_positions}: {', '.join(selected_symbols)}",
+                        f"跌出风险调整{momentum_label}日混合动量Top{sell_rank_threshold}: {', '.join(sell_rank_symbols)}",
                     )
 
-                buy_candidates = [item for item in selected if item["symbol"] not in positions]
+                slots_to_fill = max(0, max_positions - len(positions))
+                buy_candidates = [item for item in selected if item["symbol"] not in positions][:slots_to_fill]
                 if buy_candidates:
                     budget_per_symbol = cash / len(buy_candidates)
                 else:
@@ -747,11 +882,15 @@ class USStockSignalVirtualEngine:
                 "holdings_date_count": universe_history.holdings_date_count,
                 "universe_size_by_date": universe_size_by_date,
                 "min_listing_days": min_listing_days,
+                "max_positions": max_positions,
                 "momentum_window": max_momentum_window,
                 "momentum_windows": momentum_windows,
                 "momentum_weights": momentum_weights_payload,
+                "index_weight_blend": index_weight_blend,
+                "sell_rank_threshold": sell_rank_threshold,
+                "sell_rank_multiplier": sell_rank_multiplier,
                 "rebalance_frequency": "weekly",
-                "rotation_rule": "hold_until_out_of_top_n",
+                "rotation_rule": "hold_until_out_of_sell_rank",
                 "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
                 "price_source": DAILY_PRICE_SOURCE,
             },

@@ -26,7 +26,9 @@ from ...robot.us_stock_signal_virtual import (
     CANDIDATE_ETF_OPTIONS,
     DAILY_PRICE_SOURCE,
     DEFAULT_CANDIDATE_ETFS,
+    DEFAULT_INDEX_WEIGHT_BLEND,
     DEFAULT_MOMENTUM_WEIGHTS,
+    DEFAULT_SELL_RANK_MULTIPLIER,
     SUPPORTED_MOMENTUM_WINDOWS,
     USStockSignalVirtualEngine,
 )
@@ -52,7 +54,9 @@ class USStockSignalConfigPayload(BaseModel):
     min_listing_days: int = 365
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
     volume_std_multiplier: float = 1.0
-    max_positions: int = 10
+    max_positions: int = 7
+    sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
+    index_weight_blend: float = DEFAULT_INDEX_WEIGHT_BLEND
     commission_pct: float = 0.03
     slippage_pct: float = 0.02
     auto_sync_enabled: bool = True
@@ -102,6 +106,20 @@ class USStockSignalConfigPayload(BaseModel):
     def validate_max_positions(cls, value):
         if value < 1:
             raise ValueError("最大持仓数不能小于1")
+        return value
+
+    @validator("sell_rank_multiplier")
+    def validate_sell_rank_multiplier(cls, value):
+        if value < 1:
+            raise ValueError("卖出排名倍数不能小于1")
+        if value > 10:
+            raise ValueError("卖出排名倍数不能大于10")
+        return value
+
+    @validator("index_weight_blend")
+    def validate_index_weight_blend(cls, value):
+        if value < 0 or value > 1:
+            raise ValueError("成分权重倾斜必须在0到1之间")
         return value
 
     @validator("momentum_weights", pre=True)
@@ -171,6 +189,8 @@ def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
         "momentum_weights": getattr(config, "momentum_weights", None) or DEFAULT_MOMENTUM_WEIGHTS.copy(),
         "volume_std_multiplier": config.volume_std_multiplier,
         "max_positions": config.max_positions,
+        "sell_rank_multiplier": getattr(config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER),
+        "index_weight_blend": getattr(config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND),
         "commission_pct": config.commission_pct,
         "slippage_pct": config.slippage_pct,
         "auto_sync_enabled": bool(config.auto_sync_enabled),
