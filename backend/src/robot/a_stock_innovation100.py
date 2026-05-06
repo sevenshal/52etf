@@ -852,12 +852,31 @@ class AStockInnovation100Builder:
         level = BASE_LEVEL
         high_watermark = BASE_LEVEL
         last_market_frame = pd.DataFrame()
+
+        self._ensure_market_days(trading_dates)
+        market_day_counts = self._existing_market_day_counts(min(trading_dates), max(trading_dates))
+        available_trading_dates = [
+            item
+            for item in trading_dates
+            if market_day_counts.get(item, 0) >= MIN_MARKET_DAILY_ROWS
+        ]
+        skipped_dates = len(trading_dates) - len(available_trading_dates)
+        if skipped_dates:
+            self._progress(
+                f"跳过{skipped_dates}个尚无完整行情的交易日",
+                50,
+                skipped_dates=skipped_dates,
+                total_dates=len(trading_dates),
+            )
+        trading_dates = available_trading_dates
+        if not trading_dates:
+            raise RuntimeError("指定区间内没有完整行情的交易日")
+
         start_index = next((idx for idx, item in enumerate(trading_dates) if item >= start_date), None)
         if start_index is None:
-            raise RuntimeError("开始日期之后没有交易日")
+            raise RuntimeError("开始日期之后没有完整行情的交易日")
 
         total_dates = len(trading_dates)
-        self._ensure_market_days(trading_dates)
         self._progress("载入全市场行情缓存", 50, processed_dates=0, total_dates=total_dates)
         market_frames_by_date = self._load_market_frames_by_date(min(trading_dates), max(trading_dates))
 
