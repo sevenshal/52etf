@@ -73,6 +73,11 @@ const Profile = () => {
           onClick: () => navigate('/soxl-fear-strategy'),
           arrow: true
         },
+      ]
+    },
+    {
+      title: '模拟盘',
+      items: [
         {
           title: 'W20风险调整动量虚拟盘',
           onClick: () => navigate('/w20-momentum-live'),
@@ -81,6 +86,11 @@ const Profile = () => {
         {
           title: '美股风险调整混合动量虚拟盘',
           onClick: () => navigate('/us-stock-signal-live'),
+          arrow: true
+        },
+        {
+          title: 'A股创新100动量虚拟盘',
+          onClick: () => navigate('/a-stock-innovation-momentum-live'),
           arrow: true
         },
       ]

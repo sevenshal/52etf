@@ -30,6 +30,7 @@ import { formatNumber } from '../utils/format';
 
 const { Text, Title } = Typography;
 const DEFAULT_MOMENTUM_WEIGHTS = { 20: 0, 60: 0.2, 120: 0.8 };
+const DEFAULT_FUNDAMENTAL_WEIGHTS = { circ_mv: 0.34, revenue_growth_3y: 0.33, rd_exp_ratio: 0.33 };
 
 const DEFAULT_FORM_VALUES = {
   name: 'A股创新100风险调整混合动量虚拟盘',
@@ -38,6 +39,8 @@ const DEFAULT_FORM_VALUES = {
   start_date: dayjs('2020-01-02'),
   min_listing_days: 365,
   momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+  fundamental_weights: DEFAULT_FUNDAMENTAL_WEIGHTS,
+  fundamental_blend: 0,
   max_positions: 5,
   sell_rank_multiplier: 2,
   index_weight_blend: 0.8,
@@ -76,6 +79,11 @@ const normalizeMomentumWeights = weights => ({
   ...(weights || {}),
 });
 
+const normalizeFundamentalWeights = weights => ({
+  ...DEFAULT_FUNDAMENTAL_WEIGHTS,
+  ...(weights || {}),
+});
+
 const normalizeConfigForForm = config => {
   const merged = {
     ...DEFAULT_FORM_VALUES,
@@ -83,12 +91,14 @@ const normalizeConfigForForm = config => {
     start_date: config?.start_date ? dayjs(config.start_date) : DEFAULT_FORM_VALUES.start_date,
   };
   merged.momentum_weights = normalizeMomentumWeights(config?.momentum_weights);
+  merged.fundamental_weights = normalizeFundamentalWeights(config?.fundamental_weights);
   return merged;
 };
 
 const buildPayload = values => ({
   ...values,
   momentum_weights: normalizeMomentumWeights(values.momentum_weights),
+  fundamental_weights: normalizeFundamentalWeights(values.fundamental_weights),
   start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_FORM_VALUES.start_date.format('YYYY-MM-DD'),
 });
 
@@ -276,8 +286,18 @@ const AStockInnovationMomentumLive = () => {
     { title: '价格', dataIndex: 'signal_price', width: 90, align: 'right', render: value => formatNumber(value, 2) },
     { title: '成交额', dataIndex: 'turnover', width: 130, align: 'right', render: formatMoney },
     { title: '排名分数', dataIndex: ['payload', 'rank_score'], width: 100, align: 'right', render: formatScore },
+    { title: '基础分数', dataIndex: ['payload', 'base_rank_score'], width: 100, align: 'right', render: formatScore },
+    { title: '基本面分', dataIndex: ['payload', 'fundamental_score'], width: 100, align: 'right', render: formatScore },
     { title: '动量分数', dataIndex: 'threshold_pct', width: 100, align: 'right', render: formatScore },
     { title: '指数权重', dataIndex: ['payload', 'index_weight_pct'], width: 100, align: 'right', render: formatPercent },
+    { title: '自由流通市值', dataIndex: ['payload', 'circ_mv'], width: 130, align: 'right', render: formatMoney },
+    { title: '市值分位', dataIndex: ['payload', 'circ_mv_percentile'], width: 90, align: 'right', render: formatScore },
+    { title: '3年营收增速', dataIndex: ['payload', 'revenue_growth_3y_pct'], width: 120, align: 'right', render: formatPercent },
+    { title: '营收分位', dataIndex: ['payload', 'revenue_growth_3y_percentile'], width: 90, align: 'right', render: formatScore },
+    { title: '研发费用率', dataIndex: ['payload', 'rd_exp_ratio_pct'], width: 110, align: 'right', render: formatPercent },
+    { title: '研发分位', dataIndex: ['payload', 'rd_exp_ratio_percentile'], width: 90, align: 'right', render: formatScore },
+    { title: '财报期', dataIndex: ['payload', 'report_end_date'], width: 110 },
+    { title: '公告日', dataIndex: ['payload', 'report_ann_date'], width: 110 },
     { title: '20日分数', dataIndex: ['payload', 'components', '20', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
     { title: '60日分数', dataIndex: ['payload', 'components', '60', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
     { title: '120日分数', dataIndex: ['payload', 'components', '120', 'risk_adjusted_score'], width: 110, align: 'right', render: formatScore },
@@ -378,7 +398,7 @@ const AStockInnovationMomentumLive = () => {
                 <Descriptions.Item label="策略">A股创新100成分内风险调整混合动量 Top N</Descriptions.Item>
                 <Descriptions.Item label="轮换规则">持仓跌出卖出排名才卖出</Descriptions.Item>
                 <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
-                <Descriptions.Item label="排名规则">混合动量 + 创新100成分权重倾斜</Descriptions.Item>
+                <Descriptions.Item label="排名规则">混合动量 + 创新100成分权重 + 基本面倾斜</Descriptions.Item>
                 <Descriptions.Item label="执行方式">收盘出信号，次日开盘成交</Descriptions.Item>
               </Descriptions>
               <Row gutter={12}>
@@ -394,6 +414,23 @@ const AStockInnovationMomentumLive = () => {
                 </Col>
                 <Col span={8}>
                   <Form.Item name={['momentum_weights', '120']} label="120日权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Form.Item name={['fundamental_weights', 'circ_mv']} label="市值权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['fundamental_weights', 'revenue_growth_3y']} label="营收权重" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['fundamental_weights', 'rd_exp_ratio']} label="研发权重" rules={[{ required: true }]}>
                     <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
@@ -414,13 +451,18 @@ const AStockInnovationMomentumLive = () => {
                 </Col>
               </Row>
               <Row gutter={12}>
-                <Col span={12}>
+                <Col span={8}>
                   <Form.Item name="sell_rank_multiplier" label="卖出排名倍数" rules={[{ required: true }]}>
                     <InputNumber min={1} max={20} step={0.1} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
-                <Col span={12}>
+                <Col span={8}>
                   <Form.Item name="index_weight_blend" label="成分权重倾斜" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="fundamental_blend" label="基本面倾斜" rules={[{ required: true }]}>
                     <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
@@ -528,7 +570,7 @@ const AStockInnovationMomentumLive = () => {
                       {
                         key: 'events',
                         label: '排名',
-                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 1600 }} />,
+                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 2600 }} />,
                       },
                       {
                         key: 'logs',

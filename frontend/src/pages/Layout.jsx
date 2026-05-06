@@ -37,15 +37,13 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
-      key: '/a-stock-innovation-momentum-live',
-      label: 'A创盘',
-      disabled: !accountId
-    },
-    {
       key: '/profile',
       label: '我的'
     }
   ];
+  const activeKey = items.find(item => item.key === location.pathname)?.key
+    || items.find(item => item.key !== '/' && location.pathname.startsWith(`${item.key}/`))?.key
+    || '/profile';
 
   return (
     <Layout style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -59,7 +57,7 @@ const AppLayout = () => {
       </Content>
       <Tabs
         items={items}
-        activeKey={location.pathname}
+        activeKey={activeKey}
         onChange={navigate}
         centered
         size="large"
