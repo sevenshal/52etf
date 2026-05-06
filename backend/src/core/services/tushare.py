@@ -193,11 +193,275 @@ class TushareService(QuoteProvider):
     def _load_stock_basic_frame(self) -> pd.DataFrame:
         if self._stock_basic_frame is None:
             try:
-                self._stock_basic_frame = self.pro.stock_basic(fields="ts_code,name,market,exchange,list_date")
+                self._stock_basic_frame = self.pro.stock_basic(
+                    fields="ts_code,symbol,name,area,industry,market,exchange,list_date,delist_date,list_status"
+                )
             except Exception as exc:
                 self.logger.warning("Tushare stock_basic fetch failed: %s", exc)
                 self._stock_basic_frame = pd.DataFrame()
         return self._stock_basic_frame
+
+    def get_trade_calendar_frame(self, start_date: date, end_date: date, exchange: str = "SSE") -> pd.DataFrame:
+        """获取交易日历。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.trade_cal(
+                exchange=exchange,
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                fields="cal_date,is_open,pretrade_date",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare trade_cal fetch failed: %s", exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["cal_date"] = pd.to_datetime(frame["cal_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["cal_date"]).sort_values("cal_date")
+
+    def get_a_stock_basic_frame(self, list_statuses: Optional[List[str]] = None) -> pd.DataFrame:
+        """获取A股公司基础信息，默认包含上市与退市股票。"""
+        statuses = list_statuses or ["L", "D"]
+        frames = []
+        for status in statuses:
+            try:
+                frame = self.pro.stock_basic(
+                    exchange="",
+                    list_status=status,
+                    fields="ts_code,symbol,name,area,industry,market,exchange,list_date,delist_date,list_status",
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare stock_basic fetch failed for status %s: %s", status, exc)
+                continue
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        for column in ("list_date", "delist_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        return result.drop_duplicates(subset=["ts_code"], keep="first")
+
+    def get_a_stock_name_changes_frame(self, start_date: date, end_date: date) -> pd.DataFrame:
+        """获取A股名称/ST变更记录。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.namechange(
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                fields="ts_code,name,start_date,end_date,change_reason",
+                limit=10000,
+                offset=0,
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare namechange fetch failed: %s", exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        for column in ("start_date", "end_date"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], format="%Y%m%d", errors="coerce").dt.date
+        return frame.drop_duplicates()
+
+    def get_a_stock_daily_frame(self, trade_date: date) -> pd.DataFrame:
+        """获取某交易日A股全市场价格截面。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.daily(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare daily fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["ts_code", "trade_date"])
+
+    def get_a_stock_daily_range_frame(self, start_date: date, end_date: date, limit: int = 6000) -> pd.DataFrame:
+        """分页获取一段时间内A股全市场价格截面。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        frames = []
+        offset = 0
+        while True:
+            try:
+                frame = self.pro.daily(
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare daily range fetch failed for %s~%s offset=%s: %s", start_value, end_value, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"])
+
+    def get_a_stock_daily_basic_frame(self, trade_date: date) -> pd.DataFrame:
+        """获取某交易日A股全市场估值/股本截面。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.daily_basic(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields="ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare daily_basic fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["ts_code", "trade_date"])
+
+    def get_a_stock_daily_basic_range_frame(self, start_date: date, end_date: date, limit: int = 6000) -> pd.DataFrame:
+        """分页获取一段时间内A股全市场估值/股本截面。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        frames = []
+        offset = 0
+        while True:
+            try:
+                frame = self.pro.daily_basic(
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare daily_basic range fetch failed for %s~%s offset=%s: %s", start_value, end_value, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"])
+
+    def get_a_stock_bak_daily_range_frame(self, start_date: date, end_date: date, limit: int = 7000) -> pd.DataFrame:
+        """分页获取bak_daily截面；该接口同时包含价格、成交额和市值字段。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        frames = []
+        offset = 0
+        fields = (
+            "ts_code,trade_date,open,high,low,close,pre_close,change,pct_change,"
+            "vol,amount,total_share,float_share,total_mv,float_mv"
+        )
+        while True:
+            try:
+                kwargs = {
+                    "start_date": start_value.strftime("%Y%m%d"),
+                    "end_date": end_value.strftime("%Y%m%d"),
+                    "fields": fields,
+                    "offset": offset,
+                }
+                # bak_daily显式传limit时服务端会压到6000；不传limit时当前可返回7000条。
+                if limit < 7000:
+                    kwargs["limit"] = limit
+                frame = self.pro.bak_daily(**kwargs)
+            except Exception as exc:
+                self.logger.warning("Tushare bak_daily range fetch failed for %s~%s offset=%s: %s", start_value, end_value, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        result = result.dropna(subset=["ts_code", "trade_date"])
+        if result.empty:
+            return result
+
+        result = result.rename(columns={"pct_change": "pct_chg", "float_mv": "circ_mv"})
+        # bak_daily: amount单位为万元，市值单位为亿元；项目缓存沿用daily/daily_basic的千元/万元。
+        if "amount" in result.columns:
+            result["amount"] = pd.to_numeric(result["amount"], errors="coerce") * 10.0
+        for column in ("total_mv", "circ_mv"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce") * 10000.0
+        return result
+
+    def get_a_stock_market_daily_frame(self, trade_date: date) -> pd.DataFrame:
+        """合并价格与估值截面，供指数构建使用。"""
+        bak_daily = self.get_a_stock_bak_daily_range_frame(trade_date, trade_date)
+        if not bak_daily.empty:
+            return bak_daily
+
+        daily = self.get_a_stock_daily_frame(trade_date)
+        if daily.empty:
+            return pd.DataFrame()
+        daily_basic = self.get_a_stock_daily_basic_frame(trade_date)
+        if daily_basic.empty:
+            return daily
+        merged = daily.merge(
+            daily_basic.drop(columns=["trade_date"], errors="ignore"),
+            on="ts_code",
+            how="left",
+        )
+        return merged
+
+    def get_a_stock_market_daily_range_frame(self, start_date: date, end_date: date) -> pd.DataFrame:
+        """合并一段时间内的价格与估值截面，供指数构建批量缓存。"""
+        bak_daily = self.get_a_stock_bak_daily_range_frame(start_date, end_date)
+        if not bak_daily.empty:
+            return bak_daily
+
+        daily = self.get_a_stock_daily_range_frame(start_date, end_date)
+        if daily.empty:
+            return pd.DataFrame()
+        daily_basic = self.get_a_stock_daily_basic_range_frame(start_date, end_date)
+        if daily_basic.empty:
+            return daily
+        merged = daily.merge(
+            daily_basic,
+            on=["ts_code", "trade_date"],
+            how="left",
+        )
+        return merged
 
     def _load_fund_basic_frame(self) -> pd.DataFrame:
         if self._fund_basic_frame is None:

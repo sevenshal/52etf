@@ -186,6 +186,108 @@ class StockKline(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
+class AStockBasic(Base):
+    """Tushare A股公司基础信息快照。"""
+    __tablename__ = "a_stock_basic"
+
+    ts_code = Column(String(16), primary_key=True)
+    symbol = Column(String(16), index=True)
+    name = Column(String(64))
+    area = Column(String(64))
+    industry = Column(String(64), index=True)
+    market = Column(String(64))
+    exchange = Column(String(16), index=True)
+    list_date = Column(Date)
+    delist_date = Column(Date)
+    list_status = Column(String(8), index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class AStockNameChange(Base):
+    """Tushare A股曾用名/ST变更记录。"""
+    __tablename__ = "a_stock_name_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(16), index=True, nullable=False)
+    name = Column(String(64))
+    start_date = Column(Date, index=True)
+    end_date = Column(Date, index=True)
+    change_reason = Column(String(64), index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class AStockMarketDaily(Base):
+    """Tushare A股全市场日行情与估值截面缓存。"""
+    __tablename__ = "a_stock_market_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    pre_close = Column(Float)
+    change = Column(Float)
+    pct_chg = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    total_mv = Column(Float)
+    circ_mv = Column(Float)
+    float_share = Column(Float)
+    total_share = Column(Float)
+    turnover_rate = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class AStockInnovation100Level(Base):
+    """A股创新100指数每日点位。"""
+    __tablename__ = "a_stock_innovation100_levels"
+
+    index_code = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    level = Column(Float, nullable=False)
+    daily_return_pct = Column(Float)
+    drawdown_pct = Column(Float)
+    constituent_count = Column(Integer)
+    total_circ_mv = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class AStockInnovation100Rebalance(Base):
+    """A股创新100重构/再平衡记录。"""
+    __tablename__ = "a_stock_innovation100_rebalances"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    index_code = Column(String(32), index=True, nullable=False)
+    rebalance_date = Column(Date, index=True, nullable=False)
+    effective_date = Column(Date, index=True)
+    rebalance_type = Column(String(32), index=True, nullable=False)
+    constituent_count = Column(Integer)
+    turnover_pct = Column(Float)
+    total_circ_mv = Column(Float)
+    additions = Column(JSON)
+    removals = Column(JSON)
+    rule_snapshot = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+class AStockInnovation100Constituent(Base):
+    """A股创新100每次重构/再平衡后的成分股权重。"""
+    __tablename__ = "a_stock_innovation100_constituents"
+
+    index_code = Column(String(32), primary_key=True)
+    rebalance_id = Column(Integer, ForeignKey("a_stock_innovation100_rebalances.id"), primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    rebalance_date = Column(Date, index=True, nullable=False)
+    effective_date = Column(Date, index=True)
+    name = Column(String(64))
+    industry = Column(String(64), index=True)
+    rank = Column(Integer)
+    raw_weight_pct = Column(Float)
+    weight_pct = Column(Float)
+    total_mv = Column(Float)
+    circ_mv = Column(Float)
+    avg_amount_60d = Column(Float)
+    action = Column(String(16), index=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
 class InvalidSymbolCache(Base):
     """持久化缓存外部行情源返回的无效标的。"""
     __tablename__ = 'invalid_symbol_cache'
@@ -926,6 +1028,13 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_cache_source_updated ON invalid_symbol_cache(source, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_levels_date ON a_stock_innovation100_levels(index_code, date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_rebalances_date ON a_stock_innovation100_rebalances(index_code, rebalance_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_constituents_symbol ON a_stock_innovation100_constituents(index_code, ts_code, rebalance_date)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",

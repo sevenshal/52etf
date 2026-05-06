@@ -232,6 +232,16 @@ def _run_w20_momentum_live_sync():
         len(result.get("errors") or []),
     )
 
+def _run_a_stock_innovation100_rebuild():
+    from ..app.api.a_stock_innovation100 import rebuild_a_stock_innovation100_for_scheduler
+
+    result = rebuild_a_stock_innovation100_for_scheduler()
+    logging.getLogger("ScheduledTaskManager").info(
+        "A stock innovation100 rebuilt: latest_date=%s, latest_level=%s",
+        result.get("latest_date"),
+        result.get("latest_level"),
+    )
+
 
 @dataclass(frozen=True)
 class TaskDefinition:
@@ -333,6 +343,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=70,
                 runner=_run_w20_momentum_live_sync,
+            ),
+            "a_stock_innovation100_rebuild": TaskDefinition(
+                task_key="a_stock_innovation100_rebuild",
+                name="A股创新100指数刷新",
+                description="刷新A股创新100指数点位、成分股权重和再平衡追溯记录。",
+                default_time="18:30",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_a_stock_innovation100_rebuild,
             ),
         }
 
