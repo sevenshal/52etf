@@ -313,6 +313,12 @@ class AStockInnovation100Builder:
         chunks = []
         current_chunk: List[date] = []
         for missing_date in missing_dates:
+            if counts.get(missing_date, 0) > 0:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                chunks.append([missing_date])
+                continue
             if current_chunk and (
                 len(current_chunk) >= chunk_size
                 or (missing_date - current_chunk[0]).days > max_calendar_span_days
