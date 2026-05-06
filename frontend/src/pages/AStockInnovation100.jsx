@@ -142,21 +142,61 @@ const AStockInnovation100 = () => {
   const summary = detail?.summary || {};
   const rule = summary.rule_snapshot || {};
   const levels = detail?.levels || [];
+  const benchmarkLevels = detail?.benchmark_levels || [];
   const selectedConstituents = detail?.selected_constituents || [];
   const selectedRebalance = detail?.selected_rebalance;
+  const levelDateList = useMemo(() => levels.map(item => item.date), [levels]);
+  const benchmarkSeries = useMemo(() => {
+    return benchmarkLevels.map((benchmark, index) => {
+      const levelMap = new Map((benchmark.levels || []).map(item => [item.date, item.level]));
+      const colors = ['#1677ff', '#52c41a'];
+      return {
+        name: benchmark.name,
+        type: 'line',
+        showSymbol: false,
+        smooth: true,
+        connectNulls: true,
+        data: levelDateList.map(date => (levelMap.has(date) ? levelMap.get(date) : null)),
+        lineStyle: {
+          width: 1.8,
+          type: 'dashed',
+          color: colors[index % colors.length],
+        },
+        itemStyle: {
+          color: colors[index % colors.length],
+        },
+      };
+    });
+  }, [benchmarkLevels, levelDateList]);
 
   const levelOption = useMemo(() => {
     if (!levels.length) return null;
+    const formatTooltipValue = (seriesName, value) => {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+      if (seriesName === '回撤') return formatPercent(value, 2);
+      return formatNumber(value, 2);
+    };
     return {
       tooltip: {
         trigger: 'axis',
-        valueFormatter: value => Number(value).toFixed(2),
+        axisPointer: { type: 'cross' },
+        formatter: (params) => {
+          const items = Array.isArray(params) ? params : [params];
+          if (!items.length) return '';
+          const header = items[0]?.axisValueLabel || items[0]?.axisValue || '';
+          const lines = items.map(item => {
+            const marker = item.marker || '';
+            const valueText = formatTooltipValue(item.seriesName, item.data);
+            return `${marker}${item.seriesName}: ${valueText}`;
+          });
+          return [header, ...lines].join('<br/>');
+        },
       },
-      legend: { top: 0 },
+      legend: { top: 0, type: 'scroll' },
       grid: { top: 48, left: 64, right: 28, bottom: 48 },
-      xAxis: { type: 'category', data: levels.map(item => item.date), boundaryGap: false },
+      xAxis: { type: 'category', data: levelDateList, boundaryGap: false },
       yAxis: [
-        { type: 'value', name: '点位', scale: true },
+        { type: 'value', name: '归一化点位', scale: true },
         { type: 'value', name: '回撤', axisLabel: { formatter: '{value}%' } },
       ],
       dataZoom: [
@@ -172,6 +212,7 @@ const AStockInnovation100 = () => {
           data: levels.map(item => item.level),
           lineStyle: { width: 2 },
         },
+        ...benchmarkSeries,
         {
           name: '回撤',
           type: 'line',
@@ -182,7 +223,7 @@ const AStockInnovation100 = () => {
         },
       ],
     };
-  }, [levels]);
+  }, [benchmarkSeries, levelDateList, levels]);
 
   const yearlyOption = useMemo(() => {
     const yearly = detail?.yearly_returns || [];
