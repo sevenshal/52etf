@@ -262,7 +262,8 @@ const USStockSignalLive = () => {
   ];
 
   const tradeColumns = [
-    { title: '日期', dataIndex: 'date', width: 110 },
+    { title: '成交日', dataIndex: 'date', width: 110 },
+    { title: '信号日', dataIndex: 'signal_date', width: 110 },
     {
       title: '方向',
       dataIndex: 'action',
@@ -276,6 +277,7 @@ const USStockSignalLive = () => {
     { title: '佣金', dataIndex: 'commission', width: 90, align: 'right', render: value => formatNumber(value, 2) },
     { title: '收益', dataIndex: 'profit', width: 100, align: 'right', render: value => value === null || value === undefined ? '-' : formatMoney(value) },
     { title: '收益率', dataIndex: 'profit_pct', width: 90, align: 'right', render: formatPercent },
+    { title: '成交来源', dataIndex: 'price_source', width: 100 },
     { title: '原因', dataIndex: 'reason_detail', width: 260, ellipsis: true },
   ];
 
@@ -404,6 +406,7 @@ const USStockSignalLive = () => {
                 <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
                 <Descriptions.Item label="排名规则">混合动量 + 成分权重倾斜</Descriptions.Item>
                 <Descriptions.Item label="检查频率">每周最后一个交易日</Descriptions.Item>
+                <Descriptions.Item label="执行方式">收盘出信号，次日开盘成交</Descriptions.Item>
               </Descriptions>
               <Row gutter={12}>
                 <Col span={8}>
@@ -521,7 +524,7 @@ const USStockSignalLive = () => {
                       {
                         key: 'trades',
                         label: '交易',
-                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ pageSize: 20 }} scroll={{ x: 1250 }} />,
+                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ pageSize: 20 }} scroll={{ x: 1450 }} />,
                       },
                       {
                         key: 'events',
