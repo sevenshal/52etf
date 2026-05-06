@@ -16,6 +16,7 @@ from ..core.utils import normalize_us_equity_symbol
 logger = logging.getLogger(__name__)
 
 DAILY_PRICE_SOURCE = "daily_close"
+NEXT_OPEN_PRICE_SOURCE = "next_open"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
@@ -561,9 +562,11 @@ class USStockSignalVirtualEngine:
         peak_value = cash
         universe_size_by_date = {}
         rebalance_count = 0
+        pending_rebalance = None
 
         def append_trade(
-            current_date: date,
+            trade_date: date,
+            signal_date: date,
             action: str,
             symbol: str,
             price: float,
@@ -580,8 +583,8 @@ class USStockSignalVirtualEngine:
             if symbol in positions:
                 symbol_market_value = int(positions[symbol].get("shares") or 0) * float(last_prices.get(symbol) or price)
             trades.append({
-                "date": current_date.isoformat(),
-                "signal_date": current_date.isoformat(),
+                "date": trade_date.isoformat(),
+                "signal_date": signal_date.isoformat(),
                 "action": action,
                 "symbol": symbol,
                 "price": _round_or_none(price, 4),
@@ -596,10 +599,10 @@ class USStockSignalVirtualEngine:
                 "portfolio_value_after": _round_or_none(portfolio_after, 2),
                 "symbol_market_value_after": _round_or_none(symbol_market_value, 2),
                 "symbol_weight_pct_after": _round_or_none(symbol_market_value / portfolio_after * 100 if portfolio_after > 0 else 0, 2),
-                "price_source": DAILY_PRICE_SOURCE,
+                "price_source": NEXT_OPEN_PRICE_SOURCE,
             })
 
-        def sell_position(current_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
+        def sell_position(trade_date: date, signal_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
             nonlocal cash
             if symbol not in positions:
                 return
@@ -627,9 +630,11 @@ class USStockSignalVirtualEngine:
                 position["cost_basis"] = max(0.0, old_cost_basis - cost_basis_sold)
                 position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
                 position["last_price"] = price
+            last_prices[symbol] = price
 
             append_trade(
-                current_date,
+                trade_date,
+                signal_date,
                 "SELL",
                 symbol,
                 sell_price,
@@ -641,7 +646,7 @@ class USStockSignalVirtualEngine:
                 profit_pct=profit_pct,
             )
 
-        def buy_position(current_date: date, symbol: str, budget: float, price: float, reason_detail: str):
+        def buy_position(trade_date: date, signal_date: date, symbol: str, budget: float, price: float, reason_detail: str):
             nonlocal cash
             buy_price = price * (1 + slippage_rate)
             quantity = _floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
@@ -658,7 +663,7 @@ class USStockSignalVirtualEngine:
                     "shares": quantity,
                     "avg_cost": (amount + commission) / quantity,
                     "cost_basis": amount + commission,
-                    "entry_date": current_date,
+                    "entry_date": trade_date,
                     "last_price": price,
                 }
             else:
@@ -667,9 +672,11 @@ class USStockSignalVirtualEngine:
                 position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
                 position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
                 position["last_price"] = price
+            last_prices[symbol] = price
 
             append_trade(
-                current_date,
+                trade_date,
+                signal_date,
                 "BUY",
                 symbol,
                 buy_price,
@@ -683,15 +690,66 @@ class USStockSignalVirtualEngine:
             if date_index % max(1, len(dates) // 100) == 0:
                 self.report(42 + int(53 * date_index / max(1, len(dates))), f"模拟交易日 {date_index + 1}/{len(dates)}")
 
+            open_map = {}
             price_map = {}
             for symbol, rows in row_by_symbol_date.items():
                 row = rows.get(current_date)
                 if not row:
                     continue
-                price = float(row.get("close") or 0)
-                if price <= 0:
-                    continue
-                price_map[symbol] = price
+                open_price = float(row.get("open") or 0)
+                close_price = float(row.get("close") or 0)
+                if open_price > 0:
+                    open_map[symbol] = open_price
+                if close_price > 0:
+                    price_map[symbol] = close_price
+
+            if pending_rebalance:
+                signal_date = pending_rebalance["signal_date"]
+                for symbol in list(pending_rebalance["sell_symbols"]):
+                    if symbol not in positions:
+                        continue
+                    price = open_map.get(symbol)
+                    if price is None or price <= 0:
+                        continue
+                    shares = int(positions[symbol].get("shares") or 0)
+                    sell_position(
+                        current_date,
+                        signal_date,
+                        symbol,
+                        shares,
+                        price,
+                        (
+                            f"下一交易日开盘执行: 跌出风险调整{momentum_label}日混合动量"
+                            f"Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}"
+                        ),
+                    )
+
+                slots_to_fill = max(0, max_positions - len(positions))
+                buy_candidates = [
+                    item
+                    for item in pending_rebalance["selected"]
+                    if item["symbol"] not in positions
+                ][:slots_to_fill]
+                budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
+                for item in buy_candidates:
+                    symbol = item["symbol"]
+                    price = open_map.get(symbol)
+                    if price is None or price <= 0:
+                        continue
+                    buy_budget = min(cash, budget_per_symbol)
+                    if buy_budget <= 0:
+                        continue
+                    buy_position(
+                        current_date,
+                        signal_date,
+                        symbol,
+                        buy_budget,
+                        price,
+                        f"下一交易日开盘补位买入风险调整{momentum_label}日混合动量Top{max_positions}",
+                    )
+                pending_rebalance = None
+
+            for symbol, price in price_map.items():
                 last_prices[symbol] = price
                 if symbol in positions:
                     positions[symbol]["last_price"] = price
@@ -765,48 +823,25 @@ class USStockSignalVirtualEngine:
                             "momentum_windows": momentum_windows,
                             "momentum_weights": momentum_weights_payload,
                             "rebalance_frequency": "weekly",
+                            "execution_rule": "signal_close_next_open",
                             "rotation_rule": "hold_until_out_of_sell_rank",
                             "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
                         },
                         "price_source": DAILY_PRICE_SOURCE,
                     })
 
-                for symbol in list(positions.keys()):
-                    if rank_by_symbol.get(symbol, 10**9) <= sell_rank_threshold:
-                        continue
-                    price = price_map.get(symbol)
-                    if price is None or price <= 0:
-                        continue
-                    shares = int(positions[symbol].get("shares") or 0)
-                    sell_position(
-                        current_date,
-                        symbol,
-                        shares,
-                        price,
-                        f"跌出风险调整{momentum_label}日混合动量Top{sell_rank_threshold}: {', '.join(sell_rank_symbols)}",
-                    )
-
-                slots_to_fill = max(0, max_positions - len(positions))
-                buy_candidates = [item for item in selected if item["symbol"] not in positions][:slots_to_fill]
-                if buy_candidates:
-                    budget_per_symbol = cash / len(buy_candidates)
-                else:
-                    budget_per_symbol = 0.0
-                for item in buy_candidates:
-                    symbol = item["symbol"]
-                    price = price_map.get(symbol)
-                    if price is None or price <= 0:
-                        continue
-                    buy_budget = min(cash, budget_per_symbol)
-                    if buy_budget <= 0:
-                        continue
-                    buy_position(
-                        current_date,
-                        symbol,
-                        buy_budget,
-                        price,
-                        f"补位买入风险调整{momentum_label}日混合动量Top{max_positions}",
-                    )
+                sell_symbols = [
+                    symbol
+                    for symbol in list(positions.keys())
+                    if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold
+                ]
+                pending_rebalance = {
+                    "signal_date": current_date,
+                    "selected": selected,
+                    "selected_symbols": selected_symbols,
+                    "sell_rank_symbols": sell_rank_symbols,
+                    "sell_symbols": sell_symbols,
+                }
 
             value = _portfolio_value(cash, positions, last_prices)
             peak_value = max(peak_value, value)
@@ -865,6 +900,7 @@ class USStockSignalVirtualEngine:
             "ending_value": _round_or_none(current_value, 2),
             "cash": equity_curve[-1]["cash"] if equity_curve else _round_or_none(cash, 2),
             "holding_count": len(holdings),
+            "pending_signal_date": pending_rebalance["signal_date"].isoformat() if pending_rebalance else None,
         }
 
         return {
@@ -890,8 +926,11 @@ class USStockSignalVirtualEngine:
                 "sell_rank_threshold": sell_rank_threshold,
                 "sell_rank_multiplier": sell_rank_multiplier,
                 "rebalance_frequency": "weekly",
+                "execution_rule": "signal_close_next_open",
                 "rotation_rule": "hold_until_out_of_sell_rank",
                 "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
+                "signal_price_source": DAILY_PRICE_SOURCE,
+                "execution_price_source": NEXT_OPEN_PRICE_SOURCE,
                 "price_source": DAILY_PRICE_SOURCE,
             },
         }
