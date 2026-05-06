@@ -307,7 +307,7 @@ class AStockInnovation100Builder:
             self._progress("全市场日行情缓存已就绪", 50, processed_dates=len(trading_dates), total_dates=len(trading_dates))
             return
 
-        chunk_size = 20
+        chunk_size = 15
         max_calendar_span_days = 35
         chunks = []
         current_chunk: List[date] = []
