@@ -34,6 +34,7 @@ RETENTION_RANK = 125
 MIN_LISTING_DAYS = 365
 LIQUIDITY_WINDOW = 60
 MIN_AVG_AMOUNT_60D = 100_000.0  # Tushare amount单位为千元，约等于1亿元人民币。
+MIN_MARKET_DAILY_ROWS = 3500
 MAX_SINGLE_WEIGHT = 0.10
 TOP5_WEIGHT_CAP = 0.40
 LARGE_WEIGHT_THRESHOLD = 0.045
@@ -277,7 +278,7 @@ class AStockInnovation100Builder:
         existing_count = self.db.query(AStockMarketDaily).filter(
             AStockMarketDaily.trade_date == trade_date
         ).count()
-        if existing_count >= 1000:
+        if existing_count >= MIN_MARKET_DAILY_ROWS:
             return
 
         frame = self.tushare.get_a_stock_market_daily_frame(trade_date)
@@ -302,7 +303,7 @@ class AStockInnovation100Builder:
         if not trading_dates:
             return
         counts = self._existing_market_day_counts(min(trading_dates), max(trading_dates))
-        missing_dates = [item for item in trading_dates if counts.get(item, 0) < 1000]
+        missing_dates = [item for item in trading_dates if counts.get(item, 0) < MIN_MARKET_DAILY_ROWS]
         if not missing_dates:
             self._progress("全市场日行情缓存已就绪", 50, processed_dates=len(trading_dates), total_dates=len(trading_dates))
             return
