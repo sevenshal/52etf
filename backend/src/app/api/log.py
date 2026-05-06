@@ -31,7 +31,7 @@ def _read_last_lines(path: str, num_lines: int = 10, chunk_size: int = 8192):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
-        log_file = "/var/log/quant/app.log"
+        log_file = "/var/log/quant/service.log"
         print(f"Attempting to open and tail log file: {log_file}")
         # Send last 10 lines immediately upon connection
         for initial_line in _read_last_lines(log_file, num_lines=10):
