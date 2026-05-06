@@ -237,6 +237,24 @@ class AStockMarketDaily(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class AStockIndexDaily(Base):
+    """A股指数日行情缓存，用于自编指数基准对比。"""
+    __tablename__ = "a_stock_index_daily"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    pre_close = Column(Float)
+    change = Column(Float)
+    pct_chg = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class AStockInnovation100Level(Base):
     """A股创新100指数每日点位。"""
     __tablename__ = "a_stock_innovation100_levels"
@@ -1032,6 +1050,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_levels_date ON a_stock_innovation100_levels(index_code, date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_rebalances_date ON a_stock_innovation100_rebalances(index_code, rebalance_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_constituents_symbol ON a_stock_innovation100_constituents(index_code, ts_code, rebalance_date)",

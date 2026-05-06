@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..core.database import (
     AStockBasic,
+    AStockIndexDaily,
     AStockInnovation100Constituent,
     AStockInnovation100Level,
     AStockInnovation100Rebalance,
@@ -28,6 +29,10 @@ INDEX_CODE = "CNINNO100"
 INDEX_NAME = "A股创新100"
 BASE_LEVEL = 1000.0
 DEFAULT_START_DATE = date(2020, 1, 1)
+BENCHMARK_INDEXES = [
+    {"ts_code": "000300.SH", "name": "沪深300"},
+    {"ts_code": "000905.SH", "name": "中证500"},
+]
 TARGET_CONSTITUENT_COUNT = 100
 DIRECT_ENTRY_RANK = 75
 RETENTION_RANK = 125
@@ -1026,6 +1031,138 @@ def rebuild_a_stock_innovation100(
 ) -> Dict:
     builder = AStockInnovation100Builder(db, progress_callback=progress_callback)
     return builder.rebuild(start_date=start_date, end_date=end_date, force_rebuild_outputs=True)
+
+
+def _upsert_index_daily_frame(db: Session, frame: pd.DataFrame):
+    if frame.empty:
+        return
+
+    now = datetime.now()
+    mappings = []
+    for _, row in frame.iterrows():
+        ts_code = str(row.get("ts_code") or "").strip()
+        trade_date = _parse_date(row.get("trade_date"))
+        if not ts_code or not trade_date:
+            continue
+        mappings.append(
+            {
+                "ts_code": ts_code,
+                "trade_date": trade_date,
+                "open": _round_or_none(row.get("open"), 6),
+                "high": _round_or_none(row.get("high"), 6),
+                "low": _round_or_none(row.get("low"), 6),
+                "close": _round_or_none(row.get("close"), 6),
+                "pre_close": _round_or_none(row.get("pre_close"), 6),
+                "change": _round_or_none(row.get("change"), 6),
+                "pct_chg": _round_or_none(row.get("pct_chg"), 6),
+                "vol": _round_or_none(row.get("vol"), 4),
+                "amount": _round_or_none(row.get("amount"), 4),
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if not mappings:
+        return
+
+    table = AStockIndexDaily.__table__
+    for batch in AStockInnovation100Builder._chunks(mappings, 1000):
+        stmt = sqlite_insert(table).values(batch)
+        update_columns = {
+            column.name: getattr(stmt.excluded, column.name)
+            for column in table.columns
+            if column.name not in {"ts_code", "trade_date"} and not column.primary_key
+        }
+        db.execute(stmt.on_conflict_do_update(index_elements=["ts_code", "trade_date"], set_=update_columns))
+    db.commit()
+
+
+def sync_benchmark_index_daily(
+    db: Session,
+    start_date: date,
+    end_date: date,
+    tushare_service: Optional[TushareService] = None,
+):
+    start_value = _parse_date(start_date)
+    end_value = _parse_date(end_date)
+    if not start_value or not end_value or start_value > end_value:
+        return
+
+    tushare = tushare_service or TushareService.getInstance()
+    for benchmark in BENCHMARK_INDEXES:
+        ts_code = benchmark["ts_code"]
+        first_date = (
+            db.query(AStockIndexDaily.trade_date)
+            .filter(AStockIndexDaily.ts_code == ts_code)
+            .order_by(AStockIndexDaily.trade_date.asc())
+            .first()
+        )
+        last_date = (
+            db.query(AStockIndexDaily.trade_date)
+            .filter(AStockIndexDaily.ts_code == ts_code)
+            .order_by(AStockIndexDaily.trade_date.desc())
+            .first()
+        )
+        cached_start = first_date[0] if first_date else None
+        cached_end = last_date[0] if last_date else None
+
+        fetch_ranges: List[Tuple[date, date]] = []
+        if not cached_start or not cached_end:
+            fetch_ranges.append((start_value, end_value))
+        else:
+            if cached_start > start_value:
+                fetch_ranges.append((start_value, cached_start - timedelta(days=1)))
+            if cached_end < end_value:
+                fetch_ranges.append((cached_end + timedelta(days=1), end_value))
+
+        for range_start, range_end in fetch_ranges:
+            if range_start > range_end:
+                continue
+            frame = tushare.get_index_daily_range_frame(ts_code, range_start, range_end)
+            _upsert_index_daily_frame(db, frame)
+
+
+def load_benchmark_index_curves(db: Session, start_date: date, end_date: date) -> List[Dict]:
+    start_value = _parse_date(start_date)
+    end_value = _parse_date(end_date)
+    if not start_value or not end_value or start_value > end_value:
+        return []
+
+    sync_benchmark_index_daily(db, start_value, end_value)
+    curves = []
+    for benchmark in BENCHMARK_INDEXES:
+        ts_code = benchmark["ts_code"]
+        rows = (
+            db.query(AStockIndexDaily)
+            .filter(
+                AStockIndexDaily.ts_code == ts_code,
+                AStockIndexDaily.trade_date >= start_value,
+                AStockIndexDaily.trade_date <= end_value,
+            )
+            .order_by(AStockIndexDaily.trade_date.asc())
+            .all()
+        )
+        base_close = next((float(row.close) for row in rows if _is_finite_positive(row.close)), None)
+        levels = []
+        for row in rows:
+            close = float(row.close) if _is_finite_positive(row.close) else None
+            levels.append(
+                {
+                    "date": row.trade_date.isoformat(),
+                    "close": _round_or_none(close, 6),
+                    "level": _round_or_none(close / base_close * BASE_LEVEL, 6) if close and base_close else None,
+                    "daily_return_pct": _round_or_none(row.pct_chg, 6),
+                }
+            )
+        curves.append(
+            {
+                "ts_code": ts_code,
+                "name": benchmark["name"],
+                "base_level": BASE_LEVEL,
+                "levels": levels,
+            }
+        )
+    return curves
 
 
 def load_a_stock_innovation100_summary(db: Session) -> Dict:

@@ -21,6 +21,7 @@ from ...robot.a_stock_innovation100 import (
     INDEX_CODE,
     compute_yearly_returns,
     load_a_stock_innovation100_summary,
+    load_benchmark_index_curves,
     rebuild_a_stock_innovation100,
 )
 from .account import valid_account
@@ -210,6 +211,12 @@ def get_detail(
             .all()
         )
 
+    benchmark_levels = (
+        load_benchmark_index_curves(db, levels[0].date, levels[-1].date)
+        if levels
+        else []
+    )
+
     return {
         "summary": summary,
         "levels": [
@@ -223,6 +230,7 @@ def get_detail(
             }
             for row in levels
         ],
+        "benchmark_levels": benchmark_levels,
         "yearly_returns": compute_yearly_returns(levels),
         "rebalances": [_serialize_rebalance(row) for row in rebalances],
         "selected_rebalance": _serialize_rebalance(selected_rebalance) if selected_rebalance else None,

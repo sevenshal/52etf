@@ -463,6 +463,42 @@ class TushareService(QuoteProvider):
         )
         return merged
 
+    def get_index_daily_range_frame(self, ts_code: str, start_date: date, end_date: date, limit: int = 5000) -> pd.DataFrame:
+        """分页获取A股指数日行情。"""
+        index_code = self.normalize_symbol(ts_code)
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not index_code or not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        while True:
+            try:
+                frame = self.pro.index_daily(
+                    ts_code=index_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare index_daily fetch failed for %s %s~%s offset=%s: %s", index_code, start_value, end_value, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
+
     def _load_fund_basic_frame(self) -> pd.DataFrame:
         if self._fund_basic_frame is None:
             try:
