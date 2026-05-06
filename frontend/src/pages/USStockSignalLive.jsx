@@ -42,6 +42,7 @@ const DEFAULT_FORM_VALUES = {
   max_positions: 7,
   sell_rank_multiplier: 2,
   index_weight_blend: 0.4,
+  rebalance_frequency: 'weekly',
   slippage_pct: 0.02,
   commission_pct: 0.03,
   auto_sync_enabled: true,
@@ -330,6 +331,40 @@ const USStockSignalLive = () => {
 
   const summary = detail?.summary || {};
   const metrics = summary.metrics || {};
+  const yearlyStats = detail?.yearly_stats || summary.yearly_stats || [];
+  const yearlyColumns = useMemo(() => {
+    const benchmarkSymbols = selectedConfig?.candidate_etfs || [];
+    const primarySymbol = benchmarkSymbols[0];
+    return [
+      { title: '年份', dataIndex: 'year', width: 90 },
+      { title: '区间', width: 210, render: (_, row) => `${row.start_date || '-'} ~ ${row.end_date || '-'}` },
+      { title: '策略收益', dataIndex: 'strategy_return_pct', width: 110, align: 'right', render: formatPercent },
+      ...benchmarkSymbols.map(symbol => ({
+        title: `${symbol}基准`,
+        dataIndex: ['benchmark_returns_pct', symbol],
+        width: 120,
+        align: 'right',
+        render: formatPercent,
+      })),
+      {
+        title: primarySymbol ? `超额${primarySymbol}` : '超额',
+        dataIndex: ['excess_returns_pct', primarySymbol],
+        width: 120,
+        align: 'right',
+        render: formatPercent,
+      },
+      {
+        title: '跑赢全部',
+        dataIndex: 'outperformed_all',
+        width: 100,
+        render: value => (
+          value === null || value === undefined
+            ? '-'
+            : <Tag color={value ? 'green' : 'red'}>{value ? '是' : '否'}</Tag>
+        ),
+      },
+    ];
+  }, [selectedConfig]);
 
   return (
     <div style={{ padding: 24 }}>
@@ -405,7 +440,7 @@ const USStockSignalLive = () => {
                 <Descriptions.Item label="轮换规则">持仓跌出卖出排名才卖出</Descriptions.Item>
                 <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
                 <Descriptions.Item label="排名规则">混合动量 + 成分权重倾斜</Descriptions.Item>
-                <Descriptions.Item label="检查频率">每周最后一个交易日</Descriptions.Item>
+                <Descriptions.Item label="检查频率">按调仓周期最后一个交易日</Descriptions.Item>
                 <Descriptions.Item label="执行方式">收盘出信号，次日开盘成交</Descriptions.Item>
               </Descriptions>
               <Row gutter={12}>
@@ -452,6 +487,15 @@ const USStockSignalLive = () => {
                   </Form.Item>
                 </Col>
               </Row>
+              <Form.Item name="rebalance_frequency" label="调仓周期" rules={[{ required: true }]}>
+                <Select
+                  options={[
+                    { label: '日调仓', value: 'daily' },
+                    { label: '周调仓', value: 'weekly' },
+                    { label: '月调仓', value: 'monthly' },
+                  ]}
+                />
+              </Form.Item>
               <Row gutter={12}>
                 <Col span={12}>
                   <Form.Item name="min_listing_days" label="最少上市天数" rules={[{ required: true }]}>
@@ -499,7 +543,7 @@ const USStockSignalLive = () => {
                     <Descriptions.Item label="年化收益">{formatPercent(metrics.annualized_return)}</Descriptions.Item>
                     <Descriptions.Item label="最大回撤">{formatPercent(metrics.max_drawdown)}</Descriptions.Item>
                     <Descriptions.Item label="排名记录">{metrics.rank_signal_count ?? metrics.signal_count ?? summary.signal_count ?? '-'}</Descriptions.Item>
-                    <Descriptions.Item label="周度检查">{metrics.rebalance_count ?? '-'}</Descriptions.Item>
+                    <Descriptions.Item label="调仓检查">{metrics.rebalance_count ?? '-'}</Descriptions.Item>
                     <Descriptions.Item label="交易数">{metrics.trade_count ?? summary.trade_count ?? '-'}</Descriptions.Item>
                     <Descriptions.Item label="持仓数">{summary.holding_count ?? '-'}</Descriptions.Item>
                   </Descriptions>
@@ -525,6 +569,11 @@ const USStockSignalLive = () => {
                         key: 'trades',
                         label: '交易',
                         children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ pageSize: 20 }} scroll={{ x: 1450 }} />,
+                      },
+                      {
+                        key: 'yearly',
+                        label: '分年',
+                        children: <Table rowKey="year" size="small" columns={yearlyColumns} dataSource={yearlyStats} pagination={false} scroll={{ x: 960 }} />,
                       },
                       {
                         key: 'events',
