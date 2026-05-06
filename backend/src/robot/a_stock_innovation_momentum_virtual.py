@@ -1,9 +1,10 @@
 import bisect
 import logging
 import math
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session as ORMSession
@@ -16,6 +17,7 @@ from ..core.database import (
     AStockMarketDaily,
     engine,
 )
+from ..core.services.tushare import TushareService
 from .a_stock_innovation100 import INDEX_CODE as BENCHMARK_INDEX_CODE
 from .us_stock_signal_virtual import (
     DAILY_PRICE_SOURCE,
@@ -50,7 +52,15 @@ DEFAULT_COMMISSION_PCT = 0.03
 DEFAULT_SLIPPAGE_PCT = 0.02
 DEFAULT_LOT_SIZE = 100
 DEFAULT_MIN_LISTING_DAYS = 365
+DEFAULT_FUNDAMENTAL_WEIGHTS = {
+    "circ_mv": 0.34,
+    "revenue_growth_3y": 0.33,
+    "rd_exp_ratio": 0.33,
+}
+DEFAULT_FUNDAMENTAL_BLEND = 0.0
 BENCHMARK_SYMBOL = BENCHMARK_INDEX_CODE
+FUNDAMENTAL_WEIGHT_KEYS = ["circ_mv", "revenue_growth_3y", "rd_exp_ratio"]
+FUNDAMENTAL_HISTORY_LOOKBACK_DAYS = 365 * 6
 
 
 @dataclass
@@ -83,6 +93,217 @@ def _to_date(value) -> Optional[date]:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_fundamental_weights(raw_weights) -> Dict[str, float]:
+    raw_weights = raw_weights if isinstance(raw_weights, dict) else DEFAULT_FUNDAMENTAL_WEIGHTS
+    weights: Dict[str, float] = {}
+    for key in FUNDAMENTAL_WEIGHT_KEYS:
+        raw_value = raw_weights.get(key, raw_weights.get(str(key), 0.0))
+        try:
+            weight = float(raw_value or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        weights[key] = max(0.0, weight)
+
+    total = sum(weights.values())
+    if total <= 0:
+        return {key: 1.0 / len(FUNDAMENTAL_WEIGHT_KEYS) for key in FUNDAMENTAL_WEIGHT_KEYS}
+    return {
+        key: value / total
+        for key, value in weights.items()
+        if value > 0
+    }
+
+
+def _format_fundamental_weights(weights: Dict[str, float]) -> Dict[str, float]:
+    return {
+        key: _round_or_none(weights.get(key, 0.0), 6) or 0.0
+        for key in FUNDAMENTAL_WEIGHT_KEYS
+    }
+
+
+def _assign_percentiles(items: List[Dict], value_key: str, percentile_key: str, default: float = 0.5):
+    valid_items = [
+        item for item in items
+        if _is_finite_number(item.get(value_key))
+    ]
+    if not valid_items:
+        for item in items:
+            item[percentile_key] = default
+        return
+
+    ranked = sorted(
+        valid_items,
+        key=lambda item: (
+            float(item.get(value_key) or 0.0),
+            float(item.get("turnover") or 0.0),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
+    denominator = max(1, len(ranked) - 1)
+    scores = {
+        item["symbol"]: 1.0 - (index / denominator)
+        for index, item in enumerate(ranked)
+    }
+    for item in items:
+        item[percentile_key] = scores.get(item["symbol"], default)
+
+
+@lru_cache(maxsize=1024)
+def _load_symbol_income_history(ts_code: str, fetch_start_iso: str, end_date_iso: str) -> Tuple[Tuple]:
+    service = TushareService.getInstance()
+    frame = service.get_a_stock_income_frame(ts_code)
+    if frame is None or frame.empty:
+        return tuple()
+
+    fetch_start = date.fromisoformat(fetch_start_iso)
+    end_date = date.fromisoformat(end_date_iso)
+
+    working = frame.copy()
+    working = working.dropna(subset=["end_date"])
+    working = working[working["end_date"].map(lambda item: isinstance(item, date) and item.month == 12 and item.day == 31)]
+    if "ann_date" in working.columns:
+        working = working[
+            working["ann_date"].notna()
+            & (working["ann_date"] >= fetch_start)
+            & (working["ann_date"] <= end_date)
+        ]
+    if working.empty:
+        return tuple()
+
+    working = working.sort_values(["end_date", "ann_date"], na_position="first")
+    working = working.drop_duplicates(subset=["end_date"], keep="last")
+
+    records = []
+    for row in working.itertuples(index=False):
+        end_row_date = getattr(row, "end_date", None)
+        ann_row_date = getattr(row, "ann_date", None)
+        operate_income = getattr(row, "operate_income", None)
+        rd_exp = getattr(row, "rd_exp", None)
+        if not _is_finite_number(operate_income) or float(operate_income) <= 0:
+            continue
+        records.append({
+            "end_date": end_row_date.isoformat() if isinstance(end_row_date, date) else None,
+            "ann_date": ann_row_date.isoformat() if isinstance(ann_row_date, date) else None,
+            "operate_income": float(operate_income),
+            "rd_exp": float(rd_exp) if _is_finite_number(rd_exp) and float(rd_exp) >= 0 else None,
+        })
+    return tuple(tuple(sorted(record.items())) for record in records)
+
+
+def _parse_income_history(history: Tuple[Tuple]) -> List[Dict]:
+    return [dict(record) for record in history or []]
+
+
+def _build_fundamental_snapshot(history: List[Dict], current_date: date) -> Optional[Dict]:
+    if not history:
+        return None
+
+    current_rows = [
+        row for row in history
+        if row.get("ann_date") and date.fromisoformat(row["ann_date"]) <= current_date
+    ]
+    if not current_rows:
+        return None
+
+    latest = max(
+        current_rows,
+        key=lambda item: (
+            item.get("end_date") or "",
+            item.get("ann_date") or "",
+        ),
+    )
+    latest_end_date = date.fromisoformat(latest["end_date"])
+    latest_income = float(latest.get("operate_income") or 0.0)
+    latest_rd_exp = latest.get("rd_exp")
+    rd_exp_ratio_pct = (
+        float(latest_rd_exp) / latest_income * 100.0
+        if _is_finite_number(latest_rd_exp) and latest_income > 0
+        else None
+    )
+
+    base_candidates = [
+        row for row in current_rows
+        if row.get("end_date") and date.fromisoformat(row["end_date"]).year <= latest_end_date.year - 3
+    ]
+    revenue_growth_3y_pct = None
+    if base_candidates:
+        base = max(
+            base_candidates,
+            key=lambda item: (
+                item.get("end_date") or "",
+                item.get("ann_date") or "",
+            ),
+        )
+        base_end_date = date.fromisoformat(base["end_date"])
+        base_income = float(base.get("operate_income") or 0.0)
+        years = latest_end_date.year - base_end_date.year
+        if base_income > 0 and years >= 3 and latest_income > 0:
+            revenue_growth_3y_pct = (latest_income / base_income) ** (1.0 / years) - 1.0
+            revenue_growth_3y_pct *= 100.0
+
+    return {
+        "report_end_date": latest.get("end_date"),
+        "report_ann_date": latest.get("ann_date"),
+        "revenue_growth_3y_pct": _round_or_none(revenue_growth_3y_pct, 4),
+        "rd_exp_ratio_pct": _round_or_none(rd_exp_ratio_pct, 4),
+        "operate_income": _round_or_none(latest_income, 4),
+        "rd_exp": _round_or_none(latest_rd_exp, 4),
+    }
+
+
+def _apply_fundamental_blend(
+    ranked: List[Dict],
+    fundamental_weights: Dict[str, float],
+    fundamental_blend: float,
+) -> List[Dict]:
+    blend = max(0.0, min(1.0, float(fundamental_blend or 0.0)))
+    if not ranked:
+        return ranked
+
+    for key in FUNDAMENTAL_WEIGHT_KEYS:
+        _assign_percentiles(ranked, key, f"{key}_percentile")
+
+    normalized_weights = _normalize_fundamental_weights(fundamental_weights)
+    total_weight = sum(normalized_weights.values()) or 1.0
+
+    for item in ranked:
+        item["base_rank_score"] = item.get("rank_score")
+        fundamental_score = 0.0
+        for key, weight in normalized_weights.items():
+            percentile = float(item.get(f"{key}_percentile") or 0.5)
+            fundamental_score += percentile * weight
+        fundamental_score /= total_weight
+        item["fundamental_score"] = fundamental_score
+        if blend <= 0:
+            continue
+        item["rank_score"] = (
+            (1 - blend) * float(item.get("base_rank_score") or -1e18)
+            + blend * fundamental_score
+        )
+
+    return sorted(
+        ranked,
+        key=lambda item: (
+            float(item.get("rank_score") or -1e18),
+            float(item.get("base_rank_score") or -1e18),
+            float(item.get("fundamental_score") or -1e18),
+            float(item.get("momentum_score") or -1e18),
+            float(item.get("index_weight") or 0.0),
+            float(item.get("turnover") or 0.0),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
 
 
 def load_a_stock_innovation_universe_history(
@@ -171,7 +392,7 @@ def _load_price_rows(symbols: List[str], start_date: date, end_date: date) -> Di
             params.update({"start_date": start_date.isoformat(), "end_date": end_date.isoformat()})
             price_rows = conn.execute(
                 text(f"""
-                    SELECT ts_code, trade_date, open, high, low, close, amount
+                    SELECT ts_code, trade_date, open, high, low, close, amount, circ_mv
                     FROM a_stock_market_daily
                     WHERE trade_date >= :start_date
                       AND trade_date <= :end_date
@@ -196,6 +417,7 @@ def _load_price_rows(symbols: List[str], start_date: date, end_date: date) -> Di
                         "close": float(row[5]),
                         "volume": 0.0,
                         "turnover": float(row[6] or 0.0),
+                        "circ_mv": float(row[7]) if row[7] is not None else None,
                     }
                 )
     return rows_by_symbol
@@ -243,6 +465,9 @@ class AStockInnovationMomentumVirtualEngine:
         max_momentum_window = max(momentum_windows)
         momentum_label = "+".join(str(window) for window in momentum_windows)
         index_weight_blend = max(0.0, min(1.0, float(getattr(self.config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND) or 0.0)))
+        fundamental_weights = _normalize_fundamental_weights(getattr(self.config, "fundamental_weights", None))
+        fundamental_weights_payload = _format_fundamental_weights(fundamental_weights)
+        fundamental_blend = max(0.0, min(1.0, float(getattr(self.config, "fundamental_blend", DEFAULT_FUNDAMENTAL_BLEND) or 0.0)))
         min_listing_days = max(0, int(getattr(self.config, "min_listing_days", DEFAULT_MIN_LISTING_DAYS) or 0))
         max_positions = max(1, int(self.config.max_positions or 1))
         sell_rank_multiplier = max(1.0, float(getattr(self.config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER) or 1.0))
@@ -278,6 +503,24 @@ class AStockInnovationMomentumVirtualEngine:
         klines_by_symbol = _load_price_rows(universe_history.all_symbols, fetch_start, end_date)
         if not klines_by_symbol:
             raise ValueError("没有可用的A股创新100成分行情")
+
+        uses_income_factors = (
+            fundamental_blend > 0
+            and (
+                fundamental_weights.get("revenue_growth_3y", 0.0) > 0
+                or fundamental_weights.get("rd_exp_ratio", 0.0) > 0
+            )
+        )
+        fundamental_history = {}
+        if uses_income_factors:
+            self.report(7, "载入创新100历史成分财务因子")
+            fundamental_fetch_start = start_date - timedelta(days=FUNDAMENTAL_HISTORY_LOOKBACK_DAYS)
+            fundamental_history = {
+                symbol: _parse_income_history(
+                    _load_symbol_income_history(symbol, fundamental_fetch_start.isoformat(), end_date.isoformat())
+                )
+                for symbol in universe_history.all_symbols
+            }
 
         basic_rows = self.db.query(AStockBasic).filter(AStockBasic.ts_code.in_(universe_history.all_symbols)).all()
         basic_map = {
@@ -442,7 +685,8 @@ class AStockInnovationMomentumVirtualEngine:
             universe_size_by_date[current_date.isoformat()] = len(current_universe)
             open_map = {}
             price_map = {}
-            for symbol in current_universe:
+            pricing_symbols = list(dict.fromkeys([*current_universe, *positions.keys()]))
+            for symbol in pricing_symbols:
                 row = row_by_symbol_date.get(symbol, {}).get(current_date)
                 if not row:
                     continue
@@ -519,18 +763,26 @@ class AStockInnovationMomentumVirtualEngine:
                         continue
                     row = row_by_symbol_date[symbol][current_date]
                     momentum_score = snapshot.get("risk_adjusted_score")
+                    fundamental_snapshot = _build_fundamental_snapshot(fundamental_history.get(symbol) or [], current_date)
                     ranked.append({
                         "symbol": symbol,
                         "name": basic.get("name"),
                         "industry": basic.get("industry"),
                         "price": price_map[symbol],
                         "turnover": float(row.get("turnover") or 0.0),
+                        "circ_mv": float(row.get("circ_mv") or 0.0) if _is_finite_number(row.get("circ_mv")) else None,
                         "index_weight": float(current_index_weights.get(symbol) or 0.0),
                         "momentum_score": momentum_score,
                         "snapshot": snapshot,
+                        "fundamental_snapshot": fundamental_snapshot,
+                        "revenue_growth_3y_pct": fundamental_snapshot.get("revenue_growth_3y_pct") if fundamental_snapshot else None,
+                        "rd_exp_ratio_pct": fundamental_snapshot.get("rd_exp_ratio_pct") if fundamental_snapshot else None,
+                        "report_end_date": fundamental_snapshot.get("report_end_date") if fundamental_snapshot else None,
+                        "report_ann_date": fundamental_snapshot.get("report_ann_date") if fundamental_snapshot else None,
                     })
 
                 ranked = _apply_index_weight_blend(ranked, index_weight_blend)
+                ranked = _apply_fundamental_blend(ranked, fundamental_weights, fundamental_blend)
                 selected = ranked[:max_positions]
                 selected_symbols = [item["symbol"] for item in selected]
                 sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
@@ -554,12 +806,24 @@ class AStockInnovationMomentumVirtualEngine:
                             "name": item.get("name"),
                             "industry": item.get("industry"),
                             "rank_score": _round_or_none(item.get("rank_score"), 6),
+                            "base_rank_score": _round_or_none(item.get("base_rank_score"), 6),
                             "momentum_score": item.get("momentum_score"),
                             "momentum_percentile": _round_or_none(item.get("momentum_percentile"), 6),
                             "index_weight": _round_or_none(item.get("index_weight"), 8),
                             "index_weight_pct": _round_or_none((item.get("index_weight") or 0.0) * 100, 4),
                             "index_weight_percentile": _round_or_none(item.get("index_weight_percentile"), 6),
                             "index_weight_blend": index_weight_blend,
+                            "fundamental_blend": fundamental_blend,
+                            "fundamental_score": _round_or_none(item.get("fundamental_score"), 6),
+                            "fundamental_weights": fundamental_weights_payload,
+                            "circ_mv": _round_or_none(item.get("circ_mv"), 4),
+                            "circ_mv_percentile": _round_or_none(item.get("circ_mv_percentile"), 6),
+                            "revenue_growth_3y_pct": _round_or_none(item.get("revenue_growth_3y_pct"), 4),
+                            "revenue_growth_3y_percentile": _round_or_none(item.get("revenue_growth_3y_percentile"), 6),
+                            "rd_exp_ratio_pct": _round_or_none(item.get("rd_exp_ratio_pct"), 4),
+                            "rd_exp_ratio_percentile": _round_or_none(item.get("rd_exp_ratio_percentile"), 6),
+                            "report_end_date": item.get("report_end_date"),
+                            "report_ann_date": item.get("report_ann_date"),
                             "selected_symbols": selected_symbols,
                             "sell_rank_symbols": sell_rank_symbols,
                             "max_positions": max_positions,
@@ -685,6 +949,9 @@ class AStockInnovationMomentumVirtualEngine:
                 "momentum_windows": momentum_windows,
                 "momentum_weights": momentum_weights_payload,
                 "index_weight_blend": index_weight_blend,
+                "fundamental_weights": fundamental_weights_payload,
+                "fundamental_blend": fundamental_blend,
+                "fundamental_income_loaded": uses_income_factors,
                 "sell_rank_threshold": sell_rank_threshold,
                 "sell_rank_multiplier": sell_rank_multiplier,
                 "rebalance_frequency": rebalance_frequency,

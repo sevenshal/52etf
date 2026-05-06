@@ -27,6 +27,8 @@ from ...robot.a_stock_innovation_momentum_virtual import (
     DEFAULT_LOT_SIZE,
     DEFAULT_MAX_POSITIONS,
     DEFAULT_MIN_LISTING_DAYS,
+    DEFAULT_FUNDAMENTAL_BLEND,
+    DEFAULT_FUNDAMENTAL_WEIGHTS,
     DEFAULT_MOMENTUM_WEIGHTS,
     DEFAULT_NAME,
     DEFAULT_REBALANCE_FREQUENCY,
@@ -54,6 +56,8 @@ class AStockInnovationMomentumConfigPayload(BaseModel):
     start_date: date = DEFAULT_START_DATE
     min_listing_days: int = DEFAULT_MIN_LISTING_DAYS
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
+    fundamental_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_FUNDAMENTAL_WEIGHTS.copy())
+    fundamental_blend: float = DEFAULT_FUNDAMENTAL_BLEND
     max_positions: int = DEFAULT_MAX_POSITIONS
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
     index_weight_blend: float = DEFAULT_INDEX_WEIGHT_BLEND
@@ -99,6 +103,30 @@ class AStockInnovationMomentumConfigPayload(BaseModel):
         if sum(normalized.values()) <= 0:
             raise ValueError("至少设置一个大于0的动量权重")
         return normalized
+
+    @validator("fundamental_weights", pre=True)
+    def validate_fundamental_weights(cls, value):
+        raw_weights = value if isinstance(value, dict) else DEFAULT_FUNDAMENTAL_WEIGHTS
+        required_keys = ["circ_mv", "revenue_growth_3y", "rd_exp_ratio"]
+        normalized = {}
+        for key in required_keys:
+            raw_value = raw_weights.get(key, raw_weights.get(str(key), 0))
+            try:
+                weight = float(raw_value or 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} 权重必须是数字")
+            if weight < 0:
+                raise ValueError(f"{key} 权重不能为负数")
+            normalized[key] = weight
+        if sum(normalized.values()) <= 0:
+            raise ValueError("至少设置一个大于0的基本面权重")
+        return normalized
+
+    @validator("fundamental_blend")
+    def validate_fundamental_blend(cls, value):
+        if value < 0 or value > 1:
+            raise ValueError("基本面倾斜必须在0到1之间")
+        return value
 
     @validator("max_positions")
     def validate_max_positions(cls, value):
@@ -162,6 +190,8 @@ def _config_to_dict(config: AStockInnovationMomentumConfig) -> Dict:
         "start_date": config.start_date.isoformat() if config.start_date else None,
         "min_listing_days": config.min_listing_days,
         "momentum_weights": config.momentum_weights or DEFAULT_MOMENTUM_WEIGHTS.copy(),
+        "fundamental_weights": config.fundamental_weights or DEFAULT_FUNDAMENTAL_WEIGHTS.copy(),
+        "fundamental_blend": config.fundamental_blend if config.fundamental_blend is not None else DEFAULT_FUNDAMENTAL_BLEND,
         "max_positions": config.max_positions,
         "sell_rank_multiplier": config.sell_rank_multiplier,
         "index_weight_blend": config.index_weight_blend,
@@ -383,6 +413,8 @@ def get_defaults():
         "start_date": DEFAULT_START_DATE.isoformat(),
         "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
         "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS.copy(),
+        "fundamental_weights": DEFAULT_FUNDAMENTAL_WEIGHTS.copy(),
+        "fundamental_blend": DEFAULT_FUNDAMENTAL_BLEND,
         "max_positions": DEFAULT_MAX_POSITIONS,
         "sell_rank_multiplier": DEFAULT_SELL_RANK_MULTIPLIER,
         "index_weight_blend": DEFAULT_INDEX_WEIGHT_BLEND,

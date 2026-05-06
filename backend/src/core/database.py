@@ -1047,6 +1047,8 @@ class AStockInnovationMomentumConfig(Base):
     start_date = Column(Date, nullable=False)
     min_listing_days = Column(Integer, nullable=False, default=365)
     momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 0.0, "60": 0.20, "120": 0.80})
+    fundamental_weights = Column(JSON, nullable=False, default=lambda: {"circ_mv": 0.34, "revenue_growth_3y": 0.33, "rd_exp_ratio": 0.33})
+    fundamental_blend = Column(Float, nullable=False, default=0.0)
     max_positions = Column(Integer, nullable=False, default=5)
     sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
     index_weight_blend = Column(Float, nullable=False, default=0.8)
@@ -1214,6 +1216,10 @@ def ensure_table_columns():
             "sell_rank_multiplier": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN sell_rank_multiplier FLOAT NOT NULL DEFAULT 2.0",
             "index_weight_blend": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN index_weight_blend FLOAT NOT NULL DEFAULT 0.4",
             "rebalance_frequency": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly'",
+        },
+        "a_stock_innovation_momentum_configs": {
+            "fundamental_weights": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_weights JSON NOT NULL DEFAULT '{\"circ_mv\":0.34,\"revenue_growth_3y\":0.33,\"rd_exp_ratio\":0.33}'",
+            "fundamental_blend": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_blend FLOAT NOT NULL DEFAULT 0.0",
         },
     }
 
