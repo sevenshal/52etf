@@ -29,7 +29,7 @@ import request from '../utils/request';
 import { formatNumber } from '../utils/format';
 
 const { Text, Title } = Typography;
-const DEFAULT_MOMENTUM_WEIGHTS = { 20: 1, 60: 0, 120: 0 };
+const DEFAULT_MOMENTUM_WEIGHTS = { 20: 0.05, 60: 0.2, 120: 0.75 };
 
 const DEFAULT_FORM_VALUES = {
   name: '美股风险调整混合动量虚拟盘',
@@ -39,7 +39,9 @@ const DEFAULT_FORM_VALUES = {
   start_date: dayjs().subtract(3, 'year'),
   min_listing_days: 365,
   momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
-  max_positions: 10,
+  max_positions: 7,
+  sell_rank_multiplier: 2,
+  index_weight_blend: 0.4,
   slippage_pct: 0.02,
   commission_pct: 0.03,
   auto_sync_enabled: true,
@@ -294,7 +296,9 @@ const USStockSignalLive = () => {
     },
     { title: '价格', dataIndex: 'signal_price', width: 90, align: 'right', render: value => formatNumber(value, 2) },
     { title: '成交额', dataIndex: 'turnover', width: 130, align: 'right', render: formatMoney },
-    { title: '混合分数', dataIndex: 'threshold_pct', width: 100, align: 'right', render: formatScore },
+    { title: '排名分数', dataIndex: ['payload', 'rank_score'], width: 100, align: 'right', render: formatScore },
+    { title: '动量分数', dataIndex: 'threshold_pct', width: 100, align: 'right', render: formatScore },
+    { title: '权重', dataIndex: ['payload', 'index_weight_pct'], width: 90, align: 'right', render: formatPercent },
     { title: '20日分数', dataIndex: ['payload', 'components', '20', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
     { title: '60日分数', dataIndex: ['payload', 'components', '60', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
     { title: '120日分数', dataIndex: ['payload', 'components', '120', 'risk_adjusted_score'], width: 110, align: 'right', render: formatScore },
@@ -396,8 +400,9 @@ const USStockSignalLive = () => {
               </Form.Item>
               <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
                 <Descriptions.Item label="策略">风险调整混合动量 Top N</Descriptions.Item>
-                <Descriptions.Item label="轮换规则">持仓跌出 Top N 才卖出</Descriptions.Item>
+                <Descriptions.Item label="轮换规则">持仓跌出卖出排名才卖出</Descriptions.Item>
                 <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
+                <Descriptions.Item label="排名规则">混合动量 + 成分权重倾斜</Descriptions.Item>
                 <Descriptions.Item label="检查频率">每周最后一个交易日</Descriptions.Item>
               </Descriptions>
               <Row gutter={12}>
@@ -429,6 +434,18 @@ const USStockSignalLive = () => {
                 <Col span={12}>
                   <Form.Item name="max_positions" label="最大持仓数" rules={[{ required: true }]}>
                     <InputNumber min={1} max={50} step={1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="sell_rank_multiplier" label="卖出排名倍数" rules={[{ required: true }]}>
+                    <InputNumber min={1} max={10} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="index_weight_blend" label="成分权重倾斜" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
               </Row>
