@@ -32,6 +32,7 @@ import W20MomentumBacktest from './pages/W20MomentumBacktest';
 import W20MomentumLive from './pages/W20MomentumLive';
 import USStockSignalLive from './pages/USStockSignalLive';
 import AStockInnovation100 from './pages/AStockInnovation100';
+import AStockInnovationMomentumLive from './pages/AStockInnovationMomentumLive';
 
 function App() {
   return (
@@ -68,6 +69,7 @@ function App() {
           <Route path="/w20-momentum-backtest" element={<W20MomentumBacktest />} />
           <Route path="/w20-momentum-live" element={<W20MomentumLive />} />
           <Route path="/us-stock-signal-live" element={<USStockSignalLive />} />
+          <Route path="/a-stock-innovation-momentum-live" element={<AStockInnovationMomentumLive />} />
         </Route>
       </Routes>
     </AccountProvider>

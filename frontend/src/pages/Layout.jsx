@@ -37,6 +37,11 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
+      key: '/a-stock-innovation-momentum-live',
+      label: 'A创盘',
+      disabled: !accountId
+    },
+    {
       key: '/profile',
       label: '我的'
     }
