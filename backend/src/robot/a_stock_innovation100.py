@@ -459,6 +459,26 @@ class AStockInnovation100Builder:
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
         return frame
 
+    def _load_market_frames_by_date(self, start_date: date, end_date: date) -> Dict[date, pd.DataFrame]:
+        sql = """
+            SELECT trade_date, ts_code, close, pct_chg, amount, total_mv, circ_mv
+            FROM a_stock_market_daily
+            WHERE trade_date >= :start_date AND trade_date <= :end_date
+            ORDER BY trade_date
+        """
+        frame = pd.read_sql_query(
+            sql,
+            engine,
+            params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        )
+        if frame.empty:
+            return {}
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
+        return {
+            trade_date: group.drop(columns=["trade_date"]).reset_index(drop=True)
+            for trade_date, group in frame.groupby("trade_date", sort=False)
+        }
+
     def _load_basic_map(self) -> Dict[str, Dict]:
         rows = self.db.query(AStockBasic).all()
         return {
@@ -834,21 +854,26 @@ class AStockInnovation100Builder:
         if start_index is None:
             raise RuntimeError("开始日期之后没有交易日")
 
-        self._ensure_market_days(trading_dates)
-
         total_dates = len(trading_dates)
+        self._ensure_market_days(trading_dates)
+        self._progress("载入全市场行情缓存", 50, processed_dates=0, total_dates=total_dates)
+        market_frames_by_date = self._load_market_frames_by_date(min(trading_dates), max(trading_dates))
+
         for idx, current_date in enumerate(trading_dates):
             calc_progress = 50 + int(idx / max(total_dates, 1) * 40)
-            self._progress(
-                f"计算指数点位 {current_date.isoformat()}",
-                calc_progress,
-                processed_dates=idx + 1,
-                total_dates=total_dates,
-            )
-            market_frame = self._load_market_day(current_date)
+            if idx == 0 or idx == total_dates - 1 or idx % 20 == 0:
+                self._progress(
+                    f"计算指数点位 {current_date.isoformat()}",
+                    calc_progress,
+                    processed_dates=idx + 1,
+                    total_dates=total_dates,
+                )
+            market_frame = market_frames_by_date.get(current_date, pd.DataFrame())
             if market_frame.empty:
                 self._ensure_market_day(current_date)
                 market_frame = self._load_market_day(current_date)
+                if not market_frame.empty and "trade_date" in market_frame.columns:
+                    market_frames_by_date[current_date] = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
             last_market_frame = market_frame
             for _, row in market_frame.iterrows():
                 ts_code = str(row.get("ts_code") or "")
@@ -965,11 +990,7 @@ class AStockInnovation100Builder:
             "latest_rebalance_id": latest_rebalance.id if latest_rebalance else None,
             "latest_rebalance_date": latest_rebalance.rebalance_date.isoformat() if latest_rebalance else None,
             "rule_snapshot": self.rule_snapshot(),
-            "last_market_date": (
-                last_market_frame["trade_date"].iloc[0].isoformat()
-                if not last_market_frame.empty and "trade_date" in last_market_frame.columns
-                else None
-            ),
+            "last_market_date": trading_dates[-1].isoformat() if trading_dates else None,
         }
 
 
