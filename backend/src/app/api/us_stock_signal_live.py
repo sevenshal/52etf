@@ -28,7 +28,9 @@ from ...robot.us_stock_signal_virtual import (
     DEFAULT_CANDIDATE_ETFS,
     DEFAULT_INDEX_WEIGHT_BLEND,
     DEFAULT_MOMENTUM_WEIGHTS,
+    DEFAULT_REBALANCE_FREQUENCY,
     DEFAULT_SELL_RANK_MULTIPLIER,
+    SUPPORTED_REBALANCE_FREQUENCIES,
     SUPPORTED_MOMENTUM_WINDOWS,
     USStockSignalVirtualEngine,
 )
@@ -57,6 +59,7 @@ class USStockSignalConfigPayload(BaseModel):
     max_positions: int = 7
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
     index_weight_blend: float = DEFAULT_INDEX_WEIGHT_BLEND
+    rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY
     commission_pct: float = 0.03
     slippage_pct: float = 0.02
     auto_sync_enabled: bool = True
@@ -122,6 +125,13 @@ class USStockSignalConfigPayload(BaseModel):
             raise ValueError("成分权重倾斜必须在0到1之间")
         return value
 
+    @validator("rebalance_frequency")
+    def validate_rebalance_frequency(cls, value):
+        text = str(value or DEFAULT_REBALANCE_FREQUENCY).strip().lower()
+        if text not in SUPPORTED_REBALANCE_FREQUENCIES:
+            raise ValueError("调仓周期必须是 daily、weekly 或 monthly")
+        return text
+
     @validator("momentum_weights", pre=True)
     def validate_momentum_weights(cls, value):
         raw_weights = value if isinstance(value, dict) else DEFAULT_MOMENTUM_WEIGHTS
@@ -173,6 +183,9 @@ class USStockSignalConfigPayload(BaseModel):
 
 
 def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
+    rebalance_frequency = getattr(config, "rebalance_frequency", DEFAULT_REBALANCE_FREQUENCY)
+    if rebalance_frequency not in SUPPORTED_REBALANCE_FREQUENCIES:
+        rebalance_frequency = DEFAULT_REBALANCE_FREQUENCY
     return {
         "id": config.id,
         "account_id": config.account_id,
@@ -191,6 +204,7 @@ def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
         "max_positions": config.max_positions,
         "sell_rank_multiplier": getattr(config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER),
         "index_weight_blend": getattr(config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND),
+        "rebalance_frequency": rebalance_frequency,
         "commission_pct": config.commission_pct,
         "slippage_pct": config.slippage_pct,
         "auto_sync_enabled": bool(config.auto_sync_enabled),
@@ -325,6 +339,7 @@ def _replace_config_runtime_state(
             "meta": result.get("meta"),
             "errors": result.get("errors"),
             "benchmark_curve": result.get("benchmark_curve"),
+            "yearly_stats": result.get("yearly_stats"),
         },
     ))
     config.last_sync_at = now
@@ -729,11 +744,13 @@ def get_detail(
             "metrics": metrics,
             "meta": sync_payload.get("meta") or {},
             "errors": sync_payload.get("errors") or [],
+            "yearly_stats": sync_payload.get("yearly_stats") or [],
             "trade_count": db.query(USStockSignalVirtualTrade).filter(USStockSignalVirtualTrade.config_id == config.id).count(),
             "signal_count": db.query(USStockSignalVirtualEvent).filter(USStockSignalVirtualEvent.config_id == config.id).count(),
             "holding_count": len(holdings),
         },
         "benchmark_curve": sync_payload.get("benchmark_curve") or [],
+        "yearly_stats": sync_payload.get("yearly_stats") or [],
         "equity_curve": [
             {
                 "date": item.date.isoformat(),

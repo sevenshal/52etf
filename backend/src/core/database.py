@@ -812,6 +812,7 @@ class USStockSignalVirtualConfig(Base):
     max_positions = Column(Integer, nullable=False, default=7)
     sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
     index_weight_blend = Column(Float, nullable=False, default=0.4)
+    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
     commission_pct = Column(Float, nullable=False, default=0.03)
     slippage_pct = Column(Float, nullable=False, default=0.02)
     lot_size = Column(Integer, nullable=False, default=1)
@@ -960,6 +961,7 @@ def ensure_table_columns():
             "momentum_weights": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN momentum_weights JSON NOT NULL DEFAULT '{\"20\":0.05,\"60\":0.20,\"120\":0.75}'",
             "sell_rank_multiplier": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN sell_rank_multiplier FLOAT NOT NULL DEFAULT 2.0",
             "index_weight_blend": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN index_weight_blend FLOAT NOT NULL DEFAULT 0.4",
+            "rebalance_frequency": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly'",
         },
     }
 

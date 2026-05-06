@@ -22,6 +22,8 @@ SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_INDEX_WEIGHT_BLEND = 0.40
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
+DEFAULT_REBALANCE_FREQUENCY = "weekly"
+SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly"]
 CANDIDATE_ETF_OPTIONS = [
     {"label": "标普500", "value": "SPY.US", "description": "SPDR S&P 500 ETF Trust 成分股"},
     {"label": "纳指100", "value": "QQQ.US", "description": "Invesco QQQ Trust 成分股"},
@@ -184,6 +186,95 @@ def _build_benchmark_curve(
     return benchmark_curve
 
 
+def _compute_period_return(start_value, end_value) -> Optional[float]:
+    if not _is_positive_number(start_value) or not _is_positive_number(end_value):
+        return None
+    return (float(end_value) / float(start_value) - 1) * 100
+
+
+def _build_yearly_stats(
+    equity_curve: List[Dict],
+    benchmark_curve: List[Dict],
+    benchmark_symbols: List[str],
+) -> List[Dict]:
+    benchmark_by_date = {
+        item.get("date"): item.get("values") or {}
+        for item in benchmark_curve or []
+        if item.get("date")
+    }
+    by_year: Dict[int, Dict] = {}
+
+    for item in equity_curve or []:
+        item_date = item.get("date")
+        if not item_date:
+            continue
+        year = date.fromisoformat(item_date).year
+        bucket = by_year.setdefault(year, {
+            "year": year,
+            "start_date": item_date,
+            "end_date": item_date,
+            "start_value": item.get("value"),
+            "end_value": item.get("value"),
+            "benchmark_start_values": {},
+            "benchmark_end_values": {},
+        })
+        bucket["end_date"] = item_date
+        bucket["end_value"] = item.get("value")
+        benchmark_values = benchmark_by_date.get(item_date) or {}
+        for symbol in benchmark_symbols or []:
+            value = benchmark_values.get(symbol)
+            if _is_positive_number(value) and symbol not in bucket["benchmark_start_values"]:
+                bucket["benchmark_start_values"][symbol] = value
+            if _is_positive_number(value):
+                bucket["benchmark_end_values"][symbol] = value
+
+    yearly_stats = []
+    for year in sorted(by_year):
+        bucket = by_year[year]
+        strategy_return = _compute_period_return(bucket.get("start_value"), bucket.get("end_value"))
+        benchmark_returns = {}
+        excess_returns = {}
+        outperformed_by_symbol = {}
+        for symbol in benchmark_symbols or []:
+            benchmark_return = _compute_period_return(
+                bucket["benchmark_start_values"].get(symbol),
+                bucket["benchmark_end_values"].get(symbol),
+            )
+            benchmark_returns[symbol] = _round_or_none(benchmark_return, 2)
+            excess_return = (
+                strategy_return - benchmark_return
+                if strategy_return is not None and benchmark_return is not None
+                else None
+            )
+            excess_returns[symbol] = _round_or_none(excess_return, 2)
+            outperformed_by_symbol[symbol] = (
+                bool(strategy_return > benchmark_return)
+                if strategy_return is not None and benchmark_return is not None
+                else None
+            )
+
+        valid_outperformance = [
+            value for value in outperformed_by_symbol.values()
+            if value is not None
+        ]
+        primary_symbol = (benchmark_symbols or [None])[0]
+        yearly_stats.append({
+            "year": year,
+            "start_date": bucket.get("start_date"),
+            "end_date": bucket.get("end_date"),
+            "strategy_return_pct": _round_or_none(strategy_return, 2),
+            "benchmark_returns_pct": benchmark_returns,
+            "excess_returns_pct": excess_returns,
+            "outperformed_by_symbol": outperformed_by_symbol,
+            "outperformed_all": all(valid_outperformance) if valid_outperformance else None,
+            "primary_benchmark_symbol": primary_symbol,
+            "primary_benchmark_return_pct": benchmark_returns.get(primary_symbol) if primary_symbol else None,
+            "primary_excess_return_pct": excess_returns.get(primary_symbol) if primary_symbol else None,
+            "primary_outperformed": outperformed_by_symbol.get(primary_symbol) if primary_symbol else None,
+        })
+    return yearly_stats
+
+
 def _compute_risk_adjusted_momentum_snapshot(rows: List[Dict], index: int, window: int = 20) -> Optional[Dict]:
     if index < 0 or index >= len(rows):
         return None
@@ -267,10 +358,24 @@ def _compute_mixed_risk_adjusted_momentum_snapshot(
     }
 
 
-def _is_weekly_rebalance_day(dates: List[date], index: int) -> bool:
+def _normalize_rebalance_frequency(value) -> str:
+    text = str(value or DEFAULT_REBALANCE_FREQUENCY).strip().lower()
+    return text if text in SUPPORTED_REBALANCE_FREQUENCIES else DEFAULT_REBALANCE_FREQUENCY
+
+
+def _is_rebalance_day(dates: List[date], index: int, frequency: str = DEFAULT_REBALANCE_FREQUENCY) -> bool:
     if index >= len(dates) - 1:
         return True
-    return dates[index].isocalendar()[:2] != dates[index + 1].isocalendar()[:2]
+    current_date = dates[index]
+    next_date = dates[index + 1]
+    frequency = _normalize_rebalance_frequency(frequency)
+    if frequency == "daily":
+        return True
+    if frequency == "weekly":
+        return current_date.isocalendar()[:2] != next_date.isocalendar()[:2]
+    if frequency == "monthly":
+        return (current_date.year, current_date.month) != (next_date.year, next_date.month)
+    return False
 
 
 def load_universe_history(
@@ -504,6 +609,7 @@ class USStockSignalVirtualEngine:
         max_positions = max(1, int(self.config.max_positions or 1))
         sell_rank_multiplier = max(1.0, float(getattr(self.config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER) or 1.0))
         sell_rank_threshold = max(max_positions, int(round(max_positions * sell_rank_multiplier)))
+        rebalance_frequency = _normalize_rebalance_frequency(getattr(self.config, "rebalance_frequency", DEFAULT_REBALANCE_FREQUENCY))
         lot_size = max(1, int(self.config.lot_size or 1))
         commission_rate = max(0.0, float(self.config.commission_pct or 0)) / 100
         slippage_rate = max(0.0, float(self.config.slippage_pct or 0)) / 100
@@ -640,7 +746,7 @@ class USStockSignalVirtualEngine:
                 sell_price,
                 quantity,
                 commission,
-                "weekly_rebalance",
+                f"{rebalance_frequency}_rebalance",
                 reason_detail,
                 profit=profit,
                 profit_pct=profit_pct,
@@ -682,7 +788,7 @@ class USStockSignalVirtualEngine:
                 buy_price,
                 quantity,
                 commission,
-                "weekly_rebalance",
+                f"{rebalance_frequency}_rebalance",
                 reason_detail,
             )
 
@@ -761,7 +867,7 @@ class USStockSignalVirtualEngine:
             current_index_weights = _weights_for_date(universe_history, weight_history, current_date)
             universe_size_by_date[current_date.isoformat()] = len(current_universe)
 
-            if _is_weekly_rebalance_day(dates, date_index):
+            if _is_rebalance_day(dates, date_index, rebalance_frequency):
                 rebalance_count += 1
                 ranked = []
                 for symbol in sorted(current_universe):
@@ -822,7 +928,7 @@ class USStockSignalVirtualEngine:
                             "min_listing_days": min_listing_days,
                             "momentum_windows": momentum_windows,
                             "momentum_weights": momentum_weights_payload,
-                            "rebalance_frequency": "weekly",
+                            "rebalance_frequency": rebalance_frequency,
                             "execution_rule": "signal_close_next_open",
                             "rotation_rule": "hold_until_out_of_sell_rank",
                             "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
@@ -857,6 +963,7 @@ class USStockSignalVirtualEngine:
         current_value = equity_curve[-1]["value"] if equity_curve else float(self.config.initial_capital or 0)
         initial_value = float(self.config.initial_capital or 0)
         total_return = (current_value / initial_value - 1) * 100 if initial_value > 0 else 0.0
+        yearly_stats = _build_yearly_stats(equity_curve, benchmark_curve, candidate_etfs)
         elapsed_days = (
             (date.fromisoformat(equity_curve[-1]["date"]) - date.fromisoformat(equity_curve[0]["date"])).days
             if len(equity_curve) > 1
@@ -907,6 +1014,7 @@ class USStockSignalVirtualEngine:
             "metrics": metrics,
             "equity_curve": equity_curve,
             "benchmark_curve": benchmark_curve,
+            "yearly_stats": yearly_stats,
             "events": events,
             "trades": trades,
             "current_holdings": holdings,
@@ -925,7 +1033,7 @@ class USStockSignalVirtualEngine:
                 "index_weight_blend": index_weight_blend,
                 "sell_rank_threshold": sell_rank_threshold,
                 "sell_rank_multiplier": sell_rank_multiplier,
-                "rebalance_frequency": "weekly",
+                "rebalance_frequency": rebalance_frequency,
                 "execution_rule": "signal_close_next_open",
                 "rotation_rule": "hold_until_out_of_sell_rank",
                 "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
