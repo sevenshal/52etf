@@ -1035,6 +1035,126 @@ class USStockSignalVirtualLog(Base):
     message = Column(String(1000))
     payload = Column(JSON)
 
+class AStockInnovationMomentumConfig(Base):
+    """A股创新100风险调整混合动量虚拟盘配置"""
+    __tablename__ = "a_stock_innovation_momentum_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    name = Column(String(100), nullable=False, default="A股创新100风险调整混合动量虚拟盘")
+    enabled = Column(Boolean, default=True, nullable=False)
+    initial_capital = Column(Float, nullable=False, default=1_000_000.0)
+    start_date = Column(Date, nullable=False)
+    min_listing_days = Column(Integer, nullable=False, default=365)
+    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 0.0, "60": 0.20, "120": 0.80})
+    max_positions = Column(Integer, nullable=False, default=5)
+    sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
+    index_weight_blend = Column(Float, nullable=False, default=0.8)
+    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
+    commission_pct = Column(Float, nullable=False, default=0.03)
+    slippage_pct = Column(Float, nullable=False, default=0.02)
+    lot_size = Column(Integer, nullable=False, default=100)
+    auto_sync_enabled = Column(Boolean, default=True, nullable=False)
+    auto_sync_time = Column(String(5), default="15:30", nullable=False)
+    last_auto_sync_at = Column(DateTime)
+    last_sync_at = Column(DateTime)
+    last_sync_status = Column(String(16))
+    last_sync_message = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class AStockInnovationMomentumEvent(Base):
+    """A股创新100风险调整混合动量排名事件"""
+    __tablename__ = "a_stock_innovation_momentum_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    direction = Column(String(8), nullable=False)
+    signal_price = Column(Float)
+    turnover = Column(Float)
+    annualized_volatility_pct = Column(Float)
+    threshold_pct = Column(Float)
+    payload = Column(JSON)
+    price_source = Column(String(32), default="daily_close")
+    created_at = Column(DateTime, default=datetime.now)
+    __table_args__ = (
+        UniqueConstraint("config_id", "symbol", "date", "direction", name="uniq_a_stock_innovation_momentum_event"),
+    )
+
+class AStockInnovationMomentumEquity(Base):
+    """A股创新100风险调整混合动量虚拟盘每日净值"""
+    __tablename__ = "a_stock_innovation_momentum_equity"
+
+    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
+    date = Column(Date, primary_key=True)
+    account_id = Column(String, index=True)
+    value = Column(Float, nullable=False)
+    cash = Column(Float)
+    position_value = Column(Float)
+    drawdown = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class AStockInnovationMomentumTrade(Base):
+    """A股创新100风险调整混合动量虚拟盘模拟成交"""
+    __tablename__ = "a_stock_innovation_momentum_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    date = Column(Date, index=True)
+    signal_date = Column(Date)
+    action = Column(String(8), nullable=False)
+    symbol = Column(String(32), index=True)
+    name = Column(String(64))
+    price = Column(Float)
+    quantity = Column(Integer)
+    amount = Column(Float)
+    commission = Column(Float)
+    profit = Column(Float)
+    profit_pct = Column(Float)
+    reason = Column(String(64))
+    reason_detail = Column(String(1000))
+    cash_after = Column(Float)
+    portfolio_value_after = Column(Float)
+    symbol_market_value_after = Column(Float)
+    symbol_weight_pct_after = Column(Float)
+    price_source = Column(String(32))
+    created_at = Column(DateTime, default=datetime.now)
+
+class AStockInnovationMomentumHolding(Base):
+    """A股创新100风险调整混合动量虚拟盘最新持仓快照"""
+    __tablename__ = "a_stock_innovation_momentum_holdings"
+
+    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
+    symbol = Column(String(32), primary_key=True)
+    account_id = Column(String, index=True)
+    name = Column(String(64))
+    shares = Column(Integer, nullable=False, default=0)
+    price = Column(Float)
+    avg_cost = Column(Float)
+    entry_date = Column(Date)
+    market_value = Column(Float)
+    actual_weight_pct = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class AStockInnovationMomentumLog(Base):
+    """A股创新100风险调整混合动量虚拟盘运行日志"""
+    __tablename__ = "a_stock_innovation_momentum_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    date = Column(Date, index=True)
+    level = Column(String(16), default="INFO")
+    action = Column(String(32), nullable=False)
+    message = Column(String(1000))
+    payload = Column(JSON)
+
 # 创建所有表
 Base.metadata.create_all(engine)
 
@@ -1061,6 +1181,10 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_events_config_date ON us_stock_signal_virtual_events(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_trades_config_date ON us_stock_signal_virtual_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_logs_config_time ON us_stock_signal_virtual_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_configs_account ON a_stock_innovation_momentum_configs(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_events_config_date ON a_stock_innovation_momentum_events(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_trades_config_date ON a_stock_innovation_momentum_trades(config_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_logs_config_time ON a_stock_innovation_momentum_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",

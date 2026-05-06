@@ -242,6 +242,16 @@ def _run_a_stock_innovation100_rebuild():
         result.get("latest_level"),
     )
 
+def _run_a_stock_innovation_momentum_live_sync():
+    from ..app.api.a_stock_innovation_momentum_live import sync_all_enabled_a_stock_innovation_momentum_configs_for_scheduler
+
+    result = sync_all_enabled_a_stock_innovation_momentum_configs_for_scheduler()
+    logging.getLogger("ScheduledTaskManager").info(
+        "A stock innovation momentum virtual strategies synced: success=%s, errors=%s",
+        len(result.get("synced") or []),
+        len(result.get("errors") or []),
+    )
+
 
 @dataclass(frozen=True)
 class TaskDefinition:
@@ -352,6 +362,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_a_stock_innovation100_rebuild,
+            ),
+            "a_stock_innovation_momentum_live_sync": TaskDefinition(
+                task_key="a_stock_innovation_momentum_live_sync",
+                name="A股创新100动量虚拟盘同步",
+                description="同步所有启用的A股创新100风险调整混合动量虚拟盘，生成排名信号、模拟成交、刷新净值和持仓。",
+                default_time="18:45",
+                default_enabled=True,
+                sort_order=76,
+                runner=_run_a_stock_innovation_momentum_live_sync,
             ),
         }
 
