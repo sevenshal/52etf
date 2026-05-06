@@ -551,11 +551,13 @@ class AStockInnovation100Builder:
             return []
 
         candidates = []
-        for _, row in market_frame.iterrows():
-            ts_code = str(row.get("ts_code") or "")
+        for row in market_frame.itertuples(index=False):
+            ts_code = str(getattr(row, "ts_code", "") or "")
             if not ts_code:
                 continue
-            if not _is_finite_positive(row.get("close")) or not _is_finite_positive(row.get("circ_mv")):
+            close = getattr(row, "close", None)
+            circ_mv = getattr(row, "circ_mv", None)
+            if not _is_finite_positive(close) or not _is_finite_positive(circ_mv):
                 continue
             basic = basic_map.get(ts_code)
             if not self._is_basic_eligible(ts_code, as_of, basic, st_intervals):
@@ -569,12 +571,12 @@ class AStockInnovation100Builder:
                     "ts_code": ts_code,
                     "name": basic.get("name"),
                     "industry": basic.get("industry"),
-                    "close": float(row.get("close")),
-                    "pct_chg": float(row.get("pct_chg") or 0.0),
-                    "amount": float(row.get("amount") or 0.0),
+                    "close": float(close),
+                    "pct_chg": float(getattr(row, "pct_chg", 0.0) or 0.0),
+                    "amount": float(getattr(row, "amount", 0.0) or 0.0),
                     "avg_amount_60d": avg_amount,
-                    "total_mv": float(row.get("total_mv") or 0.0),
-                    "circ_mv": float(row.get("circ_mv") or 0.0),
+                    "total_mv": float(getattr(row, "total_mv", 0.0) or 0.0),
+                    "circ_mv": float(circ_mv),
                 }
             )
 
@@ -875,13 +877,13 @@ class AStockInnovation100Builder:
                 if not market_frame.empty and "trade_date" in market_frame.columns:
                     market_frames_by_date[current_date] = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
             last_market_frame = market_frame
-            for _, row in market_frame.iterrows():
-                ts_code = str(row.get("ts_code") or "")
-                if not ts_code:
-                    continue
-                amount = float(row.get("amount") or 0.0)
-                if math.isfinite(amount) and amount >= 0:
-                    amount_history[ts_code].append(amount)
+            symbols = np.array([], dtype=str)
+            if not market_frame.empty:
+                symbols = market_frame["ts_code"].astype(str).to_numpy()
+                amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
+                for ts_code, amount in zip(symbols, amounts):
+                    if ts_code and math.isfinite(amount) and amount >= 0:
+                        amount_history[ts_code].append(float(amount))
 
             if current_date < start_date:
                 continue
@@ -909,11 +911,14 @@ class AStockInnovation100Builder:
                     pending_constituents = None
                     pending_effective_date = None
 
-                pct_change_by_symbol = {
-                    str(row.get("ts_code")): float(row.get("pct_chg") or 0.0) / 100.0
-                    for _, row in market_frame.iterrows()
-                    if str(row.get("ts_code") or "")
-                }
+                pct_changes = (
+                    np.nan_to_num(market_frame["pct_chg"].to_numpy(dtype=float), nan=0.0) / 100.0
+                    if not market_frame.empty
+                    else np.array([], dtype=float)
+                )
+                pct_change_by_symbol = dict(
+                    zip(symbols, pct_changes)
+                )
                 daily_return = sum(
                     float(item.get("weight") or 0.0) * pct_change_by_symbol.get(item["ts_code"], 0.0)
                     for item in current_constituents
