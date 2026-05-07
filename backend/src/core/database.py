@@ -186,75 +186,6 @@ class StockKline(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
-class AStockBasic(Base):
-    """Tushare A股公司基础信息快照。"""
-    __tablename__ = "a_stock_basic"
-
-    ts_code = Column(String(16), primary_key=True)
-    symbol = Column(String(16), index=True)
-    name = Column(String(64))
-    area = Column(String(64))
-    industry = Column(String(64), index=True)
-    market = Column(String(64))
-    exchange = Column(String(16), index=True)
-    list_date = Column(Date)
-    delist_date = Column(Date)
-    list_status = Column(String(8), index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
-
-class AStockNameChange(Base):
-    """Tushare A股曾用名/ST变更记录。"""
-    __tablename__ = "a_stock_name_changes"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    ts_code = Column(String(16), index=True, nullable=False)
-    name = Column(String(64))
-    start_date = Column(Date, index=True)
-    end_date = Column(Date, index=True)
-    change_reason = Column(String(64), index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
-
-class AStockMarketDaily(Base):
-    """Tushare A股全市场日行情与估值截面缓存。"""
-    __tablename__ = "a_stock_market_daily"
-
-    trade_date = Column(Date, primary_key=True)
-    ts_code = Column(String(16), primary_key=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    pre_close = Column(Float)
-    change = Column(Float)
-    pct_chg = Column(Float)
-    vol = Column(Float)
-    amount = Column(Float)
-    total_mv = Column(Float)
-    circ_mv = Column(Float)
-    float_share = Column(Float)
-    total_share = Column(Float)
-    turnover_rate = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
-
-class AStockIndexDaily(Base):
-    """A股指数日行情缓存，用于自编指数基准对比。"""
-    __tablename__ = "a_stock_index_daily"
-
-    ts_code = Column(String(16), primary_key=True)
-    trade_date = Column(Date, primary_key=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    pre_close = Column(Float)
-    change = Column(Float)
-    pct_chg = Column(Float)
-    vol = Column(Float)
-    amount = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
-
 class AStockInnovation100Level(Base):
     """A股创新100指数每日点位。"""
     __tablename__ = "a_stock_innovation100_levels"
@@ -1184,11 +1115,6 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_db_sql_favorites_account_updated ON db_sql_favorites(account_id, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_cache_source_updated ON invalid_symbol_cache(source, updated_at)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_levels_date ON a_stock_innovation100_levels(index_code, date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_rebalances_date ON a_stock_innovation100_rebalances(index_code, rebalance_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_constituents_symbol ON a_stock_innovation100_constituents(index_code, ts_code, rebalance_date)",

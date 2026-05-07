@@ -268,4 +268,8 @@ def get_rebalance_detail(
 
 def rebuild_a_stock_innovation100_for_scheduler() -> Dict:
     with get_db_ctx() as db:
-        return AStockInnovation100Builder(db).refresh_incremental(end_date=date.today())
+        builder = AStockInnovation100Builder(db)
+        try:
+            return builder.refresh_incremental(end_date=date.today())
+        finally:
+            builder.close()

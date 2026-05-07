@@ -10,13 +10,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as ORMSession
 
 from ..core.database import (
-    AStockBasic,
     AStockInnovation100Constituent,
     AStockInnovation100Level,
     AStockInnovation100Rebalance,
-    AStockMarketDaily,
-    engine,
 )
+from ..core.analytics_database import analytics_engine
 from ..core.services.tushare import TushareService
 from .a_stock_innovation100 import INDEX_CODE as BENCHMARK_INDEX_CODE
 from .us_stock_signal_virtual import (
@@ -384,7 +382,7 @@ def _load_price_rows(symbols: List[str], start_date: date, end_date: date) -> Di
     if not symbols:
         return rows_by_symbol
 
-    with engine.connect() as conn:
+    with analytics_engine.connect() as conn:
         for offset in range(0, len(symbols), 500):
             chunk = symbols[offset:offset + 500]
             placeholders = ",".join([f":symbol_{index}" for index in range(len(chunk))])
@@ -421,6 +419,34 @@ def _load_price_rows(symbols: List[str], start_date: date, end_date: date) -> Di
                     }
                 )
     return rows_by_symbol
+
+
+def _load_basic_map(symbols: List[str]) -> Dict[str, Dict]:
+    basic_map: Dict[str, Dict] = {}
+    if not symbols:
+        return basic_map
+
+    with analytics_engine.connect() as conn:
+        for offset in range(0, len(symbols), 500):
+            chunk = symbols[offset:offset + 500]
+            placeholders = ",".join([f":symbol_{index}" for index in range(len(chunk))])
+            params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+            rows = conn.execute(
+                text(f"""
+                    SELECT ts_code, name, industry, list_date
+                    FROM a_stock_basic
+                    WHERE ts_code IN ({placeholders})
+                """),
+                params,
+            ).fetchall()
+            for row in rows:
+                basic_map[row[0]] = {
+                    "name": row[1],
+                    "industry": row[2],
+                    "list_date": _to_date(row[3]),
+                }
+
+    return basic_map
 
 
 def _build_benchmark_curve(level_rows: List[AStockInnovation100Level], initial_capital: float) -> List[Dict]:
@@ -522,15 +548,7 @@ class AStockInnovationMomentumVirtualEngine:
                 for symbol in universe_history.all_symbols
             }
 
-        basic_rows = self.db.query(AStockBasic).filter(AStockBasic.ts_code.in_(universe_history.all_symbols)).all()
-        basic_map = {
-            row.ts_code: {
-                "name": row.name,
-                "industry": row.industry,
-                "list_date": row.list_date,
-            }
-            for row in basic_rows
-        }
+        basic_map = _load_basic_map(universe_history.all_symbols)
         index_by_symbol_date = {
             symbol: {row["date"]: index for index, row in enumerate(rows)}
             for symbol, rows in klines_by_symbol.items()

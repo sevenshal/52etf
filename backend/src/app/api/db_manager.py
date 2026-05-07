@@ -14,6 +14,7 @@ from sqlalchemy import inspect
 from sqlalchemy.orm import Session as OrmSession
 
 from ...core.database import DB_PATH, DbSqlFavorite, engine, get_db
+from ...core.analytics_database import ANALYTICS_DB_PATH, ANALYTICS_TABLE_NAMES
 from .account import valid_account
 
 
@@ -81,6 +82,7 @@ class DbColumn(BaseModel):
 
 class DbTable(BaseModel):
     name: str
+    source: Literal["duckdb", "sqlite"]
     columns: List[DbColumn]
     column_count: int
     sample_sql: str
@@ -145,44 +147,102 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
+def _get_primary_key_columns(inspector, table_name: str) -> Set[str]:
+    try:
+        return set(inspector.get_pk_constraint(table_name).get("constrained_columns") or [])
+    except Exception:
+        return set()
+
+
+def _build_table_metadata(inspector, table_name: str) -> Optional[DbTable]:
+    columns_raw = inspector.get_columns(table_name)
+    if any(column["name"].lower() == "account_id" for column in columns_raw):
+        return None
+
+    primary_keys = _get_primary_key_columns(inspector, table_name)
+    columns = [
+        DbColumn(
+            name=column["name"],
+            type=str(column.get("type") or ""),
+            nullable=bool(column.get("nullable", True)),
+            primary_key=column["name"] in primary_keys,
+        )
+        for column in columns_raw
+    ]
+    return DbTable(
+        name=table_name,
+        source="sqlite",
+        columns=columns,
+        column_count=len(columns),
+        sample_sql=f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 100",
+    )
+
+
+def _build_duckdb_table_metadata(connection, table_name: str) -> Optional[DbTable]:
+    rows = connection.execute(f"PRAGMA table_info({_quote_sql_string(table_name)})").fetchall()
+    if any(str(row[1]).lower() == "account_id" for row in rows):
+        return None
+
+    columns = [
+        DbColumn(
+            name=str(row[1]),
+            type=str(row[2] or ""),
+            nullable=not bool(row[3]),
+            primary_key=bool(row[5]),
+        )
+        for row in rows
+    ]
+    return DbTable(
+        name=table_name,
+        source="duckdb",
+        columns=columns,
+        column_count=len(columns),
+        sample_sql=f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 100",
+    )
+
+
 def _load_table_metadata() -> Tuple[List[DbTable], Set[str], Set[str]]:
-    inspector = inspect(engine)
-    tables: List[DbTable] = []
+    sqlite_inspector = inspect(engine)
+    table_by_name: Dict[str, DbTable] = {}
     allowed_table_names: Set[str] = set()
     restricted_table_names: Set[str] = set()
 
-    for table_name in sorted(inspector.get_table_names()):
+    for table_name in sorted(sqlite_inspector.get_table_names()):
         lowered = table_name.lower()
         if lowered.startswith(INTERNAL_TABLE_PREFIXES):
             restricted_table_names.add(lowered)
             continue
 
-        columns_raw = inspector.get_columns(table_name)
-        if any(column["name"].lower() == "account_id" for column in columns_raw):
+        table = _build_table_metadata(sqlite_inspector, table_name)
+        if table is None:
             restricted_table_names.add(lowered)
             continue
 
-        primary_keys = set(inspector.get_pk_constraint(table_name).get("constrained_columns") or [])
-        columns = [
-            DbColumn(
-                name=column["name"],
-                type=str(column.get("type") or ""),
-                nullable=bool(column.get("nullable", True)),
-                primary_key=column["name"] in primary_keys,
-            )
-            for column in columns_raw
-        ]
-        tables.append(
-            DbTable(
-                name=table_name,
-                columns=columns,
-                column_count=len(columns),
-                sample_sql=f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 100",
-            )
-        )
+        table_by_name[lowered] = table
         allowed_table_names.add(table_name.lower())
 
-    return tables, allowed_table_names, restricted_table_names
+    duckdb = _import_duckdb()
+    with duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False) as connection:
+        analytics_tables = [row[0] for row in connection.execute("SHOW TABLES").fetchall()]
+        for table_name in sorted(analytics_tables):
+            lowered = table_name.lower()
+            if lowered.startswith(INTERNAL_TABLE_PREFIXES):
+                restricted_table_names.add(lowered)
+                continue
+
+            table = _build_duckdb_table_metadata(connection, table_name)
+            if table is None:
+                restricted_table_names.add(lowered)
+                continue
+
+            table_by_name[lowered] = table
+            allowed_table_names.add(lowered)
+            restricted_table_names.discard(lowered)
+
+    return sorted(
+        table_by_name.values(),
+        key=lambda table: (0 if table.source == "duckdb" else 1, table.name.lower()),
+    ), allowed_table_names, restricted_table_names
 
 
 def _get_table_metadata(force_refresh: bool = False) -> Tuple[List[DbTable], Set[str], Set[str]]:
@@ -486,8 +546,22 @@ def _create_duckdb_sqlite_views(connection, tables: List[DbTable]):
         quoted_table_name = _quote_identifier(table.name)
         connection.execute(
             f"""
-            CREATE VIEW {quoted_table_name} AS
+            CREATE TEMP VIEW {quoted_table_name} AS
             SELECT * FROM sqlite_scan({_quote_sql_string(DB_PATH)}, {_quote_sql_string(table.name)})
+            """
+        )
+
+
+def _create_duckdb_analytics_views(connection, tables: List[DbTable]):
+    if not tables:
+        return
+    connection.execute(f"ATTACH {_quote_sql_string(ANALYTICS_DB_PATH)} AS analytics_db")
+    for table in tables:
+        quoted_table_name = _quote_identifier(table.name)
+        connection.execute(
+            f"""
+            CREATE TEMP VIEW {quoted_table_name} AS
+            SELECT * FROM analytics_db.{quoted_table_name}
             """
         )
 
@@ -526,11 +600,24 @@ def _execute_duckdb_query(query: str, referenced_tables: List[DbTable]) -> Tuple
     duckdb = _import_duckdb()
     timings: Dict[str, float] = {}
     started_at = time.perf_counter()
+    native_tables = [
+        table
+        for table in referenced_tables
+        if table.name.lower() in ANALYTICS_TABLE_NAMES
+    ]
+    sqlite_tables = [
+        table
+        for table in referenced_tables
+        if table.name.lower() not in ANALYTICS_TABLE_NAMES
+    ]
+    database = ":memory:" if sqlite_tables else ANALYTICS_DB_PATH
 
     try:
-        with duckdb.connect(database=":memory:", read_only=False) as connection:
+        with duckdb.connect(database=database, read_only=False) as connection:
             setup_started_at = time.perf_counter()
-            _create_duckdb_sqlite_views(connection, referenced_tables)
+            if sqlite_tables:
+                _create_duckdb_analytics_views(connection, native_tables)
+                _create_duckdb_sqlite_views(connection, sqlite_tables)
             connection.execute("SET enable_external_access=false")
             timings["setup_ms"] = round((time.perf_counter() - setup_started_at) * 1000, 2)
 

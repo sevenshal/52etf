@@ -1,8 +1,8 @@
 import logging
 import math
 import os
-import sqlite3
-from collections import Counter, defaultdict, deque
+import hashlib
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Callable, Deque, Dict, Iterable, List, Optional, Tuple
@@ -15,15 +15,18 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..core.database import (
-    AStockBasic,
-    AStockIndexDaily,
     AStockInnovation100Constituent,
     AStockInnovation100Level,
     AStockInnovation100Rebalance,
+)
+from ..core.analytics_database import (
+    ANALYTICS_DB_PATH,
+    AStockBasic,
+    AStockIndexDaily,
     AStockMarketDaily,
     AStockNameChange,
-    DB_PATH,
-    engine,
+    AnalyticsSession,
+    analytics_engine,
 )
 from ..core.services.tushare import TushareService
 
@@ -162,17 +165,102 @@ def _year_chunks(start_date: date, end_date: date) -> Iterable[Tuple[date, date]
         current = chunk_end + timedelta(days=1)
 
 
+def _quote_duckdb_identifier(identifier: str) -> str:
+    return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+
+def _clean_text_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(pd.NA, index=frame.index, dtype="string")
+    result = frame[column].astype("string").str.strip()
+    return result.mask(result == "")
+
+
+def _date_series(frame: pd.DataFrame, column: str, fallback: Optional[date] = None) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(fallback, index=frame.index, dtype="object")
+
+    text_values = frame[column].astype("string").str.strip()
+    parsed = pd.to_datetime(text_values, format="%Y%m%d", errors="coerce")
+    missing = parsed.isna() & text_values.notna() & (text_values != "")
+    if missing.any():
+        parsed.loc[missing] = pd.to_datetime(text_values.loc[missing], format="%Y-%m-%d", errors="coerce")
+    if fallback is not None:
+        parsed = parsed.fillna(pd.Timestamp(fallback))
+    return parsed.dt.date
+
+
+def _numeric_series(frame: pd.DataFrame, column: str, digits: int) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(pd.array([pd.NA] * len(frame), dtype="Float64"), index=frame.index)
+    return pd.to_numeric(frame[column], errors="coerce").round(digits).astype("Float64")
+
+
+def _insert_or_replace_analytics_frame(
+    table_name: str,
+    columns: List[str],
+    frame: pd.DataFrame,
+    replace_dates: Optional[List[date]] = None,
+):
+    if frame.empty:
+        return
+
+    import duckdb  # type: ignore
+
+    insert_frame = frame.loc[:, columns]
+    quoted_table = _quote_duckdb_identifier(table_name)
+    quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
+    temp_frame_name = "analytics_insert_frame"
+    temp_delete_dates_name = "analytics_delete_dates"
+    insert_sql = (
+        f"INSERT OR REPLACE INTO {quoted_table} ({quoted_columns}) "
+        f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
+    )
+
+    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+    try:
+        connection.execute("BEGIN TRANSACTION")
+        if replace_dates:
+            delete_frame = pd.DataFrame({"trade_date": replace_dates})
+            connection.register(temp_delete_dates_name, delete_frame)
+            connection.execute(
+                f"""
+                DELETE FROM {quoted_table}
+                USING {_quote_duckdb_identifier(temp_delete_dates_name)}
+                WHERE {quoted_table}.trade_date = {_quote_duckdb_identifier(temp_delete_dates_name)}.trade_date
+                """
+            )
+        connection.register(temp_frame_name, insert_frame)
+        connection.execute(insert_sql)
+        connection.execute("COMMIT")
+    except Exception:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
+
+
 class AStockInnovation100Builder:
     def __init__(
         self,
         db: Session,
+        analytics_db: Optional[Session] = None,
         tushare_service: Optional[TushareService] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ):
         self.db = db
+        self.analytics_db = analytics_db or AnalyticsSession()
+        self._owns_analytics_db = analytics_db is None
         self.tushare = tushare_service or TushareService.getInstance()
         self.progress_callback = progress_callback
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def close(self):
+        if self._owns_analytics_db:
+            AnalyticsSession.remove()
 
     def _progress(self, message: str, progress: int, **extra):
         payload = {
@@ -263,20 +351,22 @@ class AStockInnovation100Builder:
                     "updated_at": now,
                 }
             )
-        self._bulk_upsert(AStockBasic, mappings, ["ts_code"])
+        self._replace_analytics_table(AStockBasic, mappings)
 
     def _replace_name_changes(self, frame: pd.DataFrame):
-        self.db.query(AStockNameChange).delete(synchronize_session=False)
+        self.analytics_db.query(AStockNameChange).delete(synchronize_session=False)
+        self.analytics_db.commit()
         self._insert_name_changes(frame)
 
     def _replace_name_changes_range(self, frame: pd.DataFrame, start_date: date, end_date: date):
-        self.db.execute(
+        self.analytics_db.execute(
             text("""
                 DELETE FROM a_stock_name_changes
                 WHERE start_date >= :start_date AND start_date <= :end_date
             """),
             {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
         )
+        self.analytics_db.commit()
         self._insert_name_changes(frame)
 
     def _insert_name_changes(self, frame: pd.DataFrame):
@@ -286,19 +376,47 @@ class AStockInnovation100Builder:
             ts_code = str(row.get("ts_code") or "").strip()
             if not ts_code:
                 continue
+            start = _parse_date(row.get("start_date"))
+            end = _parse_date(row.get("end_date"))
+            name = _clean_text(row.get("name"))
+            reason = _clean_text(row.get("change_reason"))
+            row_id = hashlib.sha1(
+                "|".join(
+                    [
+                        ts_code,
+                        name or "",
+                        start.isoformat() if start else "",
+                        end.isoformat() if end else "",
+                        reason or "",
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()
             mappings.append(
                 {
+                    "id": row_id,
                     "ts_code": ts_code,
-                    "name": _clean_text(row.get("name")),
-                    "start_date": _parse_date(row.get("start_date")),
-                    "end_date": _parse_date(row.get("end_date")),
-                    "change_reason": _clean_text(row.get("change_reason")),
+                    "name": name,
+                    "start_date": start,
+                    "end_date": end,
+                    "change_reason": reason,
                     "updated_at": now,
                 }
             )
-        for batch in self._chunks(mappings, 1000):
-            self.db.bulk_insert_mappings(AStockNameChange, batch)
-        self.db.commit()
+        mappings = list({item["id"]: item for item in mappings}.values())
+        self._insert_analytics_mappings(AStockNameChange, mappings)
+
+    def _replace_analytics_table(self, model, mappings: List[Dict], batch_size: int = 1000):
+        self.analytics_db.query(model).delete(synchronize_session=False)
+        self.analytics_db.commit()
+        self._insert_analytics_mappings(model, mappings, batch_size=batch_size)
+
+    def _insert_analytics_mappings(self, model, mappings: List[Dict], batch_size: int = 1000):
+        if not mappings:
+            return
+        table = model.__table__
+        for batch in self._chunks(mappings, batch_size):
+            self.analytics_db.execute(table.insert(), batch)
+        self.analytics_db.commit()
 
     def _bulk_upsert(self, model, mappings: List[Dict], index_elements: List[str], batch_size: int = 1000):
         if not mappings:
@@ -331,7 +449,7 @@ class AStockInnovation100Builder:
         return ohl_zero_pct > MAX_MARKET_DAILY_OHL_ZERO_PCT
 
     def _ensure_market_day(self, trade_date: date):
-        row = self.db.execute(
+        row = self.analytics_db.execute(
             text("""
                 SELECT
                     COUNT(*) AS row_count,
@@ -360,7 +478,7 @@ class AStockInnovation100Builder:
         self._upsert_market_frame(frame, trade_date=trade_date)
 
     def _existing_market_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
-        rows = self.db.execute(
+        rows = self.analytics_db.execute(
             text("""
                 SELECT
                     trade_date,
@@ -448,43 +566,68 @@ class AStockInnovation100Builder:
                     self._upsert_market_frame(frame)
 
     def _upsert_market_frame(self, frame: pd.DataFrame, trade_date: Optional[date] = None):
-        now = datetime.now()
-        mappings = []
-        for _, row in frame.iterrows():
-            ts_code = str(row.get("ts_code") or "").strip()
-            if not ts_code:
-                continue
-            mappings.append(
-                {
-                    "trade_date": _parse_date(row.get("trade_date")) or trade_date,
-                    "ts_code": ts_code,
-                    "open": _round_or_none(row.get("open"), 6),
-                    "high": _round_or_none(row.get("high"), 6),
-                    "low": _round_or_none(row.get("low"), 6),
-                    "close": _round_or_none(row.get("close"), 6),
-                    "pre_close": _round_or_none(row.get("pre_close"), 6),
-                    "change": _round_or_none(row.get("change"), 6),
-                    "pct_chg": _round_or_none(row.get("pct_chg"), 6),
-                    "vol": _round_or_none(row.get("vol"), 4),
-                    "amount": _round_or_none(row.get("amount"), 4),
-                    "total_mv": _round_or_none(row.get("total_mv"), 4),
-                    "circ_mv": _round_or_none(row.get("circ_mv"), 4),
-                    "float_share": _round_or_none(row.get("float_share"), 4),
-                    "total_share": _round_or_none(row.get("total_share"), 4),
-                    "turnover_rate": _round_or_none(row.get("turnover_rate"), 6),
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
-        self._bulk_replace_market_daily(mappings)
+        market_frame = self._normalize_market_frame(frame, trade_date=trade_date)
+        self._bulk_replace_market_daily(market_frame)
 
-    def _bulk_replace_market_daily(self, mappings: List[Dict], batch_size: int = 10000):
-        if not mappings:
+    @staticmethod
+    def _normalize_market_frame(frame: pd.DataFrame, trade_date: Optional[date] = None) -> pd.DataFrame:
+        columns = [
+            "trade_date",
+            "ts_code",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+            "total_mv",
+            "circ_mv",
+            "float_share",
+            "total_share",
+            "turnover_rate",
+            "created_at",
+            "updated_at",
+        ]
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+
+        now = datetime.now()
+        normalized = pd.DataFrame(index=frame.index)
+        normalized["trade_date"] = _date_series(frame, "trade_date", fallback=trade_date)
+        normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+        normalized["open"] = _numeric_series(frame, "open", 6)
+        normalized["high"] = _numeric_series(frame, "high", 6)
+        normalized["low"] = _numeric_series(frame, "low", 6)
+        normalized["close"] = _numeric_series(frame, "close", 6)
+        normalized["pre_close"] = _numeric_series(frame, "pre_close", 6)
+        normalized["change"] = _numeric_series(frame, "change", 6)
+        normalized["pct_chg"] = _numeric_series(frame, "pct_chg", 6)
+        normalized["vol"] = _numeric_series(frame, "vol", 4)
+        normalized["amount"] = _numeric_series(frame, "amount", 4)
+        normalized["total_mv"] = _numeric_series(frame, "total_mv", 4)
+        normalized["circ_mv"] = _numeric_series(frame, "circ_mv", 4)
+        normalized["float_share"] = _numeric_series(frame, "float_share", 4)
+        normalized["total_share"] = _numeric_series(frame, "total_share", 4)
+        normalized["turnover_rate"] = _numeric_series(frame, "turnover_rate", 6)
+        normalized["created_at"] = now
+        normalized["updated_at"] = now
+        normalized = normalized.dropna(subset=["trade_date", "ts_code"])
+        if normalized.empty:
+            return pd.DataFrame(columns=columns)
+        normalized = normalized.drop_duplicates(subset=["trade_date", "ts_code"], keep="last")
+        return normalized.loc[:, columns]
+
+    def _bulk_replace_market_daily(self, frame: pd.DataFrame):
+        if frame.empty:
             return
-        date_counts = Counter(item.get("trade_date") for item in mappings if item.get("trade_date"))
+        self.analytics_db.commit()
+        date_counts = frame["trade_date"].value_counts()
         replace_dates = sorted(
             trade_date
-            for trade_date, row_count in date_counts.items()
+            for trade_date, row_count in date_counts.to_dict().items()
             if row_count >= MIN_MARKET_DAILY_ROWS
         )
         columns = [
@@ -507,35 +650,13 @@ class AStockInnovation100Builder:
             "created_at",
             "updated_at",
         ]
-        placeholders = ",".join(["?"] * len(columns))
-        sql = f"""
-            INSERT OR REPLACE INTO a_stock_market_daily ({",".join(columns)})
-            VALUES ({placeholders})
-        """
-
-        def normalize(value):
-            if isinstance(value, datetime):
-                return value.isoformat(sep=" ")
-            if isinstance(value, date):
-                return value.isoformat()
-            return value
-
-        raw_conn = engine.raw_connection()
-        try:
-            cursor = raw_conn.cursor()
-            if replace_dates:
-                cursor.executemany(
-                    "DELETE FROM a_stock_market_daily WHERE trade_date = ?",
-                    [(normalize(trade_date),) for trade_date in replace_dates],
-                )
-            for batch in self._chunks(mappings, batch_size):
-                cursor.executemany(
-                    sql,
-                    [tuple(normalize(item.get(column)) for column in columns) for item in batch],
-                )
-            raw_conn.commit()
-        finally:
-            raw_conn.close()
+        table = AStockMarketDaily.__table__
+        _insert_or_replace_analytics_frame(
+            table.name,
+            columns,
+            frame,
+            replace_dates=replace_dates,
+        )
 
     def _load_market_day(self, trade_date: date) -> pl.DataFrame:
         sql = """
@@ -545,16 +666,28 @@ class AStockInnovation100Builder:
             FROM a_stock_market_daily
             WHERE trade_date = :trade_date
         """
-        with sqlite3.connect(DB_PATH) as connection:
-            frame = pl.read_database(
-                sql,
-                connection,
-                execute_options={"parameters": {"trade_date": trade_date.isoformat()}},
-                infer_schema_length=None,
-            )
-        if frame.is_empty():
-            return frame
-        return frame.with_columns(pl.col("trade_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False))
+        return self._read_analytics_frame(
+            sql,
+            {"trade_date": trade_date},
+            [
+                "trade_date",
+                "ts_code",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+                "total_mv",
+                "circ_mv",
+                "float_share",
+                "total_share",
+                "turnover_rate",
+            ],
+        )
 
     @staticmethod
     def _partition_market_frames(frame: pl.DataFrame) -> Dict[date, pl.DataFrame]:
@@ -572,24 +705,22 @@ class AStockInnovation100Builder:
             WHERE trade_date >= :start_date AND trade_date <= :end_date
             ORDER BY trade_date
         """
-        with sqlite3.connect(DB_PATH) as connection:
-            frame = pl.read_database(
-                sql,
-                connection,
-                execute_options={
-                    "parameters": {
-                        "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(),
-                    }
-                },
-                infer_schema_length=None,
-            )
-        if frame.is_empty():
-            return frame
-        return frame.with_columns(pl.col("trade_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False))
+        return self._read_analytics_frame(
+            sql,
+            {"start_date": start_date, "end_date": end_date},
+            ["trade_date", "ts_code", "close", "pct_chg", "amount", "total_mv", "circ_mv"],
+        )
 
     def _load_market_frames_by_date(self, start_date: date, end_date: date) -> Dict[date, pl.DataFrame]:
         return self._partition_market_frames(self._load_market_range_frame(start_date, end_date))
+
+    @staticmethod
+    def _read_analytics_frame(sql: str, params: Dict, columns: List[str]) -> pl.DataFrame:
+        with analytics_engine.connect() as connection:
+            rows = connection.execute(text(sql), params).fetchall()
+        if not rows:
+            return pl.DataFrame(schema=columns)
+        return pl.DataFrame([tuple(row) for row in rows], schema=columns, orient="row", infer_schema_length=None)
 
     def _iter_market_frames_by_date(
         self,
@@ -623,7 +754,7 @@ class AStockInnovation100Builder:
             del frames_by_date
 
     def _load_basic_map(self) -> Dict[str, Dict]:
-        rows = self.db.query(AStockBasic).all()
+        rows = self.analytics_db.query(AStockBasic).all()
         return {
             row.ts_code: {
                 "ts_code": row.ts_code,
@@ -642,7 +773,7 @@ class AStockInnovation100Builder:
 
     def _load_st_intervals(self) -> Dict[str, List[Tuple[date, date]]]:
         intervals: Dict[str, List[Tuple[date, date]]] = defaultdict(list)
-        rows = self.db.query(AStockNameChange).all()
+        rows = self.analytics_db.query(AStockNameChange).all()
         for row in rows:
             name = (row.name or "").upper()
             reason = (row.change_reason or "").upper()
@@ -1470,51 +1601,57 @@ def rebuild_a_stock_innovation100(
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict:
     builder = AStockInnovation100Builder(db, progress_callback=progress_callback)
-    return builder.rebuild(start_date=start_date, end_date=end_date, force_rebuild_outputs=True)
+    try:
+        return builder.rebuild(start_date=start_date, end_date=end_date, force_rebuild_outputs=True)
+    finally:
+        builder.close()
 
 
-def _upsert_index_daily_frame(db: Session, frame: pd.DataFrame):
+def _upsert_index_daily_frame(analytics_db: Session, frame: pd.DataFrame):
     if frame.empty:
         return
 
     now = datetime.now()
-    mappings = []
-    for _, row in frame.iterrows():
-        ts_code = str(row.get("ts_code") or "").strip()
-        trade_date = _parse_date(row.get("trade_date"))
-        if not ts_code or not trade_date:
-            continue
-        mappings.append(
-            {
-                "ts_code": ts_code,
-                "trade_date": trade_date,
-                "open": _round_or_none(row.get("open"), 6),
-                "high": _round_or_none(row.get("high"), 6),
-                "low": _round_or_none(row.get("low"), 6),
-                "close": _round_or_none(row.get("close"), 6),
-                "pre_close": _round_or_none(row.get("pre_close"), 6),
-                "change": _round_or_none(row.get("change"), 6),
-                "pct_chg": _round_or_none(row.get("pct_chg"), 6),
-                "vol": _round_or_none(row.get("vol"), 4),
-                "amount": _round_or_none(row.get("amount"), 4),
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-
-    if not mappings:
+    columns = [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount",
+        "created_at",
+        "updated_at",
+    ]
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["open"] = _numeric_series(frame, "open", 6)
+    normalized["high"] = _numeric_series(frame, "high", 6)
+    normalized["low"] = _numeric_series(frame, "low", 6)
+    normalized["close"] = _numeric_series(frame, "close", 6)
+    normalized["pre_close"] = _numeric_series(frame, "pre_close", 6)
+    normalized["change"] = _numeric_series(frame, "change", 6)
+    normalized["pct_chg"] = _numeric_series(frame, "pct_chg", 6)
+    normalized["vol"] = _numeric_series(frame, "vol", 4)
+    normalized["amount"] = _numeric_series(frame, "amount", 4)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["ts_code", "trade_date"])
+    if normalized.empty:
         return
-
+    normalized = normalized.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
     table = AStockIndexDaily.__table__
-    for batch in AStockInnovation100Builder._chunks(mappings, 1000):
-        stmt = sqlite_insert(table).values(batch)
-        update_columns = {
-            column.name: getattr(stmt.excluded, column.name)
-            for column in table.columns
-            if column.name not in {"ts_code", "trade_date"} and not column.primary_key
-        }
-        db.execute(stmt.on_conflict_do_update(index_elements=["ts_code", "trade_date"], set_=update_columns))
-    db.commit()
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        table.name,
+        columns,
+        normalized.loc[:, columns],
+    )
 
 
 def sync_benchmark_index_daily(
@@ -1522,6 +1659,7 @@ def sync_benchmark_index_daily(
     start_date: date,
     end_date: date,
     tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
 ):
     start_value = _parse_date(start_date)
     end_value = _parse_date(end_date)
@@ -1529,37 +1667,43 @@ def sync_benchmark_index_daily(
         return
 
     tushare = tushare_service or TushareService.getInstance()
-    for benchmark in BENCHMARK_INDEXES:
-        ts_code = benchmark["ts_code"]
-        first_date = (
-            db.query(AStockIndexDaily.trade_date)
-            .filter(AStockIndexDaily.ts_code == ts_code)
-            .order_by(AStockIndexDaily.trade_date.asc())
-            .first()
-        )
-        last_date = (
-            db.query(AStockIndexDaily.trade_date)
-            .filter(AStockIndexDaily.ts_code == ts_code)
-            .order_by(AStockIndexDaily.trade_date.desc())
-            .first()
-        )
-        cached_start = first_date[0] if first_date else None
-        cached_end = last_date[0] if last_date else None
+    owns_analytics_db = analytics_db is None
+    analytics_session = analytics_db or AnalyticsSession()
+    try:
+        for benchmark in BENCHMARK_INDEXES:
+            ts_code = benchmark["ts_code"]
+            first_date = (
+                analytics_session.query(AStockIndexDaily.trade_date)
+                .filter(AStockIndexDaily.ts_code == ts_code)
+                .order_by(AStockIndexDaily.trade_date.asc())
+                .first()
+            )
+            last_date = (
+                analytics_session.query(AStockIndexDaily.trade_date)
+                .filter(AStockIndexDaily.ts_code == ts_code)
+                .order_by(AStockIndexDaily.trade_date.desc())
+                .first()
+            )
+            cached_start = first_date[0] if first_date else None
+            cached_end = last_date[0] if last_date else None
 
-        fetch_ranges: List[Tuple[date, date]] = []
-        if not cached_start or not cached_end:
-            fetch_ranges.append((start_value, end_value))
-        else:
-            if cached_start > start_value:
-                fetch_ranges.append((start_value, cached_start - timedelta(days=1)))
-            if cached_end < end_value:
-                fetch_ranges.append((cached_end + timedelta(days=1), end_value))
+            fetch_ranges: List[Tuple[date, date]] = []
+            if not cached_start or not cached_end:
+                fetch_ranges.append((start_value, end_value))
+            else:
+                if cached_start > start_value:
+                    fetch_ranges.append((start_value, cached_start - timedelta(days=1)))
+                if cached_end < end_value:
+                    fetch_ranges.append((cached_end + timedelta(days=1), end_value))
 
-        for range_start, range_end in fetch_ranges:
-            if range_start > range_end:
-                continue
-            frame = tushare.get_index_daily_range_frame(ts_code, range_start, range_end)
-            _upsert_index_daily_frame(db, frame)
+            for range_start, range_end in fetch_ranges:
+                if range_start > range_end:
+                    continue
+                frame = tushare.get_index_daily_range_frame(ts_code, range_start, range_end)
+                _upsert_index_daily_frame(analytics_session, frame)
+    finally:
+        if owns_analytics_db:
+            AnalyticsSession.remove()
 
 
 def load_benchmark_index_curves(db: Session, start_date: date, end_date: date) -> List[Dict]:
@@ -1568,41 +1712,45 @@ def load_benchmark_index_curves(db: Session, start_date: date, end_date: date) -
     if not start_value or not end_value or start_value > end_value:
         return []
 
-    sync_benchmark_index_daily(db, start_value, end_value)
-    curves = []
-    for benchmark in BENCHMARK_INDEXES:
-        ts_code = benchmark["ts_code"]
-        rows = (
-            db.query(AStockIndexDaily)
-            .filter(
-                AStockIndexDaily.ts_code == ts_code,
-                AStockIndexDaily.trade_date >= start_value,
-                AStockIndexDaily.trade_date <= end_value,
+    analytics_db = AnalyticsSession()
+    try:
+        sync_benchmark_index_daily(db, start_value, end_value, analytics_db=analytics_db)
+        curves = []
+        for benchmark in BENCHMARK_INDEXES:
+            ts_code = benchmark["ts_code"]
+            rows = (
+                analytics_db.query(AStockIndexDaily)
+                .filter(
+                    AStockIndexDaily.ts_code == ts_code,
+                    AStockIndexDaily.trade_date >= start_value,
+                    AStockIndexDaily.trade_date <= end_value,
+                )
+                .order_by(AStockIndexDaily.trade_date.asc())
+                .all()
             )
-            .order_by(AStockIndexDaily.trade_date.asc())
-            .all()
-        )
-        base_close = next((float(row.close) for row in rows if _is_finite_positive(row.close)), None)
-        levels = []
-        for row in rows:
-            close = float(row.close) if _is_finite_positive(row.close) else None
-            levels.append(
+            base_close = next((float(row.close) for row in rows if _is_finite_positive(row.close)), None)
+            levels = []
+            for row in rows:
+                close = float(row.close) if _is_finite_positive(row.close) else None
+                levels.append(
+                    {
+                        "date": row.trade_date.isoformat(),
+                        "close": _round_or_none(close, 6),
+                        "level": _round_or_none(close / base_close * BASE_LEVEL, 6) if close and base_close else None,
+                        "daily_return_pct": _round_or_none(row.pct_chg, 6),
+                    }
+                )
+            curves.append(
                 {
-                    "date": row.trade_date.isoformat(),
-                    "close": _round_or_none(close, 6),
-                    "level": _round_or_none(close / base_close * BASE_LEVEL, 6) if close and base_close else None,
-                    "daily_return_pct": _round_or_none(row.pct_chg, 6),
+                    "ts_code": ts_code,
+                    "name": benchmark["name"],
+                    "base_level": BASE_LEVEL,
+                    "levels": levels,
                 }
             )
-        curves.append(
-            {
-                "ts_code": ts_code,
-                "name": benchmark["name"],
-                "base_level": BASE_LEVEL,
-                "levels": levels,
-            }
-        )
-    return curves
+        return curves
+    finally:
+        AnalyticsSession.remove()
 
 
 def load_a_stock_innovation100_summary(db: Session) -> Dict:
