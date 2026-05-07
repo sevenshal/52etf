@@ -64,7 +64,7 @@ const Profile = () => {
           arrow: true
         },
         {
-          title: '自动化策略配置',
+          title: '自动化跟单交易',
           onClick: () => navigate('/portfolio-copy-trading'),
           arrow: true
         },

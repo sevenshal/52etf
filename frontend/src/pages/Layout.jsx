@@ -5,6 +5,67 @@ import { useAccount } from '../contexts/AccountContext';
 
 const { Content } = Layout;
 
+const TAB_KEYS = ['/', '/fear', '/evc', '/options', '/a-stock-innovation100', '/db', '/profile'];
+
+const PROFILE_ROUTES = [
+  '/automated-trading',
+  '/fear/stocks',
+  '/portfolio-copy-trading',
+  '/soxl-fear-strategy',
+  '/w20-momentum-live',
+  '/us-stock-signal-live',
+  '/a-stock-innovation-momentum-live',
+  '/ib-account-manager',
+  '/longport-account-manager',
+  '/evc-account-manager',
+  '/lev-etf-backtest',
+  '/all-weather-backtest',
+  '/fear/backtest',
+  '/soxl-fear-backtest',
+  '/w20-momentum-backtest',
+  '/monthly-analysis',
+  '/scheduled-tasks',
+  '/system-log',
+];
+
+const isRouteOrChild = (pathname, route) => pathname === route || pathname.startsWith(`${route}/`);
+
+const getActiveTabKey = (pathname, state) => {
+  const stateTabKey = state?.mainTabKey;
+  if (TAB_KEYS.includes(stateTabKey)) {
+    return stateTabKey;
+  }
+
+  if (pathname === '/' || pathname.startsWith('/etf/')) {
+    return '/';
+  }
+
+  if (isRouteOrChild(pathname, '/evc') || pathname.startsWith('/stock/')) {
+    return '/evc';
+  }
+
+  if (isRouteOrChild(pathname, '/options')) {
+    return '/options';
+  }
+
+  if (
+    isRouteOrChild(pathname, '/fear') &&
+    !PROFILE_ROUTES.some(route => isRouteOrChild(pathname, route))
+  ) {
+    return '/fear';
+  }
+
+  if (isRouteOrChild(pathname, '/a-stock-innovation100')) {
+    return '/a-stock-innovation100';
+  }
+
+  if (isRouteOrChild(pathname, '/db')) {
+    return '/db';
+  }
+
+  return '/profile';
+};
+
 const AppLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -46,9 +107,21 @@ const AppLayout = () => {
       label: '我的'
     }
   ];
-  const activeKey = items.find(item => item.key === location.pathname)?.key
-    || items.find(item => item.key !== '/' && location.pathname.startsWith(`${item.key}/`))?.key
-    || '/profile';
+  const activeKey = getActiveTabKey(location.pathname, location.state);
+
+  const handleTabChange = (key) => {
+    const tab = items.find(item => item.key === key);
+    if (!tab || tab.disabled) {
+      return;
+    }
+    navigate(key);
+  };
+
+  const handleTabClick = (key) => {
+    if (key === activeKey && location.pathname !== key) {
+      handleTabChange(key);
+    }
+  };
 
   return (
     <Layout style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -63,7 +136,8 @@ const AppLayout = () => {
       <Tabs
         items={items}
         activeKey={activeKey}
-        onChange={navigate}
+        onChange={handleTabChange}
+        onTabClick={handleTabClick}
         centered
         size="large"
         style={{

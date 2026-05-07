@@ -530,7 +530,7 @@ const OptionsPositions = () => {
       width: 80,
       render: (symbol) => (
         <a
-          onClick={() => navigate(`/stock/${symbol}`)}
+          onClick={() => navigate(`/stock/${symbol}`, { state: { mainTabKey: '/options' } })}
           style={{ color: '#1890ff' }}
         >
           {symbol}
@@ -882,7 +882,10 @@ const OptionsPositions = () => {
       dataIndex: 'symbol',
       width: 100,
       render: (symbol) => (
-        <a onClick={() => navigate(`/stock/${symbol}`)} style={{ color: '#1890ff' }}>
+        <a
+          onClick={() => navigate(`/stock/${symbol}`, { state: { mainTabKey: '/options' } })}
+          style={{ color: '#1890ff' }}
+        >
           {symbol}
         </a>
       ),

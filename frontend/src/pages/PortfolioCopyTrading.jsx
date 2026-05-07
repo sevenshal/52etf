@@ -566,7 +566,7 @@ const PortfolioCopyTrading = () => {
             <Card
                 title={
                     <Space>
-                        <Title level={4} style={{ margin: 0 }}>自动化策略配置</Title>
+                        <Title level={4} style={{ margin: 0 }}>自动化跟单交易</Title>
                     </Space>
                 }
                 extra={

@@ -6,12 +6,9 @@ import FearDashboard from './pages/fear/FearDashboard';
 import FearStockList from './pages/fear/FearStockList';
 import FearTradingLogs from './pages/fear/FearTradingLogs';
 import Profile from './pages/Profile';
-import EVCDashboard from './pages/EVCDashboard';
 import ETFReport from './pages/ETFReport';
 import ETFDetail from './pages/ETFDetail';
-import EVCStrategy from './pages/EVCStrategy';
 import EVCValuation from './pages/EVCValuation';
-import EVCTradeLogs from './pages/EVCTradeLogs';
 import StockDetail from './pages/StockDetail';
 import OptionsPositions from './pages/OptionsPositions';
 import MonthlyAnalysis from './pages/MonthlyAnalysis';
@@ -51,9 +48,7 @@ function App() {
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
-          <Route path="/evc/strategy" element={<EVCStrategy />} />
           <Route path="/evc/valuation" element={<EVCValuation />} />
-          <Route path="/evc/trade-logs" element={<EVCTradeLogs />} />
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
           <Route path="/system-log" element={<SystemLog />} />

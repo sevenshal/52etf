@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Space, Select } from 'antd';
-import { SettingOutlined } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Select } from 'antd';
+import { Link } from 'react-router-dom';
 import request from '../utils/request';
 
 const EVCValuation = () => {
@@ -11,7 +10,6 @@ const EVCValuation = () => {
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
     const [tagOptions, setTagOptions] = useState([]);
-    const navigate = useNavigate();
 
     // 默认值
     const defaultValues = {
@@ -117,7 +115,9 @@ const EVCValuation = () => {
             fixed: 'left',
             width: 80,
             render: (text) => (
-                <a href={`/stock/${text}`}>{text}</a>
+                <Link to={`/stock/${text}`} state={{ mainTabKey: '/evc' }}>
+                    {text}
+                </Link>
             )
         },
         { title: '公司名称', dataIndex: 'company', key: 'company', width: 100 },
@@ -281,19 +281,6 @@ const EVCValuation = () => {
                             label: '所有股票',
                             children: (
                                 <>
-                                    <div style={{ marginBottom: 16 }}>
-                                        <Space>
-                                            <Button
-                                                icon={<SettingOutlined />}
-                                                onClick={() => navigate('/evc/strategy')}
-                                            >
-                                                策略 / Cookie配置
-                                            </Button>
-                                            <Button onClick={() => navigate('/evc')}>
-                                                返回EVC设置
-                                            </Button>
-                                        </Space>
-                                    </div>
                                     <Form form={form} onFinish={handleSearch} layout="inline">
                                         <Form.Item label="股票代码" name="symbol">
                                             <Input
