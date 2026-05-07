@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import sqlite3
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -8,6 +9,7 @@ from typing import Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from sqlalchemy import text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -20,6 +22,7 @@ from ..core.database import (
     AStockInnovation100Rebalance,
     AStockMarketDaily,
     AStockNameChange,
+    DB_PATH,
     engine,
 )
 from ..core.services.tushare import TushareService
@@ -143,6 +146,10 @@ def _is_finite_positive(value) -> bool:
     except (TypeError, ValueError):
         return False
     return math.isfinite(numeric) and numeric > 0
+
+
+def _is_market_frame_empty(frame: Optional[pl.DataFrame]) -> bool:
+    return frame is None or frame.is_empty()
 
 
 def _year_chunks(start_date: date, end_date: date) -> Iterable[Tuple[date, date]]:
@@ -530,7 +537,7 @@ class AStockInnovation100Builder:
         finally:
             raw_conn.close()
 
-    def _load_market_day(self, trade_date: date) -> pd.DataFrame:
+    def _load_market_day(self, trade_date: date) -> pl.DataFrame:
         sql = """
             SELECT
                 trade_date, ts_code, open, high, low, close, pre_close, change, pct_chg,
@@ -538,31 +545,51 @@ class AStockInnovation100Builder:
             FROM a_stock_market_daily
             WHERE trade_date = :trade_date
         """
-        frame = pd.read_sql_query(sql, engine, params={"trade_date": trade_date.isoformat()})
-        if frame.empty:
+        with sqlite3.connect(DB_PATH) as connection:
+            frame = pl.read_database(
+                sql,
+                connection,
+                execute_options={"parameters": {"trade_date": trade_date.isoformat()}},
+                infer_schema_length=None,
+            )
+        if frame.is_empty():
             return frame
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
-        return frame
+        return frame.with_columns(pl.col("trade_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False))
 
-    def _load_market_frames_by_date(self, start_date: date, end_date: date) -> Dict[date, pd.DataFrame]:
+    @staticmethod
+    def _partition_market_frames(frame: pl.DataFrame) -> Dict[date, pl.DataFrame]:
+        if frame.is_empty():
+            return {}
+        return {
+            key[0]: group.drop("trade_date")
+            for key, group in frame.partition_by("trade_date", as_dict=True, maintain_order=True).items()
+        }
+
+    def _load_market_range_frame(self, start_date: date, end_date: date) -> pl.DataFrame:
         sql = """
             SELECT trade_date, ts_code, close, pct_chg, amount, total_mv, circ_mv
             FROM a_stock_market_daily
             WHERE trade_date >= :start_date AND trade_date <= :end_date
             ORDER BY trade_date
         """
-        frame = pd.read_sql_query(
-            sql,
-            engine,
-            params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
-        )
-        if frame.empty:
-            return {}
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
-        return {
-            trade_date: group.drop(columns=["trade_date"]).reset_index(drop=True)
-            for trade_date, group in frame.groupby("trade_date", sort=False)
-        }
+        with sqlite3.connect(DB_PATH) as connection:
+            frame = pl.read_database(
+                sql,
+                connection,
+                execute_options={
+                    "parameters": {
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                    }
+                },
+                infer_schema_length=None,
+            )
+        if frame.is_empty():
+            return frame
+        return frame.with_columns(pl.col("trade_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False))
+
+    def _load_market_frames_by_date(self, start_date: date, end_date: date) -> Dict[date, pl.DataFrame]:
+        return self._partition_market_frames(self._load_market_range_frame(start_date, end_date))
 
     def _iter_market_frames_by_date(
         self,
@@ -570,7 +597,7 @@ class AStockInnovation100Builder:
         load_message: str,
         progress_start: Optional[int] = None,
         progress_end: Optional[int] = None,
-    ) -> Iterable[Tuple[int, date, pd.DataFrame]]:
+    ) -> Iterable[Tuple[int, date, pl.DataFrame]]:
         total_dates = len(trading_dates)
         if not total_dates:
             return
@@ -592,7 +619,7 @@ class AStockInnovation100Builder:
             frames_by_date = self._load_market_frames_by_date(chunk_start, chunk_end)
             chunk_offset = (chunk_index - 1) * MARKET_FRAME_LOAD_DAYS
             for offset, current_date in enumerate(chunk):
-                yield chunk_offset + offset, current_date, frames_by_date.get(current_date, pd.DataFrame())
+                yield chunk_offset + offset, current_date, frames_by_date.get(current_date, pl.DataFrame())
             del frames_by_date
 
     def _load_basic_map(self) -> Dict[str, Dict]:
@@ -655,31 +682,74 @@ class AStockInnovation100Builder:
             return False
         return True
 
+    @staticmethod
+    def _update_amount_history(
+        market_frame: pl.DataFrame,
+        amount_history: Dict[str, Deque[float]],
+    ) -> None:
+        if _is_market_frame_empty(market_frame) or not {"ts_code", "amount"}.issubset(set(market_frame.columns)):
+            return
+        frame = market_frame.select(["ts_code", "amount"]).filter(
+            pl.col("ts_code").is_not_null()
+            & pl.col("amount").is_not_null()
+            & (pl.col("amount") >= 0)
+        )
+        for ts_code, amount in frame.iter_rows():
+            if ts_code and math.isfinite(float(amount)):
+                amount_history[str(ts_code)].append(float(amount))
+
+    @staticmethod
+    def _weighted_daily_return(
+        market_frame: pl.DataFrame,
+        current_weight_map: Dict[str, float],
+    ) -> float:
+        if _is_market_frame_empty(market_frame) or not current_weight_map:
+            return 0.0
+        frame = market_frame.select(["ts_code", "pct_chg"]).filter(
+            pl.col("ts_code").is_in(list(current_weight_map.keys()))
+            & pl.col("pct_chg").is_not_null()
+        )
+        daily_return = 0.0
+        for ts_code, pct_chg in frame.iter_rows():
+            try:
+                pct_value = float(pct_chg)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(pct_value):
+                daily_return += float(current_weight_map.get(str(ts_code), 0.0)) * pct_value / 100.0
+        return daily_return if math.isfinite(daily_return) else 0.0
+
     def _rank_candidates(
         self,
-        market_frame: pd.DataFrame,
+        market_frame: pl.DataFrame,
         as_of: date,
         basic_map: Dict[str, Dict],
         st_intervals: Dict[str, List[Tuple[date, date]]],
         amount_history: Dict[str, Deque[float]],
     ) -> List[Dict]:
-        if market_frame.empty:
+        if _is_market_frame_empty(market_frame):
             return []
 
         candidates = []
-        for row in market_frame.itertuples(index=False):
-            ts_code = str(getattr(row, "ts_code", "") or "")
+        filtered = market_frame.filter(
+            (pl.col("close").is_not_null())
+            & (pl.col("close") > 0)
+            & (pl.col("circ_mv").is_not_null())
+            & (pl.col("circ_mv") > 0)
+        )
+        for row in filtered.iter_rows(named=True):
+            ts_code = str(row.get("ts_code") or "")
             if not ts_code:
-                continue
-            close = getattr(row, "close", None)
-            circ_mv = getattr(row, "circ_mv", None)
-            if not _is_finite_positive(close) or not _is_finite_positive(circ_mv):
                 continue
             basic = basic_map.get(ts_code)
             if not self._is_basic_eligible(ts_code, as_of, basic, st_intervals):
                 continue
-            history = amount_history.get(ts_code)
-            avg_amount = float(np.mean(history)) if history else 0.0
+            avg_amount = row.get("avg_amount_60d")
+            if avg_amount is None:
+                history = amount_history.get(ts_code)
+                avg_amount = float(np.mean(history)) if history else 0.0
+            else:
+                avg_amount = float(avg_amount or 0.0)
             if avg_amount < MIN_AVG_AMOUNT_60D:
                 continue
             candidates.append(
@@ -687,12 +757,12 @@ class AStockInnovation100Builder:
                     "ts_code": ts_code,
                     "name": basic.get("name"),
                     "industry": basic.get("industry"),
-                    "close": float(close),
-                    "pct_chg": float(getattr(row, "pct_chg", 0.0) or 0.0),
-                    "amount": float(getattr(row, "amount", 0.0) or 0.0),
+                    "close": float(row.get("close") or 0.0),
+                    "pct_chg": float(row.get("pct_chg") or 0.0),
+                    "amount": float(row.get("amount") or 0.0),
                     "avg_amount_60d": avg_amount,
-                    "total_mv": float(getattr(row, "total_mv", 0.0) or 0.0),
-                    "circ_mv": float(circ_mv),
+                    "total_mv": float(row.get("total_mv") or 0.0),
+                    "circ_mv": float(row.get("circ_mv") or 0.0),
                 }
             )
 
@@ -1014,19 +1084,12 @@ class AStockInnovation100Builder:
                     processed_dates=idx + 1,
                     total_dates=total_dates,
                 )
-            if market_frame.empty:
+            if _is_market_frame_empty(market_frame):
                 self._ensure_market_day(current_date)
                 market_frame = self._load_market_day(current_date)
-                if not market_frame.empty and "trade_date" in market_frame.columns:
-                    market_frame = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
-            symbols = np.array([], dtype=str)
-            if not market_frame.empty:
-                symbols = market_frame["ts_code"].astype(str).to_numpy()
-                amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
-                for ts_code, amount in zip(symbols, amounts):
-                    if ts_code and math.isfinite(amount) and amount >= 0:
-                        amount_history[ts_code].append(float(amount))
-
+                if not _is_market_frame_empty(market_frame) and "trade_date" in market_frame.columns:
+                    market_frame = market_frame.drop("trade_date")
+            self._update_amount_history(market_frame, amount_history)
             if current_date < start_date:
                 continue
 
@@ -1053,20 +1116,7 @@ class AStockInnovation100Builder:
                     pending_constituents = None
                     pending_effective_date = None
 
-                pct_changes = (
-                    np.nan_to_num(market_frame["pct_chg"].to_numpy(dtype=float), nan=0.0) / 100.0
-                    if not market_frame.empty
-                    else np.array([], dtype=float)
-                )
-                pct_change_by_symbol = dict(
-                    zip(symbols, pct_changes)
-                )
-                daily_return = sum(
-                    float(item.get("weight") or 0.0) * pct_change_by_symbol.get(item["ts_code"], 0.0)
-                    for item in current_constituents
-                )
-                if not math.isfinite(daily_return):
-                    daily_return = 0.0
+                daily_return = self._weighted_daily_return(market_frame, current_weight_map)
                 level *= (1.0 + daily_return)
                 high_watermark = max(high_watermark, level)
 
@@ -1322,19 +1372,13 @@ class AStockInnovation100Builder:
                     total_dates=total_dates,
                 )
 
-            if market_frame.empty:
+            if _is_market_frame_empty(market_frame):
                 self._ensure_market_day(current_date)
                 market_frame = self._load_market_day(current_date)
-                if not market_frame.empty and "trade_date" in market_frame.columns:
-                    market_frame = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
+                if not _is_market_frame_empty(market_frame) and "trade_date" in market_frame.columns:
+                    market_frame = market_frame.drop("trade_date")
 
-            symbols = np.array([], dtype=str)
-            if not market_frame.empty:
-                symbols = market_frame["ts_code"].astype(str).to_numpy()
-                amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
-                for ts_code, amount in zip(symbols, amounts):
-                    if ts_code and math.isfinite(amount) and amount >= 0:
-                        amount_history[ts_code].append(float(amount))
+            self._update_amount_history(market_frame, amount_history)
 
             if not is_output_date:
                 continue
@@ -1347,18 +1391,7 @@ class AStockInnovation100Builder:
                 pending_constituents = None
                 pending_effective_date = None
 
-            pct_changes = (
-                np.nan_to_num(market_frame["pct_chg"].to_numpy(dtype=float), nan=0.0) / 100.0
-                if not market_frame.empty
-                else np.array([], dtype=float)
-            )
-            pct_change_by_symbol = dict(zip(symbols, pct_changes))
-            daily_return = sum(
-                float(item.get("weight") or 0.0) * pct_change_by_symbol.get(item["ts_code"], 0.0)
-                for item in current_constituents
-            )
-            if not math.isfinite(daily_return):
-                daily_return = 0.0
+            daily_return = self._weighted_daily_return(market_frame, current_weight_map)
             level *= (1.0 + daily_return)
             high_watermark = max(high_watermark, level)
             drawdown_pct = (level / high_watermark - 1.0) * 100 if high_watermark > 0 else 0.0

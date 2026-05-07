@@ -6,6 +6,7 @@ pydantic
 python-jose
 sqlalchemy
 duckdb
+polars
 watchgod
 setproctitle
 pandas
