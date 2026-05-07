@@ -680,6 +680,9 @@ const DatabaseManager = () => {
               <Space direction="vertical" size={4} className="db-table-item-body">
                 <Space className="db-table-item-title">
                   <Text strong>{table.name}</Text>
+                  <Tag color={table.source === 'duckdb' ? 'purple' : 'default'}>
+                    {table.source === 'duckdb' ? 'DuckDB' : 'SQLite'}
+                  </Tag>
                   <Tag color="blue">{table.column_count}</Tag>
                 </Space>
                 <Text type="secondary" className="db-table-fields">
@@ -693,7 +696,12 @@ const DatabaseManager = () => {
 
         {selectedTable && (
           <div className="db-column-panel">
-            <Text strong>{selectedTable.name}</Text>
+            <Space size={6}>
+              <Text strong>{selectedTable.name}</Text>
+              <Tag color={selectedTable.source === 'duckdb' ? 'purple' : 'default'}>
+                {selectedTable.source === 'duckdb' ? 'DuckDB' : 'SQLite'}
+              </Tag>
+            </Space>
             <div className="db-column-tags">
               {selectedTable.columns.map(column => (
                 <Tooltip title={column.type || 'unknown'} key={column.name}>
