@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -375,8 +376,36 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"])
 
+    @staticmethod
+    def _merge_daily_and_basic_frame(daily: pd.DataFrame, daily_basic: pd.DataFrame) -> pd.DataFrame:
+        if daily is None or daily.empty:
+            return pd.DataFrame()
+        if daily_basic is None or daily_basic.empty:
+            return daily
+        return daily.merge(
+            daily_basic.drop(columns=["trade_date"], errors="ignore"),
+            on="ts_code",
+            how="left",
+        )
+
+    def _fetch_daily_and_basic_parallel(self, trade_date: date) -> tuple:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            daily_future = executor.submit(self.get_a_stock_daily_frame, trade_date)
+            basic_future = executor.submit(self.get_a_stock_daily_basic_frame, trade_date)
+            daily = daily_future.result()
+            daily_basic = basic_future.result()
+        return daily, daily_basic
+
+    def _fetch_daily_and_basic_range_parallel(self, start_date: date, end_date: date) -> tuple:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            daily_future = executor.submit(self.get_a_stock_daily_range_frame, start_date, end_date)
+            basic_future = executor.submit(self.get_a_stock_daily_basic_range_frame, start_date, end_date)
+            daily = daily_future.result()
+            daily_basic = basic_future.result()
+        return daily, daily_basic
+
     def get_a_stock_bak_daily_range_frame(self, start_date: date, end_date: date, limit: int = 7000) -> pd.DataFrame:
-        """分页获取bak_daily截面；该接口同时包含价格、成交额和市值字段。"""
+        """分页获取bak_daily截面；仅用于日线主接口失败时兜底。"""
         start_value = self._to_date(start_date)
         end_value = self._to_date(end_date)
         if not start_value or not end_value or start_value > end_value:
@@ -427,42 +456,39 @@ class TushareService(QuoteProvider):
         return result
 
     def get_a_stock_market_daily_frame(self, trade_date: date) -> pd.DataFrame:
-        """合并价格与估值截面，供指数构建使用。"""
+        """合并价格与估值截面，优先使用 daily + daily_basic 并行结果。"""
+        daily, daily_basic = self._fetch_daily_and_basic_parallel(trade_date)
+        merged = self._merge_daily_and_basic_frame(daily, daily_basic)
+        if not merged.empty:
+            return merged
+
         bak_daily = self.get_a_stock_bak_daily_range_frame(trade_date, trade_date)
         if not bak_daily.empty:
-            return bak_daily
-
-        daily = self.get_a_stock_daily_frame(trade_date)
-        if daily.empty:
-            return pd.DataFrame()
-        daily_basic = self.get_a_stock_daily_basic_frame(trade_date)
-        if daily_basic.empty:
-            return daily
-        merged = daily.merge(
-            daily_basic.drop(columns=["trade_date"], errors="ignore"),
-            on="ts_code",
-            how="left",
-        )
-        return merged
+            self.logger.warning("Falling back to bak_daily for %s because daily/daily_basic were unavailable", trade_date)
+        return bak_daily
 
     def get_a_stock_market_daily_range_frame(self, start_date: date, end_date: date) -> pd.DataFrame:
-        """合并一段时间内的价格与估值截面，供指数构建批量缓存。"""
+        """合并一段时间内的价格与估值截面，优先使用 daily + daily_basic 并行结果。"""
+        daily, daily_basic = self._fetch_daily_and_basic_range_parallel(start_date, end_date)
+        if not daily.empty:
+            if daily_basic.empty:
+                return daily
+            merged = daily.merge(
+                daily_basic,
+                on=["ts_code", "trade_date"],
+                how="left",
+            )
+            if not merged.empty:
+                return merged
+
         bak_daily = self.get_a_stock_bak_daily_range_frame(start_date, end_date)
         if not bak_daily.empty:
-            return bak_daily
-
-        daily = self.get_a_stock_daily_range_frame(start_date, end_date)
-        if daily.empty:
-            return pd.DataFrame()
-        daily_basic = self.get_a_stock_daily_basic_range_frame(start_date, end_date)
-        if daily_basic.empty:
-            return daily
-        merged = daily.merge(
-            daily_basic,
-            on=["ts_code", "trade_date"],
-            how="left",
-        )
-        return merged
+            self.logger.warning(
+                "Falling back to bak_daily for %s~%s because daily/daily_basic were unavailable",
+                start_date,
+                end_date,
+            )
+        return bak_daily
 
     def get_index_daily_range_frame(self, ts_code: str, start_date: date, end_date: date, limit: int = 5000) -> pd.DataFrame:
         """分页获取A股指数日行情。"""

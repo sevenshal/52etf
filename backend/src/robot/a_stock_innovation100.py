@@ -40,6 +40,7 @@ MIN_LISTING_DAYS = 365
 LIQUIDITY_WINDOW = 60
 MIN_AVG_AMOUNT_60D = 100_000.0  # Tushare amount单位为千元，约等于1亿元人民币。
 MIN_MARKET_DAILY_ROWS = 3500
+MAX_MARKET_DAILY_OHL_ZERO_PCT = 1.0
 MAX_SINGLE_WEIGHT = 0.10
 TOP5_WEIGHT_CAP = 0.40
 LARGE_WEIGHT_THRESHOLD = 0.045
@@ -279,11 +280,38 @@ class AStockInnovation100Builder:
         for index in range(0, len(items), size):
             yield items[index:index + size]
 
+    @staticmethod
+    def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
+        if not day_stats:
+            return True
+        row_count = int(day_stats.get("row_count") or 0)
+        if row_count < MIN_MARKET_DAILY_ROWS:
+            return True
+        ohl_zero_rows = int(day_stats.get("ohl_zero_rows") or 0)
+        ohl_zero_pct = ohl_zero_rows / row_count * 100 if row_count else 100.0
+        return ohl_zero_pct > MAX_MARKET_DAILY_OHL_ZERO_PCT
+
     def _ensure_market_day(self, trade_date: date):
-        existing_count = self.db.query(AStockMarketDaily).filter(
-            AStockMarketDaily.trade_date == trade_date
-        ).count()
-        if existing_count >= MIN_MARKET_DAILY_ROWS:
+        row = self.db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS row_count,
+                    SUM(CASE
+                        WHEN COALESCE(open, 0) = 0
+                          OR COALESCE(high, 0) = 0
+                          OR COALESCE(low, 0) = 0
+                        THEN 1 ELSE 0
+                    END) AS ohl_zero_rows
+                FROM a_stock_market_daily
+                WHERE trade_date = :trade_date
+            """),
+            {"trade_date": trade_date.isoformat()},
+        ).fetchone()
+        day_stats = {
+            "row_count": int(row[0] or 0),
+            "ohl_zero_rows": int(row[1] or 0),
+        } if row else None
+        if not self._market_day_needs_refresh(day_stats):
             return
 
         frame = self.tushare.get_a_stock_market_daily_frame(trade_date)
@@ -292,23 +320,38 @@ class AStockInnovation100Builder:
 
         self._upsert_market_frame(frame, trade_date=trade_date)
 
-    def _existing_market_day_counts(self, start_date: date, end_date: date) -> Dict[date, int]:
+    def _existing_market_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
         rows = self.db.execute(
             text("""
-                SELECT trade_date, COUNT(*) AS row_count
+                SELECT
+                    trade_date,
+                    COUNT(*) AS row_count,
+                    SUM(CASE
+                        WHEN COALESCE(open, 0) = 0
+                          OR COALESCE(high, 0) = 0
+                          OR COALESCE(low, 0) = 0
+                        THEN 1 ELSE 0
+                    END) AS ohl_zero_rows
                 FROM a_stock_market_daily
                 WHERE trade_date >= :start_date AND trade_date <= :end_date
                 GROUP BY trade_date
             """),
             {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
         ).fetchall()
-        return {_parse_date(row[0]): int(row[1]) for row in rows if _parse_date(row[0])}
+        return {
+            _parse_date(row[0]): {
+                "row_count": int(row[1] or 0),
+                "ohl_zero_rows": int(row[2] or 0),
+            }
+            for row in rows
+            if _parse_date(row[0])
+        }
 
     def _ensure_market_days(self, trading_dates: List[date]):
         if not trading_dates:
             return
-        counts = self._existing_market_day_counts(min(trading_dates), max(trading_dates))
-        missing_dates = [item for item in trading_dates if counts.get(item, 0) < MIN_MARKET_DAILY_ROWS]
+        stats_by_date = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
+        missing_dates = [item for item in trading_dates if self._market_day_needs_refresh(stats_by_date.get(item))]
         if not missing_dates:
             self._progress("全市场日行情缓存已就绪", 50, processed_dates=len(trading_dates), total_dates=len(trading_dates))
             return
@@ -318,7 +361,7 @@ class AStockInnovation100Builder:
         chunks = []
         current_chunk: List[date] = []
         for missing_date in missing_dates:
-            if counts.get(missing_date, 0) > 0:
+            if int((stats_by_date.get(missing_date) or {}).get("row_count") or 0) > 0:
                 if current_chunk:
                     chunks.append(current_chunk)
                     current_chunk = []
