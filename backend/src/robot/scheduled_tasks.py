@@ -237,9 +237,13 @@ def _run_a_stock_innovation100_rebuild():
 
     result = rebuild_a_stock_innovation100_for_scheduler()
     logging.getLogger("ScheduledTaskManager").info(
-        "A stock innovation100 rebuilt: latest_date=%s, latest_level=%s",
+        "A stock innovation100 refreshed: mode=%s, status=%s, latest_date=%s, latest_level=%s, levels_saved=%s, rebalances_saved=%s",
+        result.get("mode"),
+        result.get("status"),
         result.get("latest_date"),
         result.get("latest_level"),
+        result.get("levels_saved"),
+        result.get("rebalances_saved"),
     )
 
 def _run_a_stock_innovation_momentum_live_sync():

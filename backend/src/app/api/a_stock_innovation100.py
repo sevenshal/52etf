@@ -19,6 +19,7 @@ from ...core.database import (
 from ...robot.a_stock_innovation100 import (
     DEFAULT_START_DATE,
     INDEX_CODE,
+    AStockInnovation100Builder,
     compute_yearly_returns,
     load_a_stock_innovation100_summary,
     load_benchmark_index_curves,
@@ -267,4 +268,4 @@ def get_rebalance_detail(
 
 def rebuild_a_stock_innovation100_for_scheduler() -> Dict:
     with get_db_ctx() as db:
-        return rebuild_a_stock_innovation100(db, start_date=DEFAULT_START_DATE, end_date=date.today())
+        return AStockInnovation100Builder(db).refresh_incremental(end_date=date.today())

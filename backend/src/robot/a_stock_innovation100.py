@@ -215,6 +215,24 @@ class AStockInnovation100Builder:
             name_frame = pd.concat(name_frames, ignore_index=True).drop_duplicates()
             self._replace_name_changes(name_frame)
 
+    def sync_reference_data_incremental(self, start_date: date, end_date: date):
+        self._progress("增量同步A股基础信息", 5)
+        basic_frame = self.tushare.get_a_stock_basic_frame(["L", "D"])
+        if not basic_frame.empty:
+            self._upsert_stock_basic(basic_frame)
+
+        self._progress("增量同步A股名称/ST变更记录", 8)
+        name_frames = []
+        name_start = max(date(1990, 1, 1), start_date - timedelta(days=90))
+        name_end = end_date + timedelta(days=30)
+        for chunk_start, chunk_end in _year_chunks(name_start, name_end):
+            frame = self.tushare.get_a_stock_name_changes_frame(chunk_start, chunk_end)
+            if not frame.empty:
+                name_frames.append(frame)
+        if name_frames:
+            name_frame = pd.concat(name_frames, ignore_index=True).drop_duplicates()
+            self._replace_name_changes_range(name_frame, name_start, name_end)
+
     def _upsert_stock_basic(self, frame: pd.DataFrame):
         now = datetime.now()
         mappings = []
@@ -240,8 +258,21 @@ class AStockInnovation100Builder:
         self._bulk_upsert(AStockBasic, mappings, ["ts_code"])
 
     def _replace_name_changes(self, frame: pd.DataFrame):
-        now = datetime.now()
         self.db.query(AStockNameChange).delete(synchronize_session=False)
+        self._insert_name_changes(frame)
+
+    def _replace_name_changes_range(self, frame: pd.DataFrame, start_date: date, end_date: date):
+        self.db.execute(
+            text("""
+                DELETE FROM a_stock_name_changes
+                WHERE start_date >= :start_date AND start_date <= :end_date
+            """),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        )
+        self._insert_name_changes(frame)
+
+    def _insert_name_changes(self, frame: pd.DataFrame):
+        now = datetime.now()
         mappings = []
         for _, row in frame.iterrows():
             ts_code = str(row.get("ts_code") or "").strip()
@@ -902,11 +933,11 @@ class AStockInnovation100Builder:
         last_market_frame = pd.DataFrame()
 
         self._ensure_market_days(trading_dates)
-        market_day_counts = self._existing_market_day_counts(min(trading_dates), max(trading_dates))
+        market_day_stats = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
         available_trading_dates = [
             item
             for item in trading_dates
-            if market_day_counts.get(item, 0) >= MIN_MARKET_DAILY_ROWS
+            if not self._market_day_needs_refresh(market_day_stats.get(item))
         ]
         skipped_dates = len(trading_dates) - len(available_trading_dates)
         if skipped_dates:
@@ -1063,6 +1094,295 @@ class AStockInnovation100Builder:
             "latest_rebalance_date": latest_rebalance.rebalance_date.isoformat() if latest_rebalance else None,
             "rule_snapshot": self.rule_snapshot(),
             "last_market_date": trading_dates[-1].isoformat() if trading_dates else None,
+        }
+
+    def _load_constituents_for_rebalance(self, rebalance_id: int) -> List[Dict]:
+        rows = (
+            self.db.query(AStockInnovation100Constituent)
+            .filter(
+                AStockInnovation100Constituent.index_code == INDEX_CODE,
+                AStockInnovation100Constituent.rebalance_id == rebalance_id,
+            )
+            .order_by(AStockInnovation100Constituent.rank.asc())
+            .all()
+        )
+        return [
+            {
+                "ts_code": row.ts_code,
+                "name": row.name,
+                "industry": row.industry,
+                "rank": row.rank,
+                "raw_weight": float(row.raw_weight_pct or 0.0) / 100.0,
+                "weight": float(row.weight_pct or 0.0) / 100.0,
+                "total_mv": row.total_mv,
+                "circ_mv": row.circ_mv,
+                "avg_amount_60d": row.avg_amount_60d,
+            }
+            for row in rows
+        ]
+
+    def _load_incremental_state(self, as_of: date) -> Dict:
+        latest_level = (
+            self.db.query(AStockInnovation100Level)
+            .filter(AStockInnovation100Level.index_code == INDEX_CODE)
+            .order_by(AStockInnovation100Level.date.desc())
+            .first()
+        )
+        if not latest_level:
+            return {}
+
+        high_watermark_row = (
+            self.db.query(AStockInnovation100Level.level)
+            .filter(
+                AStockInnovation100Level.index_code == INDEX_CODE,
+                AStockInnovation100Level.date <= latest_level.date,
+            )
+            .order_by(AStockInnovation100Level.level.desc())
+            .first()
+        )
+        high_watermark = float(high_watermark_row[0]) if high_watermark_row and high_watermark_row[0] else float(latest_level.level or BASE_LEVEL)
+
+        effective_rebalance = (
+            self.db.query(AStockInnovation100Rebalance)
+            .filter(
+                AStockInnovation100Rebalance.index_code == INDEX_CODE,
+                AStockInnovation100Rebalance.effective_date <= latest_level.date,
+            )
+            .order_by(AStockInnovation100Rebalance.effective_date.desc(), AStockInnovation100Rebalance.id.desc())
+            .first()
+        )
+        if not effective_rebalance:
+            return {}
+
+        current_constituents = self._load_constituents_for_rebalance(effective_rebalance.id)
+        if not current_constituents:
+            return {}
+
+        pending_rebalance = (
+            self.db.query(AStockInnovation100Rebalance)
+            .filter(
+                AStockInnovation100Rebalance.index_code == INDEX_CODE,
+                AStockInnovation100Rebalance.rebalance_date <= latest_level.date,
+                AStockInnovation100Rebalance.effective_date > latest_level.date,
+                AStockInnovation100Rebalance.effective_date <= as_of,
+            )
+            .order_by(AStockInnovation100Rebalance.effective_date.asc(), AStockInnovation100Rebalance.id.asc())
+            .first()
+        )
+        pending_constituents = self._load_constituents_for_rebalance(pending_rebalance.id) if pending_rebalance else None
+
+        return {
+            "latest_level": latest_level,
+            "level": float(latest_level.level or BASE_LEVEL),
+            "high_watermark": high_watermark,
+            "current_constituents": current_constituents,
+            "current_weight_map": {item["ts_code"]: float(item.get("weight") or 0.0) for item in current_constituents},
+            "pending_constituents": pending_constituents,
+            "pending_effective_date": pending_rebalance.effective_date if pending_rebalance else None,
+        }
+
+    def refresh_incremental(self, end_date: Optional[date] = None) -> Dict:
+        end_date = _parse_date(end_date) or date.today()
+        state = self._load_incremental_state(end_date)
+        if not state:
+            self._progress("未找到可增量续算的创新100结果，执行首次全量回跑", 0)
+            return self.rebuild(start_date=DEFAULT_START_DATE, end_date=end_date, force_rebuild_outputs=True)
+
+        latest_level = state["latest_level"]
+        latest_date = latest_level.date
+        if latest_date >= end_date:
+            return {
+                "index_code": INDEX_CODE,
+                "index_name": INDEX_NAME,
+                "mode": "incremental",
+                "status": "up_to_date",
+                "start_date": latest_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "latest_date": latest_date.isoformat(),
+                "latest_level": latest_level.level,
+                "levels_saved": 0,
+                "rebalances_saved": 0,
+            }
+
+        calendar_start = latest_date - timedelta(days=RAW_FETCH_LOOKBACK_DAYS)
+        trade_calendar = self.tushare.get_trade_calendar_frame(calendar_start, end_date)
+        if trade_calendar.empty:
+            raise RuntimeError("没有获取到交易日历")
+
+        trading_dates = [
+            item
+            for item in trade_calendar[trade_calendar["is_open"] == 1]["cal_date"].tolist()
+            if item <= end_date
+        ]
+        if not trading_dates:
+            raise RuntimeError("指定区间内没有交易日")
+
+        self.sync_reference_data_incremental(max(DEFAULT_START_DATE, latest_date - timedelta(days=30)), end_date)
+        self._ensure_market_days(trading_dates)
+        market_day_stats = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
+        trading_dates = [
+            item
+            for item in trading_dates
+            if not self._market_day_needs_refresh(market_day_stats.get(item))
+        ]
+        new_trading_dates = [item for item in trading_dates if item > latest_date]
+        if not new_trading_dates:
+            return {
+                "index_code": INDEX_CODE,
+                "index_name": INDEX_NAME,
+                "mode": "incremental",
+                "status": "up_to_date",
+                "start_date": latest_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "latest_date": latest_date.isoformat(),
+                "latest_level": latest_level.level,
+                "levels_saved": 0,
+                "rebalances_saved": 0,
+            }
+
+        basic_map = self._load_basic_map()
+        st_intervals = self._load_st_intervals()
+        amount_history: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=LIQUIDITY_WINDOW))
+        current_constituents: List[Dict] = state["current_constituents"]
+        current_weight_map: Dict[str, float] = state["current_weight_map"]
+        pending_constituents: Optional[List[Dict]] = state["pending_constituents"]
+        pending_effective_date: Optional[date] = state["pending_effective_date"]
+        level = float(state["level"])
+        high_watermark = float(state["high_watermark"])
+        levels: List[Dict] = []
+        rebalances_before = self.db.query(AStockInnovation100Rebalance).filter(
+            AStockInnovation100Rebalance.index_code == INDEX_CODE
+        ).count()
+
+        self._progress(
+            "载入创新100增量行情缓存",
+            35,
+            latest_date=latest_date.isoformat(),
+            end_date=end_date.isoformat(),
+        )
+        market_frames_by_date = self._load_market_frames_by_date(min(trading_dates), max(trading_dates))
+
+        for warmup_date in [item for item in trading_dates if item <= latest_date]:
+            market_frame = market_frames_by_date.get(warmup_date, pd.DataFrame())
+            if market_frame.empty:
+                continue
+            symbols = market_frame["ts_code"].astype(str).to_numpy()
+            amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
+            for ts_code, amount in zip(symbols, amounts):
+                if ts_code and math.isfinite(amount) and amount >= 0:
+                    amount_history[ts_code].append(float(amount))
+
+        total_dates = len(new_trading_dates)
+        for output_index, current_date in enumerate(new_trading_dates):
+            calc_progress = 50 + int(output_index / max(total_dates, 1) * 40)
+            self._progress(
+                f"增量计算创新100指数点位 {current_date.isoformat()}",
+                calc_progress,
+                processed_dates=output_index + 1,
+                total_dates=total_dates,
+            )
+            market_frame = market_frames_by_date.get(current_date, pd.DataFrame())
+            if market_frame.empty:
+                self._ensure_market_day(current_date)
+                market_frame = self._load_market_day(current_date)
+                if not market_frame.empty and "trade_date" in market_frame.columns:
+                    market_frames_by_date[current_date] = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
+
+            symbols = np.array([], dtype=str)
+            if not market_frame.empty:
+                symbols = market_frame["ts_code"].astype(str).to_numpy()
+                amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
+                for ts_code, amount in zip(symbols, amounts):
+                    if ts_code and math.isfinite(amount) and amount >= 0:
+                        amount_history[ts_code].append(float(amount))
+
+            if pending_constituents is not None and pending_effective_date == current_date:
+                current_constituents = pending_constituents
+                current_weight_map = {item["ts_code"]: float(item["weight"]) for item in current_constituents}
+                pending_constituents = None
+                pending_effective_date = None
+
+            pct_changes = (
+                np.nan_to_num(market_frame["pct_chg"].to_numpy(dtype=float), nan=0.0) / 100.0
+                if not market_frame.empty
+                else np.array([], dtype=float)
+            )
+            pct_change_by_symbol = dict(zip(symbols, pct_changes))
+            daily_return = sum(
+                float(item.get("weight") or 0.0) * pct_change_by_symbol.get(item["ts_code"], 0.0)
+                for item in current_constituents
+            )
+            if not math.isfinite(daily_return):
+                daily_return = 0.0
+            level *= (1.0 + daily_return)
+            high_watermark = max(high_watermark, level)
+            drawdown_pct = (level / high_watermark - 1.0) * 100 if high_watermark > 0 else 0.0
+            levels.append(
+                {
+                    "index_code": INDEX_CODE,
+                    "date": current_date,
+                    "level": _round_or_none(level, 6),
+                    "daily_return_pct": _round_or_none(daily_return * 100, 6),
+                    "drawdown_pct": _round_or_none(drawdown_pct, 6),
+                    "constituent_count": len(current_constituents),
+                    "total_circ_mv": _round_or_none(sum(float(item.get("circ_mv") or 0.0) for item in current_constituents), 4),
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                }
+            )
+
+            current_index = trading_dates.index(current_date)
+            if current_index < len(trading_dates) - 1 and self._is_quarter_end(trading_dates, current_index):
+                existing_rebalance = (
+                    self.db.query(AStockInnovation100Rebalance)
+                    .filter(
+                        AStockInnovation100Rebalance.index_code == INDEX_CODE,
+                        AStockInnovation100Rebalance.rebalance_date == current_date,
+                    )
+                    .first()
+                )
+                if not existing_rebalance:
+                    ranked = self._rank_candidates(market_frame, current_date, basic_map, st_intervals, amount_history)
+                    rebalance_type = self._rebalance_type(current_date, is_initial=False)
+                    selected = self._select_constituents(
+                        ranked,
+                        [item["ts_code"] for item in current_constituents],
+                        reconstitution=rebalance_type == "annual_reconstitution",
+                    )
+                    next_constituents, turnover_pct = self._build_weighted_constituents(selected, current_weight_map)
+                    effective_date = trading_dates[current_index + 1]
+                    self._save_rebalance(
+                        rebalance_date=current_date,
+                        effective_date=effective_date,
+                        rebalance_type=rebalance_type,
+                        constituents=next_constituents,
+                        previous_symbols=[item["ts_code"] for item in current_constituents],
+                        previous_weight_map=current_weight_map,
+                        turnover_pct=turnover_pct,
+                    )
+                    pending_constituents = next_constituents
+                    pending_effective_date = effective_date
+
+        self._progress("写入创新100增量指数点位", 92)
+        self._bulk_upsert(AStockInnovation100Level, levels, ["index_code", "date"], batch_size=1000)
+
+        latest_saved = levels[-1] if levels else latest_level
+        rebalances_after = self.db.query(AStockInnovation100Rebalance).filter(
+            AStockInnovation100Rebalance.index_code == INDEX_CODE
+        ).count()
+        self._progress("A股创新100增量刷新完成", 100)
+        return {
+            "index_code": INDEX_CODE,
+            "index_name": INDEX_NAME,
+            "mode": "incremental",
+            "status": "completed",
+            "start_date": new_trading_dates[0].isoformat(),
+            "end_date": end_date.isoformat(),
+            "latest_date": latest_saved["date"].isoformat() if isinstance(latest_saved, dict) else latest_saved.date.isoformat(),
+            "latest_level": latest_saved.get("level") if isinstance(latest_saved, dict) else latest_saved.level,
+            "levels_saved": len(levels),
+            "rebalances_saved": rebalances_after - rebalances_before,
+            "last_market_date": new_trading_dates[-1].isoformat(),
         }
 
 
