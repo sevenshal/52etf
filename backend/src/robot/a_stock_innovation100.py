@@ -568,7 +568,8 @@ class AStockInnovation100Builder:
         self,
         trading_dates: List[date],
         load_message: str,
-        progress: int,
+        progress_start: Optional[int] = None,
+        progress_end: Optional[int] = None,
     ) -> Iterable[Tuple[int, date, pd.DataFrame]]:
         total_dates = len(trading_dates)
         if not total_dates:
@@ -578,10 +579,12 @@ class AStockInnovation100Builder:
         for chunk_index, chunk in enumerate(self._chunks(trading_dates, MARKET_FRAME_LOAD_DAYS), start=1):
             chunk_start = chunk[0]
             chunk_end = chunk[-1]
-            if total_chunks > 1:
+            if total_chunks > 1 and progress_start is not None and progress_end is not None:
+                chunk_offset = (chunk_index - 1) * MARKET_FRAME_LOAD_DAYS
+                chunk_progress = progress_start + int(chunk_offset / max(total_dates, 1) * (progress_end - progress_start))
                 self._progress(
                     f"{load_message} {chunk_start.isoformat()} ~ {chunk_end.isoformat()}",
-                    progress,
+                    chunk_progress,
                     processed_chunks=chunk_index,
                     total_chunks=total_chunks,
                     window_days=len(chunk),
@@ -1000,7 +1003,8 @@ class AStockInnovation100Builder:
         for idx, current_date, market_frame in self._iter_market_frames_by_date(
             trading_dates,
             "载入全市场行情缓存",
-            50,
+            progress_start=50,
+            progress_end=89,
         ):
             calc_progress = 50 + int(idx / max(total_dates, 1) * 40)
             if idx == 0 or idx == total_dates - 1 or idx % 20 == 0:
@@ -1307,7 +1311,6 @@ class AStockInnovation100Builder:
         for current_index, current_date, market_frame in self._iter_market_frames_by_date(
             trading_dates,
             "载入创新100增量行情缓存",
-            35,
         ):
             is_output_date = current_date > latest_date
             if is_output_date:
