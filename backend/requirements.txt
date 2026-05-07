@@ -5,6 +5,7 @@ httpx
 pydantic
 python-jose
 sqlalchemy
+duckdb
 watchgod
 setproctitle
 pandas

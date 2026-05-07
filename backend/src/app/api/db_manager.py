@@ -1,12 +1,14 @@
 import base64
 import re
 import sqlite3
+import threading
+import time
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import inspect
 
@@ -18,6 +20,55 @@ router = APIRouter(prefix="/api/db", tags=["DB"])
 
 MAX_QUERY_LIMIT = 500
 INTERNAL_TABLE_PREFIXES = ("sqlite_",)
+SCHEMA_CACHE_TTL_SECONDS = 60
+DUCKDB_FORBIDDEN_IDENTIFIERS = {
+    "attach",
+    "call",
+    "copy",
+    "csv_scan",
+    "detach",
+    "duckdb_columns",
+    "duckdb_databases",
+    "duckdb_extensions",
+    "duckdb_functions",
+    "duckdb_schemas",
+    "duckdb_secrets",
+    "duckdb_settings",
+    "duckdb_tables",
+    "export",
+    "glob",
+    "httpfs",
+    "import",
+    "information_schema",
+    "install",
+    "json_scan",
+    "load",
+    "parquet_scan",
+    "pg_catalog",
+    "pragma",
+    "read_blob",
+    "read_csv",
+    "read_csv_auto",
+    "read_json",
+    "read_json_auto",
+    "read_ndjson",
+    "read_parquet",
+    "read_text",
+    "reset",
+    "set",
+    "sqlite_master",
+    "sqlite_query",
+    "sqlite_scan",
+    "sqlite_schema",
+}
+
+_schema_cache_lock = threading.Lock()
+_schema_cache: Dict[str, Any] = {
+    "expires_at": 0.0,
+    "tables": [],
+    "allowed_table_names": set(),
+    "restricted_table_names": set(),
+}
 
 
 class DbColumn(BaseModel):
@@ -41,6 +92,7 @@ class DbSchemaResponse(BaseModel):
 
 class DbQueryRequest(BaseModel):
     sql: str = Field(..., min_length=1, max_length=20000)
+    engine: Literal["sqlite", "duckdb"] = "sqlite"
 
 
 class DbQueryResponse(BaseModel):
@@ -50,24 +102,33 @@ class DbQueryResponse(BaseModel):
     max_limit: int = MAX_QUERY_LIMIT
     limit_applied: bool
     executed_sql: str
+    engine: str
+    timings: Dict[str, float] = Field(default_factory=dict)
 
 
 def _quote_identifier(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
 
-def _get_table_metadata() -> Tuple[List[DbTable], Set[str]]:
+def _quote_sql_string(value: str) -> str:
+    return f"'{value.replace(chr(39), chr(39) * 2)}'"
+
+
+def _load_table_metadata() -> Tuple[List[DbTable], Set[str], Set[str]]:
     inspector = inspect(engine)
     tables: List[DbTable] = []
     allowed_table_names: Set[str] = set()
+    restricted_table_names: Set[str] = set()
 
     for table_name in sorted(inspector.get_table_names()):
         lowered = table_name.lower()
         if lowered.startswith(INTERNAL_TABLE_PREFIXES):
+            restricted_table_names.add(lowered)
             continue
 
         columns_raw = inspector.get_columns(table_name)
         if any(column["name"].lower() == "account_id" for column in columns_raw):
+            restricted_table_names.add(lowered)
             continue
 
         primary_keys = set(inspector.get_pk_constraint(table_name).get("constrained_columns") or [])
@@ -90,7 +151,29 @@ def _get_table_metadata() -> Tuple[List[DbTable], Set[str]]:
         )
         allowed_table_names.add(table_name.lower())
 
-    return tables, allowed_table_names
+    return tables, allowed_table_names, restricted_table_names
+
+
+def _get_table_metadata(force_refresh: bool = False) -> Tuple[List[DbTable], Set[str], Set[str]]:
+    now = time.perf_counter()
+    with _schema_cache_lock:
+        if not force_refresh and _schema_cache["expires_at"] > now:
+            return (
+                _schema_cache["tables"],
+                _schema_cache["allowed_table_names"],
+                _schema_cache["restricted_table_names"],
+            )
+
+        tables, allowed_table_names, restricted_table_names = _load_table_metadata()
+        _schema_cache.update(
+            {
+                "expires_at": now + SCHEMA_CACHE_TTL_SECONDS,
+                "tables": tables,
+                "allowed_table_names": allowed_table_names,
+                "restricted_table_names": restricted_table_names,
+            }
+        )
+        return tables, allowed_table_names, restricted_table_names
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -143,6 +226,55 @@ def _strip_sql_comments(sql: str) -> str:
                 result.append("\n" if sql[index] in "\r\n" else " ")
                 index += 1
             index += 2 if index + 1 < len(sql) else 0
+            continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+def _mask_sql_comments_and_string_literals(sql: str) -> str:
+    result: List[str] = []
+    index = 0
+    in_single_quote = False
+
+    while index < len(sql):
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < len(sql) else ""
+
+        if in_single_quote:
+            if char == "'":
+                if next_char == "'":
+                    result.extend("  ")
+                    index += 2
+                    continue
+                in_single_quote = False
+            result.append(" ")
+            index += 1
+            continue
+
+        if char == "'":
+            in_single_quote = True
+            result.append(" ")
+            index += 1
+            continue
+
+        if char == "-" and next_char == "-":
+            while index < len(sql) and sql[index] not in "\r\n":
+                result.append(" ")
+                index += 1
+            continue
+
+        if char == "/" and next_char == "*":
+            result.extend("  ")
+            index += 2
+            while index + 1 < len(sql) and not (sql[index] == "*" and sql[index + 1] == "/"):
+                result.append("\n" if sql[index] in "\r\n" else " ")
+                index += 1
+            if index + 1 < len(sql):
+                result.extend("  ")
+                index += 2
             continue
 
         result.append(char)
@@ -231,7 +363,7 @@ def _assert_select_statement(statement: str):
 
 
 def _contains_limit(statement: str) -> bool:
-    return bool(re.search(r"\blimit\b", _strip_sql_comments(statement), flags=re.IGNORECASE))
+    return bool(re.search(r"\blimit\b", _mask_sql_comments_and_string_literals(statement), flags=re.IGNORECASE))
 
 
 def _build_limited_query(statement: str) -> Tuple[str, bool]:
@@ -289,35 +421,149 @@ def _serialize_value(value):
     return str(value)
 
 
-@router.get("/tables", response_model=DbSchemaResponse)
-def list_queryable_tables(_account_id: str = Depends(valid_account)):
-    tables, _allowed_table_names = _get_table_metadata()
-    return DbSchemaResponse(tables=tables)
+def _assert_duckdb_safe_statement(statement: str):
+    masked_statement = _mask_sql_comments_and_string_literals(statement).lower()
+    identifiers = set(re.findall(r"\b[a-z_][a-z0-9_]*\b", masked_statement))
+    forbidden = sorted(identifiers.intersection(DUCKDB_FORBIDDEN_IDENTIFIERS))
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail=f"DuckDB分析模式禁止使用以下关键字或函数: {', '.join(forbidden)}",
+        )
 
 
-@router.post("/query", response_model=DbQueryResponse)
-def execute_query(payload: DbQueryRequest, _account_id: str = Depends(valid_account)):
-    statement = _normalize_single_statement(payload.sql)
-    _assert_select_statement(statement)
-    _tables, allowed_table_names = _get_table_metadata()
+def _import_duckdb():
+    try:
+        import duckdb  # type: ignore
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="DuckDB未安装，请先在后端环境安装 duckdb 依赖",
+        ) from exc
+    return duckdb
 
-    query, limit_applied = _build_limited_query(statement)
 
+def _find_referenced_tables(statement: str, tables: List[DbTable]) -> List[DbTable]:
+    masked_statement = _mask_sql_comments_and_string_literals(statement).lower()
+    identifiers = set(re.findall(r"\b[a-z_][a-z0-9_]*\b", masked_statement))
+    return [table for table in tables if table.name.lower() in identifiers]
+
+
+def _create_duckdb_sqlite_views(connection, tables: List[DbTable]):
+    connection.execute("LOAD sqlite")
+    for table in tables:
+        quoted_table_name = _quote_identifier(table.name)
+        connection.execute(
+            f"""
+            CREATE VIEW {quoted_table_name} AS
+            SELECT * FROM sqlite_scan({_quote_sql_string(DB_PATH)}, {_quote_sql_string(table.name)})
+            """
+        )
+
+
+def _execute_sqlite_query(query: str, allowed_table_names: Set[str]) -> Tuple[List[str], List[Dict[str, Any]], Dict[str, float]]:
+    timings: Dict[str, float] = {}
+    started_at = time.perf_counter()
     try:
         with sqlite3.connect(_get_readonly_db_uri(), uri=True, timeout=30) as connection:
             connection.execute("PRAGMA busy_timeout=30000")
             connection.set_authorizer(_make_authorizer(allowed_table_names))
+            execute_started_at = time.perf_counter()
             cursor = connection.execute(query)
+            timings["execute_ms"] = round((time.perf_counter() - execute_started_at) * 1000, 2)
             columns = [column[0] for column in (cursor.description or [])]
-            rows = [
-                {column: _serialize_value(value) for column, value in zip(columns, row)}
-                for row in cursor.fetchall()
-            ]
+            fetch_started_at = time.perf_counter()
+            raw_rows = cursor.fetchall()
+            timings["fetch_ms"] = round((time.perf_counter() - fetch_started_at) * 1000, 2)
     except sqlite3.Error as exc:
         detail = str(exc)
         if "prohibited" in detail or "not authorized" in detail:
             detail = "只允许查询没有account_id字段的数据表，且只能执行只读SELECT语句"
         raise HTTPException(status_code=400, detail=detail) from exc
+
+    serialize_started_at = time.perf_counter()
+    rows = [
+        {column: _serialize_value(value) for column, value in zip(columns, row)}
+        for row in raw_rows
+    ]
+    timings["serialize_ms"] = round((time.perf_counter() - serialize_started_at) * 1000, 2)
+    timings["total_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+    return columns, rows, timings
+
+
+def _execute_duckdb_query(query: str, referenced_tables: List[DbTable]) -> Tuple[List[str], List[Dict[str, Any]], Dict[str, float]]:
+    duckdb = _import_duckdb()
+    timings: Dict[str, float] = {}
+    started_at = time.perf_counter()
+
+    try:
+        with duckdb.connect(database=":memory:", read_only=False) as connection:
+            setup_started_at = time.perf_counter()
+            _create_duckdb_sqlite_views(connection, referenced_tables)
+            connection.execute("SET enable_external_access=false")
+            timings["setup_ms"] = round((time.perf_counter() - setup_started_at) * 1000, 2)
+
+            execute_started_at = time.perf_counter()
+            result = connection.execute(query)
+            timings["execute_ms"] = round((time.perf_counter() - execute_started_at) * 1000, 2)
+            columns = [column[0] for column in (result.description or [])]
+
+            fetch_started_at = time.perf_counter()
+            raw_rows = result.fetchall()
+            timings["fetch_ms"] = round((time.perf_counter() - fetch_started_at) * 1000, 2)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    serialize_started_at = time.perf_counter()
+    rows = [
+        {column: _serialize_value(value) for column, value in zip(columns, row)}
+        for row in raw_rows
+    ]
+    timings["serialize_ms"] = round((time.perf_counter() - serialize_started_at) * 1000, 2)
+    timings["total_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+    return columns, rows, timings
+
+
+@router.get("/tables", response_model=DbSchemaResponse)
+def list_queryable_tables(
+    refresh: bool = Query(False),
+    _account_id: str = Depends(valid_account),
+):
+    tables, _allowed_table_names, _restricted_table_names = _get_table_metadata(force_refresh=refresh)
+    return DbSchemaResponse(tables=tables)
+
+
+@router.post("/query", response_model=DbQueryResponse)
+def execute_query(payload: DbQueryRequest, _account_id: str = Depends(valid_account)):
+    total_started_at = time.perf_counter()
+    statement = _normalize_single_statement(payload.sql)
+    _assert_select_statement(statement)
+
+    schema_started_at = time.perf_counter()
+    tables, allowed_table_names, restricted_table_names = _get_table_metadata()
+    schema_ms = round((time.perf_counter() - schema_started_at) * 1000, 2)
+
+    query, limit_applied = _build_limited_query(statement)
+
+    if payload.engine == "duckdb":
+        _assert_duckdb_safe_statement(statement)
+        referenced_tables = _find_referenced_tables(statement, tables)
+        masked_statement = _mask_sql_comments_and_string_literals(statement).lower()
+        referenced_identifiers = set(re.findall(r"\b[a-z_][a-z0-9_]*\b", masked_statement))
+        blocked_identifiers = sorted(referenced_identifiers.intersection(restricted_table_names))
+        if blocked_identifiers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"DuckDB分析模式只能查询没有account_id字段的数据表，当前SQL引用了受限表: {', '.join(blocked_identifiers)}",
+            )
+        columns, rows, timings = _execute_duckdb_query(query, referenced_tables)
+    else:
+        columns, rows, timings = _execute_sqlite_query(query, allowed_table_names)
+
+    timings["schema_ms"] = schema_ms
+    timings["request_total_ms"] = round((time.perf_counter() - total_started_at) * 1000, 2)
 
     return DbQueryResponse(
         columns=columns,
@@ -325,4 +571,6 @@ def execute_query(payload: DbQueryRequest, _account_id: str = Depends(valid_acco
         row_count=len(rows),
         limit_applied=limit_applied,
         executed_sql=query,
+        engine=payload.engine,
+        timings=timings,
     )
