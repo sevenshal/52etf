@@ -47,6 +47,7 @@ LARGE_WEIGHT_THRESHOLD = 0.045
 LARGE_WEIGHT_CAP = 0.48
 RAW_FETCH_LOOKBACK_DAYS = 180
 MARKET_FETCH_WORKERS = max(1, int(os.getenv("A_STOCK_INNOVATION100_FETCH_WORKERS", "3")))
+MARKET_FRAME_LOAD_DAYS = max(1, int(os.getenv("A_STOCK_INNOVATION100_MARKET_LOAD_DAYS", "20")))
 
 INNOVATION_INDUSTRIES = {
     "IT设备",
@@ -563,6 +564,34 @@ class AStockInnovation100Builder:
             for trade_date, group in frame.groupby("trade_date", sort=False)
         }
 
+    def _iter_market_frames_by_date(
+        self,
+        trading_dates: List[date],
+        load_message: str,
+        progress: int,
+    ) -> Iterable[Tuple[int, date, pd.DataFrame]]:
+        total_dates = len(trading_dates)
+        if not total_dates:
+            return
+
+        total_chunks = math.ceil(total_dates / MARKET_FRAME_LOAD_DAYS)
+        for chunk_index, chunk in enumerate(self._chunks(trading_dates, MARKET_FRAME_LOAD_DAYS), start=1):
+            chunk_start = chunk[0]
+            chunk_end = chunk[-1]
+            if total_chunks > 1:
+                self._progress(
+                    f"{load_message} {chunk_start.isoformat()} ~ {chunk_end.isoformat()}",
+                    progress,
+                    processed_chunks=chunk_index,
+                    total_chunks=total_chunks,
+                    window_days=len(chunk),
+                )
+            frames_by_date = self._load_market_frames_by_date(chunk_start, chunk_end)
+            chunk_offset = (chunk_index - 1) * MARKET_FRAME_LOAD_DAYS
+            for offset, current_date in enumerate(chunk):
+                yield chunk_offset + offset, current_date, frames_by_date.get(current_date, pd.DataFrame())
+            del frames_by_date
+
     def _load_basic_map(self) -> Dict[str, Dict]:
         rows = self.db.query(AStockBasic).all()
         return {
@@ -935,7 +964,6 @@ class AStockInnovation100Builder:
         levels: List[Dict] = []
         level = BASE_LEVEL
         high_watermark = BASE_LEVEL
-        last_market_frame = pd.DataFrame()
 
         self._ensure_market_days(trading_dates)
         market_day_stats = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
@@ -961,10 +989,19 @@ class AStockInnovation100Builder:
             raise RuntimeError("开始日期之后没有完整行情的交易日")
 
         total_dates = len(trading_dates)
-        self._progress("载入全市场行情缓存", 50, processed_dates=0, total_dates=total_dates)
-        market_frames_by_date = self._load_market_frames_by_date(min(trading_dates), max(trading_dates))
+        self._progress(
+            "按窗口载入全市场行情缓存",
+            50,
+            processed_dates=0,
+            total_dates=total_dates,
+            window_days=MARKET_FRAME_LOAD_DAYS,
+        )
 
-        for idx, current_date in enumerate(trading_dates):
+        for idx, current_date, market_frame in self._iter_market_frames_by_date(
+            trading_dates,
+            "载入全市场行情缓存",
+            50,
+        ):
             calc_progress = 50 + int(idx / max(total_dates, 1) * 40)
             if idx == 0 or idx == total_dates - 1 or idx % 20 == 0:
                 self._progress(
@@ -973,13 +1010,11 @@ class AStockInnovation100Builder:
                     processed_dates=idx + 1,
                     total_dates=total_dates,
                 )
-            market_frame = market_frames_by_date.get(current_date, pd.DataFrame())
             if market_frame.empty:
                 self._ensure_market_day(current_date)
                 market_frame = self._load_market_day(current_date)
                 if not market_frame.empty and "trade_date" in market_frame.columns:
-                    market_frames_by_date[current_date] = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
-            last_market_frame = market_frame
+                    market_frame = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
             symbols = np.array([], dtype=str)
             if not market_frame.empty:
                 symbols = market_frame["ts_code"].astype(str).to_numpy()
@@ -1260,38 +1295,35 @@ class AStockInnovation100Builder:
         ).count()
 
         self._progress(
-            "载入创新100增量行情缓存",
+            "按窗口载入创新100增量行情缓存",
             35,
             latest_date=latest_date.isoformat(),
             end_date=end_date.isoformat(),
+            window_days=MARKET_FRAME_LOAD_DAYS,
         )
-        market_frames_by_date = self._load_market_frames_by_date(min(trading_dates), max(trading_dates))
-
-        for warmup_date in [item for item in trading_dates if item <= latest_date]:
-            market_frame = market_frames_by_date.get(warmup_date, pd.DataFrame())
-            if market_frame.empty:
-                continue
-            symbols = market_frame["ts_code"].astype(str).to_numpy()
-            amounts = np.nan_to_num(market_frame["amount"].to_numpy(dtype=float), nan=0.0)
-            for ts_code, amount in zip(symbols, amounts):
-                if ts_code and math.isfinite(amount) and amount >= 0:
-                    amount_history[ts_code].append(float(amount))
 
         total_dates = len(new_trading_dates)
-        for output_index, current_date in enumerate(new_trading_dates):
-            calc_progress = 50 + int(output_index / max(total_dates, 1) * 40)
-            self._progress(
-                f"增量计算创新100指数点位 {current_date.isoformat()}",
-                calc_progress,
-                processed_dates=output_index + 1,
-                total_dates=total_dates,
-            )
-            market_frame = market_frames_by_date.get(current_date, pd.DataFrame())
+        processed_output_dates = 0
+        for current_index, current_date, market_frame in self._iter_market_frames_by_date(
+            trading_dates,
+            "载入创新100增量行情缓存",
+            35,
+        ):
+            is_output_date = current_date > latest_date
+            if is_output_date:
+                calc_progress = 50 + int(processed_output_dates / max(total_dates, 1) * 40)
+                self._progress(
+                    f"增量计算创新100指数点位 {current_date.isoformat()}",
+                    calc_progress,
+                    processed_dates=processed_output_dates + 1,
+                    total_dates=total_dates,
+                )
+
             if market_frame.empty:
                 self._ensure_market_day(current_date)
                 market_frame = self._load_market_day(current_date)
                 if not market_frame.empty and "trade_date" in market_frame.columns:
-                    market_frames_by_date[current_date] = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
+                    market_frame = market_frame.drop(columns=["trade_date"]).reset_index(drop=True)
 
             symbols = np.array([], dtype=str)
             if not market_frame.empty:
@@ -1300,6 +1332,11 @@ class AStockInnovation100Builder:
                 for ts_code, amount in zip(symbols, amounts):
                     if ts_code and math.isfinite(amount) and amount >= 0:
                         amount_history[ts_code].append(float(amount))
+
+            if not is_output_date:
+                continue
+
+            processed_output_dates += 1
 
             if pending_constituents is not None and pending_effective_date == current_date:
                 current_constituents = pending_constituents
@@ -1336,7 +1373,6 @@ class AStockInnovation100Builder:
                 }
             )
 
-            current_index = trading_dates.index(current_date)
             if current_index < len(trading_dates) - 1 and self._is_quarter_end(trading_dates, current_index):
                 existing_rebalance = (
                     self.db.query(AStockInnovation100Rebalance)
