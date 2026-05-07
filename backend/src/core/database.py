@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON, text, event
+from sqlalchemy import create_engine, Column, String, Float, Boolean, DateTime, Date, Integer, ForeignKey, Table, PrimaryKeyConstraint, UniqueConstraint, JSON, Text, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship
 from contextlib import contextmanager
@@ -467,6 +467,21 @@ class StockFavorite(Base):
     account_id = Column(String, primary_key=True) # Added for migration
     symbol = Column(String(32), primary_key=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+class DbSqlFavorite(Base):
+    """DB管理工具SQL收藏。"""
+    __tablename__ = "db_sql_favorites"
+    __table_args__ = (
+        UniqueConstraint("account_id", "name", name="uq_db_sql_favorites_account_name"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    name = Column(String(120), nullable=False)
+    sql = Column(Text, nullable=False)
+    engine = Column(String(16), default="duckdb", nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 class CNNFearGreedIndex(Base):
     __tablename__ = 'cnn_fear_greed_index'
@@ -1167,6 +1182,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_tag_date_symbol ON stock_tags(tag_id, date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_db_sql_favorites_account_updated ON db_sql_favorites(account_id, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_invalid_symbol_cache_source_updated ON invalid_symbol_cache(source, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",

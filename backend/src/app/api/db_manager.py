@@ -11,8 +11,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import inspect
+from sqlalchemy.orm import Session as OrmSession
 
-from ...core.database import DB_PATH, engine
+from ...core.database import DB_PATH, DbSqlFavorite, engine, get_db
 from .account import valid_account
 
 
@@ -104,6 +105,36 @@ class DbQueryResponse(BaseModel):
     executed_sql: str
     engine: str
     timings: Dict[str, float] = Field(default_factory=dict)
+
+
+class DbSqlFavoriteRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    sql: str = Field(..., min_length=1, max_length=20000)
+    engine: Literal["sqlite", "duckdb"] = "duckdb"
+
+
+class DbSqlFavoriteResponse(BaseModel):
+    id: int
+    name: str
+    sql: str
+    engine: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class DbSqlFavoriteDeleteResponse(BaseModel):
+    success: bool
+
+
+def _serialize_favorite(favorite: DbSqlFavorite) -> DbSqlFavoriteResponse:
+    return DbSqlFavoriteResponse(
+        id=int(favorite.id),
+        name=favorite.name,
+        sql=favorite.sql,
+        engine=favorite.engine or "duckdb",
+        created_at=favorite.created_at,
+        updated_at=favorite.updated_at,
+    )
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -533,6 +564,84 @@ def list_queryable_tables(
 ):
     tables, _allowed_table_names, _restricted_table_names = _get_table_metadata(force_refresh=refresh)
     return DbSchemaResponse(tables=tables)
+
+
+@router.get("/favorites", response_model=List[DbSqlFavoriteResponse])
+def list_sql_favorites(
+    account_id: str = Depends(valid_account),
+    db: OrmSession = Depends(get_db),
+):
+    favorites = (
+        db.query(DbSqlFavorite)
+        .filter(DbSqlFavorite.account_id == account_id)
+        .order_by(DbSqlFavorite.updated_at.desc(), DbSqlFavorite.id.desc())
+        .all()
+    )
+    return [_serialize_favorite(favorite) for favorite in favorites]
+
+
+@router.post("/favorites", response_model=DbSqlFavoriteResponse)
+def save_sql_favorite(
+    payload: DbSqlFavoriteRequest,
+    account_id: str = Depends(valid_account),
+    db: OrmSession = Depends(get_db),
+):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="收藏名称不能为空")
+
+    statement = _normalize_single_statement(payload.sql)
+    _assert_select_statement(statement)
+
+    favorite = (
+        db.query(DbSqlFavorite)
+        .filter(
+            DbSqlFavorite.account_id == account_id,
+            DbSqlFavorite.name == name,
+        )
+        .first()
+    )
+    now = datetime.now()
+    if favorite:
+        favorite.sql = statement
+        favorite.engine = payload.engine
+        favorite.updated_at = now
+    else:
+        favorite = DbSqlFavorite(
+            account_id=account_id,
+            name=name,
+            sql=statement,
+            engine=payload.engine,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(favorite)
+
+    db.commit()
+    db.refresh(favorite)
+    return _serialize_favorite(favorite)
+
+
+@router.delete("/favorites/{favorite_id}", response_model=DbSqlFavoriteDeleteResponse)
+def delete_sql_favorite(
+    favorite_id: int,
+    account_id: str = Depends(valid_account),
+    db: OrmSession = Depends(get_db),
+):
+    favorite = (
+        db.query(DbSqlFavorite)
+        .filter(
+            DbSqlFavorite.id == favorite_id,
+            DbSqlFavorite.account_id == account_id,
+        )
+        .first()
+    )
+    if not favorite:
+        raise HTTPException(status_code=404, detail="未找到收藏")
+
+    db.delete(favorite)
+    db.commit()
+    return DbSqlFavoriteDeleteResponse(success=True)
 
 
 @router.post("/query", response_model=DbQueryResponse)
