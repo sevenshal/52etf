@@ -168,9 +168,6 @@ const SqlEditorCard = React.memo(({
   const handleSqlChange = (event) => {
     const nextSql = event.target.value;
     setSql(nextSql);
-    if (selectedFavoriteId) {
-      onFavoriteClear();
-    }
     refreshSuggestions(nextSql, event.target.selectionStart || nextSql.length);
   };
 
