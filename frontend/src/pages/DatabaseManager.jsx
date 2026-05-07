@@ -6,6 +6,8 @@ import {
   Empty,
   Input,
   List,
+  Modal,
+  Popconfirm,
   Select,
   Segmented,
   Space,
@@ -20,12 +22,14 @@ import {
   ClearOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
   DotChartOutlined,
   LineChartOutlined,
   PieChartOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
+  StarOutlined,
   TableOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -85,12 +89,20 @@ const getCurrentToken = (text, caretPosition) => {
 };
 
 const SqlEditorCard = React.memo(({
+  favoriteDeleting,
+  favoriteOptions,
+  favoritesLoading,
   maxLimit,
   queryEngine,
   queryLoading,
+  selectedFavoriteId,
   sqlSeed,
   suggestionSource,
+  onDeleteFavorite,
   onEngineChange,
+  onFavoriteClear,
+  onFavoriteSelect,
+  onOpenSaveFavorite,
   onRun,
 }) => {
   const [sql, setSql] = useState('');
@@ -156,6 +168,9 @@ const SqlEditorCard = React.memo(({
   const handleSqlChange = (event) => {
     const nextSql = event.target.value;
     setSql(nextSql);
+    if (selectedFavoriteId) {
+      onFavoriteClear();
+    }
     refreshSuggestions(nextSql, event.target.selectionStart || nextSql.length);
   };
 
@@ -186,7 +201,44 @@ const SqlEditorCard = React.memo(({
         </Space>
       )}
       extra={(
-        <Space>
+        <Space wrap className="db-editor-toolbar">
+          <Select
+            allowClear
+            showSearch
+            className="db-favorite-select"
+            value={selectedFavoriteId || undefined}
+            loading={favoritesLoading}
+            placeholder="收藏夹"
+            options={favoriteOptions}
+            optionFilterProp="label"
+            onChange={value => {
+              if (value) {
+                onFavoriteSelect(value);
+              } else {
+                onFavoriteClear();
+              }
+            }}
+          />
+          <Button
+            icon={<StarOutlined />}
+            onClick={() => onOpenSaveFavorite(sql)}
+          >
+            收藏
+          </Button>
+          <Popconfirm
+            title="删除这个SQL收藏？"
+            okText="删除"
+            cancelText="取消"
+            disabled={!selectedFavoriteId}
+            onConfirm={onDeleteFavorite}
+          >
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              disabled={!selectedFavoriteId}
+              loading={favoriteDeleting}
+            />
+          </Popconfirm>
           <Select
             className="db-engine-select"
             value={queryEngine}
@@ -198,6 +250,7 @@ const SqlEditorCard = React.memo(({
             onClick={() => {
               setSql('');
               setSuggestions([]);
+              onFavoriteClear();
             }}
           >
             清空
@@ -262,6 +315,14 @@ const DatabaseManager = () => {
   const [selectedTableName, setSelectedTableName] = useState(null);
   const [tableSearch, setTableSearch] = useState('');
   const [sqlSeed, setSqlSeed] = useState({ id: 0, sql: '' });
+  const [favorites, setFavorites] = useState([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
+  const [favoriteSaving, setFavoriteSaving] = useState(false);
+  const [favoriteDeleting, setFavoriteDeleting] = useState(false);
+  const [selectedFavoriteId, setSelectedFavoriteId] = useState();
+  const [favoriteModalOpen, setFavoriteModalOpen] = useState(false);
+  const [favoriteName, setFavoriteName] = useState('');
+  const [pendingFavoriteSql, setPendingFavoriteSql] = useState('');
   const [queryEngine, setQueryEngine] = useState('duckdb');
   const [queryLoading, setQueryLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -274,6 +335,18 @@ const DatabaseManager = () => {
     () => tables.find(table => table.name === selectedTableName) || null,
     [tables, selectedTableName]
   );
+
+  const selectedFavorite = useMemo(
+    () => favorites.find(favorite => favorite.id === selectedFavoriteId) || null,
+    [favorites, selectedFavoriteId]
+  );
+
+  const favoriteOptions = useMemo(() => (
+    favorites.map(favorite => ({
+      value: favorite.id,
+      label: favorite.name,
+    }))
+  ), [favorites]);
 
   const suggestionSource = useMemo(() => {
     const columnSuggestions = [];
@@ -434,8 +507,21 @@ const DatabaseManager = () => {
     }
   };
 
+  const fetchFavorites = async () => {
+    setFavoritesLoading(true);
+    try {
+      const { data } = await request.get('/api/db/favorites');
+      setFavorites(data || []);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载SQL收藏失败'));
+    } finally {
+      setFavoritesLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchTables();
+    fetchFavorites();
   }, []);
 
   useEffect(() => {
@@ -453,8 +539,86 @@ const DatabaseManager = () => {
 
   const handleTableSelect = (table) => {
     setSelectedTableName(table.name);
+    setSelectedFavoriteId(undefined);
     setSqlSeed(prev => ({ id: prev.id + 1, sql: table.sample_sql }));
   };
+
+  const handleFavoriteClear = useCallback(() => {
+    setSelectedFavoriteId(undefined);
+  }, []);
+
+  const handleFavoriteSelect = useCallback((favoriteId) => {
+    const favorite = favorites.find(item => item.id === favoriteId);
+    if (!favorite) return;
+
+    setSelectedFavoriteId(favorite.id);
+    setSqlSeed(prev => ({ id: prev.id + 1, sql: favorite.sql }));
+    if (favorite.engine) {
+      setQueryEngine(favorite.engine);
+    }
+  }, [favorites]);
+
+  const handleOpenSaveFavorite = useCallback((sqlText) => {
+    const trimmedSql = sqlText.trim();
+    if (!trimmedSql) {
+      message.warning('请先输入要收藏的SQL');
+      return;
+    }
+
+    setPendingFavoriteSql(trimmedSql);
+    setFavoriteName(selectedFavorite?.name || '');
+    setFavoriteModalOpen(true);
+  }, [selectedFavorite]);
+
+  const handleSaveFavorite = async () => {
+    const trimmedName = favoriteName.trim();
+    if (!trimmedName) {
+      message.warning('请给这个SQL起个名字');
+      return;
+    }
+    if (!pendingFavoriteSql.trim()) {
+      message.warning('SQL内容不能为空');
+      return;
+    }
+
+    setFavoriteSaving(true);
+    try {
+      const { data } = await request.post('/api/db/favorites', {
+        name: trimmedName,
+        sql: pendingFavoriteSql.trim(),
+        engine: queryEngine,
+      });
+      setFavorites(prev => {
+        const withoutCurrent = prev.filter(item => item.id !== data.id);
+        return [data, ...withoutCurrent];
+      });
+      setSelectedFavoriteId(data.id);
+      setFavoriteModalOpen(false);
+      setFavoriteName('');
+      setPendingFavoriteSql('');
+      message.success('SQL已加入收藏夹');
+    } catch (error) {
+      message.error(getErrorMessage(error, '保存SQL收藏失败'));
+    } finally {
+      setFavoriteSaving(false);
+    }
+  };
+
+  const handleDeleteFavorite = useCallback(async () => {
+    if (!selectedFavoriteId) return;
+
+    setFavoriteDeleting(true);
+    try {
+      await request.delete(`/api/db/favorites/${selectedFavoriteId}`);
+      setFavorites(prev => prev.filter(item => item.id !== selectedFavoriteId));
+      setSelectedFavoriteId(undefined);
+      message.success('SQL收藏已删除');
+    } catch (error) {
+      message.error(getErrorMessage(error, '删除SQL收藏失败'));
+    } finally {
+      setFavoriteDeleting(false);
+    }
+  }, [selectedFavoriteId]);
 
   const runQuery = useCallback(async (sqlText) => {
     const trimmedSql = sqlText.trim();
@@ -481,7 +645,8 @@ const DatabaseManager = () => {
   }, [maxLimit, queryEngine]);
 
   return (
-    <div className="db-manager-page">
+    <>
+      <div className="db-manager-page">
       <Card
         className="db-sidebar"
         title={(
@@ -545,12 +710,20 @@ const DatabaseManager = () => {
 
       <div className="db-workbench">
         <SqlEditorCard
+          favoriteDeleting={favoriteDeleting}
+          favoriteOptions={favoriteOptions}
+          favoritesLoading={favoritesLoading}
           maxLimit={maxLimit}
           queryEngine={queryEngine}
           queryLoading={queryLoading}
+          selectedFavoriteId={selectedFavoriteId}
           sqlSeed={sqlSeed}
           suggestionSource={suggestionSource}
+          onDeleteFavorite={handleDeleteFavorite}
           onEngineChange={setQueryEngine}
+          onFavoriteClear={handleFavoriteClear}
+          onFavoriteSelect={handleFavoriteSelect}
+          onOpenSaveFavorite={handleOpenSaveFavorite}
           onRun={runQuery}
         />
 
@@ -651,7 +824,35 @@ const DatabaseManager = () => {
           )}
         </Card>
       </div>
-    </div>
+      </div>
+
+      <Modal
+        title="收藏当前SQL"
+        open={favoriteModalOpen}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={favoriteSaving}
+        onOk={handleSaveFavorite}
+        onCancel={() => {
+          setFavoriteModalOpen(false);
+          setFavoriteName('');
+          setPendingFavoriteSql('');
+        }}
+      >
+        <Space direction="vertical" size={12} className="db-favorite-modal">
+          <Input
+            autoFocus
+            maxLength={120}
+            showCount
+            placeholder="比如：创新100每日成分统计"
+            value={favoriteName}
+            onChange={event => setFavoriteName(event.target.value)}
+            onPressEnter={handleSaveFavorite}
+          />
+          <Text type="secondary">同名收藏会自动更新为当前SQL。</Text>
+        </Space>
+      </Modal>
+    </>
   );
 };
 

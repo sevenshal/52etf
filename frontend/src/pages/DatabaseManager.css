@@ -99,6 +99,14 @@
   margin-bottom: 12px;
 }
 
+.db-editor-toolbar {
+  justify-content: flex-end;
+}
+
+.db-favorite-select {
+  width: 180px;
+}
+
 .db-engine-select {
   width: 130px;
 }
@@ -219,6 +227,10 @@
   margin-bottom: 12px;
 }
 
+.db-favorite-modal {
+  width: 100%;
+}
+
 @media (max-width: 920px) {
   .db-manager-page {
     grid-template-columns: 1fr;
@@ -235,6 +247,16 @@
 
   .db-column-panel {
     max-height: 140px;
+  }
+
+  .db-editor-toolbar {
+    max-width: 100%;
+  }
+
+  .db-favorite-select,
+  .db-engine-select {
+    width: 100%;
+    min-width: 180px;
   }
 
   .db-suggestions button {
