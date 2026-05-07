@@ -1,10 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Header, Query, Path
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Optional
-import os
-from ...core.utils import get_data_file, read_json_file, write_json_file
-from datetime import datetime
-from ...core.database import get_db, TradingLog, SzdtTradeStock, SZDTTradingConfig
+from ...core.database import get_db, SzdtTradeStock, SZDTTradingConfig
 from ...core.services.szdt import SZDTService
 from sqlalchemy.orm import Session
 
@@ -83,9 +80,6 @@ class StockEmotionResponse(BaseModel):
     status: int
     msg: str
     data: Optional[StockEmotionData] = None
-
-def get_stocks_config_path(account_id: str):
-    return get_data_file(account_id, "szdt_stocks.json")
 
 def read_stocks(account_id: str, db: Session) -> List[StockModel]:
     """读取股票列表"""

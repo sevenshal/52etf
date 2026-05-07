@@ -3,7 +3,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship
 from contextlib import contextmanager
 import os
-from .utils import get_data_file
 from datetime import datetime
 
 # 创建基础目录

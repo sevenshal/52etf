@@ -2,13 +2,10 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
-import logging
 import random
 from ...core.database import get_db, TradingState, StockCooldown, SzdtTradeStock, TradingLog, Session, SZDTTradingConfig
 from .account import valid_account
 from .szdt import szdt_service
-from ...core.models.account import SzdtActiveCode
-from ...core.utils import load_config_file
 from sqlalchemy import and_
 
 router = APIRouter(prefix="/api/trade")
@@ -304,8 +301,6 @@ async def create_trading_log(
     db.add(db_log)
     db.commit()
     return {"message": "Log created successfully"}
-
-from enum import Enum
 
 # 日志级别权重映射
 LOG_LEVEL_WEIGHT = {
