@@ -1,6 +1,9 @@
 import logging
 import math
 import os
+import threading
+import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
@@ -16,14 +19,44 @@ DEFAULT_TUSHARE_TOKEN = (
     or os.getenv("TUSHARE_TOKEN")
     or "ab64214cee604266631006c89f6b0b5dffa4c661b3d59f4fe3ea50d8"
 )
+TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
+)
 
 
 class TushareUnsupportedError(NotImplementedError):
     pass
 
 
+class _SlidingWindowRateLimiter:
+    def __init__(self, max_calls: int, period_seconds: float):
+        self.max_calls = max(0, int(max_calls or 0))
+        self.period_seconds = float(period_seconds)
+        self._lock = threading.Lock()
+        self._calls = deque()
+
+    def wait(self):
+        if self.max_calls <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= self.period_seconds:
+                    self._calls.popleft()
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return
+                wait_seconds = self.period_seconds - (now - self._calls[0])
+            time.sleep(max(wait_seconds, 0.01))
+
+
 class TushareService(QuoteProvider):
     _instances = {}
+    _income_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
 
     def __init__(self, token: Optional[str] = None):
         self.token = (token or DEFAULT_TUSHARE_TOKEN or "").strip()
@@ -605,6 +638,7 @@ class TushareService(QuoteProvider):
         offset = 0
         while True:
             try:
+                self._income_rate_limiter.wait()
                 frame = self.pro.income(
                     ts_code=ts_code,
                     fields="ts_code,end_date,ann_date,operate_income,rd_exp,report_type",
@@ -663,6 +697,7 @@ class TushareService(QuoteProvider):
         offset = 0
         while True:
             try:
+                self._income_rate_limiter.wait()
                 frame = self.pro.income(
                     ts_code=ts_code,
                     start_date=start_value.strftime("%Y%m%d"),

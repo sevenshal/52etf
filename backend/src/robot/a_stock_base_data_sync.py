@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -43,7 +44,9 @@ MARKET_FETCH_WORKERS = max(
 )
 INCOME_HISTORY_LOOKBACK_DAYS = max(365, int(os.getenv("A_STOCK_INCOME_HISTORY_LOOKBACK_DAYS", str(365 * 6))))
 INCOME_SYNC_REFRESH_OVERLAP_DAYS = max(0, int(os.getenv("A_STOCK_INCOME_SYNC_REFRESH_OVERLAP_DAYS", "45")))
-INCOME_SYNC_WORKERS = max(1, int(os.getenv("A_STOCK_INCOME_SYNC_WORKERS", "1")))
+INCOME_SYNC_WORKERS = max(1, int(os.getenv("A_STOCK_INCOME_SYNC_WORKERS", "8")))
+INCOME_INSERT_BATCH_ROWS = max(1, int(os.getenv("A_STOCK_INCOME_INSERT_BATCH_ROWS", "5000")))
+INCOME_INSERT_BATCH_FRAMES = max(1, int(os.getenv("A_STOCK_INCOME_INSERT_BATCH_FRAMES", "500")))
 A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS = max(
     0,
     int(os.getenv("A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS", "45")),
@@ -578,18 +581,30 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
-        income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
+        requested_income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
+        income_start = requested_income_start
+        income_end = end_value
+        income_incremental = incremental and not requested_income_start
+        income_sync_mode = "per_symbol" if requested_income_start else ("incremental" if incremental else "full")
+        income_symbols = _load_income_symbols(self.analytics_db)
+        income_symbol_scope = "a_stock_basic"
         self._progress(
             "同步A股利润表财务数据缓存",
             76,
             start_date=income_start.isoformat() if income_start else None,
-            end_date=end_value.isoformat(),
+            end_date=income_end.isoformat(),
             lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
+            mode=income_sync_mode,
+            requested_start_date=requested_income_start.isoformat() if requested_income_start else None,
+            symbol_scope=income_symbol_scope,
+            symbols=len(income_symbols),
         )
         income_result = sync_a_stock_income_data(
             start_date=income_start,
-            end_date=end_value,
-            incremental=incremental and not explicit_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            symbols=income_symbols,
+            symbol_scope=income_symbol_scope,
             tushare_service=self.tushare,
             analytics_db=self.analytics_db,
             progress_callback=self.progress_callback,
@@ -613,8 +628,26 @@ class AStockBaseDataSyncService:
             "market_trade_days": len(trading_dates),
             "index_start_date": index_start.isoformat(),
             "income_start_date": income_result.get("start_date"),
+            "income_end_date": income_result.get("end_date"),
+            "income_sync_mode": income_sync_mode,
+            "income_symbol_scope": income_symbol_scope,
+            "income_symbols": income_result.get("symbols"),
+            "income_requested_start_date": requested_income_start.isoformat() if requested_income_start else None,
+            "income_earliest_ann_date_before": income_result.get("earliest_ann_date"),
+            "income_latest_ann_date_before": income_result.get("latest_ann_date"),
             "income_fetched_rows": income_result.get("fetched_rows"),
             "income_saved_rows": income_result.get("saved_rows"),
+            "income_empty_symbols": income_result.get("empty_symbols"),
+            "income_non_empty_symbols": income_result.get("non_empty_symbols"),
+            "income_skipped_symbols": income_result.get("skipped_symbols"),
+            "income_backfill_symbols": income_result.get("backfill_symbols"),
+            "income_incremental_symbols": income_result.get("incremental_symbols"),
+            "income_full_symbols": income_result.get("full_symbols"),
+            "income_fetch_seconds": income_result.get("fetch_seconds"),
+            "income_insert_seconds": income_result.get("insert_seconds"),
+            "income_total_seconds": income_result.get("total_seconds"),
+            "income_avg_fetch_ms": income_result.get("avg_fetch_ms"),
+            "income_insert_batches": income_result.get("insert_batches"),
             "tables": {
                 AStockBasic.__tablename__: basic_rows,
                 AStockIncome.__tablename__: income_rows,
@@ -665,7 +698,7 @@ def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return normalized.loc[:, columns]
 
 
-def _upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
     if frame.empty:
         return 0
     normalized = _normalize_income_frame(frame)
@@ -685,6 +718,8 @@ def _upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
     ]
     table = AStockIncome.__table__
     analytics_db.commit()
+    # Keep this on the same DuckDB bulk path used by market/index daily:
+    # register one DataFrame and let DuckDB execute a set-based INSERT OR REPLACE.
     _insert_or_replace_analytics_frame(
         table.name,
         columns,
@@ -693,14 +728,35 @@ def _upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
     return len(normalized)
 
 
-def _latest_income_ann_date(analytics_db: Session) -> Optional[date]:
-    row = (
-        analytics_db.query(AStockIncome.ann_date)
-        .filter(AStockIncome.ann_date.isnot(None))
-        .order_by(AStockIncome.ann_date.desc())
-        .first()
-    )
-    return _parse_date(row[0]) if row else None
+def _income_ann_date_bounds(analytics_db: Session) -> Tuple[Optional[date], Optional[date]]:
+    row = analytics_db.execute(
+        text("""
+            SELECT MIN(ann_date), MAX(ann_date)
+            FROM a_stock_income
+            WHERE ann_date IS NOT NULL
+        """)
+    ).fetchone()
+    if not row:
+        return None, None
+    return _parse_date(row[0]), _parse_date(row[1])
+
+
+def _income_ann_date_bounds_by_symbol(analytics_db: Session) -> Dict[str, Tuple[Optional[date], Optional[date]]]:
+    rows = analytics_db.execute(
+        text("""
+            SELECT ts_code, MIN(ann_date), MAX(ann_date)
+            FROM a_stock_income
+            WHERE ts_code IS NOT NULL AND ann_date IS NOT NULL
+            GROUP BY ts_code
+        """)
+    ).fetchall()
+    result = {}
+    for row in rows:
+        symbol = str(row[0] or "").strip().upper()
+        if not symbol:
+            continue
+        result[symbol] = (_parse_date(row[1]), _parse_date(row[2]))
+    return result
 
 
 def _load_income_symbols(analytics_db: Session) -> List[str]:
@@ -731,10 +787,70 @@ def _filter_income_ann_date_range(frame: pd.DataFrame, start_date: date, end_dat
     return working
 
 
+def _plan_income_symbol_ranges(
+    symbols: List[str],
+    start_date: Optional[date],
+    end_date: date,
+    *,
+    incremental: bool,
+    symbol_bounds: Dict[str, Tuple[Optional[date], Optional[date]]],
+) -> Tuple[List[Tuple[str, date, date, str]], Dict[str, int]]:
+    default_start = DEFAULT_START_DATE - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS)
+    jobs: List[Tuple[str, date, date, str]] = []
+    stats = {
+        "skipped": 0,
+        "backfill": 0,
+        "incremental": 0,
+        "full": 0,
+    }
+
+    for symbol in symbols:
+        earliest_ann_date, latest_ann_date = symbol_bounds.get(symbol, (None, None))
+        symbol_start: Optional[date] = None
+        symbol_end = end_date
+        sync_kind = "incremental"
+
+        if start_date:
+            if earliest_ann_date is None:
+                symbol_start = start_date
+                sync_kind = "backfill"
+            elif start_date < earliest_ann_date:
+                symbol_start = start_date
+                symbol_end = min(end_date, earliest_ann_date - timedelta(days=1))
+                sync_kind = "backfill"
+            elif latest_ann_date:
+                symbol_start = max(default_start, latest_ann_date - timedelta(days=INCOME_SYNC_REFRESH_OVERLAP_DAYS))
+                sync_kind = "incremental"
+            else:
+                symbol_start = start_date
+                sync_kind = "backfill"
+        elif incremental:
+            if latest_ann_date:
+                symbol_start = max(default_start, latest_ann_date - timedelta(days=INCOME_SYNC_REFRESH_OVERLAP_DAYS))
+                sync_kind = "incremental"
+            else:
+                symbol_start = default_start
+                sync_kind = "backfill"
+        else:
+            symbol_start = default_start
+            sync_kind = "full"
+
+        if not symbol_start or symbol_start > symbol_end:
+            stats["skipped"] += 1
+            continue
+
+        jobs.append((symbol, symbol_start, symbol_end, sync_kind))
+        stats[sync_kind] += 1
+
+    return jobs, stats
+
+
 def sync_a_stock_income_data(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     incremental: bool = True,
+    symbols: Optional[List[str]] = None,
+    symbol_scope: str = "a_stock_basic",
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
@@ -745,14 +861,10 @@ def sync_a_stock_income_data(
     analytics_session = analytics_db or AnalyticsSession()
     try:
         explicit_start = _parse_date(start_date)
-        latest_ann_date = _latest_income_ann_date(analytics_session)
+        earliest_ann_date, latest_ann_date = _income_ann_date_bounds(analytics_session)
+        symbol_bounds = _income_ann_date_bounds_by_symbol(analytics_session)
         analytics_session.commit()
-        if explicit_start:
-            start_value = explicit_start
-        elif incremental and latest_ann_date:
-            start_value = max(default_start, latest_ann_date - timedelta(days=INCOME_SYNC_REFRESH_OVERLAP_DAYS))
-        else:
-            start_value = default_start
+        start_value = explicit_start or default_start
 
         if start_value > end_value:
             return {
@@ -764,14 +876,35 @@ def sync_a_stock_income_data(
                 "chunks": 0,
                 "symbols": 0,
                 "processed_symbols": 0,
+                "symbol_scope": symbol_scope,
+                "empty_symbols": 0,
+                "non_empty_symbols": 0,
+                "fetch_seconds": 0.0,
+                "insert_seconds": 0.0,
+                "total_seconds": 0.0,
+                "avg_fetch_ms": 0.0,
+                "insert_batches": 0,
+                "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
                 "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+                "skipped_symbols": 0,
+                "backfill_symbols": 0,
+                "incremental_symbols": 0,
+                "full_symbols": 0,
             }
 
-        tushare = tushare_service or TushareService.getInstance()
-        symbols = _load_income_symbols(analytics_session)
-        if not symbols:
+        if symbols is None:
+            income_symbols = _load_income_symbols(analytics_session)
+        else:
+            income_symbols = sorted(
+                {
+                    str(symbol or "").strip().upper()
+                    for symbol in symbols
+                    if str(symbol or "").strip()
+                }
+            )
+        if not income_symbols:
             return {
-                "status": "no_symbols",
+                "status": "skipped",
                 "start_date": start_value.isoformat(),
                 "end_date": end_value.isoformat(),
                 "fetched_rows": 0,
@@ -779,60 +912,208 @@ def sync_a_stock_income_data(
                 "chunks": 0,
                 "symbols": 0,
                 "processed_symbols": 0,
+                "symbol_scope": symbol_scope,
+                "empty_symbols": 0,
+                "non_empty_symbols": 0,
+                "fetch_seconds": 0.0,
+                "insert_seconds": 0.0,
+                "total_seconds": 0.0,
+                "avg_fetch_ms": 0.0,
+                "insert_batches": 0,
+                "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
                 "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+                "skipped_symbols": 0,
+                "backfill_symbols": 0,
+                "incremental_symbols": 0,
+                "full_symbols": 0,
             }
 
-        workers = min(INCOME_SYNC_WORKERS, len(symbols))
+        income_jobs, job_stats = _plan_income_symbol_ranges(
+            income_symbols,
+            explicit_start,
+            end_value,
+            incremental=incremental,
+            symbol_bounds=symbol_bounds,
+        )
+        skipped_symbols = job_stats["skipped"]
+        backfill_symbols = job_stats["backfill"]
+        incremental_symbols = job_stats["incremental"]
+        full_symbols = job_stats["full"]
+        if not income_jobs:
+            return {
+                "status": "up_to_date",
+                "start_date": start_value.isoformat(),
+                "end_date": end_value.isoformat(),
+                "fetched_rows": 0,
+                "saved_rows": 0,
+                "chunks": 0,
+                "symbols": len(income_symbols),
+                "processed_symbols": 0,
+                "symbol_scope": symbol_scope,
+                "empty_symbols": 0,
+                "non_empty_symbols": 0,
+                "fetch_seconds": 0.0,
+                "insert_seconds": 0.0,
+                "total_seconds": 0.0,
+                "avg_fetch_ms": 0.0,
+                "insert_batches": 0,
+                "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
+                "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+                "skipped_symbols": skipped_symbols,
+                "backfill_symbols": backfill_symbols,
+                "incremental_symbols": incremental_symbols,
+                "full_symbols": full_symbols,
+            }
+
+        tushare = tushare_service or TushareService.getInstance()
+        workers = min(INCOME_SYNC_WORKERS, len(income_jobs))
+        sync_started_at = time.perf_counter()
+        fetch_seconds = 0.0
+        insert_seconds = 0.0
         fetched_rows = 0
         saved_rows = 0
         processed_symbols = 0
+        empty_symbols = 0
+        non_empty_symbols = 0
+        insert_batches = 0
+        pending_income_frames: List[pd.DataFrame] = []
+        pending_income_rows = 0
         logger.info(
-            "Sync A stock income data range=%s~%s symbols=%s workers=%s incremental=%s latest_ann_date=%s",
+            (
+                "Sync A stock income data base_range=%s~%s symbols=%s fetch_jobs=%s "
+                "skipped=%s backfill=%s incremental_jobs=%s full_jobs=%s "
+                "scope=%s workers=%s incremental=%s ann_date_bounds=%s~%s"
+            ),
             start_value,
             end_value,
-            len(symbols),
+            len(income_symbols),
+            len(income_jobs),
+            skipped_symbols,
+            backfill_symbols,
+            incremental_symbols,
+            full_symbols,
+            symbol_scope,
             workers,
             incremental,
+            earliest_ann_date,
             latest_ann_date,
         )
 
-        def fetch_symbol(symbol: str) -> Tuple[str, pd.DataFrame]:
-            frame = tushare.get_a_stock_income_range_frame(start_value, end_value, ts_code=symbol)
+        def fetch_symbol(job: Tuple[str, date, date, str]) -> Tuple[str, pd.DataFrame, float, date, date, str]:
+            symbol, symbol_start, symbol_end, sync_kind = job
+            fetch_started_at = time.perf_counter()
+            frame = tushare.get_a_stock_income_range_frame(symbol_start, symbol_end, ts_code=symbol)
             if isinstance(frame, pd.DataFrame) and not frame.empty:
-                frame = _filter_income_ann_date_range(frame, start_value, end_value)
-            return symbol, frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+                frame = _filter_income_ann_date_range(frame, symbol_start, symbol_end)
+            fetch_elapsed = time.perf_counter() - fetch_started_at
+            return symbol, frame if isinstance(frame, pd.DataFrame) else pd.DataFrame(), fetch_elapsed, symbol_start, symbol_end, sync_kind
+
+        def flush_income_frames():
+            nonlocal insert_batches, insert_seconds, pending_income_frames, pending_income_rows, saved_rows
+            if not pending_income_frames:
+                return
+            if len(pending_income_frames) == 1:
+                batch_frame = pending_income_frames[0]
+            else:
+                batch_frame = pd.concat(pending_income_frames, ignore_index=True)
+            insert_started_at = time.perf_counter()
+            saved_rows += _bulk_upsert_income_frame(analytics_session, batch_frame)
+            insert_seconds += time.perf_counter() - insert_started_at
+            insert_batches += 1
+            pending_income_frames = []
+            pending_income_rows = 0
+
+        def queue_income_frame(frame: pd.DataFrame):
+            nonlocal pending_income_rows
+            pending_income_frames.append(frame)
+            pending_income_rows += len(frame)
+            if (
+                pending_income_rows >= INCOME_INSERT_BATCH_ROWS
+                or len(pending_income_frames) >= INCOME_INSERT_BATCH_FRAMES
+            ):
+                flush_income_frames()
 
         def report_progress(processed: int, symbol: str):
             if progress_callback:
                 progress_callback(
                     {
                         "message": f"同步A股利润表 {symbol}",
-                        "progress": 5 + int(processed / max(len(symbols), 1) * 90),
+                        "progress": 5 + int((processed + skipped_symbols) / max(len(income_symbols), 1) * 90),
                         "processed_symbols": processed,
-                        "total_symbols": len(symbols),
+                        "total_symbols": len(income_symbols),
+                        "fetch_jobs": len(income_jobs),
+                        "skipped_symbols": skipped_symbols,
+                        "backfill_symbols": backfill_symbols,
+                        "incremental_symbols": incremental_symbols,
+                        "full_symbols": full_symbols,
+                        "symbol_scope": symbol_scope,
+                        "fetch_seconds": round(fetch_seconds, 3),
+                        "insert_seconds": round(insert_seconds, 3),
+                        "fetched_rows": fetched_rows,
+                        "saved_rows": saved_rows,
+                        "empty_symbols": empty_symbols,
+                        "non_empty_symbols": non_empty_symbols,
+                        "insert_batches": insert_batches,
+                        "pending_insert_rows": pending_income_rows,
                     }
                 )
 
         if workers <= 1:
-            for symbol in symbols:
-                _, frame = fetch_symbol(symbol)
+            for job in income_jobs:
+                symbol, frame, fetch_elapsed, _symbol_start, _symbol_end, _sync_kind = fetch_symbol(job)
+                fetch_seconds += fetch_elapsed
                 processed_symbols += 1
                 fetched_rows += len(frame)
-                if not frame.empty:
-                    saved_rows += _upsert_income_frame(analytics_session, frame)
-                if processed_symbols == 1 or processed_symbols == len(symbols) or processed_symbols % 50 == 0:
+                if frame.empty:
+                    empty_symbols += 1
+                else:
+                    non_empty_symbols += 1
+                    queue_income_frame(frame)
+                if processed_symbols == 1 or processed_symbols == len(income_jobs) or processed_symbols % 50 == 0:
                     report_progress(processed_symbols, symbol)
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(fetch_symbol, symbol) for symbol in symbols]
+                futures = [executor.submit(fetch_symbol, job) for job in income_jobs]
                 for future in as_completed(futures):
-                    symbol, frame = future.result()
+                    symbol, frame, fetch_elapsed, _symbol_start, _symbol_end, _sync_kind = future.result()
+                    fetch_seconds += fetch_elapsed
                     processed_symbols += 1
                     fetched_rows += len(frame)
-                    if not frame.empty:
-                        saved_rows += _upsert_income_frame(analytics_session, frame)
-                    if processed_symbols == 1 or processed_symbols == len(symbols) or processed_symbols % 50 == 0:
+                    if frame.empty:
+                        empty_symbols += 1
+                    else:
+                        non_empty_symbols += 1
+                        queue_income_frame(frame)
+                    if processed_symbols == 1 or processed_symbols == len(income_jobs) or processed_symbols % 50 == 0:
                         report_progress(processed_symbols, symbol)
+
+        flush_income_frames()
+        total_seconds = time.perf_counter() - sync_started_at
+        avg_fetch_ms = fetch_seconds / max(processed_symbols, 1) * 1000
+        logger.info(
+            (
+                "A stock income sync timing: total=%.3fs fetch=%.3fs insert=%.3fs "
+                "avg_fetch=%.1fms symbols=%s fetch_jobs=%s skipped=%s backfill=%s "
+                "incremental_jobs=%s full_jobs=%s empty_symbols=%s non_empty_symbols=%s "
+                "fetched_rows=%s saved_rows=%s insert_batches=%s scope=%s"
+            ),
+            total_seconds,
+            fetch_seconds,
+            insert_seconds,
+            avg_fetch_ms,
+            len(income_symbols),
+            processed_symbols,
+            skipped_symbols,
+            backfill_symbols,
+            incremental_symbols,
+            full_symbols,
+            empty_symbols,
+            non_empty_symbols,
+            fetched_rows,
+            saved_rows,
+            insert_batches,
+            symbol_scope,
+        )
 
         if progress_callback:
             progress_callback(
@@ -840,7 +1121,17 @@ def sync_a_stock_income_data(
                     "message": "A股利润表同步完成",
                     "progress": 100,
                     "processed_symbols": processed_symbols,
-                    "total_symbols": len(symbols),
+                    "total_symbols": len(income_symbols),
+                    "fetch_jobs": len(income_jobs),
+                    "skipped_symbols": skipped_symbols,
+                    "backfill_symbols": backfill_symbols,
+                    "incremental_symbols": incremental_symbols,
+                    "full_symbols": full_symbols,
+                    "symbol_scope": symbol_scope,
+                    "fetch_seconds": round(fetch_seconds, 3),
+                    "insert_seconds": round(insert_seconds, 3),
+                    "total_seconds": round(total_seconds, 3),
+                    "insert_batches": insert_batches,
                 }
             )
 
@@ -850,10 +1141,23 @@ def sync_a_stock_income_data(
             "end_date": end_value.isoformat(),
             "fetched_rows": fetched_rows,
             "saved_rows": saved_rows,
-            "chunks": len(symbols),
-            "symbols": len(symbols),
+            "chunks": len(income_jobs),
+            "symbols": len(income_symbols),
             "processed_symbols": processed_symbols,
+            "symbol_scope": symbol_scope,
+            "empty_symbols": empty_symbols,
+            "non_empty_symbols": non_empty_symbols,
+            "fetch_seconds": round(fetch_seconds, 3),
+            "insert_seconds": round(insert_seconds, 3),
+            "total_seconds": round(total_seconds, 3),
+            "avg_fetch_ms": round(avg_fetch_ms, 3),
+            "insert_batches": insert_batches,
+            "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
             "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+            "skipped_symbols": skipped_symbols,
+            "backfill_symbols": backfill_symbols,
+            "incremental_symbols": incremental_symbols,
+            "full_symbols": full_symbols,
         }
     finally:
         if owns_analytics_db:

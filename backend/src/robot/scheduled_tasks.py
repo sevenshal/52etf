@@ -239,21 +239,46 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
     result = sync_a_stock_base_data(start_date=parsed_start_date, incremental=parsed_start_date is None)
     logging.getLogger("ScheduledTaskManager").info(
-        "A stock base data synced: status=%s mode=%s end_date=%s tables=%s income_fetched_rows=%s income_saved_rows=%s",
+        (
+            "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
+            "income_fetched_rows=%s income_saved_rows=%s income_fetch_seconds=%s "
+            "income_insert_seconds=%s income_total_seconds=%s income_insert_batches=%s "
+            "income_skipped_symbols=%s income_backfill_symbols=%s income_incremental_symbols=%s income_full_symbols=%s"
+        ),
         result.get("status"),
         result.get("mode"),
         result.get("end_date"),
         result.get("tables"),
         result.get("income_fetched_rows"),
         result.get("income_saved_rows"),
+        result.get("income_fetch_seconds"),
+        result.get("income_insert_seconds"),
+        result.get("income_total_seconds"),
+        result.get("income_insert_batches"),
+        result.get("income_skipped_symbols"),
+        result.get("income_backfill_symbols"),
+        result.get("income_incremental_symbols"),
+        result.get("income_full_symbols"),
     )
     return (
         "A stock base data sync "
         f"start={result.get('start_date')} "
         f"market_start={result.get('market_start_date')} "
+        f"income_mode={result.get('income_sync_mode')} "
+        f"income_scope={result.get('income_symbol_scope')} "
+        f"income_symbols={result.get('income_symbols')} "
         f"income_start={result.get('income_start_date')} "
+        f"income_end={result.get('income_end_date')} "
         f"end_date={result.get('end_date')} "
         f"income_saved_rows={result.get('income_saved_rows')} "
+        f"income_fetch_seconds={result.get('income_fetch_seconds')} "
+        f"income_insert_seconds={result.get('income_insert_seconds')} "
+        f"income_total_seconds={result.get('income_total_seconds')} "
+        f"income_insert_batches={result.get('income_insert_batches')} "
+        f"income_skipped_symbols={result.get('income_skipped_symbols')} "
+        f"income_backfill_symbols={result.get('income_backfill_symbols')} "
+        f"income_incremental_symbols={result.get('income_incremental_symbols')} "
+        f"income_full_symbols={result.get('income_full_symbols')} "
         f"tables={result.get('tables')}"
     )
 
