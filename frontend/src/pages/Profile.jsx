@@ -79,7 +79,7 @@ const Profile = () => {
       title: '模拟盘',
       items: [
         {
-          title: 'W20风险调整动量虚拟盘',
+          title: 'A股ETF风险调整动量虚拟盘',
           onClick: () => navigate('/w20-momentum-live'),
           arrow: true
         },
