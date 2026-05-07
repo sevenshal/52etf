@@ -209,21 +209,31 @@ class TushareService(QuoteProvider):
         end_value = self._to_date(end_date)
         if not start_value or not end_value or start_value > end_value:
             return pd.DataFrame()
-        try:
-            frame = self.pro.trade_cal(
-                exchange=exchange,
-                start_date=start_value.strftime("%Y%m%d"),
-                end_date=end_value.strftime("%Y%m%d"),
-                fields="cal_date,is_open,pretrade_date",
-            )
-        except Exception as exc:
-            self.logger.warning("Tushare trade_cal fetch failed: %s", exc)
+
+        frames = []
+        chunk_start = start_value
+        while chunk_start <= end_value:
+            chunk_end = min(chunk_start + timedelta(days=370), end_value)
+            try:
+                frame = self.pro.trade_cal(
+                    exchange=exchange,
+                    start_date=chunk_start.strftime("%Y%m%d"),
+                    end_date=chunk_end.strftime("%Y%m%d"),
+                    fields="cal_date,is_open,pretrade_date",
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare trade_cal fetch failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                chunk_start = chunk_end + timedelta(days=1)
+                continue
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                frames.append(frame)
+            chunk_start = chunk_end + timedelta(days=1)
+
+        if not frames:
             return pd.DataFrame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return pd.DataFrame()
-        frame = frame.copy()
-        frame["cal_date"] = pd.to_datetime(frame["cal_date"], format="%Y%m%d", errors="coerce").dt.date
-        return frame.dropna(subset=["cal_date"]).sort_values("cal_date")
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["cal_date"], keep="last")
+        result["cal_date"] = pd.to_datetime(result["cal_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["cal_date"]).sort_values("cal_date")
 
     def get_a_stock_basic_frame(self, list_statuses: Optional[List[str]] = None) -> pd.DataFrame:
         """获取A股公司基础信息，默认包含上市与退市股票。"""

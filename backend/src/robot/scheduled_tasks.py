@@ -249,9 +249,14 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     )
     return (
         "A stock base data sync "
+        f"start={result.get('start_date')} "
+        f"market_start={result.get('market_start_date')} "
+        f"income_start={result.get('income_start_date')} "
         f"end_date={result.get('end_date')} "
+        f"income_saved_rows={result.get('income_saved_rows')} "
         f"tables={result.get('tables')}"
     )
+
 
 def _run_a_stock_innovation100_rebuild():
     from ..app.api.a_stock_innovation100 import rebuild_a_stock_innovation100_for_scheduler

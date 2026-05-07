@@ -547,7 +547,7 @@ class AStockBaseDataSyncService:
 
         market_default_start = DEFAULT_START_DATE - timedelta(days=RAW_FETCH_LOOKBACK_DAYS)
         if explicit_start:
-            market_start = max(market_default_start, explicit_start)
+            market_start = explicit_start
         elif incremental:
             market_start = _overlap_start(market_default_start, latest_market_date)
         else:
@@ -565,7 +565,7 @@ class AStockBaseDataSyncService:
 
         index_default_start = DEFAULT_START_DATE
         if explicit_start:
-            index_start = max(index_default_start, explicit_start)
+            index_start = explicit_start
         elif incremental:
             index_start = _overlap_start(index_default_start, latest_index_date)
         else:
@@ -579,7 +579,13 @@ class AStockBaseDataSyncService:
         )
 
         income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
-        self._progress("同步A股利润表财务数据缓存", 76)
+        self._progress(
+            "同步A股利润表财务数据缓存",
+            76,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=end_value.isoformat(),
+            lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
+        )
         income_result = sync_a_stock_income_data(
             start_date=income_start,
             end_date=end_value,
@@ -855,8 +861,21 @@ def sync_a_stock_income_data(
 
 
 def _count_analytics_table_rows(analytics_db: Session, table_name: str) -> int:
-    row = analytics_db.execute(text(f"SELECT COUNT(*) FROM {_quote_duckdb_identifier(table_name)}")).fetchone()
-    return int(row[0] or 0) if row else 0
+    analytics_db.commit()
+    import duckdb  # type: ignore
+
+    try:
+        connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+        try:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM {_quote_duckdb_identifier(table_name)}"
+            ).fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            connection.close()
+    except Exception:
+        row = analytics_db.execute(text(f"SELECT COUNT(*) FROM {_quote_duckdb_identifier(table_name)}")).fetchone()
+        return int(row[0] or 0) if row else 0
 
 
 def _latest_analytics_date(analytics_db: Session, model, column_name: str) -> Optional[date]:
