@@ -1,7 +1,7 @@
 import logging
 import math
 import os
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Callable, Deque, Dict, Iterable, List, Optional, Tuple
@@ -387,17 +387,11 @@ class AStockInnovation100Builder:
             self._progress("全市场日行情缓存已就绪", 50, processed_dates=len(trading_dates), total_dates=len(trading_dates))
             return
 
-        chunk_size = 15
-        max_calendar_span_days = 35
+        chunk_size = 8
+        max_calendar_span_days = 20
         chunks = []
         current_chunk: List[date] = []
         for missing_date in missing_dates:
-            if int((stats_by_date.get(missing_date) or {}).get("row_count") or 0) > 0:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = []
-                chunks.append([missing_date])
-                continue
             if current_chunk and (
                 len(current_chunk) >= chunk_size
                 or (missing_date - current_chunk[0]).days > max_calendar_span_days
@@ -479,6 +473,12 @@ class AStockInnovation100Builder:
     def _bulk_replace_market_daily(self, mappings: List[Dict], batch_size: int = 10000):
         if not mappings:
             return
+        date_counts = Counter(item.get("trade_date") for item in mappings if item.get("trade_date"))
+        replace_dates = sorted(
+            trade_date
+            for trade_date, row_count in date_counts.items()
+            if row_count >= MIN_MARKET_DAILY_ROWS
+        )
         columns = [
             "trade_date",
             "ts_code",
@@ -515,6 +515,11 @@ class AStockInnovation100Builder:
         raw_conn = engine.raw_connection()
         try:
             cursor = raw_conn.cursor()
+            if replace_dates:
+                cursor.executemany(
+                    "DELETE FROM a_stock_market_daily WHERE trade_date = ?",
+                    [(normalize(trade_date),) for trade_date in replace_dates],
+                )
             for batch in self._chunks(mappings, batch_size):
                 cursor.executemany(
                     sql,
