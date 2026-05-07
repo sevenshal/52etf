@@ -37,6 +37,11 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
+      key: '/db',
+      label: 'DB',
+      disabled: !accountId
+    },
+    {
       key: '/profile',
       label: '我的'
     }

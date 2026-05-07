@@ -33,6 +33,7 @@ import W20MomentumLive from './pages/W20MomentumLive';
 import USStockSignalLive from './pages/USStockSignalLive';
 import AStockInnovation100 from './pages/AStockInnovation100';
 import AStockInnovationMomentumLive from './pages/AStockInnovationMomentumLive';
+import DatabaseManager from './pages/DatabaseManager';
 
 function App() {
   return (
@@ -45,6 +46,7 @@ function App() {
           <Route path="/evc" element={<EVCValuation />} />
           <Route path="/options" element={<OptionsPositions />} />
           <Route path="/a-stock-innovation100" element={<AStockInnovation100 />} />
+          <Route path="/db" element={<DatabaseManager />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
