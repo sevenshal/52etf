@@ -232,6 +232,27 @@ def _run_w20_momentum_live_sync():
         len(result.get("errors") or []),
     )
 
+
+def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
+    from .a_stock_base_data_sync import sync_a_stock_base_data
+
+    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
+    result = sync_a_stock_base_data(start_date=parsed_start_date, incremental=parsed_start_date is None)
+    logging.getLogger("ScheduledTaskManager").info(
+        "A stock base data synced: status=%s mode=%s end_date=%s tables=%s income_fetched_rows=%s income_saved_rows=%s",
+        result.get("status"),
+        result.get("mode"),
+        result.get("end_date"),
+        result.get("tables"),
+        result.get("income_fetched_rows"),
+        result.get("income_saved_rows"),
+    )
+    return (
+        "A stock base data sync "
+        f"end_date={result.get('end_date')} "
+        f"tables={result.get('tables')}"
+    )
+
 def _run_a_stock_innovation100_rebuild():
     from ..app.api.a_stock_innovation100 import rebuild_a_stock_innovation100_for_scheduler
 
@@ -358,6 +379,15 @@ class ScheduledTaskManager:
                 sort_order=70,
                 runner=_run_w20_momentum_live_sync,
             ),
+            "a_stock_base_data_sync": TaskDefinition(
+                task_key="a_stock_base_data_sync",
+                name="A股基础数据同步",
+                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情和利润表到DuckDB分析库。",
+                default_time="18:20",
+                default_enabled=True,
+                sort_order=74,
+                runner=_run_a_stock_base_data_sync,
+            ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",
                 name="A股创新100指数刷新",
@@ -403,6 +433,7 @@ class ScheduledTaskManager:
             ).delete(synchronize_session=False)
             db.query(ScheduledTaskConfig).filter(
                 ScheduledTaskConfig.task_key.in_([
+                    "a_stock_income_sync",
                     "etf_nport_holdings_import",
                 ])
             ).delete(synchronize_session=False)
@@ -657,6 +688,7 @@ class ScheduledTaskManager:
             "schedule_time": config["schedule_time"],
             "sort_order": config["sort_order"],
             "supports_start_date": config["task_key"] in {
+                "a_stock_base_data_sync",
                 "etf_historical_holdings_backfill",
                 "soxx_fear_greed_backfill",
             },

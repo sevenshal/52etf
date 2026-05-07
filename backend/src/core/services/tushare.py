@@ -632,6 +632,69 @@ class TushareService(QuoteProvider):
         self._income_frame_cache[ts_code] = result
         return result.copy()
 
+    def get_a_stock_income_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """按股票代码和公告日期分页获取一段时间内的A股利润表/收入表数据。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            self.logger.warning("Skip Tushare income range fetch for %s~%s: ts_code is required", start_date, end_date)
+            return pd.DataFrame()
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        while True:
+            try:
+                frame = self.pro.income(
+                    ts_code=ts_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields="ts_code,end_date,ann_date,operate_income,rd_exp,report_type",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare income range fetch failed for %s %s~%s offset=%s: %s",
+                    ts_code,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date", "report_type"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in ("operate_income", "rd_exp"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "report_type" in result.columns:
+            result["report_type"] = result["report_type"].astype("string")
+        return result.dropna(subset=["ts_code", "end_date"])
+
     def _fetch_frame(self, symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
         ts_code = self.normalize_symbol(symbol)
         asset = self._infer_asset(ts_code)

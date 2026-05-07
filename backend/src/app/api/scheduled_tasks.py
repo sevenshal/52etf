@@ -72,6 +72,7 @@ def run_scheduled_task_now(
     try:
         runner_kwargs = {}
         if task_key in {
+            "a_stock_base_data_sync",
             "etf_historical_holdings_backfill",
             "soxx_fear_greed_backfill",
         } and payload and payload.start_date:

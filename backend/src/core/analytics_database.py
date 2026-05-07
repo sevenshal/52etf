@@ -16,6 +16,7 @@ if ANALYTICS_DB_DIR:
 ANALYTICS_TABLE_NAMES = frozenset(
     {
         "a_stock_basic",
+        "a_stock_income",
         "a_stock_index_daily",
         "a_stock_market_daily",
         "a_stock_name_changes",
@@ -54,6 +55,21 @@ class AStockNameChange(AnalyticsBase):
     start_date = Column(Date)
     end_date = Column(Date)
     change_reason = Column(String(64))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockIncome(AnalyticsBase):
+    """Tushare A股利润表/收入表缓存，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_income"
+
+    id = Column(String(80), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    end_date = Column(Date, nullable=False)
+    ann_date = Column(Date)
+    operate_income = Column(Float)
+    rd_exp = Column(Float)
+    report_type = Column(String(16))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -104,6 +120,9 @@ def ensure_analytics_schema():
     AnalyticsBase.metadata.create_all(analytics_engine)
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_income_ann ON a_stock_income(ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",

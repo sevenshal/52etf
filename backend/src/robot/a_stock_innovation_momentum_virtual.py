@@ -15,7 +15,6 @@ from ..core.database import (
     AStockInnovation100Rebalance,
 )
 from ..core.analytics_database import analytics_engine
-from ..core.services.tushare import TushareService
 from .a_stock_innovation100 import INDEX_CODE as BENCHMARK_INDEX_CODE
 from .us_stock_signal_virtual import (
     DAILY_PRICE_SOURCE,
@@ -158,43 +157,47 @@ def _assign_percentiles(items: List[Dict], value_key: str, percentile_key: str, 
 
 @lru_cache(maxsize=1024)
 def _load_symbol_income_history(ts_code: str, fetch_start_iso: str, end_date_iso: str) -> Tuple[Tuple]:
-    service = TushareService.getInstance()
-    frame = service.get_a_stock_income_frame(ts_code)
-    if frame is None or frame.empty:
-        return tuple()
-
     fetch_start = date.fromisoformat(fetch_start_iso)
     end_date = date.fromisoformat(end_date_iso)
-
-    working = frame.copy()
-    working = working.dropna(subset=["end_date"])
-    working = working[working["end_date"].map(lambda item: isinstance(item, date) and item.month == 12 and item.day == 31)]
-    if "ann_date" in working.columns:
-        working = working[
-            working["ann_date"].notna()
-            & (working["ann_date"] >= fetch_start)
-            & (working["ann_date"] <= end_date)
-        ]
-    if working.empty:
+    with analytics_engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT end_date, ann_date, operate_income, rd_exp
+                FROM a_stock_income
+                WHERE ts_code = :ts_code
+                  AND ann_date IS NOT NULL
+                  AND ann_date >= :fetch_start
+                  AND ann_date <= :end_date
+                  AND EXTRACT(MONTH FROM end_date) = 12
+                  AND EXTRACT(DAY FROM end_date) = 31
+                ORDER BY end_date ASC, ann_date ASC
+            """),
+            {
+                "ts_code": ts_code,
+                "fetch_start": fetch_start.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+        ).fetchall()
+    if not rows:
         return tuple()
 
-    working = working.sort_values(["end_date", "ann_date"], na_position="first")
-    working = working.drop_duplicates(subset=["end_date"], keep="last")
-
-    records = []
-    for row in working.itertuples(index=False):
-        end_row_date = getattr(row, "end_date", None)
-        ann_row_date = getattr(row, "ann_date", None)
-        operate_income = getattr(row, "operate_income", None)
-        rd_exp = getattr(row, "rd_exp", None)
+    records_by_end_date = {}
+    for row in rows:
+        end_row_date = _to_date(row[0])
+        ann_row_date = _to_date(row[1])
+        operate_income = row[2]
+        rd_exp = row[3]
         if not _is_finite_number(operate_income) or float(operate_income) <= 0:
             continue
-        records.append({
+        if not end_row_date or not ann_row_date:
+            continue
+        records_by_end_date[end_row_date] = {
             "end_date": end_row_date.isoformat() if isinstance(end_row_date, date) else None,
             "ann_date": ann_row_date.isoformat() if isinstance(ann_row_date, date) else None,
             "operate_income": float(operate_income),
             "rd_exp": float(rd_exp) if _is_finite_number(rd_exp) and float(rd_exp) >= 0 else None,
-        })
+        }
+    records = [records_by_end_date[key] for key in sorted(records_by_end_date)]
     return tuple(tuple(sorted(record.items())) for record in records)
 
 
