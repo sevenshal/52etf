@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api/db", tags=["DB"])
 MAX_QUERY_LIMIT = 500
 INTERNAL_TABLE_PREFIXES = ("sqlite_",)
 SCHEMA_CACHE_TTL_SECONDS = 60
+DUCKDB_CONFIG_MISMATCH_MESSAGE = "Can't open a connection to same database file with a different configuration than existing connections"
 DUCKDB_FORBIDDEN_IDENTIFIERS = {
     "attach",
     "call",
@@ -147,6 +148,27 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
+def _is_duckdb_config_mismatch(exc: Exception) -> bool:
+    return DUCKDB_CONFIG_MISMATCH_MESSAGE in str(exc)
+
+
+def _connect_duckdb_with_fallback(database: str, prefer_read_only: bool = True):
+    duckdb = _import_duckdb()
+    attempts = [True, False] if prefer_read_only else [False, True]
+    last_exc = None
+    for read_only in attempts:
+        try:
+            return duckdb.connect(database=database, read_only=read_only)
+        except Exception as exc:
+            if _is_duckdb_config_mismatch(exc):
+                last_exc = exc
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(status_code=500, detail="无法连接DuckDB分析库")
+
+
 def _get_primary_key_columns(inspector, table_name: str) -> Set[str]:
     try:
         return set(inspector.get_pk_constraint(table_name).get("constrained_columns") or [])
@@ -221,8 +243,8 @@ def _load_table_metadata() -> Tuple[List[DbTable], Set[str], Set[str]]:
         table_by_name[lowered] = table
         allowed_table_names.add(table_name.lower())
 
-    duckdb = _import_duckdb()
-    with duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False) as connection:
+    connection = _connect_duckdb_with_fallback(ANALYTICS_DB_PATH, prefer_read_only=True)
+    try:
         analytics_tables = [row[0] for row in connection.execute("SHOW TABLES").fetchall()]
         for table_name in sorted(analytics_tables):
             lowered = table_name.lower()
@@ -238,6 +260,8 @@ def _load_table_metadata() -> Tuple[List[DbTable], Set[str], Set[str]]:
             table_by_name[lowered] = table
             allowed_table_names.add(lowered)
             restricted_table_names.discard(lowered)
+    finally:
+        connection.close()
 
     return sorted(
         table_by_name.values(),
@@ -552,20 +576,6 @@ def _create_duckdb_sqlite_views(connection, tables: List[DbTable]):
         )
 
 
-def _create_duckdb_analytics_views(connection, tables: List[DbTable]):
-    if not tables:
-        return
-    connection.execute(f"ATTACH {_quote_sql_string(ANALYTICS_DB_PATH)} AS analytics_db")
-    for table in tables:
-        quoted_table_name = _quote_identifier(table.name)
-        connection.execute(
-            f"""
-            CREATE TEMP VIEW {quoted_table_name} AS
-            SELECT * FROM analytics_db.{quoted_table_name}
-            """
-        )
-
-
 def _execute_sqlite_query(query: str, allowed_table_names: Set[str]) -> Tuple[List[str], List[Dict[str, Any]], Dict[str, float]]:
     timings: Dict[str, float] = {}
     started_at = time.perf_counter()
@@ -610,15 +620,17 @@ def _execute_duckdb_query(query: str, referenced_tables: List[DbTable]) -> Tuple
         for table in referenced_tables
         if table.name.lower() not in ANALYTICS_TABLE_NAMES
     ]
-    database = ":memory:" if sqlite_tables else ANALYTICS_DB_PATH
+    has_native_tables = bool(native_tables)
 
     try:
-        with duckdb.connect(database=database, read_only=False) as connection:
+        if has_native_tables:
+            connection = _connect_duckdb_with_fallback(database=ANALYTICS_DB_PATH, prefer_read_only=True)
+        else:
+            connection = duckdb.connect(database=":memory:", read_only=False)
+        try:
             setup_started_at = time.perf_counter()
             if sqlite_tables:
-                _create_duckdb_analytics_views(connection, native_tables)
                 _create_duckdb_sqlite_views(connection, sqlite_tables)
-            connection.execute("SET enable_external_access=false")
             timings["setup_ms"] = round((time.perf_counter() - setup_started_at) * 1000, 2)
 
             execute_started_at = time.perf_counter()
@@ -629,6 +641,8 @@ def _execute_duckdb_query(query: str, referenced_tables: List[DbTable]) -> Tuple
             fetch_started_at = time.perf_counter()
             raw_rows = result.fetchall()
             timings["fetch_ms"] = round((time.perf_counter() - fetch_started_at) * 1000, 2)
+        finally:
+            connection.close()
     except HTTPException:
         raise
     except Exception as exc:
