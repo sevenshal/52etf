@@ -1,4 +1,4 @@
-from src.core.database import Session, engine, Base, SzdtTradeStock, TradingState, StockCooldown, EVCTradeLog, StockFavorite
+from src.core.database import Session, engine, Base, SzdtTradeStock, TradingState, StockCooldown, StockFavorite
 from src.core.utils import DATA_DIR
 import os
 import glob
@@ -42,16 +42,6 @@ class OldStockCooldown(OldBase):
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 
-class OldEVCTradeLog(OldBase):
-    __tablename__ = "evc_trade_logs"
-    id = Column(Integer, primary_key=True)
-    symbol = Column(String)
-    quantity = Column(Integer)
-    price = Column(Float)
-    reason = Column(String)
-    operation = Column(String)
-    timestamp = Column(DateTime)
-
 class OldStockFavorite(OldBase):
     __tablename__ = 'stock_favorites'
     symbol = Column(String, primary_key=True)
@@ -72,7 +62,7 @@ def migrate_all():
     # CAUTION: This deletes existing global data for these tables.
     tables_to_reset = [
         "szdt_trade_stocks", "trading_states", "stock_cooldowns", 
-        "evc_trade_logs", "stock_favorites"
+        "stock_favorites"
     ]
     
     with engine.connect() as conn:
@@ -172,23 +162,6 @@ def migrate_all():
                     stats["stock_cooldowns"] += 1
             except Exception: pass
 
-            # --- EVCTradeLog ---
-            try:
-                items = local_session.query(OldEVCTradeLog).all()
-                for i in items:
-                    new_item = EVCTradeLog(
-                        account_id=account_id,
-                        symbol=i.symbol,
-                        quantity=i.quantity,
-                        price=i.price,
-                        reason=i.reason,
-                        operation=i.operation,
-                        timestamp=i.timestamp
-                    )
-                    global_db.add(new_item)
-                    stats["evc_trade_logs"] += 1
-            except Exception: pass
-            
             # --- StockFavorite ---
             try:
                 items = local_session.query(OldStockFavorite).all()

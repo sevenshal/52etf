@@ -378,19 +378,6 @@ class ETFOptionExpiration(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
-class EVCTradeLog(Base):
-    __tablename__ = "evc_trade_logs"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True) # Added for migration
-    symbol = Column(String, index=True)
-    quantity = Column(Integer)
-    price = Column(Float)
-    reason = Column(String)
-    operation = Column(String)  # 'buy' or 'sell'
-    timestamp = Column(DateTime, default=datetime.now, index=True)
-
-
 class StockFavorite(Base):
     """用户股票收藏表"""
     __tablename__ = 'stock_favorites'

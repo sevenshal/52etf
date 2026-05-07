@@ -1,26 +1,14 @@
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
 from typing import Optional, List
-from ...core.utils import get_data_file, read_json_file, write_json_file
-from datetime import datetime
 from sqlalchemy.orm import Session
-from ...core.database import StockEVC, StockTag, stock_tags, get_db, EVCTradeLog, EVCAccountConfig
+from ...core.database import StockEVC, StockTag, stock_tags, get_db
 from sqlalchemy import func, and_
 from ...core.static_info import get_static_info_snapshot_map
-from ...core.services.evc import EVCService
 
 router = APIRouter(prefix="/api/evc")
 
 ONE_HUNDRED_MILLION = 100_000_000
-
-class StrategyConfig(BaseModel):
-    auto_trading_enabled: bool
-    undervalue_threshold: float
-    next_fy_growth_threshold: float
-    max_hold_stock_count: int
-    max_hold_amount_per_stock: int
-    current_fy_hi_threshold: float
-    next_fy_median_threshold: float
 
 class ValuationSearchRequest(BaseModel):
     undervalue_threshold: float = 0.9
@@ -48,56 +36,6 @@ def _calculate_market_cap(stock: StockEVC, static_info: dict) -> Optional[float]
     if not isinstance(shares, (int, float)) or shares <= 0:
         return None
     return stock.last_price * shares
-
-def get_strategy_config_path(account_id: str) -> str:
-    return get_data_file(account_id, "evc_strategy.json")
-
-_default_strategy_config = {
-    "auto_trading_enabled": False,
-    "undervalue_threshold": 0.9,
-    "next_fy_growth_threshold": 1.1,
-    "max_hold_stock_count": 20,
-    "max_hold_amount_per_stock": 100000,
-    "current_fy_hi_threshold": 1.0,
-    "next_fy_median_threshold": 1.0
-}
-
-@router.get("/config")
-async def get_config(
-    account_id: str = Depends(get_account_id),
-    db: Session = Depends(get_db)
-):
-    api_config = db.query(EVCAccountConfig).filter(
-        EVCAccountConfig.account_id == account_id
-    ).first()
-    strategy_config = read_json_file(get_strategy_config_path(account_id)) or _default_strategy_config
-    return {
-        "activated": False,
-        "evc_account_configured": bool(api_config and api_config.evc_username and api_config.evc_password),
-        "evc_cookie_configured": bool(api_config and api_config.evc_cookie),
-        **strategy_config
-    }
-
-@router.post("/update-strategy")
-async def update_strategy(
-    config: StrategyConfig,
-    account_id: str = Depends(get_account_id)
-):
-    try:
-        strategy_config = {
-            "auto_trading_enabled": config.auto_trading_enabled,
-            "undervalue_threshold": config.undervalue_threshold,
-            "next_fy_growth_threshold": config.next_fy_growth_threshold,
-            "max_hold_stock_count": config.max_hold_stock_count,
-            "max_hold_amount_per_stock": config.max_hold_amount_per_stock,
-            "current_fy_hi_threshold": config.current_fy_hi_threshold,
-            "next_fy_median_threshold": config.next_fy_median_threshold
-        }
-        
-        write_json_file(get_strategy_config_path(account_id), strategy_config)
-        return {"message": "更新成功"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/valuation-search")
 async def valuation_search(
@@ -237,39 +175,6 @@ async def get_stock_tags(
             }
             for tag in tags
         ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/trade-logs")
-async def get_trade_logs(
-    account_id: str = Depends(get_account_id),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db)
-):
-    try:
-        query = db.query(EVCTradeLog).filter(
-            EVCTradeLog.account_id == account_id
-        ).order_by(EVCTradeLog.timestamp.desc())
-        total = query.count()
-        logs = query.offset((page - 1) * page_size).limit(page_size).all()
-            
-        return {
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "items": [
-                {
-                    "symbol": log.symbol,
-                    "quantity": log.quantity,
-                    "price": log.price,
-                    "reason": log.reason,
-                    "operation": log.operation,
-                    "timestamp": log.timestamp.isoformat()
-                }
-                for log in logs
-            ]
-        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
