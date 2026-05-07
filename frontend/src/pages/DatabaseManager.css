@@ -99,6 +99,10 @@
   margin-bottom: 12px;
 }
 
+.db-engine-select {
+  width: 130px;
+}
+
 .db-sql-editor textarea,
 .db-sql-editor {
   font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
@@ -156,6 +160,17 @@
   min-height: 520px;
   min-width: 0;
   overflow: hidden;
+}
+
+.db-timing-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.db-timing-row .ant-tag {
+  margin-inline-end: 0;
 }
 
 .db-result-card .ant-card-head,

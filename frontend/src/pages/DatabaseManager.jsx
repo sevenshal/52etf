@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -42,6 +42,11 @@ const chartTypeOptions = [
   { label: '饼图', value: 'pie', icon: <PieChartOutlined /> },
 ];
 
+const queryEngineOptions = [
+  { label: 'DuckDB分析', value: 'duckdb' },
+  { label: 'SQLite只读', value: 'sqlite' },
+];
+
 const getErrorMessage = (error, fallback) => {
   const detail = error?.response?.data?.detail || error?.response?.data?.message || error?.message;
   if (!detail) return fallback;
@@ -63,6 +68,11 @@ const formatCellValue = (value) => {
   return String(value);
 };
 
+const formatTiming = (value) => {
+  if (value === null || value === undefined) return '-';
+  return `${Number(value).toFixed(1)} ms`;
+};
+
 const getCurrentToken = (text, caretPosition) => {
   const beforeCaret = text.slice(0, caretPosition);
   const match = beforeCaret.match(/([A-Za-z_][A-Za-z0-9_.$]*)$/);
@@ -74,7 +84,15 @@ const getCurrentToken = (text, caretPosition) => {
   };
 };
 
-const SqlEditorCard = React.memo(({ maxLimit, queryLoading, sqlSeed, suggestionSource, onRun }) => {
+const SqlEditorCard = React.memo(({
+  maxLimit,
+  queryEngine,
+  queryLoading,
+  sqlSeed,
+  suggestionSource,
+  onEngineChange,
+  onRun,
+}) => {
   const [sql, setSql] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
@@ -169,6 +187,12 @@ const SqlEditorCard = React.memo(({ maxLimit, queryLoading, sqlSeed, suggestionS
       )}
       extra={(
         <Space>
+          <Select
+            className="db-engine-select"
+            value={queryEngine}
+            options={queryEngineOptions}
+            onChange={onEngineChange}
+          />
           <Button
             icon={<ClearOutlined />}
             onClick={() => {
@@ -192,7 +216,7 @@ const SqlEditorCard = React.memo(({ maxLimit, queryLoading, sqlSeed, suggestionS
       <Alert
         showIcon
         type="info"
-        message={`仅允许SELECT查询；只能读取无account_id字段的数据表；未写LIMIT时后端自动限制${maxLimit}行，超过${maxLimit}行会被截断。`}
+        message={`${queryEngine === 'duckdb' ? 'DuckDB分析模式支持GROUP BY、JOIN和窗口函数；' : 'SQLite只读模式；'}仅允许SELECT查询；只能读取无account_id字段的数据表；未写LIMIT时后端自动限制${maxLimit}行，超过${maxLimit}行会被截断。`}
         className="db-query-alert"
       />
       <TextArea
@@ -238,6 +262,7 @@ const DatabaseManager = () => {
   const [selectedTableName, setSelectedTableName] = useState(null);
   const [tableSearch, setTableSearch] = useState('');
   const [sqlSeed, setSqlSeed] = useState({ id: 0, sql: '' });
+  const [queryEngine, setQueryEngine] = useState('duckdb');
   const [queryLoading, setQueryLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [viewMode, setViewMode] = useState('table');
@@ -316,6 +341,20 @@ const DatabaseManager = () => {
   const tableDataSource = useMemo(() => (
     resultRows.map((row, index) => ({ ...row, __rowIndex: index }))
   ), [resultRows]);
+
+  const timingItems = useMemo(() => {
+    const timings = result?.timings || {};
+    return [
+      ['总耗时', 'request_total_ms'],
+      ['Schema', 'schema_ms'],
+      ['Setup', 'setup_ms'],
+      ['执行', 'execute_ms'],
+      ['拉取', 'fetch_ms'],
+      ['序列化', 'serialize_ms'],
+    ]
+      .filter(([, key]) => timings[key] !== undefined)
+      .map(([label, key]) => ({ label, value: timings[key] }));
+  }, [result]);
 
   const chartOption = useMemo(() => {
     if (!resultRows.length || !dimensionColumn || !valueColumn) return null;
@@ -417,7 +456,7 @@ const DatabaseManager = () => {
     setSqlSeed(prev => ({ id: prev.id + 1, sql: table.sample_sql }));
   };
 
-  const runQuery = async (sqlText) => {
+  const runQuery = useCallback(async (sqlText) => {
     const trimmedSql = sqlText.trim();
     if (!trimmedSql) {
       message.warning('请先输入SQL查询语句');
@@ -426,7 +465,7 @@ const DatabaseManager = () => {
 
     setQueryLoading(true);
     try {
-      const { data } = await request.post('/api/db/query', { sql: trimmedSql });
+      const { data } = await request.post('/api/db/query', { sql: trimmedSql, engine: queryEngine });
       setResult(data);
       setViewMode('table');
       if (data.limit_applied) {
@@ -439,7 +478,7 @@ const DatabaseManager = () => {
     } finally {
       setQueryLoading(false);
     }
-  };
+  }, [maxLimit, queryEngine]);
 
   return (
     <div className="db-manager-page">
@@ -507,9 +546,11 @@ const DatabaseManager = () => {
       <div className="db-workbench">
         <SqlEditorCard
           maxLimit={maxLimit}
+          queryEngine={queryEngine}
           queryLoading={queryLoading}
           sqlSeed={sqlSeed}
           suggestionSource={suggestionSource}
+          onEngineChange={setQueryEngine}
           onRun={runQuery}
         />
 
@@ -520,6 +561,14 @@ const DatabaseManager = () => {
               <TableOutlined />
               <Title level={5} style={{ margin: 0 }}>查询结果</Title>
               {result && <Tag>{result.row_count} 行</Tag>}
+              {result && (
+                <Tag color={result.engine === 'duckdb' ? 'purple' : 'default'}>
+                  {result.engine === 'duckdb' ? 'DuckDB' : 'SQLite'}
+                </Tag>
+              )}
+              {result?.timings?.request_total_ms !== undefined && (
+                <Tag color="blue">{formatTiming(result.timings.request_total_ms)}</Tag>
+              )}
             </Space>
           )}
           extra={(
@@ -533,6 +582,14 @@ const DatabaseManager = () => {
             />
           )}
         >
+          {!!timingItems.length && (
+            <div className="db-timing-row">
+              {timingItems.map(item => (
+                <Tag key={item.label}>{item.label}: {formatTiming(item.value)}</Tag>
+              ))}
+            </div>
+          )}
+
           {!result ? (
             <Empty description="执行查询后在这里查看结果" />
           ) : viewMode === 'table' ? (
