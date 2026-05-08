@@ -196,7 +196,7 @@ const AllWeatherBacktest = () => {
                         dataSource={result.rebalance_events}
                         columns={columns}
                         rowKey="date"
-                        pagination={{ pageSize: 5 }}
+                        pagination={{ defaultPageSize: 5 }}
                         size="small"
                     />
                 </Card>

@@ -962,7 +962,7 @@ const SoxlFearBacktest = () => {
             dataSource={searchResults}
             columns={resultColumns}
             rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
-            pagination={{ pageSize: 10 }}
+            pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 1980 }}
             onRow={(record) => ({
               onClick: () => loadDetail(record),
@@ -1061,7 +1061,7 @@ const SoxlFearBacktest = () => {
               dataSource={detailedResult.trades || []}
               columns={tradeColumns}
               rowKey={(record, index) => `${record.date}-${record.action}-${index}`}
-              pagination={{ pageSize: 12 }}
+              pagination={{ defaultPageSize: 12 }}
               scroll={{ x: 1800 }}
             />
           </Card>

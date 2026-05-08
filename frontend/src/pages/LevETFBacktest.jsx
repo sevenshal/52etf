@@ -366,7 +366,7 @@ const LevETFBacktest = () => {
                         dataSource={batchResults}
                         columns={batchColumns}
                         rowKey={(record) => `${record.short_window}-${record.long_window}`}
-                        pagination={{ pageSize: 10 }}
+                        pagination={{ defaultPageSize: 10 }}
                         size="small"
                         onRow={(record) => {
                             return {
@@ -436,7 +436,7 @@ const LevETFBacktest = () => {
                             dataSource={detailedResult.trades}
                             columns={columns}
                             rowKey="date"
-                            pagination={{ pageSize: 10 }}
+                            pagination={{ defaultPageSize: 10 }}
                         />
                     </Card>
                 </div>

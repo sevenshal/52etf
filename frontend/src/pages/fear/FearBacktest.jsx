@@ -568,7 +568,7 @@ const FearBacktest = () => {
             <Table
               dataSource={result?.trades || []}
               columns={tradeColumns}
-              pagination={{ pageSize: 10 }}
+              pagination={{ defaultPageSize: 10 }}
               scroll={{ x: true }}
             />
           </div>
@@ -590,7 +590,7 @@ const FearBacktest = () => {
               <Table
                 dataSource={verifyResult.trades}
                 columns={tradeColumns}
-                pagination={{ pageSize: 10 }}
+                pagination={{ defaultPageSize: 10 }}
                 scroll={{ x: true }}
               />
             </div>

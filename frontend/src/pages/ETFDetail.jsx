@@ -360,7 +360,7 @@ const ETFDetail = () => {
           size="small"
           scroll={{ x: 'max-content' }}
           pagination={{
-            pageSize: 20,
+            defaultPageSize: 20,
             showSizeChanger: false,
           }}
           rowClassName={(record) => {

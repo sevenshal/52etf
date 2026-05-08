@@ -449,7 +449,7 @@ const AStockInnovation100 = () => {
             rowKey="ts_code"
             columns={constituentColumns}
             dataSource={selectedConstituents}
-            pagination={{ pageSize: 20 }}
+            pagination={{ defaultPageSize: 20 }}
             scroll={{ x: 1100 }}
           />
         </Card>
@@ -458,7 +458,7 @@ const AStockInnovation100 = () => {
             rowKey="id"
             columns={rebalanceColumns}
             dataSource={detail?.rebalances || []}
-            pagination={{ pageSize: 12 }}
+            pagination={{ defaultPageSize: 12 }}
             scroll={{ x: 1200 }}
             rowClassName={record => (record.id === selectedRebalanceId ? 'ant-table-row-selected' : '')}
             onRow={(record) => ({

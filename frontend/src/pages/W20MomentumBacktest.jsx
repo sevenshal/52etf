@@ -981,7 +981,7 @@ const W20MomentumBacktest = () => {
             dataSource={batchResult.results || []}
             columns={batchColumns}
             rowKey={(record) => record.result_id}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
+            pagination={{ defaultPageSize: 20, showSizeChanger: true }}
             scroll={{ x: 1550 }}
             size="small"
           />
@@ -1064,7 +1064,7 @@ const W20MomentumBacktest = () => {
               dataSource={result.latest_signal?.ranking || []}
               columns={rankingColumns}
               rowKey={(record) => `${record.symbol}-${record.rank}`}
-              pagination={{ pageSize: 8 }}
+              pagination={{ defaultPageSize: 8 }}
               scroll={{ x: 1000 }}
             />
           </Card>
@@ -1127,7 +1127,7 @@ const W20MomentumBacktest = () => {
               dataSource={result.trades || []}
               columns={tradeColumns}
               rowKey={(record, index) => `${record.date}-${record.symbol}-${record.action}-${index}`}
-              pagination={{ pageSize: 12 }}
+              pagination={{ defaultPageSize: 12 }}
               scroll={{ x: 2000 }}
               size="small"
             />

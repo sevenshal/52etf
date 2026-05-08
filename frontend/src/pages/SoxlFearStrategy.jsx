@@ -658,7 +658,7 @@ const SoxlFearStrategy = () => {
           dataSource={logs}
           rowKey="id"
           loading={logLoading}
-          pagination={{ pageSize: 10 }}
+          pagination={{ defaultPageSize: 10 }}
           scroll={{ x: 1400 }}
         />
         <Button style={{ marginTop: 16 }} icon={<ReloadOutlined />} onClick={() => fetchLogs()} loading={logLoading}>
@@ -686,7 +686,7 @@ const SoxlFearStrategy = () => {
         dataSource={configs}
         rowKey="id"
         loading={listLoading}
-        pagination={{ pageSize: 10 }}
+        pagination={{ defaultPageSize: 10 }}
         scroll={{ x: 1500 }}
         onRow={(record) => ({
           onClick: () => openConfig(record),

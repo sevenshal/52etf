@@ -223,7 +223,7 @@ const AutomatedTrading = () => {
                             dataSource={logs}
                             rowKey="id"
                             loading={logLoading}
-                            pagination={{ pageSize: 10 }}
+                            pagination={{ defaultPageSize: 10 }}
                         />
                         <Button
                             style={{ marginTop: 16 }}

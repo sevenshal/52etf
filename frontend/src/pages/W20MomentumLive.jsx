@@ -823,7 +823,7 @@ const W20MomentumLive = () => {
         rowKey="id"
         columns={tradeColumns}
         dataSource={detail?.trades || []}
-        pagination={{ pageSize: 10 }}
+        pagination={{ defaultPageSize: 10 }}
         scroll={{ x: 2200 }}
       />
     </Space>
@@ -863,7 +863,7 @@ const W20MomentumLive = () => {
       rowKey="id"
       columns={logColumns}
       dataSource={detail?.logs || []}
-      pagination={{ pageSize: 12 }}
+      pagination={{ defaultPageSize: 12 }}
       scroll={{ x: 900 }}
     />
   );
@@ -886,7 +886,7 @@ const W20MomentumLive = () => {
         dataSource={configs}
         rowKey="id"
         loading={listLoading}
-        pagination={{ pageSize: 10 }}
+        pagination={{ defaultPageSize: 10 }}
         scroll={{ x: 1500 }}
         onRow={(record) => ({
           onClick: () => openConfig(record),

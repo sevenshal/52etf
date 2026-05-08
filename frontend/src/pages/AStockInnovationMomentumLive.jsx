@@ -560,7 +560,7 @@ const AStockInnovationMomentumLive = () => {
                       {
                         key: 'trades',
                         label: '交易',
-                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ pageSize: 20 }} scroll={{ x: 1560 }} />,
+                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1560 }} />,
                       },
                       {
                         key: 'yearly',
@@ -570,12 +570,12 @@ const AStockInnovationMomentumLive = () => {
                       {
                         key: 'events',
                         label: '排名',
-                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 2600 }} />,
+                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 2600 }} />,
                       },
                       {
                         key: 'logs',
                         label: '日志',
-                        children: <Table rowKey="id" size="small" columns={logColumns} dataSource={detail?.logs || []} pagination={{ pageSize: 20 }} scroll={{ x: 760 }} />,
+                        children: <Table rowKey="id" size="small" columns={logColumns} dataSource={detail?.logs || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 760 }} />,
                       },
                     ]}
                   />

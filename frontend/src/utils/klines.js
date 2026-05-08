@@ -11,6 +11,11 @@ const meanAndStd = (values) => {
   return { mean, std: Math.sqrt(variance) };
 };
 
+const log10Volume = (volume) => {
+  const numericVolume = toNumber(volume);
+  return numericVolume !== null && numericVolume > 0 ? Math.log10(numericVolume) : null;
+};
+
 const isValidProfileKline = (kline) => {
   const high = toNumber(kline?.high);
   const low = toNumber(kline?.low);
@@ -246,38 +251,75 @@ export const appendRollingPocSupportResistance = (
 };
 
 /**
- * 预处理K线数据，计算成交量N日均线、标准差和放量判断
+ * 预处理K线数据，用过去N日log10(成交量)计算放量z-score，不包含当天。
  * @param {Array} klines - K线数据数组
- * @param {number} stdDevMultiplier - 标准差倍数，默认为1
- * @returns {Array} 处理后的K线数据，每个元素包含volumeMA20、volumeStdDev、isVolumeSpike属性
+ * @param {number} zScoreThreshold - log成交量z-score阈值，默认为1
+ * @param {number} days - 回看交易日数量，默认为60
+ * @returns {Array} 处理后的K线数据，每个元素包含volumeMA、volumeZScore、volumeMultiple、isVolumeSpike属性
  */
-export const preprocessKlinesVolume = (klines, stdDevMultiplier = 1, days = 60) => {
+export const preprocessKlinesVolume = (klines, zScoreThreshold = 1, days = 60) => {
+  const lookback = Math.max(1, Number(days) || 60);
+  const threshold = Math.max(0, Number(zScoreThreshold) || 0);
+
   return klines.map((kline, index) => {
-    if (index < (days-1)) {
-      // 前N个数据点，无法计算均线
+    const currentLogVolume = log10Volume(kline.volume);
+    if (index < lookback || currentLogVolume === null) {
       return {
         ...kline,
         volumeMA: null,
         volumeStdDev: null,
+        volumeArithmeticMA: null,
+        logVolume: currentLogVolume,
+        logVolumeMean: null,
+        logVolumeStdDev: null,
+        volumeZScore: null,
+        volumeMultiple: null,
         isVolumeSpike: false
       };
     }
-    
-    // 计算N日成交量均线和标准差
-    const startIndex = index - (days-1);
-    const volumes = klines.slice(startIndex, index + 1).map(k => k.volume);
-    const mean = volumes.reduce((sum, v) => sum + v, 0) / days;
-    const variance = volumes.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / days;
-    const stdDev = Math.sqrt(variance);
-    
-    // 判断是否放量（超过均线+n个标准差）
-    const isVolumeSpike = kline.volume > mean + (stdDev * stdDevMultiplier);
-    
+
+    const windowKlines = klines.slice(index - lookback, index);
+    const windowVolumes = windowKlines
+      .map(item => toNumber(item.volume))
+      .filter(volume => volume !== null && volume > 0);
+    const windowLogVolumes = windowKlines
+      .map(item => log10Volume(item.volume))
+      .filter(value => value !== null);
+
+    if (windowLogVolumes.length < lookback) {
+      return {
+        ...kline,
+        volumeMA: null,
+        volumeStdDev: null,
+        volumeArithmeticMA: null,
+        logVolume: currentLogVolume,
+        logVolumeMean: null,
+        logVolumeStdDev: null,
+        volumeZScore: null,
+        volumeMultiple: null,
+        isVolumeSpike: false
+      };
+    }
+
+    const { mean: logMean, std: logStdDev } = meanAndStd(windowLogVolumes);
+    const volumeZScore = logStdDev > 0 ? (currentLogVolume - logMean) / logStdDev : null;
+    const logDiff = currentLogVolume - logMean;
+    const volumeGeometricMA = Math.pow(10, logMean);
+    const volumeMultiple = Math.pow(10, logDiff);
+    const volumeArithmeticMA = windowVolumes.reduce((sum, value) => sum + value, 0) / windowVolumes.length;
+    const isVolumeSpike = volumeZScore !== null && volumeZScore > threshold;
+
     return {
       ...kline,
-      volumeMA: mean,
-      volumeStdDev: stdDev,
-      isVolumeSpike: isVolumeSpike
+      volumeMA: volumeGeometricMA,
+      volumeStdDev: logStdDev,
+      volumeArithmeticMA,
+      logVolume: currentLogVolume,
+      logVolumeMean: logMean,
+      logVolumeStdDev: logStdDev,
+      volumeZScore,
+      volumeMultiple,
+      isVolumeSpike
     };
   });
 };

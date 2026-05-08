@@ -12,6 +12,8 @@ const POC_WINDOW_OPTIONS = [
   { label: '250', value: 250 },
   { label: '500', value: 500 },
 ];
+const VOLUME_LOOKBACK_DAYS = 60;
+const VOLUME_BASELINE_SERIES_NAME = `成交量${VOLUME_LOOKBACK_DAYS}日几何均线`;
 
 const toPositiveNumber = (value) => {
   if (value === null || value === undefined || value === '') return null;
@@ -138,7 +140,7 @@ const StockKlineChart = ({
       minPeriods: supportResistanceWindow,
       volumeStdDevMultiplier,
     });
-    const processed = preprocessKlinesVolume(enriched, volumeStdDevMultiplier);
+    const processed = preprocessKlinesVolume(enriched, volumeStdDevMultiplier, VOLUME_LOOKBACK_DAYS);
     setProcessedKlines(processed);
   }, [rawKlines, supportResistanceWindow, volumeStdDevMultiplier]);
 
@@ -291,9 +293,9 @@ const StockKlineChart = ({
     const hasForwardNextFyHi = hasSeriesData(forwardNextFyHi);
     const hasForwardNextFyLo = hasSeriesData(forwardNextFyLo);
 
-    const klineData = processedKlines.map((item, index) => {
+    const klineData = processedKlines.map((item) => {
       const isUp = item.close >= item.open;
-      if (index < 19) {
+      if (!Number.isFinite(item.volumeZScore)) {
         return {
           value: [item.open, item.close, item.low, item.high],
           itemStyle: {
@@ -321,9 +323,9 @@ const StockKlineChart = ({
       };
     });
 
-    const volumeData = processedKlines.map((item, index) => {
+    const volumeData = processedKlines.map((item) => {
       const isUp = item.close >= item.open;
-      if (index < 19) {
+      if (!Number.isFinite(item.volumeZScore)) {
         return {
           value: item.volume,
           itemStyle: {
@@ -343,7 +345,7 @@ const StockKlineChart = ({
       };
     });
 
-    const volumeMA = processedKlines.map(item => item.volumeMA);
+    const volumeBaseline = processedKlines.map(item => item.volumeMA);
 
     const buyPointMarkers = buyPoints.map(point => ({
       name: '买点',
@@ -383,11 +385,11 @@ const StockKlineChart = ({
         data: volumeData
       },
       {
-        name: '成交量N日均线',
+        name: VOLUME_BASELINE_SERIES_NAME,
         type: 'line',
         xAxisIndex: 1,
         yAxisIndex: 1,
-        data: volumeMA,
+        data: volumeBaseline,
         lineStyle: { color: '#FFA500', width: 1 },
         symbol: 'none'
       }
@@ -577,12 +579,22 @@ const StockKlineChart = ({
             `;
           }
           if (dataIndex !== undefined && processedKlines[dataIndex]) {
-            const volume = processedKlines[dataIndex].volume;
+            const currentKline = processedKlines[dataIndex];
+            const volume = currentKline.volume;
             result += `
               <div style="margin-bottom: 4px;">
-                <span style="color: #666;">成交量：</span><span style="color: #1890ff;">${volume.toLocaleString()}</span>
+                <span style="color: #666;">成交量：</span><span style="color: #1890ff;">${formatNumber(volume, 0)}</span>
               </div>
             `;
+            if (Number.isFinite(currentKline.volumeZScore)) {
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color: #666;">${VOLUME_LOOKBACK_DAYS}日几何均量：</span>${formatNumber(currentKline.volumeMA, 0)}
+                  <span style="color:#999;margin-left:8px;">倍数 ${formatNumber(currentKline.volumeMultiple, 2)}</span>
+                  <span style="color:#999;margin-left:8px;">logZ ${formatNumber(currentKline.volumeZScore, 2)}</span>
+                </div>
+              `;
+            }
             const supportResistance = processedKlines[dataIndex].support_resistance;
             if (showSupportResistance && supportResistance) {
               const roleLabelMap = { strongest: '最强', nearest: '最近' };
@@ -598,7 +610,7 @@ const StockKlineChart = ({
                     <div style="margin-bottom: 4px;">
                       <span style="color:${color};">${levelLabel}：</span>${fmtPrice(price)}
                       <span style="color:#999;margin-left:8px;">覆盖量 ${formatNumber(level.volume, 0)}</span>
-                      <span style="color:#999;margin-left:8px;">Z ${formatNumber(level.volume_zscore, 2)}</span>
+                      <span style="color:#999;margin-left:8px;">覆盖Z ${formatNumber(level.volume_zscore, 2)}</span>
                     </div>
                   `;
                 });
@@ -627,7 +639,7 @@ const StockKlineChart = ({
         data: [
           'K线',
           '成交量',
-          '成交量N日均线',
+          VOLUME_BASELINE_SERIES_NAME,
           '买点',
           '卖点',
           ...indicatorLegendNames,
@@ -746,14 +758,16 @@ const StockKlineChart = ({
         </Form.Item>
         <Form.Item
           label={renderMetricTitle(
-            '成交量标准差倍数',
+            '成交量Z阈值',
             <>
-              <div>先把窗口价格区间切成价格桶，K 线只要穿过某个桶，就把整根 K 线成交量计入该桶。</div>
-              <div style={{ marginTop: 6 }}>
-                再计算所有价格桶覆盖量的均值和标准差。
+              <div>
+                K 线放量使用：<code>z = (log10(当天成交量) - 过去{VOLUME_LOOKBACK_DAYS}日log均值) / 过去{VOLUME_LOOKBACK_DAYS}日log标准差</code>，不包含当天。
               </div>
               <div style={{ marginTop: 6 }}>
-                价格桶需要满足：<code>覆盖量 &gt; 平均覆盖量 + 覆盖量标准差 * 倍数</code>。
+                当 <code>z &gt; 阈值</code> 时，K 线和成交量柱会标记为放量，并参与买卖点识别。
+              </div>
+              <div style={{ marginTop: 6 }}>
+                支撑压力线的价格桶覆盖量也使用这个阈值筛选高覆盖量价格位。
               </div>
             </>
           )}

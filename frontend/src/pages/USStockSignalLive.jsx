@@ -568,7 +568,7 @@ const USStockSignalLive = () => {
                       {
                         key: 'trades',
                         label: '交易',
-                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ pageSize: 20 }} scroll={{ x: 1450 }} />,
+                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1450 }} />,
                       },
                       {
                         key: 'yearly',
@@ -578,12 +578,12 @@ const USStockSignalLive = () => {
                       {
                         key: 'events',
                         label: '排名',
-                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ pageSize: 20 }} scroll={{ x: 1450 }} />,
+                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1450 }} />,
                       },
                       {
                         key: 'logs',
                         label: '日志',
-                        children: <Table rowKey="id" size="small" columns={logColumns} dataSource={detail?.logs || []} pagination={{ pageSize: 20 }} scroll={{ x: 760 }} />,
+                        children: <Table rowKey="id" size="small" columns={logColumns} dataSource={detail?.logs || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 760 }} />,
                       },
                     ]}
                   />
