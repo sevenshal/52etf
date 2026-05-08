@@ -31,6 +31,11 @@ DEFAULT_START_DATE = date(2020, 1, 2)
 DEFAULT_MIN_LISTING_DAYS = 365
 MAX_HEATMAP_CELLS = 20
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+FACTOR_DIRECTION_OPTIONS = {
+    "higher_is_better": {"sign": 1.0, "label": "高值更好"},
+    "lower_is_better": {"sign": -1.0, "label": "低值更好"},
+    "exploratory": {"sign": 1.0, "label": "探索方向"},
+}
 
 
 POOL_OPTIONS = [
@@ -158,6 +163,7 @@ class FactorDefinition:
     compute: Callable[[pl.DataFrame, FactorContext], pl.DataFrame]
 
     def to_option(self) -> Dict[str, Any]:
+        direction = FACTOR_DIRECTION_OPTIONS.get(self.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
         return {
             "key": self.key,
             "label": self.label,
@@ -166,6 +172,8 @@ class FactorDefinition:
             "default_windows": self.default_windows,
             "supports_windows": self.supports_windows,
             "direction": self.direction,
+            "direction_label": direction["label"],
+            "direction_sign": direction["sign"],
         }
 
 
@@ -434,12 +442,11 @@ def _ensure_base_columns(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataFrame:
+def _add_momentum_window_features(df: pl.DataFrame, window: int, prefix: str) -> pl.DataFrame:
     w = int(window)
     sum_x = w * (w - 1) / 2
     sum_x2 = w * (w - 1) * (2 * w - 1) / 6
     denominator = w * sum_x2 - sum_x * sum_x
-    prefix = f"_ram_{w}"
 
     df = df.with_columns(
         pl.col("_log_close").rolling_sum(w, min_samples=w).over("symbol").alias(f"{prefix}_sum_y"),
@@ -477,7 +484,7 @@ def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataF
             + (pl.col(f"{prefix}_slope") ** 2) * sum_x2
         ).alias(f"{prefix}_ss_res")
     )
-    df = df.with_columns(
+    return df.with_columns(
         pl.when(pl.col(f"{prefix}_ss_tot") > 0)
         .then((1 - pl.col(f"{prefix}_ss_res") / pl.col(f"{prefix}_ss_tot")).clip(0.0, 1.0))
         .otherwise(None)
@@ -485,6 +492,12 @@ def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataF
         (pl.col(f"{prefix}_daily_vol") * math.sqrt(TRADING_DAYS_PER_YEAR) * 100).alias(f"{prefix}_annualized_vol_pct"),
         (pl.col(f"{prefix}_slope") * TRADING_DAYS_PER_YEAR * 100).alias(f"{prefix}_annualized_slope_pct"),
     )
+
+
+def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataFrame:
+    w = int(window)
+    prefix = f"_ram_{w}"
+    df = _add_momentum_window_features(df, w, prefix)
     return df.with_columns(
         pl.when(pl.col(f"{prefix}_annualized_vol_pct") > 0)
         .then(
@@ -492,6 +505,21 @@ def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataF
             * pl.col(f"{prefix}_r_squared")
             / pl.col(f"{prefix}_annualized_vol_pct")
             * 100
+        )
+        .otherwise(None)
+        .alias(f"{prefix}_score")
+    )
+
+
+def _add_raw_momentum_score(df: pl.DataFrame, window: int) -> pl.DataFrame:
+    w = int(window)
+    prefix = f"_raw_mom_{w}"
+    df = _add_momentum_window_features(df, w, prefix)
+    return df.with_columns(
+        pl.when(pl.col(f"{prefix}_r_squared").is_not_null())
+        .then(
+            pl.col(f"{prefix}_annualized_slope_pct")
+            * pl.col(f"{prefix}_r_squared")
         )
         .otherwise(None)
         .alias(f"{prefix}_score")
@@ -509,6 +537,21 @@ def _compute_risk_adjusted_momentum(df: pl.DataFrame, context: FactorContext) ->
     factor_expr = None
     for window, weight in context.momentum_weights.items():
         expr = pl.col(f"_ram_{window}_score") * float(weight)
+        factor_expr = expr if factor_expr is None else factor_expr + expr
+    return result.with_columns(factor_expr.alias("factor_value"))
+
+
+def _compute_raw_momentum(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    result = _ensure_base_columns(df)
+    for window in context.momentum_weights:
+        result = _add_raw_momentum_score(result, window)
+
+    factor_expr = None
+    for window, weight in context.momentum_weights.items():
+        expr = pl.col(f"_raw_mom_{window}_score") * float(weight)
         factor_expr = expr if factor_expr is None else factor_expr + expr
     return result.with_columns(factor_expr.alias("factor_value"))
 
@@ -601,6 +644,16 @@ def _compute_custom_momentum_volume(df: pl.DataFrame, context: FactorContext) ->
 
 
 FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
+    "raw_momentum": FactorDefinition(
+        key="raw_momentum",
+        label="动量：原始动量",
+        group="动量",
+        description="与风险调整动量同源：ln(close) 回归斜率 * R2，不除以波动率，用来和风险调整版直接对照。",
+        default_windows=[20, 60, 120],
+        supports_windows=True,
+        direction="higher_is_better",
+        compute=_compute_raw_momentum,
+    ),
     "risk_adjusted_momentum": FactorDefinition(
         key="risk_adjusted_momentum",
         label="动量：风险调整动量",
@@ -615,20 +668,20 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="volume_z",
         label="成交量：对数成交量Z分数",
         group="成交量",
-        description="log10(volume) 相对过去窗口均值和标准差的异常程度，窗口不含当天。",
+        description="log10(volume) 相对过去窗口均值和标准差的异常程度，窗口不含当天；方向先作为探索项观察。",
         default_windows=[20],
         supports_windows=True,
-        direction="higher_is_larger_volume",
+        direction="exploratory",
         compute=_compute_volume_z,
     ),
     "volatility": FactorDefinition(
         key="volatility",
         label="波动：年化波动率",
         group="波动",
-        description="过去窗口日收益标准差年化。桶1为低波，最高桶为高波。",
+        description="过去窗口日收益标准差年化；按低波更好进行方向调整。",
         default_windows=[20],
         supports_windows=True,
-        direction="higher_is_higher_volatility",
+        direction="exploratory",
         compute=_compute_volatility,
     ),
     "valuation_gap": FactorDefinition(
@@ -638,7 +691,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="使用最近一次EVC估值中值 / 当日收盘价 - 1，越高代表相对低估。",
         default_windows=[20],
         supports_windows=False,
-        direction="higher_is_cheaper",
+        direction="higher_is_better",
         compute=_compute_valuation_gap,
     ),
     "custom_momentum_volume": FactorDefinition(
@@ -661,6 +714,18 @@ def register_factor(definition: FactorDefinition):
     function during app startup/import.
     """
     FACTOR_REGISTRY[definition.key] = definition
+
+
+def _apply_factor_direction(df: pl.DataFrame, factor_definition: FactorDefinition) -> pl.DataFrame:
+    if df.is_empty() or "factor_value" not in df.columns:
+        return df
+
+    direction = FACTOR_DIRECTION_OPTIONS.get(factor_definition.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
+    sign = float(direction["sign"])
+    return df.with_columns(
+        pl.col("factor_value").alias("factor_value_raw"),
+        (pl.col("factor_value") * sign).alias("factor_value"),
+    )
 
 
 def _add_forward_return(df: pl.DataFrame, forward_window: int) -> pl.DataFrame:
@@ -769,6 +834,11 @@ def _compute_bucket_report(df: pl.DataFrame) -> pl.DataFrame:
             pl.len().alias("samples"),
             pl.n_unique("trade_date").alias("trade_dates"),
             (pl.mean("factor_value")).alias("avg_factor_value"),
+            (
+                pl.mean("factor_value_raw")
+                if "factor_value_raw" in df.columns
+                else pl.mean("factor_value")
+            ).alias("avg_factor_value_raw"),
             (pl.mean("forward_return") * 100).alias("avg_return_pct"),
             (pl.mean("forward_excess_return") * 100).alias("avg_excess_return_pct"),
             ((pl.col("forward_return") > 0).cast(pl.Float64).mean() * 100).alias("win_rate_pct"),
@@ -776,6 +846,7 @@ def _compute_bucket_report(df: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             pl.col("avg_factor_value").round(4),
+            pl.col("avg_factor_value_raw").round(4),
             pl.col("avg_return_pct").round(4),
             pl.col("avg_excess_return_pct").round(4),
             pl.col("win_rate_pct").round(2),
@@ -1166,7 +1237,10 @@ def _compute_parameter_heatmap(
             start_date=context_base.start_date,
             end_date=context_base.end_date,
         )
-        factor_df = factor_definition.compute(price_df, heatmap_context)
+        factor_df = _apply_factor_direction(
+            factor_definition.compute(price_df, heatmap_context),
+            factor_definition,
+        )
         for forward_window in forward_windows:
             sample = _assign_buckets(
                 _prepare_factor_sample(factor_df, universe_df, request, forward_window),
@@ -1271,7 +1345,10 @@ def _compute_factor_analysis_for_combo(
         start_date=start_date,
         end_date=end_date,
     )
-    factor_df = factor_definition.compute(price_df, context)
+    factor_df = _apply_factor_direction(
+        factor_definition.compute(price_df, context),
+        factor_definition,
+    )
     factor_sample = _assign_buckets(
         _prepare_factor_sample(factor_df, universe_df, request, int(combo["forward_window"])),
         int(request.bucket_count),
@@ -1396,6 +1473,12 @@ def _run_factor_analysis(
         "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
         "candidate_etfs": candidate_etfs,
         "factor": factor_definition.to_option(),
+        "factor_direction": factor_definition.direction,
+        "factor_direction_label": FACTOR_DIRECTION_OPTIONS.get(
+            factor_definition.direction,
+            FACTOR_DIRECTION_OPTIONS["exploratory"],
+        )["label"],
+        "factor_direction_adjusted": factor_definition.direction == "lower_is_better",
         "windows": selected_combo["windows"],
         "forward_window": selected_combo["forward_window"],
         "selected_combo": selected_combo,
