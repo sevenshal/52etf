@@ -38,7 +38,12 @@ const ETFDetail = () => {
   const fetchKlines = async () => {
     setLoading(true);
     try {
-      const { data } = await request.get(`/api/stock/klines/${symbol}?days=300`);
+      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
+        params: {
+          start_date: dayjs().subtract(365, 'day').format('YYYY-MM-DD'),
+          end_date: dayjs().format('YYYY-MM-DD')
+        }
+      });
       setKlines(data);
     } catch (error) {
       console.error('获取K线数据失败:', error);

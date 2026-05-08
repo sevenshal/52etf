@@ -77,15 +77,11 @@ const MonthlyAnalysis = () => {
   const handleAnalyze = async () => {
     setLoading(true);
     try {
-      // 计算从开始日期到现在的天数
-      const startDate = new Date(formData.startDate);
-      const endDate = new Date();
-      const days = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
-      
       // 获取月度K线数据
       const response = await request.get(`/api/stock/klines/${formData.symbol}`, {
         params: {
-          days: days,
+          start_date: formData.startDate,
+          end_date: dayjs().format('YYYY-MM-DD'),
           period: 'm'
         }
       });
