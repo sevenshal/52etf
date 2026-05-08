@@ -156,27 +156,57 @@ const getBucketChartOption = rows => {
 };
 
 const getIcOption = rows => ({
-  grid: { top: 28, right: 24, bottom: 36, left: 52 },
+  grid: { top: 52, right: 58, bottom: 36, left: 52 },
   tooltip: {
     trigger: 'axis',
     formatter: params => {
-      const item = Array.isArray(params) ? params[0] : params;
-      return `${item.axisValue}<br/>${item.marker}Rank IC: ${icFormatter(item.value)}`;
+      const items = Array.isArray(params) ? params : [params];
+      const dateLabel = items[0]?.axisValue || '';
+      return [
+        dateLabel,
+        ...items.map(item => `${item.marker}${item.seriesName}: ${icFormatter(item.value)}`),
+      ].join('<br/>');
     },
   },
+  legend: { top: 0, type: 'scroll' },
   xAxis: {
     type: 'category',
     data: rows.map(item => item.trade_date),
     axisLabel: { hideOverlap: true },
   },
-  yAxis: { type: 'value', name: 'IC', splitLine: { lineStyle: { color: '#edf1f7' } } },
+  yAxis: [
+    { type: 'value', name: 'IC', splitLine: { lineStyle: { color: '#edf1f7' } } },
+    { type: 'value', name: '累计IC', splitLine: { show: false } },
+  ],
   series: [
     {
       name: 'Rank IC',
+      type: 'bar',
+      data: rows.map(item => item.rank_ic),
+      itemStyle: { color: 'rgba(36, 119, 179, 0.32)' },
+      barMaxWidth: 5,
+    },
+    {
+      name: 'MA20',
       type: 'line',
       showSymbol: false,
-      data: rows.map(item => item.rank_ic),
-      lineStyle: { color: '#d95f59', width: 1.8 },
+      data: rows.map(item => item.rank_ic_ma20),
+      lineStyle: { color: '#d95f59', width: 2 },
+    },
+    {
+      name: 'MA60',
+      type: 'line',
+      showSymbol: false,
+      data: rows.map(item => item.rank_ic_ma60),
+      lineStyle: { color: '#2f9e6d', width: 2 },
+    },
+    {
+      name: '累计IC',
+      type: 'line',
+      yAxisIndex: 1,
+      showSymbol: false,
+      data: rows.map(item => item.cumulative_rank_ic),
+      lineStyle: { color: '#14213d', width: 2 },
     },
   ],
 });
