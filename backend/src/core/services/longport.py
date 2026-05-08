@@ -14,6 +14,10 @@ from .trade import TradeService, OrderSide, OrderType, TimeInForceType, OutsideR
 from .quote import QuoteProvider, SubType, QuoteObserver, QuoteEvent
 
 logger = logging.getLogger(__name__)
+LONGPORT_CANDLESTICK_RATE_LIMIT_CALLS = 60
+LONGPORT_CANDLESTICK_RATE_LIMIT_PERIOD = 30
+LONGPORT_RATE_LIMIT_RETRY_SECONDS = 5
+LONGPORT_RATE_LIMIT_MAX_RETRIES = 3
 
 order_side_map = {
     OrderSide.Buy: LPOrderSide.Buy,
@@ -83,6 +87,14 @@ def _normalize_enum_list(values) -> List[str]:
         if name:
             result.append(name)
     return sorted(dict.fromkeys(result))
+
+def _is_request_rate_limit_error(error) -> bool:
+    return "code=301606" in str(error) or "request rate limit" in str(error).lower()
+
+@sleep_and_retry
+@limits(calls=LONGPORT_CANDLESTICK_RATE_LIMIT_CALLS, period=LONGPORT_CANDLESTICK_RATE_LIMIT_PERIOD)
+def _limited_candlestick_request(callable_obj, *args, **kwargs):
+    return callable_obj(*args, **kwargs)
 
 class LongPortService(QuoteProvider, TradeService):
     """长桥接口服务"""
@@ -468,19 +480,19 @@ class LongPortService(QuoteProvider, TradeService):
                     return value, False
         raise ValueError(f"Unsupported candlestick period: {period}")
 
-    @sleep_and_retry
-    @limits(calls=10, period=1)
     def get_candlesticks(self, symbol: str, count: int, period = 'd') -> List[Dict]:
         """实现QuoteProvider接口"""
         if symbol in self.invalid_kline_symbols:
             return []
 
         request_count = count if isinstance(count, int) and count > 0 else 1000
+        rate_limit_retries = 0
         try:
             while request_count > 0:
                 try:
                     resolved_period, is_daily_like = self._resolve_candlestick_period(period)
-                    resp = self.ctx.candlesticks(
+                    resp = _limited_candlestick_request(
+                        self.ctx.candlesticks,
                         symbol=symbol,
                         period=resolved_period,
                         count=request_count,
@@ -500,6 +512,12 @@ class LongPortService(QuoteProvider, TradeService):
                 except Exception as e:
                     err = str(e)
                     err_lower = err.lower()
+                    if _is_request_rate_limit_error(e) and rate_limit_retries < LONGPORT_RATE_LIMIT_MAX_RETRIES:
+                        rate_limit_retries += 1
+                        sleep_seconds = LONGPORT_RATE_LIMIT_RETRY_SECONDS * rate_limit_retries
+                        logging.warning(f"获取{symbol} K线触发长桥限频，等待{sleep_seconds}s后重试: {err}")
+                        time.sleep(sleep_seconds)
+                        continue
                     if "code=301600" in err or "invalid symbol" in err_lower:
                         self._remember_invalid_kline_symbol(symbol, err)
                         logging.warning(f"跳过无效标的 {symbol}: {err}")
@@ -517,8 +535,6 @@ class LongPortService(QuoteProvider, TradeService):
             logging.error(f"获取{symbol} K线数据失败: {str(e)}")
             return []
 
-    @sleep_and_retry
-    @limits(calls=10, period=1)
     def get_candlesticks_by_date(self, symbol: str, start: datetime.date, end: datetime.date, period = 'd') -> List[Dict]:
         """根据日期范围获取K线数据(自动分页, 从后向前获取)"""
         if symbol in self.invalid_kline_symbols:
@@ -526,17 +542,29 @@ class LongPortService(QuoteProvider, TradeService):
 
         all_candlesticks = []
         current_end = end
+        rate_limit_retries = 0
         
         try:
             while start <= current_end:
-                resolved_period, is_daily_like = self._resolve_candlestick_period(period)
-                resp = self.ctx.history_candlesticks_by_date(
-                    symbol=symbol,
-                    period=resolved_period,
-                    start=start,
-                    end=current_end,
-                    adjust_type=AdjustType.ForwardAdjust
-                )
+                try:
+                    resolved_period, is_daily_like = self._resolve_candlestick_period(period)
+                    resp = _limited_candlestick_request(
+                        self.ctx.history_candlesticks_by_date,
+                        symbol=symbol,
+                        period=resolved_period,
+                        start=start,
+                        end=current_end,
+                        adjust_type=AdjustType.ForwardAdjust
+                    )
+                    rate_limit_retries = 0
+                except Exception as e:
+                    if _is_request_rate_limit_error(e) and rate_limit_retries < LONGPORT_RATE_LIMIT_MAX_RETRIES:
+                        rate_limit_retries += 1
+                        sleep_seconds = LONGPORT_RATE_LIMIT_RETRY_SECONDS * rate_limit_retries
+                        logging.warning(f"获取{symbol}历史K线触发长桥限频，等待{sleep_seconds}s后重试: {str(e)}")
+                        time.sleep(sleep_seconds)
+                        continue
+                    raise
                 
                 if not resp:
                     break

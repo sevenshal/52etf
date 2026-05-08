@@ -9,9 +9,10 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.request import Request, urlopen
 
 import pandas as pd
+from sqlalchemy import distinct, or_
 
 from ..core.analytics_database import ANALYTICS_DB_PATH, USStockDaily
-from ..core.database import Session, StockStaticInfoHistory, StockStaticInfoSnapshot
+from ..core.database import ETFHolding, Session, StockEVC, StockStaticInfoHistory, StockStaticInfoSnapshot
 from ..core.services.longport import LongPortService
 from ..core.static_info import STATIC_INFO_FIELDS
 from ..core.utils import normalize_us_equity_symbol
@@ -25,6 +26,11 @@ US_STOCK_STATIC_INFO_BATCH_SIZE = max(1, int(os.getenv("US_STOCK_STATIC_INFO_BAT
 US_STOCK_DAILY_INSERT_BATCH_SYMBOLS = max(1, int(os.getenv("US_STOCK_DAILY_INSERT_BATCH_SYMBOLS", "25")))
 US_STOCK_DAILY_REFRESH_OVERLAP_DAYS = max(0, int(os.getenv("US_STOCK_DAILY_REFRESH_OVERLAP_DAYS", "7")))
 US_STOCK_DAILY_MAX_SYMBOLS = max(0, int(os.getenv("US_STOCK_DAILY_MAX_SYMBOLS", "0")))
+US_STOCK_BASE_DATA_CANDIDATE_ETFS = [
+    item.strip().upper()
+    for item in os.getenv("US_STOCK_BASE_DATA_CANDIDATE_ETFS", "SPY.US,QQQ.US").split(",")
+    if item.strip()
+]
 NASDAQ_TRADER_NASDAQ_LISTED_URL = os.getenv(
     "NASDAQ_TRADER_NASDAQ_LISTED_URL",
     "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
@@ -176,6 +182,68 @@ def _count_table_rows(table_name: str) -> int:
     return int(row[0] if row else 0)
 
 
+def _evc_static_info_symbols(batch_size: int = US_STOCK_STATIC_INFO_BATCH_SIZE) -> List[str]:
+    db = Session()
+    symbols: List[str] = []
+    offset = 0
+    try:
+        while True:
+            rows = (
+                db.query(StockEVC.symbol)
+                .distinct()
+                .order_by(StockEVC.symbol)
+                .offset(offset)
+                .limit(batch_size)
+                .all()
+            )
+            batch_symbols = [
+                normalize_us_equity_symbol(row[0])
+                for row in rows
+                if row and row[0]
+            ]
+            batch_symbols = [symbol for symbol in batch_symbols if symbol]
+            if not batch_symbols:
+                break
+            symbols.extend(batch_symbols)
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+    finally:
+        db.close()
+
+    return sorted(dict.fromkeys(symbols))
+
+
+def _candidate_etf_component_symbols(candidate_etfs: Optional[Sequence[str]] = None) -> List[str]:
+    etf_symbols = [
+        normalize_us_equity_symbol(item)
+        for item in (candidate_etfs or US_STOCK_BASE_DATA_CANDIDATE_ETFS)
+    ]
+    etf_symbols = [item for item in dict.fromkeys(etf_symbols) if item]
+    if not etf_symbols:
+        return []
+
+    db = Session()
+    try:
+        rows = (
+            db.query(distinct(ETFHolding.symbol))
+            .filter(
+                ETFHolding.etf_symbol.in_(etf_symbols),
+                or_(ETFHolding.asset_class == "Equity", ETFHolding.asset_class == "EQUITY"),
+            )
+            .all()
+        )
+    finally:
+        db.close()
+
+    symbols = []
+    for row in rows:
+        symbol = normalize_us_equity_symbol(row[0])
+        if symbol and symbol.endswith(".US"):
+            symbols.append(symbol)
+    return sorted(dict.fromkeys(symbols))
+
+
 def _kline_trade_date(timestamp) -> Optional[date]:
     if isinstance(timestamp, datetime):
         return timestamp.date()
@@ -281,23 +349,28 @@ class USStockBaseDataSyncService:
             seen.add(symbol)
             normalized.append({
                 "symbol": symbol,
-                "source": "evc_symbols",
+                "source": "provided_symbols",
             })
         return sorted(normalized, key=lambda item: item["symbol"])
 
-    def _fetch_us_securities(self, symbols: Optional[Sequence[str]] = None) -> List[Dict]:
+    def _fetch_us_securities(
+        self,
+        symbols: Optional[Sequence[str]] = None,
+        max_symbols: Optional[int] = None,
+    ) -> List[Dict]:
+        limit = max(0, int(max_symbols or 0))
         if symbols is not None:
             normalized = self._securities_from_symbols(symbols)
-            if US_STOCK_DAILY_MAX_SYMBOLS > 0:
-                normalized = normalized[:US_STOCK_DAILY_MAX_SYMBOLS]
+            if limit > 0:
+                normalized = normalized[:limit]
             return normalized
 
         try:
             securities = _fetch_nasdaq_trader_us_equities()
             if securities:
                 self.logger.info("Loaded %s US securities from Nasdaq Trader symbol directories", len(securities))
-                if US_STOCK_DAILY_MAX_SYMBOLS > 0:
-                    return securities[:US_STOCK_DAILY_MAX_SYMBOLS]
+                if limit > 0:
+                    return securities[:limit]
                 return securities
         except Exception as exc:
             self.logger.warning("Fetch Nasdaq Trader US securities failed, fallback to LongPort overnight list: %s", exc)
@@ -319,8 +392,8 @@ class USStockBaseDataSyncService:
                 "source": "longport_overnight",
             })
         normalized.sort(key=lambda item: item["symbol"])
-        if US_STOCK_DAILY_MAX_SYMBOLS > 0:
-            normalized = normalized[:US_STOCK_DAILY_MAX_SYMBOLS]
+        if limit > 0:
+            normalized = normalized[:limit]
         return normalized
 
     def _fetch_static_info_map(self, symbols: List[str]) -> Tuple[Dict[str, Dict], int]:
@@ -572,7 +645,6 @@ class USStockBaseDataSyncService:
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
-        symbols: Optional[Sequence[str]] = None,
     ) -> Dict:
         started = time.perf_counter()
         current_date = date.today()
@@ -580,20 +652,32 @@ class USStockBaseDataSyncService:
         now = datetime.now()
 
         self._progress("准备美股同步股票池", 3)
-        securities = self._fetch_us_securities(symbols=symbols)
-        symbols = [item["symbol"] for item in securities]
-        if not symbols:
-            raise RuntimeError("没有可同步的美股列表")
+        evc_symbols = _evc_static_info_symbols()
+        static_securities = self._fetch_us_securities(symbols=evc_symbols)
+        static_symbols = [item["symbol"] for item in static_securities]
+        if not static_symbols:
+            raise RuntimeError("EVC 未返回可同步 static_info 的美股列表")
 
-        self._progress("同步美股 static_info 快照", 8, symbols=len(symbols))
-        static_info_map, static_missing = self._fetch_static_info_map(symbols)
+        daily_symbols = _candidate_etf_component_symbols()
+        if not daily_symbols:
+            raise RuntimeError("未找到 SPY/QQQ 成分股，请先同步 ETF 持仓数据")
+        daily_securities = self._fetch_us_securities(
+            symbols=daily_symbols,
+            max_symbols=US_STOCK_DAILY_MAX_SYMBOLS,
+        )
+        daily_symbols = [item["symbol"] for item in daily_securities]
+        if not daily_symbols:
+            raise RuntimeError("没有可同步日K的美股列表")
+
+        self._progress("同步美股 static_info 快照", 8, symbols=len(static_symbols))
+        static_info_map, static_missing = self._fetch_static_info_map(static_symbols)
         static_snapshot_result = self.sync_static_info_snapshots(
-            symbols=symbols,
+            symbols=static_symbols,
             static_info_map=static_info_map,
         )
 
-        self._progress("同步美股日K到 DuckDB", 35, symbols=len(symbols))
-        daily_result = self._sync_daily_klines(symbols, start_date, end_value, now)
+        self._progress("同步美股日K到 DuckDB", 35, symbols=len(daily_symbols))
+        daily_result = self._sync_daily_klines(daily_symbols, start_date, end_value, now)
 
         daily_rows = _count_table_rows(USStockDaily.__tablename__)
         total_seconds = round(time.perf_counter() - started, 3)
@@ -601,7 +685,9 @@ class USStockBaseDataSyncService:
             "status": "success",
             "start_date": (start_date or DEFAULT_START_DATE).isoformat(),
             "end_date": end_value.isoformat(),
-            "symbols": len(symbols),
+            "symbols": len(static_symbols),
+            "static_symbols": len(static_symbols),
+            "daily_symbols": len(daily_symbols),
             "static_info_fetched": len(static_info_map),
             "static_info_missing": static_missing,
             "static_snapshot": static_snapshot_result,
@@ -618,7 +704,6 @@ class USStockBaseDataSyncService:
 def sync_us_stock_base_data(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    symbols: Optional[Sequence[str]] = None,
 ) -> Dict:
     service = USStockBaseDataSyncService()
-    return service.sync(start_date=start_date, end_date=end_date, symbols=symbols)
+    return service.sync(start_date=start_date, end_date=end_date)

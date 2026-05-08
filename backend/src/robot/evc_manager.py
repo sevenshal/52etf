@@ -1,5 +1,4 @@
 from datetime import datetime, date
-from typing import List
 from ..core.database import (
     Session,
     StockEVC,
@@ -10,8 +9,6 @@ from ..core.database import (
 import logging
 from sqlalchemy import and_
 from ..core.services.evc import EVCService
-
-STATIC_INFO_SYNC_BATCH_SIZE = 500
 
 
 class EVCManager:
@@ -27,31 +24,6 @@ class EVCManager:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.db_session = Session()
         self.evc_service = EVCService()
-
-    def _iter_evc_symbols(self, batch_size: int = STATIC_INFO_SYNC_BATCH_SIZE):
-        offset = 0
-        while True:
-            rows = (
-                self.db_session.query(StockEVC.symbol)
-                .distinct()
-                .order_by(StockEVC.symbol)
-                .offset(offset)
-                .limit(batch_size)
-                .all()
-            )
-            symbols = [row[0] for row in rows if row and row[0]]
-            if not symbols:
-                break
-            yield symbols
-            if len(symbols) < batch_size:
-                break
-            offset += batch_size
-
-    def list_evc_symbols(self, batch_size: int = STATIC_INFO_SYNC_BATCH_SIZE) -> List[str]:
-        symbols: List[str] = []
-        for batch in self._iter_evc_symbols(batch_size=batch_size):
-            symbols.extend(batch)
-        return symbols
 
     def fetch_and_stocks(self):
         """分页抓取所有股票数据并存储到数据库"""
