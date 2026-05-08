@@ -388,7 +388,7 @@ async def get_snowball_heartbeat(
     if not heartbeat:
         return SnowballHeartbeatResponse(endpoint=SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT)
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     seconds_since_last_call = (
         (now - heartbeat.last_called_at).total_seconds()
         if heartbeat.last_called_at else None
@@ -710,7 +710,7 @@ async def get_snowball_opportunities(
     acc_cookie = acc_config.xueqiu_cookie if acc_config else None
 
     # 0. Background Token Refresh
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
         asyncio.create_task(_refresh_xueqiu_guest_token_task(account_id, acc_cookie))
 
