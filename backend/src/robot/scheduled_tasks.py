@@ -47,24 +47,45 @@ def _run_evc_stock_fetch():
     EVCManager().fetch_and_stocks()
 
 
-def _run_evc_static_info_sync():
+def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
+    from .us_stock_base_data_sync import sync_us_stock_base_data
     from .evc_manager import EVCManager
+
+    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
 
     manager = EVCManager()
     try:
-        result = manager.sync_static_info_snapshots()
+        evc_symbols = manager.list_evc_symbols()
     finally:
         manager.db_session.close()
 
+    us_result = sync_us_stock_base_data(start_date=parsed_start_date, symbols=evc_symbols)
+    static_result = us_result.get("static_snapshot") or {}
+
     logging.getLogger("ScheduledTaskManager").info(
-        "EVC static info sync symbols=%s fetched=%s created=%s changed=%s refreshed=%s history=%s missing=%s",
-        result.get("symbols"),
-        result.get("fetched"),
-        result.get("created"),
-        result.get("changed"),
-        result.get("refreshed"),
-        result.get("history"),
-        result.get("missing"),
+        (
+            "US stock base data synced: evc_static_symbols=%s evc_static_fetched=%s "
+            "us_symbols=%s us_static_info_fetched=%s daily_saved_rows=%s daily_errors=%s tables=%s"
+        ),
+        static_result.get("symbols"),
+        static_result.get("fetched"),
+        us_result.get("symbols"),
+        us_result.get("static_info_fetched"),
+        us_result.get("daily_saved_rows"),
+        len(us_result.get("daily_errors") or []),
+        us_result.get("tables"),
+    )
+
+    return (
+        "US stock base data sync "
+        f"evc_static_symbols={static_result.get('symbols')} "
+        f"evc_static_fetched={static_result.get('fetched')} "
+        f"symbols={us_result.get('symbols')} "
+        f"static_info_fetched={us_result.get('static_info_fetched')} "
+        f"daily_fetched_symbols={us_result.get('daily_fetched_symbols')} "
+        f"daily_saved_rows={us_result.get('daily_saved_rows')} "
+        f"daily_errors={len(us_result.get('daily_errors') or [])} "
+        f"tables={us_result.get('tables')}"
     )
 
 
@@ -339,12 +360,12 @@ class ScheduledTaskManager:
             ),
             "evc_static_info_sync": TaskDefinition(
                 task_key="evc_static_info_sync",
-                name="股票静态信息同步",
-                description="批量获取 EVC 股票池的 LongPort static_info，维护快照与历史记录。",
+                name="美股基础数据同步",
+                description="保留 EVC 股票池 LongPort static_info 快照/历史记录，并同步 LongPort 全量美股基础信息与日K到 DuckDB。",
                 default_time="07:15",
                 default_enabled=True,
                 sort_order=11,
-                runner=_run_evc_static_info_sync,
+                runner=_run_us_stock_base_data_sync,
             ),
             "etf_fair_value_analysis": TaskDefinition(
                 task_key="etf_fair_value_analysis",
@@ -718,6 +739,7 @@ class ScheduledTaskManager:
             "schedule_time": config["schedule_time"],
             "sort_order": config["sort_order"],
             "supports_start_date": config["task_key"] in {
+                "evc_static_info_sync",
                 "a_stock_base_data_sync",
                 "etf_historical_holdings_backfill",
                 "soxx_fear_greed_backfill",

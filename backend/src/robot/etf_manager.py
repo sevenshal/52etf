@@ -1,8 +1,7 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, Optional, List
-from sqlalchemy.orm import Session
 from ..core.database import ETFHolding as DBETFHolding
-from ..core.database import ETFAnalysis, StockEVC, Session, ETFEmotion
+from ..core.database import ETFAnalysis, StockEVC, Session
 from ..core.models.etf import ETFHolding, ETFHoldingsData
 from ..core.static_info import get_static_info_snapshot, get_static_info_snapshot_map
 from ..core.utils import normalize_us_equity_symbol
@@ -14,7 +13,6 @@ from .etf.vanguard import VanguardETFFetcher
 import logging
 from ..core.services.quote import QuoteService, QuoteProvider
 from ..core.services.szdt import SZDTService
-from ..emotion.etf_emotion import ETFEmotionCalculator
 import asyncio
 import traceback
 # 添加三倍做多ETF映射关系
@@ -47,6 +45,13 @@ LEVERAGED_ETF_MAP = {
     'VUG.US': ['VUG.US', 1],    # Vanguard成长
 }
 
+
+def _recent_klines(quote_service: QuoteService, symbol: str, count: int, end_date: Optional[date] = None) -> List[dict]:
+    end_value = end_date or date.today()
+    start_value = end_value - timedelta(days=max(60, count * 3))
+    klines = quote_service.get_klines(symbol, start_date=start_value, end_date=end_value)
+    return klines[-count:] if count > 0 else klines
+
 class ETFManager:
     """ETF数据管理
     
@@ -61,7 +66,6 @@ class ETFManager:
         self.db_session = Session()
         self.quote_service = QuoteService(quote_provider)
         self.szdt_service = SZDTService()
-        self.calculator = ETFEmotionCalculator(self.quote_service)
         ishares_fetcher = ISharesETFFetcher()
         spdr_fetcher = SPDRDataFetcher()
         vanguard_fetcher = VanguardETFFetcher()  # 需要新增 Vanguard ETF 抓取器
@@ -172,7 +176,7 @@ class ETFManager:
             raise
 
     def get_latest_trading_date(self) -> date:
-        klines = self.quote_service.get_klines('SPY.US', 1)
+        klines = _recent_klines(self.quote_service, 'SPY.US', 1)
         if not klines:
             raise ValueError("无法通过 SPY 日K确认最近美股交易日")
         timestamp = klines[-1]['timestamp']
@@ -443,59 +447,4 @@ class ETFManager:
                     self.logger.error(f"分析ETF {etf_symbol} 失败: {str(e)}")
         except Exception as e:
             self.logger.error(f"执行ETF分析任务失败: {str(e)}")
-            raise
-
-    def calculate_all_emotions(self, date: Optional[date] = None):
-        """计算所有ETF的情绪指标"""
-        # 获取最近一个交易日日期
-        if date is None:
-            last_trading_day = self.quote_service.get_klines('SPY.US', 1)
-            if last_trading_day:
-                date = last_trading_day[0]['timestamp'].date()
-            else:
-                date = date.today()
-            
-        for etf_symbol in self.fetchers.keys():
-            try:
-                self.calculate_emotion(etf_symbol, date)
-                self.logger.info(f"完成ETF {etf_symbol} {date} 情绪指标计算")
-            except Exception as e:
-                self.logger.error(f"计算ETF {etf_symbol} {date} 情绪指标失败: {str(e)}")
-        self.calculator.clear_cache()
-
-    def calculate_emotion(self, etf_symbol: str, date: Optional[date] = None):
-        """计算并存储指定日期的ETF情绪指标"""
-        try:
-            if date is None:
-                # 获取最近一个交易日日期
-                last_trading_day = self.quote_service.get_klines(etf_symbol, 1)
-                if last_trading_day:
-                    date = last_trading_day[0]['timestamp'].date()
-                else:
-                    date = date.today()
-
-            emotion = self.calculator.calculate(etf_symbol, date)
-            
-            # 创建情绪指数记录
-            emotion_record = ETFEmotion(
-                symbol=emotion.symbol,
-                date=emotion.date,
-                score=emotion.score,
-                momentum_score=emotion.indicators[0].value,
-                strength_score=emotion.indicators[1].value,
-                breadth_score=emotion.indicators[2].value,
-                volatility_score=emotion.indicators[3].value,
-                rsi_score=emotion.indicators[4].value,
-                created_at=datetime.now(),
-                updated_at=datetime.now()
-            )
-            
-            # 保存记录
-            self.db_session.merge(emotion_record)
-            self.db_session.commit()
-            self.logger.info(f"成功计算并存储 {etf_symbol} 的当日情绪指标")
-            
-        except Exception as e:
-            self.db_session.rollback()
-            self.logger.error(f"计算 {etf_symbol} {date} 情绪指标失败: {str(e)}")
             raise

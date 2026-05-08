@@ -410,9 +410,11 @@ class SoxlFearStrategyTrader:
         preferred_longport_account_id: Optional[str] = None,
     ) -> Tuple[pd.DataFrame, dict]:
         market_data_service = self._get_market_data_service(account_id, preferred_longport_account_id)
-        quote_service = QuoteService(market_data_service)
-        previous_trading_day = MarketService.get_previous_us_trading_day(current_market_date)
-        history = quote_service.get_klines(symbol, count=25, end_date=previous_trading_day)
+        history = [
+            item for item in (market_data_service.get_candlesticks(symbol, 25, period="d") or [])
+            if (item["timestamp"].date() if hasattr(item["timestamp"], "date") else item["timestamp"])
+            < current_market_date
+        ]
         quote = market_data_service.get_quote(symbol)
 
         if not history:

@@ -20,6 +20,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_index_daily",
         "a_stock_market_daily",
         "a_stock_name_changes",
+        "us_stock_daily",
     }
 )
 
@@ -116,6 +117,24 @@ class AStockIndexDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class USStockDaily(AnalyticsBase):
+    """LongPort 美股日K行情，存放在 DuckDB 分析库。"""
+    __tablename__ = "us_stock_daily"
+
+    symbol = Column(String(32), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    volume = Column(Float)
+    turnover = Column(Float)
+    adjust_type = Column(String(32))
+    period = Column(String(16))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 def ensure_analytics_schema():
     AnalyticsBase.metadata.create_all(analytics_engine)
     index_sqls = [
@@ -127,8 +146,11 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_symbol_date ON us_stock_daily(symbol, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]
     with analytics_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS us_stock_basic"))
         for sql in index_sqls:
             conn.execute(text(sql))
 

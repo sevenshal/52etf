@@ -6,7 +6,7 @@ from ratelimit import limits, sleep_and_retry
 from longport.openapi import (
     Config, Language, QuoteContext, TradeContext, TopicType, 
     OrderSide as LPOrderSide, OrderType as LPOrderType, TimeInForceType as LPTimeInForceType, OutsideRTH as LPOutsideRTH,
-    Period, AdjustType, PushOrderChanged, OrderStatus, SubType as LPSubType, PushQuote
+    Period, AdjustType, PushOrderChanged, OrderStatus, SubType as LPSubType, PushQuote, Market, SecurityListCategory
 )
 from ..utils import mask_account_id
 from ..database import Session, LongPortAccount, InvalidSymbolCache
@@ -350,6 +350,38 @@ class LongPortService(QuoteProvider, TradeService):
             return []
         except Exception as e:
             logging.error(f"获取{symbols}基础信息失败: {str(e)}")
+            return []
+
+    @sleep_and_retry
+    @limits(calls=10, period=1)
+    def get_security_list(self, market: str = "US") -> List[dict]:
+        """获取指定市场的证券列表。
+
+        LongPort 当前只开放美股夜盘可交易标的列表，category 必须传 Overnight。
+        """
+        market_map = {
+            "US": Market.US,
+            "HK": Market.HK,
+            "CN": Market.CN,
+            "SG": Market.SG,
+        }
+        normalized_market = str(market or "US").upper()
+        market_value = market_map.get(normalized_market)
+        if market_value is None:
+            raise ValueError(f"Unsupported LongPort market: {market}")
+
+        try:
+            resp = self.ctx.security_list(market_value, SecurityListCategory.Overnight)
+            if resp:
+                return [{
+                    "symbol": item.symbol,
+                    "name_cn": getattr(item, "name_cn", None),
+                    "name_en": getattr(item, "name_en", None),
+                    "name_hk": getattr(item, "name_hk", None),
+                } for item in resp]
+            return []
+        except Exception as e:
+            logging.error(f"获取{normalized_market}证券列表失败: {str(e)}")
             return []
     
     def get_quote(self, symbol: str) -> Dict:

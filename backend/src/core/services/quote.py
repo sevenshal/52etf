@@ -2,9 +2,6 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 from datetime import datetime, date
 from enum import Enum
-import pandas as pd
-from sqlalchemy import and_, desc
-from ..database import Session, StockKline
 
 
 class SubType(Enum):
@@ -103,7 +100,6 @@ class QuoteService:
     
     def __init__(self, provider: QuoteProvider):
         self.provider = provider
-        self.db = Session()
         
     def get_static_info(self, symbols: List[str]) -> List[Dict]:
         """获取静态信息，包括市值、发行股数等信息
@@ -153,112 +149,60 @@ class QuoteService:
         """
         return self.provider.get_quote(symbol)
         
-    def get_klines(self, symbol: str, count: int = None, end_date: Optional[date] = None, start_date: Optional[date] = None, cache_only: Optional[bool] = False, period: Optional[str] = 'd') -> List[Dict]:
+    @staticmethod
+    def _normalize_kline(item: Dict) -> Dict:
+        timestamp = item.get("timestamp")
+        if isinstance(timestamp, datetime):
+            normalized_timestamp = timestamp
+        elif isinstance(timestamp, date):
+            normalized_timestamp = datetime.combine(timestamp, datetime.min.time())
+        else:
+            normalized_timestamp = timestamp
+
+        return {
+            "timestamp": normalized_timestamp,
+            "open": item.get("open"),
+            "high": item.get("high"),
+            "low": item.get("low"),
+            "close": item.get("close"),
+            "volume": item.get("volume"),
+            "turnover": item.get("turnover"),
+        }
+
+    @staticmethod
+    def _to_date(value) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return None
+
+    def _get_klines_by_date(self, symbol: str, start_date: date, end_date: date, period: Optional[str]) -> List[Dict]:
+        if not hasattr(self.provider, "get_candlesticks_by_date"):
+            raise NotImplementedError("Provider does not support date range fetching")
+        data = self.provider.get_candlesticks_by_date(symbol, start_date, end_date, period)
+        return [self._normalize_kline(k) for k in data or []]
+
+    def get_klines(self, symbol: str, start_date: date, end_date: date, period: Optional[str] = 'd') -> List[Dict]:
         """获取K线数据
         
         Args:
             symbol: 股票代码
-            count:需要的K线数量 (If provided, legacy behavior)
+            start_date: 开始日期
             end_date: 结束日期
-            start_date: 开始日期 (If provided with end_date, uses date range fetch)
             
         Returns:
             List[Dict]: K线数据列表
         """
-        # Scenario 1: Date Range Fetching (New Mode)
-        if start_date and end_date:
-             # Use direct provider fetch for now -> user requested "can also only support start/end".
-             # Ignoring DB cache for this specific ad-hoc range request to ensure accuracy if it's for backtesting long periods
-             # Or we can implement caching later. Given the "Backtest" context which often needs fresh or verified full history,
-             # fetching from provider is safer and simpler for now.
-             if hasattr(self.provider, 'get_candlesticks_by_date'):
-                 data = self.provider.get_candlesticks_by_date(symbol, start_date, end_date, period)
-                 return [{
-                    'timestamp': datetime.combine(k['timestamp'], datetime.min.time()),
-                    'open': k['open'],
-                    'high': k['high'],
-                    'low': k['low'],
-                    'close': k['close'],
-                    'volume': k['volume'],
-                    'turnover': k['turnover']
-                } for k in data]
-             else:
-                 # Fallback if provider doesn't support it (should not happen with LongPortService updated)
-                 raise NotImplementedError("Provider does not support date range fetching")
-
-        # Scenario 2: Legacy Count-based Fetching (Preserved for existing calls)
-        if count is None:
-            count = 1000 # Default
-
-        # 确定结束日期
-        end_date = end_date or date.today()
-        
-        db_symbol = symbol + ('' if period == 'd' else f':{period}')
-
-        # 从数据库获取指定数量的历史K线
-        db_klines = self.db.query(StockKline).filter(
-            and_(
-                StockKline.symbol == db_symbol,
-                StockKline.date <= end_date
-            )
-        ).order_by(desc(StockKline.date)).limit(count).all()
-        
-        # 反转列表使其按日期升序
-        db_klines = db_klines[::-1]
-        
-        # 如果没有数据或最新数据不是end_date
-        if not cache_only and (not db_klines or db_klines[-1].date < end_date):
-            # 从接口获取数据
-            if not db_klines:
-                # 如果没有历史数据，直接获取请求的数量，避免一次性拉取过多K线触发限额
-                fetch_count = count if isinstance(count, int) and count > 0 else 1000
-                new_klines = self.provider.get_candlesticks(symbol, fetch_count, period)
-            else:
-                # 计算需要补充最新的k线（不超过请求数量）
-                loss_count = (datetime.now().date() - db_klines[-1].date).days
-                if isinstance(count, int) and count > 0:
-                    fetch_count = min(loss_count + 1, count)
-                else:
-                    fetch_count = loss_count + 1
-                new_klines = self.provider.get_candlesticks(symbol, fetch_count, period)
-            
-            # 保存到数据库
-            for kline in new_klines:
-                db_kline = StockKline(
-                    symbol=db_symbol,
-                    date=kline['timestamp'],
-                    open=kline['open'],
-                    high=kline['high'],
-                    low=kline['low'],
-                    close=kline['close'],
-                    volume=kline['volume'],
-                    turnover=kline['turnover']
-                )
-                self.db.merge(db_kline)
-            
-            self.db.commit()
-            
-            # 重新查询
-            db_klines = self.db.query(StockKline).filter(
-                and_(
-                    StockKline.symbol == db_symbol,
-                    StockKline.date <= end_date
-                )
-            ).order_by(desc(StockKline.date)).limit(count).all()
-            
-            # 反转列表使其按日期升序
-            db_klines = db_klines[::-1]
-        
-        # 转换为字典列表
-        return [{
-            'timestamp': datetime.combine(k.date, datetime.min.time()),
-            'open': float(k.open),
-            'high': float(k.high),
-            'low': float(k.low),
-            'close': float(k.close),
-            'volume': k.volume,
-            'turnover': float(k.turnover)
-        } for k in db_klines]
+        parsed_start_date = self._to_date(start_date)
+        parsed_end_date = self._to_date(end_date)
+        if not parsed_start_date or not parsed_end_date:
+            raise ValueError("get_klines only supports date range fetching: start_date and end_date are required")
+        if parsed_start_date > parsed_end_date:
+            return []
+        return self._get_klines_by_date(symbol, parsed_start_date, parsed_end_date, period)
     
     def subscribe(self, symbols: List[str], sub_types: List[str], is_first_push: bool = False) -> None:
         self.provider.subscribe(symbols, sub_types, is_first_push)

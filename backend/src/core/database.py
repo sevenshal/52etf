@@ -170,21 +170,6 @@ class ETFHolding(Base):
     shares = Column(Integer)
     weight = Column(Float)
 
-class StockKline(Base):
-    """股票K线数据表"""
-    __tablename__ = 'stock_klines'
-    
-    symbol = Column(String(32), primary_key=True)
-    date = Column(Date, primary_key=True)
-    open = Column(Float, nullable=False)
-    high = Column(Float, nullable=False)
-    low = Column(Float, nullable=False)
-    close = Column(Float, nullable=False)
-    volume = Column(Integer, nullable=False)
-    turnover = Column(Float, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
-    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
-
 class AStockInnovation100Level(Base):
     """A股创新100指数每日点位。"""
     __tablename__ = "a_stock_innovation100_levels"
@@ -254,26 +239,6 @@ class FetchLog(Base):
     total_tags_fetched = Column(Integer, nullable=False)
     total_stocks_fetched = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
-
-class ETFEmotion(Base):
-    """ETF情绪指数记录"""
-    __tablename__ = 'etf_emotions'
-    
-    symbol = Column(String(32), primary_key=True)
-    date = Column(Date, primary_key=True)
-    
-    # 总体情绪指标
-    score = Column(Float)
-    
-    # 各个子指标的分数
-    momentum_score = Column(Float)
-    strength_score = Column(Float)
-    breadth_score = Column(Float)
-    volatility_score = Column(Float)
-    rsi_score = Column(Float)
-    
-    created_at = Column(DateTime)
-    updated_at = Column(DateTime)
 
 class ETFFearGreedCloneHistory(Base):
     """ETF恐贪复刻指数历史记录"""
@@ -1091,6 +1056,14 @@ class AStockInnovationMomentumLog(Base):
 
 # 创建所有表
 Base.metadata.create_all(engine)
+
+def drop_deprecated_tables():
+    """删除已经迁移出 SQLite 的旧缓存表。"""
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS stock_klines"))
+        conn.execute(text("DROP TABLE IF EXISTS etf_emotions"))
+
+drop_deprecated_tables()
 
 def ensure_performance_indexes():
     """为高频查询补充索引（幂等执行，适配存量数据库）。"""

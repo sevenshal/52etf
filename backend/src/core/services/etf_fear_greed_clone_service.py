@@ -1187,11 +1187,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         count: int,
         end_date: date,
     ) -> pd.DataFrame:
+        start_date = end_date - timedelta(days=max(60, count * 3))
         klines = self.quote_service.get_klines(
             symbol=symbol,
-            count=count,
+            start_date=start_date,
             end_date=end_date,
-        )
+        )[-count:]
         if not klines:
             raise FearGreedCloneError(f"{symbol} 在指定区间内没有 K 线数据")
 

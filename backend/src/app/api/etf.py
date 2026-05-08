@@ -1,12 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
 from datetime import date, datetime, timedelta
-import json
-from sqlalchemy import create_engine, select, desc, func, and_
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
-from ...core.database import ETFAnalysis, Session, ETFEmotion, ETFHolding, StockEVC, get_db
-from .account import is_valid_account, valid_account
+from ...core.database import ETFAnalysis, ETFHolding, StockEVC, get_db
+from .account import valid_account
 from ...core.services.quote import QuoteProvider
 from ...core.services.longport import LongPortService
 
@@ -160,64 +159,6 @@ async def get_etf_report_history(
     )
 
     return reports
-
-class ETFEmotionHistory(BaseModel):
-    """ETF历史情绪数据"""
-    date: datetime
-    score: float
-    momentum_score: float
-    strength_score: float
-    breadth_score: float
-    volatility_score: float
-    rsi_score: float
-
-class EmotionWeights(BaseModel):
-    momentum_score: float = 0.2
-    strength_score: float = 0.2
-    breadth_score: float = 0.2
-    volatility_score: float = 0.2
-    rsi_score: float = 0.2
-
-@router.post("/emotions/{symbol}", response_model=List[ETFEmotionHistory])
-async def get_etf_emotions(
-    symbol: str,
-    days: Optional[int] = Query(90, ge=1, le=365),
-    account_id: str = Depends(valid_account),
-    weights: EmotionWeights = Body(...),
-    db: Session = Depends(get_db)
-):
-    """获取ETF的历史情绪指标数据"""
-    start_date = datetime.now() - timedelta(days=days)
-    
-    db_emotions = (
-        db.query(ETFEmotion)
-        .filter(
-            ETFEmotion.symbol == symbol,
-            ETFEmotion.date >= start_date
-        )
-        .order_by(ETFEmotion.date.asc())
-        .all()
-    )
-    
-    emotions = [
-        ETFEmotionHistory(
-            date=e.date,
-            score=(
-                e.momentum_score * weights.momentum_score +
-                e.strength_score * weights.strength_score +
-                e.breadth_score * weights.breadth_score +
-                e.volatility_score * weights.volatility_score +
-                e.rsi_score * weights.rsi_score
-            ),
-            momentum_score=e.momentum_score,
-            strength_score=e.strength_score,
-            breadth_score=e.breadth_score,
-            volatility_score=e.volatility_score,
-            rsi_score=e.rsi_score
-        ) for e in db_emotions
-    ]
-    
-    return emotions
 
 class ETFComponentDetail(BaseModel):
     """ETF成分股详细信息"""

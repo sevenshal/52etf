@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
@@ -31,15 +31,18 @@ class FavoriteResponse(BaseModel):
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])
 async def get_stock_klines(
+    request: Request,
     symbol: str,
-    days: Optional[int] = Query(90, ge=1, le=10000),
     account_id: str = Depends(valid_account),
     period: Optional[str] = Query(default='d', enum=['d', 'w', 'm']),
-    start_date: Optional[str] = Query(None),
+    start_date: str = Query(...),
     end_date: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     """获取股票的K线数据"""
+    if "days" in request.query_params:
+        raise HTTPException(status_code=400, detail="days 参数已不支持，请使用 start_date/end_date 日期区间")
+
     lp_account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
     lp_account_id = lp_account.lp_account_id if lp_account else "LBPT10001248"
     trade_service: LongPortService = LongPortService.get_instance(lp_account_id)
@@ -62,18 +65,13 @@ async def get_stock_klines(
     else:
         parsed_end_date = datetime.now().date()
 
-    if parsed_start_date and parsed_end_date:
-        # 使用日期范围获取
-        klines_data = quote_service.get_klines(
-            symbol, 
-            start_date=parsed_start_date, 
-            end_date=parsed_end_date, 
-            period=period
-        )
-    else:
-        # 使用数量获取 (保留旧模式兼容性)
-        count = days / 30 if period == 'm' else days / 7 if period == 'w' else days
-        klines_data = quote_service.get_klines(symbol, count=int(count), cache_only=False, period=period)
+    # 使用日期范围获取
+    klines_data = quote_service.get_klines(
+        symbol,
+        start_date=parsed_start_date,
+        end_date=parsed_end_date,
+        period=period
+    )
     
     # 转换为响应格式
     klines = []
