@@ -1,6 +1,11 @@
 from datetime import datetime
 import requests
 
+# HTTP mode: set to False to use http/ws and avoid TLS certificate validation.
+USE_HTTPS = False
+API_HOST = "api.52etf.vip"
+API_PREFIX = "/api/snowball"
+
 # --- WebSocket Client Logic (Tornado Implementation) ---
 try:
     from tornado import websocket, ioloop
@@ -20,7 +25,8 @@ def run_ws_client():
         return
         
     cli_id = g.cli_id
-    ws_url = "wss://api.52etf.vip/api/monitor/ws/%s" % cli_id
+    ws_scheme = "wss" if USE_HTTPS else "ws"
+    ws_url = "%s://%s/api/monitor/ws/%s" % (ws_scheme, API_HOST, cli_id)
     
     async def msg_handler(msg):
         if not msg: return
@@ -81,7 +87,8 @@ def run_ws_client():
 
 def initialize(context):
     # 全局变量初始化
-    g.api_base_url = "https://api.52etf.vip/api/snowball"
+    api_scheme = "https" if USE_HTTPS else "http"
+    g.api_base_url = "%s://%s%s" % (api_scheme, API_HOST, API_PREFIX)
     g.account_id = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
     g.headers = {"x-account-id": g.account_id}
     
