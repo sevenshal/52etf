@@ -3,13 +3,14 @@ from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
 from datetime import datetime
-from ...core.database import Session, StockFavorite, StockEVC, get_db, LongPortAccount
+from ...core.database import StockFavorite, StockEVC, get_db, LongPortAccount
 from .account import valid_account
 from sqlalchemy import func
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
 from ...core.static_info import get_static_info_snapshot_map
+from sqlalchemy.orm import Session
 
 # db_session removed, use dependency injection
 router = APIRouter(prefix="/api/stock")
