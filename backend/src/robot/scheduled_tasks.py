@@ -57,13 +57,15 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
     logging.getLogger("ScheduledTaskManager").info(
         (
             "US stock base data synced: static_symbols=%s static_fetched=%s "
-            "daily_symbols=%s us_static_info_fetched=%s daily_saved_rows=%s daily_errors=%s tables=%s"
+            "daily_symbols=%s us_static_info_fetched=%s daily_saved_rows=%s "
+            "daily_adjustment_refreshes=%s daily_errors=%s tables=%s"
         ),
         static_result.get("symbols"),
         static_result.get("fetched"),
         us_result.get("daily_symbols"),
         us_result.get("static_info_fetched"),
         us_result.get("daily_saved_rows"),
+        us_result.get("daily_adjustment_refresh_count"),
         len(us_result.get("daily_errors") or []),
         us_result.get("tables"),
     )
@@ -76,6 +78,7 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
         f"static_info_fetched={us_result.get('static_info_fetched')} "
         f"daily_fetched_symbols={us_result.get('daily_fetched_symbols')} "
         f"daily_saved_rows={us_result.get('daily_saved_rows')} "
+        f"daily_adjustment_refreshes={us_result.get('daily_adjustment_refresh_count')} "
         f"daily_errors={len(us_result.get('daily_errors') or [])} "
         f"tables={us_result.get('tables')}"
     )

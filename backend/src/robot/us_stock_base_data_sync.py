@@ -26,6 +26,14 @@ US_STOCK_STATIC_INFO_BATCH_SIZE = max(1, int(os.getenv("US_STOCK_STATIC_INFO_BAT
 US_STOCK_DAILY_INSERT_BATCH_SYMBOLS = max(1, int(os.getenv("US_STOCK_DAILY_INSERT_BATCH_SYMBOLS", "25")))
 US_STOCK_DAILY_REFRESH_OVERLAP_DAYS = max(0, int(os.getenv("US_STOCK_DAILY_REFRESH_OVERLAP_DAYS", "7")))
 US_STOCK_DAILY_MAX_SYMBOLS = max(0, int(os.getenv("US_STOCK_DAILY_MAX_SYMBOLS", "0")))
+US_STOCK_DAILY_ADJUST_PRICE_ABS_TOL = max(
+    0.0,
+    float(os.getenv("US_STOCK_DAILY_ADJUST_PRICE_ABS_TOL", "0.0001")),
+)
+US_STOCK_DAILY_ADJUST_PRICE_REL_TOL = max(
+    0.0,
+    float(os.getenv("US_STOCK_DAILY_ADJUST_PRICE_REL_TOL", "0.000001")),
+)
 US_STOCK_BASE_DATA_CANDIDATE_ETFS = [
     item.strip().upper()
     for item in os.getenv("US_STOCK_BASE_DATA_CANDIDATE_ETFS", "SPY.US,QQQ.US").split(",")
@@ -52,6 +60,21 @@ NON_COMPANY_SECURITY_NAME_PATTERN = re.compile(
     r"\b(warrants?|rights?|units?|preferred|preference|notes?|bonds?|debentures?)\b",
     re.IGNORECASE,
 )
+US_STOCK_DAILY_COLUMNS = [
+    "symbol",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "turnover",
+    "adjust_type",
+    "period",
+    "created_at",
+    "updated_at",
+]
+US_STOCK_DAILY_PRICE_FIELDS = ("open", "high", "low", "close")
 
 
 def _default_start_date() -> date:
@@ -121,7 +144,12 @@ def _create_static_info_model(model_cls, payload: Dict, record_date: date, now: 
     return model_cls(**kwargs)
 
 
-def _insert_or_replace_frame(table_name: str, columns: List[str], frame: pd.DataFrame):
+def _insert_or_replace_frame(
+    table_name: str,
+    columns: List[str],
+    frame: pd.DataFrame,
+    replace_ranges: Optional[List[Tuple[str, date, date]]] = None,
+):
     if frame.empty:
         return
 
@@ -131,6 +159,7 @@ def _insert_or_replace_frame(table_name: str, columns: List[str], frame: pd.Data
     quoted_table = _quote_duckdb_identifier(table_name)
     quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
     temp_frame_name = "us_stock_insert_frame"
+    temp_replace_ranges_name = "us_stock_replace_ranges"
     insert_sql = (
         f"INSERT OR REPLACE INTO {quoted_table} ({quoted_columns}) "
         f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
@@ -139,6 +168,22 @@ def _insert_or_replace_frame(table_name: str, columns: List[str], frame: pd.Data
     connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
     try:
         connection.execute("BEGIN TRANSACTION")
+        if replace_ranges:
+            replace_frame = pd.DataFrame(
+                replace_ranges,
+                columns=["symbol", "start_date", "end_date"],
+            )
+            connection.register(temp_replace_ranges_name, replace_frame)
+            quoted_ranges = _quote_duckdb_identifier(temp_replace_ranges_name)
+            connection.execute(
+                f"""
+                DELETE FROM {quoted_table}
+                USING {quoted_ranges}
+                WHERE {quoted_table}.symbol = {quoted_ranges}.symbol
+                  AND {quoted_table}.trade_date >= {quoted_ranges}.start_date
+                  AND {quoted_table}.trade_date <= {quoted_ranges}.end_date
+                """
+            )
         connection.register(temp_frame_name, insert_frame)
         connection.execute(insert_sql)
         connection.execute("COMMIT")
@@ -152,21 +197,60 @@ def _insert_or_replace_frame(table_name: str, columns: List[str], frame: pd.Data
         connection.close()
 
 
-def _latest_daily_dates() -> Dict[str, date]:
+def _daily_date_bounds() -> Dict[str, Tuple[date, date]]:
     import duckdb  # type: ignore
 
     connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
     try:
         rows = connection.execute(
-            "SELECT symbol, MAX(trade_date) AS latest_date FROM us_stock_daily GROUP BY symbol"
+            """
+            SELECT
+                symbol,
+                MIN(trade_date) AS earliest_date,
+                MAX(trade_date) AS latest_date
+            FROM us_stock_daily
+            GROUP BY symbol
+            """
         ).fetchall()
     finally:
         connection.close()
     return {
-        str(symbol): latest_date
-        for symbol, latest_date in rows
-        if symbol and isinstance(latest_date, date)
+        str(symbol): (earliest_date, latest_date)
+        for symbol, earliest_date, latest_date in rows
+        if symbol and isinstance(earliest_date, date) and isinstance(latest_date, date)
     }
+
+
+def _existing_daily_prices(symbol: str, start_date: date, end_date: date) -> Dict[date, Dict]:
+    import duckdb  # type: ignore
+
+    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+    try:
+        rows = connection.execute(
+            """
+            SELECT trade_date, open, high, low, close
+            FROM us_stock_daily
+            WHERE symbol = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            """,
+            [symbol, start_date, end_date],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    result: Dict[date, Dict] = {}
+    for trade_date, open_value, high_value, low_value, close_value in rows:
+        normalized_date = _kline_trade_date(trade_date)
+        if not normalized_date:
+            continue
+        result[normalized_date] = {
+            "open": open_value,
+            "high": high_value,
+            "low": low_value,
+            "close": close_value,
+        }
+    return result
 
 
 def _count_table_rows(table_name: str) -> int:
@@ -541,6 +625,57 @@ class USStockBaseDataSyncService:
             return max(DEFAULT_START_DATE, latest_date - timedelta(days=US_STOCK_DAILY_REFRESH_OVERLAP_DAYS))
         return DEFAULT_START_DATE
 
+    @staticmethod
+    def _price_value_changed(old_value, new_value) -> bool:
+        old_missing = bool(pd.isna(old_value))
+        new_missing = bool(pd.isna(new_value))
+        if old_missing or new_missing:
+            return old_missing != new_missing
+        try:
+            old_number = float(old_value)
+            new_number = float(new_value)
+        except (TypeError, ValueError):
+            return old_value != new_value
+        diff = abs(old_number - new_number)
+        tolerance = max(
+            US_STOCK_DAILY_ADJUST_PRICE_ABS_TOL,
+            US_STOCK_DAILY_ADJUST_PRICE_REL_TOL * max(abs(old_number), abs(new_number), 1.0),
+        )
+        return diff > tolerance
+
+    def _find_adjusted_price_change(self, symbol: str, rows: List[Dict]) -> Optional[Dict]:
+        trade_dates = [
+            row["trade_date"]
+            for row in rows
+            if isinstance(row.get("trade_date"), date)
+        ]
+        if not trade_dates:
+            return None
+
+        existing_prices = _existing_daily_prices(symbol, min(trade_dates), max(trade_dates))
+        if not existing_prices:
+            return None
+
+        for row in rows:
+            trade_date = row.get("trade_date")
+            if not isinstance(trade_date, date):
+                continue
+            existing = existing_prices.get(trade_date)
+            if not existing:
+                continue
+            for field in US_STOCK_DAILY_PRICE_FIELDS:
+                old_value = existing.get(field)
+                new_value = row.get(field)
+                if self._price_value_changed(old_value, new_value):
+                    return {
+                        "symbol": symbol,
+                        "trade_date": trade_date.isoformat(),
+                        "field": field,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                    }
+        return None
+
     def _build_daily_rows(self, symbol: str, klines: List[Dict], start_date: date, end_date: date, now: datetime) -> List[Dict]:
         rows = []
         for kline in klines or []:
@@ -563,26 +698,21 @@ class USStockBaseDataSyncService:
             })
         return rows
 
-    def _flush_daily_rows(self, rows: List[Dict]) -> int:
+    def _flush_daily_rows(
+        self,
+        rows: List[Dict],
+        replace_ranges: Optional[List[Tuple[str, date, date]]] = None,
+    ) -> int:
         if not rows:
             return 0
-        columns = [
-            "symbol",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "turnover",
-            "adjust_type",
-            "period",
-            "created_at",
-            "updated_at",
-        ]
         frame = pd.DataFrame(rows)
         frame = frame.drop_duplicates(subset=["symbol", "trade_date"], keep="last")
-        _insert_or_replace_frame(USStockDaily.__tablename__, columns, frame)
+        _insert_or_replace_frame(
+            USStockDaily.__tablename__,
+            US_STOCK_DAILY_COLUMNS,
+            frame,
+            replace_ranges=replace_ranges,
+        )
         return len(frame)
 
     def _sync_daily_klines(
@@ -592,12 +722,19 @@ class USStockBaseDataSyncService:
         end_date: date,
         now: datetime,
     ) -> Dict:
-        latest_daily_dates = {} if start_date else _latest_daily_dates()
+        daily_date_bounds = {} if start_date else _daily_date_bounds()
+        latest_daily_dates = {
+            symbol: bounds[1]
+            for symbol, bounds in daily_date_bounds.items()
+        }
         pending_rows: List[Dict] = []
+        pending_replace_ranges: List[Tuple[str, date, date]] = []
         saved_rows = 0
         fetched_symbols = 0
         empty_symbols = 0
         skipped_symbols = 0
+        adjustment_refresh_symbols: List[str] = []
+        adjustment_refresh_errors: List[Dict] = []
         errors: List[Dict] = []
         total = len(symbols)
 
@@ -620,6 +757,50 @@ class USStockBaseDataSyncService:
                 if not rows:
                     empty_symbols += 1
                     continue
+                if start_date is None and latest_daily_dates.get(symbol):
+                    price_change = self._find_adjusted_price_change(symbol, rows)
+                    if price_change:
+                        full_refresh_start = daily_date_bounds[symbol][0]
+                        self.logger.info(
+                            "Detected adjusted US daily price change for %s on %s %s old=%s new=%s; full refresh from %s",
+                            symbol,
+                            price_change.get("trade_date"),
+                            price_change.get("field"),
+                            price_change.get("old_value"),
+                            price_change.get("new_value"),
+                            full_refresh_start,
+                        )
+                        self._progress(
+                            f"检测到美股复权变化，重刷日K: {symbol}",
+                            35 + int(60 * index / max(1, total)),
+                            symbol=symbol,
+                            start_date=full_refresh_start.isoformat(),
+                            end_date=end_date.isoformat(),
+                        )
+                        full_klines = self.longport.get_candlesticks_by_date(
+                            symbol,
+                            full_refresh_start,
+                            end_date,
+                            "d",
+                        )
+                        full_rows = self._build_daily_rows(symbol, full_klines, full_refresh_start, end_date, now)
+                        if full_rows:
+                            rows = full_rows
+                            pending_replace_ranges.append((symbol, full_refresh_start, end_date))
+                            adjustment_refresh_symbols.append(symbol)
+                        else:
+                            self.logger.warning(
+                                "Adjusted price change detected for %s but full refresh returned empty; skip incremental rows",
+                                symbol,
+                            )
+                            error_payload = {
+                                "symbol": symbol,
+                                "error": "full_refresh_empty",
+                                "change": price_change,
+                            }
+                            adjustment_refresh_errors.append(error_payload)
+                            errors.append(error_payload)
+                            continue
                 pending_rows.extend(rows)
                 fetched_symbols += 1
             except Exception as exc:
@@ -628,15 +809,19 @@ class USStockBaseDataSyncService:
                 continue
 
             if index % US_STOCK_DAILY_INSERT_BATCH_SYMBOLS == 0:
-                saved_rows += self._flush_daily_rows(pending_rows)
+                saved_rows += self._flush_daily_rows(pending_rows, pending_replace_ranges)
                 pending_rows = []
+                pending_replace_ranges = []
 
-        saved_rows += self._flush_daily_rows(pending_rows)
+        saved_rows += self._flush_daily_rows(pending_rows, pending_replace_ranges)
         return {
             "daily_symbols": total,
             "daily_fetched_symbols": fetched_symbols,
             "daily_empty_symbols": empty_symbols,
             "daily_skipped_symbols": skipped_symbols,
+            "daily_adjustment_refresh_symbols": adjustment_refresh_symbols,
+            "daily_adjustment_refresh_count": len(adjustment_refresh_symbols),
+            "daily_adjustment_refresh_errors": adjustment_refresh_errors,
             "daily_saved_rows": saved_rows,
             "daily_errors": errors,
         }
