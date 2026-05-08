@@ -432,8 +432,8 @@ class ScheduledTaskManager:
             ),
             "etf_fair_value_analysis": TaskDefinition(
                 task_key="etf_fair_value_analysis",
-                name="ETF 估值分析",
-                description="分析全部 ETF 的持仓与公允价值。",
+                name="美股ETF 估值分析",
+                description="分析全部 美股ETF 的持仓与公允价值。",
                 default_time="09:00",
                 default_enabled=True,
                 sort_order=20,
@@ -441,7 +441,7 @@ class ScheduledTaskManager:
             ),
             "etf_holdings_backfill": TaskDefinition(
                 task_key="etf_holdings_backfill",
-                name="ETF持仓抓取入库",
+                name="美股ETF持仓抓取入库",
                 description="抓取全部 ETF 最新持仓，并按发行商返回的持仓日期覆盖入库。",
                 default_time="05:30",
                 default_enabled=True,
@@ -450,7 +450,7 @@ class ScheduledTaskManager:
             ),
             "etf_put_call_ratio_sync": TaskDefinition(
                 task_key="etf_put_call_ratio_sync",
-                name="ETF期权数据刷新",
+                name="美股ETF期权数据刷新",
                 description="手动触发时全量抓取 Barchart ETF Put/Call Ratio；每天自动刷新最近 10 条并记录当前期权到期未平仓快照。",
                 default_time="06:00",
                 default_enabled=True,
@@ -459,7 +459,7 @@ class ScheduledTaskManager:
             ),
             "etf_historical_holdings_backfill": TaskDefinition(
                 task_key="etf_historical_holdings_backfill",
-                name="ETF历史持仓回刷",
+                name="美股ETF历史持仓回刷",
                 description="手动回刷 iShares 历史 asOfDate 持仓和非 iShares 的 SEC N-PORT 历史持仓。",
                 default_time="05:00",
                 default_enabled=False,
@@ -477,7 +477,7 @@ class ScheduledTaskManager:
             ),
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
-                name="ETF贪恐回跑入库",
+                name="美股ETF贪恐回跑入库",
                 description="计算 SOXX/SPY/QQQ/DIA 贪恐复刻指数并保存历史、价格和持仓明细。",
                 default_time="06:00",
                 default_enabled=True,
@@ -486,7 +486,7 @@ class ScheduledTaskManager:
             ),
             "w20_momentum_live_sync": TaskDefinition(
                 task_key="w20_momentum_live_sync",
-                name="W20动量虚拟盘同步",
+                name="A股ETF W20动量虚拟盘同步",
                 description="同步所有启用的 W20 风险调整 ETF 动量虚拟盘，生成信号、模拟成交、刷新净值和持仓。",
                 default_time="09:35",
                 default_enabled=True,
