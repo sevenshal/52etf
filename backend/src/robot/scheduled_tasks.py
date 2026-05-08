@@ -3,18 +3,23 @@ import re
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as dtime, timedelta
 from typing import Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import schedule
 
-from ..core.database import ScheduledTaskConfig, get_db_ctx
+from ..core.database import ScheduledTaskConfig, SnowballApiHeartbeat, get_db_ctx
 from ..core.utils import send_alert_email
 
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 LAST_RUN_MESSAGE_MAX_LENGTH = 4000
 TASK_ERROR_PREVIEW_LIMIT = 20
 TASK_ERROR_PREVIEW_MAX_LENGTH = 3600
+SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT = "snowball_opportunities"
+SNOWBALL_PTRADE_MONITORED_URL = "http://api.52etf.vip/api/snowball/opportunities"
+SNOWBALL_PTRADE_BASE_URL = "http://api.52etf.vip/api/snowball"
+SNOWBALL_PTRADE_HEARTBEAT_WINDOW_MINUTES = 5
 
 
 def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
@@ -324,6 +329,69 @@ def _run_a_stock_innovation_momentum_live_sync():
     )
 
 
+def _is_china_trading_day(check_date: date) -> bool:
+    if check_date.weekday() >= 5:
+        return False
+
+    logger = logging.getLogger("ScheduledTaskManager")
+    try:
+        from ..core.services.tushare import TushareService
+
+        calendar = TushareService.get_instance().get_trade_calendar_frame(check_date, check_date)
+        if not calendar.empty:
+            row = calendar.iloc[0]
+            return int(row.get("is_open") or 0) == 1
+    except Exception as exc:
+        logger.warning("A-share trading calendar check failed for %s: %s", check_date, exc)
+
+    return True
+
+
+def _run_snowball_ptrade_heartbeat_check():
+    now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
+    check_time = now_shanghai.time()
+    if not (dtime(9, 35) <= check_time <= dtime(9, 45)):
+        return f"跳过检查: 当前上海时间 {now_shanghai.strftime('%H:%M:%S')} 不在 09:35-09:45 窗口"
+
+    if not _is_china_trading_day(now_shanghai.date()):
+        return f"跳过检查: {now_shanghai.date().isoformat()} 非A股交易日"
+
+    now = datetime.now()
+    cutoff = now - timedelta(minutes=SNOWBALL_PTRADE_HEARTBEAT_WINDOW_MINUTES)
+    with get_db_ctx() as db:
+        heartbeat = db.query(SnowballApiHeartbeat).filter(
+            SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
+        ).first()
+        heartbeat_snapshot = {
+            "last_called_at": heartbeat.last_called_at,
+            "last_cli_id": heartbeat.last_cli_id,
+            "call_count": heartbeat.call_count,
+        } if heartbeat else None
+
+    last_called_at = heartbeat_snapshot["last_called_at"] if heartbeat_snapshot else None
+    if last_called_at and last_called_at >= cutoff:
+        return (
+            "雪球 PTrade 心跳正常 "
+            f"last_called_at={last_called_at.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"cli_id={heartbeat_snapshot['last_cli_id']} call_count={heartbeat_snapshot['call_count']}"
+        )
+
+    last_called_text = last_called_at.strftime("%Y-%m-%d %H:%M:%S") if last_called_at else "无记录"
+    subject = "雪球PTrade接口心跳告警: A股开盘后5分钟未调用"
+    body = (
+        "A股开盘后心跳检查发现最近5分钟没有收到 PTrade 对雪球交易机会接口的调用。\n\n"
+        f"监控接口: {SNOWBALL_PTRADE_MONITORED_URL}\n"
+        f"接口前缀: {SNOWBALL_PTRADE_BASE_URL}\n"
+        f"检查时间(上海): {now_shanghai.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+        f"检查窗口: 最近 {SNOWBALL_PTRADE_HEARTBEAT_WINDOW_MINUTES} 分钟\n"
+        f"最近调用时间: {last_called_text}\n"
+        f"最近 cli_id: {heartbeat_snapshot['last_cli_id'] if heartbeat_snapshot else '无'}\n\n"
+        "请检查 PTrade 策略是否已启动、券商服务器能否访问 HTTP 接口，以及 nginx 的 api.52etf.vip:80 反代是否正常。"
+    )
+    send_alert_email(subject, body)
+    return f"已发送告警: 最近调用时间={last_called_text}"
+
+
 @dataclass(frozen=True)
 class TaskDefinition:
     task_key: str
@@ -451,6 +519,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_a_stock_innovation_momentum_live_sync,
+            ),
+            "snowball_ptrade_heartbeat_check": TaskDefinition(
+                task_key="snowball_ptrade_heartbeat_check",
+                name="PTrade接口心跳检查",
+                description="A股开盘后检查PTrade交易机会接口最近5分钟是否被调用，未调用则发送告警邮件。",
+                default_time="09:35",
+                default_enabled=True,
+                sort_order=22,
+                runner=_run_snowball_ptrade_heartbeat_check,
             ),
         }
 

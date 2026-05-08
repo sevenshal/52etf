@@ -636,6 +636,17 @@ class SnowballCopyLog(Base):
     status = Column(String)
     message = Column(String)
 
+class SnowballApiHeartbeat(Base):
+    """雪球 PTrade 接口调用心跳"""
+    __tablename__ = "snowball_api_heartbeats"
+
+    endpoint = Column(String(64), primary_key=True)
+    last_called_at = Column(DateTime, default=datetime.now, index=True)
+    last_account_id = Column(String, index=True)
+    last_cli_id = Column(String, index=True)
+    call_count = Column(Integer, default=0)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"

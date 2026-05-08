@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import httpx
 import logging
 import collections
@@ -9,12 +10,13 @@ import fnmatch
 import asyncio
 import re
 from sqlalchemy.orm import Session
-from ...core.database import get_db, get_db_ctx, Session, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot, SnowballAccountConfig
+from ...core.database import get_db, get_db_ctx, Session, SnowballApiHeartbeat, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot, SnowballAccountConfig
 from .account import valid_account
 from .trade import TradeRequest
 
 router = APIRouter(prefix="/api/snowball")
 logger = logging.getLogger(__name__)
+SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT = "snowball_opportunities"
 
 # --- Constants ---
 XUEQIU_HEADERS = {
@@ -35,13 +37,36 @@ XUEQIU_STOCK_HEADERS["Host"] = "stock.xueqiu.com"
 _last_token_refresh_time = None
 _is_refreshing_token = False
 
+def _record_snowball_ptrade_heartbeat(db: Session, account_id: str, cli_id: str):
+    """记录 PTrade 对雪球交易机会接口的最近调用时间。"""
+    try:
+        now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+        heartbeat = db.query(SnowballApiHeartbeat).filter(
+            SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
+        ).first()
+        if not heartbeat:
+            heartbeat = SnowballApiHeartbeat(
+                endpoint=SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT,
+                call_count=0,
+            )
+            db.add(heartbeat)
+
+        heartbeat.last_called_at = now
+        heartbeat.last_account_id = account_id
+        heartbeat.last_cli_id = cli_id
+        heartbeat.call_count = (heartbeat.call_count or 0) + 1
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to record Snowball PTrade heartbeat: %s", exc)
+
 async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str = None):
     global _last_token_refresh_time, _is_refreshing_token, XUEQIU_HEADERS, XUEQIU_STOCK_HEADERS
     
     if _is_refreshing_token:
         return
         
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     if _last_token_refresh_time and (now - _last_token_refresh_time).total_seconds() < 43200:
         return
 
@@ -88,6 +113,15 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
 
 class SnowballAccountConfigModel(BaseModel):
     xueqiu_cookie: Optional[str] = None
+
+class SnowballHeartbeatResponse(BaseModel):
+    endpoint: str
+    last_called_at: Optional[datetime] = None
+    last_called_at_text: Optional[str] = None
+    last_cli_id: Optional[str] = None
+    call_count: int = 0
+    seconds_since_last_call: Optional[float] = None
+    is_recent: bool = False
 
 class SnowballConfigCreate(BaseModel):
     cli_id: str
@@ -342,6 +376,35 @@ async def update_account_config(
         config.xueqiu_cookie = data.xueqiu_cookie
     db.commit()
     return {"message": "Success"}
+
+@router.get("/heartbeat", response_model=SnowballHeartbeatResponse)
+async def get_snowball_heartbeat(
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db)
+):
+    heartbeat = db.query(SnowballApiHeartbeat).filter(
+        SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
+    ).first()
+    if not heartbeat:
+        return SnowballHeartbeatResponse(endpoint=SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT)
+
+    now = datetime.now()
+    seconds_since_last_call = (
+        (now - heartbeat.last_called_at).total_seconds()
+        if heartbeat.last_called_at else None
+    )
+    return SnowballHeartbeatResponse(
+        endpoint=heartbeat.endpoint,
+        last_called_at=heartbeat.last_called_at,
+        last_called_at_text=(
+            heartbeat.last_called_at.strftime("%Y-%m-%d %H:%M:%S")
+            if heartbeat.last_called_at else None
+        ),
+        last_cli_id=heartbeat.last_cli_id,
+        call_count=heartbeat.call_count or 0,
+        seconds_since_last_call=seconds_since_last_call,
+        is_recent=seconds_since_last_call is not None and seconds_since_last_call <= 300,
+    )
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
@@ -618,6 +681,7 @@ async def get_snowball_opportunities(
     Supports multiple combinations per cli_id using Snapshot tracking.
     """
     cli_id = request.cli_id
+    _record_snowball_ptrade_heartbeat(db, account_id, cli_id)
 
     # 1. Fetch Configs
     _configs_orm = db.query(SnowballCopyConfig).filter(
