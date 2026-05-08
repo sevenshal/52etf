@@ -24,6 +24,7 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   DotChartOutlined,
+  HeatMapOutlined,
   LineChartOutlined,
   PieChartOutlined,
   PlayCircleOutlined,
@@ -44,6 +45,7 @@ const chartTypeOptions = [
   { label: '折线图', value: 'line', icon: <LineChartOutlined /> },
   { label: '点图', value: 'scatter', icon: <DotChartOutlined /> },
   { label: '饼图', value: 'pie', icon: <PieChartOutlined /> },
+  { label: '热力图', value: 'heatmap', icon: <HeatMapOutlined /> },
 ];
 
 const queryEngineOptions = [
@@ -76,6 +78,18 @@ const formatTiming = (value) => {
   if (value === null || value === undefined) return '-';
   return `${Number(value).toFixed(1)} ms`;
 };
+
+const formatChartValue = (value) => (
+  Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 })
+);
+
+const escapeTooltipText = (value) => String(value).replace(/[&<>"']/g, char => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}[char]));
 
 const getCurrentToken = (text, caretPosition) => {
   const beforeCaret = text.slice(0, caretPosition);
@@ -326,6 +340,7 @@ const DatabaseManager = () => {
   const [viewMode, setViewMode] = useState('table');
   const [chartType, setChartType] = useState('bar');
   const [dimensionColumn, setDimensionColumn] = useState();
+  const [heatmapYColumn, setHeatmapYColumn] = useState();
   const [valueColumn, setValueColumn] = useState();
 
   const selectedTable = useMemo(
@@ -429,6 +444,126 @@ const DatabaseManager = () => {
   const chartOption = useMemo(() => {
     if (!resultRows.length || !dimensionColumn || !valueColumn) return null;
 
+    if (chartType === 'heatmap') {
+      if (!heatmapYColumn) return null;
+
+      const xLabels = [];
+      const yLabels = [];
+      const xLabelSet = new Set();
+      const yLabelSet = new Set();
+      const heatmapRows = resultRows
+        .map(row => {
+          const xLabel = formatCellValue(row[dimensionColumn]);
+          const yLabel = formatCellValue(row[heatmapYColumn]);
+          const value = Number(row[valueColumn]);
+          if (!Number.isFinite(value)) return null;
+
+          if (!xLabelSet.has(xLabel)) {
+            xLabelSet.add(xLabel);
+            xLabels.push(xLabel);
+          }
+          if (!yLabelSet.has(yLabel)) {
+            yLabelSet.add(yLabel);
+            yLabels.push(yLabel);
+          }
+
+          return { xLabel, yLabel, value };
+        })
+        .filter(Boolean);
+
+      if (!heatmapRows.length) return null;
+
+      const xIndexMap = new Map(xLabels.map((label, index) => [label, index]));
+      const yIndexMap = new Map(yLabels.map((label, index) => [label, index]));
+      const cellValueMap = new Map();
+
+      heatmapRows.forEach(row => {
+        const xIndex = xIndexMap.get(row.xLabel);
+        const yIndex = yIndexMap.get(row.yLabel);
+        const key = `${xIndex}-${yIndex}`;
+        cellValueMap.set(key, (cellValueMap.get(key) || 0) + row.value);
+      });
+
+      const cellValues = Array.from(cellValueMap.values());
+      const minValue = Math.min(...cellValues);
+      const maxValue = Math.max(...cellValues);
+      const visualPadding = Math.abs(maxValue || 1);
+      const visualMin = minValue === maxValue ? minValue - visualPadding : minValue;
+      const visualMax = minValue === maxValue ? maxValue + visualPadding : maxValue;
+      const heatmapData = Array.from(cellValueMap.entries()).map(([key, value]) => {
+        const [xIndex, yIndex] = key.split('-').map(Number);
+        return [xIndex, yIndex, value];
+      });
+
+      return {
+        tooltip: {
+          position: 'top',
+          formatter: params => {
+            const point = Array.isArray(params) ? params[0] : params;
+            const pointValue = Array.isArray(point?.value) ? point.value : point?.data;
+            if (!Array.isArray(pointValue) || pointValue.length < 3) {
+              return '';
+            }
+
+            const [xIndex, yIndex, value] = pointValue;
+            return [
+              `${escapeTooltipText(dimensionColumn)}: ${escapeTooltipText(xLabels[xIndex])}`,
+              `${escapeTooltipText(heatmapYColumn)}: ${escapeTooltipText(yLabels[yIndex])}`,
+              `${escapeTooltipText(valueColumn)}: ${formatChartValue(value)}`,
+            ].join('<br/>');
+          },
+        },
+        grid: { left: 96, right: 56, top: 36, bottom: 96 },
+        dataZoom: [
+          { type: 'inside', xAxisIndex: 0 },
+          { type: 'slider', xAxisIndex: 0, height: 18, bottom: 44 },
+          { type: 'inside', yAxisIndex: 0 },
+          { type: 'slider', yAxisIndex: 0, orient: 'vertical', width: 16, right: 8 },
+        ],
+        visualMap: {
+          min: visualMin,
+          max: visualMax,
+          calculable: true,
+          orient: 'horizontal',
+          left: 'center',
+          bottom: 0,
+          inRange: {
+            color: ['#2166ac', '#f7f7f7', '#b2182b'],
+          },
+          formatter: value => formatChartValue(value),
+        },
+        xAxis: {
+          type: 'category',
+          data: xLabels,
+          splitArea: { show: true },
+          axisLabel: {
+            hideOverlap: true,
+            rotate: xLabels.some(label => label.length > 8) ? 30 : 0,
+          },
+        },
+        yAxis: {
+          type: 'category',
+          data: yLabels,
+          splitArea: { show: true },
+          axisLabel: { hideOverlap: true },
+        },
+        series: [
+          {
+            name: valueColumn,
+            type: 'heatmap',
+            data: heatmapData,
+            progressive: 1000,
+            emphasis: {
+              itemStyle: {
+                shadowBlur: 10,
+                shadowColor: 'rgba(0, 0, 0, 0.28)',
+              },
+            },
+          },
+        ],
+      };
+    }
+
     const rows = resultRows
       .map(row => ({
         name: formatCellValue(row[dimensionColumn]),
@@ -483,7 +618,7 @@ const DatabaseManager = () => {
         },
       ],
     };
-  }, [chartType, dimensionColumn, resultRows, valueColumn]);
+  }, [chartType, dimensionColumn, heatmapYColumn, resultRows, valueColumn]);
 
   const fetchTables = async () => {
     setSchemaLoading(true);
@@ -524,13 +659,20 @@ const DatabaseManager = () => {
   useEffect(() => {
     if (!resultColumns.length) {
       setDimensionColumn(undefined);
+      setHeatmapYColumn(undefined);
       setValueColumn(undefined);
       return;
     }
 
     const firstNumericColumn = numericColumns[0];
-    const firstDimensionColumn = resultColumns.find(column => !numericColumns.includes(column)) || resultColumns[0];
+    const dimensionColumns = resultColumns.filter(column => !numericColumns.includes(column));
+    const firstDimensionColumn = dimensionColumns[0] || resultColumns[0];
+    const secondDimensionColumn = dimensionColumns.find(column => column !== firstDimensionColumn)
+      || resultColumns.find(column => column !== firstDimensionColumn && column !== firstNumericColumn)
+      || resultColumns.find(column => column !== firstDimensionColumn)
+      || firstDimensionColumn;
     setDimensionColumn(firstDimensionColumn);
+    setHeatmapYColumn(secondDimensionColumn);
     setValueColumn(firstNumericColumn);
   }, [numericColumns, resultColumns]);
 
@@ -803,12 +945,21 @@ const DatabaseManager = () => {
                   style={{ width: 132 }}
                 />
                 <Select
-                  placeholder="维度列"
+                  placeholder={chartType === 'heatmap' ? 'X轴列' : '维度列'}
                   value={dimensionColumn}
                   onChange={setDimensionColumn}
                   options={resultColumns.map(column => ({ label: column, value: column }))}
                   style={{ width: 180 }}
                 />
+                {chartType === 'heatmap' && (
+                  <Select
+                    placeholder="Y轴列"
+                    value={heatmapYColumn}
+                    onChange={setHeatmapYColumn}
+                    options={resultColumns.map(column => ({ label: column, value: column }))}
+                    style={{ width: 180 }}
+                  />
+                )}
                 <Select
                   placeholder="数据列"
                   value={valueColumn}
@@ -821,7 +972,7 @@ const DatabaseManager = () => {
               {!numericColumns.length ? (
                 <Empty description="结果中没有可用于绘图的数值列" />
               ) : !chartOption ? (
-                <Empty description="请选择维度列和数据列" />
+                <Empty description={chartType === 'heatmap' ? '请选择X轴列、Y轴列和数据列' : '请选择维度列和数据列'} />
               ) : (
                 <ReactECharts option={chartOption} style={{ height: 460 }} notMerge />
               )}
