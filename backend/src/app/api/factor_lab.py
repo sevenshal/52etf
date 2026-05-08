@@ -800,8 +800,18 @@ def _compute_rank_ic(df: pl.DataFrame) -> pl.DataFrame:
             pl.corr("_factor_rank_ic", "_return_rank_ic").alias("rank_ic"),
         )
         .filter(pl.col("rank_ic").is_not_null() & pl.col("rank_ic").is_finite())
-        .with_columns(pl.col("rank_ic").round(6))
         .sort("trade_date")
+        .with_columns(
+            pl.col("rank_ic").rolling_mean(window_size=20, min_samples=5).alias("rank_ic_ma20"),
+            pl.col("rank_ic").rolling_mean(window_size=60, min_samples=10).alias("rank_ic_ma60"),
+            pl.col("rank_ic").cum_sum().alias("cumulative_rank_ic"),
+        )
+        .with_columns(
+            pl.col("rank_ic").round(6),
+            pl.col("rank_ic_ma20").round(6),
+            pl.col("rank_ic_ma60").round(6),
+            pl.col("cumulative_rank_ic").round(6),
+        )
     )
 
 
