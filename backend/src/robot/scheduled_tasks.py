@@ -356,7 +356,7 @@ def _run_snowball_ptrade_heartbeat_check():
     if not _is_china_trading_day(now_shanghai.date()):
         return f"跳过检查: {now_shanghai.date().isoformat()} 非A股交易日"
 
-    now = datetime.now()
+    now = now_shanghai.replace(tzinfo=None)
     cutoff = now - timedelta(minutes=SNOWBALL_PTRADE_HEARTBEAT_WINDOW_MINUTES)
     with get_db_ctx() as db:
         heartbeat = db.query(SnowballApiHeartbeat).filter(
