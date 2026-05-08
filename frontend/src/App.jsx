@@ -31,6 +31,7 @@ import USStockSignalLive from './pages/USStockSignalLive';
 import AStockInnovation100 from './pages/AStockInnovation100';
 import AStockInnovationMomentumLive from './pages/AStockInnovationMomentumLive';
 import DatabaseManager from './pages/DatabaseManager';
+import FactorLab from './pages/FactorLab';
 
 function App() {
   return (
@@ -44,6 +45,7 @@ function App() {
           <Route path="/options" element={<OptionsPositions />} />
           <Route path="/a-stock-innovation100" element={<AStockInnovation100 />} />
           <Route path="/db" element={<DatabaseManager />} />
+          <Route path="/factor-lab" element={<FactorLab />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />

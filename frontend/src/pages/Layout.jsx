@@ -5,7 +5,7 @@ import { useAccount } from '../contexts/AccountContext';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/options', '/a-stock-innovation100', '/db', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/options', '/a-stock-innovation100', '/db', '/factor-lab', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -63,6 +63,10 @@ const getActiveTabKey = (pathname, state) => {
     return '/db';
   }
 
+  if (isRouteOrChild(pathname, '/factor-lab')) {
+    return '/factor-lab';
+  }
+
   return '/profile';
 };
 
@@ -100,6 +104,11 @@ const AppLayout = () => {
     {
       key: '/db',
       label: 'DB',
+      disabled: !accountId
+    },
+    {
+      key: '/factor-lab',
+      label: '因子',
       disabled: !accountId
     },
     {

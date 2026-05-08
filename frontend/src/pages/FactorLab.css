@@ -1,0 +1,147 @@
+.factor-lab-page {
+  min-height: 100%;
+  padding: 16px;
+  background: #f4f7fb;
+}
+
+.factor-lab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.factor-lab-header h3 {
+  margin: 0 0 6px;
+}
+
+.factor-lab-control-card,
+.factor-lab-page .ant-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(23, 36, 58, 0.06);
+}
+
+.factor-lab-control-card {
+  margin-bottom: 12px;
+}
+
+.factor-lab-control-card .ant-form-item {
+  margin-bottom: 8px;
+}
+
+.factor-lab-full {
+  width: 100%;
+}
+
+.factor-lab-factor-note {
+  border-top: 1px solid #edf1f7;
+  margin-top: 2px;
+  padding-top: 8px;
+}
+
+.factor-lab-empty {
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #7a869a;
+}
+
+.factor-lab-empty .anticon {
+  font-size: 34px;
+}
+
+.factor-lab-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.factor-lab-heatmap-card {
+  margin-top: 12px;
+}
+
+.factor-lab-metrics .ant-statistic {
+  min-height: 82px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #edf1f7;
+  border-radius: 8px;
+}
+
+.factor-lab-metrics .ant-statistic-title {
+  margin-bottom: 6px;
+  color: #5f6f86;
+}
+
+.factor-lab-metrics .ant-statistic-content {
+  color: #14213d;
+  font-size: 22px;
+}
+
+.factor-lab-meta {
+  margin-bottom: 12px;
+  border-radius: 8px;
+}
+
+.factor-lab-compact-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #4a5870;
+  font-size: 12px;
+}
+
+.factor-lab-compact-stats span {
+  padding: 3px 8px;
+  background: #f4f7fb;
+  border: 1px solid #e4ebf5;
+  border-radius: 6px;
+}
+
+.factor-lab-page .ant-card-head {
+  min-height: 44px;
+  border-bottom-color: #edf1f7;
+}
+
+.factor-lab-page .ant-card-head-title {
+  padding: 11px 0;
+}
+
+.factor-lab-page .ant-card-body {
+  padding: 12px;
+}
+
+.factor-lab-table-row {
+  margin-top: 12px;
+}
+
+@media (max-width: 1200px) {
+  .factor-lab-metrics {
+    grid-template-columns: repeat(3, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .factor-lab-page {
+    padding: 10px;
+  }
+
+  .factor-lab-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .factor-lab-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .factor-lab-metrics .ant-statistic-content {
+    font-size: 18px;
+  }
+}
