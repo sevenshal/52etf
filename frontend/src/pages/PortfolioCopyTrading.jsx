@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, PlayCircleOutlined, HistoryOutlined,
-    SettingOutlined, DeleteOutlined, EditOutlined
+    SettingOutlined, DeleteOutlined, EditOutlined, ClockCircleOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
@@ -39,6 +39,8 @@ const PortfolioCopyTrading = () => {
 
     // Snowball States
     const [snowballConfigs, setSnowballConfigs] = useState([]);
+    const [snowballHeartbeat, setSnowballHeartbeat] = useState(null);
+    const [snowballHeartbeatLoading, setSnowballHeartbeatLoading] = useState(false);
     const [snowballModalVisible, setSnowballModalVisible] = useState(false);
     const [snowballForm] = Form.useForm();
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
@@ -71,6 +73,23 @@ const PortfolioCopyTrading = () => {
         } finally {
             setLoading(false);
         }
+    };
+
+    const fetchSnowballHeartbeat = async () => {
+        setSnowballHeartbeatLoading(true);
+        try {
+            const response = await request.get('/api/snowball/heartbeat');
+            setSnowballHeartbeat(response.data);
+        } catch (error) {
+            console.error('获取雪球接口心跳失败', error);
+        } finally {
+            setSnowballHeartbeatLoading(false);
+        }
+    };
+
+    const fetchSnowballTabData = () => {
+        fetchSnowballConfigs();
+        fetchSnowballHeartbeat();
     };
 
     const fetchSnowballAccountConfig = async () => {
@@ -299,7 +318,7 @@ const PortfolioCopyTrading = () => {
             if (activeTab === 'ib_configs') {
                 fetchConfigs();
             } else if (activeTab === 'snowball_configs') {
-                fetchSnowballConfigs();
+                fetchSnowballTabData();
             }
             // IB accounts and Longport accounts are always useful or global
             fetchIbAccounts();
@@ -561,6 +580,45 @@ const PortfolioCopyTrading = () => {
         }
     };
 
+    const formatHeartbeatAge = (seconds) => {
+        if (seconds === null || seconds === undefined) return '';
+        if (seconds < 60) return '刚刚';
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
+        return `${Math.floor(seconds / 3600)}小时前`;
+    };
+
+    const renderSnowballHeartbeat = () => {
+        if (snowballHeartbeatLoading && !snowballHeartbeat) {
+            return <Text type="secondary">接口心跳加载中...</Text>;
+        }
+
+        const lastCalled = snowballHeartbeat?.last_called_at_text;
+        if (!lastCalled) {
+            return (
+                <Space size={6}>
+                    <ClockCircleOutlined />
+                    <Text type="secondary">接口心跳</Text>
+                    <Tag color="default">暂无调用</Tag>
+                </Space>
+            );
+        }
+
+        const isRecent = snowballHeartbeat?.is_recent;
+        const ageText = formatHeartbeatAge(snowballHeartbeat?.seconds_since_last_call);
+        return (
+            <Space size={6} wrap>
+                <ClockCircleOutlined />
+                <Text type="secondary">接口心跳</Text>
+                <Tag color={isRecent ? 'green' : 'red'}>{isRecent ? '正常' : '超时'}</Tag>
+                <Text>{lastCalled}</Text>
+                {ageText && <Text type="secondary">({ageText})</Text>}
+                {snowballHeartbeat?.last_cli_id && (
+                    <Text type="secondary">cli_id: {snowballHeartbeat.last_cli_id}</Text>
+                )}
+            </Space>
+        );
+    };
+
     return (
         <div style={{ padding: '24px' }}>
             <Card
@@ -573,7 +631,7 @@ const PortfolioCopyTrading = () => {
                     <Space>
                         <Button icon={<ReloadOutlined />} onClick={() => {
                             if (activeTab === 'ib_configs') fetchConfigs();
-                            else if (activeTab === 'snowball_configs') fetchSnowballConfigs();
+                            else if (activeTab === 'snowball_configs') fetchSnowballTabData();
                         }}>刷新数据</Button>
 
                     </Space>
@@ -674,13 +732,16 @@ const PortfolioCopyTrading = () => {
                                 }
                             ]}
                         />
-                        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                             <div>
                                 <Button type="primary" icon={<PlusOutlined />} onClick={() => {
                                     setSnowballEditingConfig(null);
                                     snowballForm.resetFields();
                                     setSnowballModalVisible(true);
                                 }}>添加雪球跟单配置</Button>
+                            </div>
+                            <div style={{ flex: 1, minWidth: 320, textAlign: 'center' }}>
+                                {renderSnowballHeartbeat()}
                             </div>
                             <div>
                                 <Button icon={<SettingOutlined />} onClick={() => {
