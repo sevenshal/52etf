@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Spin, Button, InputNumber, Form, Descriptions, Statistic, Row, Col, Typography, Table, Tag } from 'antd';
+import { Card, Button, Statistic, Row, Col, Typography, Table, Tag } from 'antd';
 import { LeftOutlined } from '@ant-design/icons';
-import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
-import dayjs from 'dayjs';
-import { calculateSupportResistanceValues } from '../utils/klines'
+import StockKlineChart from '../components/StockKlineChart';
 
 const { Text } = Typography;
 
@@ -13,14 +11,11 @@ const { Text } = Typography;
 const ETFDetail = () => {
   const { symbol } = useParams();
   const navigate = useNavigate();
-  const [loading, setLoading] = useState(true);
-  const [klines, setKlines] = useState([]);
   const [report, setReport] = useState(null);
   const [reportHistory, setReportHistory] = useState([]);
   const [components, setComponents] = useState([]);
 
   useEffect(() => {
-    fetchKlines();
     fetchReport();
     fetchReportHistory();
     fetchComponents();
@@ -35,26 +30,9 @@ const ETFDetail = () => {
     }
   };
 
-  const fetchKlines = async () => {
-    setLoading(true);
-    try {
-      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
-        params: {
-          start_date: dayjs().subtract(365, 'day').format('YYYY-MM-DD'),
-          end_date: dayjs().format('YYYY-MM-DD')
-        }
-      });
-      setKlines(data);
-    } catch (error) {
-      console.error('获取K线数据失败:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const fetchReportHistory = async () => {
     try {
-      const { data } = await request.get(`/api/etf/reports/${symbol}/history?days=500`);
+      const { data } = await request.get(`/api/etf/reports/${symbol}/history?days=2000`);
       setReportHistory(data || []);
     } catch (error) {
       console.error('获取ETF历史估值失败:', error);
@@ -69,232 +47,6 @@ const ETFDetail = () => {
       console.error('获取成分股信息失败:', error);
     }
   };
-
-  // 2. 添加新的状态变量
-  const [supportLevels, setSupportLevels] = useState([]);
-  const [resistanceLevels, setResistanceLevels] = useState([]);
-  const [days, setDays] = useState(200);
-  const [volumeRatio, setVolumeRatio] = useState(2);
-
-  // 3. 添加计算支撑压力位
-  useEffect(() => {
-    if (klines.length > 0 && volumeRatio > 1 && days > 1) {
-      const { supports, resistances } = calculateSupportResistanceValues(klines, days, volumeRatio);
-      setSupportLevels(supports);
-      setResistanceLevels(resistances);
-    }
-  }, [days, volumeRatio, klines]);
-
-  // 4. 修改 getChartOption 函数
-  const getChartOption = () => {
-    const dates = klines.map(item => dayjs(item.timestamp).format('YYYY-MM-DD'));
-    const toFiniteNumber = (value) => {
-      if (value === null || value === undefined) return null;
-      const num = Number(value);
-      return Number.isFinite(num) ? num : null;
-    };
-    const sortedReportHistory = [...reportHistory]
-      .map(item => ({
-        ...item,
-        date: dayjs(item.date).format('YYYY-MM-DD'),
-        fair_value_lo: toFiniteNumber(item.fair_value_lo),
-        fair_value_hi: toFiniteNumber(item.fair_value_hi)
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const fairValueLoData = [];
-    const fairValueHiData = [];
-    let historyIndex = 0;
-    let latestHistory = null;
-
-    dates.forEach(dateStr => {
-      while (
-        historyIndex < sortedReportHistory.length &&
-        sortedReportHistory[historyIndex].date <= dateStr
-      ) {
-        latestHistory = sortedReportHistory[historyIndex];
-        historyIndex += 1;
-      }
-      fairValueLoData.push(latestHistory?.fair_value_lo ?? null);
-      fairValueHiData.push(latestHistory?.fair_value_hi ?? null);
-    });
-    const hasFairValueLo = fairValueLoData.some(value => value !== null);
-    const hasFairValueHi = fairValueHiData.some(value => value !== null);
-    const klineData = klines.map(item => [
-      item.open,
-      item.close,
-      item.low,
-      item.high,
-      item.volume
-    ]);
-
-    const series = [{
-      name: 'K线',
-      type: 'candlestick',
-      data: klineData.map(item => [
-        item[0],
-        item[1],
-        item[2],
-        item[3]
-      ]),
-      itemStyle: {
-        color: '#ef232a',
-        color0: '#14b143',
-        borderColor: '#ef232a',
-        borderColor0: '#14b143'
-      }
-    }, {
-      name: '成交量',
-      type: 'bar',
-      xAxisIndex: 1,
-      yAxisIndex: 1,
-      data: klineData.map(item => item[4]),
-      itemStyle: {
-        color: (params) => {
-          const kline = klineData[params.dataIndex];
-          return kline[1] > kline[0] ? '#ef232a' : '#14b143';
-        }
-      }
-    }];
-
-    if (hasFairValueLo) {
-      series.push({
-        name: '估值下限',
-        type: 'line',
-        data: fairValueLoData,
-        symbol: 'none',
-        lineStyle: {
-          width: 2,
-          color: '#0066FF',
-          type: 'dashed'
-        }
-      });
-    }
-
-    if (hasFairValueHi) {
-      series.push({
-        name: '估值上限',
-        type: 'line',
-        data: fairValueHiData,
-        symbol: 'none',
-        lineStyle: {
-          width: 2,
-          color: '#FF0000',
-          type: 'dashed'
-        }
-      });
-    }
-
-    // 添加支撑位线
-    supportLevels.forEach((level) => {
-      series.push({
-        name: `支撑位${level}`,
-        type: 'line',
-        data: Array(dates.length).fill(level),
-        lineStyle: {
-          color: '#00FF00',
-          type: 'dashed',
-          opacity: 0.5
-        },
-        symbol: 'none'
-      });
-    });
-
-    // 添加压力位线
-    resistanceLevels.forEach((level) => {
-      series.push({
-        name: `压力位${level}`,
-        type: 'line',
-        data: Array(dates.length).fill(level),
-        lineStyle: {
-          color: '#FF0000',
-          type: 'dashed',
-          opacity: 0.5
-        },
-        symbol: 'none'
-      });
-    });
-
-    return {
-      animation: false,
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: {
-          type: 'cross'
-        }
-      },
-      legend: {
-        data: ['K线', '成交量',
-          ...(hasFairValueLo ? ['估值下限'] : []),
-          ...(hasFairValueHi ? ['估值上限'] : []),
-          ...supportLevels.map(v => `支撑位${v}`),
-          ...resistanceLevels.map(v => `压力位${v}`)
-        ]
-      },
-      grid: [{
-        left: '5%',
-        right: '5%',
-        height: '60%'
-      }, {
-        left: '5%',
-        right: '5%',
-        top: '75%',
-        height: '20%'
-      }],
-      xAxis: [{
-        type: 'category',
-        data: dates,
-        scale: true,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        splitLine: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax'
-      }, {
-        type: 'category',
-        gridIndex: 1,
-        data: dates,
-        scale: true,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        axisLabel: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax'
-      }],
-      yAxis: [{
-        scale: true,
-        splitArea: { show: true }
-      }, {
-        scale: true,
-        gridIndex: 1,
-        splitNumber: 2,
-        axisLabel: { show: false },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false }
-      }],
-      dataZoom: [{
-        type: 'inside',
-        xAxisIndex: [0, 1],
-        start: 0,
-        end: 100
-      }, {
-        show: true,
-        xAxisIndex: [0, 1],
-        type: 'slider',
-        top: '97%',
-        start: 0,
-        end: 100
-      }],
-      series: series
-    };
-  };
-
-  // 响应式布局配置
-  const isMobile = window.innerWidth <= window.innerHeight;
 
   // 格式化数字显示
   const formatNumber = (num) => {
@@ -416,10 +168,6 @@ const ETFDetail = () => {
       render: (value) => value?.toFixed(1) || '-',
     },
   ];
-
-  if (loading) {
-    return <Spin size="large" />;
-  }
 
   return (
     <div style={{ padding: '6px' }}>
@@ -584,47 +332,17 @@ const ETFDetail = () => {
           </>
         )}
       </Card>
-      {/*  支撑压力阈值参数设置 */}
+      {/* K线图表 */}
       <Card
         size="small"
         style={{ marginTop: '16px' }}
         bodyStyle={{ padding: '6px' }}
       >
-        <Form layout="inline" style={{ paddingLeft: '6px' }}>
-          <Form.Item label="计算天数">
-            <InputNumber
-              min={1}
-              max={300}
-              value={days}
-              onChange={value => setDays(value)}
-            />
-          </Form.Item>
-          <Form.Item label="放量比率">
-            <InputNumber
-              min={1}
-              step={0.1}
-              value={volumeRatio}
-              onChange={value => setVolumeRatio(value)}
-            />
-          </Form.Item>
-        </Form>
-      </Card>
-      {/* K线图表 */}
-      <Card
-        size="small"
-        style={{ marginTop: '16px' }}
-        bodyStyle={{ padding: '4px' }}
-      >
-        <ReactECharts
-          option={getChartOption()}
-          notMerge={true}
-          key={[
-            supportLevels.join(','),
-            resistanceLevels.join(','),
-            reportHistory.length,
-            reportHistory[reportHistory.length - 1]?.date ?? ''
-          ].join('|')}
-          style={{ height: '400px' }}
+        <StockKlineChart
+          symbol={symbol}
+          valuationHistory={reportHistory}
+          valuationFillMode="forward"
+          height={600}
         />
       </Card>
 
