@@ -89,15 +89,27 @@ const buildFactorSelectOptions = factors => {
   return Object.entries(groups).map(([label, options]) => ({ label, options }));
 };
 
+const getDirectionColor = direction => {
+  if (direction === 'higher_is_better') return 'green';
+  if (direction === 'lower_is_better') return 'orange';
+  return 'default';
+};
+
 const normalizeNumberArray = (value, fallback) => {
   const items = Array.isArray(value) ? value : [];
   const normalized = [...new Set(items.map(item => Number(item)).filter(item => Number.isFinite(item)))];
   return normalized.length ? normalized : fallback;
 };
 
-const buildAnalyzePayload = values => {
-  const heatmapWindows = normalizeNumberArray(values.heatmap_windows, DEFAULT_FORM_VALUES.heatmap_windows);
-  const heatmapForwardWindows = normalizeNumberArray(values.heatmap_forward_windows, DEFAULT_FORM_VALUES.heatmap_forward_windows);
+const buildAnalyzePayload = (values, overrides = {}) => {
+  const heatmapWindows = normalizeNumberArray(
+    overrides.heatmap_windows || values.heatmap_windows,
+    DEFAULT_FORM_VALUES.heatmap_windows,
+  );
+  const heatmapForwardWindows = normalizeNumberArray(
+    overrides.heatmap_forward_windows || values.heatmap_forward_windows,
+    DEFAULT_FORM_VALUES.heatmap_forward_windows,
+  );
   return {
     pool: values.pool,
     factor: values.factor,
@@ -106,7 +118,7 @@ const buildAnalyzePayload = values => {
     end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
     momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
     min_listing_days: DEFAULT_MIN_LISTING_DAYS,
-    include_heatmap: true,
+    include_heatmap: overrides.include_heatmap ?? true,
     heatmap_windows: heatmapWindows,
     heatmap_forward_windows: heatmapForwardWindows,
   };
@@ -294,7 +306,8 @@ const bucketColumns = [
   { title: '桶', dataIndex: 'bucket', width: 64, fixed: 'left' },
   { title: '样本', dataIndex: 'samples', align: 'right', render: numberFormatter },
   { title: '日期数', dataIndex: 'trade_dates', align: 'right', render: numberFormatter },
-  { title: '因子均值', dataIndex: 'avg_factor_value', align: 'right', render: icFormatter },
+  { title: '分析因子均值', dataIndex: 'avg_factor_value', align: 'right', render: icFormatter },
+  { title: '原始因子均值', dataIndex: 'avg_factor_value_raw', align: 'right', render: icFormatter },
   { title: '平均收益', dataIndex: 'avg_return_pct', align: 'right', render: percentFormatter },
   { title: '超额收益', dataIndex: 'avg_excess_return_pct', align: 'right', render: percentFormatter },
   { title: '胜率', dataIndex: 'win_rate_pct', align: 'right', render: percentFormatter },
@@ -331,6 +344,7 @@ const FactorLab = () => {
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
+  const [selectingCombo, setSelectingCombo] = useState(false);
 
   const selectedFactorKey = Form.useWatch('factor', form);
   const selectedFactor = useMemo(() => (
@@ -379,6 +393,43 @@ const FactorLab = () => {
     }
   };
 
+  const runSelectedComboAnalysis = useCallback(async (combo) => {
+    if (!combo) return;
+    const values = await form.validateFields();
+    const manualCombo = {
+      window: Number(combo.window),
+      forward_window: Number(combo.forward_window),
+      windows: [Number(combo.window)],
+      selection_mode: 'manual',
+      reason: 'heatmap_selection',
+    };
+    setSelectedCombo(manualCombo);
+    setSelectingCombo(true);
+    try {
+      const payload = buildAnalyzePayload(values, {
+        include_heatmap: false,
+        heatmap_windows: [manualCombo.window],
+        heatmap_forward_windows: [manualCombo.forward_window],
+      });
+      const { data } = await request.post('/api/factor-lab/analyze', payload, { timeout: 300000 });
+      setResult(previous => ({
+        ...data,
+        metadata: {
+          ...data.metadata,
+          selected_combo: manualCombo,
+        },
+        parameter_heatmap: previous?.parameter_heatmap?.length
+          ? previous.parameter_heatmap
+          : data.parameter_heatmap,
+      }));
+      message.success('参数组合已切换');
+    } catch (error) {
+      message.error(getErrorMessage(error, '切换参数组合失败'));
+    } finally {
+      setSelectingCombo(false);
+    }
+  }, [form]);
+
   const factorSelectOptions = useMemo(() => buildFactorSelectOptions(options?.factors), [options]);
   const windowOptions = useMemo(() => (options?.windows || [20, 60, 120]).map(item => ({
     label: `${item}日`,
@@ -400,6 +451,21 @@ const FactorLab = () => {
   const selectedComboText = selectedCombo
     ? `${selectedCombo.window}日 × T+${selectedCombo.forward_window}`
     : '-';
+  const heatmapEvents = useMemo(() => ({
+    click: params => {
+      if (params.seriesType !== 'heatmap' || !Array.isArray(params.value)) return;
+      const validRows = heatmapRows.filter(item => getHeatmapValue(item) !== null && getHeatmapValue(item) !== undefined);
+      const windows = [...new Set(validRows.map(item => item.window))].sort((a, b) => a - b);
+      const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
+      const row = validRows.find(item => (
+        Number(item.forward_window) === Number(forwards[params.value[0]])
+        && Number(item.window) === Number(windows[params.value[1]])
+      ));
+      if (row) {
+        runSelectedComboAnalysis({ window: row.window, forward_window: row.forward_window });
+      }
+    },
+  }), [heatmapRows, runSelectedComboAnalysis]);
 
   return (
     <div className="factor-lab-page">
@@ -410,6 +476,11 @@ const FactorLab = () => {
             <Tag color="blue">Polars</Tag>
             {metadata.factor?.label && <Tag>{metadata.factor.label}</Tag>}
             {metadata.pool_label && <Tag>{metadata.pool_label}</Tag>}
+            {metadata.factor_direction_label && (
+              <Tag color={getDirectionColor(metadata.factor_direction)}>
+                {metadata.factor_direction_label}
+              </Tag>
+            )}
           </Space>
         </div>
         <Space>
@@ -483,7 +554,7 @@ const FactorLab = () => {
       )}
 
       {result && (
-        <Spin spinning={running}>
+        <Spin spinning={running || selectingCombo}>
           <Card
             className="factor-lab-heatmap-card"
             title={<Space><FireOutlined />参数热力图（非重叠年化多空差）</Space>}
@@ -494,6 +565,7 @@ const FactorLab = () => {
               <ReactECharts
                 option={getHeatmapOption(heatmapRows, selectedCombo)}
                 style={{ height: 360 }}
+                onEvents={heatmapEvents}
               />
             ) : <Empty />}
           </Card>
@@ -528,6 +600,7 @@ const FactorLab = () => {
                 {metadata.min_listing_days !== undefined && <span>上市满 {metadata.min_listing_days} 天</span>}
                 <span>{metadata.price_rows?.toLocaleString?.('zh-CN') || metadata.price_rows} 行行情</span>
                 <span>{selectedComboText}</span>
+                {metadata.factor_direction_adjusted && <span>已按方向反转因子值</span>}
                 <span>{numberFormatter(summary.elapsed_ms)} ms</span>
               </Space>
             )}
@@ -595,7 +668,7 @@ const FactorLab = () => {
                   columns={bucketColumns}
                   dataSource={bucketRows}
                   pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50] }}
-                  scroll={{ x: 920 }}
+                  scroll={{ x: 1040 }}
                 />
               </Card>
             </Col>
