@@ -5,7 +5,7 @@ import time
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import numpy as np
 import polars as pl
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 TRADING_DAYS_PER_YEAR = 252
 SUPPORTED_WINDOWS = [20, 60, 120]
+MIXED_WINDOW_KEY = "mixed"
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
 DEFAULT_START_DATE = date(2020, 1, 2)
 DEFAULT_MIN_LISTING_DAYS = 365
@@ -127,7 +128,7 @@ class FactorLabAnalyzeRequest(BaseModel):
     standardization: str = DEFAULT_STANDARDIZATION
     oos_start_date: Optional[date] = None
     heatmap_metric: str = DEFAULT_HEATMAP_METRIC
-    heatmap_windows: List[int] = Field(default_factory=lambda: SUPPORTED_WINDOWS.copy())
+    heatmap_windows: List[Union[int, str]] = Field(default_factory=lambda: SUPPORTED_WINDOWS.copy())
     heatmap_forward_windows: List[int] = Field(default_factory=lambda: DEFAULT_FORWARD_WINDOWS.copy())
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
     min_listing_days: int = DEFAULT_MIN_LISTING_DAYS
@@ -136,12 +137,16 @@ class FactorLabAnalyzeRequest(BaseModel):
     @validator("heatmap_windows", pre=True)
     def validate_windows(cls, value):
         items = value if isinstance(value, list) else [value]
-        normalized: List[int] = []
+        normalized: List[Union[int, str]] = []
         for item in items:
+            if isinstance(item, str) and item.strip().lower() == MIXED_WINDOW_KEY:
+                if MIXED_WINDOW_KEY not in normalized:
+                    normalized.append(MIXED_WINDOW_KEY)
+                continue
             try:
                 window = int(item)
             except (TypeError, ValueError):
-                raise ValueError("窗口必须是数字")
+                raise ValueError("窗口必须是数字或 mixed")
             if window not in SUPPORTED_WINDOWS:
                 raise ValueError(f"窗口只支持: {', '.join(str(item) for item in SUPPORTED_WINDOWS)}")
             if window not in normalized:
@@ -257,6 +262,7 @@ class FactorDefinition:
     description: str
     default_windows: List[int]
     supports_windows: bool
+    supports_mixed_windows: bool
     direction: str
     compute: Callable[[pl.DataFrame, FactorContext], pl.DataFrame]
 
@@ -269,6 +275,7 @@ class FactorDefinition:
             "description": self.description,
             "default_windows": self.default_windows,
             "supports_windows": self.supports_windows,
+            "supports_mixed_windows": self.supports_mixed_windows,
             "direction": self.direction,
             "direction_label": direction["label"],
             "direction_sign": direction["sign"],
@@ -308,6 +315,55 @@ def _normalize_momentum_weights_payload(raw_weights: Dict[str, float]) -> Dict[s
     if sum(normalized.values()) <= 0:
         raise ValueError("至少设置一个大于0的动量权重")
     return normalized
+
+
+def _numeric_heatmap_windows(windows: List[Union[int, str]]) -> List[int]:
+    numeric = [
+        int(item)
+        for item in windows
+        if not (isinstance(item, str) and item == MIXED_WINDOW_KEY)
+    ]
+    return numeric or SUPPORTED_WINDOWS.copy()
+
+
+def _factor_required_windows(
+    windows: List[Union[int, str]],
+    factor_definition: FactorDefinition,
+) -> List[int]:
+    if not factor_definition.supports_windows:
+        return factor_definition.default_windows
+
+    required = _numeric_heatmap_windows(windows)
+    if MIXED_WINDOW_KEY in windows:
+        required.extend(factor_definition.default_windows)
+    return list(dict.fromkeys(int(item) for item in required))
+
+
+def _window_label(window: Union[int, str]) -> str:
+    return "多窗口合成" if window == MIXED_WINDOW_KEY else f"{int(window)}日"
+
+
+def _active_windows_for_heatmap_row(
+    window: Union[int, str],
+    factor_definition: FactorDefinition,
+) -> List[int]:
+    if not factor_definition.supports_windows:
+        return factor_definition.default_windows
+    if window == MIXED_WINDOW_KEY:
+        if not factor_definition.supports_mixed_windows:
+            raise HTTPException(status_code=400, detail=f"{factor_definition.label} 不支持多窗口合成")
+        return factor_definition.default_windows
+    return [int(window)]
+
+
+def _weights_for_heatmap_row(
+    raw_weights: Dict[str, float],
+    active_windows: List[int],
+    window: Union[int, str],
+) -> Dict[int, float]:
+    if window == MIXED_WINDOW_KEY:
+        return _normalize_momentum_weights(raw_weights, active_windows)
+    return _normalize_momentum_weights({str(active_windows[0]): 1.0}, active_windows)
 
 
 def _safe_float(value: Any, digits: Optional[int] = None) -> Optional[float]:
@@ -799,6 +855,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="与风险调整动量同源：ln(close) 回归斜率 * R2，不除以波动率，用来和风险调整版直接对照。",
         default_windows=[20, 60, 120],
         supports_windows=True,
+        supports_mixed_windows=True,
         direction="higher_is_better",
         compute=_compute_raw_momentum,
     ),
@@ -809,6 +866,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="与美股风险调整混合动量虚拟盘同源：ln(close) 回归斜率 * R2 / 年化波动；热力图按每个滑动窗口单独测试。",
         default_windows=[20, 60, 120],
         supports_windows=True,
+        supports_mixed_windows=True,
         direction="higher_is_better",
         compute=_compute_risk_adjusted_momentum,
     ),
@@ -819,6 +877,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="log10(volume) 相对过去窗口均值和标准差的异常程度，窗口不含当天；方向先作为探索项观察。",
         default_windows=[20],
         supports_windows=True,
+        supports_mixed_windows=False,
         direction="exploratory",
         compute=_compute_volume_z,
     ),
@@ -829,6 +888,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="过去窗口日收益标准差年化；按低波更好进行方向调整。",
         default_windows=[20],
         supports_windows=True,
+        supports_mixed_windows=False,
         direction="exploratory",
         compute=_compute_volatility,
     ),
@@ -839,6 +899,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="使用最近一次EVC估值中值 / 当日收盘价 - 1，越高代表相对低估。",
         default_windows=[20],
         supports_windows=False,
+        supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_valuation_gap,
     ),
@@ -849,6 +910,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         description="示例注册因子：风险调整混合动量截面排名 + 0.25 * 成交量Z分数截面排名。",
         default_windows=[20, 60, 120],
         supports_windows=True,
+        supports_mixed_windows=True,
         direction="higher_is_better",
         compute=_compute_custom_momentum_volume,
     ),
@@ -1647,16 +1709,21 @@ def _compute_parameter_heatmap(
     if not request.include_heatmap or price_df.is_empty() or universe_df.is_empty():
         return []
 
-    windows = request.heatmap_windows if factor_definition.supports_windows else [request.heatmap_windows[0]]
+    windows = (
+        request.heatmap_windows
+        if factor_definition.supports_windows
+        else [factor_definition.default_windows[0]]
+    )
     forward_windows = request.heatmap_forward_windows
     if len(windows) * len(forward_windows) > MAX_HEATMAP_CELLS:
         forward_windows = forward_windows[: max(1, MAX_HEATMAP_CELLS // max(1, len(windows)))]
 
     records: List[Dict[str, Any]] = []
     for window in windows:
+        active_windows = _active_windows_for_heatmap_row(window, factor_definition)
         heatmap_context = FactorContext(
-            windows=[window],
-            momentum_weights=_normalize_momentum_weights(request.momentum_weights, [window]),
+            windows=active_windows,
+            momentum_weights=_weights_for_heatmap_row(request.momentum_weights, active_windows, window),
             db=context_base.db,
             symbols=context_base.symbols,
             start_date=context_base.start_date,
@@ -1691,7 +1758,9 @@ def _compute_parameter_heatmap(
 
             non_overlap_annualized_value = non_overlap_summary.get("annualized_median_pct")
             record = {
-                "window": int(window),
+                "window": window,
+                "window_label": _window_label(window),
+                "windows": active_windows,
                 "forward_window": int(forward_window),
                 "top_minus_bottom_avg_return_pct": summary.get("top_minus_bottom_avg_return_pct"),
                 "annualized_top_minus_bottom_avg_return_pct": summary.get("annualized_top_minus_bottom_avg_return_pct"),
@@ -1739,16 +1808,13 @@ def _select_best_combo(
     selected_window = request.heatmap_windows[0]
     selected_forward_window = request.heatmap_forward_windows[0]
     if selected_record:
-        selected_window = int(selected_record["window"])
+        selected_window = selected_record["window"]
         selected_forward_window = int(selected_record["forward_window"])
 
-    selected_windows = (
-        [int(selected_window)]
-        if factor_definition.supports_windows
-        else factor_definition.default_windows
-    )
+    selected_windows = _active_windows_for_heatmap_row(selected_window, factor_definition)
     return {
-        "window": int(selected_window),
+        "window": selected_window,
+        "window_label": _window_label(selected_window),
         "forward_window": int(selected_forward_window),
         "windows": selected_windows,
         "selection_mode": "best",
@@ -1774,13 +1840,13 @@ def _compute_factor_analysis_for_combo(
 ) -> Dict[str, Any]:
     forward_window = int(combo["forward_window"])
     active_windows = (
-        [int(combo["window"])]
+        _active_windows_for_heatmap_row(combo["window"], factor_definition)
         if factor_definition.supports_windows
         else factor_definition.default_windows
     )
     context = FactorContext(
         windows=active_windows,
-        momentum_weights=_normalize_momentum_weights(momentum_weights, active_windows),
+        momentum_weights=_weights_for_heatmap_row(momentum_weights, active_windows, combo["window"]),
         db=db,
         symbols=symbols,
         start_date=start_date,
@@ -1831,13 +1897,16 @@ def _run_factor_analysis(
     factor_definition = FACTOR_REGISTRY.get(request.factor)
     if not factor_definition:
         raise HTTPException(status_code=400, detail=f"未注册的因子: {request.factor}")
+    if MIXED_WINDOW_KEY in request.heatmap_windows and not factor_definition.supports_mixed_windows:
+        raise HTTPException(status_code=400, detail=f"{factor_definition.label} 不支持多窗口合成")
 
     started_at = time.perf_counter()
     end_date = request.end_date or _get_max_trade_date()
     if request.oos_start_date and request.oos_start_date >= end_date:
         raise HTTPException(status_code=400, detail="样本外起始日期必须早于实际结束日期")
     max_forward_window = max(request.heatmap_forward_windows)
-    max_factor_window = max(request.heatmap_windows)
+    required_windows = _factor_required_windows(request.heatmap_windows, factor_definition)
+    max_factor_window = max(required_windows)
     fetch_start = request.start_date - timedelta(
         days=max(370, request.min_listing_days + 30, max_factor_window * 4)
     )
@@ -1876,10 +1945,10 @@ def _run_factor_analysis(
     )
 
     heatmap_context = FactorContext(
-        windows=request.heatmap_windows if factor_definition.supports_windows else factor_definition.default_windows,
+        windows=required_windows,
         momentum_weights=_normalize_momentum_weights(
             request.momentum_weights,
-            request.heatmap_windows if factor_definition.supports_windows else factor_definition.default_windows,
+            required_windows,
         ),
         db=db,
         symbols=universe_history.all_symbols,
