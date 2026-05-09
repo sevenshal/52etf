@@ -65,6 +65,14 @@
   margin-top: 12px;
 }
 
+.factor-lab-oos-card {
+  margin-bottom: 12px;
+}
+
+.factor-lab-metrics-compact {
+  margin: 0;
+}
+
 .factor-lab-metrics .ant-statistic {
   min-height: 82px;
   padding: 12px;

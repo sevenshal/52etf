@@ -38,10 +38,15 @@ const DEFAULT_FORM_VALUES = {
   bucket_count: 10,
   start_date: dayjs('2020-01-02'),
   end_date: null,
+  neutralization: 'none',
+  standardization: 'zscore',
+  oos_start_date: null,
+  heatmap_metric: 'non_overlap_annualized_median_pct',
   heatmap_windows: [20, 60, 120],
   heatmap_forward_windows: [5, 20, 60],
 };
 
+const DEFAULT_HEATMAP_METRIC = 'non_overlap_annualized_median_pct';
 const DEFAULT_MIN_LISTING_DAYS = 365;
 const DEFAULT_MOMENTUM_WEIGHTS = { 20: 0.05, 60: 0.2, 120: 0.75 };
 
@@ -72,6 +77,10 @@ const normalizeDefaultRequest = (payload = {}) => ({
   ...payload,
   start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_FORM_VALUES.start_date,
   end_date: payload.end_date ? dayjs(payload.end_date) : null,
+  oos_start_date: payload.oos_start_date ? dayjs(payload.oos_start_date) : null,
+  neutralization: payload.neutralization || DEFAULT_FORM_VALUES.neutralization,
+  standardization: payload.standardization || DEFAULT_FORM_VALUES.standardization,
+  heatmap_metric: payload.heatmap_metric || DEFAULT_FORM_VALUES.heatmap_metric,
   heatmap_windows: payload.heatmap_windows || payload.windows || DEFAULT_FORM_VALUES.heatmap_windows,
   heatmap_forward_windows: payload.heatmap_forward_windows || DEFAULT_FORM_VALUES.heatmap_forward_windows,
 });
@@ -116,6 +125,10 @@ const buildAnalyzePayload = (values, overrides = {}) => {
     bucket_count: values.bucket_count,
     start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_FORM_VALUES.start_date.format('YYYY-MM-DD'),
     end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
+    neutralization: values.neutralization || DEFAULT_FORM_VALUES.neutralization,
+    standardization: values.standardization || DEFAULT_FORM_VALUES.standardization,
+    oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
+    heatmap_metric: values.heatmap_metric || DEFAULT_HEATMAP_METRIC,
     momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
     min_listing_days: DEFAULT_MIN_LISTING_DAYS,
     include_heatmap: overrides.include_heatmap ?? true,
@@ -229,18 +242,33 @@ const isSameCombo = (combo, row) => (
   && Number(combo.forward_window) === Number(row.forward_window)
 );
 
-const getHeatmapValue = item => (
-  item?.heatmap_value_pct
+const getHeatmapMetricMeta = (metric, metrics = []) => (
+  (metrics || []).find(item => item.key === metric)
+  || { key: metric, label: metric, kind: metric?.endsWith('_pct') ? 'percent' : 'number' }
+);
+
+const formatHeatmapMetricValue = (metric, value, metrics = []) => {
+  const meta = getHeatmapMetricMeta(metric, metrics);
+  if (meta.kind === 'percent') return percentFormatter(value);
+  return icFormatter(value);
+};
+
+const getHeatmapValue = (item, metric = DEFAULT_HEATMAP_METRIC) => (
+  item?.[metric]
+  ?? (metric === DEFAULT_HEATMAP_METRIC ? item?.non_overlap_annualized_top_minus_bottom_pct : undefined)
+  ?? item?.heatmap_value
+  ?? item?.heatmap_value_pct
   ?? item?.non_overlap_annualized_top_minus_bottom_pct
   ?? item?.annualized_top_minus_bottom_avg_return_pct
   ?? item?.top_minus_bottom_avg_return_pct
 );
 
-const getHeatmapOption = (rows, selectedCombo) => {
-  const validRows = (rows || []).filter(item => getHeatmapValue(item) !== null && getHeatmapValue(item) !== undefined);
+const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, metrics = []) => {
+  const metricMeta = getHeatmapMetricMeta(metric, metrics);
+  const validRows = (rows || []).filter(item => getHeatmapValue(item, metric) !== null && getHeatmapValue(item, metric) !== undefined);
   const windows = [...new Set(validRows.map(item => item.window))].sort((a, b) => a - b);
   const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
-  const values = validRows.map(getHeatmapValue);
+  const values = validRows.map(item => getHeatmapValue(item, metric));
   const min = values.length ? Math.min(...values) : -1;
   const max = values.length ? Math.max(...values) : 1;
   return {
@@ -252,14 +280,20 @@ const getHeatmapOption = (rows, selectedCombo) => {
           row.forward_window === forwards[params.value[0]] && row.window === windows[params.value[1]]
         ));
         if (!item) return '';
-        return [
+        const lines = [
           `窗口: ${item.window}`,
           `T+${item.forward_window}`,
-          `非重叠年化多空差: ${percentFormatter(getHeatmapValue(item))}`,
+          `${metricMeta.label}: ${formatHeatmapMetricValue(metric, getHeatmapValue(item, metric), metrics)}`,
+          `Rank IC: ${icFormatter(item.rank_ic_mean)}`,
+          `Rank IC t-stat: ${icFormatter(item.rank_ic_t_stat)}`,
           `重叠年化多空差: ${percentFormatter(item.annualized_top_minus_bottom_avg_return_pct)}`,
           `T+n多空差: ${percentFormatter(item.top_minus_bottom_avg_return_pct)}`,
           `样本: ${numberFormatter(item.samples)}`,
-        ].join('<br/>');
+        ];
+        if (metric !== DEFAULT_HEATMAP_METRIC) {
+          lines.splice(3, 0, `非重叠年化多空差: ${percentFormatter(item.non_overlap_annualized_median_pct ?? item.non_overlap_annualized_top_minus_bottom_pct)}`);
+        }
+        return lines.join('<br/>');
       },
     },
     xAxis: { type: 'category', data: forwards.map(item => `T+${item}`), splitArea: { show: true } },
@@ -272,16 +306,17 @@ const getHeatmapOption = (rows, selectedCombo) => {
       right: 8,
       top: 40,
       inRange: { color: ['#2f70b7', '#f6f7f9', '#cb3a31'] },
+      formatter: value => formatHeatmapMetricValue(metric, value, metrics),
     },
     series: [
       {
-        name: '非重叠年化多空差',
+        name: metricMeta.label,
         type: 'heatmap',
         data: validRows.map(item => ({
           value: [
             forwards.indexOf(item.forward_window),
             windows.indexOf(item.window),
-            getHeatmapValue(item),
+            getHeatmapValue(item, metric),
           ],
           itemStyle: isSameCombo(selectedCombo, item)
             ? { borderColor: '#111827', borderWidth: 3 }
@@ -289,7 +324,7 @@ const getHeatmapOption = (rows, selectedCombo) => {
         })),
         label: {
           show: true,
-          formatter: params => `${Number(params.value[2]).toFixed(2)}%`,
+          formatter: params => formatHeatmapMetricValue(metric, params.value[2], metrics),
         },
         emphasis: {
           itemStyle: {
@@ -347,6 +382,7 @@ const FactorLab = () => {
   const [selectingCombo, setSelectingCombo] = useState(false);
 
   const selectedFactorKey = Form.useWatch('factor', form);
+  const selectedHeatmapMetric = Form.useWatch('heatmap_metric', form);
   const selectedFactor = useMemo(() => (
     (options?.factors || []).find(item => item.key === selectedFactorKey)
   ), [options, selectedFactorKey]);
@@ -439,22 +475,45 @@ const FactorLab = () => {
     const values = [...new Set([...(options?.forward_windows || [5, 20, 60]), 10, 120])].sort((a, b) => a - b);
     return values.map(item => ({ label: `T+${item}`, value: item }));
   }, [options]);
+  const heatmapMetricOptions = useMemo(() => (
+    (options?.heatmap_metrics || [{ key: DEFAULT_HEATMAP_METRIC, label: '非重叠年化多空差' }])
+      .map(item => ({ label: item.label, value: item.key }))
+  ), [options]);
+  const neutralizationOptions = useMemo(() => (
+    (options?.neutralization_options || [
+      { key: 'none', label: '不做中性化' },
+      { key: 'sector', label: '行业大类中性化（Sector）' },
+      { key: 'sector_market_cap', label: '行业大类+市值中性化' },
+      { key: 'fine_industry', label: '细行业中性化（Industry，小样本回退Sector）' },
+      { key: 'fine_industry_market_cap', label: '细行业+市值中性化（小样本回退Sector）' },
+    ]).map(item => ({ label: item.label, value: item.key }))
+  ), [options]);
+  const standardizationOptions = useMemo(() => (
+    (options?.standardization_options || [
+      { key: 'none', label: '不标准化' },
+      { key: 'zscore', label: '截面 Z-Score' },
+    ]).map(item => ({ label: item.label, value: item.key }))
+  ), [options]);
 
   const summary = result?.summary || {};
   const metadata = result?.metadata || {};
+  const oosSummary = result?.oos_summary || {};
+  const hasOosSummary = Number(oosSummary.samples || 0) > 0;
   const bucketRows = result?.bucket_returns || [];
   const icRows = result?.rank_ic_series || [];
   const heatmapRows = result?.parameter_heatmap || [];
   const nonOverlapSummary = result?.non_overlapping_summary || {};
   const nonOverlapRows = result?.non_overlapping_offsets || [];
   const yearlyRows = result?.yearly_stability || [];
+  const heatmapMetric = selectedHeatmapMetric || metadata.heatmap_metric || DEFAULT_HEATMAP_METRIC;
+  const heatmapMetricMeta = getHeatmapMetricMeta(heatmapMetric, options?.heatmap_metrics);
   const selectedComboText = selectedCombo
     ? `${selectedCombo.window}日 × T+${selectedCombo.forward_window}`
     : '-';
   const heatmapEvents = useMemo(() => ({
     click: params => {
       if (params.seriesType !== 'heatmap' || !Array.isArray(params.value)) return;
-      const validRows = heatmapRows.filter(item => getHeatmapValue(item) !== null && getHeatmapValue(item) !== undefined);
+      const validRows = heatmapRows.filter(item => getHeatmapValue(item, heatmapMetric) !== null && getHeatmapValue(item, heatmapMetric) !== undefined);
       const windows = [...new Set(validRows.map(item => item.window))].sort((a, b) => a - b);
       const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
       const row = validRows.find(item => (
@@ -465,7 +524,7 @@ const FactorLab = () => {
         runSelectedComboAnalysis({ window: row.window, forward_window: row.forward_window });
       }
     },
-  }), [heatmapRows, runSelectedComboAnalysis]);
+  }), [heatmapRows, heatmapMetric, runSelectedComboAnalysis]);
 
   return (
     <div className="factor-lab-page">
@@ -481,6 +540,8 @@ const FactorLab = () => {
                 {metadata.factor_direction_label}
               </Tag>
             )}
+            {metadata.neutralization_label && <Tag color="purple">{metadata.neutralization_label}</Tag>}
+            {metadata.standardization_label && <Tag>{metadata.standardization_label}</Tag>}
           </Space>
         </div>
         <Space>
@@ -511,6 +572,16 @@ const FactorLab = () => {
                 </Form.Item>
               </Col>
               <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="neutralization" label="中性化" rules={[{ required: true }]}>
+                  <Select options={neutralizationOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="standardization" label="标准化" rules={[{ required: true }]}>
+                  <Select options={standardizationOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
                 <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
                   <DatePicker className="factor-lab-full" />
                 </Form.Item>
@@ -518,6 +589,16 @@ const FactorLab = () => {
               <Col xs={24} sm={12} md={6} lg={4}>
                 <Form.Item name="end_date" label="结束日期">
                   <DatePicker className="factor-lab-full" allowClear />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="oos_start_date" label="样本外起始">
+                  <DatePicker className="factor-lab-full" allowClear />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={5}>
+                <Form.Item name="heatmap_metric" label="热力图指标" rules={[{ required: true }]}>
+                  <Select options={heatmapMetricOptions} />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={12} md={8} lg={5}>
@@ -557,13 +638,13 @@ const FactorLab = () => {
         <Spin spinning={running || selectingCombo}>
           <Card
             className="factor-lab-heatmap-card"
-            title={<Space><FireOutlined />参数热力图（非重叠年化多空差）</Space>}
+            title={<Space><FireOutlined />参数热力图（{heatmapMetricMeta.label}）</Space>}
             extra={<Tag color="blue">当前：{selectedComboText}</Tag>}
             bordered={false}
           >
             {heatmapRows.length ? (
               <ReactECharts
-                option={getHeatmapOption(heatmapRows, selectedCombo)}
+                option={getHeatmapOption(heatmapRows, selectedCombo, heatmapMetric, options?.heatmap_metrics)}
                 style={{ height: 360 }}
                 onEvents={heatmapEvents}
               />
@@ -575,10 +656,12 @@ const FactorLab = () => {
             <Statistic title="交易日" value={summary.trade_dates} formatter={numberFormatter} />
             <Statistic title="Rank IC" value={summary.rank_ic_mean} formatter={icFormatter} />
             <Statistic title="ICIR" value={summary.icir} formatter={icFormatter} />
+            <Statistic title="IC t-stat" value={summary.rank_ic_t_stat} formatter={icFormatter} />
             <Statistic title="最高桶收益" value={summary.top_bucket_avg_return_pct} formatter={percentFormatter} />
             <Statistic title="T+n多空差" value={summary.top_minus_bottom_avg_return_pct} formatter={percentFormatter} />
             <Statistic title="年化多空差" value={summary.annualized_top_minus_bottom_avg_return_pct} formatter={percentFormatter} />
             <Statistic title="非重叠年化" value={nonOverlapSummary.annualized_median_pct} formatter={percentFormatter} />
+            <Statistic title="多空 t-stat" value={summary.spread_t_stat} formatter={icFormatter} />
             <Statistic title="单调性" value={summary.monotonicity_spearman} formatter={icFormatter} />
             <Statistic title="相邻命中" value={summary.adjacent_hit_rate_pct} formatter={percentFormatter} />
             <Statistic
@@ -589,6 +672,23 @@ const FactorLab = () => {
             />
           </div>
 
+          {hasOosSummary && (
+            <Card className="factor-lab-oos-card" title="样本外摘要" bordered={false}>
+              <div className="factor-lab-metrics factor-lab-metrics-compact">
+                <Statistic title="样本" value={oosSummary.samples} formatter={numberFormatter} />
+                <Statistic title="交易日" value={oosSummary.trade_dates} formatter={numberFormatter} />
+                <Statistic title="Rank IC" value={oosSummary.rank_ic_mean} formatter={icFormatter} />
+                <Statistic title="IC t-stat" value={oosSummary.rank_ic_t_stat} formatter={icFormatter} />
+                <Statistic title="T+n多空差" value={oosSummary.top_minus_bottom_avg_return_pct} formatter={percentFormatter} />
+                <Statistic title="年化多空差" value={oosSummary.annualized_top_minus_bottom_avg_return_pct} formatter={percentFormatter} />
+                <Statistic title="非重叠年化" value={oosSummary.non_overlap_annualized_median_pct} formatter={percentFormatter} />
+                <Statistic title="多空 t-stat" value={oosSummary.spread_t_stat} formatter={icFormatter} />
+                <Statistic title="单调性" value={oosSummary.monotonicity_spearman} formatter={icFormatter} />
+                <Statistic title="相邻命中" value={oosSummary.adjacent_hit_rate_pct} formatter={percentFormatter} />
+              </div>
+            </Card>
+          )}
+
           <Alert
             className="factor-lab-meta"
             type="info"
@@ -598,8 +698,14 @@ const FactorLab = () => {
                 <span>{metadata.start_date} 至 {metadata.end_date}</span>
                 <span>{metadata.universe_symbols} 只股票</span>
                 {metadata.min_listing_days !== undefined && <span>上市满 {metadata.min_listing_days} 天</span>}
+                {metadata.oos_start_date && <span>样本外自 {metadata.oos_start_date}</span>}
                 <span>{metadata.price_rows?.toLocaleString?.('zh-CN') || metadata.price_rows} 行行情</span>
                 <span>{selectedComboText}</span>
+                {metadata.heatmap_metric_label && <span>热力图：{metadata.heatmap_metric_label}</span>}
+                {metadata.neutralization_label && <span>{metadata.neutralization_label}</span>}
+                {metadata.standardization_label && <span>{metadata.standardization_label}</span>}
+                {metadata.industry_snapshot_mode && <span>行业快照 {numberFormatter(metadata.industry_rows)} 行</span>}
+                {metadata.neutralization_warning && <Tag color="orange">{metadata.neutralization_warning}</Tag>}
                 {metadata.factor_direction_adjusted && <span>已按方向反转因子值</span>}
                 <span>{numberFormatter(summary.elapsed_ms)} ms</span>
               </Space>
