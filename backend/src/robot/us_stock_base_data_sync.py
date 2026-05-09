@@ -328,6 +328,38 @@ def _candidate_etf_component_symbols(candidate_etfs: Optional[Sequence[str]] = N
     return sorted(dict.fromkeys(symbols))
 
 
+def _managed_etf_symbols(candidate_etfs: Optional[Sequence[str]] = None) -> List[str]:
+    from .etf_manager import get_leveraged_etf_map_symbols
+
+    symbols = [
+        normalize_us_equity_symbol(item)
+        for item in [
+            *(candidate_etfs or US_STOCK_BASE_DATA_CANDIDATE_ETFS),
+            *get_leveraged_etf_map_symbols(),
+        ]
+    ]
+    return sorted(dict.fromkeys(symbol for symbol in symbols if symbol and symbol.endswith(".US")))
+
+
+def _daily_sync_symbols(candidate_etfs: Optional[Sequence[str]] = None) -> Tuple[List[str], List[str], List[str]]:
+    component_symbols = _candidate_etf_component_symbols(candidate_etfs)
+    etf_symbols = _managed_etf_symbols(candidate_etfs)
+    etf_set = set(etf_symbols)
+
+    if US_STOCK_DAILY_MAX_SYMBOLS > 0:
+        remaining_limit = max(0, US_STOCK_DAILY_MAX_SYMBOLS - len(etf_symbols))
+        component_symbols = [
+            symbol
+            for symbol in component_symbols
+            if symbol not in etf_set
+        ][:remaining_limit]
+
+    combined_symbols = sorted(dict.fromkeys([*etf_symbols, *component_symbols]))
+    combined_set = set(combined_symbols)
+    included_component_symbols = sorted(symbol for symbol in component_symbols if symbol in combined_set)
+    return combined_symbols, included_component_symbols, sorted(etf_set)
+
+
 def _kline_trade_date(timestamp) -> Optional[date]:
     if isinstance(timestamp, datetime):
         return timestamp.date()
@@ -843,12 +875,13 @@ class USStockBaseDataSyncService:
         if not static_symbols:
             raise RuntimeError("EVC 未返回可同步 static_info 的美股列表")
 
-        daily_symbols = _candidate_etf_component_symbols()
+        daily_symbols, daily_component_symbols, daily_etf_symbols = _daily_sync_symbols()
         if not daily_symbols:
-            raise RuntimeError("未找到 SPY/QQQ 成分股，请先同步 ETF 持仓数据")
+            raise RuntimeError("未找到可同步日K的美股列表，请先同步 ETF 持仓数据")
+        if not daily_component_symbols:
+            self.logger.warning("No SPY/QQQ component symbols found; US daily sync will only include managed ETFs")
         daily_securities = self._fetch_us_securities(
             symbols=daily_symbols,
-            max_symbols=US_STOCK_DAILY_MAX_SYMBOLS,
         )
         daily_symbols = [item["symbol"] for item in daily_securities]
         if not daily_symbols:
@@ -873,6 +906,9 @@ class USStockBaseDataSyncService:
             "symbols": len(static_symbols),
             "static_symbols": len(static_symbols),
             "daily_symbols": len(daily_symbols),
+            "daily_component_symbols": len(daily_component_symbols),
+            "daily_etf_symbols": len(daily_etf_symbols),
+            "daily_etf_symbol_list": daily_etf_symbols,
             "static_info_fetched": len(static_info_map),
             "static_info_missing": static_missing,
             "static_snapshot": static_snapshot_result,

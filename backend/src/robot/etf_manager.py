@@ -45,6 +45,16 @@ LEVERAGED_ETF_MAP = {
     'VUG.US': ['VUG.US', 1],    # Vanguard成长
 }
 
+def get_leveraged_etf_map_symbols() -> List[str]:
+    """Return all single and leveraged ETF symbols defined in LEVERAGED_ETF_MAP."""
+    symbols: List[str] = []
+    for base_symbol, mapping in LEVERAGED_ETF_MAP.items():
+        symbols.append(base_symbol)
+        if mapping:
+            symbols.append(mapping[0])
+    normalized = [normalize_us_equity_symbol(symbol) for symbol in symbols]
+    return sorted(dict.fromkeys(symbol for symbol in normalized if symbol and symbol.endswith(".US")))
+
 
 def _recent_klines(quote_service: QuoteService, symbol: str, count: int, end_date: Optional[date] = None) -> List[dict]:
     end_value = end_date or date.today()
@@ -84,17 +94,17 @@ class ETFManager:
             'XLK.US': spdr_fetcher,
             'XRT.US': spdr_fetcher,  # 添加 XRT
             'QQQ.US': QQQDataFetcher(),
-            
+
             # 新增的 iShares ETF
             # 'IAK.US': ishares_fetcher,  # iShares U.S. Insurance ETF
-            
+
             # 新增的 SPDR ETF
             # 'XLC.US': spdr_fetcher,  # SPDR Communication Services
             'XLE.US': spdr_fetcher,  # SPDR Energy
             'XLI.US': spdr_fetcher,  # SPDR Industrial
             # 'XLP.US': spdr_fetcher,  # SPDR Consumer Staples
             'XLU.US': spdr_fetcher,  # SPDR Utilities
-            
+
             # # 新增的 Vanguard ETF
             # 'VDC.US': vanguard_fetcher,  # Vanguard Consumer Staples ETF
             # 'VIG.US': vanguard_fetcher,  # Vanguard Dividend Appreciation ETF

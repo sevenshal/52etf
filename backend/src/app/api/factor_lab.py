@@ -1,10 +1,15 @@
 import logging
 import math
+import os
 import re
+import threading
 import time
-from bisect import bisect_left
+import uuid
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from itertools import combinations, product
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import numpy as np
@@ -13,12 +18,23 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as ORMSession
 
-from ...core.analytics_database import ANALYTICS_DB_PATH
+from ...core.database import Session as DBSession
 from ...core.database import StockEVC, USStockIndustrySnapshot, get_db
 from ...robot.us_stock_signal_virtual import (
+    DEFAULT_CANDIDATE_ETFS,
     DEFAULT_MOMENTUM_WEIGHTS,
+    DEFAULT_REBALANCE_FREQUENCY,
+    DEFAULT_SELL_RANK_MULTIPLIER,
+    SUPPORTED_REBALANCE_FREQUENCIES,
     SUPPORTED_MOMENTUM_WINDOWS,
+    _build_benchmark_curve,
+    _build_yearly_stats,
+    _floor_lot,
+    _is_rebalance_day,
+    _normalize_rebalance_frequency,
+    _portfolio_value,
     load_universe_history,
+    load_universe_weight_history,
 )
 from .account import valid_account
 
@@ -27,6 +43,7 @@ router = APIRouter(prefix="/api/factor-lab", tags=["Factor Lab"])
 logger = logging.getLogger(__name__)
 
 TRADING_DAYS_PER_YEAR = 252
+ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
 SUPPORTED_WINDOWS = [20, 60, 120]
 MIXED_WINDOW_KEY = "mixed"
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
@@ -57,6 +74,7 @@ NEUTRALIZATION_ALIASES = {
 STANDARDIZATION_OPTIONS = {
     "none": {"label": "不标准化"},
     "zscore": {"label": "截面 Z-Score"},
+    "rank_percentile": {"label": "截面排名分位"},
 }
 HEATMAP_METRIC_OPTIONS = {
     "non_overlap_annualized_median_pct": {
@@ -91,6 +109,21 @@ HEATMAP_METRIC_OPTIONS = {
         "label": "相邻命中率",
         "kind": "percent",
     },
+}
+
+BACKTEST_SEARCH_OBJECTIVE_OPTIONS = {
+    "annualized_return": {"label": "年化收益最大"},
+    "total_return": {"label": "总收益最大"},
+    "sharpe": {"label": "夏普最大"},
+    "calmar": {"label": "卡玛最大"},
+}
+BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
+BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
+BACKTEST_SEARCH_JOBS: Dict[str, Dict[str, Any]] = {}
+BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
+MOMENTUM_FACTOR_SCORE_PREFIX = {
+    "risk_adjusted_momentum": "_ram",
+    "raw_momentum": "_raw_mom",
 }
 
 
@@ -231,15 +264,298 @@ class FactorLabAnalyzeRequest(BaseModel):
         return value
 
 
+class CompositeFactorLeg(BaseModel):
+    factor: str
+    window: Union[int, str] = 20
+    weight: float = 1.0
+    neutralization: str = DEFAULT_NEUTRALIZATION
+    standardization: str = "rank_percentile"
+    momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
+
+    @validator("window", pre=True)
+    def validate_window(cls, value):
+        if isinstance(value, str) and value.strip().lower() == MIXED_WINDOW_KEY:
+            return MIXED_WINDOW_KEY
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("窗口必须是数字或 mixed")
+        if window not in SUPPORTED_WINDOWS:
+            raise ValueError(f"窗口只支持: {', '.join(str(item) for item in SUPPORTED_WINDOWS)}")
+        return window
+
+    @validator("weight")
+    def validate_weight(cls, value):
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("因子权重必须是数字")
+        if not math.isfinite(weight) or abs(weight) > 100:
+            raise ValueError("因子权重必须是有限数字，绝对值不超过100")
+        return weight
+
+    @validator("momentum_weights", pre=True)
+    def validate_momentum_weights(cls, value):
+        return _normalize_momentum_weights_payload(value)
+
+    @validator("neutralization")
+    def validate_neutralization(cls, value):
+        normalized = str(value or DEFAULT_NEUTRALIZATION)
+        normalized = NEUTRALIZATION_ALIASES.get(normalized, normalized)
+        if normalized not in NEUTRALIZATION_OPTIONS:
+            raise ValueError(f"中性化仅支持: {', '.join(NEUTRALIZATION_OPTIONS)}")
+        return normalized
+
+    @validator("standardization")
+    def validate_standardization(cls, value):
+        normalized = str(value or "rank_percentile")
+        if normalized not in STANDARDIZATION_OPTIONS:
+            raise ValueError(f"标准化仅支持: {', '.join(STANDARDIZATION_OPTIONS)}")
+        return normalized
+
+
+class CompositeFactorAnalyzeRequest(BaseModel):
+    pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
+    bucket_count: int = 10
+    start_date: date = DEFAULT_START_DATE
+    end_date: Optional[date] = None
+    oos_start_date: Optional[date] = None
+    forward_window: int = 20
+    min_listing_days: int = DEFAULT_MIN_LISTING_DAYS
+    legs: List[CompositeFactorLeg] = Field(
+        default_factory=lambda: [
+            CompositeFactorLeg(factor="risk_adjusted_momentum", window=MIXED_WINDOW_KEY, weight=0.7, standardization="rank_percentile"),
+            CompositeFactorLeg(factor="volume_z", window=20, weight=0.3, standardization="rank_percentile"),
+        ]
+    )
+
+    @validator("bucket_count")
+    def validate_bucket_count(cls, value):
+        if value < 2 or value > 20:
+            raise ValueError("分桶数必须在 2 到 20 之间")
+        return int(value)
+
+    @validator("forward_window", pre=True)
+    def validate_forward_window(cls, value):
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("收益窗口必须是数字")
+        if window < 1 or window > 252:
+            raise ValueError("收益窗口必须在 1 到 252 之间")
+        return window
+
+    @validator("min_listing_days")
+    def validate_min_listing_days(cls, value):
+        days = int(value)
+        if days < 0 or days > 3650:
+            raise ValueError("上市天数过滤必须在 0 到 3650 天之间")
+        return days
+
+    @validator("oos_start_date")
+    def validate_oos_start_date(cls, value, values):
+        if value is None:
+            return value
+        start = values.get("start_date")
+        end = values.get("end_date") or date.today()
+        if start is not None and value <= start:
+            raise ValueError("样本外起始日期必须晚于开始日期")
+        if end is not None and value >= end:
+            raise ValueError("样本外起始日期必须早于结束日期")
+        return value
+
+    @validator("end_date")
+    def validate_date_range(cls, value, values):
+        start = values.get("start_date")
+        if value is not None and start is not None and value <= start:
+            raise ValueError("结束日期必须晚于开始日期")
+        return value
+
+    @validator("legs")
+    def validate_legs(cls, value):
+        if len(value) < 2:
+            raise ValueError("组合因子至少需要2个子因子")
+        if len(value) > 8:
+            raise ValueError("组合因子最多支持8个子因子")
+        if sum(abs(float(item.weight)) for item in value) <= 0:
+            raise ValueError("至少设置一个非0因子权重")
+        return value
+
+
+class FactorBacktestRequest(BaseModel):
+    pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
+    start_date: date = DEFAULT_START_DATE
+    end_date: Optional[date] = None
+    initial_capital: float = 100_000.0
+    max_positions: int = 7
+    sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
+    rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY
+    commission_pct: float = 0.03
+    slippage_pct: float = 0.02
+    lot_size: int = 1
+    min_listing_days: int = DEFAULT_MIN_LISTING_DAYS
+    legs: List[CompositeFactorLeg] = Field(
+        default_factory=lambda: [
+            CompositeFactorLeg(
+                factor="risk_adjusted_momentum",
+                window=MIXED_WINDOW_KEY,
+                weight=0.6,
+                neutralization=DEFAULT_NEUTRALIZATION,
+                standardization="rank_percentile",
+                momentum_weights=DEFAULT_MOMENTUM_WEIGHTS.copy(),
+            ),
+            CompositeFactorLeg(
+                factor="index_weight",
+                window=20,
+                weight=0.4,
+                neutralization=DEFAULT_NEUTRALIZATION,
+                standardization="rank_percentile",
+                momentum_weights=DEFAULT_MOMENTUM_WEIGHTS.copy(),
+            ),
+        ]
+    )
+
+    @validator("initial_capital")
+    def validate_initial_capital(cls, value):
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError("初始资金必须大于0")
+        return number
+
+    @validator("max_positions")
+    def validate_max_positions(cls, value):
+        number = int(value)
+        if number < 1 or number > 100:
+            raise ValueError("持仓数量必须在1到100之间")
+        return number
+
+    @validator("sell_rank_multiplier")
+    def validate_sell_rank_multiplier(cls, value):
+        number = float(value)
+        if not math.isfinite(number) or number < 1 or number > 10:
+            raise ValueError("卖出排名倍数必须在1到10之间")
+        return number
+
+    @validator("rebalance_frequency")
+    def validate_rebalance_frequency(cls, value):
+        normalized = _normalize_rebalance_frequency(value)
+        if normalized not in SUPPORTED_REBALANCE_FREQUENCIES:
+            raise ValueError(f"调仓频率仅支持: {', '.join(SUPPORTED_REBALANCE_FREQUENCIES)}")
+        return normalized
+
+    @validator("commission_pct", "slippage_pct")
+    def validate_cost_pct(cls, value):
+        number = float(value)
+        if not math.isfinite(number) or number < 0 or number > 10:
+            raise ValueError("交易成本百分比必须在0到10之间")
+        return number
+
+    @validator("lot_size")
+    def validate_lot_size(cls, value):
+        number = int(value)
+        if number < 1 or number > 10_000:
+            raise ValueError("交易单位必须在1到10000之间")
+        return number
+
+    @validator("min_listing_days")
+    def validate_min_listing_days(cls, value):
+        days = int(value)
+        if days < 0 or days > 3650:
+            raise ValueError("上市天数过滤必须在 0 到 3650 天之间")
+        return days
+
+    @validator("end_date")
+    def validate_date_range(cls, value, values):
+        start = values.get("start_date")
+        if value is not None and start is not None and value <= start:
+            raise ValueError("结束日期必须晚于开始日期")
+        return value
+
+    @validator("legs")
+    def validate_legs(cls, value):
+        if len(value) < 1:
+            raise ValueError("因子回测至少需要1个因子")
+        if len(value) > 8:
+            raise ValueError("因子回测最多支持8个因子")
+        if sum(abs(float(item.weight)) for item in value) <= 0:
+            raise ValueError("至少设置一个非0因子权重")
+        return value
+
+
+class FactorBacktestSearchRequest(BaseModel):
+    request: FactorBacktestRequest
+    objective: Literal["annualized_return", "total_return", "sharpe", "calmar"] = "annualized_return"
+    window_weight_bucket_count: int = 20
+    factor_weight_bucket_count: int = 20
+    max_positions_candidates: Optional[List[int]] = None
+    sell_rank_multiplier_candidates: Optional[List[float]] = None
+    top_n: int = 200
+
+    @validator("window_weight_bucket_count", "factor_weight_bucket_count")
+    def validate_bucket_count(cls, value):
+        number = int(value)
+        if number < 1 or number > 100:
+            raise ValueError("权重分桶数必须在1到100之间")
+        return number
+
+    @validator("max_positions_candidates", pre=True, always=True)
+    def validate_max_positions_candidates(cls, value, values):
+        request = values.get("request")
+        items = value if isinstance(value, list) else ([] if value is None else [value])
+        if not items and request is not None:
+            items = [request.max_positions]
+        normalized: List[int] = []
+        for item in items:
+            raw_number = float(item)
+            if not math.isfinite(raw_number) or abs(raw_number - int(raw_number)) > 1e-9:
+                raise ValueError("持仓数候选项必须是整数")
+            number = int(raw_number)
+            if number < 1 or number > 100:
+                raise ValueError("持仓数候选项必须在1到100之间")
+            if number not in normalized:
+                normalized.append(number)
+        if len(normalized) > 50:
+            raise ValueError("持仓数候选项最多支持50个")
+        return normalized
+
+    @validator("sell_rank_multiplier_candidates", pre=True, always=True)
+    def validate_sell_rank_multiplier_candidates(cls, value, values):
+        request = values.get("request")
+        items = value if isinstance(value, list) else ([] if value is None else [value])
+        if not items and request is not None:
+            items = [request.sell_rank_multiplier]
+        normalized: List[float] = []
+        for item in items:
+            number = float(item)
+            if not math.isfinite(number) or number < 1 or number > 10:
+                raise ValueError("卖出倍数候选项必须在1到10之间")
+            rounded = round(number, 6)
+            if rounded not in normalized:
+                normalized.append(rounded)
+        if len(normalized) > 50:
+            raise ValueError("卖出倍数候选项最多支持50个")
+        return normalized
+
+    @validator("top_n")
+    def validate_top_n(cls, value):
+        number = int(value)
+        if number < 1 or number > 1000:
+            raise ValueError("Top N 必须在1到1000之间")
+        return number
+
+
 class FactorLabOptionsResponse(BaseModel):
     pools: List[Dict[str, Any]]
     factors: List[Dict[str, Any]]
     windows: List[int]
     forward_windows: List[int]
     heatmap_metrics: List[Dict[str, Any]]
+    backtest_search_objectives: List[Dict[str, Any]]
     neutralization_options: List[Dict[str, Any]]
     standardization_options: List[Dict[str, Any]]
     default_request: Dict[str, Any]
+    default_composite_request: Dict[str, Any]
+    default_backtest_request: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -252,6 +568,9 @@ class FactorContext:
     end_date: date
     analysis_dates: List[date] = field(default_factory=list)
     industry_df: Optional[pl.DataFrame] = None
+    candidate_etfs: List[str] = field(default_factory=list)
+    valuation_df: Optional[pl.DataFrame] = None
+    weight_history: Optional[Dict[str, Dict[date, Dict[str, float]]]] = None
 
 
 @dataclass(frozen=True)
@@ -425,6 +744,23 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
+def _request_to_dict(request: Any) -> Dict[str, Any]:
+    if isinstance(request, BaseModel):
+        if hasattr(request, "model_dump"):
+            return request.model_dump()
+        return request.dict()
+    return dict(vars(request))
+
+
+def _put_limited_cache(cache: Dict[Any, Any], key: Any, value: Any, limit: int):
+    if key in cache:
+        cache[key] = value
+        return
+    while len(cache) >= max(1, int(limit)):
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
 def _records(df: pl.DataFrame, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     if df.is_empty():
         return []
@@ -448,8 +784,10 @@ def _connect_duckdb():
     try:
         return duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
     except Exception as exc:
-        logger.warning("Read-only DuckDB connection failed, retrying writable connection: %s", exc)
-        return duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+        raise HTTPException(
+            status_code=503,
+            detail=f"DuckDB分析库当前不可读，可能正在同步写入或被其他进程占用: {exc}",
+        ) from exc
 
 
 def _get_max_trade_date() -> date:
@@ -478,6 +816,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
             schema={
                 "symbol": pl.Utf8,
                 "trade_date": pl.Date,
+                "open": pl.Float64,
                 "close": pl.Float64,
                 "volume": pl.Float64,
                 "turnover": pl.Float64,
@@ -489,6 +828,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
         SELECT
             symbol,
             CAST(trade_date AS DATE) AS trade_date,
+            CAST(open AS DOUBLE) AS open,
             CAST(close AS DOUBLE) AS close,
             CAST(volume AS DOUBLE) AS volume,
             CAST(turnover AS DOUBLE) AS turnover
@@ -513,6 +853,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
         return df
     return df.with_columns(
         pl.col("trade_date").cast(pl.Date),
+        pl.col("open").cast(pl.Float64),
         pl.col("close").cast(pl.Float64),
         pl.col("volume").cast(pl.Float64),
         pl.col("turnover").cast(pl.Float64),
@@ -760,6 +1101,96 @@ def _compute_raw_momentum(df: pl.DataFrame, context: FactorContext) -> pl.DataFr
     return result.with_columns(factor_expr.alias("factor_value"))
 
 
+def _build_momentum_score_source_frame(
+    price_df: pl.DataFrame,
+    factor_key: str,
+    windows: List[int],
+) -> pl.DataFrame:
+    if price_df.is_empty():
+        return price_df
+
+    result = _ensure_base_columns(price_df)
+    score_columns: List[str] = []
+    for window in list(dict.fromkeys(int(item) for item in windows)):
+        if factor_key == "risk_adjusted_momentum":
+            result = _add_risk_adjusted_momentum_score(result, window)
+            score_columns.append(f"_ram_{window}_score")
+        elif factor_key == "raw_momentum":
+            result = _add_raw_momentum_score(result, window)
+            score_columns.append(f"_raw_mom_{window}_score")
+
+    base_columns = [
+        column
+        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
+        if column in result.columns
+    ]
+    return result.select([*base_columns, *score_columns])
+
+
+def _momentum_score_source_frame(
+    price_df: pl.DataFrame,
+    factor_key: str,
+    windows: List[int],
+    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]],
+) -> pl.DataFrame:
+    cache_key = (
+        factor_key,
+        tuple(sorted(list(dict.fromkeys(int(item) for item in windows)))),
+    )
+    if raw_factor_cache is not None and cache_key in raw_factor_cache:
+        return raw_factor_cache[cache_key]
+
+    source = _build_momentum_score_source_frame(price_df, factor_key, list(cache_key[1]))
+    if raw_factor_cache is not None:
+        raw_factor_cache[cache_key] = source
+    return source
+
+
+def _prepare_momentum_factor_frame_from_source(
+    source_df: pl.DataFrame,
+    factor_definition: FactorDefinition,
+    context: FactorContext,
+    request: FactorLabAnalyzeRequest,
+) -> pl.DataFrame:
+    prefix = MOMENTUM_FACTOR_SCORE_PREFIX.get(factor_definition.key)
+    if source_df.is_empty() or not prefix:
+        return source_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    base_columns = [
+        column
+        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
+        if column in source_df.columns
+    ]
+    result = source_df.select(base_columns).unique(subset=["symbol", "trade_date"])
+    factor_expr = None
+    for window, weight in context.momentum_weights.items():
+        column = f"{prefix}_{int(window)}_score"
+        if column not in source_df.columns:
+            continue
+        window_factor_column = f"_window_factor_{int(window)}"
+        window_df = (
+            source_df.select([*base_columns, column])
+            .with_columns(pl.col(column).alias("factor_value"))
+        )
+        window_df = _apply_factor_transformations(
+            _apply_factor_direction(window_df, factor_definition),
+            request,
+            context,
+        ).select(
+            "symbol",
+            "trade_date",
+            pl.col("factor_value").alias(window_factor_column),
+        )
+        result = result.join(window_df, on=["symbol", "trade_date"], how="left")
+        expr = pl.col(window_factor_column) * float(weight)
+        factor_expr = expr if factor_expr is None else factor_expr + expr
+
+    result = result.with_columns(
+        (factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value")
+    )
+    return result.select([*base_columns, "factor_value"])
+
+
 def _compute_volume_z(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty():
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -799,12 +1230,14 @@ def _compute_valuation_gap(df: pl.DataFrame, context: FactorContext) -> pl.DataF
     if df.is_empty():
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
 
-    valuation_df = _load_valuation_frame(
-        context.db,
-        context.symbols,
-        context.start_date - timedelta(days=540),
-        context.end_date,
-    )
+    valuation_df = context.valuation_df
+    if valuation_df is None:
+        valuation_df = _load_valuation_frame(
+            context.db,
+            context.symbols,
+            context.start_date - timedelta(days=540),
+            context.end_date,
+        )
     if valuation_df.is_empty():
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
 
@@ -822,6 +1255,71 @@ def _compute_valuation_gap(df: pl.DataFrame, context: FactorContext) -> pl.DataF
     return result
 
 
+def _compute_index_weight(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    candidate_etfs = list(dict.fromkeys(context.candidate_etfs or DEFAULT_CANDIDATE_ETFS))
+    if not candidate_etfs:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    analysis_dates = context.analysis_dates or (
+        df.filter((pl.col("trade_date") >= context.start_date) & (pl.col("trade_date") <= context.end_date))
+        .select("trade_date")
+        .unique()
+        .sort("trade_date")
+        .to_series()
+        .to_list()
+    )
+    if not analysis_dates:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    weight_history = context.weight_history
+    if weight_history is None:
+        weight_history = load_universe_weight_history(
+            context.db,
+            candidate_etfs,
+            context.start_date,
+            context.end_date,
+        )
+    if not weight_history:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    etf_weight = 1.0 / len(candidate_etfs)
+    sorted_weight_dates = {
+        etf_symbol: sorted(history.keys())
+        for etf_symbol, history in weight_history.items()
+    }
+    records: List[Dict[str, Any]] = []
+    for current_date in analysis_dates:
+        combined_weights: Dict[str, float] = {}
+        for etf_symbol in candidate_etfs:
+            snapshot_dates = sorted_weight_dates.get(etf_symbol) or []
+            date_index = bisect_right(snapshot_dates, current_date) - 1
+            if date_index < 0:
+                continue
+            snapshot_date = snapshot_dates[date_index]
+            for symbol, weight in weight_history.get(etf_symbol, {}).get(snapshot_date, {}).items():
+                combined_weights[symbol] = combined_weights.get(symbol, 0.0) + float(weight or 0.0) * etf_weight
+        for symbol, weight in combined_weights.items():
+            records.append(
+                {
+                    "trade_date": current_date,
+                    "symbol": symbol,
+                    "factor_value": weight,
+                }
+            )
+
+    if not records:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    weight_df = pl.DataFrame(records).with_columns(
+        pl.col("trade_date").cast(pl.Date),
+        pl.col("factor_value").cast(pl.Float64),
+    )
+    return df.join(weight_df, on=["symbol", "trade_date"], how="left")
+
+
 def _compute_custom_momentum_volume(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     momentum = _compute_risk_adjusted_momentum(df, context).select(["symbol", "trade_date", "factor_value"])
     volume_context = FactorContext(
@@ -831,6 +1329,7 @@ def _compute_custom_momentum_volume(df: pl.DataFrame, context: FactorContext) ->
         symbols=context.symbols,
         start_date=context.start_date,
         end_date=context.end_date,
+        candidate_etfs=context.candidate_etfs,
     )
     volume = _compute_volume_z(df, volume_context).select(
         ["symbol", "trade_date", pl.col("factor_value").alias("_volume_z")]
@@ -902,6 +1401,17 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_valuation_gap,
+    ),
+    "index_weight": FactorDefinition(
+        key="index_weight",
+        label="指数：成分权重",
+        group="指数",
+        description="股票在所选股票池ETF中的成分权重；SPY+QQQ按两个ETF等权合成后再做截面排名。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="higher_is_better",
+        compute=_compute_index_weight,
     ),
     "custom_momentum_volume": FactorDefinition(
         key="custom_momentum_volume",
@@ -1080,6 +1590,52 @@ def _apply_factor_standardization(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _with_cross_section_rank_percentile(
+    df: pl.DataFrame,
+    source_column: str,
+    output_column: str,
+) -> pl.DataFrame:
+    if df.is_empty() or source_column not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias(output_column))
+
+    valid_column = f"_{output_column}_valid"
+    rank_column = f"_{output_column}_rank"
+    count_column = f"_{output_column}_count"
+    return (
+        df.with_columns(
+            pl.when(pl.col(source_column).is_not_null() & pl.col(source_column).is_finite())
+            .then(pl.col(source_column).cast(pl.Float64))
+            .otherwise(None)
+            .alias(valid_column)
+        )
+        .with_columns(
+            pl.col(valid_column).rank("average").over("trade_date").alias(rank_column),
+            pl.col(valid_column).count().over("trade_date").alias(count_column),
+        )
+        .with_columns(
+            pl.when(pl.col(valid_column).is_null())
+            .then(None)
+            .when(pl.col(count_column) <= 1)
+            .then(1.0)
+            .otherwise((pl.col(rank_column) - 1) / (pl.col(count_column) - 1))
+            .alias(output_column)
+        )
+        .drop([valid_column, rank_column, count_column])
+    )
+
+
+def _apply_factor_rank_percentile(df: pl.DataFrame) -> pl.DataFrame:
+    if df.is_empty() or "factor_value" not in df.columns:
+        return df
+    return _with_cross_section_rank_percentile(
+        df,
+        "factor_value",
+        "factor_value_rank_percentile",
+    ).with_columns(
+        pl.col("factor_value_rank_percentile").alias("factor_value")
+    )
+
+
 def _apply_factor_transformations(
     df: pl.DataFrame,
     request: FactorLabAnalyzeRequest,
@@ -1090,6 +1646,8 @@ def _apply_factor_transformations(
         result = _apply_factor_neutralization(result, request.neutralization, context.industry_df)
     if request.standardization == "zscore":
         result = _apply_factor_standardization(result)
+    elif request.standardization == "rank_percentile":
+        result = _apply_factor_rank_percentile(result)
     return result
 
 
@@ -1719,6 +2277,7 @@ def _compute_parameter_heatmap(
         forward_windows = forward_windows[: max(1, MAX_HEATMAP_CELLS // max(1, len(windows)))]
 
     records: List[Dict[str, Any]] = []
+    raw_factor_cache: Dict[Any, pl.DataFrame] = {}
     for window in windows:
         active_windows = _active_windows_for_heatmap_row(window, factor_definition)
         heatmap_context = FactorContext(
@@ -1730,8 +2289,15 @@ def _compute_parameter_heatmap(
             end_date=context_base.end_date,
             analysis_dates=context_base.analysis_dates,
             industry_df=context_base.industry_df,
+            candidate_etfs=context_base.candidate_etfs,
         )
-        factor_df = _prepare_factor_frame(price_df, factor_definition, heatmap_context, request)
+        factor_df = _prepare_cached_leg_factor_frame(
+            price_df,
+            factor_definition,
+            heatmap_context,
+            request,
+            raw_factor_cache,
+        )
         for forward_window in forward_windows:
             sample = _assign_buckets(
                 _prepare_factor_sample(factor_df, universe_df, request, forward_window),
@@ -1837,6 +2403,7 @@ def _compute_factor_analysis_for_combo(
     momentum_weights: Dict[str, float],
     analysis_dates: List[date],
     industry_df: Optional[pl.DataFrame],
+    candidate_etfs: List[str],
 ) -> Dict[str, Any]:
     forward_window = int(combo["forward_window"])
     active_windows = (
@@ -1853,8 +2420,15 @@ def _compute_factor_analysis_for_combo(
         end_date=end_date,
         analysis_dates=analysis_dates,
         industry_df=industry_df,
+        candidate_etfs=candidate_etfs,
     )
-    factor_df = _prepare_factor_frame(price_df, factor_definition, context, request)
+    factor_df = _prepare_cached_leg_factor_frame(
+        price_df,
+        factor_definition,
+        context,
+        request,
+        {},
+    )
     full_sample = _assign_buckets(
         _prepare_factor_sample(factor_df, universe_df, request, forward_window),
         int(request.bucket_count),
@@ -1887,6 +2461,1620 @@ def _compute_factor_analysis_for_combo(
         "oos_non_overlapping_summary": oos_result["non_overlapping_summary"],
         "oos_non_overlapping_offsets": oos_result["non_overlapping_offsets"],
         "oos_yearly_stability": oos_result["yearly_stability"],
+    }
+
+
+def _resolve_composite_leg(
+    leg: CompositeFactorLeg,
+    index: int,
+) -> Dict[str, Any]:
+    factor_definition = FACTOR_REGISTRY.get(leg.factor)
+    if not factor_definition:
+        raise HTTPException(status_code=400, detail=f"未注册的组合子因子: {leg.factor}")
+    if leg.window == MIXED_WINDOW_KEY and not factor_definition.supports_mixed_windows:
+        raise HTTPException(status_code=400, detail=f"{factor_definition.label} 不支持多窗口合成")
+
+    active_windows = (
+        _active_windows_for_heatmap_row(leg.window, factor_definition)
+        if factor_definition.supports_windows
+        else factor_definition.default_windows
+    )
+    return {
+        "index": index,
+        "key": f"component_{index + 1}",
+        "column": f"_component_{index + 1}",
+        "factor_definition": factor_definition,
+        "factor": factor_definition.to_option(),
+        "window": leg.window,
+        "window_label": _window_label(leg.window) if factor_definition.supports_windows else "固定",
+        "windows": active_windows,
+        "raw_weight": float(leg.weight),
+        "neutralization": leg.neutralization,
+        "neutralization_label": NEUTRALIZATION_OPTIONS[leg.neutralization]["label"],
+        "standardization": leg.standardization,
+        "standardization_label": STANDARDIZATION_OPTIONS[leg.standardization]["label"],
+        "momentum_weights": leg.momentum_weights,
+    }
+
+
+def _resolve_factor_legs(legs: List[CompositeFactorLeg]) -> List[Dict[str, Any]]:
+    resolved = [_resolve_composite_leg(leg, index) for index, leg in enumerate(legs)]
+    total_abs_weight = sum(abs(item["raw_weight"]) for item in resolved)
+    if total_abs_weight <= 0:
+        raise HTTPException(status_code=400, detail="至少设置一个非0因子权重")
+    return [
+        {
+            **item,
+            "weight": item["raw_weight"] / total_abs_weight,
+        }
+        for item in resolved
+    ]
+
+
+def _resolve_composite_legs(request: CompositeFactorAnalyzeRequest) -> List[Dict[str, Any]]:
+    return _resolve_factor_legs(request.legs)
+
+
+def _required_windows_for_composite_legs(legs: List[Dict[str, Any]]) -> List[int]:
+    required: List[int] = []
+    for leg in legs:
+        required.extend(int(item) for item in leg["windows"])
+    return list(dict.fromkeys(required)) or SUPPORTED_WINDOWS.copy()
+
+
+def _leg_momentum_weights(leg: Dict[str, Any]) -> Dict[int, float]:
+    return _weights_for_heatmap_row(
+        leg["momentum_weights"],
+        leg["windows"],
+        leg["window"],
+    )
+
+
+def _backtest_leg_factor_cache_key(leg: Dict[str, Any]) -> Any:
+    momentum_weights = _leg_momentum_weights(leg)
+    return (
+        leg["factor"]["key"],
+        str(leg["window"]),
+        tuple(int(item) for item in leg["windows"]),
+        leg["neutralization"],
+        leg["standardization"],
+        tuple((int(window), round(float(weight), 10)) for window, weight in sorted(momentum_weights.items())),
+    )
+
+
+def _prepare_cached_leg_factor_frame(
+    price_df: pl.DataFrame,
+    factor_definition: FactorDefinition,
+    leg_context: FactorContext,
+    leg_request: FactorLabAnalyzeRequest,
+    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]],
+) -> pl.DataFrame:
+    if factor_definition.key in MOMENTUM_FACTOR_SCORE_PREFIX:
+        source_df = _momentum_score_source_frame(
+            price_df,
+            factor_definition.key,
+            leg_context.windows,
+            raw_factor_cache,
+        )
+        return _prepare_momentum_factor_frame_from_source(
+            source_df,
+            factor_definition,
+            leg_context,
+            leg_request,
+        )
+
+    return _prepare_factor_frame(price_df, factor_definition, leg_context, leg_request)
+
+
+def _prepare_composite_factor_frame(
+    price_df: pl.DataFrame,
+    request: CompositeFactorAnalyzeRequest,
+    db: ORMSession,
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+    analysis_dates: List[date],
+    industry_df: Optional[pl.DataFrame],
+    resolved_legs: List[Dict[str, Any]],
+    candidate_etfs: List[str],
+    valuation_df: Optional[pl.DataFrame] = None,
+    weight_history: Optional[Dict[str, Dict[date, Dict[str, float]]]] = None,
+    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
+    component_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
+) -> pl.DataFrame:
+    if price_df.is_empty():
+        return price_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    active_legs = [
+        leg
+        for leg in resolved_legs
+        if abs(float(leg.get("weight") or 0)) > 1e-12
+    ]
+    base_columns = [
+        column
+        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
+        if column in price_df.columns
+    ]
+    composite_df = price_df.select(base_columns).unique(subset=["symbol", "trade_date"])
+
+    for leg in active_legs:
+        factor_definition = leg["factor_definition"]
+        momentum_weights = _leg_momentum_weights(leg)
+        leg_context = FactorContext(
+            windows=leg["windows"],
+            momentum_weights=momentum_weights,
+            db=db,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            analysis_dates=analysis_dates,
+            industry_df=industry_df,
+            candidate_etfs=candidate_etfs,
+            valuation_df=valuation_df,
+            weight_history=weight_history,
+        )
+        leg_request_payload = _request_to_dict(request)
+        leg_request_payload.update(
+            {
+                "neutralization": leg["neutralization"],
+                "standardization": leg["standardization"],
+            }
+        )
+        leg_request = SimpleNamespace(**leg_request_payload)
+        leg_cache_key = _backtest_leg_factor_cache_key(leg)
+        cache_component = leg["window"] != MIXED_WINDOW_KEY
+        factor_df = (
+            component_factor_cache.get(leg_cache_key)
+            if cache_component and component_factor_cache is not None
+            else None
+        )
+        if factor_df is None:
+            factor_df = _prepare_cached_leg_factor_frame(
+                price_df,
+                factor_definition,
+                leg_context,
+                leg_request,
+                raw_factor_cache,
+            ).select("symbol", "trade_date", "factor_value")
+            if cache_component and component_factor_cache is not None:
+                _put_limited_cache(
+                    component_factor_cache,
+                    leg_cache_key,
+                    factor_df,
+                    BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT,
+                )
+        composite_df = composite_df.join(
+            factor_df.select(
+                "symbol",
+                "trade_date",
+                pl.col("factor_value").alias(leg["column"]),
+            ),
+            on=["symbol", "trade_date"],
+            how="left",
+        )
+
+    composite_expr = None
+    for leg in active_legs:
+        if leg["column"] not in composite_df.columns:
+            continue
+        expr = pl.col(leg["column"]) * float(leg["weight"])
+        composite_expr = expr if composite_expr is None else composite_expr + expr
+
+    if composite_expr is None:
+        return composite_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    return composite_df.with_columns(
+        composite_expr.alias("factor_value")
+    ).with_columns(
+        pl.col("factor_value").alias("factor_value_raw")
+    )
+
+
+def _compute_component_ic_summary(
+    analysis_sample: pl.DataFrame,
+    resolved_legs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if analysis_sample.is_empty():
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for leg in resolved_legs:
+        column = leg["column"]
+        if column not in analysis_sample.columns:
+            continue
+        leg_sample = (
+            analysis_sample
+            .filter(pl.col(column).is_not_null() & pl.col(column).is_finite())
+            .with_columns(pl.col(column).alias("factor_value"))
+        )
+        ic_df = _compute_rank_ic(leg_sample)
+        ic_mean = _safe_float(ic_df.select(pl.mean("rank_ic")).item(), 6) if not ic_df.is_empty() else None
+        ic_std = _safe_float(ic_df.select(pl.std("rank_ic")).item(), 6) if not ic_df.is_empty() and ic_df.height > 1 else None
+        icir = round(ic_mean / ic_std * math.sqrt(TRADING_DAYS_PER_YEAR), 4) if ic_mean is not None and ic_std and ic_std > 0 else None
+        t_stat = round(ic_mean / ic_std * math.sqrt(ic_df.height), 4) if ic_mean is not None and ic_std and ic_std > 0 and ic_df.height > 1 else None
+        records.append(
+            {
+                "component_key": leg["key"],
+                "component_label": leg["factor"]["label"],
+                "factor": leg["factor"]["key"],
+                "window": leg["window"],
+                "window_label": leg["window_label"],
+                "raw_weight": _safe_float(leg["raw_weight"], 4),
+                "weight": _safe_float(leg["weight"], 4),
+                "neutralization": leg["neutralization"],
+                "neutralization_label": leg["neutralization_label"],
+                "standardization": leg["standardization"],
+                "standardization_label": leg["standardization_label"],
+                "samples": int(leg_sample.height),
+                "trade_dates": int(leg_sample.select(pl.n_unique("trade_date")).item()) if not leg_sample.is_empty() else 0,
+                "rank_ic_mean": ic_mean,
+                "rank_ic_std": ic_std,
+                "icir": icir,
+                "rank_ic_t_stat": t_stat,
+            }
+        )
+    return records
+
+
+def _compute_component_correlation(
+    analysis_sample: pl.DataFrame,
+    resolved_legs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if analysis_sample.is_empty() or len(resolved_legs) < 2:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for left in resolved_legs:
+        row = {
+            "component_key": left["key"],
+            "component_label": left["factor"]["label"],
+        }
+        for right in resolved_legs:
+            left_col = left["column"]
+            right_col = right["column"]
+            if left_col not in analysis_sample.columns or right_col not in analysis_sample.columns:
+                corr = None
+            elif left_col == right_col:
+                corr = 1.0
+            else:
+                try:
+                    corr = analysis_sample.select(pl.corr(left_col, right_col).alias("corr")).item()
+                except Exception:
+                    corr = None
+            row[right["key"]] = _safe_float(corr, 4)
+        rows.append(row)
+    return rows
+
+
+def _price_frame_to_rows_by_symbol(price_df: pl.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
+    if price_df.is_empty():
+        return {}
+
+    rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    columns = [
+        column
+        for column in ["symbol", "trade_date", "open", "close", "volume", "turnover"]
+        if column in price_df.columns
+    ]
+    for row in price_df.select(columns).sort(["symbol", "trade_date"]).to_dicts():
+        symbol = row.get("symbol")
+        row_date = row.get("trade_date")
+        open_price = _safe_float(row.get("open"))
+        close_price = _safe_float(row.get("close"))
+        if not symbol or not row_date or open_price is None or close_price is None or open_price <= 0 or close_price <= 0:
+            continue
+        rows_by_symbol.setdefault(symbol, []).append(
+            {
+                "date": row_date,
+                "open": open_price,
+                "close": close_price,
+                "volume": _safe_float(row.get("volume")) or 0.0,
+                "turnover": _safe_float(row.get("turnover")) or 0.0,
+            }
+        )
+    return rows_by_symbol
+
+
+def _build_backtest_factor_frame(
+    request: FactorBacktestRequest,
+    db: ORMSession,
+    universe_symbols: List[str],
+    price_df: pl.DataFrame,
+    analysis_dates: List[date],
+    required_windows: List[int],
+    end_date: date,
+    resolved_legs: List[Dict[str, Any]],
+    candidate_etfs: List[str],
+    industry_df: Optional[pl.DataFrame] = None,
+    valuation_df: Optional[pl.DataFrame] = None,
+    weight_history: Optional[Dict[str, Dict[date, Dict[str, float]]]] = None,
+    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
+    component_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
+) -> pl.DataFrame:
+    needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
+    if needs_industry and industry_df is None:
+        industry_df = _load_industry_frame(
+            db,
+            universe_symbols,
+            request.start_date - timedelta(days=3650),
+            end_date,
+        )
+    factor_request = SimpleNamespace(
+        pool=request.pool,
+        bucket_count=max(2, min(20, request.max_positions)),
+        start_date=request.start_date,
+        end_date=end_date,
+        oos_start_date=None,
+        forward_window=1,
+        min_listing_days=request.min_listing_days,
+        legs=request.legs,
+    )
+    return _prepare_composite_factor_frame(
+        price_df=price_df,
+        request=factor_request,
+        db=db,
+        symbols=universe_symbols,
+        start_date=request.start_date,
+        end_date=end_date,
+        analysis_dates=analysis_dates,
+        industry_df=industry_df,
+        valuation_df=valuation_df,
+        weight_history=weight_history,
+        raw_factor_cache=raw_factor_cache,
+        component_factor_cache=component_factor_cache,
+        resolved_legs=resolved_legs,
+        candidate_etfs=candidate_etfs,
+    )
+
+
+def _factor_values_by_date(factor_df: pl.DataFrame, request: FactorBacktestRequest, end_date: date) -> Dict[date, Dict[str, float]]:
+    if factor_df.is_empty():
+        return {}
+
+    source = (
+        _filter_min_listing_days(factor_df, request.min_listing_days)
+        .filter(
+            (pl.col("trade_date") >= request.start_date)
+            & (pl.col("trade_date") <= end_date)
+            & pl.col("factor_value").is_not_null()
+            & pl.col("factor_value").is_finite()
+        )
+        .select("trade_date", "symbol", "factor_value")
+    )
+    values_by_date: Dict[date, Dict[str, float]] = {}
+    for row in source.to_dicts():
+        score = _safe_float(row.get("factor_value"))
+        if score is None:
+            continue
+        values_by_date.setdefault(row["trade_date"], {})[row["symbol"]] = score
+    return values_by_date
+
+
+def _is_virtual_replication_shape(resolved_legs: List[Dict[str, Any]]) -> bool:
+    if len(resolved_legs) != 2:
+        return False
+    by_key = {leg["factor"]["key"]: leg for leg in resolved_legs}
+    momentum_leg = by_key.get("risk_adjusted_momentum")
+    index_leg = by_key.get("index_weight")
+    if not momentum_leg or not index_leg:
+        return False
+    return (
+        momentum_leg["window"] == MIXED_WINDOW_KEY
+        and momentum_leg["neutralization"] == "none"
+        and momentum_leg["standardization"] == "rank_percentile"
+        and index_leg["neutralization"] == "none"
+        and index_leg["standardization"] == "rank_percentile"
+        and abs(float(momentum_leg.get("weight") or 0) - 0.6) < 1e-6
+        and abs(float(index_leg.get("weight") or 0) - 0.4) < 1e-6
+    )
+
+
+def _build_factor_backtest_metadata(
+    request: FactorBacktestRequest,
+    candidate_etfs: List[str],
+    universe_history,
+    price_df: pl.DataFrame,
+    resolved_legs: List[Dict[str, Any]],
+    end_date: date,
+    elapsed_ms: float,
+) -> Dict[str, Any]:
+    required_windows = _required_windows_for_composite_legs(resolved_legs)
+    return {
+        "mode": "factor_backtest",
+        "pool": request.pool,
+        "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
+        "candidate_etfs": candidate_etfs,
+        "components": [
+            {
+                "component_key": leg["key"],
+                "factor": leg["factor"],
+                "factor_key": leg["factor"]["key"],
+                "factor_label": leg["factor"]["label"],
+                "window": leg["window"],
+                "window_label": leg["window_label"],
+                "windows": leg["windows"],
+                "raw_weight": _safe_float(leg["raw_weight"], 4),
+                "weight": _safe_float(leg["weight"], 4),
+                "neutralization": leg["neutralization"],
+                "neutralization_label": leg["neutralization_label"],
+                "standardization": leg["standardization"],
+                "standardization_label": leg["standardization_label"],
+                "momentum_weights": leg["momentum_weights"],
+            }
+            for leg in resolved_legs
+        ],
+        "start_date": request.start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "initial_capital": request.initial_capital,
+        "max_positions": request.max_positions,
+        "sell_rank_multiplier": request.sell_rank_multiplier,
+        "sell_rank_threshold": max(request.max_positions, int(round(request.max_positions * request.sell_rank_multiplier))),
+        "factor_combination_method": "weighted_standardized_factor_values",
+        "factor_combination_method_label": "子因子标准化后加权",
+        "rebalance_frequency": request.rebalance_frequency,
+        "commission_pct": request.commission_pct,
+        "slippage_pct": request.slippage_pct,
+        "lot_size": request.lot_size,
+        "min_listing_days": request.min_listing_days,
+        "windows": required_windows,
+        "universe_symbols": len(universe_history.all_symbols),
+        "holdings_date_count": universe_history.holdings_date_count,
+        "price_rows": int(price_df.height),
+        "engine": "polars",
+        "elapsed_ms": round(elapsed_ms, 1),
+        "replicates_virtual_strategy": _is_virtual_replication_shape(resolved_legs),
+    }
+
+
+def _compute_equity_risk_metrics(
+    equity_curve: List[Dict[str, Any]],
+    annualized_return_pct: float,
+) -> Dict[str, Optional[float]]:
+    values = [
+        float(item.get("value"))
+        for item in equity_curve or []
+        if item.get("value") is not None and math.isfinite(float(item.get("value")))
+    ]
+    if len(values) < 2:
+        return {"annualized_volatility": None, "sharpe": None, "calmar": None}
+
+    returns = []
+    for index in range(1, len(values)):
+        previous = values[index - 1]
+        current = values[index]
+        if previous > 0:
+            returns.append(current / previous - 1)
+    if not returns:
+        return {"annualized_volatility": None, "sharpe": None, "calmar": None}
+
+    mean_return = sum(returns) / len(returns)
+    std_return = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.0
+    annualized_volatility = std_return * math.sqrt(TRADING_DAYS_PER_YEAR) * 100 if std_return > 0 else None
+    sharpe = mean_return / std_return * math.sqrt(TRADING_DAYS_PER_YEAR) if std_return > 0 else None
+    max_drawdown = min([float(item.get("drawdown") or 0) for item in equity_curve] or [0])
+    calmar = annualized_return_pct / abs(max_drawdown) if max_drawdown < 0 else None
+    return {
+        "annualized_volatility": _safe_float(annualized_volatility, 2),
+        "sharpe": _safe_float(sharpe, 4),
+        "calmar": _safe_float(calmar, 4),
+    }
+
+
+def _factor_values_cache_key(
+    request: FactorBacktestRequest,
+    resolved_legs: List[Dict[str, Any]],
+) -> Any:
+    return (
+        int(request.min_listing_days),
+        tuple(
+            (
+                _backtest_leg_factor_cache_key(leg),
+                round(float(leg.get("weight") or 0), 10),
+            )
+            for leg in resolved_legs
+            if abs(float(leg.get("weight") or 0)) > 1e-12
+        ),
+    )
+
+
+def _prepare_factor_backtest_base_data(
+    request: FactorBacktestRequest,
+    db: ORMSession,
+    resolved_legs: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    end_date = request.end_date or _get_max_trade_date()
+    candidate_etfs = POOL_ETFS[request.pool]
+    required_windows = _required_windows_for_composite_legs(resolved_legs)
+    max_factor_window = max(required_windows)
+    fetch_padding_days = max(370, request.min_listing_days + 30, int(max_factor_window * 3))
+    fetch_start = request.start_date - timedelta(days=fetch_padding_days)
+
+    universe_history = load_universe_history(db, candidate_etfs, request.start_date, end_date)
+    if not universe_history.all_symbols:
+        raise HTTPException(status_code=400, detail="股票池没有可用成分股数据")
+
+    price_df = _load_price_frame(universe_history.all_symbols, fetch_start, end_date)
+    if price_df.is_empty():
+        raise HTTPException(status_code=400, detail="股票池没有可用日行情数据")
+
+    rows_by_symbol = _price_frame_to_rows_by_symbol(price_df)
+    row_by_symbol_date = {
+        symbol: {row["date"]: row for row in rows}
+        for symbol, rows in rows_by_symbol.items()
+    }
+    dates = sorted({
+        row["date"]
+        for rows in rows_by_symbol.values()
+        for row in rows
+        if request.start_date <= row["date"] <= end_date
+    })
+    if not dates:
+        raise HTTPException(status_code=400, detail="回测区间内没有可交易日行情")
+
+    factor_keys = {leg["factor"]["key"] for leg in resolved_legs}
+    needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
+    industry_df = (
+        _load_industry_frame(
+            db,
+            universe_history.all_symbols,
+            request.start_date - timedelta(days=3650),
+            end_date,
+        )
+        if needs_industry
+        else None
+    )
+    valuation_df = (
+        _load_valuation_frame(
+            db,
+            universe_history.all_symbols,
+            request.start_date - timedelta(days=540),
+            end_date,
+        )
+        if "valuation_gap" in factor_keys
+        else None
+    )
+    weight_history = (
+        load_universe_weight_history(
+            db,
+            candidate_etfs,
+            request.start_date,
+            end_date,
+        )
+        if "index_weight" in factor_keys
+        else None
+    )
+    benchmark_rows = _price_frame_to_rows_by_symbol(
+        _load_price_frame(candidate_etfs, request.start_date - timedelta(days=10), end_date)
+    )
+
+    return {
+        "end_date": end_date,
+        "candidate_etfs": candidate_etfs,
+        "required_windows": required_windows,
+        "universe_history": universe_history,
+        "price_df": price_df,
+        "symbol_count": len(rows_by_symbol),
+        "row_by_symbol_date": row_by_symbol_date,
+        "dates": dates,
+        "industry_df": industry_df,
+        "valuation_df": valuation_df,
+        "weight_history": weight_history,
+        "benchmark_rows": benchmark_rows,
+        "raw_factor_cache": {},
+        "component_factor_cache": {},
+        "factor_values_cache": {},
+    }
+
+
+def _warm_backtest_search_factor_caches(
+    search_request: FactorBacktestSearchRequest,
+    prepared_data: Dict[str, Any],
+    db: ORMSession,
+):
+    price_df = prepared_data.get("price_df")
+    if price_df is None or price_df.is_empty():
+        return
+
+    raw_factor_cache = prepared_data.setdefault("raw_factor_cache", {})
+    component_factor_cache = prepared_data.setdefault("component_factor_cache", {})
+    base_request = search_request.request
+    base_resolved_legs = _resolve_factor_legs(base_request.legs)
+
+    for leg in base_resolved_legs:
+        factor_definition = leg["factor_definition"]
+        if factor_definition.key in MOMENTUM_FACTOR_SCORE_PREFIX:
+            _momentum_score_source_frame(
+                price_df,
+                factor_definition.key,
+                leg["windows"],
+                raw_factor_cache,
+            )
+
+        if leg["window"] == MIXED_WINDOW_KEY:
+            continue
+
+        momentum_weights = _leg_momentum_weights(leg)
+        leg_context = FactorContext(
+            windows=leg["windows"],
+            momentum_weights=momentum_weights,
+            db=db,
+            symbols=prepared_data["universe_history"].all_symbols,
+            start_date=base_request.start_date,
+            end_date=prepared_data["end_date"],
+            analysis_dates=prepared_data["dates"],
+            industry_df=prepared_data.get("industry_df"),
+            candidate_etfs=prepared_data["candidate_etfs"],
+            valuation_df=prepared_data.get("valuation_df"),
+            weight_history=prepared_data.get("weight_history"),
+        )
+        leg_request_payload = _request_to_dict(base_request)
+        leg_request_payload.update(
+            {
+                "neutralization": leg["neutralization"],
+                "standardization": leg["standardization"],
+            }
+        )
+        leg_request = SimpleNamespace(**leg_request_payload)
+        factor_df = _prepare_cached_leg_factor_frame(
+            price_df,
+            factor_definition,
+            leg_context,
+            leg_request,
+            raw_factor_cache,
+        ).select("symbol", "trade_date", "factor_value")
+        _put_limited_cache(
+            component_factor_cache,
+            _backtest_leg_factor_cache_key(leg),
+            factor_df,
+            BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT,
+        )
+
+    factor_columns = [
+        column
+        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
+        if column in price_df.columns
+    ]
+    prepared_data["price_df"] = price_df.select(factor_columns).rechunk()
+
+
+def _run_factor_backtest(
+    request: FactorBacktestRequest,
+    db: ORMSession,
+    prepared_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    resolved_legs = _resolve_factor_legs(request.legs)
+    if prepared_data is None:
+        prepared_data = _prepare_factor_backtest_base_data(request, db, resolved_legs)
+
+    end_date = prepared_data["end_date"]
+    candidate_etfs = prepared_data["candidate_etfs"]
+    required_windows = prepared_data["required_windows"]
+    universe_history = prepared_data["universe_history"]
+    price_df = prepared_data["price_df"]
+    row_by_symbol_date = prepared_data["row_by_symbol_date"]
+    dates = prepared_data["dates"]
+
+    factor_values_cache = prepared_data.setdefault("factor_values_cache", {})
+    factor_values_key = _factor_values_cache_key(request, resolved_legs)
+    factor_values = factor_values_cache.get(factor_values_key)
+    if factor_values is None:
+        factor_df = _build_backtest_factor_frame(
+            request=request,
+            db=db,
+            universe_symbols=universe_history.all_symbols,
+            price_df=price_df,
+            analysis_dates=dates,
+            required_windows=required_windows,
+            end_date=end_date,
+            resolved_legs=resolved_legs,
+            candidate_etfs=candidate_etfs,
+            industry_df=prepared_data.get("industry_df"),
+            valuation_df=prepared_data.get("valuation_df"),
+            weight_history=prepared_data.get("weight_history"),
+            raw_factor_cache=prepared_data.setdefault("raw_factor_cache", {}),
+            component_factor_cache=prepared_data.setdefault("component_factor_cache", {}),
+        )
+        factor_values = _factor_values_by_date(factor_df, request, end_date)
+        _put_limited_cache(
+            factor_values_cache,
+            factor_values_key,
+            factor_values,
+            BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT,
+        )
+    if not factor_values:
+        raise HTTPException(status_code=400, detail="没有可用因子信号，请调整日期、窗口或股票池")
+
+    benchmark_curve = _build_benchmark_curve(
+        prepared_data["benchmark_rows"],
+        dates,
+        float(request.initial_capital),
+        request.start_date,
+    )
+
+    max_positions = int(request.max_positions)
+    sell_rank_multiplier = float(request.sell_rank_multiplier)
+    sell_rank_threshold = max(max_positions, int(round(max_positions * sell_rank_multiplier)))
+    rebalance_frequency = _normalize_rebalance_frequency(request.rebalance_frequency)
+    lot_size = max(1, int(request.lot_size or 1))
+    commission_rate = max(0.0, float(request.commission_pct or 0)) / 100
+    slippage_rate = max(0.0, float(request.slippage_pct or 0)) / 100
+
+    cash = float(request.initial_capital)
+    positions: Dict[str, Dict[str, Any]] = {}
+    last_prices: Dict[str, float] = {}
+    equity_curve: List[Dict[str, Any]] = []
+    events: List[Dict[str, Any]] = []
+    trades: List[Dict[str, Any]] = []
+    closed_profits: List[float] = []
+    peak_value = cash
+    universe_size_by_date: Dict[str, int] = {}
+    rebalance_count = 0
+    pending_rebalance: Optional[Dict[str, Any]] = None
+
+    def append_trade(
+        trade_date: date,
+        signal_date: date,
+        action: str,
+        symbol: str,
+        price: float,
+        quantity: int,
+        commission: float,
+        reason: str,
+        reason_detail: str,
+        profit: Optional[float] = None,
+        profit_pct: Optional[float] = None,
+    ):
+        amount = price * quantity
+        portfolio_after = _portfolio_value(cash, positions, last_prices)
+        symbol_market_value = 0.0
+        if symbol in positions:
+            symbol_market_value = int(positions[symbol].get("shares") or 0) * float(last_prices.get(symbol) or price)
+        trades.append(
+            {
+                "date": trade_date.isoformat(),
+                "signal_date": signal_date.isoformat(),
+                "action": action,
+                "symbol": symbol,
+                "price": _safe_float(price, 4),
+                "quantity": int(quantity),
+                "amount": _safe_float(amount, 2),
+                "commission": _safe_float(commission, 2),
+                "profit": _safe_float(profit, 2),
+                "profit_pct": _safe_float(profit_pct, 2),
+                "reason": reason,
+                "reason_detail": reason_detail,
+                "cash_after": _safe_float(cash, 2),
+                "portfolio_value_after": _safe_float(portfolio_after, 2),
+                "symbol_market_value_after": _safe_float(symbol_market_value, 2),
+                "symbol_weight_pct_after": _safe_float(symbol_market_value / portfolio_after * 100 if portfolio_after > 0 else 0, 2),
+                "price_source": "next_open",
+            }
+        )
+
+    def sell_position(trade_date: date, signal_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
+        nonlocal cash
+        if symbol not in positions:
+            return
+        position = positions[symbol]
+        old_shares = int(position.get("shares") or 0)
+        quantity = min(old_shares, int(quantity or 0))
+        if quantity <= 0:
+            return
+
+        sell_price = price * (1 - slippage_rate)
+        amount = sell_price * quantity
+        commission = amount * commission_rate
+        old_cost_basis = float(position.get("cost_basis") or 0)
+        cost_basis_sold = old_cost_basis * quantity / old_shares if old_shares > 0 else 0.0
+        cash += amount - commission
+        profit = amount - commission - cost_basis_sold
+        profit_pct = profit / cost_basis_sold * 100 if cost_basis_sold > 0 else None
+        closed_profits.append(profit)
+
+        remaining_shares = old_shares - quantity
+        if remaining_shares <= 0:
+            del positions[symbol]
+        else:
+            position["shares"] = remaining_shares
+            position["cost_basis"] = max(0.0, old_cost_basis - cost_basis_sold)
+            position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
+            position["last_price"] = price
+        last_prices[symbol] = price
+
+        append_trade(
+            trade_date,
+            signal_date,
+            "SELL",
+            symbol,
+            sell_price,
+            quantity,
+            commission,
+            f"{rebalance_frequency}_rebalance",
+            reason_detail,
+            profit=profit,
+            profit_pct=profit_pct,
+        )
+
+    def buy_position(trade_date: date, signal_date: date, symbol: str, budget: float, price: float, reason_detail: str):
+        nonlocal cash
+        buy_price = price * (1 + slippage_rate)
+        quantity = _floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
+        if quantity <= 0:
+            return
+        amount = buy_price * quantity
+        commission = amount * commission_rate
+        if amount + commission > cash + 1e-9:
+            return
+
+        cash -= amount + commission
+        if symbol not in positions:
+            positions[symbol] = {
+                "shares": quantity,
+                "avg_cost": (amount + commission) / quantity,
+                "cost_basis": amount + commission,
+                "entry_date": trade_date,
+                "last_price": price,
+            }
+        else:
+            position = positions[symbol]
+            position["shares"] = int(position.get("shares") or 0) + quantity
+            position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
+            position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
+            position["last_price"] = price
+        last_prices[symbol] = price
+
+        append_trade(
+            trade_date,
+            signal_date,
+            "BUY",
+            symbol,
+            buy_price,
+            quantity,
+            commission,
+            f"{rebalance_frequency}_rebalance",
+            reason_detail,
+        )
+
+    for date_index, current_date in enumerate(dates):
+        open_map: Dict[str, float] = {}
+        price_map: Dict[str, float] = {}
+        turnover_map: Dict[str, float] = {}
+        for symbol, row_by_date in row_by_symbol_date.items():
+            row = row_by_date.get(current_date)
+            if not row:
+                continue
+            open_price = _safe_float(row.get("open"))
+            close_price = _safe_float(row.get("close"))
+            if open_price is not None and open_price > 0:
+                open_map[symbol] = open_price
+            if close_price is not None and close_price > 0:
+                price_map[symbol] = close_price
+            turnover_map[symbol] = _safe_float(row.get("turnover")) or 0.0
+
+        if pending_rebalance:
+            signal_date = pending_rebalance["signal_date"]
+            for symbol in list(pending_rebalance["sell_symbols"]):
+                if symbol not in positions:
+                    continue
+                price = open_map.get(symbol)
+                if price is None or price <= 0:
+                    continue
+                shares = int(positions[symbol].get("shares") or 0)
+                sell_position(
+                    current_date,
+                    signal_date,
+                    symbol,
+                    shares,
+                    price,
+                    f"下一交易日开盘执行: 跌出因子排名Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}",
+                )
+
+            slots_to_fill = max(0, max_positions - len(positions))
+            buy_candidates = [
+                item
+                for item in pending_rebalance["selected"]
+                if item["symbol"] not in positions
+            ][:slots_to_fill]
+            budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
+            for item in buy_candidates:
+                symbol = item["symbol"]
+                price = open_map.get(symbol)
+                if price is None or price <= 0:
+                    continue
+                buy_budget = min(cash, budget_per_symbol)
+                if buy_budget <= 0:
+                    continue
+                buy_position(
+                    current_date,
+                    signal_date,
+                    symbol,
+                    buy_budget,
+                    price,
+                    f"下一交易日开盘补位买入因子Top{max_positions}",
+                )
+            pending_rebalance = None
+
+        for symbol, price in price_map.items():
+            last_prices[symbol] = price
+            if symbol in positions:
+                positions[symbol]["last_price"] = price
+
+        if not price_map:
+            continue
+
+        current_universe = set(universe_history.symbols_for_date(current_date))
+        universe_size_by_date[current_date.isoformat()] = len(current_universe)
+
+        if _is_rebalance_day(dates, date_index, rebalance_frequency):
+            rebalance_count += 1
+            score_map = factor_values.get(current_date, {})
+            ranked: List[Dict[str, Any]] = []
+            for symbol in sorted(current_universe):
+                if symbol not in price_map:
+                    continue
+                raw_score = score_map.get(symbol)
+                factor_score = _safe_float(raw_score)
+                if factor_score is None:
+                    continue
+                ranked.append(
+                    {
+                        "symbol": symbol,
+                        "price": price_map[symbol],
+                        "turnover": turnover_map.get(symbol, 0.0),
+                        "factor_score": factor_score,
+                    }
+                )
+
+            ranked.sort(
+                key=lambda item: (
+                    float(item.get("factor_score") or -1e18),
+                    float(item.get("turnover") or 0),
+                    item["symbol"],
+                ),
+                reverse=True,
+            )
+            denominator = max(1, len(ranked) - 1)
+            for rank_index, item in enumerate(ranked):
+                item["factor_percentile"] = 1 - rank_index / denominator
+                item["rank_score"] = item["factor_score"]
+            selected = ranked[:max_positions]
+            selected_symbols = [item["symbol"] for item in selected]
+            sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
+            rank_by_symbol = {item["symbol"]: rank for rank, item in enumerate(ranked, start=1)}
+
+            for rank, item in enumerate(selected, start=1):
+                events.append(
+                    {
+                        "symbol": item["symbol"],
+                        "date": current_date.isoformat(),
+                        "direction": "RANK",
+                        "signal_price": _safe_float(item["price"], 4),
+                        "turnover": _safe_float(item.get("turnover"), 2),
+                        "threshold_pct": _safe_float(item.get("factor_score"), 4),
+                        "payload": {
+                            "rank": rank,
+                            "rank_score": _safe_float(item.get("rank_score"), 6),
+                            "factor_score": _safe_float(item.get("factor_score"), 6),
+                            "factor_percentile": _safe_float(item.get("factor_percentile"), 6),
+                            "selected_symbols": selected_symbols,
+                            "sell_rank_symbols": sell_rank_symbols,
+                            "max_positions": max_positions,
+                            "sell_rank_threshold": sell_rank_threshold,
+                            "sell_rank_multiplier": sell_rank_multiplier,
+                            "min_listing_days": request.min_listing_days,
+                            "rebalance_frequency": rebalance_frequency,
+                            "execution_rule": "signal_close_next_open",
+                            "rotation_rule": "hold_until_out_of_sell_rank",
+                            "strategy": "factor_lab_top_n_rotation",
+                        },
+                        "price_source": "daily_close",
+                    }
+                )
+
+            sell_symbols = [
+                symbol
+                for symbol in list(positions.keys())
+                if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold
+            ]
+            pending_rebalance = {
+                "signal_date": current_date,
+                "selected": selected,
+                "selected_symbols": selected_symbols,
+                "sell_rank_symbols": sell_rank_symbols,
+                "sell_symbols": sell_symbols,
+            }
+
+        value = _portfolio_value(cash, positions, last_prices)
+        peak_value = max(peak_value, value)
+        drawdown = (value / peak_value - 1) * 100 if peak_value > 0 else 0.0
+        equity_curve.append(
+            {
+                "date": current_date.isoformat(),
+                "value": _safe_float(value, 2),
+                "cash": _safe_float(cash, 2),
+                "position_value": _safe_float(value - cash, 2),
+                "drawdown": _safe_float(drawdown, 2),
+            }
+        )
+
+    current_value = equity_curve[-1]["value"] if equity_curve else float(request.initial_capital)
+    initial_value = float(request.initial_capital)
+    total_return = (current_value / initial_value - 1) * 100 if initial_value > 0 else 0.0
+    yearly_stats = _build_yearly_stats(equity_curve, benchmark_curve, candidate_etfs)
+    elapsed_days = (
+        (date.fromisoformat(equity_curve[-1]["date"]) - date.fromisoformat(equity_curve[0]["date"])).days
+        if len(equity_curve) > 1
+        else 0
+    )
+    annualized_return = (
+        ((1 + total_return / 100) ** (365 / elapsed_days) - 1) * 100
+        if elapsed_days > 0 and total_return > -100
+        else 0.0
+    )
+    win_count = sum(1 for item in closed_profits if item > 0)
+    risk_metrics = _compute_equity_risk_metrics(equity_curve, annualized_return)
+
+    holdings: List[Dict[str, Any]] = []
+    for symbol, position in positions.items():
+        price = float(last_prices.get(symbol) or position.get("last_price") or position.get("avg_cost") or 0)
+        market_value = int(position["shares"]) * price
+        holdings.append(
+            {
+                "symbol": symbol,
+                "shares": int(position["shares"]),
+                "price": _safe_float(price, 4),
+                "avg_cost": _safe_float(position.get("avg_cost"), 4),
+                "entry_date": position["entry_date"].isoformat() if position.get("entry_date") else None,
+                "market_value": _safe_float(market_value, 2),
+                "actual_weight_pct": _safe_float(market_value / current_value * 100 if current_value > 0 else 0, 2),
+            }
+        )
+    holdings.sort(key=lambda item: item.get("market_value") or 0, reverse=True)
+
+    metrics = {
+        "total_return": _safe_float(total_return, 2),
+        "annualized_return": _safe_float(annualized_return, 2),
+        "max_drawdown": _safe_float(min([item["drawdown"] for item in equity_curve] or [0]), 2),
+        "signal_count": len(events),
+        "rank_signal_count": len(events),
+        "rebalance_count": rebalance_count,
+        "buy_signal_count": sum(1 for item in trades if item["action"] == "BUY"),
+        "sell_signal_count": sum(1 for item in trades if item["action"] == "SELL"),
+        "trade_count": len(trades),
+        "closed_trade_count": len(closed_profits),
+        "win_count": win_count,
+        "win_rate": _safe_float(win_count / len(closed_profits) * 100 if closed_profits else 0.0, 2),
+        "ending_value": _safe_float(current_value, 2),
+        "cash": equity_curve[-1]["cash"] if equity_curve else _safe_float(cash, 2),
+        "holding_count": len(holdings),
+        "pending_signal_date": pending_rebalance["signal_date"].isoformat() if pending_rebalance else None,
+        **risk_metrics,
+    }
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metadata = _build_factor_backtest_metadata(
+        request,
+        candidate_etfs,
+        universe_history,
+        price_df,
+        resolved_legs,
+        end_date,
+        elapsed_ms,
+    )
+    metadata.update(
+        {
+            "symbol_count": prepared_data.get("symbol_count"),
+            "universe_size_latest": next(reversed(universe_size_by_date.values()), None) if universe_size_by_date else None,
+            "execution_rule": "signal_close_next_open",
+            "rotation_rule": "hold_until_out_of_sell_rank",
+            "strategy": "factor_lab_top_n_rotation",
+        }
+    )
+
+    return {
+        "metadata": metadata,
+        "metrics": metrics,
+        "equity_curve": equity_curve,
+        "benchmark_curve": benchmark_curve,
+        "yearly_stats": yearly_stats,
+        "events": events,
+        "trades": trades,
+        "current_holdings": holdings,
+        "component_correlation": [],
+    }
+
+
+def _composition_count(total: int, parts: int) -> int:
+    if parts <= 1:
+        return 1
+    return math.comb(int(total) + int(parts) - 1, int(parts) - 1)
+
+
+def _simplex_weight_grid(parts: int, bucket_count: int) -> List[List[float]]:
+    parts = int(parts)
+    bucket_count = int(bucket_count)
+    if parts <= 1:
+        return [[1.0]]
+
+    result: List[List[float]] = []
+
+    def walk(remaining: int, slots: int, prefix: List[int]):
+        if slots == 1:
+            result.append([*(value / bucket_count for value in prefix), remaining / bucket_count])
+            return
+        for value in range(remaining + 1):
+            walk(remaining - value, slots - 1, [*prefix, value])
+
+    walk(bucket_count, parts, [])
+    return result
+
+
+def _estimate_backtest_search_cases(request: FactorBacktestSearchRequest) -> int:
+    legs = list(request.request.legs)
+    leg_count = len(legs)
+    if leg_count <= 0:
+        return 0
+
+    mixed_indexes = {
+        index
+        for index, leg in enumerate(legs)
+        if leg.window == MIXED_WINDOW_KEY
+    }
+    window_case_count = _composition_count(
+        request.window_weight_bucket_count,
+        len(SUPPORTED_MOMENTUM_WINDOWS),
+    )
+    factor_bucket_count = int(request.factor_weight_bucket_count)
+    total = 0
+
+    for active_count in range(1, leg_count + 1):
+        factor_cases_for_subset = math.comb(factor_bucket_count - 1, active_count - 1)
+        if factor_cases_for_subset <= 0:
+            continue
+        for active_indexes in combinations(range(leg_count), active_count):
+            active_mixed_count = sum(1 for index in active_indexes if index in mixed_indexes)
+            total += factor_cases_for_subset * (window_case_count ** active_mixed_count)
+    return int(
+        total
+        * max(1, len(request.max_positions_candidates or []))
+        * max(1, len(request.sell_rank_multiplier_candidates or []))
+    )
+
+
+def _backtest_request_payload(request: FactorBacktestRequest) -> Dict[str, Any]:
+    return request.model_dump() if hasattr(request, "model_dump") else request.dict()
+
+
+def _backtest_leg_payload(leg: CompositeFactorLeg) -> Dict[str, Any]:
+    return leg.model_dump() if hasattr(leg, "model_dump") else leg.dict()
+
+
+def _format_weight(value: float) -> str:
+    return f"{float(value):.4f}".rstrip("0").rstrip(".")
+
+
+def _format_backtest_search_params(
+    request: FactorBacktestRequest,
+    legs: List[Dict[str, Any]],
+) -> str:
+    factor_parts = [
+        f"{leg.get('factor')}={_format_weight(float(leg.get('weight') or 0))}"
+        for leg in legs
+    ]
+    window_parts = []
+    for leg in legs:
+        if leg.get("window") != MIXED_WINDOW_KEY:
+            continue
+        weights = _normalize_momentum_weights_payload(leg.get("momentum_weights"))
+        window_parts.append(
+            f"{leg.get('factor')}窗口 "
+            + "/".join(f"{window}:{_format_weight(weights[str(window)])}" for window in SUPPORTED_MOMENTUM_WINDOWS)
+        )
+    return "；".join(
+        item
+        for item in [
+            f"持仓 {int(request.max_positions)}",
+            f"卖出倍数 {_format_weight(float(request.sell_rank_multiplier))}",
+            "因子 " + " / ".join(factor_parts),
+            "；".join(window_parts),
+        ]
+        if item
+    )
+
+
+def _iter_backtest_search_requests(
+    search_request: FactorBacktestSearchRequest,
+):
+    base_payload = _backtest_request_payload(search_request.request)
+    leg_payloads = [_backtest_leg_payload(leg) for leg in search_request.request.legs]
+    leg_count = len(leg_payloads)
+    factor_weight_grid = (
+        _simplex_weight_grid(leg_count, search_request.factor_weight_bucket_count)
+        if leg_count > 1
+        else [[1.0]]
+    )
+    max_positions_grid = search_request.max_positions_candidates or [search_request.request.max_positions]
+    sell_multiplier_grid = search_request.sell_rank_multiplier_candidates or [search_request.request.sell_rank_multiplier]
+    for factor_weights in factor_weight_grid:
+        window_grids = []
+        for index, leg in enumerate(leg_payloads):
+            if leg.get("window") == MIXED_WINDOW_KEY and abs(float(factor_weights[index])) > 1e-12:
+                window_grids.append(_simplex_weight_grid(len(SUPPORTED_MOMENTUM_WINDOWS), search_request.window_weight_bucket_count))
+            else:
+                window_grids.append([None])
+        for window_weights_tuple in product(*window_grids):
+            next_legs: List[Dict[str, Any]] = []
+            for index, leg in enumerate(leg_payloads):
+                next_leg = dict(leg)
+                next_leg["weight"] = factor_weights[index]
+                window_weights = window_weights_tuple[index]
+                if window_weights is not None:
+                    next_leg["momentum_weights"] = {
+                        str(window): float(window_weights[window_index])
+                        for window_index, window in enumerate(SUPPORTED_MOMENTUM_WINDOWS)
+                    }
+                next_legs.append(next_leg)
+            for max_positions, sell_rank_multiplier in product(max_positions_grid, sell_multiplier_grid):
+                next_payload = dict(base_payload)
+                next_payload["max_positions"] = int(max_positions)
+                next_payload["sell_rank_multiplier"] = float(sell_rank_multiplier)
+                next_payload["legs"] = next_legs
+                yield FactorBacktestRequest(**next_payload), next_legs
+
+
+def _search_row_from_backtest_result(
+    index: int,
+    request: FactorBacktestRequest,
+    legs: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    objective: str,
+) -> Dict[str, Any]:
+    metrics = result.get("metrics") or {}
+    objective_value = _safe_float(metrics.get(objective), 6)
+    return {
+        "case_index": index,
+        "objective": objective,
+        "objective_value": objective_value,
+        "params_label": _format_backtest_search_params(request, legs),
+        "max_positions": request.max_positions,
+        "sell_rank_multiplier": request.sell_rank_multiplier,
+        "total_return": metrics.get("total_return"),
+        "annualized_return": metrics.get("annualized_return"),
+        "sharpe": metrics.get("sharpe"),
+        "calmar": metrics.get("calmar"),
+        "annualized_volatility": metrics.get("annualized_volatility"),
+        "max_drawdown": metrics.get("max_drawdown"),
+        "ending_value": metrics.get("ending_value"),
+        "trade_count": metrics.get("trade_count"),
+        "win_rate": metrics.get("win_rate"),
+        "rebalance_count": metrics.get("rebalance_count"),
+        "holding_count": metrics.get("holding_count"),
+        "request": _backtest_request_payload(request),
+    }
+
+
+def _serialize_backtest_search_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "objective": job["objective"],
+        "objective_label": BACKTEST_SEARCH_OBJECTIVE_OPTIONS[job["objective"]]["label"],
+        "window_weight_bucket_count": job.get("window_weight_bucket_count"),
+        "factor_weight_bucket_count": job.get("factor_weight_bucket_count"),
+        "max_positions_candidates": job.get("max_positions_candidates"),
+        "sell_rank_multiplier_candidates": job.get("sell_rank_multiplier_candidates"),
+        "top_n": job.get("top_n"),
+        "worker_count": job.get("worker_count"),
+        "total_cases": job["total_cases"],
+        "submitted_cases": job.get("submitted_cases", 0),
+        "completed_cases": job["completed_cases"],
+        "failed_cases": job["failed_cases"],
+        "progress_pct": _safe_float(job["completed_cases"] * 100 / job["total_cases"], 2) if job["total_cases"] else 0,
+        "current_case": job.get("current_case"),
+        "error": job.get("error"),
+        "summary": {
+            "cases": job["completed_cases"],
+            "total_cases": job["total_cases"],
+            "submitted_cases": job.get("submitted_cases", 0),
+            "failed_cases": job["failed_cases"],
+            "worker_count": job.get("worker_count"),
+            "elapsed_ms": _safe_float((time.time() - job["started_monotonic"]) * 1000, 1) if job.get("started_monotonic") else None,
+            "best_case": job["rows"][0]["params_label"] if job.get("rows") else None,
+            "best_objective_value": job["rows"][0]["objective_value"] if job.get("rows") else None,
+            "objective": job["objective"],
+            "objective_label": BACKTEST_SEARCH_OBJECTIVE_OPTIONS[job["objective"]]["label"],
+        },
+        "rows": job.get("rows", []),
+    }
+
+
+def _update_backtest_search_top_rows(job: Dict[str, Any], row: Dict[str, Any]):
+    objective_value = row.get("objective_value")
+    if objective_value is None:
+        return
+    rows = [*job.get("rows", []), row]
+    rows.sort(
+        key=lambda item: (
+            _record_float(item, "objective_value", -1e18),
+            _record_float(item, "annualized_return", -1e18),
+            _record_float(item, "total_return", -1e18),
+        ),
+        reverse=True,
+    )
+    top_n = int(job.get("top_n") or 200)
+    job["rows"] = rows[:top_n]
+    for rank, item in enumerate(job["rows"], start=1):
+        item["rank"] = rank
+
+
+def _run_backtest_search_job(job_id: str, search_request: FactorBacktestSearchRequest):
+    db = DBSession()
+    prepared_data: Optional[Dict[str, Any]] = None
+    try:
+        with BACKTEST_SEARCH_JOBS_LOCK:
+            job = BACKTEST_SEARCH_JOBS[job_id]
+            job["status"] = "running"
+            job["started_at"] = datetime.now().isoformat()
+            job["started_monotonic"] = time.time()
+            job["worker_count"] = 1
+            job["current_case"] = "准备基础数据和基础因子"
+
+        base_resolved_legs = _resolve_factor_legs(search_request.request.legs)
+        prepared_data = _prepare_factor_backtest_base_data(search_request.request, db, base_resolved_legs)
+        _warm_backtest_search_factor_caches(search_request, prepared_data, db)
+
+        for index, (case_request, legs) in enumerate(_iter_backtest_search_requests(search_request), start=1):
+            with BACKTEST_SEARCH_JOBS_LOCK:
+                job = BACKTEST_SEARCH_JOBS[job_id]
+                if job.get("cancel_requested"):
+                    job["status"] = "cancelled"
+                    job["finished_at"] = datetime.now().isoformat()
+                    job["current_case"] = None
+                    return
+                job["submitted_cases"] = index
+                job["current_case"] = _format_backtest_search_params(case_request, legs)
+
+            try:
+                result = _run_factor_backtest(case_request, db, prepared_data=prepared_data)
+                row = _search_row_from_backtest_result(index, case_request, legs, result, search_request.objective)
+                with BACKTEST_SEARCH_JOBS_LOCK:
+                    job = BACKTEST_SEARCH_JOBS[job_id]
+                    job["completed_cases"] += 1
+                    _update_backtest_search_top_rows(job, row)
+            except Exception as exc:
+                detail = getattr(exc, "detail", None)
+                logger.warning("Factor backtest search case %s failed: %s", index, detail or exc)
+                with BACKTEST_SEARCH_JOBS_LOCK:
+                    job = BACKTEST_SEARCH_JOBS[job_id]
+                    job["completed_cases"] += 1
+                    job["failed_cases"] += 1
+
+        with BACKTEST_SEARCH_JOBS_LOCK:
+            job = BACKTEST_SEARCH_JOBS[job_id]
+            if job.get("status") != "cancelled":
+                job["status"] = "completed"
+                job["finished_at"] = datetime.now().isoformat()
+                job["current_case"] = None
+    except Exception as exc:
+        logger.exception("Factor backtest search job failed")
+        with BACKTEST_SEARCH_JOBS_LOCK:
+            job = BACKTEST_SEARCH_JOBS[job_id]
+            job["status"] = "failed"
+            job["error"] = str(exc)
+            job["finished_at"] = datetime.now().isoformat()
+    finally:
+        if prepared_data is not None:
+            prepared_data.clear()
+        db.close()
+        DBSession.remove()
+
+
+def _start_backtest_search_job(search_request: FactorBacktestSearchRequest) -> Dict[str, Any]:
+    total_cases = _estimate_backtest_search_cases(search_request)
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": datetime.now().isoformat(),
+        "objective": search_request.objective,
+        "window_weight_bucket_count": search_request.window_weight_bucket_count,
+        "factor_weight_bucket_count": search_request.factor_weight_bucket_count,
+        "max_positions_candidates": search_request.max_positions_candidates,
+        "sell_rank_multiplier_candidates": search_request.sell_rank_multiplier_candidates,
+        "total_cases": total_cases,
+        "completed_cases": 0,
+        "failed_cases": 0,
+        "top_n": search_request.top_n,
+        "worker_count": 1,
+        "rows": [],
+        "error": None,
+        "cancel_requested": False,
+        "submitted_cases": 0,
+    }
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        BACKTEST_SEARCH_JOBS[job_id] = job
+    thread = threading.Thread(
+        target=_run_backtest_search_job,
+        args=(job_id, search_request),
+        daemon=True,
+        name=f"factor-backtest-search-{job_id[:8]}",
+    )
+    thread.start()
+    return _serialize_backtest_search_job(job)
+
+
+def _run_composite_factor_analysis(
+    request: CompositeFactorAnalyzeRequest,
+    db: ORMSession,
+) -> Dict[str, Any]:
+    resolved_legs = _resolve_composite_legs(request)
+    required_windows = _required_windows_for_composite_legs(resolved_legs)
+
+    started_at = time.perf_counter()
+    end_date = request.end_date or _get_max_trade_date()
+    if request.oos_start_date and request.oos_start_date >= end_date:
+        raise HTTPException(status_code=400, detail="样本外起始日期必须早于实际结束日期")
+
+    max_factor_window = max(required_windows)
+    forward_window = int(request.forward_window)
+    fetch_start = request.start_date - timedelta(
+        days=max(370, request.min_listing_days + 30, max_factor_window * 4)
+    )
+    fetch_end = end_date + timedelta(days=max(30, forward_window * 4))
+    candidate_etfs = POOL_ETFS[request.pool]
+
+    universe_history = load_universe_history(db, candidate_etfs, request.start_date, end_date)
+    if not universe_history.all_symbols:
+        raise HTTPException(status_code=400, detail="股票池没有可用成分股数据")
+
+    price_df = _load_price_frame(universe_history.all_symbols, fetch_start, fetch_end)
+    if price_df.is_empty():
+        raise HTTPException(status_code=400, detail="股票池没有可用日行情数据")
+
+    analysis_dates = (
+        price_df.filter((pl.col("trade_date") >= request.start_date) & (pl.col("trade_date") <= end_date))
+        .select("trade_date")
+        .unique()
+        .sort("trade_date")
+        .to_series()
+        .to_list()
+    )
+    universe_df = _build_universe_frame(universe_history, analysis_dates)
+    if universe_df.is_empty():
+        raise HTTPException(status_code=400, detail="分析区间内没有可用股票池截面")
+
+    needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
+    industry_df = (
+        _load_industry_frame(
+            db,
+            universe_history.all_symbols,
+            request.start_date - timedelta(days=3650),
+            end_date,
+        )
+        if needs_industry
+        else None
+    )
+
+    composite_df = _prepare_composite_factor_frame(
+        price_df=price_df,
+        request=request,
+        db=db,
+        symbols=universe_history.all_symbols,
+        start_date=request.start_date,
+        end_date=end_date,
+        analysis_dates=analysis_dates,
+        industry_df=industry_df,
+        resolved_legs=resolved_legs,
+        candidate_etfs=candidate_etfs,
+    )
+    full_sample = _assign_buckets(
+        _prepare_factor_sample(composite_df, universe_df, request, forward_window),
+        int(request.bucket_count),
+    )
+    split_sample = _split_sample_for_oos(
+        full_sample,
+        analysis_dates,
+        request.oos_start_date,
+        forward_window,
+    )
+    analysis_sample = split_sample["analysis"]
+    if analysis_sample.is_empty():
+        detail = (
+            "样本外切分后样本内训练样本不足，请调早样本外起始日期或缩短收益窗口"
+            if request.oos_start_date
+            else "没有可用于分桶的组合因子样本，请调整日期、窗口或股票池"
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+    analysis_result = _compute_sample_artifacts(analysis_sample, request, forward_window)
+    oos_result = _compute_sample_artifacts(split_sample["oos"], request, forward_window)
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    analysis_result["summary"]["elapsed_ms"] = round(elapsed_ms, 1)
+
+    industry_rows = int(industry_df.height) if industry_df is not None else 0
+    neutralization_warning = (
+        "行业快照为空，中性化未生效"
+        if needs_industry and industry_rows == 0
+        else None
+    )
+
+    component_metadata = [
+        {
+            "component_key": leg["key"],
+            "factor": leg["factor"],
+            "factor_key": leg["factor"]["key"],
+            "factor_label": leg["factor"]["label"],
+            "window": leg["window"],
+            "window_label": leg["window_label"],
+            "windows": leg["windows"],
+            "raw_weight": _safe_float(leg["raw_weight"], 4),
+            "weight": _safe_float(leg["weight"], 4),
+            "neutralization": leg["neutralization"],
+            "neutralization_label": leg["neutralization_label"],
+            "standardization": leg["standardization"],
+            "standardization_label": leg["standardization_label"],
+            "momentum_weights": leg["momentum_weights"],
+        }
+        for leg in resolved_legs
+    ]
+    metadata = {
+        "mode": "composite",
+        "pool": request.pool,
+        "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
+        "candidate_etfs": candidate_etfs,
+        "factor": {
+            "key": "composite",
+            "label": "组合因子",
+            "group": "组合因子",
+            "description": "多个子因子先独立方向调整、中性化、标准化，再按权重线性合成。",
+            "direction": "higher_is_better",
+        },
+        "components": component_metadata,
+        "neutralization": "per_leg",
+        "neutralization_label": "子因子独立中性化",
+        "neutralization_effective": needs_industry and industry_rows > 0,
+        "neutralization_warning": neutralization_warning,
+        "standardization": "per_leg",
+        "standardization_label": "子因子独立标准化",
+        "factor_combination_method": "weighted_standardized_factor_values",
+        "factor_combination_method_label": "子因子标准化后加权",
+        "windows": required_windows,
+        "forward_window": forward_window,
+        "bucket_count": request.bucket_count,
+        "min_listing_days": request.min_listing_days,
+        "oos_start_date": request.oos_start_date.isoformat() if request.oos_start_date else None,
+        "analysis_scope": "in_sample" if request.oos_start_date else "full",
+        "analysis_scope_label": "样本内" if request.oos_start_date else "全样本",
+        "start_date": request.start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "universe_symbols": len(universe_history.all_symbols),
+        "holdings_date_count": universe_history.holdings_date_count,
+        "industry_rows": industry_rows,
+        "industry_snapshot_mode": "latest_snapshot" if industry_rows else None,
+        "price_rows": int(price_df.height),
+        "engine": "polars",
+    }
+
+    return {
+        "metadata": metadata,
+        "summary": analysis_result["summary"],
+        "bucket_returns": _records(analysis_result["bucket_df"]),
+        "rank_ic_series": _records(analysis_result["ic_df"]),
+        "non_overlapping_summary": analysis_result["non_overlapping_summary"],
+        "non_overlapping_offsets": analysis_result["non_overlapping_offsets"],
+        "yearly_stability": _records(analysis_result["yearly_stability"]),
+        "oos_summary": oos_result["summary"],
+        "oos_bucket_returns": _records(oos_result["bucket_df"]),
+        "oos_rank_ic_series": _records(oos_result["ic_df"]),
+        "oos_non_overlapping_summary": oos_result["non_overlapping_summary"],
+        "oos_non_overlapping_offsets": oos_result["non_overlapping_offsets"],
+        "oos_yearly_stability": _records(oos_result["yearly_stability"]),
+        "component_ic": _compute_component_ic_summary(analysis_sample, resolved_legs),
+        "component_correlation": _compute_component_correlation(analysis_sample, resolved_legs),
+        "parameter_heatmap": [],
     }
 
 
@@ -1956,6 +4144,7 @@ def _run_factor_analysis(
         end_date=end_date,
         analysis_dates=analysis_dates,
         industry_df=industry_df,
+        candidate_etfs=candidate_etfs,
     )
     heatmap_records = _compute_parameter_heatmap(price_df, universe_df, factor_definition, request, heatmap_context)
     selected_combo = _select_best_combo(request, factor_definition, heatmap_records)
@@ -1972,6 +4161,7 @@ def _run_factor_analysis(
         momentum_weights=request.momentum_weights,
         analysis_dates=analysis_dates,
         industry_df=industry_df,
+        candidate_etfs=candidate_etfs,
     )
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     factor_analysis["summary"]["elapsed_ms"] = round(elapsed_ms, 1)
@@ -2050,6 +4240,10 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             {"key": key, **value}
             for key, value in HEATMAP_METRIC_OPTIONS.items()
         ],
+        backtest_search_objectives=[
+            {"key": key, **value}
+            for key, value in BACKTEST_SEARCH_OBJECTIVE_OPTIONS.items()
+        ],
         neutralization_options=[
             {"key": key, **value}
             for key, value in NEUTRALIZATION_OPTIONS.items()
@@ -2073,6 +4267,63 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             "heatmap_windows": SUPPORTED_WINDOWS,
             "heatmap_forward_windows": DEFAULT_FORWARD_WINDOWS,
         },
+        default_composite_request={
+            "pool": "SPY_QQQ",
+            "bucket_count": 10,
+            "start_date": DEFAULT_START_DATE.isoformat(),
+            "oos_start_date": None,
+            "forward_window": 20,
+            "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
+            "legs": [
+                {
+                    "factor": "risk_adjusted_momentum",
+                    "window": MIXED_WINDOW_KEY,
+                    "weight": 0.7,
+                    "neutralization": DEFAULT_NEUTRALIZATION,
+                    "standardization": "rank_percentile",
+                    "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
+                },
+                {
+                    "factor": "volume_z",
+                    "window": 20,
+                    "weight": 0.3,
+                    "neutralization": DEFAULT_NEUTRALIZATION,
+                    "standardization": "rank_percentile",
+                    "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
+                },
+            ],
+        },
+        default_backtest_request={
+            "pool": "SPY_QQQ",
+            "start_date": DEFAULT_START_DATE.isoformat(),
+            "end_date": None,
+            "initial_capital": 100_000.0,
+            "max_positions": 7,
+            "sell_rank_multiplier": DEFAULT_SELL_RANK_MULTIPLIER,
+            "rebalance_frequency": DEFAULT_REBALANCE_FREQUENCY,
+            "commission_pct": 0.03,
+            "slippage_pct": 0.02,
+            "lot_size": 1,
+            "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
+            "legs": [
+                {
+                    "factor": "risk_adjusted_momentum",
+                    "window": MIXED_WINDOW_KEY,
+                    "weight": 0.6,
+                    "neutralization": DEFAULT_NEUTRALIZATION,
+                    "standardization": "rank_percentile",
+                    "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
+                },
+                {
+                    "factor": "index_weight",
+                    "window": 20,
+                    "weight": 0.4,
+                    "neutralization": DEFAULT_NEUTRALIZATION,
+                    "standardization": "rank_percentile",
+                    "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
+                },
+            ],
+        },
     )
 
 
@@ -2083,3 +4334,55 @@ async def analyze_factor(
     db: ORMSession = Depends(get_db),
 ):
     return _run_factor_analysis(payload, db)
+
+
+@router.post("/analyze-composite")
+async def analyze_composite_factor(
+    payload: CompositeFactorAnalyzeRequest,
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _run_composite_factor_analysis(payload, db)
+
+
+@router.post("/backtest")
+async def backtest_factor_strategy(
+    payload: FactorBacktestRequest,
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _run_factor_backtest(payload, db)
+
+
+@router.post("/backtest-search/start")
+async def start_factor_backtest_search(
+    payload: FactorBacktestSearchRequest,
+    _: str = Depends(valid_account),
+):
+    return _start_backtest_search_job(payload)
+
+
+@router.get("/backtest-search/{job_id}")
+async def get_factor_backtest_search_job(
+    job_id: str,
+    _: str = Depends(valid_account),
+):
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        job = BACKTEST_SEARCH_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="批量回测任务不存在")
+        return _serialize_backtest_search_job(job)
+
+
+@router.post("/backtest-search/{job_id}/cancel")
+async def cancel_factor_backtest_search_job(
+    job_id: str,
+    _: str = Depends(valid_account),
+):
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        job = BACKTEST_SEARCH_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="批量回测任务不存在")
+        if job["status"] in {"queued", "running"}:
+            job["cancel_requested"] = True
+        return _serialize_backtest_search_job(job)

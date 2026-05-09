@@ -460,7 +460,7 @@ class ScheduledTaskManager:
             "evc_static_info_sync": TaskDefinition(
                 task_key="evc_static_info_sync",
                 name="美股基础数据同步",
-                description="同步 EVC 全量股票池 LongPort static_info 快照/历史记录，并将标普500/纳指100成分股日K落到 DuckDB。",
+                description="同步 EVC 全量股票池 LongPort static_info 快照/历史记录，并将标普500/纳指100成分股和 ETFManager 杠杆映射中的单倍/多倍 ETF 日K落到 DuckDB。",
                 default_time="07:15",
                 default_enabled=True,
                 sort_order=11,
