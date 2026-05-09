@@ -89,6 +89,42 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
     )
 
 
+def _run_us_stock_industry_sync():
+    from .us_stock_industry_sync import sync_us_stock_industry_snapshots
+
+    result = sync_us_stock_industry_snapshots()
+    logging.getLogger("ScheduledTaskManager").info(
+        (
+            "US stock industry synced: symbols=%s target=%s saved=%s skipped=%s "
+            "remaining=%s api_calls=%s errors=%s"
+        ),
+        result.get("symbols"),
+        result.get("target_symbols"),
+        result.get("saved"),
+        result.get("skipped_existing"),
+        result.get("remaining"),
+        result.get("api_calls"),
+        len(result.get("errors") or []),
+    )
+    errors = result.get("errors") or []
+    if errors and not result.get("saved"):
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('symbol')}: {item.get('error')}",
+        )
+        raise RuntimeError(f"US stock industry sync failed: {preview}")
+    return (
+        "US stock industry sync "
+        f"symbols={result.get('symbols')} "
+        f"target={result.get('target_symbols')} "
+        f"saved={result.get('saved')} "
+        f"skipped={result.get('skipped_existing')} "
+        f"remaining={result.get('remaining')} "
+        f"api_calls={result.get('api_calls')} "
+        f"errors={len(errors)}"
+    )
+
+
 def _run_etf_fair_value_analysis():
     from ..core.services.longport import LongPortService
     from .etf_manager import ETFManager
@@ -429,6 +465,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=11,
                 runner=_run_us_stock_base_data_sync,
+            ),
+            "us_stock_industry_sync": TaskDefinition(
+                task_key="us_stock_industry_sync",
+                name="美股行业分类同步",
+                description="使用 FMP Company Profile 补全 SPY/QQQ 成分股的 sector/industry 元数据，保存到 SQLite。",
+                default_time="07:05",
+                default_enabled=False,
+                sort_order=13,
+                runner=_run_us_stock_industry_sync,
             ),
             "etf_fair_value_analysis": TaskDefinition(
                 task_key="etf_fair_value_analysis",

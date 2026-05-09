@@ -1,16 +1,50 @@
 from typing import Dict, List, Optional
 import httpx
 import logging
+import os
+import re
+import threading
 from datetime import datetime
 
 class FMPService:
     """Financial Modeling Prep API 服务"""
+    _api_key_lock = threading.Lock()
+    _api_key_index = 0
     
     def __init__(self):
-        self.api_key = "OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8"
+        fallback_api_key = "OL3LA1wnJ5pVzhEKSZCIJ3uKHtvIHWB8"
         self.base_url = "https://financialmodelingprep.com/api/v3"
         self.stable_base_url = "https://financialmodelingprep.com/stable"
         self.logger = logging.getLogger("FMPService")
+        self.api_keys = self._load_api_keys(fallback_api_key)
+        self.api_key = self.api_keys[0]
+
+    def _load_api_keys(self, fallback_api_key: str) -> List[str]:
+        raw_values = [
+            os.getenv("FMP_API_KEYS"),
+            os.getenv("FMP_API_KEY"),
+            os.getenv("FMP_API_TOKEN"),
+            'n5HxCqbrt96Kw3J2rAZ7kQlBxFrISKsd',
+            'G1EB4dsFkzSNGv2X1TuPoDhBZiLBucrt',
+            'PEliVS2Zk3NxfSVj2LXS7zLR0TEn0fw0',
+            'pq4BZ0KzPb2dU0c61HCn6yktvSbZ7CM8'
+        ]
+        keys: List[str] = []
+        for raw_value in raw_values:
+            for item in re.split(r"[\s,;]+", str(raw_value or "").strip()):
+                key = item.strip()
+                if key and key not in keys:
+                    keys.append(key)
+        return keys or [fallback_api_key]
+
+    def _next_api_key(self) -> str:
+        with self._api_key_lock:
+            key = self.api_keys[self.__class__._api_key_index % len(self.api_keys)]
+            self.__class__._api_key_index += 1
+            return key
+
+    def _params_with_api_key(self, **params) -> Dict:
+        return {**params, "apikey": self._next_api_key()}
 
     async def get_quote(self, symbol: str) -> Optional[Dict]:
         """获取股票当前报价数据，包含价格、PE等信息
@@ -46,10 +80,10 @@ class FMPService:
             }
         """
         try:
-            url = f"{self.base_url}/quote/{symbol}?apikey={self.api_key}"
+            url = f"{self.base_url}/quote/{symbol}"
             
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+                response = await client.get(url, params=self._params_with_api_key())
                 response.raise_for_status()
                 data = response.json()
                 
@@ -60,6 +94,26 @@ class FMPService:
                     
         except Exception as e:
             self.logger.error(f"获取{symbol}报价数据失败: {str(e)}")
+            return None
+
+    def get_company_profile(self, symbol: str) -> Optional[Dict]:
+        """同步获取单只股票 Company Profile。"""
+        if not symbol:
+            return None
+        try:
+            url = f"{self.stable_base_url}/profile"
+            params = self._params_with_api_key(symbol=symbol)
+            with httpx.Client(timeout=30) as client:
+                response = client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+            if isinstance(data, list) and data:
+                return data[0]
+            if isinstance(data, dict) and data:
+                return data
+            return None
+        except Exception as e:
+            self.logger.error(f"获取{symbol}公司Profile失败: {str(e)}")
             return None
 
     async def get_historical_data(self, symbol: str, days: int = 365) -> Optional[Dict]:
@@ -82,10 +136,13 @@ class FMPService:
             }
         """
         try:
-            url = f"{self.base_url}/historical-price-full/{symbol}?apikey={self.api_key}&serietype=line&limit={days}"
+            url = f"{self.base_url}/historical-price-full/{symbol}"
             
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+                response = await client.get(
+                    url,
+                    params=self._params_with_api_key(serietype="line", limit=days),
+                )
                 response.raise_for_status()
                 return response.json()
                     
@@ -116,10 +173,13 @@ class FMPService:
             ]
         """
         try:
-            url = f"{self.stable_base_url}/historical-price-eod/dividend-adjusted?symbol={symbol}&apikey={self.api_key}&limit={days}"
+            url = f"{self.stable_base_url}/historical-price-eod/dividend-adjusted"
             
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+                response = await client.get(
+                    url,
+                    params=self._params_with_api_key(symbol=symbol, limit=days),
+                )
                 response.raise_for_status()
                 data = response.json()
                 return data
@@ -134,9 +194,9 @@ class FMPService:
             float: 10年美债收益率（如4.25），获取失败返回None
         """
         try:
-            url = f"{self.base_url}/quote/^TNX?apikey={self.api_key}"
+            url = f"{self.base_url}/quote/^TNX"
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+                response = await client.get(url, params=self._params_with_api_key())
                 response.raise_for_status()
                 data = response.json()
                 if data and len(data) > 0 and 'price' in data[0]:
@@ -160,10 +220,13 @@ class FMPService:
             Dict: 财报预测数据，获取失败返回 None
         """
         try:
-            url = f"{self.stable_base_url}/analyst-estimates/{symbol}?period={period}&page={page}&limit={limit}&apikey={self.api_key}"
+            url = f"{self.stable_base_url}/analyst-estimates/{symbol}"
             
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+                response = await client.get(
+                    url,
+                    params=self._params_with_api_key(period=period, page=page, limit=limit),
+                )
                 response.raise_for_status()
                 return response.json()
                     

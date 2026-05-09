@@ -2,17 +2,19 @@ import logging
 import math
 import re
 import time
-from dataclasses import dataclass
+from bisect import bisect_left
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional
 
+import numpy as np
 import polars as pl
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as ORMSession
 
 from ...core.analytics_database import ANALYTICS_DB_PATH
-from ...core.database import StockEVC, get_db
+from ...core.database import StockEVC, USStockIndustrySnapshot, get_db
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_MOMENTUM_WEIGHTS,
     SUPPORTED_MOMENTUM_WINDOWS,
@@ -29,12 +31,65 @@ SUPPORTED_WINDOWS = [20, 60, 120]
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
 DEFAULT_START_DATE = date(2020, 1, 2)
 DEFAULT_MIN_LISTING_DAYS = 365
+DEFAULT_NEUTRALIZATION = "none"
+DEFAULT_STANDARDIZATION = "zscore"
+DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
+MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE = 10
 MAX_HEATMAP_CELLS = 20
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FACTOR_DIRECTION_OPTIONS = {
     "higher_is_better": {"sign": 1.0, "label": "高值更好"},
     "lower_is_better": {"sign": -1.0, "label": "低值更好"},
     "exploratory": {"sign": 1.0, "label": "探索方向"},
+}
+NEUTRALIZATION_OPTIONS = {
+    "none": {"label": "不做中性化"},
+    "sector": {"label": "行业大类中性化（Sector）"},
+    "sector_market_cap": {"label": "行业大类+市值中性化"},
+    "fine_industry": {"label": "细行业中性化（Industry，小样本回退Sector）"},
+    "fine_industry_market_cap": {"label": "细行业+市值中性化（小样本回退Sector）"},
+}
+NEUTRALIZATION_ALIASES = {
+    "industry": "sector",
+    "industry_market_cap": "sector_market_cap",
+}
+STANDARDIZATION_OPTIONS = {
+    "none": {"label": "不标准化"},
+    "zscore": {"label": "截面 Z-Score"},
+}
+HEATMAP_METRIC_OPTIONS = {
+    "non_overlap_annualized_median_pct": {
+        "label": "非重叠年化多空差",
+        "kind": "percent",
+    },
+    "annualized_top_minus_bottom_avg_return_pct": {
+        "label": "年化多空差",
+        "kind": "percent",
+    },
+    "top_minus_bottom_avg_return_pct": {
+        "label": "T+n 多空差",
+        "kind": "percent",
+    },
+    "rank_ic_mean": {
+        "label": "Rank IC 均值",
+        "kind": "ic",
+    },
+    "rank_ic_t_stat": {
+        "label": "Rank IC t-stat",
+        "kind": "ic",
+    },
+    "non_overlap_mean_t_stat": {
+        "label": "多空 t-stat",
+        "kind": "ic",
+    },
+    "monotonicity_spearman": {
+        "label": "单调性 Spearman",
+        "kind": "ic",
+    },
+    "adjacent_hit_rate_pct": {
+        "label": "相邻命中率",
+        "kind": "percent",
+    },
 }
 
 
@@ -68,6 +123,10 @@ class FactorLabAnalyzeRequest(BaseModel):
     bucket_count: int = 10
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
+    neutralization: str = DEFAULT_NEUTRALIZATION
+    standardization: str = DEFAULT_STANDARDIZATION
+    oos_start_date: Optional[date] = None
+    heatmap_metric: str = DEFAULT_HEATMAP_METRIC
     heatmap_windows: List[int] = Field(default_factory=lambda: SUPPORTED_WINDOWS.copy())
     heatmap_forward_windows: List[int] = Field(default_factory=lambda: DEFAULT_FORWARD_WINDOWS.copy())
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
@@ -121,6 +180,40 @@ class FactorLabAnalyzeRequest(BaseModel):
             raise ValueError("上市天数过滤必须在 0 到 3650 天之间")
         return days
 
+    @validator("neutralization")
+    def validate_neutralization(cls, value):
+        normalized = str(value or DEFAULT_NEUTRALIZATION)
+        normalized = NEUTRALIZATION_ALIASES.get(normalized, normalized)
+        if normalized not in NEUTRALIZATION_OPTIONS:
+            raise ValueError(f"中性化仅支持: {', '.join(NEUTRALIZATION_OPTIONS)}")
+        return normalized
+
+    @validator("standardization")
+    def validate_standardization(cls, value):
+        normalized = str(value or DEFAULT_STANDARDIZATION)
+        if normalized not in STANDARDIZATION_OPTIONS:
+            raise ValueError(f"标准化仅支持: {', '.join(STANDARDIZATION_OPTIONS)}")
+        return normalized
+
+    @validator("heatmap_metric")
+    def validate_heatmap_metric(cls, value):
+        normalized = str(value or DEFAULT_HEATMAP_METRIC)
+        if normalized not in HEATMAP_METRIC_OPTIONS:
+            raise ValueError(f"热力图指标仅支持: {', '.join(HEATMAP_METRIC_OPTIONS)}")
+        return normalized
+
+    @validator("oos_start_date")
+    def validate_oos_start_date(cls, value, values):
+        if value is None:
+            return value
+        start = values.get("start_date")
+        end = values.get("end_date") or date.today()
+        if start is not None and value <= start:
+            raise ValueError("样本外起始日期必须晚于开始日期")
+        if end is not None and value >= end:
+            raise ValueError("样本外起始日期必须早于结束日期")
+        return value
+
     @validator("momentum_weights", pre=True)
     def validate_momentum_weights(cls, value):
         return _normalize_momentum_weights_payload(value)
@@ -138,6 +231,9 @@ class FactorLabOptionsResponse(BaseModel):
     factors: List[Dict[str, Any]]
     windows: List[int]
     forward_windows: List[int]
+    heatmap_metrics: List[Dict[str, Any]]
+    neutralization_options: List[Dict[str, Any]]
+    standardization_options: List[Dict[str, Any]]
     default_request: Dict[str, Any]
 
 
@@ -149,6 +245,8 @@ class FactorContext:
     symbols: List[str]
     start_date: date
     end_date: date
+    analysis_dates: List[date] = field(default_factory=list)
+    industry_df: Optional[pl.DataFrame] = None
 
 
 @dataclass(frozen=True)
@@ -424,6 +522,56 @@ def _load_valuation_frame(
         )
         .filter(pl.col("_fair_value_mid").is_not_null() & (pl.col("_fair_value_mid") > 0))
         .sort(["symbol", "valuation_date"])
+    )
+
+
+def _load_industry_frame(
+    db: ORMSession,
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+) -> pl.DataFrame:
+    if not symbols:
+        return pl.DataFrame()
+
+    rows = (
+        db.query(
+            USStockIndustrySnapshot.symbol,
+            USStockIndustrySnapshot.date,
+            USStockIndustrySnapshot.sector,
+            USStockIndustrySnapshot.industry_group,
+            USStockIndustrySnapshot.industry,
+            USStockIndustrySnapshot.sub_industry,
+            USStockIndustrySnapshot.market_cap,
+        )
+        .filter(
+            USStockIndustrySnapshot.symbol.in_(symbols),
+            USStockIndustrySnapshot.provider == "fmp",
+        )
+        .all()
+    )
+    if not rows:
+        return pl.DataFrame()
+
+    return (
+        pl.DataFrame(
+            {
+                "symbol": [row.symbol for row in rows],
+                "industry_date": [row.date for row in rows],
+                "sector": [row.sector for row in rows],
+                "industry_group": [row.industry_group for row in rows],
+                "industry": [row.industry for row in rows],
+                "sub_industry": [row.sub_industry for row in rows],
+                "market_cap": [row.market_cap for row in rows],
+            }
+        )
+        .with_columns(
+            pl.col("industry_date").cast(pl.Date),
+            pl.col("market_cap").cast(pl.Float64),
+        )
+        .sort(["symbol", "industry_date"])
+        .unique(subset=["symbol"], keep="last")
+        .sort("symbol")
     )
 
 
@@ -724,7 +872,178 @@ def _apply_factor_direction(df: pl.DataFrame, factor_definition: FactorDefinitio
     sign = float(direction["sign"])
     return df.with_columns(
         pl.col("factor_value").alias("factor_value_raw"),
+        (pl.col("factor_value") * sign).alias("factor_value_directional"),
         (pl.col("factor_value") * sign).alias("factor_value"),
+    )
+
+
+def _with_neutralization_columns(
+    df: pl.DataFrame,
+    industry_df: Optional[pl.DataFrame],
+    neutralization: str,
+) -> pl.DataFrame:
+    source = df
+    if industry_df is not None and not industry_df.is_empty():
+        source = (
+            source.sort(["symbol", "trade_date"])
+            .join(industry_df, on="symbol", how="left")
+        )
+
+    for column in ["industry_group", "industry", "sector", "sub_industry", "market_cap"]:
+        if column not in source.columns:
+            source = source.with_columns(pl.lit(None).alias(column))
+
+    source = source.with_columns(
+        pl.coalesce([pl.col("sector"), pl.lit("Unknown")]).alias("_neutralization_sector"),
+        pl.coalesce(
+            [
+                pl.col("industry"),
+                pl.col("sector"),
+                pl.lit("Unknown"),
+            ]
+        ).alias("_neutralization_fine_industry"),
+        pl.when(pl.col("market_cap").is_not_null() & (pl.col("market_cap") > 0))
+        .then(pl.col("market_cap").cast(pl.Float64))
+        .otherwise(None)
+        .alias("_neutralization_market_cap"),
+    )
+    if neutralization.startswith("fine_industry"):
+        source = source.with_columns(
+            pl.when(pl.col("factor_value").is_not_null() & pl.col("factor_value").is_finite())
+            .then(1)
+            .otherwise(0)
+            .sum()
+            .over(["trade_date", "_neutralization_fine_industry"])
+            .alias("_fine_industry_sample_count")
+        )
+        return source.with_columns(
+            pl.when(
+                pl.col("industry").is_not_null()
+                & (pl.col("_fine_industry_sample_count") >= MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE)
+            )
+            .then(pl.col("_neutralization_fine_industry"))
+            .otherwise(pl.col("_neutralization_sector"))
+            .alias("_neutralization_industry")
+        )
+
+    return source.with_columns(pl.col("_neutralization_sector").alias("_neutralization_industry"))
+
+
+def _neutralize_group(group: pl.DataFrame, mode: str) -> pl.DataFrame:
+    if group.is_empty() or "factor_value" not in group.columns:
+        return group
+
+    y = group.get_column("factor_value").cast(pl.Float64).to_numpy()
+    finite_y = np.isfinite(y)
+    if finite_y.sum() < 2:
+        return group.with_columns(pl.Series("factor_value_neutralized", y))
+
+    labels = group.get_column("_neutralization_industry").fill_null("Unknown").cast(pl.Utf8).to_list()
+    _, label_inverse = np.unique(np.asarray(labels, dtype=str), return_inverse=True)
+
+    x_parts = [np.ones((group.height, 1), dtype=float)]
+    category_count = int(label_inverse.max()) + 1 if label_inverse.size else 0
+    if category_count > 1:
+        x_parts.append(np.eye(category_count, dtype=float)[label_inverse][:, 1:])
+
+    if mode.endswith("_market_cap") and "_neutralization_market_cap" in group.columns:
+        market_cap = group.get_column("_neutralization_market_cap").cast(pl.Float64).to_numpy()
+        finite_market_cap = np.isfinite(market_cap) & (market_cap > 0)
+        if finite_market_cap.any():
+            median_market_cap = float(np.nanmedian(market_cap[finite_market_cap]))
+            filled_market_cap = np.where(finite_market_cap, market_cap, median_market_cap)
+            log_market_cap = np.log(np.clip(filled_market_cap, 1.0, None))
+            log_market_cap = log_market_cap - float(np.nanmean(log_market_cap))
+            if np.nanstd(log_market_cap) > 1e-12:
+                x_parts.append(log_market_cap.reshape(-1, 1))
+
+    x = np.hstack(x_parts)
+    fit_mask = finite_y & np.all(np.isfinite(x), axis=1)
+    if fit_mask.sum() < max(3, x.shape[1] + 1):
+        residual = y - float(np.nanmean(y[finite_y]))
+    else:
+        try:
+            beta, *_ = np.linalg.lstsq(x[fit_mask], y[fit_mask], rcond=None)
+            residual = y - x @ beta
+        except np.linalg.LinAlgError:
+            residual = y - float(np.nanmean(y[finite_y]))
+
+    residual = np.where(np.isfinite(residual), residual, y)
+    return group.with_columns(pl.Series("factor_value_neutralized", residual))
+
+
+def _apply_factor_neutralization(
+    df: pl.DataFrame,
+    neutralization: str,
+    industry_df: Optional[pl.DataFrame],
+) -> pl.DataFrame:
+    if df.is_empty() or neutralization == "none":
+        return df
+
+    if industry_df is None or industry_df.is_empty():
+        logger.warning("Factor neutralization requested but industry snapshot data is empty")
+        return df.with_columns(pl.col("factor_value").alias("factor_value_neutralized"))
+
+    return (
+        _with_neutralization_columns(df, industry_df, neutralization)
+        .group_by("trade_date", maintain_order=True)
+        .map_groups(lambda group: _neutralize_group(group, neutralization))
+        .with_columns(pl.col("factor_value_neutralized").alias("factor_value"))
+    )
+
+
+def _apply_factor_standardization(df: pl.DataFrame) -> pl.DataFrame:
+    if df.is_empty() or "factor_value" not in df.columns:
+        return df
+
+    return (
+        df.with_columns(
+            pl.when(pl.col("factor_value").is_finite())
+            .then(pl.col("factor_value"))
+            .otherwise(None)
+            .alias("_factor_for_standardization")
+        )
+        .with_columns(
+            pl.mean("_factor_for_standardization").over("trade_date").alias("_factor_mean"),
+            pl.std("_factor_for_standardization").over("trade_date").alias("_factor_std"),
+        )
+        .with_columns(
+            pl.when((pl.col("_factor_std") > 0) & pl.col("factor_value").is_finite())
+            .then((pl.col("factor_value") - pl.col("_factor_mean")) / pl.col("_factor_std"))
+            .otherwise(pl.col("factor_value"))
+            .alias("factor_value_standardized")
+        )
+        .with_columns(pl.col("factor_value_standardized").alias("factor_value"))
+        .drop(["_factor_for_standardization", "_factor_mean", "_factor_std"])
+    )
+
+
+def _apply_factor_transformations(
+    df: pl.DataFrame,
+    request: FactorLabAnalyzeRequest,
+    context: FactorContext,
+) -> pl.DataFrame:
+    result = df
+    if request.neutralization != "none":
+        result = _apply_factor_neutralization(result, request.neutralization, context.industry_df)
+    if request.standardization == "zscore":
+        result = _apply_factor_standardization(result)
+    return result
+
+
+def _prepare_factor_frame(
+    price_df: pl.DataFrame,
+    factor_definition: FactorDefinition,
+    context: FactorContext,
+    request: FactorLabAnalyzeRequest,
+) -> pl.DataFrame:
+    return _apply_factor_transformations(
+        _apply_factor_direction(
+            factor_definition.compute(price_df, context),
+            factor_definition,
+        ),
+        request,
+        context,
     )
 
 
@@ -822,6 +1141,42 @@ def _assign_buckets(df: pl.DataFrame, bucket_count: int) -> pl.DataFrame:
             (pl.col("forward_return") - pl.mean("forward_return").over("trade_date")).alias("forward_excess_return"),
         )
     )
+
+
+def _empty_like(df: pl.DataFrame) -> pl.DataFrame:
+    return pl.DataFrame(schema=df.schema)
+
+
+def _split_sample_for_oos(
+    df: pl.DataFrame,
+    analysis_dates: List[date],
+    oos_start_date: Optional[date],
+    forward_window: int,
+) -> Dict[str, pl.DataFrame]:
+    if df.is_empty() or oos_start_date is None or not analysis_dates:
+        return {"analysis": df, "oos": _empty_like(df)}
+
+    split_index = bisect_left(analysis_dates, oos_start_date)
+    if split_index >= len(analysis_dates):
+        return {"analysis": df, "oos": _empty_like(df)}
+
+    # Purge one full forward-return window before the OOS start date so the
+    # training metric does not use outcomes realized inside the OOS period.
+    train_cutoff_index = max(0, split_index - max(1, int(forward_window)))
+    train_dates = analysis_dates[:train_cutoff_index]
+    oos_dates = analysis_dates[split_index:]
+
+    analysis_df = (
+        df.filter(pl.col("trade_date").is_in(train_dates))
+        if train_dates
+        else _empty_like(df)
+    )
+    oos_df = (
+        df.filter(pl.col("trade_date").is_in(oos_dates))
+        if oos_dates
+        else _empty_like(df)
+    )
+    return {"analysis": analysis_df, "oos": oos_df}
 
 
 def _compute_bucket_report(df: pl.DataFrame) -> pl.DataFrame:
@@ -1181,6 +1536,9 @@ def _summarize(
     icir = None
     if ic_mean is not None and ic_std is not None and ic_std > 0:
         icir = round(ic_mean / ic_std * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
+    rank_ic_t_stat = None
+    if ic_mean is not None and ic_std is not None and ic_std > 0 and ic_df.height > 1:
+        rank_ic_t_stat = round(ic_mean / ic_std * math.sqrt(ic_df.height), 4)
 
     top_return = None
     bottom_return = None
@@ -1204,12 +1562,79 @@ def _summarize(
         "rank_ic_mean": ic_mean,
         "rank_ic_std": ic_std,
         "icir": icir,
+        "rank_ic_t_stat": rank_ic_t_stat,
         "top_bucket_avg_return_pct": top_return,
         "bottom_bucket_avg_return_pct": bottom_return,
         "top_minus_bottom_avg_return_pct": spread_return,
         "annualized_top_minus_bottom_avg_return_pct": annualized_spread_return,
         "elapsed_ms": round(elapsed_ms, 1),
     } | monotonicity
+
+
+def _compute_sample_artifacts(
+    factor_sample: pl.DataFrame,
+    request: FactorLabAnalyzeRequest,
+    forward_window: int,
+) -> Dict[str, Any]:
+    if factor_sample.is_empty():
+        return {
+            "factor_sample": factor_sample,
+            "bucket_df": pl.DataFrame(),
+            "ic_df": pl.DataFrame(),
+            "non_overlapping_summary": {},
+            "non_overlapping_offsets": [],
+            "yearly_stability": pl.DataFrame(),
+            "summary": {},
+        }
+
+    bucket_df = _compute_bucket_report(factor_sample)
+    ic_df = _compute_rank_ic(factor_sample)
+    summary = _summarize(bucket_df, ic_df, request, factor_sample, forward_window, 0)
+    non_overlap = _compute_non_overlapping_stats(
+        factor_sample,
+        int(request.bucket_count),
+        int(forward_window),
+    )
+    yearly_df = _compute_yearly_stability(
+        factor_sample,
+        ic_df,
+        int(request.bucket_count),
+        int(forward_window),
+    )
+
+    non_overlap_summary = non_overlap["summary"]
+    if non_overlap_summary:
+        summary.update(
+            {
+                "non_overlap_annualized_median_pct": non_overlap_summary.get("annualized_median_pct"),
+                "non_overlap_annualized_mean_pct": non_overlap_summary.get("annualized_mean_pct"),
+                "non_overlap_positive_period_rate_pct": non_overlap_summary.get("positive_period_rate_pct"),
+                "non_overlap_offsets": non_overlap_summary.get("offsets"),
+                "spread_t_stat": non_overlap_summary.get("mean_t_stat"),
+            }
+        )
+
+    if not yearly_df.is_empty():
+        total_years = yearly_df.height
+        spread_years = yearly_df.filter(pl.col("annualized_top_minus_bottom_return_pct") > 0).height
+        ic_years = yearly_df.filter(pl.col("avg_rank_ic") > 0).height
+        summary.update(
+            {
+                "positive_spread_years": int(spread_years),
+                "positive_ic_years": int(ic_years),
+                "total_years": int(total_years),
+            }
+        )
+
+    return {
+        "factor_sample": factor_sample,
+        "bucket_df": bucket_df,
+        "ic_df": ic_df,
+        "non_overlapping_summary": non_overlap_summary,
+        "non_overlapping_offsets": non_overlap["offsets"],
+        "yearly_stability": yearly_df,
+        "summary": summary,
+    }
 
 
 def _compute_parameter_heatmap(
@@ -1236,52 +1661,62 @@ def _compute_parameter_heatmap(
             symbols=context_base.symbols,
             start_date=context_base.start_date,
             end_date=context_base.end_date,
+            analysis_dates=context_base.analysis_dates,
+            industry_df=context_base.industry_df,
         )
-        factor_df = _apply_factor_direction(
-            factor_definition.compute(price_df, heatmap_context),
-            factor_definition,
-        )
+        factor_df = _prepare_factor_frame(price_df, factor_definition, heatmap_context, request)
         for forward_window in forward_windows:
             sample = _assign_buckets(
                 _prepare_factor_sample(factor_df, universe_df, request, forward_window),
                 request.bucket_count,
             )
-            bucket_df = _compute_bucket_report(sample)
-            value = None
-            annualized_value = None
-            non_overlap_annualized_value = None
-            top = None
-            bottom = None
-            if not bucket_df.is_empty():
-                top_row = bucket_df.filter(pl.col("bucket") == request.bucket_count)
-                bottom_row = bucket_df.filter(pl.col("bucket") == 1)
-                if top_row.height:
-                    top = _safe_float(top_row.select("avg_return_pct").item(), 4)
-                if bottom_row.height:
-                    bottom = _safe_float(bottom_row.select("avg_return_pct").item(), 4)
-                if top is not None and bottom is not None:
-                    value = round(top - bottom, 4)
-                    annualized_value = _annualize_period_return_pct(value, int(forward_window))
-                non_overlap = _compute_non_overlapping_stats(
-                    sample,
+            split_sample = _split_sample_for_oos(
+                sample,
+                context_base.analysis_dates,
+                request.oos_start_date,
+                int(forward_window),
+            )
+            analysis_sample = split_sample["analysis"]
+            bucket_df = _compute_bucket_report(analysis_sample)
+            ic_df = _compute_rank_ic(analysis_sample)
+            summary = _summarize(bucket_df, ic_df, request, analysis_sample, int(forward_window), 0)
+            non_overlap_summary = {}
+            if not analysis_sample.is_empty():
+                non_overlap_summary = _compute_non_overlapping_stats(
+                    analysis_sample,
                     int(request.bucket_count),
                     int(forward_window),
                     include_offsets=False,
-                )
-                non_overlap_annualized_value = non_overlap["summary"].get("annualized_median_pct")
+                )["summary"]
+
+            non_overlap_annualized_value = non_overlap_summary.get("annualized_median_pct")
+            record = {
+                "window": int(window),
+                "forward_window": int(forward_window),
+                "top_minus_bottom_avg_return_pct": summary.get("top_minus_bottom_avg_return_pct"),
+                "annualized_top_minus_bottom_avg_return_pct": summary.get("annualized_top_minus_bottom_avg_return_pct"),
+                "non_overlap_annualized_top_minus_bottom_pct": non_overlap_annualized_value,
+                "non_overlap_annualized_median_pct": non_overlap_annualized_value,
+                "non_overlap_annualized_mean_pct": non_overlap_summary.get("annualized_mean_pct"),
+                "non_overlap_mean_t_stat": non_overlap_summary.get("mean_t_stat"),
+                "rank_ic_mean": summary.get("rank_ic_mean"),
+                "rank_ic_std": summary.get("rank_ic_std"),
+                "rank_ic_t_stat": summary.get("rank_ic_t_stat"),
+                "icir": summary.get("icir"),
+                "monotonicity_spearman": summary.get("monotonicity_spearman"),
+                "adjacent_hit_rate_pct": summary.get("adjacent_hit_rate_pct"),
+                "top_bucket_avg_return_pct": summary.get("top_bucket_avg_return_pct"),
+                "bottom_bucket_avg_return_pct": summary.get("bottom_bucket_avg_return_pct"),
+                "samples": int(analysis_sample.height),
+                "trade_dates": int(analysis_sample.select(pl.n_unique("trade_date")).item()) if not analysis_sample.is_empty() else 0,
+                "full_samples": int(sample.height),
+                "oos_samples": int(split_sample["oos"].height),
+            }
+            metric_value = record.get(request.heatmap_metric)
+            record["heatmap_value"] = metric_value
+            record["heatmap_value_pct"] = metric_value
             records.append(
-                {
-                    "window": int(window),
-                    "forward_window": int(forward_window),
-                    "top_minus_bottom_avg_return_pct": value,
-                    "annualized_top_minus_bottom_avg_return_pct": annualized_value,
-                    "non_overlap_annualized_top_minus_bottom_pct": non_overlap_annualized_value,
-                    "heatmap_value_pct": non_overlap_annualized_value if non_overlap_annualized_value is not None else annualized_value,
-                    "top_bucket_avg_return_pct": top,
-                    "bottom_bucket_avg_return_pct": bottom,
-                    "samples": int(sample.height),
-                    "trade_dates": int(sample.select(pl.n_unique("trade_date")).item()) if not sample.is_empty() else 0,
-                }
+                record
             )
     return records
 
@@ -1291,13 +1726,14 @@ def _select_best_combo(
     factor_definition: FactorDefinition,
     heatmap_records: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    metric_key = request.heatmap_metric
     valid_records = [
         item for item in heatmap_records
-        if item.get("heatmap_value_pct") is not None
+        if item.get(metric_key) is not None
     ]
     selected_record = max(
         valid_records,
-        key=lambda item: _record_float(item, "heatmap_value_pct", -1e18),
+        key=lambda item: _record_float(item, metric_key, -1e18),
     ) if valid_records else None
 
     selected_window = request.heatmap_windows[0]
@@ -1316,7 +1752,9 @@ def _select_best_combo(
         "forward_window": int(selected_forward_window),
         "windows": selected_windows,
         "selection_mode": "best",
-        "reason": "max_non_overlap_annualized_top_minus_bottom_pct" if selected_record else "fallback_first_combo",
+        "heatmap_metric": metric_key,
+        "heatmap_metric_label": HEATMAP_METRIC_OPTIONS.get(metric_key, {}).get("label", metric_key),
+        "reason": f"max_{metric_key}" if selected_record else "fallback_first_combo",
     }
 
 
@@ -1324,14 +1762,17 @@ def _compute_factor_analysis_for_combo(
     price_df: pl.DataFrame,
     universe_df: pl.DataFrame,
     factor_definition: FactorDefinition,
-    request,
+    request: FactorLabAnalyzeRequest,
     db: ORMSession,
     symbols: List[str],
     start_date: date,
     end_date: date,
     combo: Dict[str, Any],
     momentum_weights: Dict[str, float],
+    analysis_dates: List[date],
+    industry_df: Optional[pl.DataFrame],
 ) -> Dict[str, Any]:
+    forward_window = int(combo["forward_window"])
     active_windows = (
         [int(combo["window"])]
         if factor_definition.supports_windows
@@ -1344,61 +1785,42 @@ def _compute_factor_analysis_for_combo(
         symbols=symbols,
         start_date=start_date,
         end_date=end_date,
+        analysis_dates=analysis_dates,
+        industry_df=industry_df,
     )
-    factor_df = _apply_factor_direction(
-        factor_definition.compute(price_df, context),
-        factor_definition,
-    )
-    factor_sample = _assign_buckets(
-        _prepare_factor_sample(factor_df, universe_df, request, int(combo["forward_window"])),
+    factor_df = _prepare_factor_frame(price_df, factor_definition, context, request)
+    full_sample = _assign_buckets(
+        _prepare_factor_sample(factor_df, universe_df, request, forward_window),
         int(request.bucket_count),
     )
-    if factor_sample.is_empty():
-        raise HTTPException(status_code=400, detail="没有可用于分桶的因子样本，请调整日期、窗口或股票池")
+    split_sample = _split_sample_for_oos(
+        full_sample,
+        analysis_dates,
+        request.oos_start_date,
+        forward_window,
+    )
+    analysis_sample = split_sample["analysis"]
+    if analysis_sample.is_empty():
+        detail = (
+            "样本外切分后样本内训练样本不足，请调早样本外起始日期或缩短收益窗口"
+            if request.oos_start_date
+            else "没有可用于分桶的因子样本，请调整日期、窗口或股票池"
+        )
+        raise HTTPException(status_code=400, detail=detail)
 
-    bucket_df = _compute_bucket_report(factor_sample)
-    ic_df = _compute_rank_ic(factor_sample)
-    summary = _summarize(bucket_df, ic_df, request, factor_sample, int(combo["forward_window"]), 0)
-    non_overlap = _compute_non_overlapping_stats(
-        factor_sample,
-        int(request.bucket_count),
-        int(combo["forward_window"]),
-    )
-    yearly_df = _compute_yearly_stability(
-        factor_sample,
-        ic_df,
-        int(request.bucket_count),
-        int(combo["forward_window"]),
-    )
-    non_overlap_summary = non_overlap["summary"]
-    if non_overlap_summary:
-        summary.update(
-            {
-                "non_overlap_annualized_median_pct": non_overlap_summary.get("annualized_median_pct"),
-                "non_overlap_annualized_mean_pct": non_overlap_summary.get("annualized_mean_pct"),
-                "non_overlap_positive_period_rate_pct": non_overlap_summary.get("positive_period_rate_pct"),
-                "non_overlap_offsets": non_overlap_summary.get("offsets"),
-            }
-        )
-    if not yearly_df.is_empty():
-        total_years = yearly_df.height
-        spread_years = yearly_df.filter(pl.col("annualized_top_minus_bottom_return_pct") > 0).height
-        ic_years = yearly_df.filter(pl.col("avg_rank_ic") > 0).height
-        summary.update(
-            {
-                "positive_spread_years": int(spread_years),
-                "positive_ic_years": int(ic_years),
-                "total_years": int(total_years),
-            }
-        )
+    analysis_result = _compute_sample_artifacts(analysis_sample, request, forward_window)
+    oos_result = _compute_sample_artifacts(split_sample["oos"], request, forward_window)
+
     return {
-        "factor_sample": factor_sample,
-        "bucket_df": bucket_df,
-        "ic_df": ic_df,
-        "non_overlapping_summary": non_overlap_summary,
-        "non_overlapping_offsets": non_overlap["offsets"],
-        "yearly_stability": yearly_df,
-        "summary": summary,
+        **analysis_result,
+        "full_factor_sample": full_sample,
+        "oos_factor_sample": split_sample["oos"],
+        "oos_summary": oos_result["summary"],
+        "oos_bucket_df": oos_result["bucket_df"],
+        "oos_ic_df": oos_result["ic_df"],
+        "oos_non_overlapping_summary": oos_result["non_overlapping_summary"],
+        "oos_non_overlapping_offsets": oos_result["non_overlapping_offsets"],
+        "oos_yearly_stability": oos_result["yearly_stability"],
     }
 
 
@@ -1412,6 +1834,8 @@ def _run_factor_analysis(
 
     started_at = time.perf_counter()
     end_date = request.end_date or _get_max_trade_date()
+    if request.oos_start_date and request.oos_start_date >= end_date:
+        raise HTTPException(status_code=400, detail="样本外起始日期必须早于实际结束日期")
     max_forward_window = max(request.heatmap_forward_windows)
     max_factor_window = max(request.heatmap_windows)
     fetch_start = request.start_date - timedelta(
@@ -1440,6 +1864,17 @@ def _run_factor_analysis(
     if universe_df.is_empty():
         raise HTTPException(status_code=400, detail="分析区间内没有可用股票池截面")
 
+    industry_df = (
+        _load_industry_frame(
+            db,
+            universe_history.all_symbols,
+            request.start_date - timedelta(days=3650),
+            end_date,
+        )
+        if request.neutralization != "none"
+        else None
+    )
+
     heatmap_context = FactorContext(
         windows=request.heatmap_windows if factor_definition.supports_windows else factor_definition.default_windows,
         momentum_weights=_normalize_momentum_weights(
@@ -1450,6 +1885,8 @@ def _run_factor_analysis(
         symbols=universe_history.all_symbols,
         start_date=request.start_date,
         end_date=end_date,
+        analysis_dates=analysis_dates,
+        industry_df=industry_df,
     )
     heatmap_records = _compute_parameter_heatmap(price_df, universe_df, factor_definition, request, heatmap_context)
     selected_combo = _select_best_combo(request, factor_definition, heatmap_records)
@@ -1464,9 +1901,18 @@ def _run_factor_analysis(
         end_date=end_date,
         combo=selected_combo,
         momentum_weights=request.momentum_weights,
+        analysis_dates=analysis_dates,
+        industry_df=industry_df,
     )
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     factor_analysis["summary"]["elapsed_ms"] = round(elapsed_ms, 1)
+    heatmap_metric_meta = HEATMAP_METRIC_OPTIONS.get(request.heatmap_metric, {})
+    industry_rows = int(industry_df.height) if industry_df is not None else 0
+    neutralization_warning = (
+        "行业快照为空，中性化未生效"
+        if request.neutralization != "none" and industry_rows == 0
+        else None
+    )
 
     metadata = {
         "pool": request.pool,
@@ -1479,15 +1925,29 @@ def _run_factor_analysis(
             FACTOR_DIRECTION_OPTIONS["exploratory"],
         )["label"],
         "factor_direction_adjusted": factor_definition.direction == "lower_is_better",
+        "neutralization": request.neutralization,
+        "neutralization_label": NEUTRALIZATION_OPTIONS[request.neutralization]["label"],
+        "neutralization_effective": request.neutralization != "none" and industry_rows > 0,
+        "neutralization_warning": neutralization_warning,
+        "standardization": request.standardization,
+        "standardization_label": STANDARDIZATION_OPTIONS[request.standardization]["label"],
+        "heatmap_metric": request.heatmap_metric,
+        "heatmap_metric_label": heatmap_metric_meta.get("label", request.heatmap_metric),
+        "heatmap_metric_kind": heatmap_metric_meta.get("kind", "number"),
         "windows": selected_combo["windows"],
         "forward_window": selected_combo["forward_window"],
         "selected_combo": selected_combo,
         "bucket_count": request.bucket_count,
         "min_listing_days": request.min_listing_days,
+        "oos_start_date": request.oos_start_date.isoformat() if request.oos_start_date else None,
+        "analysis_scope": "in_sample" if request.oos_start_date else "full",
+        "analysis_scope_label": "样本内" if request.oos_start_date else "全样本",
         "start_date": request.start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "universe_symbols": len(universe_history.all_symbols),
         "holdings_date_count": universe_history.holdings_date_count,
+        "industry_rows": industry_rows,
+        "industry_snapshot_mode": "latest_snapshot" if industry_rows else None,
         "price_rows": int(price_df.height),
         "engine": "polars",
     }
@@ -1500,6 +1960,12 @@ def _run_factor_analysis(
         "non_overlapping_summary": factor_analysis["non_overlapping_summary"],
         "non_overlapping_offsets": factor_analysis["non_overlapping_offsets"],
         "yearly_stability": _records(factor_analysis["yearly_stability"]),
+        "oos_summary": factor_analysis["oos_summary"],
+        "oos_bucket_returns": _records(factor_analysis["oos_bucket_df"]),
+        "oos_rank_ic_series": _records(factor_analysis["oos_ic_df"]),
+        "oos_non_overlapping_summary": factor_analysis["oos_non_overlapping_summary"],
+        "oos_non_overlapping_offsets": factor_analysis["oos_non_overlapping_offsets"],
+        "oos_yearly_stability": _records(factor_analysis["oos_yearly_stability"]),
         "parameter_heatmap": heatmap_records,
     }
 
@@ -1511,11 +1977,27 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
         factors=[definition.to_option() for definition in FACTOR_REGISTRY.values()],
         windows=SUPPORTED_WINDOWS,
         forward_windows=DEFAULT_FORWARD_WINDOWS,
+        heatmap_metrics=[
+            {"key": key, **value}
+            for key, value in HEATMAP_METRIC_OPTIONS.items()
+        ],
+        neutralization_options=[
+            {"key": key, **value}
+            for key, value in NEUTRALIZATION_OPTIONS.items()
+        ],
+        standardization_options=[
+            {"key": key, **value}
+            for key, value in STANDARDIZATION_OPTIONS.items()
+        ],
         default_request={
             "pool": "SPY_QQQ",
             "factor": "risk_adjusted_momentum",
             "bucket_count": 10,
             "start_date": DEFAULT_START_DATE.isoformat(),
+            "neutralization": DEFAULT_NEUTRALIZATION,
+            "standardization": DEFAULT_STANDARDIZATION,
+            "oos_start_date": None,
+            "heatmap_metric": DEFAULT_HEATMAP_METRIC,
             "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
             "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
             "include_heatmap": True,

@@ -170,6 +170,25 @@ class ETFHolding(Base):
     shares = Column(Integer)
     weight = Column(Float)
 
+class USStockIndustrySnapshot(Base):
+    """美股行业分类快照。"""
+    __tablename__ = "us_stock_industry_snapshot"
+
+    symbol = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    provider = Column(String(32), primary_key=True, default="fmp")
+    name = Column(String)
+    exchange = Column(String)
+    sector = Column(String(128), index=True)
+    industry_group = Column(String(128), index=True)
+    industry = Column(String(128), index=True)
+    sub_industry = Column(String(128), index=True)
+    sic_code = Column(String(32), index=True)
+    sic_description = Column(String(255))
+    market_cap = Column(Float)
+    raw_data = Column(JSON)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class AStockInnovation100Level(Base):
     """A股创新100指数每日点位。"""
     __tablename__ = "a_stock_innovation100_levels"
