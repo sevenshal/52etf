@@ -44,11 +44,14 @@ const DEFAULT_FORM_VALUES = {
   heatmap_metric: 'non_overlap_annualized_median_pct',
   heatmap_windows: [20, 60, 120],
   heatmap_forward_windows: [5, 20, 60],
+  momentum_weights: { 20: 0.05, 60: 0.2, 120: 0.75 },
 };
 
 const DEFAULT_HEATMAP_METRIC = 'non_overlap_annualized_median_pct';
 const DEFAULT_MIN_LISTING_DAYS = 365;
-const DEFAULT_MOMENTUM_WEIGHTS = { 20: 0.05, 60: 0.2, 120: 0.75 };
+const MIXED_WINDOW_KEY = 'mixed';
+const DEFAULT_MOMENTUM_WEIGHTS = DEFAULT_FORM_VALUES.momentum_weights;
+const MOMENTUM_WEIGHT_WINDOWS = [20, 60, 120];
 
 const numberFormatter = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -83,6 +86,7 @@ const normalizeDefaultRequest = (payload = {}) => ({
   heatmap_metric: payload.heatmap_metric || DEFAULT_FORM_VALUES.heatmap_metric,
   heatmap_windows: payload.heatmap_windows || payload.windows || DEFAULT_FORM_VALUES.heatmap_windows,
   heatmap_forward_windows: payload.heatmap_forward_windows || DEFAULT_FORM_VALUES.heatmap_forward_windows,
+  momentum_weights: payload.momentum_weights || DEFAULT_MOMENTUM_WEIGHTS,
 });
 
 const buildFactorSelectOptions = factors => {
@@ -110,8 +114,61 @@ const normalizeNumberArray = (value, fallback) => {
   return normalized.length ? normalized : fallback;
 };
 
+const isMixedWindow = value => String(value).toLowerCase() === MIXED_WINDOW_KEY;
+
+const normalizeHeatmapWindows = (value, fallback) => {
+  const items = Array.isArray(value) ? value : [];
+  const normalized = [];
+  items.forEach(item => {
+    if (isMixedWindow(item)) {
+      if (!normalized.includes(MIXED_WINDOW_KEY)) normalized.push(MIXED_WINDOW_KEY);
+      return;
+    }
+    const numberValue = Number(item);
+    if (Number.isFinite(numberValue) && !normalized.includes(numberValue)) {
+      normalized.push(numberValue);
+    }
+  });
+  return normalized.length ? normalized : fallback;
+};
+
+const getWindowKey = value => (isMixedWindow(value) ? MIXED_WINDOW_KEY : String(Number(value)));
+
+const isSameWindow = (left, right) => getWindowKey(left) === getWindowKey(right);
+
+const formatWindowLabel = value => (isMixedWindow(value) ? '多窗口合成' : `${Number(value)}日`);
+
+const getWindowSortValue = value => (isMixedWindow(value) ? Number.MAX_SAFE_INTEGER : Number(value));
+
+const getHeatmapWindowItems = rows => {
+  const map = new Map();
+  (rows || []).forEach(row => {
+    const key = getWindowKey(row.window);
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        value: row.window,
+        label: row.window_label || formatWindowLabel(row.window),
+      });
+    }
+  });
+  return [...map.values()].sort((left, right) => (
+    getWindowSortValue(left.value) - getWindowSortValue(right.value)
+  ));
+};
+
+const normalizeMomentumWeights = weights => {
+  const source = weights || DEFAULT_MOMENTUM_WEIGHTS;
+  return MOMENTUM_WEIGHT_WINDOWS.reduce((acc, window) => {
+    const rawValue = source[String(window)] ?? source[window] ?? DEFAULT_MOMENTUM_WEIGHTS[window] ?? 0;
+    const numberValue = Number(rawValue);
+    acc[String(window)] = Number.isFinite(numberValue) ? Math.max(0, numberValue) : 0;
+    return acc;
+  }, {});
+};
+
 const buildAnalyzePayload = (values, overrides = {}) => {
-  const heatmapWindows = normalizeNumberArray(
+  const heatmapWindows = normalizeHeatmapWindows(
     overrides.heatmap_windows || values.heatmap_windows,
     DEFAULT_FORM_VALUES.heatmap_windows,
   );
@@ -129,7 +186,7 @@ const buildAnalyzePayload = (values, overrides = {}) => {
     standardization: values.standardization || DEFAULT_FORM_VALUES.standardization,
     oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
     heatmap_metric: values.heatmap_metric || DEFAULT_HEATMAP_METRIC,
-    momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+    momentum_weights: normalizeMomentumWeights(overrides.momentum_weights || values.momentum_weights),
     min_listing_days: DEFAULT_MIN_LISTING_DAYS,
     include_heatmap: overrides.include_heatmap ?? true,
     heatmap_windows: heatmapWindows,
@@ -238,7 +295,7 @@ const getIcOption = rows => ({
 
 const isSameCombo = (combo, row) => (
   combo
-  && Number(combo.window) === Number(row.window)
+  && isSameWindow(combo.window, row.window)
   && Number(combo.forward_window) === Number(row.forward_window)
 );
 
@@ -266,7 +323,8 @@ const getHeatmapValue = (item, metric = DEFAULT_HEATMAP_METRIC) => (
 const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, metrics = []) => {
   const metricMeta = getHeatmapMetricMeta(metric, metrics);
   const validRows = (rows || []).filter(item => getHeatmapValue(item, metric) !== null && getHeatmapValue(item, metric) !== undefined);
-  const windows = [...new Set(validRows.map(item => item.window))].sort((a, b) => a - b);
+  const windowItems = getHeatmapWindowItems(validRows);
+  const windowKeys = windowItems.map(item => item.key);
   const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
   const values = validRows.map(item => getHeatmapValue(item, metric));
   const min = values.length ? Math.min(...values) : -1;
@@ -277,11 +335,11 @@ const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, 
       position: 'top',
       formatter: params => {
         const item = validRows.find(row => (
-          row.forward_window === forwards[params.value[0]] && row.window === windows[params.value[1]]
+          row.forward_window === forwards[params.value[0]] && getWindowKey(row.window) === windowKeys[params.value[1]]
         ));
         if (!item) return '';
         const lines = [
-          `窗口: ${item.window}`,
+          `窗口: ${item.window_label || formatWindowLabel(item.window)}`,
           `T+${item.forward_window}`,
           `${metricMeta.label}: ${formatHeatmapMetricValue(metric, getHeatmapValue(item, metric), metrics)}`,
           `Rank IC: ${icFormatter(item.rank_ic_mean)}`,
@@ -297,7 +355,7 @@ const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, 
       },
     },
     xAxis: { type: 'category', data: forwards.map(item => `T+${item}`), splitArea: { show: true } },
-    yAxis: { type: 'category', data: windows.map(item => `${item}日`), splitArea: { show: true } },
+    yAxis: { type: 'category', data: windowItems.map(item => item.label), splitArea: { show: true } },
     visualMap: {
       min,
       max,
@@ -315,7 +373,7 @@ const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, 
         data: validRows.map(item => ({
           value: [
             forwards.indexOf(item.forward_window),
-            windows.indexOf(item.window),
+            windowKeys.indexOf(getWindowKey(item.window)),
             getHeatmapValue(item, metric),
           ],
           itemStyle: isSameCombo(selectedCombo, item)
@@ -383,9 +441,14 @@ const FactorLab = () => {
 
   const selectedFactorKey = Form.useWatch('factor', form);
   const selectedHeatmapMetric = Form.useWatch('heatmap_metric', form);
+  const selectedHeatmapWindows = Form.useWatch('heatmap_windows', form);
   const selectedFactor = useMemo(() => (
     (options?.factors || []).find(item => item.key === selectedFactorKey)
   ), [options, selectedFactorKey]);
+  const showMomentumWeights = Boolean(
+    selectedFactor?.supports_mixed_windows
+    && normalizeHeatmapWindows(selectedHeatmapWindows, []).some(isMixedWindow)
+  );
 
   const loadOptions = useCallback(async () => {
     setLoadingOptions(true);
@@ -410,6 +473,7 @@ const FactorLab = () => {
     const nextWindows = factor.supports_windows ? factor.default_windows : DEFAULT_FORM_VALUES.heatmap_windows;
     form.setFieldsValue({
       heatmap_windows: factor.supports_windows ? nextWindows : DEFAULT_FORM_VALUES.heatmap_windows,
+      momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
     });
   };
 
@@ -432,10 +496,15 @@ const FactorLab = () => {
   const runSelectedComboAnalysis = useCallback(async (combo) => {
     if (!combo) return;
     const values = await form.validateFields();
+    const comboWindow = isMixedWindow(combo.window) ? MIXED_WINDOW_KEY : Number(combo.window);
+    const comboWindows = Array.isArray(combo.windows) && combo.windows.length
+      ? combo.windows.map(item => Number(item)).filter(item => Number.isFinite(item))
+      : (isMixedWindow(comboWindow) ? (selectedFactor?.default_windows || DEFAULT_FORM_VALUES.heatmap_windows) : [Number(comboWindow)]);
     const manualCombo = {
-      window: Number(combo.window),
+      window: comboWindow,
+      window_label: combo.window_label || formatWindowLabel(comboWindow),
       forward_window: Number(combo.forward_window),
-      windows: [Number(combo.window)],
+      windows: comboWindows,
       selection_mode: 'manual',
       reason: 'heatmap_selection',
     };
@@ -464,13 +533,19 @@ const FactorLab = () => {
     } finally {
       setSelectingCombo(false);
     }
-  }, [form]);
+  }, [form, selectedFactor]);
 
   const factorSelectOptions = useMemo(() => buildFactorSelectOptions(options?.factors), [options]);
-  const windowOptions = useMemo(() => (options?.windows || [20, 60, 120]).map(item => ({
-    label: `${item}日`,
-    value: item,
-  })), [options]);
+  const windowOptions = useMemo(() => {
+    const baseOptions = (options?.windows || [20, 60, 120]).map(item => ({
+      label: `${item}日`,
+      value: item,
+    }));
+    if (selectedFactor?.supports_mixed_windows) {
+      baseOptions.push({ label: '多窗口合成', value: MIXED_WINDOW_KEY });
+    }
+    return baseOptions;
+  }, [options, selectedFactor]);
   const forwardOptions = useMemo(() => {
     const values = [...new Set([...(options?.forward_windows || [5, 20, 60]), 10, 120])].sort((a, b) => a - b);
     return values.map(item => ({ label: `T+${item}`, value: item }));
@@ -508,20 +583,21 @@ const FactorLab = () => {
   const heatmapMetric = selectedHeatmapMetric || metadata.heatmap_metric || DEFAULT_HEATMAP_METRIC;
   const heatmapMetricMeta = getHeatmapMetricMeta(heatmapMetric, options?.heatmap_metrics);
   const selectedComboText = selectedCombo
-    ? `${selectedCombo.window}日 × T+${selectedCombo.forward_window}`
+    ? `${selectedCombo.window_label || formatWindowLabel(selectedCombo.window)} × T+${selectedCombo.forward_window}`
     : '-';
   const heatmapEvents = useMemo(() => ({
     click: params => {
       if (params.seriesType !== 'heatmap' || !Array.isArray(params.value)) return;
       const validRows = heatmapRows.filter(item => getHeatmapValue(item, heatmapMetric) !== null && getHeatmapValue(item, heatmapMetric) !== undefined);
-      const windows = [...new Set(validRows.map(item => item.window))].sort((a, b) => a - b);
+      const windowItems = getHeatmapWindowItems(validRows);
+      const windowKeys = windowItems.map(item => item.key);
       const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
       const row = validRows.find(item => (
         Number(item.forward_window) === Number(forwards[params.value[0]])
-        && Number(item.window) === Number(windows[params.value[1]])
+        && getWindowKey(item.window) === windowKeys[params.value[1]]
       ));
       if (row) {
-        runSelectedComboAnalysis({ window: row.window, forward_window: row.forward_window });
+        runSelectedComboAnalysis(row);
       }
     },
   }), [heatmapRows, heatmapMetric, runSelectedComboAnalysis]);
@@ -616,6 +692,19 @@ const FactorLab = () => {
                   <Select mode="multiple" maxTagCount="responsive" options={forwardOptions} />
                 </Form.Item>
               </Col>
+              {showMomentumWeights && MOMENTUM_WEIGHT_WINDOWS.map(window => (
+                <Col xs={8} sm={8} md={4} lg={3} key={window}>
+                  <Form.Item name={['momentum_weights', String(window)]} label={`${window}日权重`}>
+                    <InputNumber
+                      min={0}
+                      step={0.05}
+                      precision={4}
+                      controls
+                      className="factor-lab-full"
+                    />
+                  </Form.Item>
+                </Col>
+              ))}
             </Row>
 
             {selectedFactor?.description && (
