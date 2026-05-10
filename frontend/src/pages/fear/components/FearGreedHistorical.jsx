@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Radio } from 'antd';
 import ReactECharts from 'echarts-for-react';
-import { fetchFearGreedData } from '../../utils/cnnRequest';
 import request from '../../utils/request';
 import { TIME_RANGES, fitExponentialCurve } from '../utils';
 
 const FearGreedHistorical = () => {
-  const [historicalData, setHistoricalData] = useState(null);
+  const [cnnHistoryData, setCnnHistoryData] = useState(null);
   const [spyEmotionData, setSpyEmotionData] = useState(null);
   const [spyPriceData, setSpyPriceData] = useState(null);
   const [vixData, setVixData] = useState(null);
@@ -18,14 +17,20 @@ const FearGreedHistorical = () => {
 
   const fetchHistoricalData = async () => {
     try {
-      const [cnnData, spyEmotion, spyPrice, vixJson] = await Promise.all([
-        fetchFearGreedData(-1),
+      const [cnnHistory, spyEmotion, spyPrice, vixJson] = await Promise.all([
+        request.get('/api/cnn/etf-fear-greed-clone/history', {
+          params: {
+            symbol: 'CNN*.US',
+            include_components: false,
+            include_latest_holdings: false
+          }
+        }),
         request.get('/api/quant/etf/emotion/history/US.SPY'),
         request.get('/api/stock/klines/SPY.US', { params: { start_date: '2005-01-01' } }),
         request.get('https://api.52etf.vip/fred/series/observations?series_id=VIXCLS&file_type=json&observation_start=2005-01-01')
       ]);
 
-      setHistoricalData(cnnData);
+      setCnnHistoryData(cnnHistory.data);
       setSpyEmotionData(spyEmotion.data);
       setSpyPriceData(spyPrice.data
         .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
@@ -45,12 +50,12 @@ const FearGreedHistorical = () => {
   };
 
   const renderChart = () => {
-    if (!historicalData?.fear_and_greed_historical?.data) return null;
+    if (!cnnHistoryData?.data) return null;
 
     // 处理CNN恐贪指数数据
-    const cnnData = historicalData.fear_and_greed_historical.data.map(item => ({
-      date: new Date(item.x).toLocaleDateString(),
-      value: Number(item.y.toFixed(1)),
+    const cnnData = cnnHistoryData.data.map(item => ({
+      date: new Date(item.date).toLocaleDateString(),
+      value: Number(Number(item.score).toFixed(1)),
       type: 'CNN'
     }));
 
