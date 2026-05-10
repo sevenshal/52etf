@@ -9,6 +9,7 @@ const ETF_OPTIONS = [
   { symbol: 'SPY.US', ticker: 'SPY', label: '标普500' },
   { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100' },
   { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯' },
+  { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
 
 const SOXXFearGreed = () => {
@@ -54,6 +55,12 @@ const SOXXFearGreed = () => {
     };
 
     const fetchRealtime = async () => {
+      if (activeETF.realtime === false) {
+        setRealtime(null);
+        setRealtimeError(null);
+        setRealtimeLoading(false);
+        return;
+      }
       setRealtimeLoading(true);
       setRealtimeError(null);
       setRealtime(null);
@@ -79,7 +86,7 @@ const SOXXFearGreed = () => {
 
     fetchHistory();
     fetchRealtime();
-  }, [activeSymbol, activeETF.ticker]);
+  }, [activeSymbol, activeETF]);
 
   const filteredData = useMemo(() => {
     if (timeRange === -1) return data;
@@ -173,6 +180,8 @@ const SOXXFearGreed = () => {
   const latestPrice = latest?.etf_price?.close;
   const displayPrice = realtimePrice ?? latestPrice;
   const topHoldings = latestHoldings.slice(0, 6);
+  const realtimeEnabled = activeETF.realtime !== false;
+  const pricePrecision = activeETF.pricePrecision ?? 2;
 
   return (
     <Card title="ETF自算贪恐" style={{ marginBottom: 16 }} loading={loading}>
@@ -202,6 +211,15 @@ const SOXXFearGreed = () => {
         />
       )}
 
+      {!error && !loading && !latest && (
+        <Alert
+          type="info"
+          showIcon
+          message={`${activeETF.ticker}贪恐数据暂无入库记录`}
+          description="请先执行对应的贪恐回跑入库任务。"
+        />
+      )}
+
       {!error && latest && (
         <>
           <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -209,9 +227,9 @@ const SOXXFearGreed = () => {
               <Statistic
                 title={
                   <Space size={6}>
-                    <span>实时贪恐</span>
-                    {realtimeScore !== undefined && <Tag color="processing">实时值</Tag>}
-                    {realtimeScore === undefined && realtimeLoading && <Tag color="processing">加载中</Tag>}
+                    <span>{realtimeEnabled ? '实时贪恐' : '最新贪恐'}</span>
+                    {realtimeEnabled && realtimeScore !== undefined && <Tag color="processing">实时值</Tag>}
+                    {realtimeEnabled && realtimeScore === undefined && realtimeLoading && <Tag color="processing">加载中</Tag>}
                   </Space>
                 }
                 value={realtimeScore ?? latestScore}
@@ -233,10 +251,15 @@ const SOXXFearGreed = () => {
               />
             </Col>
             <Col xs={12} md={6} xl={4}>
-              <Statistic title={`${activeETF.ticker}价格`} value={displayPrice} precision={2} prefix="$" />
+              <Statistic
+                title={`${activeETF.ticker}${activeETF.priceLabel || '价格'}`}
+                value={displayPrice}
+                precision={pricePrecision}
+                prefix={activeETF.symbol.endsWith('.US') ? '$' : undefined}
+              />
             </Col>
             <Col xs={12} md={6} xl={4}>
-              <Statistic title="报价时间" value={realtimeTimestamp || '-'} />
+              <Statistic title={realtimeEnabled ? '报价时间' : '实时状态'} value={realtimeEnabled ? (realtimeTimestamp || '-') : '日线'} />
             </Col>
             <Col xs={12} md={6} xl={4}>
               <Statistic title="数据日期" value={latest.date} />
@@ -246,13 +269,15 @@ const SOXXFearGreed = () => {
             </Col>
           </Row>
 
-          <Space wrap size={[8, 8]} style={{ marginBottom: 16 }}>
-            {topHoldings.map(item => (
-              <Tag key={item.symbol}>
-                {item.symbol} {(item.weight * 100).toFixed(2)}%
-              </Tag>
-            ))}
-          </Space>
+          {topHoldings.length > 0 && (
+            <Space wrap size={[8, 8]} style={{ marginBottom: 16 }}>
+              {topHoldings.map(item => (
+                <Tag key={item.symbol}>
+                  {item.symbol} {(item.weight * 100).toFixed(2)}%
+                </Tag>
+              ))}
+            </Space>
+          )}
 
           <div style={{ marginBottom: 12, textAlign: 'right' }}>
             <Radio.Group
