@@ -119,6 +119,17 @@ const DEFAULT_MIN_LISTING_DAYS = 365;
 const MIXED_WINDOW_KEY = 'mixed';
 const DEFAULT_MOMENTUM_WEIGHTS = DEFAULT_FORM_VALUES.momentum_weights;
 const MOMENTUM_WEIGHT_WINDOWS = [20, 60, 120];
+const REBALANCE_FREQUENCY_OPTIONS = [
+  { label: '每日', value: 'daily' },
+  { label: '每周', value: 'weekly' },
+  { label: '每月', value: 'monthly' },
+  { label: '季度', value: 'quarterly' },
+  { label: '半年', value: 'semiannual' },
+];
+const REBALANCE_FREQUENCY_LABELS = REBALANCE_FREQUENCY_OPTIONS.reduce((acc, item) => {
+  acc[item.value] = item.label;
+  return acc;
+}, {});
 const DEFAULT_BACKTEST_SEARCH_OBJECTIVES = [
   { key: 'annualized_return', label: '全区间年化收益最大' },
   { key: 'total_return', label: '全区间总收益最大' },
@@ -921,6 +932,23 @@ const getCorrelationColumns = components => [
   })),
 ];
 
+const formatMomentumWeightsText = weights => {
+  const source = weights || {};
+  return MOMENTUM_WEIGHT_WINDOWS
+    .map(window => {
+      const value = source[String(window)] ?? source[window] ?? 0;
+      return `${window}:${Number(value || 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') || '0'}`;
+    })
+    .join(' / ');
+};
+
+const formatFactorWeight = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toFixed(4);
+};
+
+const getRebalanceFrequencyLabel = value => REBALANCE_FREQUENCY_LABELS[value] || value || '-';
+
 const FactorLab = () => {
   const [form] = Form.useForm();
   const [compositeForm] = Form.useForm();
@@ -1390,11 +1418,7 @@ const FactorLab = () => {
       { key: 'rank_percentile', label: '截面排名分位' },
     ]).map(item => ({ label: item.label, value: item.key }))
   ), [options]);
-  const rebalanceFrequencyOptions = useMemo(() => ([
-    { label: '每日', value: 'daily' },
-    { label: '每周', value: 'weekly' },
-    { label: '每月', value: 'monthly' },
-  ]), []);
+  const rebalanceFrequencyOptions = useMemo(() => REBALANCE_FREQUENCY_OPTIONS, []);
   const summary = result?.summary || {};
   const metadata = result?.metadata || {};
   const oosSummary = result?.oos_summary || {};
@@ -1445,6 +1469,7 @@ const FactorLab = () => {
   const backtestYearlyRows = backtestResult?.yearly_stats || [];
   const backtestHoldingRows = backtestResult?.current_holdings || [];
   const backtestTradeRows = backtestResult?.trades || [];
+  const backtestComponents = backtestMetadata.components || [];
   const backtestSearchSummary = backtestSearchJob?.summary || {};
   const backtestSearchRunning = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
   const effectiveBacktestSearchObjective = backtestSearchJob?.objective || backtestSearchObjective;
@@ -2381,6 +2406,39 @@ const FactorLab = () => {
 
       {backtestResult && (
         <Spin spinning={backtestRunning}>
+          <Card className="factor-lab-backtest-params" title="回测参数" bordered={false}>
+            <div className="factor-lab-param-grid">
+              <span>股票池：{backtestMetadata.pool_label || backtestMetadata.pool}</span>
+              <span>区间：{backtestMetadata.start_date} 至 {backtestMetadata.end_date}</span>
+              {backtestMetadata.oos_start_date && <span>样本外：{backtestMetadata.oos_start_date} 起</span>}
+              <span>初始资金：{numberFormatter(backtestMetadata.initial_capital)}</span>
+              <span>持仓数：Top{backtestMetadata.max_positions}</span>
+              <span>卖出阈值：Top{backtestMetadata.sell_rank_threshold}</span>
+              <span>卖出倍数：{formatFactorWeight(backtestMetadata.sell_rank_multiplier)}</span>
+              <span>调仓频率：{getRebalanceFrequencyLabel(backtestMetadata.rebalance_frequency)}</span>
+              <span>手续费：{percentFormatter(backtestMetadata.commission_pct)}</span>
+              <span>滑点：{percentFormatter(backtestMetadata.slippage_pct)}</span>
+              <span>交易单位：{numberFormatter(backtestMetadata.lot_size)}</span>
+              <span>上市天数：{numberFormatter(backtestMetadata.min_listing_days)}</span>
+            </div>
+            <div className="factor-lab-param-components">
+              {backtestComponents.map(component => (
+                <div className="factor-lab-param-component" key={component.component_key}>
+                  <Text strong>{component.factor_label || component.factor_key}</Text>
+                  <Space size={6} wrap>
+                    <Tag>{component.window_label || formatWindowLabel(component.window)}</Tag>
+                    <Tag>权重 {formatFactorWeight(component.raw_weight ?? component.weight)}</Tag>
+                    <Tag>{component.neutralization_label || component.neutralization}</Tag>
+                    <Tag>{component.standardization_label || component.standardization}</Tag>
+                    {isMixedWindow(component.window) && (
+                      <Tag color="blue">{formatMomentumWeightsText(component.momentum_weights)}</Tag>
+                    )}
+                  </Space>
+                </div>
+              ))}
+            </div>
+          </Card>
+
           <div className="factor-lab-metrics">
             <Statistic title="总收益" value={backtestMetrics.total_return} formatter={percentFormatter} />
             <Statistic title="年化收益" value={backtestMetrics.annualized_return} formatter={percentFormatter} />
@@ -2404,7 +2462,7 @@ const FactorLab = () => {
                 <span>{backtestMetadata.universe_symbols} 只股票</span>
                 <span>Top{backtestMetadata.max_positions}</span>
                 <span>卖出阈值 Top{backtestMetadata.sell_rank_threshold}</span>
-                <span>{backtestMetadata.rebalance_frequency}</span>
+                <span>{getRebalanceFrequencyLabel(backtestMetadata.rebalance_frequency)}</span>
                 <span>{backtestMetadata.factor_combination_method_label || '子因子标准化后加权'}</span>
                 <span>上市满 {backtestMetadata.min_listing_days} 天</span>
                 <span>{numberFormatter(backtestMetadata.price_rows)} 行行情</span>

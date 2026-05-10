@@ -365,6 +365,8 @@ const USStockSignalLive = () => {
     { label: '每日', value: 'daily' },
     { label: '每周', value: 'weekly' },
     { label: '每月', value: 'monthly' },
+    { label: '季度', value: 'quarterly' },
+    { label: '半年', value: 'semiannual' },
   ]), []);
 
   const handleLegFactorChange = (index, value) => {

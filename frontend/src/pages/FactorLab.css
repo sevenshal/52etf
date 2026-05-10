@@ -101,6 +101,33 @@
   margin: 12px 0;
 }
 
+.factor-lab-backtest-params {
+  margin-top: 12px;
+}
+
+.factor-lab-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.factor-lab-param-components {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #edf1f7;
+}
+
+.factor-lab-param-component {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .factor-lab-heatmap-card {
   margin-top: 12px;
 }
@@ -198,5 +225,10 @@
 
   .factor-lab-metrics .ant-statistic-content {
     font-size: 18px;
+  }
+
+  .factor-lab-param-component {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
