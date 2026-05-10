@@ -114,6 +114,18 @@ const DEFAULT_BACKTEST_VALUES = {
   ],
 };
 
+const DEFAULT_TIMING_VALUES = {
+  target_symbol: 'SOXL.US',
+  fear_symbol: 'CNN*.US',
+  ma_window: 1,
+  bucket_count: 10,
+  start_date: dayjs('2020-01-02'),
+  end_date: null,
+  forward_window: 20,
+  heatmap_forward_windows: [5, 20, 60],
+  heatmap_ma_windows: [1, 5, 20],
+};
+
 const DEFAULT_HEATMAP_METRIC = 'non_overlap_annualized_median_pct';
 const DEFAULT_MIN_LISTING_DAYS = 365;
 const MIXED_WINDOW_KEY = 'mixed';
@@ -223,6 +235,20 @@ const normalizeBacktestDefaultRequest = (payload = {}) => ({
     standardization: leg.standardization || 'rank_percentile',
     momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
   })),
+});
+
+const normalizeTimingDefaultRequest = (payload = {}) => ({
+  ...DEFAULT_TIMING_VALUES,
+  ...payload,
+  start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_TIMING_VALUES.start_date,
+  end_date: payload.end_date ? dayjs(payload.end_date) : null,
+  target_symbol: payload.target_symbol || DEFAULT_TIMING_VALUES.target_symbol,
+  fear_symbol: payload.fear_symbol || DEFAULT_TIMING_VALUES.fear_symbol,
+  ma_window: payload.ma_window || DEFAULT_TIMING_VALUES.ma_window,
+  bucket_count: payload.bucket_count || DEFAULT_TIMING_VALUES.bucket_count,
+  forward_window: payload.forward_window || DEFAULT_TIMING_VALUES.forward_window,
+  heatmap_forward_windows: payload.heatmap_forward_windows || DEFAULT_TIMING_VALUES.heatmap_forward_windows,
+  heatmap_ma_windows: payload.heatmap_ma_windows || DEFAULT_TIMING_VALUES.heatmap_ma_windows,
 });
 
 const buildFactorSelectOptions = factors => {
@@ -410,6 +436,25 @@ const buildBacktestPayload = values => ({
       standardization: leg.standardization || 'rank_percentile',
       momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
     })),
+});
+
+const buildTimingPayload = values => ({
+  target_symbol: String(values.target_symbol || DEFAULT_TIMING_VALUES.target_symbol).trim().toUpperCase(),
+  fear_symbol: String(values.fear_symbol || DEFAULT_TIMING_VALUES.fear_symbol).trim().toUpperCase(),
+  ma_window: Number(values.ma_window || DEFAULT_TIMING_VALUES.ma_window),
+  bucket_count: Number(values.bucket_count || DEFAULT_TIMING_VALUES.bucket_count),
+  start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_TIMING_VALUES.start_date.format('YYYY-MM-DD'),
+  end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
+  forward_window: Number(values.forward_window || DEFAULT_TIMING_VALUES.forward_window),
+  heatmap_forward_windows: normalizeNumberArray(
+    values.heatmap_forward_windows,
+    DEFAULT_TIMING_VALUES.heatmap_forward_windows,
+  ),
+  heatmap_ma_windows: normalizeNumberArray(
+    values.heatmap_ma_windows,
+    DEFAULT_TIMING_VALUES.heatmap_ma_windows,
+  ),
+  include_heatmap: true,
 });
 
 const getBucketChartOption = rows => {
@@ -607,6 +652,73 @@ const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, 
             shadowBlur: 8,
             shadowColor: 'rgba(0, 0, 0, 0.18)',
           },
+        },
+      },
+    ],
+  };
+};
+
+const getTimingHeatmapOption = (rows, selectedCombo) => {
+  const validRows = (rows || []).filter(item => item.heatmap_value !== null && item.heatmap_value !== undefined);
+  const maItems = [...new Map(validRows.map(item => [item.ma_window, item.ma_window_label || `${item.ma_window}日均值`])).entries()]
+    .sort((left, right) => Number(left[0]) - Number(right[0]));
+  const maKeys = maItems.map(item => item[0]);
+  const maLabels = maItems.map(item => item[1]);
+  const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
+  const values = validRows.map(item => Number(item.heatmap_value)).filter(Number.isFinite);
+  const min = values.length ? Math.min(...values) : -1;
+  const max = values.length ? Math.max(...values) : 1;
+  return {
+    grid: { top: 36, right: 88, bottom: 40, left: 180 },
+    tooltip: {
+      position: 'top',
+      formatter: params => {
+        const item = validRows.find(row => (
+          row.forward_window === forwards[params.value[0]] && Number(row.ma_window) === Number(maKeys[params.value[1]])
+        ));
+        if (!item) return '';
+        return [
+          `贪恐均线: ${item.ma_window_label || `${item.ma_window}日均值`}`,
+          `T+${item.forward_window}`,
+          `年化低-高桶差: ${percentFormatter(item.annualized_low_minus_high_avg_return_pct)}`,
+          `T+n低-高桶差: ${percentFormatter(item.low_minus_high_avg_return_pct)}`,
+          `高-低桶差: ${percentFormatter(item.top_minus_bottom_avg_return_pct)}`,
+          `时间序列IC: ${icFormatter(item.rank_ic_mean)}`,
+          `样本: ${numberFormatter(item.samples)}`,
+        ].join('<br/>');
+      },
+    },
+    xAxis: { type: 'category', data: forwards.map(item => `T+${item}`), splitArea: { show: true } },
+    yAxis: { type: 'category', data: maLabels, splitArea: { show: true } },
+    visualMap: {
+      min,
+      max,
+      calculable: true,
+      orient: 'vertical',
+      right: 8,
+      top: 40,
+      inRange: { color: ['#2f70b7', '#f6f7f9', '#cb3a31'] },
+      formatter: value => percentFormatter(value),
+    },
+    series: [
+      {
+        name: '年化低-高桶差',
+        type: 'heatmap',
+        data: validRows.map(item => ({
+          value: [
+            forwards.indexOf(item.forward_window),
+            maKeys.findIndex(value => Number(value) === Number(item.ma_window)),
+            item.heatmap_value,
+          ],
+          itemStyle: selectedCombo
+            && Number(selectedCombo.ma_window) === Number(item.ma_window)
+            && Number(selectedCombo.forward_window) === Number(item.forward_window)
+            ? { borderColor: '#111827', borderWidth: 3 }
+            : undefined,
+        })),
+        label: {
+          show: true,
+          formatter: params => percentFormatter(params.value[2]),
         },
       },
     ],
@@ -953,11 +1065,13 @@ const FactorLab = () => {
   const [form] = Form.useForm();
   const [compositeForm] = Form.useForm();
   const [backtestForm] = Form.useForm();
+  const [timingForm] = Form.useForm();
   const [activeTab, setActiveTab] = useState('single');
   const [options, setOptions] = useState(null);
   const [result, setResult] = useState(null);
   const [compositeResult, setCompositeResult] = useState(null);
   const [backtestResult, setBacktestResult] = useState(null);
+  const [timingResult, setTimingResult] = useState(null);
   const [backtestSearchJob, setBacktestSearchJob] = useState(null);
   const [backtestSearchObjective, setBacktestSearchObjective] = useState('annualized_return');
   const [backtestSearchWindowBucketCount, setBacktestSearchWindowBucketCount] = useState(20);
@@ -980,6 +1094,7 @@ const FactorLab = () => {
   const [running, setRunning] = useState(false);
   const [compositeRunning, setCompositeRunning] = useState(false);
   const [backtestRunning, setBacktestRunning] = useState(false);
+  const [timingRunning, setTimingRunning] = useState(false);
   const [backtestSearchStarting, setBacktestSearchStarting] = useState(false);
   const [backtestSearchHistoryLoading, setBacktestSearchHistoryLoading] = useState(false);
   const [applyingSearchCaseIndex, setApplyingSearchCaseIndex] = useState(null);
@@ -1011,12 +1126,13 @@ const FactorLab = () => {
       form.setFieldsValue(normalizeDefaultRequest(data.default_request));
       compositeForm.setFieldsValue(normalizeCompositeDefaultRequest(data.default_composite_request));
       backtestForm.setFieldsValue(normalizeBacktestDefaultRequest(data.default_backtest_request));
+      timingForm.setFieldsValue(normalizeTimingDefaultRequest(data.default_timing_request));
     } catch (error) {
       message.error(getErrorMessage(error, '加载因子实验室配置失败'));
     } finally {
       setLoadingOptions(false);
     }
-  }, [form, compositeForm, backtestForm]);
+  }, [form, compositeForm, backtestForm, timingForm]);
 
   const loadBacktestSearchResults = useCallback(async (nextState = {}) => {
     const queryState = {
@@ -1238,6 +1354,51 @@ const FactorLab = () => {
     await executeBacktestPayload(buildBacktestPayload(values));
   };
 
+  const runTimingAnalysis = async () => {
+    const values = await timingForm.validateFields();
+    setTimingRunning(true);
+    try {
+      const payload = buildTimingPayload(values);
+      const { data } = await request.post('/api/factor-lab/analyze-timing', payload, { timeout: 300000 });
+      setTimingResult(data);
+      message.success('择时因子分析完成');
+    } catch (error) {
+      message.error(getErrorMessage(error, '择时因子分析失败'));
+    } finally {
+      setTimingRunning(false);
+    }
+  };
+
+  const runSelectedTimingComboAnalysis = useCallback(async combo => {
+    if (!combo) return;
+    const values = await timingForm.validateFields();
+    setTimingRunning(true);
+    try {
+      const payload = {
+        ...buildTimingPayload(values),
+        ma_window: Number(combo.ma_window),
+        forward_window: Number(combo.forward_window),
+        include_heatmap: false,
+      };
+      timingForm.setFieldsValue({
+        ma_window: Number(combo.ma_window),
+        forward_window: Number(combo.forward_window),
+      });
+      const { data } = await request.post('/api/factor-lab/analyze-timing', payload, { timeout: 300000 });
+      setTimingResult(previous => ({
+        ...data,
+        parameter_heatmap: previous?.parameter_heatmap?.length
+          ? previous.parameter_heatmap
+          : data.parameter_heatmap,
+      }));
+      message.success('择时参数组合已切换');
+    } catch (error) {
+      message.error(getErrorMessage(error, '切换择时参数组合失败'));
+    } finally {
+      setTimingRunning(false);
+    }
+  }, [timingForm]);
+
   const startBacktestSearch = async () => {
     const values = await backtestForm.validateFields();
     const baseRequest = buildBacktestPayload(values);
@@ -1419,6 +1580,27 @@ const FactorLab = () => {
     ]).map(item => ({ label: item.label, value: item.key }))
   ), [options]);
   const rebalanceFrequencyOptions = useMemo(() => REBALANCE_FREQUENCY_OPTIONS, []);
+  const timingMaWindowOptions = useMemo(() => [1, 5, 20].map(item => ({
+    label: item === 1 ? '原始值' : `${item}日均值`,
+    value: item,
+  })), []);
+  const timingFearSourceOptions = useMemo(() => (
+    (options?.timing_fear_sources || [{ label: 'CNN Fear & Greed', value: 'CNN*.US' }])
+      .map(item => ({
+        label: item.start_date && item.end_date
+          ? `${item.label}（${item.start_date} ~ ${item.end_date}）`
+          : item.label,
+        value: item.value || item.symbol,
+      }))
+  ), [options]);
+  const timingTargetOptions = useMemo(() => (
+    options?.timing_target_options || [
+      { label: 'SOXL', value: 'SOXL.US' },
+      { label: 'TQQQ', value: 'TQQQ.US' },
+      { label: 'QQQ', value: 'QQQ.US' },
+      { label: 'SPY', value: 'SPY.US' },
+    ]
+  ), [options]);
   const summary = result?.summary || {};
   const metadata = result?.metadata || {};
   const oosSummary = result?.oos_summary || {};
@@ -1470,6 +1652,32 @@ const FactorLab = () => {
   const backtestHoldingRows = backtestResult?.current_holdings || [];
   const backtestTradeRows = backtestResult?.trades || [];
   const backtestComponents = backtestMetadata.components || [];
+  const timingSummary = timingResult?.summary || {};
+  const timingMetadata = timingResult?.metadata || {};
+  const timingBucketRows = timingResult?.bucket_returns || [];
+  const timingIcRows = timingResult?.rank_ic_series || [];
+  const timingHeatmapRows = timingResult?.parameter_heatmap || [];
+  const timingNonOverlapSummary = timingResult?.non_overlapping_summary || {};
+  const timingNonOverlapRows = timingResult?.non_overlapping_offsets || [];
+  const timingYearlyRows = timingResult?.yearly_stability || [];
+  const timingSelectedCombo = timingMetadata.ma_window ? {
+    ma_window: timingMetadata.ma_window,
+    forward_window: timingMetadata.forward_window,
+  } : null;
+  const timingHeatmapEvents = useMemo(() => ({
+    click: params => {
+      if (params.seriesType !== 'heatmap' || !Array.isArray(params.value)) return;
+      const maWindows = [...new Set(timingHeatmapRows.map(item => item.ma_window))].sort((a, b) => Number(a) - Number(b));
+      const forwards = [...new Set(timingHeatmapRows.map(item => item.forward_window))].sort((a, b) => a - b);
+      const row = timingHeatmapRows.find(item => (
+        Number(item.ma_window) === Number(maWindows[params.value[1]])
+        && Number(item.forward_window) === Number(forwards[params.value[0]])
+      ));
+      if (row) {
+        void runSelectedTimingComboAnalysis(row);
+      }
+    },
+  }), [timingHeatmapRows, runSelectedTimingComboAnalysis]);
   const backtestSearchSummary = backtestSearchJob?.summary || {};
   const backtestSearchRunning = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
   const effectiveBacktestSearchObjective = backtestSearchJob?.objective || backtestSearchObjective;
@@ -1489,10 +1697,10 @@ const FactorLab = () => {
   ), [options]);
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
-    : (activeTab === 'backtest' ? runBacktest : runAnalysis);
+    : (activeTab === 'backtest' ? runBacktest : (activeTab === 'timing' ? runTimingAnalysis : runAnalysis));
   const activeRunning = activeTab === 'composite'
     ? compositeRunning
-    : (activeTab === 'backtest' ? backtestRunning : running);
+    : (activeTab === 'backtest' ? backtestRunning : (activeTab === 'timing' ? timingRunning : running));
 
   return (
     <div className="factor-lab-page">
@@ -1504,6 +1712,7 @@ const FactorLab = () => {
           items={[
             { key: 'single', label: '单因子' },
             { key: 'composite', label: '组合因子' },
+            { key: 'timing', label: '择时因子' },
             { key: 'backtest', label: '因子回测' },
           ]}
         />
@@ -2055,6 +2264,185 @@ const FactorLab = () => {
                   size="small"
                   columns={bucketColumns}
                   dataSource={compositeBucketRows}
+                  pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50] }}
+                  scroll={{ x: 1040 }}
+                />
+              </Card>
+            </Col>
+          </Row>
+        </Spin>
+      )}
+      </>
+      )}
+
+      {activeTab === 'timing' && (
+      <>
+      <Card className="factor-lab-control-card" bordered={false}>
+        <Spin spinning={loadingOptions}>
+          <Form form={timingForm} layout="vertical" initialValues={DEFAULT_TIMING_VALUES}>
+            <Row gutter={[12, 8]}>
+              <Col xs={24} sm={12} md={5} lg={4}>
+                <Form.Item name="target_symbol" label="目标标的" rules={[{ required: true }]}>
+                  <Select showSearch options={timingTargetOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={7} lg={6}>
+                <Form.Item name="fear_symbol" label="恐贪来源" rules={[{ required: true }]}>
+                  <Select showSearch options={timingFearSourceOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={6} md={3} lg={3}>
+                <Form.Item name="bucket_count" label="分桶" rules={[{ required: true }]}>
+                  <InputNumber min={2} max={20} controls className="factor-lab-full" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={5} lg={4}>
+                <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
+                  <DatePicker className="factor-lab-full" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={5} lg={4}>
+                <Form.Item name="end_date" label="结束日期">
+                  <DatePicker className="factor-lab-full" allowClear />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={6} lg={5}>
+                <Form.Item name="heatmap_ma_windows" label="贪恐均线窗口" rules={[{ required: true }]}>
+                  <Select mode="multiple" maxTagCount="responsive" options={timingMaWindowOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={5} lg={4}>
+                <Form.Item name="heatmap_forward_windows" label="热力图收益窗口" rules={[{ required: true }]}>
+                  <Select mode="multiple" maxTagCount="responsive" options={forwardOptions} />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item name="ma_window" hidden><InputNumber /></Form.Item>
+            <Form.Item name="forward_window" hidden><InputNumber /></Form.Item>
+            <div className="factor-lab-factor-note">
+              <Text type="secondary">择时因子按日期分桶。热力图会先比较“贪恐均线窗口 × T+n”，详情由当前选中的格子驱动；低桶代表恐慌，高桶代表贪婪。</Text>
+            </div>
+          </Form>
+        </Spin>
+      </Card>
+
+      {!timingResult && (
+        <div className="factor-lab-empty">
+          <ExperimentOutlined />
+          <Text type="secondary">选择目标标的和恐贪来源后运行择时分析</Text>
+        </div>
+      )}
+
+      {timingResult && (
+        <Spin spinning={timingRunning}>
+          <Card
+            className="factor-lab-heatmap-card"
+            title={<Space><FireOutlined />择时参数热力图（年化低-高桶差）</Space>}
+            extra={<Tag color="blue">当前：{timingMetadata.ma_window_label} × T+{timingMetadata.forward_window}</Tag>}
+            bordered={false}
+          >
+            {timingHeatmapRows.length ? (
+              <ReactECharts
+                option={getTimingHeatmapOption(timingHeatmapRows, timingSelectedCombo)}
+                style={{ height: 340 }}
+                onEvents={timingHeatmapEvents}
+              />
+            ) : <Empty />}
+          </Card>
+
+          <div className="factor-lab-metrics">
+            <Statistic title="样本" value={timingSummary.samples} formatter={numberFormatter} />
+            <Statistic title="交易日" value={timingSummary.trade_dates} formatter={numberFormatter} />
+            <Statistic title="时间序列IC" value={timingSummary.rank_ic_mean} formatter={icFormatter} />
+            <Statistic title="滚动ICIR" value={timingSummary.icir} formatter={icFormatter} />
+            <Statistic title="IC t-stat" value={timingSummary.rank_ic_t_stat} formatter={icFormatter} />
+            <Statistic title="高桶收益" value={timingSummary.top_bucket_avg_return_pct} formatter={percentFormatter} />
+            <Statistic title="低桶收益" value={timingSummary.bottom_bucket_avg_return_pct} formatter={percentFormatter} />
+            <Statistic title="低-高桶" value={timingSummary.low_minus_high_avg_return_pct} formatter={percentFormatter} />
+            <Statistic title="年化低高差" value={timingSummary.annualized_low_minus_high_avg_return_pct} formatter={percentFormatter} />
+            <Statistic title="高-低桶" value={timingSummary.top_minus_bottom_avg_return_pct} formatter={percentFormatter} />
+            <Statistic title="非重叠年化" value={timingNonOverlapSummary.annualized_median_pct} formatter={percentFormatter} />
+            <Statistic title="单调性" value={timingSummary.monotonicity_spearman} formatter={icFormatter} />
+          </div>
+
+          <Alert
+            className="factor-lab-meta"
+            type="info"
+            showIcon
+            message={(
+              <Space size={12} wrap>
+                <span>{timingMetadata.effective_start_date || timingMetadata.start_date} 至 {timingMetadata.effective_end_date || timingMetadata.end_date}</span>
+                <span>目标 {timingMetadata.target_symbol}</span>
+                <span>{timingMetadata.fear_label}</span>
+                <span>{timingMetadata.ma_window_label}</span>
+                <span>T+{timingMetadata.forward_window}</span>
+                <span>{numberFormatter(timingMetadata.price_rows)} 行行情</span>
+                <span>{numberFormatter(timingMetadata.fear_points)} 条恐贪</span>
+                <span>{numberFormatter(timingSummary.elapsed_ms)} ms</span>
+              </Space>
+            )}
+          />
+
+          <Row gutter={[12, 12]}>
+            <Col xs={24} xl={12}>
+              <Card title={<Space><BarChartOutlined />择时分桶收益</Space>} bordered={false}>
+                {timingBucketRows.length ? <ReactECharts option={getBucketChartOption(timingBucketRows)} style={{ height: 340 }} /> : <Empty />}
+              </Card>
+            </Col>
+            <Col xs={24} xl={12}>
+              <Card title={<Space><ExperimentOutlined />滚动时间序列 IC</Space>} bordered={false}>
+                {timingIcRows.length ? <ReactECharts option={getIcOption(timingIcRows)} style={{ height: 340 }} /> : <Empty />}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24} xl={12}>
+              <Card title="非重叠统计" bordered={false}>
+                {timingNonOverlapRows.length ? (
+                  <>
+                    <div className="factor-lab-compact-stats">
+                      <span>Offset {numberFormatter(timingNonOverlapSummary.offsets)}</span>
+                      <span>总期数 {numberFormatter(timingNonOverlapSummary.total_periods)}</span>
+                      <span>年化中位 {percentFormatter(timingNonOverlapSummary.annualized_median_pct)}</span>
+                      <span>正收益Offset {percentFormatter(timingNonOverlapSummary.positive_period_rate_pct)}</span>
+                    </div>
+                    <Table
+                      rowKey="offset"
+                      size="small"
+                      columns={nonOverlapColumns}
+                      dataSource={timingNonOverlapRows}
+                      pagination={{ defaultPageSize: 8, showSizeChanger: true, pageSizeOptions: [8, 20, 50] }}
+                      scroll={{ x: 880 }}
+                    />
+                  </>
+                ) : <Empty />}
+              </Card>
+            </Col>
+            <Col xs={24} xl={12}>
+              <Card title="年度稳定性" bordered={false}>
+                {timingYearlyRows.length ? (
+                  <Table
+                    rowKey="year"
+                    size="small"
+                    columns={yearlyColumns}
+                    dataSource={timingYearlyRows}
+                    pagination={false}
+                    scroll={{ x: 980 }}
+                  />
+                ) : <Empty />}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title="择时分桶明细" bordered={false}>
+                <Table
+                  rowKey="bucket"
+                  size="small"
+                  columns={bucketColumns}
+                  dataSource={timingBucketRows}
                   pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50] }}
                   scroll={{ x: 1040 }}
                 />
