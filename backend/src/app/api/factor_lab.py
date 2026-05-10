@@ -17,10 +17,12 @@ import polars as pl
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, validator
+from sqlalchemy import text
 from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import Session as DBSession
 from ...core.database import (
+    ETFFearGreedCloneHistory,
     FactorBacktestSearchResult,
     FactorBacktestSearchState,
     StockEVC,
@@ -64,12 +66,14 @@ DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
 DEFAULT_START_DATE = date(2020, 1, 2)
 DEFAULT_OOS_START_DATE = date(date.today().year - 1, 1, 1)
 DEFAULT_MIN_LISTING_DAYS = 365
+CNN_HISTORY_SYMBOL = "CNN*.US"
 DEFAULT_NEUTRALIZATION = "none"
 DEFAULT_STANDARDIZATION = "zscore"
 DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
 MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE = 10
 MAX_HEATMAP_CELLS = 20
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+FEAR_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
 FACTOR_DIRECTION_OPTIONS = {
     "higher_is_better": {"sign": 1.0, "label": "高值更好"},
     "lower_is_better": {"sign": -1.0, "label": "低值更好"},
@@ -140,6 +144,14 @@ BACKTEST_SEARCH_OBJECTIVE_OPTIONS = {
     "oos_sharpe": {"label": "样本外夏普最大"},
     "oos_calmar": {"label": "样本外卡玛最大"},
 }
+DEFAULT_TIMING_MA_WINDOWS = [1, 5, 20]
+DEFAULT_TIMING_TARGET_OPTIONS = [
+    {"label": "SOXL", "value": "SOXL.US"},
+    {"label": "TQQQ", "value": "TQQQ.US"},
+    {"label": "QQQ", "value": "QQQ.US"},
+    {"label": "SPY", "value": "SPY.US"},
+    {"label": "SOXX", "value": "SOXX.US"},
+]
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
 BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
@@ -280,6 +292,94 @@ class FactorLabAnalyzeRequest(BaseModel):
     @validator("momentum_weights", pre=True)
     def validate_momentum_weights(cls, value):
         return _normalize_momentum_weights_payload(value)
+
+    @validator("end_date")
+    def validate_date_range(cls, value, values):
+        start = values.get("start_date")
+        if value is not None and start is not None and value <= start:
+            raise ValueError("结束日期必须晚于开始日期")
+        return value
+
+
+class TimingFactorAnalyzeRequest(BaseModel):
+    target_symbol: str = "SOXL.US"
+    fear_symbol: str = CNN_HISTORY_SYMBOL
+    ma_window: int = 1
+    bucket_count: int = 10
+    start_date: date = DEFAULT_START_DATE
+    end_date: Optional[date] = None
+    forward_window: int = 20
+    heatmap_forward_windows: List[int] = Field(default_factory=lambda: DEFAULT_FORWARD_WINDOWS.copy())
+    heatmap_ma_windows: List[int] = Field(default_factory=lambda: DEFAULT_TIMING_MA_WINDOWS.copy())
+    include_heatmap: bool = True
+
+    @validator("target_symbol")
+    def validate_target_symbol(cls, value):
+        text = str(value or "").strip().upper()
+        if not text or not SYMBOL_PATTERN.match(text):
+            raise ValueError("目标标的代码格式不正确")
+        return text
+
+    @validator("fear_symbol")
+    def validate_fear_symbol(cls, value):
+        text = str(value or "").strip().upper()
+        if not text or not FEAR_SYMBOL_PATTERN.match(text):
+            raise ValueError("恐贪来源代码格式不正确")
+        return text
+
+    @validator("ma_window")
+    def validate_ma_window(cls, value):
+        window = int(value)
+        if window < 1 or window > 252:
+            raise ValueError("贪恐均线窗口必须在 1 到 252 之间")
+        return window
+
+    @validator("heatmap_ma_windows", pre=True)
+    def validate_heatmap_ma_windows(cls, value):
+        items = value if isinstance(value, list) else [value]
+        normalized: List[int] = []
+        for item in items:
+            try:
+                window = int(item)
+            except (TypeError, ValueError):
+                raise ValueError("热力图贪恐均线窗口必须是数字")
+            if window < 1 or window > 252:
+                raise ValueError("热力图贪恐均线窗口必须在 1 到 252 之间")
+            if window not in normalized:
+                normalized.append(window)
+        if not normalized:
+            raise ValueError("至少选择一个热力图贪恐均线窗口")
+        return normalized[:8]
+
+    @validator("bucket_count")
+    def validate_bucket_count(cls, value):
+        if value < 2 or value > 20:
+            raise ValueError("分桶数必须在 2 到 20 之间")
+        return int(value)
+
+    @validator("forward_window")
+    def validate_forward_window(cls, value):
+        window = int(value)
+        if window < 1 or window > 252:
+            raise ValueError("收益窗口必须在 1 到 252 之间")
+        return window
+
+    @validator("heatmap_forward_windows", pre=True)
+    def validate_timing_heatmap_forward_windows(cls, value):
+        items = value if isinstance(value, list) else [value]
+        normalized: List[int] = []
+        for item in items:
+            try:
+                window = int(item)
+            except (TypeError, ValueError):
+                raise ValueError("热力图收益窗口必须是数字")
+            if window < 1 or window > 252:
+                raise ValueError("热力图收益窗口必须在 1 到 252 之间")
+            if window not in normalized:
+                normalized.append(window)
+        if not normalized:
+            raise ValueError("至少选择一个热力图收益窗口")
+        return normalized[:8]
 
     @validator("end_date")
     def validate_date_range(cls, value, values):
@@ -604,12 +704,15 @@ class FactorLabOptionsResponse(BaseModel):
     windows: List[int]
     forward_windows: List[int]
     heatmap_metrics: List[Dict[str, Any]]
+    timing_fear_sources: List[Dict[str, Any]]
+    timing_target_options: List[Dict[str, Any]]
     backtest_search_objectives: List[Dict[str, Any]]
     neutralization_options: List[Dict[str, Any]]
     standardization_options: List[Dict[str, Any]]
     default_request: Dict[str, Any]
     default_composite_request: Dict[str, Any]
     default_backtest_request: Dict[str, Any]
+    default_timing_request: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -914,6 +1017,479 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
     ).sort(["symbol", "trade_date"]).with_columns(
         pl.min("trade_date").over("symbol").alias("_first_trade_date")
     )
+
+
+def _fear_source_label(symbol: str) -> str:
+    if symbol == CNN_HISTORY_SYMBOL:
+        return "CNN Fear & Greed"
+    if symbol.endswith(".US"):
+        return f"{symbol[:-3]} 自算贪恐"
+    return symbol
+
+
+def _load_fear_history_frame(
+    db: ORMSession,
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    lookback_days: int = 420,
+) -> pl.DataFrame:
+    history_start = start_date - timedelta(days=max(0, int(lookback_days)))
+    rows = (
+        db.query(
+            ETFFearGreedCloneHistory.symbol,
+            ETFFearGreedCloneHistory.date,
+            ETFFearGreedCloneHistory.score,
+            ETFFearGreedCloneHistory.rating,
+            ETFFearGreedCloneHistory.method,
+        )
+        .filter(
+            ETFFearGreedCloneHistory.symbol == symbol,
+            ETFFearGreedCloneHistory.date >= history_start,
+            ETFFearGreedCloneHistory.date <= end_date,
+            ETFFearGreedCloneHistory.score.isnot(None),
+        )
+        .order_by(ETFFearGreedCloneHistory.date.asc())
+        .all()
+    )
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "trade_date": pl.Date,
+                "score": pl.Float64,
+                "rating": pl.Utf8,
+                "method": pl.Utf8,
+            }
+        )
+    return (
+        pl.DataFrame(
+            [
+                {
+                    "trade_date": row.date,
+                    "score": float(row.score),
+                    "rating": row.rating,
+                    "method": row.method,
+                }
+                for row in rows
+                if row.score is not None
+            ]
+        )
+        .with_columns(
+            pl.col("trade_date").cast(pl.Date),
+            pl.col("score").cast(pl.Float64),
+        )
+        .unique(subset=["trade_date"], keep="last")
+        .sort("trade_date")
+    )
+
+
+def _timing_ma_label(ma_window: int) -> str:
+    return "原始值" if int(ma_window) <= 1 else f"{int(ma_window)}日均值"
+
+
+def _rank_average(values: List[float]) -> List[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    index = 0
+    while index < len(indexed):
+        end = index + 1
+        while end < len(indexed) and indexed[end][1] == indexed[index][1]:
+            end += 1
+        avg_rank = (index + 1 + end) / 2.0
+        for offset in range(index, end):
+            ranks[indexed[offset][0]] = avg_rank
+        index = end
+    return ranks
+
+
+def _pearson_corr(left: List[float], right: List[float]) -> Optional[float]:
+    if len(left) != len(right) or len(left) < 2:
+        return None
+    left_arr = np.array(left, dtype=float)
+    right_arr = np.array(right, dtype=float)
+    if not np.isfinite(left_arr).all() or not np.isfinite(right_arr).all():
+        return None
+    left_std = float(left_arr.std(ddof=1))
+    right_std = float(right_arr.std(ddof=1))
+    if left_std <= 0 or right_std <= 0:
+        return None
+    return float(np.corrcoef(left_arr, right_arr)[0, 1])
+
+
+def _spearman_corr_from_records(records: List[Dict[str, Any]]) -> Optional[float]:
+    pairs = [
+        (float(item["factor_value"]), float(item["forward_return"]))
+        for item in records
+        if item.get("factor_value") is not None
+        and item.get("forward_return") is not None
+        and math.isfinite(float(item["factor_value"]))
+        and math.isfinite(float(item["forward_return"]))
+    ]
+    if len(pairs) < 3:
+        return None
+    factor_ranks = _rank_average([item[0] for item in pairs])
+    return_ranks = _rank_average([item[1] for item in pairs])
+    return _pearson_corr(factor_ranks, return_ranks)
+
+
+def _compute_timing_ic_series(sample_df: pl.DataFrame, window: int = 60, min_periods: int = 20) -> pl.DataFrame:
+    if sample_df.is_empty():
+        return pl.DataFrame()
+
+    records = sample_df.sort("trade_date").select(
+        "trade_date",
+        "factor_value",
+        "forward_return",
+    ).to_dicts()
+    rows = []
+    for index, item in enumerate(records):
+        start = max(0, index - window + 1)
+        window_records = records[start:index + 1]
+        rank_ic = _spearman_corr_from_records(window_records) if len(window_records) >= min_periods else None
+        rows.append(
+            {
+                "trade_date": item["trade_date"],
+                "samples": len(window_records),
+                "rank_ic": _safe_float(rank_ic, 6),
+            }
+        )
+
+    ic_df = pl.DataFrame(rows).with_columns(pl.col("trade_date").cast(pl.Date)).sort("trade_date")
+    return (
+        ic_df.with_columns(
+            pl.col("rank_ic").rolling_mean(window_size=20, min_samples=5).alias("rank_ic_ma20"),
+            pl.col("rank_ic").rolling_mean(window_size=60, min_samples=10).alias("rank_ic_ma60"),
+            pl.col("rank_ic").fill_null(0).cum_sum().alias("cumulative_rank_ic"),
+        )
+        .with_columns(
+            pl.col("rank_ic_ma20").round(6),
+            pl.col("rank_ic_ma60").round(6),
+            pl.col("cumulative_rank_ic").round(6),
+        )
+    )
+
+
+def _prepare_timing_sample(
+    price_df: pl.DataFrame,
+    fear_df: pl.DataFrame,
+    request: TimingFactorAnalyzeRequest,
+    forward_window: int,
+    ma_window: int,
+) -> pl.DataFrame:
+    if price_df.is_empty() or fear_df.is_empty():
+        return pl.DataFrame()
+
+    price = (
+        price_df.select("symbol", "trade_date", "close")
+        .sort("trade_date")
+        .with_columns(
+            pl.col("close").shift(-int(forward_window)).over("symbol").alias("_future_close")
+        )
+    )
+    factor_source = (
+        fear_df.sort("trade_date")
+        .with_columns(
+            (
+                pl.col("score")
+                if int(ma_window) <= 1
+                else pl.col("score").rolling_mean(window_size=int(ma_window), min_samples=int(ma_window))
+            ).alias("factor_value")
+        )
+        .select(
+            "trade_date",
+            pl.col("score").alias("fear_score"),
+            "factor_value",
+        )
+        .sort("trade_date")
+    )
+    sample = (
+        price.join_asof(factor_source, on="trade_date", strategy="backward")
+        .with_columns(
+            (pl.col("_future_close") / pl.col("close") - 1).alias("forward_return"),
+        )
+        .with_columns(pl.col("forward_return").mean().alias("_mean_forward_return"))
+        .with_columns((pl.col("forward_return") - pl.col("_mean_forward_return")).alias("forward_excess_return"))
+        .filter(
+            (pl.col("trade_date") >= request.start_date)
+            & pl.col("factor_value").is_not_null()
+            & pl.col("factor_value").is_finite()
+            & pl.col("forward_return").is_not_null()
+            & pl.col("forward_return").is_finite()
+        )
+        .select(
+            "symbol",
+            "trade_date",
+            "close",
+            "fear_score",
+            "factor_value",
+            pl.col("factor_value").alias("factor_value_raw"),
+            "forward_return",
+            "forward_excess_return",
+        )
+        .sort("trade_date")
+    )
+    if sample.is_empty():
+        return sample
+
+    sample_count = sample.height
+    return (
+        sample.with_columns(
+            pl.col("factor_value").rank(method="ordinal").alias("_factor_rank")
+        )
+        .with_columns(
+            (
+                ((pl.col("_factor_rank") - 1) * int(request.bucket_count) / sample_count).floor() + 1
+            )
+            .clip(1, int(request.bucket_count))
+            .cast(pl.Int64)
+            .alias("bucket")
+        )
+    )
+
+
+def _compute_timing_non_overlapping_stats(
+    sample_df: pl.DataFrame,
+    bucket_count: int,
+    forward_window: int,
+) -> Dict[str, Any]:
+    if sample_df.is_empty():
+        return {"summary": {}, "offsets": []}
+    step = max(1, int(forward_window))
+    rows = []
+    source = sample_df.sort("trade_date").with_row_index("_date_index").with_columns(
+        (pl.col("_date_index") % step).cast(pl.Int64).alias("offset")
+    )
+    for offset in range(step):
+        part = source.filter(pl.col("offset") == offset)
+        if part.is_empty():
+            continue
+        bucket_df = _compute_bucket_report(part)
+        top_row = bucket_df.filter(pl.col("bucket") == bucket_count)
+        bottom_row = bucket_df.filter(pl.col("bucket") == 1)
+        if not top_row.height or not bottom_row.height:
+            continue
+        top_return = _safe_float(top_row.select("avg_return_pct").item(), 6)
+        bottom_return = _safe_float(bottom_row.select("avg_return_pct").item(), 6)
+        spread = None if top_return is None or bottom_return is None else bottom_return - top_return
+        rows.append(
+            {
+                "offset": offset,
+                "periods": int(part.height),
+                "start_date": part.select(pl.min("trade_date")).item(),
+                "end_date": part.select(pl.max("trade_date")).item(),
+                "avg_top_minus_bottom_return_pct": _safe_float(spread, 4),
+                "annualized_top_minus_bottom_return_pct": _annualize_period_return_pct(spread, forward_window),
+                "positive_periods": 1 if spread is not None and spread > 0 else 0,
+                "positive_period_rate_pct": 100.0 if spread is not None and spread > 0 else 0.0,
+                "t_stat": None,
+            }
+        )
+
+    if not rows:
+        return {"summary": {}, "offsets": []}
+    annualized_values = [
+        item["annualized_top_minus_bottom_return_pct"]
+        for item in rows
+        if item.get("annualized_top_minus_bottom_return_pct") is not None
+    ]
+    avg_values = [
+        item["avg_top_minus_bottom_return_pct"]
+        for item in rows
+        if item.get("avg_top_minus_bottom_return_pct") is not None
+    ]
+    positive = sum(1 for item in rows if (item.get("avg_top_minus_bottom_return_pct") or 0) > 0)
+    summary = {
+        "forward_window": int(forward_window),
+        "offsets": len(rows),
+        "total_periods": sum(int(item["periods"]) for item in rows),
+        "avg_period_return_pct": _safe_float(_mean(avg_values), 4),
+        "annualized_mean_pct": _safe_float(_mean(annualized_values), 4),
+        "annualized_median_pct": _safe_float(_median(annualized_values), 4),
+        "positive_period_rate_pct": _safe_float(positive * 100 / len(rows), 2),
+        "mean_t_stat": None,
+    }
+    return {"summary": summary, "offsets": [_serialize_timing_record(item) for item in rows]}
+
+
+def _serialize_timing_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: _serialize_value(value) for key, value in record.items()}
+
+
+def _compute_timing_yearly_stability(
+    sample_df: pl.DataFrame,
+    bucket_count: int,
+    forward_window: int,
+) -> pl.DataFrame:
+    if sample_df.is_empty():
+        return pl.DataFrame()
+
+    rows = []
+    for year in sorted(sample_df.select(pl.col("trade_date").dt.year()).unique().to_series().to_list()):
+        part = sample_df.filter(pl.col("trade_date").dt.year() == year)
+        bucket_df = _compute_bucket_report(part)
+        top_row = bucket_df.filter(pl.col("bucket") == bucket_count)
+        bottom_row = bucket_df.filter(pl.col("bucket") == 1)
+        top_return = _safe_float(top_row.select("avg_return_pct").item(), 6) if top_row.height else None
+        bottom_return = _safe_float(bottom_row.select("avg_return_pct").item(), 6) if bottom_row.height else None
+        spread = None if top_return is None or bottom_return is None else bottom_return - top_return
+        ic = _spearman_corr_from_records(part.select("factor_value", "forward_return").to_dicts())
+        rows.append(
+            {
+                "year": int(year),
+                "samples": int(part.height),
+                "trade_dates": int(part.select(pl.n_unique("trade_date")).item()),
+                "symbols": 1,
+                "avg_top_minus_bottom_return_pct": _safe_float(spread, 4),
+                "annualized_top_minus_bottom_return_pct": _annualize_period_return_pct(spread, forward_window),
+                "non_overlap_annualized_median_pct": None,
+                "avg_rank_ic": _safe_float(ic, 6),
+                "positive_ic_rate_pct": 100.0 if ic is not None and ic > 0 else 0.0,
+                "positive_spread_rate_pct": 100.0 if spread is not None and spread > 0 else 0.0,
+            }
+        )
+    return pl.DataFrame(rows).sort("year")
+
+
+def _summarize_timing_sample(
+    sample_df: pl.DataFrame,
+    bucket_df: pl.DataFrame,
+    ic_df: pl.DataFrame,
+    request: TimingFactorAnalyzeRequest,
+    forward_window: int,
+    elapsed_ms: float,
+    non_overlap_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    records = sample_df.select("factor_value", "forward_return").to_dicts() if not sample_df.is_empty() else []
+    global_ic = _safe_float(_spearman_corr_from_records(records), 6)
+    rolling_ics = [
+        float(value)
+        for value in (ic_df.select("rank_ic").drop_nulls().to_series().to_list() if not ic_df.is_empty() else [])
+        if value is not None and math.isfinite(float(value))
+    ]
+    ic_std = _safe_float(float(np.std(rolling_ics, ddof=1)), 6) if len(rolling_ics) > 1 else None
+    ic_avg = _safe_float(_mean(rolling_ics), 6)
+    icir = _safe_float(ic_avg / ic_std, 4) if ic_avg is not None and ic_std is not None and ic_std > 0 else None
+    sample_n = len(records)
+    rank_ic_t_stat = None
+    if global_ic is not None and sample_n > 2 and abs(global_ic) < 1:
+        rank_ic_t_stat = _safe_float(
+            global_ic * math.sqrt((sample_n - 2) / max(1e-12, 1 - global_ic * global_ic)),
+            4,
+        )
+
+    top_return = None
+    bottom_return = None
+    spread_return = None
+    if not bucket_df.is_empty():
+        top_row = bucket_df.filter(pl.col("bucket") == request.bucket_count)
+        bottom_row = bucket_df.filter(pl.col("bucket") == 1)
+        top_return = _safe_float(top_row.select("avg_return_pct").item(), 4) if top_row.height else None
+        bottom_return = _safe_float(bottom_row.select("avg_return_pct").item(), 4) if bottom_row.height else None
+        if top_return is not None and bottom_return is not None:
+            spread_return = round(top_return - bottom_return, 4)
+    monotonicity = _compute_monotonicity(bucket_df)
+    summary = {
+        "samples": int(sample_df.height),
+        "trade_dates": int(sample_df.select(pl.n_unique("trade_date")).item()) if not sample_df.is_empty() else 0,
+        "symbols": 1 if not sample_df.is_empty() else 0,
+        "rank_ic_mean": global_ic,
+        "rank_ic_std": ic_std,
+        "icir": icir,
+        "rank_ic_t_stat": rank_ic_t_stat,
+        "top_bucket_avg_return_pct": top_return,
+        "bottom_bucket_avg_return_pct": bottom_return,
+        "top_minus_bottom_avg_return_pct": spread_return,
+        "annualized_top_minus_bottom_avg_return_pct": _annualize_period_return_pct(spread_return, forward_window),
+        "low_minus_high_avg_return_pct": _safe_float(-spread_return, 4) if spread_return is not None else None,
+        "annualized_low_minus_high_avg_return_pct": _annualize_period_return_pct(
+            _safe_float(-spread_return, 6) if spread_return is not None else None,
+            forward_window,
+        ),
+        "elapsed_ms": round(elapsed_ms, 1),
+    } | monotonicity
+    if non_overlap_summary:
+        summary.update(
+            {
+                "non_overlap_annualized_median_pct": non_overlap_summary.get("annualized_median_pct"),
+                "non_overlap_annualized_mean_pct": non_overlap_summary.get("annualized_mean_pct"),
+                "non_overlap_positive_period_rate_pct": non_overlap_summary.get("positive_period_rate_pct"),
+                "non_overlap_offsets": non_overlap_summary.get("offsets"),
+                "spread_t_stat": non_overlap_summary.get("mean_t_stat"),
+            }
+        )
+    return summary
+
+
+def _compute_timing_heatmap(
+    price_df: pl.DataFrame,
+    fear_df: pl.DataFrame,
+    request: TimingFactorAnalyzeRequest,
+) -> List[Dict[str, Any]]:
+    if not request.include_heatmap:
+        return []
+    records = []
+    for ma_window in request.heatmap_ma_windows:
+        for forward_window in request.heatmap_forward_windows:
+            sample = _prepare_timing_sample(price_df, fear_df, request, int(forward_window), int(ma_window))
+            if sample.is_empty():
+                continue
+            bucket_df = _compute_bucket_report(sample)
+            summary = _summarize_timing_sample(
+                sample,
+                bucket_df,
+                _compute_timing_ic_series(sample),
+                request,
+                int(forward_window),
+                0,
+            )
+            records.append(
+                {
+                    "ma_window": int(ma_window),
+                    "ma_window_label": _timing_ma_label(int(ma_window)),
+                    "forward_window": int(forward_window),
+                    "samples": summary.get("samples"),
+                    "rank_ic_mean": summary.get("rank_ic_mean"),
+                    "rank_ic_t_stat": summary.get("rank_ic_t_stat"),
+                    "top_minus_bottom_avg_return_pct": summary.get("top_minus_bottom_avg_return_pct"),
+                    "annualized_top_minus_bottom_avg_return_pct": summary.get("annualized_top_minus_bottom_avg_return_pct"),
+                    "low_minus_high_avg_return_pct": summary.get("low_minus_high_avg_return_pct"),
+                    "annualized_low_minus_high_avg_return_pct": summary.get("annualized_low_minus_high_avg_return_pct"),
+                    "monotonicity_spearman": summary.get("monotonicity_spearman"),
+                    "heatmap_value": summary.get("annualized_low_minus_high_avg_return_pct"),
+                }
+            )
+    return records
+
+
+def _get_timing_fear_sources(db: ORMSession) -> List[Dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                symbol,
+                MIN(date) AS start_date,
+                MAX(date) AS end_date,
+                COUNT(*) AS points
+            FROM "etf_fear_greed_clone_history"
+            WHERE symbol IS NOT NULL
+            GROUP BY symbol
+            ORDER BY symbol
+            """
+        )
+    ).mappings().all()
+    sources = [
+        {
+            "label": _fear_source_label(row["symbol"]),
+            "value": row["symbol"],
+            "symbol": row["symbol"],
+            "start_date": row["start_date"].isoformat() if hasattr(row["start_date"], "isoformat") else str(row["start_date"] or ""),
+            "end_date": row["end_date"].isoformat() if hasattr(row["end_date"], "isoformat") else str(row["end_date"] or ""),
+            "points": int(row["points"] or 0),
+        }
+        for row in rows
+    ]
+    sources.sort(key=lambda item: (0 if item["symbol"] == CNN_HISTORY_SYMBOL else 1, item["symbol"]))
+    return sources
 
 
 def _load_valuation_frame(
@@ -4555,6 +5131,130 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
     return response
 
 
+def _run_timing_factor_analysis(
+    request: TimingFactorAnalyzeRequest,
+    db: ORMSession,
+) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    end_date = request.end_date or _get_max_trade_date()
+    if request.start_date >= end_date:
+        raise HTTPException(status_code=400, detail="开始日期必须早于实际结束日期")
+
+    max_forward_window = max([request.forward_window, *request.heatmap_forward_windows])
+    fetch_end = end_date + timedelta(days=max(30, max_forward_window * 4))
+    price_df = _load_price_frame([request.target_symbol], request.start_date, fetch_end)
+    if price_df.is_empty():
+        raise HTTPException(status_code=400, detail=f"{request.target_symbol} 没有可用日行情数据")
+
+    fear_df = _load_fear_history_frame(db, request.fear_symbol, request.start_date, end_date)
+    if fear_df.is_empty():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{request.fear_symbol} 没有可用恐贪历史数据，请先同步 etf_fear_greed_clone_history",
+        )
+
+    heatmap_records = _compute_timing_heatmap(price_df, fear_df, request)
+    selected_ma_window = int(request.ma_window)
+    selected_forward_window = int(request.forward_window)
+    if request.include_heatmap and heatmap_records:
+        best_record = max(
+            heatmap_records,
+            key=lambda item: _record_float(item, "heatmap_value", -1e18),
+        )
+        if best_record.get("heatmap_value") is not None:
+            selected_ma_window = int(best_record["ma_window"])
+            selected_forward_window = int(best_record["forward_window"])
+
+    sample = _prepare_timing_sample(
+        price_df=price_df,
+        fear_df=fear_df,
+        request=request,
+        forward_window=selected_forward_window,
+        ma_window=selected_ma_window,
+    )
+    if sample.is_empty():
+        raise HTTPException(
+            status_code=400,
+            detail="目标标的行情与恐贪指数没有足够重叠样本，请调整日期、均线窗口或收益窗口",
+        )
+
+    bucket_df = _compute_bucket_report(sample)
+    ic_df = _compute_timing_ic_series(sample)
+    non_overlap = _compute_timing_non_overlapping_stats(
+        sample,
+        int(request.bucket_count),
+        selected_forward_window,
+    )
+    yearly_df = _compute_timing_yearly_stability(sample, int(request.bucket_count), selected_forward_window)
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    summary = _summarize_timing_sample(
+        sample,
+        bucket_df,
+        ic_df,
+        request,
+        selected_forward_window,
+        elapsed_ms,
+        non_overlap.get("summary"),
+    )
+    if not yearly_df.is_empty():
+        total_years = yearly_df.height
+        spread_years = yearly_df.filter(pl.col("annualized_top_minus_bottom_return_pct") > 0).height
+        ic_years = yearly_df.filter(pl.col("avg_rank_ic") > 0).height
+        summary.update(
+            {
+                "positive_spread_years": int(spread_years),
+                "positive_ic_years": int(ic_years),
+                "total_years": int(total_years),
+            }
+        )
+
+    fear_dates = fear_df.filter((pl.col("trade_date") >= request.start_date) & (pl.col("trade_date") <= end_date))
+    metadata = {
+        "mode": "timing",
+        "target_symbol": request.target_symbol,
+        "fear_symbol": request.fear_symbol,
+        "fear_label": _fear_source_label(request.fear_symbol),
+        "ma_window": selected_ma_window,
+        "ma_window_label": _timing_ma_label(selected_ma_window),
+        "selected_combo": {
+            "ma_window": selected_ma_window,
+            "ma_window_label": _timing_ma_label(selected_ma_window),
+            "forward_window": selected_forward_window,
+            "selection_mode": "auto" if request.include_heatmap and heatmap_records else "manual",
+            "reason": "best_heatmap_low_minus_high" if request.include_heatmap and heatmap_records else "request",
+        },
+        "factor": {
+            "key": "fear_greed_timing",
+            "label": "择时：恐贪指数",
+            "group": "择时",
+            "description": "时间序列择时因子：同一天只有一个市场状态值，按日期分桶检验未来收益。低桶代表恐慌，高桶代表贪婪。",
+            "direction": "exploratory",
+        },
+        "bucket_count": request.bucket_count,
+        "forward_window": selected_forward_window,
+        "heatmap_forward_windows": request.heatmap_forward_windows,
+        "heatmap_ma_windows": request.heatmap_ma_windows,
+        "start_date": request.start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "effective_start_date": sample.select(pl.min("trade_date")).item().isoformat(),
+        "effective_end_date": sample.select(pl.max("trade_date")).item().isoformat(),
+        "price_rows": int(price_df.filter(pl.col("trade_date") <= end_date).height),
+        "fear_points": int(fear_dates.height),
+        "engine": "polars",
+    }
+
+    return {
+        "metadata": metadata,
+        "summary": summary,
+        "bucket_returns": _records(bucket_df),
+        "rank_ic_series": _records(ic_df),
+        "non_overlapping_summary": non_overlap.get("summary") or {},
+        "non_overlapping_offsets": non_overlap.get("offsets") or [],
+        "yearly_stability": _records(yearly_df),
+        "parameter_heatmap": heatmap_records,
+    }
+
+
 def _run_composite_factor_analysis(
     request: CompositeFactorAnalyzeRequest,
     db: ORMSession,
@@ -4879,7 +5579,10 @@ def _run_factor_analysis(
 
 
 @router.get("/options", response_model=FactorLabOptionsResponse)
-async def get_factor_lab_options(_: str = Depends(valid_account)):
+async def get_factor_lab_options(
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
     return FactorLabOptionsResponse(
         pools=POOL_OPTIONS,
         factors=[definition.to_option() for definition in FACTOR_REGISTRY.values()],
@@ -4889,6 +5592,8 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             {"key": key, **value}
             for key, value in HEATMAP_METRIC_OPTIONS.items()
         ],
+        timing_fear_sources=_get_timing_fear_sources(db),
+        timing_target_options=DEFAULT_TIMING_TARGET_OPTIONS,
         backtest_search_objectives=[
             {"key": key, **value}
             for key, value in BACKTEST_SEARCH_OBJECTIVE_OPTIONS.items()
@@ -4974,6 +5679,18 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
                 },
             ],
         },
+        default_timing_request={
+            "target_symbol": "SOXL.US",
+            "fear_symbol": CNN_HISTORY_SYMBOL,
+            "ma_window": 1,
+            "bucket_count": 10,
+            "start_date": DEFAULT_START_DATE.isoformat(),
+            "end_date": None,
+            "forward_window": 20,
+            "heatmap_forward_windows": DEFAULT_FORWARD_WINDOWS,
+            "heatmap_ma_windows": DEFAULT_TIMING_MA_WINDOWS,
+            "include_heatmap": True,
+        },
     )
 
 
@@ -4993,6 +5710,15 @@ async def analyze_composite_factor(
     db: ORMSession = Depends(get_db),
 ):
     return _run_composite_factor_analysis(payload, db)
+
+
+@router.post("/analyze-timing")
+async def analyze_timing_factor(
+    payload: TimingFactorAnalyzeRequest,
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _run_timing_factor_analysis(payload, db)
 
 
 @router.post("/backtest")
