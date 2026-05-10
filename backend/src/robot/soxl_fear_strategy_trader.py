@@ -9,10 +9,10 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import requests
 
 from ..core.database import (
     CNNFearGreedIndex,
+    ETFFearGreedCloneHistory,
     IBKRAccountConfig,
     LongPortAccount,
     Session,
@@ -27,19 +27,9 @@ from ..core.services.market import MarketService
 from ..core.services.quote import QuoteService
 from ..core.services.trade import OrderSide, OrderType, OutsideRTH, TimeInForceType
 from ..core.utils import mask_account_id, send_alert_email
-from .cnn_fear_index import CNNFearGreedIndexScraper
+from .cnn_fear_index import CNNFearGreedIndexScraper, CNN_HISTORY_SYMBOL
 
 logger = logging.getLogger(__name__)
-CNN_HISTORY_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-CNN_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "cache-control": "no-cache",
-    "origin": "https://www.cnn.com",
-    "pragma": "no-cache",
-    "referer": "https://www.cnn.com/",
-    "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-}
 
 
 @dataclass
@@ -144,7 +134,13 @@ class SoxlFearStrategyTrader:
         try:
             data = scraper.fetch_data_and_save()
             fear_and_greed = data["fear_and_greed"]
-            index_timestamp = datetime.fromtimestamp(data["fear_and_greed_historical"]["timestamp"] / 1000)
+            index_timestamp = (
+                scraper._parse_cnn_datetime(
+                    fear_and_greed.get("timestamp")
+                    or data.get("fear_and_greed_historical", {}).get("timestamp")
+                )
+                or datetime.now()
+            )
             return float(fear_and_greed["score"]), index_timestamp
         except Exception as exc:
             logger.warning("Failed to fetch latest CNN fear&greed, fallback to DB: %s", exc)
@@ -218,34 +214,25 @@ class SoxlFearStrategyTrader:
 
         scores: Dict[date, float] = {}
         rows = (
-            db.query(CNNFearGreedIndex)
+            db.query(ETFFearGreedCloneHistory)
             .filter(
-                CNNFearGreedIndex.date >= start_date,
-                CNNFearGreedIndex.date <= end_date,
+                ETFFearGreedCloneHistory.symbol == CNN_HISTORY_SYMBOL,
+                ETFFearGreedCloneHistory.date >= start_date,
+                ETFFearGreedCloneHistory.date <= end_date,
             )
-            .order_by(CNNFearGreedIndex.date.asc())
+            .order_by(ETFFearGreedCloneHistory.date.asc())
             .all()
         )
         for row in rows:
-            if row.index_value is not None:
-                scores[row.date] = float(row.index_value)
+            if row.score is not None:
+                scores[row.date] = float(row.score)
 
-        try:
-            response = requests.get(
-                f"{CNN_HISTORY_BASE_URL}/{start_date.isoformat()}",
-                headers=CNN_HEADERS,
-                timeout=30,
+        if not scores:
+            logger.info(
+                "No CNN history found in etf_fear_greed_clone_history for %s~%s",
+                start_date,
+                end_date,
             )
-            response.raise_for_status()
-            payload = response.json()
-            for item in payload.get("fear_and_greed_historical", {}).get("data", []):
-                if item.get("x") is None or item.get("y") is None:
-                    continue
-                item_date = datetime.utcfromtimestamp(item["x"] / 1000).date()
-                if start_date <= item_date <= end_date:
-                    scores[item_date] = float(item["y"])
-        except Exception as exc:
-            logger.info("Failed to fetch CNN history for SOXL greed state backfill: %s", exc)
 
         return scores
 

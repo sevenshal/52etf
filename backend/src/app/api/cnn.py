@@ -4,22 +4,17 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from ...core.services.cnn_service import CNNService
 from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
+from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 
 router = APIRouter(prefix="/api/cnn")
 
 @router.get("/fear-greed")
-async def get_fear_greed_index(days: int = 1):
-    """获取最新的CNN恐贪指数
-    
-    Args:
-        days: 获取多少天的数据，默认1天
-    """
+async def get_fear_greed_index():
+    """获取最新的CNN恐贪指数。"""
     try:
-        cnn_service = CNNService()
-        return await cnn_service.get_fear_greed_index(days=days)
+        return await run_in_threadpool(_fetch_cnn_fear_greed)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取CNN恐贪指数失败: {str(e)}") 
 
@@ -180,3 +175,11 @@ def _parse_date(value: Optional[str]):
     if not value:
         return None
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _fetch_cnn_fear_greed():
+    scraper = CNNFearGreedIndexScraper()
+    try:
+        return scraper.fetch_data()
+    finally:
+        scraper.db_session.close()

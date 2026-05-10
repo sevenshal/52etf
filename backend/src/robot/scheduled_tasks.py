@@ -233,9 +233,19 @@ def _run_cnn_fear_greed_fetch():
 
     scraper = CNNFearGreedIndexScraper()
     try:
-        scraper.fetch_data_and_save()
+        result = scraper.fetch_data_and_save_history()
     finally:
         scraper.db_session.close()
+
+    history = result.get("history", {})
+    return (
+        "CNN Fear & Greed sync "
+        f"mode={history.get('mode')} "
+        f"symbol={history.get('symbol')} "
+        f"fetch_start={history.get('fetch_start_date')} "
+        f"range={history.get('start_date')}~{history.get('end_date')} "
+        f"saved={history.get('saved')}"
+    )
 
 
 def _run_etf_fear_greed_backfill(start_date: Optional[str] = None):
@@ -514,7 +524,7 @@ class ScheduledTaskManager:
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
                 name="CNN Fear & Greed 抓取",
-                description="抓取并保存 CNN Fear & Greed Index。",
+                description="抓取并保存 CNN Fear & Greed Index 快照，并将 CNN 历史曲线增量写入 etf_fear_greed_clone_history。",
                 default_time="10:00",
                 default_enabled=True,
                 sort_order=50,

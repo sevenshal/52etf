@@ -10,13 +10,13 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError, validator
 
 from ...core.database import ETFFearGreedCloneHistory, Session
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
+from ...robot.cnn_fear_index import CNN_HISTORY_SYMBOL
 from .account import valid_account
 
 router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["SOXL Fear Backtest"])
@@ -26,16 +26,6 @@ SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="soxl-fear-search")
 SEARCH_EVAL_MAX_WORKERS = min(8, max(2, (os.cpu_count() or 4) // 2))
 
-CNN_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "cache-control": "no-cache",
-    "origin": "https://www.cnn.com",
-    "pragma": "no-cache",
-    "referer": "https://www.cnn.com/",
-    "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-}
-CNN_BASE_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 FEAR_SOURCE_OPTIONS = {
     "cnn": {
         "label": "CNN贪恐",
@@ -246,30 +236,35 @@ def _describe_df_range(df: pd.DataFrame, date_col: str = "date") -> str:
 
 
 def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
-    response = requests.get(
-        f"{CNN_BASE_URL}/{start_date.isoformat()}",
-        headers=CNN_HEADERS,
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    rows = payload.get("fear_and_greed_historical", {}).get("data", [])
-    if not rows:
-        raise ValueError("CNN 历史恐贪数据为空")
+    db = Session()
+    try:
+        rows = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(
+                ETFFearGreedCloneHistory.symbol == CNN_HISTORY_SYMBOL,
+                ETFFearGreedCloneHistory.date >= start_date,
+                ETFFearGreedCloneHistory.date <= end_date,
+            )
+            .order_by(ETFFearGreedCloneHistory.date.asc())
+            .all()
+        )
+        records = [
+            {
+                "date": row.date,
+                "cnn_fear_greed": float(row.score),
+            }
+            for row in rows
+            if row.score is not None
+        ]
+    finally:
+        Session.remove()
 
-    df = pd.DataFrame([
-        {
-            "date": datetime.utcfromtimestamp(item["x"] / 1000).date(),
-            "cnn_fear_greed": float(item["y"]),
-        }
-        for item in rows
-        if item.get("x") is not None and item.get("y") is not None
-    ])
-    df = df.drop_duplicates(subset=["date"], keep="last")
-    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)].sort_values("date")
+    df = pd.DataFrame(records)
     if df.empty:
-        raise ValueError("指定区间内没有 CNN 恐贪数据")
-    return df
+        raise ValueError(
+            "指定区间内没有 CNN 恐贪数据，请先执行 CNN Fear & Greed 抓取任务"
+        )
+    return df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
 
 
 def _fetch_etf_clone_history(fear_source: str, start_date: date, end_date: date) -> pd.DataFrame:
