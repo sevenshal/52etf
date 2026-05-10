@@ -24,7 +24,7 @@ def robot():
   start_portfolio_copy_trader()
   # 启动 SOXL 情绪量能自动交易
   start_soxl_fear_strategy_trader()
-  # 启动美股成分股风险调整混合动量虚拟盘自动同步（美股收盘后轮询配置）
+  # 启动美股多因子策略虚拟盘自动同步（美股收盘后轮询配置）
   start_us_stock_signal_live_sync()
 
   while True:

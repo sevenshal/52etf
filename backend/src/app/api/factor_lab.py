@@ -20,6 +20,13 @@ from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import Session as DBSession
 from ...core.database import StockEVC, USStockIndustrySnapshot, get_db
+from ...core.services.factor_backtest_engine import (
+    FactorBacktestConfig as SharedFactorBacktestConfig,
+    FactorBacktestLeg as SharedFactorBacktestLeg,
+    prepare_factor_backtest_base_data as shared_prepare_factor_backtest_base_data,
+    run_factor_backtest as shared_run_factor_backtest,
+    warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
+)
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_CANDIDATE_ETFS,
     DEFAULT_MOMENTUM_WEIGHTS,
@@ -1362,7 +1369,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="risk_adjusted_momentum",
         label="动量：风险调整动量",
         group="动量",
-        description="与美股风险调整混合动量虚拟盘同源：ln(close) 回归斜率 * R2 / 年化波动；热力图按每个滑动窗口单独测试。",
+        description="与美股多因子策略虚拟盘默认动量腿同源：ln(close) 回归斜率 * R2 / 年化波动；热力图按每个滑动窗口单独测试。",
         default_windows=[20, 60, 120],
         supports_windows=True,
         supports_mixed_windows=True,
@@ -2977,11 +2984,47 @@ def _factor_values_cache_key(
     )
 
 
+def _to_shared_backtest_config(request: FactorBacktestRequest) -> SharedFactorBacktestConfig:
+    return SharedFactorBacktestConfig(
+        pool=request.pool,
+        pool_label=next((item["label"] for item in POOL_OPTIONS if item["key"] == request.pool), request.pool),
+        candidate_etfs=POOL_ETFS[request.pool],
+        start_date=request.start_date,
+        end_date=request.end_date,
+        initial_capital=request.initial_capital,
+        max_positions=request.max_positions,
+        sell_rank_multiplier=request.sell_rank_multiplier,
+        rebalance_frequency=request.rebalance_frequency,
+        commission_pct=request.commission_pct,
+        slippage_pct=request.slippage_pct,
+        lot_size=request.lot_size,
+        min_listing_days=request.min_listing_days,
+        legs=[
+            SharedFactorBacktestLeg(
+                factor=leg.factor,
+                window=leg.window,
+                weight=leg.weight,
+                neutralization=leg.neutralization,
+                standardization=leg.standardization,
+                momentum_weights=leg.momentum_weights,
+            )
+            for leg in request.legs
+        ],
+        mode="factor_backtest",
+        strategy="factor_lab_top_n_rotation",
+    )
+
+
 def _prepare_factor_backtest_base_data(
     request: FactorBacktestRequest,
     db: ORMSession,
     resolved_legs: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    return shared_prepare_factor_backtest_base_data(
+        _to_shared_backtest_config(request),
+        db,
+    )
+
     end_date = request.end_date or _get_max_trade_date()
     candidate_etfs = POOL_ETFS[request.pool]
     required_windows = _required_windows_for_composite_legs(resolved_legs)
@@ -3071,6 +3114,12 @@ def _warm_backtest_search_factor_caches(
     prepared_data: Dict[str, Any],
     db: ORMSession,
 ):
+    return shared_warm_backtest_search_factor_caches(
+        _to_shared_backtest_config(search_request.request),
+        prepared_data,
+        db,
+    )
+
     price_df = prepared_data.get("price_df")
     if price_df is None or price_df.is_empty():
         return
@@ -3142,6 +3191,15 @@ def _run_factor_backtest(
     db: ORMSession,
     prepared_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    try:
+        return shared_run_factor_backtest(
+            _to_shared_backtest_config(request),
+            db,
+            prepared_data=prepared_data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     started_at = time.perf_counter()
     resolved_legs = _resolve_factor_legs(request.legs)
     if prepared_data is None:

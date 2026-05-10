@@ -839,12 +839,12 @@ class W20MomentumLiveLog(Base):
     payload = Column(JSON)
 
 class USStockSignalVirtualConfig(Base):
-    """美股成分股风险调整混合动量虚拟盘配置"""
+    """美股多因子策略虚拟盘配置"""
     __tablename__ = "us_stock_signal_virtual_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="美股风险调整混合动量虚拟盘")
+    name = Column(String(100), nullable=False, default="美股多因子策略虚拟盘")
     enabled = Column(Boolean, default=True, nullable=False)
     candidate_etfs = Column(JSON, nullable=False)
     initial_capital = Column(Float, nullable=False, default=100_000.0)
@@ -863,6 +863,7 @@ class USStockSignalVirtualConfig(Base):
     commission_pct = Column(Float, nullable=False, default=0.03)
     slippage_pct = Column(Float, nullable=False, default=0.02)
     lot_size = Column(Integer, nullable=False, default=1)
+    legs = Column(JSON, nullable=True)
     auto_sync_enabled = Column(Boolean, default=True, nullable=False)
     auto_sync_time = Column(String(5), default="16:15", nullable=False)
     last_auto_sync_at = Column(DateTime)
@@ -873,7 +874,7 @@ class USStockSignalVirtualConfig(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualEvent(Base):
-    """美股成分股风险调整混合动量排名事件"""
+    """美股多因子策略虚拟盘排名事件"""
     __tablename__ = "us_stock_signal_virtual_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -894,7 +895,7 @@ class USStockSignalVirtualEvent(Base):
     )
 
 class USStockSignalVirtualEquity(Base):
-    """美股成分股风险调整混合动量虚拟盘每日净值"""
+    """美股多因子策略虚拟盘每日净值"""
     __tablename__ = "us_stock_signal_virtual_equity"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -908,7 +909,7 @@ class USStockSignalVirtualEquity(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualTrade(Base):
-    """美股成分股风险调整混合动量虚拟盘模拟成交"""
+    """美股多因子策略虚拟盘模拟成交"""
     __tablename__ = "us_stock_signal_virtual_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -934,7 +935,7 @@ class USStockSignalVirtualTrade(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class USStockSignalVirtualHolding(Base):
-    """美股成分股风险调整混合动量虚拟盘最新持仓快照"""
+    """美股多因子策略虚拟盘最新持仓快照"""
     __tablename__ = "us_stock_signal_virtual_holdings"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -949,7 +950,7 @@ class USStockSignalVirtualHolding(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualLog(Base):
-    """美股成分股风险调整混合动量虚拟盘运行日志"""
+    """美股多因子策略虚拟盘运行日志"""
     __tablename__ = "us_stock_signal_virtual_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1147,6 +1148,8 @@ def ensure_table_columns():
             "sell_rank_multiplier": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN sell_rank_multiplier FLOAT NOT NULL DEFAULT 2.0",
             "index_weight_blend": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN index_weight_blend FLOAT NOT NULL DEFAULT 0.4",
             "rebalance_frequency": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly'",
+            "lot_size": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN lot_size INTEGER NOT NULL DEFAULT 1",
+            "legs": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN legs JSON",
         },
         "a_stock_innovation_momentum_configs": {
             "fundamental_weights": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_weights JSON NOT NULL DEFAULT '{\"circ_mv\":0.34,\"revenue_growth_3y\":0.33,\"rd_exp_ratio\":0.33}'",
@@ -1165,39 +1168,6 @@ def ensure_table_columns():
                     conn.exec_driver_sql(ddl)
 
 ensure_table_columns()
-
-def ensure_us_stock_signal_virtual_recommended_defaults():
-    """把旧的 20 日 Top10 默认配置迁移到当前推荐的混合动量参数。"""
-    with engine.begin() as conn:
-        existing = {
-            row[1]
-            for row in conn.execute(text("PRAGMA table_info(us_stock_signal_virtual_configs)")).fetchall()
-        }
-        required = {"name", "momentum_weights", "max_positions", "sell_rank_multiplier", "index_weight_blend", "updated_at"}
-        if not required.issubset(existing):
-            return
-        conn.exec_driver_sql("""
-            UPDATE us_stock_signal_virtual_configs
-            SET
-                name = CASE
-                    WHEN name LIKE '%20日动量Top10%' THEN '美股风险调整混合动量虚拟盘'
-                    ELSE name
-                END,
-                momentum_weights = '{"20":0.05,"60":0.20,"120":0.75}',
-                max_positions = 7,
-                sell_rank_multiplier = 2.0,
-                index_weight_blend = 0.4,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE max_positions = 10
-              AND (name LIKE '%20日动量Top10%' OR name LIKE '%风险调整20日动量Top10%')
-              AND (
-                  momentum_weights = '{"20":1.0,"60":0.0,"120":0.0}'
-                  OR momentum_weights = '{"20": 1.0, "60": 0.0, "120": 0.0}'
-                  OR momentum_weights = '{"20": 1, "60": 0, "120": 0}'
-              )
-        """)
-
-ensure_us_stock_signal_virtual_recommended_defaults()
 
 def ensure_soxl_fear_strategy_multi_config_schema():
     """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""

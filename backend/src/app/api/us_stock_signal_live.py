@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import date, datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import (
-    LongPortAccount,
     USStockSignalVirtualConfig,
     USStockSignalVirtualEquity,
     USStockSignalVirtualEvent,
@@ -19,14 +18,19 @@ from ...core.database import (
     get_db,
     get_db_ctx,
 )
-from ...core.services.longport import LongPortService
 from ...core.services.market import MarketService
-from ...core.services.quote import QuoteService
+from ...core.services.factor_backtest_engine import (
+    FACTOR_REGISTRY,
+    MIXED_WINDOW_KEY,
+    NEUTRALIZATION_OPTIONS,
+    SUPPORTED_WINDOWS,
+    STANDARDIZATION_OPTIONS,
+    default_virtual_factor_leg_payloads,
+)
 from ...robot.us_stock_signal_virtual import (
     CANDIDATE_ETF_OPTIONS,
     DAILY_PRICE_SOURCE,
     DEFAULT_CANDIDATE_ETFS,
-    DEFAULT_INDEX_WEIGHT_BLEND,
     DEFAULT_MOMENTUM_WEIGHTS,
     DEFAULT_REBALANCE_FREQUENCY,
     DEFAULT_SELL_RANK_MULTIPLIER,
@@ -43,25 +47,80 @@ DEFAULT_AUTO_SYNC_TIME = "16:15"
 AUTO_SYNC_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
+def _default_virtual_legs() -> List[Dict]:
+    return default_virtual_factor_leg_payloads()
+
+
+class VirtualFactorLegPayload(BaseModel):
+    factor: str
+    window: Union[int, str] = 20
+    weight: float = 1.0
+    neutralization: str = "none"
+    standardization: str = "rank_percentile"
+    momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
+
+    @validator("factor")
+    def validate_factor(cls, value):
+        if value not in FACTOR_REGISTRY:
+            raise ValueError(f"不支持的因子: {value}")
+        return value
+
+    @validator("window", pre=True)
+    def validate_window(cls, value):
+        if isinstance(value, str) and value.strip().lower() == MIXED_WINDOW_KEY:
+            return MIXED_WINDOW_KEY
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("窗口必须是数字或 mixed")
+        if window not in SUPPORTED_MOMENTUM_WINDOWS:
+            raise ValueError("窗口只支持 20、60、120 或 mixed")
+        return window
+
+    @validator("neutralization")
+    def validate_neutralization(cls, value):
+        if value not in NEUTRALIZATION_OPTIONS:
+            raise ValueError("不支持的中性化方式")
+        return value
+
+    @validator("standardization")
+    def validate_standardization(cls, value):
+        if value not in STANDARDIZATION_OPTIONS:
+            raise ValueError("不支持的标准化方式")
+        return value
+
+    @validator("momentum_weights", pre=True)
+    def validate_momentum_weights(cls, value):
+        raw_weights = value if isinstance(value, dict) else DEFAULT_MOMENTUM_WEIGHTS
+        normalized = {}
+        for window in SUPPORTED_MOMENTUM_WINDOWS:
+            raw_value = raw_weights.get(str(window), raw_weights.get(window, 0))
+            try:
+                weight = float(raw_value or 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"{window}日动量权重必须是数字")
+            if weight < 0:
+                raise ValueError(f"{window}日动量权重不能为负数")
+            normalized[str(window)] = weight
+        if sum(normalized.values()) <= 0:
+            raise ValueError("至少设置一个大于0的动量权重")
+        return normalized
+
+
 class USStockSignalConfigPayload(BaseModel):
-    name: str = "美股风险调整混合动量虚拟盘"
+    name: str = "美股多因子策略虚拟盘"
     enabled: bool = True
     candidate_etfs: List[str] = Field(default_factory=lambda: DEFAULT_CANDIDATE_ETFS.copy())
     initial_capital: float = 100_000.0
     start_date: date = date(2020, 1, 2)
-    window: int = 20
-    stabilization_period: int = 10
-    volatility_floor_pct: float = 15.0
-    volatility_cap_pct: float = 45.0
     min_listing_days: int = 365
-    momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
-    volume_std_multiplier: float = 1.0
     max_positions: int = 7
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
-    index_weight_blend: float = DEFAULT_INDEX_WEIGHT_BLEND
     rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY
     commission_pct: float = 0.03
     slippage_pct: float = 0.02
+    lot_size: int = 1
+    legs: List[VirtualFactorLegPayload] = Field(default_factory=lambda: [VirtualFactorLegPayload(**item) for item in _default_virtual_legs()])
     auto_sync_enabled: bool = True
     auto_sync_time: str = DEFAULT_AUTO_SYNC_TIME
 
@@ -93,22 +152,16 @@ class USStockSignalConfigPayload(BaseModel):
             raise ValueError("至少选择一个候选ETF")
         return normalized
 
-    @validator("window")
-    def validate_window(cls, value):
-        if value < 20:
-            raise ValueError("动量窗口不能小于20")
-        return value
-
-    @validator("stabilization_period")
-    def validate_stabilization_period(cls, value):
-        if value < 1:
-            raise ValueError("历史兼容参数不能小于1")
-        return value
-
     @validator("max_positions")
     def validate_max_positions(cls, value):
         if value < 1:
             raise ValueError("最大持仓数不能小于1")
+        return value
+
+    @validator("lot_size")
+    def validate_lot_size(cls, value):
+        if value < 1:
+            raise ValueError("交易单位不能小于1")
         return value
 
     @validator("sell_rank_multiplier")
@@ -119,35 +172,12 @@ class USStockSignalConfigPayload(BaseModel):
             raise ValueError("卖出排名倍数不能大于10")
         return value
 
-    @validator("index_weight_blend")
-    def validate_index_weight_blend(cls, value):
-        if value < 0 or value > 1:
-            raise ValueError("成分权重倾斜必须在0到1之间")
-        return value
-
     @validator("rebalance_frequency")
     def validate_rebalance_frequency(cls, value):
         text = str(value or DEFAULT_REBALANCE_FREQUENCY).strip().lower()
         if text not in SUPPORTED_REBALANCE_FREQUENCIES:
             raise ValueError("调仓周期必须是 daily、weekly 或 monthly")
         return text
-
-    @validator("momentum_weights", pre=True)
-    def validate_momentum_weights(cls, value):
-        raw_weights = value if isinstance(value, dict) else DEFAULT_MOMENTUM_WEIGHTS
-        normalized = {}
-        for window in SUPPORTED_MOMENTUM_WINDOWS:
-            raw_value = raw_weights.get(str(window), raw_weights.get(window, 0))
-            try:
-                weight = float(raw_value or 0)
-            except (TypeError, ValueError):
-                raise ValueError(f"{window}日动量权重必须是数字")
-            if weight < 0:
-                raise ValueError(f"{window}日动量权重不能为负数")
-            normalized[str(window)] = weight
-        if sum(normalized.values()) <= 0:
-            raise ValueError("至少设置一个大于0的动量权重")
-        return normalized
 
     @validator("min_listing_days")
     def validate_min_listing_days(cls, value):
@@ -161,17 +191,10 @@ class USStockSignalConfigPayload(BaseModel):
             raise ValueError("初始资金必须大于0")
         return value
 
-    @validator("volatility_floor_pct", "volatility_cap_pct", "volume_std_multiplier", "commission_pct", "slippage_pct")
+    @validator("commission_pct", "slippage_pct")
     def validate_non_negative(cls, value):
         if value < 0:
             raise ValueError("参数不能为负数")
-        return value
-
-    @validator("volatility_cap_pct")
-    def validate_volatility_cap(cls, value, values):
-        lower = values.get("volatility_floor_pct")
-        if lower is not None and value < lower:
-            raise ValueError("历史兼容波动参数上限不能小于下限")
         return value
 
     @validator("auto_sync_time")
@@ -180,6 +203,16 @@ class USStockSignalConfigPayload(BaseModel):
         if not AUTO_SYNC_TIME_PATTERN.match(text):
             raise ValueError("自动同步时间格式应为 HH:mm")
         return text
+
+    @validator("legs")
+    def validate_legs(cls, value):
+        if len(value) < 1:
+            raise ValueError("至少配置一个因子")
+        if len(value) > 8:
+            raise ValueError("最多支持8个因子")
+        if sum(abs(float(item.weight)) for item in value) <= 0:
+            raise ValueError("至少设置一个非0因子权重")
+        return value
 
 
 def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
@@ -194,19 +227,14 @@ def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
         "candidate_etfs": config.candidate_etfs or DEFAULT_CANDIDATE_ETFS.copy(),
         "initial_capital": config.initial_capital,
         "start_date": config.start_date.isoformat() if config.start_date else None,
-        "window": config.window,
-        "stabilization_period": config.stabilization_period,
-        "volatility_floor_pct": config.volatility_floor_pct,
-        "volatility_cap_pct": config.volatility_cap_pct,
         "min_listing_days": getattr(config, "min_listing_days", 365),
-        "momentum_weights": getattr(config, "momentum_weights", None) or DEFAULT_MOMENTUM_WEIGHTS.copy(),
-        "volume_std_multiplier": config.volume_std_multiplier,
         "max_positions": config.max_positions,
         "sell_rank_multiplier": getattr(config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER),
-        "index_weight_blend": getattr(config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND),
         "rebalance_frequency": rebalance_frequency,
         "commission_pct": config.commission_pct,
         "slippage_pct": config.slippage_pct,
+        "lot_size": getattr(config, "lot_size", 1),
+        "legs": getattr(config, "legs", None) or _default_virtual_legs(),
         "auto_sync_enabled": bool(config.auto_sync_enabled),
         "auto_sync_time": config.auto_sync_time or DEFAULT_AUTO_SYNC_TIME,
         "last_auto_sync_at": config.last_auto_sync_at,
@@ -224,26 +252,15 @@ def _get_config_or_404(db: ORMSession, account_id: str, config_id: int) -> USSto
         USStockSignalVirtualConfig.account_id == account_id,
     ).first()
     if not config:
-        raise HTTPException(status_code=404, detail="未找到美股风险调整混合动量虚拟盘配置")
+        raise HTTPException(status_code=404, detail="未找到美股多因子策略虚拟盘配置")
     return config
 
 
 def _apply_payload(config: USStockSignalVirtualConfig, payload: USStockSignalConfigPayload):
-    for field, value in payload.dict().items():
+    payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    for field, value in payload_data.items():
         setattr(config, field, value)
-    config.lot_size = 1
     config.updated_at = datetime.now()
-
-
-def _get_longport_account_id(db: ORMSession, account_id: str) -> str:
-    account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
-    if account and account.lp_account_id:
-        return account.lp_account_id
-    return "LBPT10001248"
-
-
-def _get_quote_service(db: ORMSession, account_id: str) -> QuoteService:
-    return QuoteService(LongPortService.get_instance(_get_longport_account_id(db, account_id)))
 
 
 def _replace_config_runtime_state(
@@ -332,7 +349,7 @@ def _replace_config_runtime_state(
         timestamp=now,
         level="INFO",
         action="SYNC",
-        message="美股风险调整混合动量虚拟盘已同步到最新状态",
+        message="美股多因子策略虚拟盘已同步到最新状态",
         payload={
             "trigger_source": trigger_source,
             "metrics": result.get("metrics"),
@@ -382,14 +399,10 @@ def _sync_config_now(
     db: ORMSession,
     config: USStockSignalVirtualConfig,
     trigger_source: str = "manual",
-    end_date: Optional[date] = None,
 ) -> Dict:
-    quote_service = _get_quote_service(db, config.account_id)
     result = USStockSignalVirtualEngine(
         db,
-        quote_service,
         config,
-        end_date=end_date,
     ).run()
     _replace_config_runtime_state(db, config, result, trigger_source=trigger_source)
     return result
@@ -430,6 +443,22 @@ def _runtime_summary(db: ORMSession, config: USStockSignalVirtualConfig) -> Dict
 @router.get("/candidate-etfs")
 def get_candidate_etfs():
     return CANDIDATE_ETF_OPTIONS
+
+
+@router.get("/factor-options")
+def get_factor_options():
+    return {
+        "factors": [definition.to_option() for definition in FACTOR_REGISTRY.values()],
+        "windows": SUPPORTED_WINDOWS,
+        "neutralization_options": [
+            {"key": key, **value}
+            for key, value in NEUTRALIZATION_OPTIONS.items()
+        ],
+        "standardization_options": [
+            {"key": key, **value}
+            for key, value in STANDARDIZATION_OPTIONS.items()
+        ],
+    }
 
 
 @router.get("/configs")
@@ -494,7 +523,7 @@ def delete_config(
     db.query(USStockSignalVirtualLog).filter(USStockSignalVirtualLog.config_id == config.id).delete()
     db.delete(config)
     db.commit()
-    return {"message": "已删除美股风险调整混合动量虚拟盘配置"}
+    return {"message": "已删除美股多因子策略虚拟盘配置"}
 
 
 @router.post("/configs/{config_id}/sync")
@@ -706,7 +735,7 @@ def get_detail(
             USStockSignalVirtualEvent.price_source.label("price_source"),
         )
         .filter(USStockSignalVirtualEvent.config_id == config.id)
-        .order_by(USStockSignalVirtualEvent.date.desc(), USStockSignalVirtualEvent.id.desc())
+        .order_by(USStockSignalVirtualEvent.date.desc(), USStockSignalVirtualEvent.id.asc())
         .limit(event_limit)
         .all()
     )

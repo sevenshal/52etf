@@ -2,7 +2,7 @@ import bisect
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Callable, Dict, List, Optional, Set
 
 import numpy as np
@@ -10,7 +10,10 @@ from sqlalchemy import distinct, or_
 from sqlalchemy.orm import Session as ORMSession
 
 from ..core.database import ETFHolding
-from ..core.services.quote import QuoteService
+from ..core.services.factor_backtest_engine import (
+    make_virtual_signal_backtest_config,
+    run_factor_backtest as run_shared_factor_backtest,
+)
 from ..core.utils import normalize_us_equity_symbol
 
 logger = logging.getLogger(__name__)
@@ -20,7 +23,6 @@ NEXT_OPEN_PRICE_SOURCE = "next_open"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
-DEFAULT_INDEX_WEIGHT_BLEND = 0.40
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 DEFAULT_REBALANCE_FREQUENCY = "weekly"
 SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly"]
@@ -312,6 +314,7 @@ def _compute_risk_adjusted_momentum_snapshot(rows: List[Dict], index: int, windo
         "raw_score": _round_or_none(raw_score, 4),
         "annualized_volatility_pct": _round_or_none(annualized_vol_pct, 4),
         "risk_adjusted_score": _round_or_none(risk_adjusted_score, 4),
+        "risk_adjusted_score_value": risk_adjusted_score,
     }
 
 
@@ -333,7 +336,7 @@ def _compute_mixed_risk_adjusted_momentum_snapshot(
         if not snapshot or snapshot.get("risk_adjusted_score") is None:
             return None
         components[str(window)] = snapshot
-        weighted_score += float(snapshot.get("risk_adjusted_score") or 0) * weight
+        weighted_score += float(snapshot.get("risk_adjusted_score_value") or snapshot.get("risk_adjusted_score") or 0) * weight
         weighted_return += float(snapshot.get("window_return_pct") or 0) * weight
         weighted_slope += float(snapshot.get("annualized_slope_pct") or 0) * weight
         weighted_r_squared += float(snapshot.get("r_squared") or 0) * weight
@@ -354,6 +357,7 @@ def _compute_mixed_risk_adjusted_momentum_snapshot(
         "raw_score": _round_or_none(weighted_raw_score, 4),
         "annualized_volatility_pct": _round_or_none(weighted_volatility, 4),
         "risk_adjusted_score": _round_or_none(weighted_score, 4),
+        "risk_adjusted_score_value": weighted_score,
         "components": components,
     }
 
@@ -502,543 +506,156 @@ def _weights_for_date(
     return weights
 
 
-def _apply_index_weight_blend(ranked: List[Dict], index_weight_blend: float) -> List[Dict]:
+def _finite_float(value) -> Optional[float]:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_percentiles_from_values(values_by_symbol: Dict[str, float]) -> Dict[str, float]:
+    valid_values = [
+        (symbol, number)
+        for symbol, value in values_by_symbol.items()
+        for number in [_finite_float(value)]
+        if number is not None
+    ]
+    if not valid_values:
+        return {}
+    if len(valid_values) == 1:
+        return {valid_values[0][0]: 1.0}
+
+    valid_values.sort(key=lambda item: item[1])
+    denominator = len(valid_values) - 1
+    percentiles: Dict[str, float] = {}
+    start = 0
+    while start < len(valid_values):
+        end = start + 1
+        value = valid_values[start][1]
+        while end < len(valid_values) and valid_values[end][1] == value:
+            end += 1
+        average_rank = ((start + 1) + end) / 2
+        percentile = (average_rank - 1) / denominator
+        for index in range(start, end):
+            percentiles[valid_values[index][0]] = percentile
+        start = end
+    return percentiles
+
+
+def _build_momentum_window_percentiles(
+    momentum_candidates: List[Dict],
+    weights: Dict[int, float],
+) -> Dict[int, Dict[str, float]]:
+    percentiles_by_window: Dict[int, Dict[str, float]] = {}
+    for window in sorted(weights):
+        values_by_symbol: Dict[str, float] = {}
+        for item in momentum_candidates:
+            component = (item.get("snapshot") or {}).get("components", {}).get(str(window)) or {}
+            score = _finite_float(component.get("risk_adjusted_score_value", component.get("risk_adjusted_score")))
+            if score is not None:
+                values_by_symbol[item["symbol"]] = score
+        percentiles_by_window[window] = _rank_percentiles_from_values(values_by_symbol)
+    return percentiles_by_window
+
+
+def _apply_index_weight_blend(
+    ranked: List[Dict],
+    index_weight_blend: float,
+    momentum_weights: Dict[int, float],
+    momentum_percentiles_by_window: Dict[int, Dict[str, float]],
+    index_weight_percentile: Dict[str, float],
+) -> List[Dict]:
     blend = max(0.0, min(1.0, float(index_weight_blend or 0.0)))
     if not ranked:
         return ranked
 
-    ranked_by_momentum = sorted(
-        ranked,
-        key=lambda item: (
-            float(item.get("momentum_score") or -1e18),
-            float(item.get("turnover") or 0),
-            item["symbol"],
-        ),
-        reverse=True,
-    )
-    ranked_by_weight = sorted(
-        ranked,
-        key=lambda item: (
-            float(item.get("index_weight") or 0),
-            float(item.get("turnover") or 0),
-            item["symbol"],
-        ),
-        reverse=True,
-    )
-    denominator = max(1, len(ranked) - 1)
-    momentum_percentile = {
-        item["symbol"]: 1 - index / denominator
-        for index, item in enumerate(ranked_by_momentum)
-    }
-    weight_percentile = {
-        item["symbol"]: 1 - index / denominator
-        for index, item in enumerate(ranked_by_weight)
-    }
-
+    scored: List[Dict] = []
     for item in ranked:
         symbol = item["symbol"]
-        item["momentum_percentile"] = momentum_percentile.get(symbol, 0.0)
-        item["index_weight_percentile"] = weight_percentile.get(symbol, 0.0)
-        item["rank_score"] = (
-            (1 - blend) * item["momentum_percentile"]
-            + blend * item["index_weight_percentile"]
-            if blend > 0
-            else float(item.get("momentum_score") or -1e18)
-        )
+        window_percentiles: Dict[str, float] = {}
+        momentum_score = 0.0
+        missing_window = False
+        for window, weight in sorted(momentum_weights.items()):
+            percentile = momentum_percentiles_by_window.get(window, {}).get(symbol)
+            if percentile is None:
+                missing_window = True
+                break
+            window_percentiles[str(window)] = percentile
+            momentum_score += percentile * float(weight)
+        if missing_window:
+            continue
 
-    return sorted(
-        ranked,
+        weight_percentile = index_weight_percentile.get(symbol)
+        if blend > 0 and weight_percentile is None:
+            continue
+        weight_percentile = float(weight_percentile or 0.0)
+
+        item["raw_mixed_risk_adjusted_score"] = item.get("momentum_score")
+        item["momentum_score"] = momentum_score
+        item["momentum_percentile"] = momentum_score
+        item["momentum_window_percentiles"] = window_percentiles
+        item["index_weight_percentile"] = weight_percentile
+        item["rank_score"] = (1 - blend) * momentum_score + blend * weight_percentile
+        item["factor_score"] = item["rank_score"]
+        scored.append(item)
+
+    ranked_result = sorted(
+        scored,
         key=lambda item: (
             float(item.get("rank_score") or -1e18),
-            float(item.get("momentum_score") or -1e18),
-            float(item.get("index_weight") or 0),
             float(item.get("turnover") or 0),
             item["symbol"],
         ),
         reverse=True,
     )
+    denominator = max(1, len(ranked_result) - 1)
+    for index, item in enumerate(ranked_result):
+        item["factor_percentile"] = 1 - index / denominator
+    return ranked_result
 
 
 class USStockSignalVirtualEngine:
     def __init__(
         self,
         db: ORMSession,
-        quote_service: QuoteService,
         config,
-        end_date: Optional[date] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ):
         self.db = db
-        self.quote_service = quote_service
         self.config = config
-        self.end_date = end_date or date.today()
         self.progress_callback = progress_callback
 
     def report(self, progress: int, message: str):
         if self.progress_callback:
             self.progress_callback(int(max(0, min(100, progress))), message)
 
-    def _fetch_klines(self, symbols: List[str], fetch_start: date, end_date: date) -> Dict[str, List[Dict]]:
-        klines_by_symbol: Dict[str, List[Dict]] = {}
-        errors = []
-        total = len(symbols)
-        for index, symbol in enumerate(symbols, start=1):
-            self.report(5 + int(35 * (index - 1) / max(1, total)), f"获取K线 {index}/{total}: {symbol}")
-            try:
-                raw_klines = self.quote_service.get_klines(symbol, start_date=fetch_start, end_date=end_date, period="d")
-                rows = _prepare_klines(raw_klines)
-                if rows:
-                    klines_by_symbol[symbol] = rows
-                else:
-                    errors.append({"symbol": symbol, "message": "没有可用K线"})
-            except Exception as exc:
-                logger.warning("Fetch klines failed for %s: %s", symbol, exc)
-                errors.append({"symbol": symbol, "message": str(exc)})
-        return klines_by_symbol, errors
-
     def run(self) -> Dict:
-        start_date = self.config.start_date
-        end_date = self.end_date
-        momentum_weights = _normalize_momentum_weights(getattr(self.config, "momentum_weights", None))
-        momentum_weights_payload = _format_momentum_weights(momentum_weights)
-        momentum_windows = sorted(momentum_weights)
-        max_momentum_window = max(momentum_windows)
-        momentum_label = "+".join(str(window) for window in momentum_windows)
-        index_weight_blend = max(0.0, min(1.0, float(getattr(self.config, "index_weight_blend", DEFAULT_INDEX_WEIGHT_BLEND) or 0.0)))
-        min_listing_days = max(0, int(getattr(self.config, "min_listing_days", 365) or 0))
-        max_positions = max(1, int(self.config.max_positions or 1))
-        sell_rank_multiplier = max(1.0, float(getattr(self.config, "sell_rank_multiplier", DEFAULT_SELL_RANK_MULTIPLIER) or 1.0))
-        sell_rank_threshold = max(max_positions, int(round(max_positions * sell_rank_multiplier)))
-        rebalance_frequency = _normalize_rebalance_frequency(getattr(self.config, "rebalance_frequency", DEFAULT_REBALANCE_FREQUENCY))
-        lot_size = max(1, int(self.config.lot_size or 1))
-        commission_rate = max(0.0, float(self.config.commission_pct or 0)) / 100
-        slippage_rate = max(0.0, float(self.config.slippage_pct or 0)) / 100
+        shared_config = make_virtual_signal_backtest_config(self.config)
         candidate_etfs = self.config.candidate_etfs or DEFAULT_CANDIDATE_ETFS
 
-        self.report(1, "读取历史成分股")
-        universe_history = load_universe_history(self.db, candidate_etfs, start_date, end_date)
-        weight_history = load_universe_weight_history(self.db, candidate_etfs, start_date, end_date)
-        if not universe_history.all_symbols:
-            raise ValueError("没有找到候选ETF的历史成分股，请先同步 ETF 持仓历史")
-
-        fetch_padding_days = max(370, min_listing_days + 30, int(max_momentum_window * 3))
-        fetch_start = start_date - timedelta(days=fetch_padding_days)
-        self.report(4, f"准备获取 {len(universe_history.all_symbols)} 个候选股票K线")
-        klines_by_symbol, errors = self._fetch_klines(universe_history.all_symbols, fetch_start, end_date)
-        if not klines_by_symbol:
-            raise ValueError("没有可用的候选股票K线")
-
-        benchmark_rows_by_symbol, benchmark_errors = self._fetch_klines(
-            candidate_etfs,
-            start_date - timedelta(days=10),
-            end_date,
-        )
-        errors.extend([{**item, "scope": "benchmark"} for item in benchmark_errors])
-
-        index_by_symbol_date = {
-            symbol: {row["date"]: index for index, row in enumerate(rows)}
-            for symbol, rows in klines_by_symbol.items()
-        }
-        row_by_symbol_date = {
-            symbol: {row["date"]: row for row in rows}
-            for symbol, rows in klines_by_symbol.items()
-        }
-        dates = sorted({
-            row["date"]
-            for rows in klines_by_symbol.values()
-            for row in rows
-            if start_date <= row["date"] <= end_date
-        })
-        if not dates:
-            raise ValueError("回跑区间内没有可用交易日")
-        benchmark_curve = _build_benchmark_curve(
-            benchmark_rows_by_symbol,
-            dates,
-            float(self.config.initial_capital or 0),
-            start_date,
-        )
-
-        cash = float(self.config.initial_capital or 0)
-        positions: Dict[str, Dict] = {}
-        last_prices: Dict[str, float] = {}
-        equity_curve = []
-        events = []
-        trades = []
-        closed_profits = []
-        peak_value = cash
-        universe_size_by_date = {}
-        rebalance_count = 0
-        pending_rebalance = None
-
-        def append_trade(
-            trade_date: date,
-            signal_date: date,
-            action: str,
-            symbol: str,
-            price: float,
-            quantity: int,
-            commission: float,
-            reason: str,
-            reason_detail: str,
-            profit: Optional[float] = None,
-            profit_pct: Optional[float] = None,
-        ):
-            amount = price * quantity
-            portfolio_after = _portfolio_value(cash, positions, last_prices)
-            symbol_market_value = 0.0
-            if symbol in positions:
-                symbol_market_value = int(positions[symbol].get("shares") or 0) * float(last_prices.get(symbol) or price)
-            trades.append({
-                "date": trade_date.isoformat(),
-                "signal_date": signal_date.isoformat(),
-                "action": action,
-                "symbol": symbol,
-                "price": _round_or_none(price, 4),
-                "quantity": int(quantity),
-                "amount": _round_or_none(amount, 2),
-                "commission": _round_or_none(commission, 2),
-                "profit": _round_or_none(profit, 2),
-                "profit_pct": _round_or_none(profit_pct, 2),
-                "reason": reason,
-                "reason_detail": reason_detail,
-                "cash_after": _round_or_none(cash, 2),
-                "portfolio_value_after": _round_or_none(portfolio_after, 2),
-                "symbol_market_value_after": _round_or_none(symbol_market_value, 2),
-                "symbol_weight_pct_after": _round_or_none(symbol_market_value / portfolio_after * 100 if portfolio_after > 0 else 0, 2),
-                "price_source": NEXT_OPEN_PRICE_SOURCE,
-            })
-
-        def sell_position(trade_date: date, signal_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
-            nonlocal cash
-            if symbol not in positions:
-                return
-            position = positions[symbol]
-            old_shares = int(position.get("shares") or 0)
-            quantity = min(old_shares, int(quantity or 0))
-            if quantity <= 0:
-                return
-
-            sell_price = price * (1 - slippage_rate)
-            amount = sell_price * quantity
-            commission = amount * commission_rate
-            old_cost_basis = float(position.get("cost_basis") or 0)
-            cost_basis_sold = old_cost_basis * quantity / old_shares if old_shares > 0 else 0.0
-            cash += amount - commission
-            profit = amount - commission - cost_basis_sold
-            profit_pct = profit / cost_basis_sold * 100 if cost_basis_sold > 0 else None
-            closed_profits.append(profit)
-
-            remaining_shares = old_shares - quantity
-            if remaining_shares <= 0:
-                del positions[symbol]
-            else:
-                position["shares"] = remaining_shares
-                position["cost_basis"] = max(0.0, old_cost_basis - cost_basis_sold)
-                position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
-                position["last_price"] = price
-            last_prices[symbol] = price
-
-            append_trade(
-                trade_date,
-                signal_date,
-                "SELL",
-                symbol,
-                sell_price,
-                quantity,
-                commission,
-                f"{rebalance_frequency}_rebalance",
-                reason_detail,
-                profit=profit,
-                profit_pct=profit_pct,
-            )
-
-        def buy_position(trade_date: date, signal_date: date, symbol: str, budget: float, price: float, reason_detail: str):
-            nonlocal cash
-            buy_price = price * (1 + slippage_rate)
-            quantity = _floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
-            if quantity <= 0:
-                return
-            amount = buy_price * quantity
-            commission = amount * commission_rate
-            if amount + commission > cash + 1e-9:
-                return
-
-            cash -= amount + commission
-            if symbol not in positions:
-                positions[symbol] = {
-                    "shares": quantity,
-                    "avg_cost": (amount + commission) / quantity,
-                    "cost_basis": amount + commission,
-                    "entry_date": trade_date,
-                    "last_price": price,
-                }
-            else:
-                position = positions[symbol]
-                position["shares"] = int(position.get("shares") or 0) + quantity
-                position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
-                position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
-                position["last_price"] = price
-            last_prices[symbol] = price
-
-            append_trade(
-                trade_date,
-                signal_date,
-                "BUY",
-                symbol,
-                buy_price,
-                quantity,
-                commission,
-                f"{rebalance_frequency}_rebalance",
-                reason_detail,
-            )
-
-        for date_index, current_date in enumerate(dates):
-            if date_index % max(1, len(dates) // 100) == 0:
-                self.report(42 + int(53 * date_index / max(1, len(dates))), f"模拟交易日 {date_index + 1}/{len(dates)}")
-
-            open_map = {}
-            price_map = {}
-            for symbol, rows in row_by_symbol_date.items():
-                row = rows.get(current_date)
-                if not row:
-                    continue
-                open_price = float(row.get("open") or 0)
-                close_price = float(row.get("close") or 0)
-                if open_price > 0:
-                    open_map[symbol] = open_price
-                if close_price > 0:
-                    price_map[symbol] = close_price
-
-            if pending_rebalance:
-                signal_date = pending_rebalance["signal_date"]
-                for symbol in list(pending_rebalance["sell_symbols"]):
-                    if symbol not in positions:
-                        continue
-                    price = open_map.get(symbol)
-                    if price is None or price <= 0:
-                        continue
-                    shares = int(positions[symbol].get("shares") or 0)
-                    sell_position(
-                        current_date,
-                        signal_date,
-                        symbol,
-                        shares,
-                        price,
-                        (
-                            f"下一交易日开盘执行: 跌出风险调整{momentum_label}日混合动量"
-                            f"Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}"
-                        ),
-                    )
-
-                slots_to_fill = max(0, max_positions - len(positions))
-                buy_candidates = [
-                    item
-                    for item in pending_rebalance["selected"]
-                    if item["symbol"] not in positions
-                ][:slots_to_fill]
-                budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
-                for item in buy_candidates:
-                    symbol = item["symbol"]
-                    price = open_map.get(symbol)
-                    if price is None or price <= 0:
-                        continue
-                    buy_budget = min(cash, budget_per_symbol)
-                    if buy_budget <= 0:
-                        continue
-                    buy_position(
-                        current_date,
-                        signal_date,
-                        symbol,
-                        buy_budget,
-                        price,
-                        f"下一交易日开盘补位买入风险调整{momentum_label}日混合动量Top{max_positions}",
-                    )
-                pending_rebalance = None
-
-            for symbol, price in price_map.items():
-                last_prices[symbol] = price
-                if symbol in positions:
-                    positions[symbol]["last_price"] = price
-
-            if not price_map:
-                continue
-
-            current_universe = set(universe_history.symbols_for_date(current_date))
-            current_index_weights = _weights_for_date(universe_history, weight_history, current_date)
-            universe_size_by_date[current_date.isoformat()] = len(current_universe)
-
-            if _is_rebalance_day(dates, date_index, rebalance_frequency):
-                rebalance_count += 1
-                ranked = []
-                for symbol in sorted(current_universe):
-                    symbol_index = index_by_symbol_date.get(symbol, {}).get(current_date)
-                    if symbol_index is None or symbol not in price_map:
-                        continue
-                    rows = klines_by_symbol[symbol]
-                    first_kline_date = rows[0]["date"] if rows else None
-                    if first_kline_date and min_listing_days > 0 and (current_date - first_kline_date).days < min_listing_days:
-                        continue
-                    snapshot = _compute_mixed_risk_adjusted_momentum_snapshot(rows, symbol_index, momentum_weights)
-                    if not snapshot or snapshot.get("risk_adjusted_score") is None:
-                        continue
-                    row = row_by_symbol_date[symbol][current_date]
-                    momentum_score = snapshot.get("risk_adjusted_score")
-                    ranked.append({
-                        "symbol": symbol,
-                        "price": price_map[symbol],
-                        "turnover": float(row.get("turnover") or 0),
-                        "index_weight": float(current_index_weights.get(symbol) or 0),
-                        "momentum_score": momentum_score,
-                        "snapshot": snapshot,
-                    })
-
-                ranked = _apply_index_weight_blend(ranked, index_weight_blend)
-                selected = ranked[:max_positions]
-                selected_symbols = [item["symbol"] for item in selected]
-                sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
-                rank_by_symbol = {item["symbol"]: rank for rank, item in enumerate(ranked, start=1)}
-
-                for rank, item in enumerate(selected, start=1):
-                    snapshot = item["snapshot"]
-                    events.append({
-                        "config_id": self.config.id,
-                        "account_id": self.config.account_id,
-                        "symbol": item["symbol"],
-                        "date": current_date.isoformat(),
-                        "direction": "RANK",
-                        "signal_price": _round_or_none(item["price"], 4),
-                        "turnover": _round_or_none(item.get("turnover"), 2),
-                        "annualized_volatility_pct": snapshot.get("annualized_volatility_pct"),
-                        "threshold_pct": snapshot.get("risk_adjusted_score"),
-                        "payload": {
-                            **snapshot,
-                            "rank": rank,
-                            "rank_score": _round_or_none(item.get("rank_score"), 6),
-                            "momentum_score": item.get("momentum_score"),
-                            "momentum_percentile": _round_or_none(item.get("momentum_percentile"), 6),
-                            "index_weight": _round_or_none(item.get("index_weight"), 8),
-                            "index_weight_pct": _round_or_none((item.get("index_weight") or 0) * 100, 4),
-                            "index_weight_percentile": _round_or_none(item.get("index_weight_percentile"), 6),
-                            "index_weight_blend": index_weight_blend,
-                            "selected_symbols": selected_symbols,
-                            "sell_rank_symbols": sell_rank_symbols,
-                            "max_positions": max_positions,
-                            "sell_rank_threshold": sell_rank_threshold,
-                            "sell_rank_multiplier": sell_rank_multiplier,
-                            "min_listing_days": min_listing_days,
-                            "momentum_windows": momentum_windows,
-                            "momentum_weights": momentum_weights_payload,
-                            "rebalance_frequency": rebalance_frequency,
-                            "execution_rule": "signal_close_next_open",
-                            "rotation_rule": "hold_until_out_of_sell_rank",
-                            "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
-                        },
-                        "price_source": DAILY_PRICE_SOURCE,
-                    })
-
-                sell_symbols = [
-                    symbol
-                    for symbol in list(positions.keys())
-                    if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold
-                ]
-                pending_rebalance = {
-                    "signal_date": current_date,
-                    "selected": selected,
-                    "selected_symbols": selected_symbols,
-                    "sell_rank_symbols": sell_rank_symbols,
-                    "sell_symbols": sell_symbols,
-                }
-
-            value = _portfolio_value(cash, positions, last_prices)
-            peak_value = max(peak_value, value)
-            drawdown = (value / peak_value - 1) * 100 if peak_value > 0 else 0.0
-            equity_curve.append({
-                "date": current_date.isoformat(),
-                "value": _round_or_none(value, 2),
-                "cash": _round_or_none(cash, 2),
-                "position_value": _round_or_none(value - cash, 2),
-                "drawdown": _round_or_none(drawdown, 2),
-            })
-
-        current_value = equity_curve[-1]["value"] if equity_curve else float(self.config.initial_capital or 0)
-        initial_value = float(self.config.initial_capital or 0)
-        total_return = (current_value / initial_value - 1) * 100 if initial_value > 0 else 0.0
-        yearly_stats = _build_yearly_stats(equity_curve, benchmark_curve, candidate_etfs)
-        elapsed_days = (
-            (date.fromisoformat(equity_curve[-1]["date"]) - date.fromisoformat(equity_curve[0]["date"])).days
-            if len(equity_curve) > 1
-            else 0
-        )
-        annualized_return = (
-            ((1 + total_return / 100) ** (365 / elapsed_days) - 1) * 100
-            if elapsed_days > 0 and total_return > -100
-            else 0.0
-        )
-        win_count = sum(1 for item in closed_profits if item > 0)
-
-        holdings = []
-        for symbol, position in positions.items():
-            price = float(last_prices.get(symbol) or position.get("last_price") or position.get("avg_cost") or 0)
-            market_value = int(position["shares"]) * price
-            holdings.append({
-                "symbol": symbol,
-                "shares": int(position["shares"]),
-                "price": _round_or_none(price, 4),
-                "avg_cost": _round_or_none(position.get("avg_cost"), 4),
-                "entry_date": position["entry_date"].isoformat() if position.get("entry_date") else None,
-                "market_value": _round_or_none(market_value, 2),
-                "actual_weight_pct": _round_or_none(market_value / current_value * 100 if current_value > 0 else 0, 2),
-            })
-        holdings.sort(key=lambda item: item.get("market_value") or 0, reverse=True)
-
-        metrics = {
-            "total_return": _round_or_none(total_return, 2),
-            "annualized_return": _round_or_none(annualized_return, 2),
-            "max_drawdown": _round_or_none(min([item["drawdown"] for item in equity_curve] or [0]), 2),
-            "signal_count": len(events),
-            "rank_signal_count": len(events),
-            "rebalance_count": rebalance_count,
-            "buy_signal_count": sum(1 for item in trades if item["action"] == "BUY"),
-            "sell_signal_count": sum(1 for item in trades if item["action"] == "SELL"),
-            "trade_count": len(trades),
-            "closed_trade_count": len(closed_profits),
-            "win_count": win_count,
-            "win_rate": _round_or_none(win_count / len(closed_profits) * 100 if closed_profits else 0.0, 2),
-            "ending_value": _round_or_none(current_value, 2),
-            "cash": equity_curve[-1]["cash"] if equity_curve else _round_or_none(cash, 2),
-            "holding_count": len(holdings),
-            "pending_signal_date": pending_rebalance["signal_date"].isoformat() if pending_rebalance else None,
-        }
-
-        return {
-            "metrics": metrics,
-            "equity_curve": equity_curve,
-            "benchmark_curve": benchmark_curve,
-            "yearly_stats": yearly_stats,
-            "events": events,
-            "trades": trades,
-            "current_holdings": holdings,
-            "errors": errors,
-            "meta": {
+        self.report(1, "使用共享因子回测引擎从DuckDB读取历史行情")
+        result = run_shared_factor_backtest(shared_config, self.db)
+        metadata = result.get("metadata") or result.get("meta") or {}
+        metadata.update(
+            {
                 "candidate_etfs": candidate_etfs,
-                "symbols_used": list(klines_by_symbol.keys()),
-                "symbol_count": len(klines_by_symbol),
-                "holdings_date_count": universe_history.holdings_date_count,
-                "universe_size_by_date": universe_size_by_date,
-                "min_listing_days": min_listing_days,
-                "max_positions": max_positions,
-                "momentum_window": max_momentum_window,
-                "momentum_windows": momentum_windows,
-                "momentum_weights": momentum_weights_payload,
-                "index_weight_blend": index_weight_blend,
-                "sell_rank_threshold": sell_rank_threshold,
-                "sell_rank_multiplier": sell_rank_multiplier,
-                "rebalance_frequency": rebalance_frequency,
+                "min_listing_days": shared_config.min_listing_days,
+                "max_positions": shared_config.max_positions,
+                "sell_rank_threshold": max(shared_config.max_positions, int(round(shared_config.max_positions * shared_config.sell_rank_multiplier))),
+                "sell_rank_multiplier": shared_config.sell_rank_multiplier,
+                "rebalance_frequency": shared_config.rebalance_frequency,
                 "execution_rule": "signal_close_next_open",
                 "rotation_rule": "hold_until_out_of_sell_rank",
-                "strategy": "risk_adjusted_mixed_momentum_top_n_rotation",
+                "strategy": shared_config.strategy,
                 "signal_price_source": DAILY_PRICE_SOURCE,
                 "execution_price_source": NEXT_OPEN_PRICE_SOURCE,
                 "price_source": DAILY_PRICE_SOURCE,
-            },
-        }
+                "data_source": "duckdb.us_stock_daily",
+            }
+        )
+        result["metadata"] = metadata
+        result["meta"] = metadata
+        result.setdefault("errors", [])
+        self.report(100, "共享因子回测引擎运行完成")
+        return result
