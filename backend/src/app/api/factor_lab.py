@@ -70,6 +70,7 @@ CNN_HISTORY_SYMBOL = "CNN*.US"
 DEFAULT_NEUTRALIZATION = "none"
 DEFAULT_STANDARDIZATION = "zscore"
 DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
+DEFAULT_TIMING_HEATMAP_METRIC = "annualized_low_minus_high_avg_return_pct"
 MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE = 10
 MAX_HEATMAP_CELLS = 20
 FACTOR_DISTRIBUTION_BIN_COUNT = 40
@@ -119,6 +120,40 @@ HEATMAP_METRIC_OPTIONS = {
     },
     "non_overlap_mean_t_stat": {
         "label": "多空 t-stat",
+        "kind": "ic",
+    },
+    "monotonicity_spearman": {
+        "label": "单调性 Spearman",
+        "kind": "ic",
+    },
+    "adjacent_hit_rate_pct": {
+        "label": "相邻命中率",
+        "kind": "percent",
+    },
+}
+TIMING_HEATMAP_METRIC_OPTIONS = {
+    "annualized_low_minus_high_avg_return_pct": {
+        "label": "年化低-高桶差",
+        "kind": "percent",
+    },
+    "low_minus_high_avg_return_pct": {
+        "label": "T+n 低-高桶差",
+        "kind": "percent",
+    },
+    "annualized_top_minus_bottom_avg_return_pct": {
+        "label": "年化高-低桶差",
+        "kind": "percent",
+    },
+    "top_minus_bottom_avg_return_pct": {
+        "label": "T+n 高-低桶差",
+        "kind": "percent",
+    },
+    "rank_ic_mean": {
+        "label": "时间序列 IC",
+        "kind": "ic",
+    },
+    "rank_ic_t_stat": {
+        "label": "IC t-stat",
         "kind": "ic",
     },
     "monotonicity_spearman": {
@@ -310,6 +345,7 @@ class TimingFactorAnalyzeRequest(BaseModel):
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
     forward_window: int = 20
+    heatmap_metric: str = DEFAULT_TIMING_HEATMAP_METRIC
     heatmap_forward_windows: List[int] = Field(default_factory=lambda: DEFAULT_FORWARD_WINDOWS.copy())
     heatmap_ma_windows: List[int] = Field(default_factory=lambda: DEFAULT_TIMING_MA_WINDOWS.copy())
     include_heatmap: bool = True
@@ -364,6 +400,13 @@ class TimingFactorAnalyzeRequest(BaseModel):
         if window < 1 or window > 252:
             raise ValueError("收益窗口必须在 1 到 252 之间")
         return window
+
+    @validator("heatmap_metric")
+    def validate_timing_heatmap_metric(cls, value):
+        normalized = str(value or DEFAULT_TIMING_HEATMAP_METRIC)
+        if normalized not in TIMING_HEATMAP_METRIC_OPTIONS:
+            raise ValueError(f"择时热力图指标仅支持: {', '.join(TIMING_HEATMAP_METRIC_OPTIONS)}")
+        return normalized
 
     @validator("heatmap_forward_windows", pre=True)
     def validate_timing_heatmap_forward_windows(cls, value):
@@ -705,6 +748,7 @@ class FactorLabOptionsResponse(BaseModel):
     windows: List[int]
     forward_windows: List[int]
     heatmap_metrics: List[Dict[str, Any]]
+    timing_heatmap_metrics: List[Dict[str, Any]]
     timing_fear_sources: List[Dict[str, Any]]
     timing_target_options: List[Dict[str, Any]]
     backtest_search_objectives: List[Dict[str, Any]]
@@ -1456,7 +1500,9 @@ def _compute_timing_heatmap(
                     "low_minus_high_avg_return_pct": summary.get("low_minus_high_avg_return_pct"),
                     "annualized_low_minus_high_avg_return_pct": summary.get("annualized_low_minus_high_avg_return_pct"),
                     "monotonicity_spearman": summary.get("monotonicity_spearman"),
+                    "adjacent_hit_rate_pct": summary.get("adjacent_hit_rate_pct"),
                     "heatmap_value": summary.get("annualized_low_minus_high_avg_return_pct"),
+                    "selected_heatmap_value": summary.get(request.heatmap_metric),
                 }
             )
     return records
@@ -5376,9 +5422,9 @@ def _run_timing_factor_analysis(
     if request.include_heatmap and heatmap_records:
         best_record = max(
             heatmap_records,
-            key=lambda item: _record_float(item, "heatmap_value", -1e18),
+            key=lambda item: _record_float(item, request.heatmap_metric, -1e18),
         )
-        if best_record.get("heatmap_value") is not None:
+        if best_record.get(request.heatmap_metric) is not None:
             selected_ma_window = int(best_record["ma_window"])
             selected_forward_window = int(best_record["forward_window"])
 
@@ -5426,6 +5472,7 @@ def _run_timing_factor_analysis(
         )
 
     fear_dates = fear_df.filter((pl.col("trade_date") >= request.start_date) & (pl.col("trade_date") <= end_date))
+    heatmap_metric_meta = TIMING_HEATMAP_METRIC_OPTIONS.get(request.heatmap_metric, {})
     metadata = {
         "mode": "timing",
         "target_symbol": request.target_symbol,
@@ -5438,7 +5485,7 @@ def _run_timing_factor_analysis(
             "ma_window_label": _timing_ma_label(selected_ma_window),
             "forward_window": selected_forward_window,
             "selection_mode": "auto" if request.include_heatmap and heatmap_records else "manual",
-            "reason": "best_heatmap_low_minus_high" if request.include_heatmap and heatmap_records else "request",
+            "reason": f"best_heatmap_{request.heatmap_metric}" if request.include_heatmap and heatmap_records else "request",
         },
         "factor": {
             "key": "fear_greed_timing",
@@ -5449,6 +5496,9 @@ def _run_timing_factor_analysis(
         },
         "bucket_count": request.bucket_count,
         "forward_window": selected_forward_window,
+        "heatmap_metric": request.heatmap_metric,
+        "heatmap_metric_label": heatmap_metric_meta.get("label", request.heatmap_metric),
+        "heatmap_metric_kind": heatmap_metric_meta.get("kind", "number"),
         "heatmap_forward_windows": request.heatmap_forward_windows,
         "heatmap_ma_windows": request.heatmap_ma_windows,
         "start_date": request.start_date.isoformat(),
@@ -5814,6 +5864,10 @@ async def get_factor_lab_options(
             {"key": key, **value}
             for key, value in HEATMAP_METRIC_OPTIONS.items()
         ],
+        timing_heatmap_metrics=[
+            {"key": key, **value}
+            for key, value in TIMING_HEATMAP_METRIC_OPTIONS.items()
+        ],
         timing_fear_sources=_get_timing_fear_sources(db),
         timing_target_options=DEFAULT_TIMING_TARGET_OPTIONS,
         backtest_search_objectives=[
@@ -5909,6 +5963,7 @@ async def get_factor_lab_options(
             "start_date": DEFAULT_START_DATE.isoformat(),
             "end_date": None,
             "forward_window": 20,
+            "heatmap_metric": DEFAULT_TIMING_HEATMAP_METRIC,
             "heatmap_forward_windows": DEFAULT_FORWARD_WINDOWS,
             "heatmap_ma_windows": DEFAULT_TIMING_MA_WINDOWS,
             "include_heatmap": True,
