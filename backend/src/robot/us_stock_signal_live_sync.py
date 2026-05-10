@@ -28,14 +28,17 @@ class USStockSignalLiveSync:
                     await asyncio.sleep(3600)
                     continue
 
-                result = self._sync_due_configs(now_et)
-                synced_count = len(result.get("synced") or [])
-                error_count = len(result.get("errors") or [])
-                if synced_count or error_count:
+                sync_result = self._sync_due_configs(now_et)
+                trade_result = self._trade_due_configs(now_et)
+                synced_count = len(sync_result.get("synced") or [])
+                traded_count = len(trade_result.get("traded") or [])
+                error_count = len(sync_result.get("errors") or []) + len(trade_result.get("errors") or [])
+                if synced_count or traded_count or error_count:
                     logger.info(
-                        "US stock signal virtual auto sync checked at %s US/Eastern: success=%s, errors=%s",
-                        result.get("current_time"),
+                        "US stock signal virtual scheduler checked at %s US/Eastern: synced=%s, traded=%s, errors=%s",
+                        sync_result.get("current_time"),
                         synced_count,
+                        traded_count,
                         error_count,
                     )
 
@@ -52,6 +55,11 @@ class USStockSignalLiveSync:
         from ..app.api.us_stock_signal_live import sync_due_us_stock_signal_configs_for_auto_sync
 
         return sync_due_us_stock_signal_configs_for_auto_sync(now_et=now_et)
+
+    def _trade_due_configs(self, now_et):
+        from ..app.api.us_stock_signal_live import execute_due_us_stock_signal_configs_for_auto_trade
+
+        return execute_due_us_stock_signal_configs_for_auto_trade(now_et=now_et)
 
 
 def start_us_stock_signal_live_sync():

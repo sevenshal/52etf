@@ -148,6 +148,12 @@ class QuoteService:
               ... (其他字段)
         """
         return self.provider.get_quote(symbol)
+
+    def get_depth(self, symbol: str) -> Dict:
+        """获取盘口深度数据。"""
+        if not hasattr(self.provider, "get_depth"):
+            return {}
+        return self.provider.get_depth(symbol) or {}
         
     @staticmethod
     def _normalize_kline(item: Dict) -> Dict:

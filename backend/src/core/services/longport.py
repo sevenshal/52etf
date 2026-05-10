@@ -406,6 +406,39 @@ class LongPortService(QuoteProvider, TradeService):
 
     @sleep_and_retry
     @limits(calls=10, period=1)
+    def get_depth(self, symbol: str) -> Dict:
+        """获取标的盘口深度。"""
+        try:
+            resp = self.ctx.depth(symbol)
+            if not resp:
+                return {}
+
+            def normalize_levels(levels):
+                result = []
+                for level in levels or []:
+                    price = _to_float(getattr(level, "price", None))
+                    volume = _to_int(getattr(level, "volume", None)) or 0
+                    if price is None or price <= 0 or volume <= 0:
+                        continue
+                    result.append({
+                        "position": _to_int(getattr(level, "position", None)),
+                        "price": price,
+                        "volume": volume,
+                        "order_num": _to_int(getattr(level, "order_num", None)),
+                    })
+                return result
+
+            return {
+                "symbol": getattr(resp, "symbol", symbol),
+                "ask": normalize_levels(getattr(resp, "ask", None)),
+                "bid": normalize_levels(getattr(resp, "bid", None)),
+            }
+        except Exception as e:
+            logging.error(f"获取{symbol}盘口失败: {str(e)}")
+            return {}
+
+    @sleep_and_retry
+    @limits(calls=10, period=1)
     def get_quote_batch(self, symbols: List[str]) -> List[Dict]:
         """批量获取实时行情数据"""
         try:

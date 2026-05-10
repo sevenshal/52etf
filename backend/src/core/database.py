@@ -866,7 +866,9 @@ class USStockSignalVirtualConfig(Base):
     legs = Column(JSON, nullable=True)
     auto_sync_enabled = Column(Boolean, default=True, nullable=False)
     auto_sync_time = Column(String(5), default="16:15", nullable=False)
+    auto_trade_time = Column(String(5), default="09:31", nullable=False)
     last_auto_sync_at = Column(DateTime)
+    last_auto_trade_at = Column(DateTime)
     last_sync_at = Column(DateTime)
     last_sync_status = Column(String(16))
     last_sync_message = Column(String(500))
@@ -920,6 +922,7 @@ class USStockSignalVirtualTrade(Base):
     action = Column(String(8), nullable=False)
     symbol = Column(String(32), index=True)
     price = Column(Float)
+    execution_price = Column(Float)
     quantity = Column(Integer)
     amount = Column(Float)
     commission = Column(Float)
@@ -932,6 +935,7 @@ class USStockSignalVirtualTrade(Base):
     symbol_market_value_after = Column(Float)
     symbol_weight_pct_after = Column(Float)
     price_source = Column(String(32))
+    quote_timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
 
 class USStockSignalVirtualHolding(Base):
@@ -1150,6 +1154,12 @@ def ensure_table_columns():
             "rebalance_frequency": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly'",
             "lot_size": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN lot_size INTEGER NOT NULL DEFAULT 1",
             "legs": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN legs JSON",
+            "auto_trade_time": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN auto_trade_time VARCHAR(5) NOT NULL DEFAULT '09:31'",
+            "last_auto_trade_at": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN last_auto_trade_at DATETIME",
+        },
+        "us_stock_signal_virtual_trades": {
+            "execution_price": "ALTER TABLE us_stock_signal_virtual_trades ADD COLUMN execution_price FLOAT",
+            "quote_timestamp": "ALTER TABLE us_stock_signal_virtual_trades ADD COLUMN quote_timestamp DATETIME",
         },
         "a_stock_innovation_momentum_configs": {
             "fundamental_weights": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_weights JSON NOT NULL DEFAULT '{\"circ_mv\":0.34,\"revenue_growth_3y\":0.33,\"rd_exp_ratio\":0.33}'",

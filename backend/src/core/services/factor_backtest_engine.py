@@ -134,6 +134,10 @@ class FactorBacktestConfig:
     legs: List[FactorBacktestLeg] = field(default_factory=list)
     mode: str = "factor_backtest"
     strategy: str = "factor_lab_top_n_rotation"
+    execution_price_overrides: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    execution_price_source_overrides: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    execution_quote_timestamp_overrides: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    execution_depth_overrides: Dict[str, Dict[str, Dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -374,6 +378,70 @@ def floor_lot(quantity: float, lot_size: int = 1) -> int:
     if quantity <= 0:
         return 0
     return int(quantity // lot) * lot
+
+
+def _depth_levels(depth_payload: Optional[Dict[str, Any]], side: str) -> List[Dict[str, float]]:
+    if not depth_payload:
+        return []
+    levels = depth_payload.get(side) or []
+    normalized = []
+    for level in levels:
+        price = _safe_float(level.get("price") if isinstance(level, dict) else None)
+        volume = _safe_float(level.get("volume") if isinstance(level, dict) else None)
+        if price is None or volume is None or price <= 0 or volume <= 0:
+            continue
+        normalized.append({"price": price, "volume": volume})
+    return normalized
+
+
+def estimate_depth_execution_price(
+    depth_payload: Optional[Dict[str, Any]],
+    action: str,
+    quantity: Optional[int] = None,
+    budget: Optional[float] = None,
+) -> Optional[float]:
+    action = str(action or "").upper()
+    levels = _depth_levels(depth_payload, "bid" if action == "SELL" else "ask")
+    if not levels:
+        return None
+
+    target_quantity = int(quantity or 0)
+    if action == "BUY" and target_quantity <= 0 and budget and budget > 0:
+        remaining_budget = float(budget)
+        total_quantity = 0.0
+        total_amount = 0.0
+        for level in levels:
+            price = float(level["price"])
+            volume = float(level["volume"])
+            affordable_quantity = math.floor(remaining_budget / price) if price > 0 else 0
+            fill_quantity = min(volume, affordable_quantity)
+            if fill_quantity <= 0:
+                break
+            total_quantity += fill_quantity
+            total_amount += fill_quantity * price
+            remaining_budget -= fill_quantity * price
+            if remaining_budget < price:
+                break
+        return total_amount / total_quantity if total_quantity > 0 else None
+
+    if target_quantity <= 0:
+        return float(levels[0]["price"])
+
+    remaining_quantity = float(target_quantity)
+    total_quantity = 0.0
+    total_amount = 0.0
+    for level in levels:
+        fill_quantity = min(float(level["volume"]), remaining_quantity)
+        if fill_quantity <= 0:
+            continue
+        total_quantity += fill_quantity
+        total_amount += fill_quantity * float(level["price"])
+        remaining_quantity -= fill_quantity
+        if remaining_quantity <= 0:
+            break
+    if total_quantity <= 0:
+        return None
+    return total_amount / total_quantity
 
 
 def portfolio_value(cash: float, positions: Dict[str, Dict], last_prices: Dict[str, float]) -> float:
@@ -1436,6 +1504,39 @@ def _price_frame_to_rows_by_symbol(price_df: pl.DataFrame) -> Dict[str, List[Dic
     return rows_by_symbol
 
 
+def append_execution_price_rows(
+    prepared_data: Dict[str, Any],
+    execution_date: date,
+    prices_by_symbol: Dict[str, float],
+):
+    if not prepared_data or not execution_date or not prices_by_symbol:
+        return
+    row_by_symbol_date = prepared_data.setdefault("row_by_symbol_date", {})
+    dates = prepared_data.setdefault("dates", [])
+    inserted = False
+    for symbol, raw_price in prices_by_symbol.items():
+        price = _safe_float(raw_price)
+        if not symbol or price is None or price <= 0:
+            continue
+        rows_for_symbol = row_by_symbol_date.setdefault(symbol, {})
+        rows_for_symbol.setdefault(
+            execution_date,
+            {
+                "date": execution_date,
+                "open": price,
+                "close": price,
+                "volume": 0.0,
+                "turnover": 0.0,
+            },
+        )
+        inserted = True
+    if inserted and execution_date not in dates:
+        dates.append(execution_date)
+        dates.sort()
+    if inserted and prepared_data.get("end_date") and execution_date > prepared_data["end_date"]:
+        prepared_data["end_date"] = execution_date
+
+
 def _factor_values_cache_key(request: FactorBacktestConfig, resolved_legs: List[Dict[str, Any]]) -> Any:
     return (
         int(request.min_listing_days),
@@ -1794,6 +1895,10 @@ def run_factor_backtest(
     lot_size = max(1, int(request.lot_size or 1))
     commission_rate = max(0.0, float(request.commission_pct or 0)) / 100
     slippage_rate = max(0.0, float(request.slippage_pct or 0)) / 100
+    execution_price_overrides = request.execution_price_overrides or {}
+    execution_price_source_overrides = request.execution_price_source_overrides or {}
+    execution_quote_timestamp_overrides = request.execution_quote_timestamp_overrides or {}
+    execution_depth_overrides = request.execution_depth_overrides or {}
 
     cash = float(request.initial_capital)
     positions: Dict[str, Dict[str, Any]] = {}
@@ -1819,6 +1924,9 @@ def run_factor_backtest(
         reason_detail: str,
         profit: Optional[float] = None,
         profit_pct: Optional[float] = None,
+        price_source: str = NEXT_OPEN_PRICE_SOURCE,
+        quote_timestamp: Optional[str] = None,
+        execution_price: Optional[float] = None,
     ):
         amount = price * quantity
         portfolio_after = portfolio_value(cash, positions, last_prices)
@@ -1832,6 +1940,7 @@ def run_factor_backtest(
                 "action": action,
                 "symbol": symbol,
                 "price": _safe_float(price, 4),
+                "execution_price": _safe_float(execution_price if execution_price is not None else price, 4),
                 "quantity": int(quantity),
                 "amount": _safe_float(amount, 2),
                 "commission": _safe_float(commission, 2),
@@ -1843,11 +1952,21 @@ def run_factor_backtest(
                 "portfolio_value_after": _safe_float(portfolio_after, 2),
                 "symbol_market_value_after": _safe_float(symbol_market_value, 2),
                 "symbol_weight_pct_after": _safe_float(symbol_market_value / portfolio_after * 100 if portfolio_after > 0 else 0, 2),
-                "price_source": NEXT_OPEN_PRICE_SOURCE,
+                "price_source": price_source or NEXT_OPEN_PRICE_SOURCE,
+                "quote_timestamp": quote_timestamp,
             }
         )
 
-    def sell_position(trade_date: date, signal_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
+    def sell_position(
+        trade_date: date,
+        signal_date: date,
+        symbol: str,
+        quantity: int,
+        price: float,
+        reason_detail: str,
+        price_source: str = NEXT_OPEN_PRICE_SOURCE,
+        quote_timestamp: Optional[str] = None,
+    ):
         nonlocal cash
         if symbol not in positions:
             return
@@ -1874,9 +1993,33 @@ def run_factor_backtest(
             position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
             position["last_price"] = price
         last_prices[symbol] = price
-        append_trade(trade_date, signal_date, "SELL", symbol, sell_price, quantity, commission, f"{rebalance_frequency}_rebalance", reason_detail, profit, profit_pct)
+        append_trade(
+            trade_date,
+            signal_date,
+            "SELL",
+            symbol,
+            sell_price,
+            quantity,
+            commission,
+            f"{rebalance_frequency}_rebalance",
+            reason_detail,
+            profit,
+            profit_pct,
+            price_source,
+            quote_timestamp,
+            price,
+        )
 
-    def buy_position(trade_date: date, signal_date: date, symbol: str, budget: float, price: float, reason_detail: str):
+    def buy_position(
+        trade_date: date,
+        signal_date: date,
+        symbol: str,
+        budget: float,
+        price: float,
+        reason_detail: str,
+        price_source: str = NEXT_OPEN_PRICE_SOURCE,
+        quote_timestamp: Optional[str] = None,
+    ):
         nonlocal cash
         buy_price = price * (1 + slippage_rate)
         quantity = floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
@@ -1902,7 +2045,49 @@ def run_factor_backtest(
             position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
             position["last_price"] = price
         last_prices[symbol] = price
-        append_trade(trade_date, signal_date, "BUY", symbol, buy_price, quantity, commission, f"{rebalance_frequency}_rebalance", reason_detail)
+        append_trade(
+            trade_date,
+            signal_date,
+            "BUY",
+            symbol,
+            buy_price,
+            quantity,
+            commission,
+            f"{rebalance_frequency}_rebalance",
+            reason_detail,
+            None,
+            None,
+            price_source,
+            quote_timestamp,
+            price,
+        )
+
+    def get_execution_price(
+        symbol: str,
+        current_date: date,
+        action: str,
+        open_map: Dict[str, float],
+        quantity: Optional[int] = None,
+        budget: Optional[float] = None,
+    ):
+        date_key = current_date.isoformat()
+        depth_payload = (execution_depth_overrides.get(date_key) or {}).get(symbol)
+        depth_price = estimate_depth_execution_price(depth_payload, action, quantity=quantity, budget=budget)
+        if depth_price is not None and depth_price > 0:
+            return (
+                depth_price,
+                depth_payload.get("price_source") or "depth_orderbook",
+                depth_payload.get("timestamp"),
+            )
+        override_price = _safe_float((execution_price_overrides.get(date_key) or {}).get(symbol))
+        if override_price is not None and override_price > 0:
+            source = (execution_price_source_overrides.get(date_key) or {}).get(symbol) or NEXT_OPEN_PRICE_SOURCE
+            quote_timestamp = (execution_quote_timestamp_overrides.get(date_key) or {}).get(symbol)
+            return override_price, source, quote_timestamp
+        fallback_price = _safe_float(open_map.get(symbol))
+        if fallback_price is not None and fallback_price > 0:
+            return fallback_price, NEXT_OPEN_PRICE_SOURCE, None
+        return None, None, None
 
     for date_index, current_date in enumerate(dates):
         open_map: Dict[str, float] = {}
@@ -1925,10 +2110,16 @@ def run_factor_backtest(
             for symbol in list(pending_rebalance["sell_symbols"]):
                 if symbol not in positions:
                     continue
-                price = open_map.get(symbol)
+                shares = int(positions[symbol].get("shares") or 0)
+                price, price_source, quote_timestamp = get_execution_price(
+                    symbol,
+                    current_date,
+                    "SELL",
+                    open_map,
+                    quantity=shares,
+                )
                 if price is None or price <= 0:
                     continue
-                shares = int(positions[symbol].get("shares") or 0)
                 sell_position(
                     current_date,
                     signal_date,
@@ -1936,19 +2127,36 @@ def run_factor_backtest(
                     shares,
                     price,
                     f"下一交易日开盘执行: 跌出因子排名Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}",
+                    price_source,
+                    quote_timestamp,
                 )
             slots_to_fill = max(0, max_positions - len(positions))
             buy_candidates = [item for item in pending_rebalance["selected"] if item["symbol"] not in positions][:slots_to_fill]
             budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
             for item in buy_candidates:
                 symbol = item["symbol"]
-                price = open_map.get(symbol)
-                if price is None or price <= 0:
-                    continue
                 buy_budget = min(cash, budget_per_symbol)
                 if buy_budget <= 0:
                     continue
-                buy_position(current_date, signal_date, symbol, buy_budget, price, f"下一交易日开盘补位买入因子Top{max_positions}")
+                price, price_source, quote_timestamp = get_execution_price(
+                    symbol,
+                    current_date,
+                    "BUY",
+                    open_map,
+                    budget=buy_budget,
+                )
+                if price is None or price <= 0:
+                    continue
+                buy_position(
+                    current_date,
+                    signal_date,
+                    symbol,
+                    buy_budget,
+                    price,
+                    f"下一交易日开盘补位买入因子Top{max_positions}",
+                    price_source,
+                    quote_timestamp,
+                )
             pending_rebalance = None
 
         for symbol, price in price_map.items():
@@ -1961,9 +2169,9 @@ def run_factor_backtest(
         current_universe = set(universe_history.symbols_for_date(current_date))
         universe_size_by_date[current_date.isoformat()] = len(current_universe)
 
-        if is_rebalance_day(dates, date_index, rebalance_frequency):
+        score_map = factor_values.get(current_date, {})
+        if score_map and is_rebalance_day(dates, date_index, rebalance_frequency):
             rebalance_count += 1
-            score_map = factor_values.get(current_date, {})
             ranked: List[Dict[str, Any]] = []
             for symbol in sorted(current_universe):
                 if symbol not in price_map:

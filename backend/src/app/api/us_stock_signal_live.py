@@ -1,7 +1,7 @@
 import logging
 import re
-from datetime import date, datetime
-from typing import Dict, List, Optional, Union
+from datetime import date, datetime, time as dtime
+from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import (
+    LongPortAccount,
     USStockSignalVirtualConfig,
     USStockSignalVirtualEquity,
     USStockSignalVirtualEvent,
@@ -19,6 +20,8 @@ from ...core.database import (
     get_db_ctx,
 )
 from ...core.services.market import MarketService
+from ...core.services.longport import LongPortService
+from ...core.services.quote import QuoteService
 from ...core.services.factor_backtest_engine import (
     FACTOR_REGISTRY,
     MIXED_WINDOW_KEY,
@@ -44,7 +47,14 @@ router = APIRouter(prefix="/api/us-stock-signal-live", tags=["US Stock Momentum 
 logger = logging.getLogger(__name__)
 EASTERN_TZ = ZoneInfo("US/Eastern")
 DEFAULT_AUTO_SYNC_TIME = "16:15"
+DEFAULT_AUTO_TRADE_TIME = "09:31"
+LIVE_QUOTE_PRICE_SOURCE = "quote_realtime"
+LIVE_DEPTH_PRICE_SOURCE = "depth_orderbook"
 AUTO_SYNC_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+class LiveQuoteUnavailable(Exception):
+    pass
 
 
 def _default_virtual_legs() -> List[Dict]:
@@ -123,6 +133,7 @@ class USStockSignalConfigPayload(BaseModel):
     legs: List[VirtualFactorLegPayload] = Field(default_factory=lambda: [VirtualFactorLegPayload(**item) for item in _default_virtual_legs()])
     auto_sync_enabled: bool = True
     auto_sync_time: str = DEFAULT_AUTO_SYNC_TIME
+    auto_trade_time: str = DEFAULT_AUTO_TRADE_TIME
 
     @validator("name")
     def validate_name(cls, value):
@@ -204,6 +215,13 @@ class USStockSignalConfigPayload(BaseModel):
             raise ValueError("自动同步时间格式应为 HH:mm")
         return text
 
+    @validator("auto_trade_time")
+    def validate_auto_trade_time(cls, value):
+        text = str(value or DEFAULT_AUTO_TRADE_TIME).strip()
+        if not AUTO_SYNC_TIME_PATTERN.match(text):
+            raise ValueError("自动交易时间格式应为 HH:mm")
+        return text
+
     @validator("legs")
     def validate_legs(cls, value):
         if len(value) < 1:
@@ -237,7 +255,9 @@ def _config_to_dict(config: USStockSignalVirtualConfig) -> Dict:
         "legs": getattr(config, "legs", None) or _default_virtual_legs(),
         "auto_sync_enabled": bool(config.auto_sync_enabled),
         "auto_sync_time": config.auto_sync_time or DEFAULT_AUTO_SYNC_TIME,
+        "auto_trade_time": getattr(config, "auto_trade_time", None) or DEFAULT_AUTO_TRADE_TIME,
         "last_auto_sync_at": config.last_auto_sync_at,
+        "last_auto_trade_at": getattr(config, "last_auto_trade_at", None),
         "last_sync_at": config.last_sync_at,
         "last_sync_status": config.last_sync_status,
         "last_sync_message": config.last_sync_message,
@@ -261,6 +281,246 @@ def _apply_payload(config: USStockSignalVirtualConfig, payload: USStockSignalCon
     for field, value in payload_data.items():
         setattr(config, field, value)
     config.updated_at = datetime.now()
+
+
+def _is_valid_price(value) -> bool:
+    try:
+        number = float(value)
+        return number > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_longport_account_id(db: ORMSession, account_id: str) -> str:
+    account = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
+    if account and account.lp_account_id:
+        return account.lp_account_id
+    return "LBPT10001248"
+
+
+def _get_quote_service(db: ORMSession, account_id: str) -> QuoteService:
+    return QuoteService(LongPortService.get_instance(_get_longport_account_id(db, account_id)))
+
+
+def _quote_eastern_datetime(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            timestamp = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if timestamp.tzinfo:
+        return timestamp.astimezone(EASTERN_TZ)
+    return timestamp.replace(tzinfo=EASTERN_TZ)
+
+
+def _load_existing_realtime_execution_overrides(
+    db: ORMSession,
+    config: USStockSignalVirtualConfig,
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    price_overrides: Dict[str, Dict[str, float]] = {}
+    source_overrides: Dict[str, Dict[str, str]] = {}
+    timestamp_overrides: Dict[str, Dict[str, str]] = {}
+    live_price_sources = [LIVE_QUOTE_PRICE_SOURCE, LIVE_DEPTH_PRICE_SOURCE]
+    rows = (
+        db.query(USStockSignalVirtualTrade)
+        .filter(
+            USStockSignalVirtualTrade.config_id == config.id,
+            USStockSignalVirtualTrade.price_source.in_(live_price_sources),
+        )
+        .all()
+    )
+    slippage_rate = max(0.0, float(getattr(config, "slippage_pct", 0) or 0)) / 100
+    for row in rows:
+        if not row.date or not row.symbol:
+            continue
+        execution_price = getattr(row, "execution_price", None)
+        if not _is_valid_price(execution_price) and _is_valid_price(row.price):
+            if row.action == "BUY":
+                execution_price = float(row.price) / (1 + slippage_rate)
+            elif row.action == "SELL" and slippage_rate < 1:
+                execution_price = float(row.price) / (1 - slippage_rate)
+        if not _is_valid_price(execution_price):
+            continue
+        date_key = row.date.isoformat()
+        price_overrides.setdefault(date_key, {})[row.symbol] = float(execution_price)
+        source_overrides.setdefault(date_key, {})[row.symbol] = row.price_source or LIVE_QUOTE_PRICE_SOURCE
+        if getattr(row, "quote_timestamp", None):
+            timestamp_overrides.setdefault(date_key, {})[row.symbol] = row.quote_timestamp.isoformat()
+    return price_overrides, source_overrides, timestamp_overrides
+
+
+def _merge_execution_override(
+    price_overrides: Dict[str, Dict[str, float]],
+    source_overrides: Dict[str, Dict[str, str]],
+    timestamp_overrides: Dict[str, Dict[str, str]],
+    date_key: str,
+    symbol: str,
+    price: float,
+    source: str,
+    quote_timestamp: Optional[datetime],
+    overwrite: bool = False,
+):
+    if not symbol or not _is_valid_price(price):
+        return
+    if not overwrite and symbol in price_overrides.get(date_key, {}):
+        return
+    price_overrides.setdefault(date_key, {})[symbol] = float(price)
+    source_overrides.setdefault(date_key, {})[symbol] = source
+    if quote_timestamp:
+        timestamp_overrides.setdefault(date_key, {})[symbol] = quote_timestamp.isoformat()
+
+
+def _valid_depth_levels(levels: List[Dict]) -> List[Dict]:
+    result = []
+    for level in levels or []:
+        if not isinstance(level, dict):
+            continue
+        price = level.get("price")
+        volume = level.get("volume")
+        if not _is_valid_price(price):
+            continue
+        try:
+            volume_value = int(float(volume or 0))
+        except (TypeError, ValueError):
+            volume_value = 0
+        if volume_value <= 0:
+            continue
+        result.append({
+            "position": level.get("position"),
+            "price": float(price),
+            "volume": volume_value,
+            "order_num": level.get("order_num"),
+        })
+    return result
+
+
+def _normalize_depth_payload(depth: Dict, quote_timestamp: datetime) -> Optional[Dict]:
+    if not depth:
+        return None
+    ask = _valid_depth_levels(depth.get("ask") or [])
+    bid = _valid_depth_levels(depth.get("bid") or [])
+    if not ask and not bid:
+        return None
+    return {
+        "symbol": depth.get("symbol"),
+        "ask": ask,
+        "bid": bid,
+        "price_source": LIVE_DEPTH_PRICE_SOURCE,
+        "timestamp": quote_timestamp.isoformat(),
+    }
+
+
+def _latest_rank_signal_symbols(db: ORMSession, config: USStockSignalVirtualConfig) -> List[str]:
+    latest_date = (
+        db.query(USStockSignalVirtualEvent.date)
+        .filter(
+            USStockSignalVirtualEvent.config_id == config.id,
+            USStockSignalVirtualEvent.direction == "RANK",
+        )
+        .order_by(USStockSignalVirtualEvent.date.desc())
+        .first()
+    )
+    symbols: List[str] = []
+    if latest_date and latest_date[0]:
+        rows = (
+            db.query(USStockSignalVirtualEvent.symbol, USStockSignalVirtualEvent.payload)
+            .filter(
+                USStockSignalVirtualEvent.config_id == config.id,
+                USStockSignalVirtualEvent.date == latest_date[0],
+                USStockSignalVirtualEvent.direction == "RANK",
+            )
+            .all()
+        )
+        for symbol, payload in rows:
+            if symbol:
+                symbols.append(symbol)
+            payload = payload or {}
+            for key in ("selected_symbols", "sell_rank_symbols", "event_symbols"):
+                symbols.extend([item for item in (payload.get(key) or []) if item])
+    holding_symbols = [
+        item[0]
+        for item in db.query(USStockSignalVirtualHolding.symbol)
+        .filter(USStockSignalVirtualHolding.config_id == config.id)
+        .all()
+        if item[0]
+    ]
+    symbols.extend(holding_symbols)
+    return list(dict.fromkeys(symbols))
+
+
+def _time_from_hhmm(value: str, default_value: str) -> dtime:
+    text = value if AUTO_SYNC_TIME_PATTERN.match(str(value or "")) else default_value
+    hour, minute = [int(item) for item in text.split(":")]
+    return dtime(hour=hour, minute=minute)
+
+
+def _fetch_live_execution_overrides(
+    db: ORMSession,
+    config: USStockSignalVirtualConfig,
+    now_et: datetime,
+    price_overrides: Dict[str, Dict[str, float]],
+    source_overrides: Dict[str, Dict[str, str]],
+    timestamp_overrides: Dict[str, Dict[str, str]],
+    depth_overrides: Dict[str, Dict[str, Dict]],
+) -> Dict:
+    symbols = _latest_rank_signal_symbols(db, config)
+    if not symbols:
+        return {"symbols": [], "quotes": [], "reason": "没有可执行的最新排名信号"}
+
+    quote_service = _get_quote_service(db, config.account_id)
+    trade_date_key = now_et.date().isoformat()
+    depth_items = []
+    min_quote_time = _time_from_hhmm(getattr(config, "auto_trade_time", DEFAULT_AUTO_TRADE_TIME), DEFAULT_AUTO_TRADE_TIME)
+    for symbol in symbols:
+        depth = quote_service.get_depth(symbol)
+        normalized_depth = _normalize_depth_payload(depth, now_et)
+        if not normalized_depth:
+            continue
+        depth_overrides.setdefault(trade_date_key, {})[symbol] = normalized_depth
+        depth_items.append({
+            "symbol": symbol,
+            "bid1": normalized_depth["bid"][0]["price"] if normalized_depth["bid"] else None,
+            "ask1": normalized_depth["ask"][0]["price"] if normalized_depth["ask"] else None,
+            "timestamp": now_et.isoformat(),
+        })
+
+    quotes = quote_service.get_quote_batch(symbols) or []
+    accepted = []
+
+    for quote in quotes:
+        symbol = quote.get("symbol")
+        price = quote.get("price")
+        quote_dt = _quote_eastern_datetime(quote.get("timestamp"))
+        if not symbol or not _is_valid_price(price) or not quote_dt:
+            continue
+        if quote_dt.date() != now_et.date() or quote_dt.time() < min_quote_time:
+            continue
+        _merge_execution_override(
+            price_overrides,
+            source_overrides,
+            timestamp_overrides,
+            trade_date_key,
+            symbol,
+            float(price),
+            LIVE_QUOTE_PRICE_SOURCE,
+            quote_dt,
+            overwrite=False,
+        )
+        accepted.append({
+            "symbol": symbol,
+            "price": float(price),
+            "timestamp": quote_dt.isoformat(),
+        })
+    return {"symbols": symbols, "depths": depth_items, "quotes": accepted, "trade_date": trade_date_key}
 
 
 def _replace_config_runtime_state(
@@ -314,6 +574,7 @@ def _replace_config_runtime_state(
             action=item.get("action"),
             symbol=item.get("symbol"),
             price=item.get("price"),
+            execution_price=item.get("execution_price"),
             quantity=item.get("quantity"),
             amount=item.get("amount"),
             commission=item.get("commission"),
@@ -326,6 +587,7 @@ def _replace_config_runtime_state(
             symbol_market_value_after=item.get("symbol_market_value_after"),
             symbol_weight_pct_after=item.get("symbol_weight_pct_after"),
             price_source=item.get("price_source") or DAILY_PRICE_SOURCE,
+            quote_timestamp=datetime.fromisoformat(item["quote_timestamp"]) if item.get("quote_timestamp") else None,
             created_at=now,
         ))
 
@@ -399,11 +661,63 @@ def _sync_config_now(
     db: ORMSession,
     config: USStockSignalVirtualConfig,
     trigger_source: str = "manual",
+    use_live_quotes: bool = False,
+    now_et: Optional[datetime] = None,
+) -> Dict:
+    price_overrides, source_overrides, timestamp_overrides = _load_existing_realtime_execution_overrides(db, config)
+    depth_overrides: Dict[str, Dict[str, Dict]] = {}
+    live_quote_payload = None
+    live_execution_date = None
+    if use_live_quotes:
+        now_et = now_et or MarketService.get_eastern_now()
+        live_quote_payload = _fetch_live_execution_overrides(
+            db,
+            config,
+            now_et,
+            price_overrides,
+            source_overrides,
+            timestamp_overrides,
+            depth_overrides,
+        )
+        if not live_quote_payload.get("quotes") and not live_quote_payload.get("depths"):
+            raise LiveQuoteUnavailable(live_quote_payload.get("reason") or "没有拿到可用实时成交报价或盘口")
+        live_execution_date = now_et.date()
+    return _sync_config_with_execution_context(
+        db,
+        config,
+        trigger_source,
+        price_overrides,
+        source_overrides,
+        timestamp_overrides,
+        depth_overrides,
+        live_execution_date,
+        live_quote_payload,
+    )
+
+
+def _sync_config_with_execution_context(
+    db: ORMSession,
+    config: USStockSignalVirtualConfig,
+    trigger_source: str,
+    price_overrides: Dict[str, Dict[str, float]],
+    source_overrides: Dict[str, Dict[str, str]],
+    timestamp_overrides: Dict[str, Dict[str, str]],
+    depth_overrides: Optional[Dict[str, Dict[str, Dict]]] = None,
+    live_execution_date: Optional[date] = None,
+    live_quote_payload: Optional[Dict] = None,
 ) -> Dict:
     result = USStockSignalVirtualEngine(
         db,
         config,
+        execution_price_overrides=price_overrides,
+        execution_price_source_overrides=source_overrides,
+        execution_quote_timestamp_overrides=timestamp_overrides,
+        execution_depth_overrides=depth_overrides or {},
+        live_execution_date=live_execution_date,
     ).run()
+    if live_quote_payload is not None:
+        result.setdefault("meta", {}).setdefault("live_execution", live_quote_payload)
+        result.setdefault("metadata", {}).setdefault("live_execution", live_quote_payload)
     _replace_config_runtime_state(db, config, result, trigger_source=trigger_source)
     return result
 
@@ -591,6 +905,22 @@ def _is_auto_sync_due(config: USStockSignalVirtualConfig, now_et: datetime) -> b
     return now_et.strftime("%H:%M") >= auto_sync_time
 
 
+def _auto_trade_already_attempted(config: USStockSignalVirtualConfig, now_et: datetime) -> bool:
+    last_auto_trade_at = getattr(config, "last_auto_trade_at", None)
+    if not last_auto_trade_at:
+        return False
+    if last_auto_trade_at.tzinfo:
+        return last_auto_trade_at.astimezone(EASTERN_TZ).date() == now_et.date()
+    return last_auto_trade_at.date() == now_et.date()
+
+
+def _is_auto_trade_due(config: USStockSignalVirtualConfig, now_et: datetime) -> bool:
+    auto_trade_time = getattr(config, "auto_trade_time", None) or DEFAULT_AUTO_TRADE_TIME
+    if not AUTO_SYNC_TIME_PATTERN.match(auto_trade_time):
+        auto_trade_time = DEFAULT_AUTO_TRADE_TIME
+    return now_et.strftime("%H:%M") >= auto_trade_time
+
+
 def sync_due_us_stock_signal_configs_for_auto_sync(now_et: Optional[datetime] = None) -> Dict:
     now_et = now_et or MarketService.get_eastern_now()
     result = {
@@ -659,6 +989,97 @@ def sync_due_us_stock_signal_configs_for_auto_sync(now_et: Optional[datetime] = 
     return result
 
 
+def execute_due_us_stock_signal_configs_for_auto_trade(now_et: Optional[datetime] = None) -> Dict:
+    now_et = now_et or MarketService.get_eastern_now()
+    result = {
+        "traded": [],
+        "errors": [],
+        "skipped": [],
+        "current_time": now_et.strftime("%H:%M"),
+        "timezone": "US/Eastern",
+    }
+    if now_et.weekday() >= 5 or MarketService.is_us_market_holiday(now_et.date()):
+        result["skipped"].append({"reason": "美股休市日"})
+        return result
+    if not MarketService.is_us_market_open(include_extended=False):
+        result["skipped"].append({"reason": "美股未处于常规交易时段"})
+        return result
+
+    with get_db_ctx() as db:
+        configs = (
+            db.query(USStockSignalVirtualConfig)
+            .filter(
+                USStockSignalVirtualConfig.enabled == True,  # noqa: E712
+                USStockSignalVirtualConfig.auto_sync_enabled == True,  # noqa: E712
+            )
+            .order_by(USStockSignalVirtualConfig.account_id.asc(), USStockSignalVirtualConfig.id.asc())
+            .all()
+        )
+        for config in configs:
+            config_id = config.id
+            account_id = config.account_id
+            config_name = config.name
+            if not _is_auto_trade_due(config, now_et):
+                result["skipped"].append({"id": config_id, "account_id": account_id, "name": config_name, "reason": "未到自动交易时间"})
+                continue
+            if _auto_trade_already_attempted(config, now_et):
+                result["skipped"].append({"id": config_id, "account_id": account_id, "name": config_name, "reason": "今日已自动交易"})
+                continue
+
+            attempt_at = now_et.replace(tzinfo=None)
+            _mark_sync_running(db, config, message=f"自动交易执行中（美东 {now_et.strftime('%H:%M')}）")
+            db.commit()
+            try:
+                trade_result = _sync_config_now(db, config, trigger_source="module_auto_trade", use_live_quotes=True, now_et=now_et)
+                config.last_auto_trade_at = attempt_at
+                db.commit()
+                live_execution = (trade_result.get("meta") or {}).get("live_execution") or {}
+                result["traded"].append({
+                    "id": config_id,
+                    "account_id": account_id,
+                    "name": config_name,
+                    "quote_count": len(live_execution.get("quotes") or []),
+                    "depth_count": len(live_execution.get("depths") or []),
+                    "summary": trade_result.get("metrics"),
+                })
+            except LiveQuoteUnavailable as exc:
+                db.rollback()
+                skipped_config = db.query(USStockSignalVirtualConfig).filter(
+                    USStockSignalVirtualConfig.id == config_id,
+                    USStockSignalVirtualConfig.account_id == account_id,
+                ).first()
+                if skipped_config:
+                    now = datetime.now()
+                    skipped_config.last_sync_at = now
+                    skipped_config.last_sync_status = "skipped"
+                    skipped_config.last_sync_message = str(exc)[:500]
+                    skipped_config.updated_at = now
+                    db.commit()
+                result["skipped"].append({
+                    "id": config_id,
+                    "account_id": account_id,
+                    "name": config_name,
+                    "reason": str(exc),
+                })
+            except Exception as exc:
+                db.rollback()
+                failed_config = db.query(USStockSignalVirtualConfig).filter(
+                    USStockSignalVirtualConfig.id == config_id,
+                    USStockSignalVirtualConfig.account_id == account_id,
+                ).first()
+                if failed_config:
+                    _mark_sync_failed(db, config_id, account_id, exc)
+                    db.commit()
+                logger.exception("US stock signal module auto trade failed")
+                result["errors"].append({
+                    "id": config_id,
+                    "account_id": account_id,
+                    "name": config_name,
+                    "error": str(exc),
+                })
+    return result
+
+
 @router.get("/configs/{config_id}/detail")
 def get_detail(
     config_id: int,
@@ -703,6 +1124,7 @@ def get_detail(
             USStockSignalVirtualTrade.action.label("action"),
             USStockSignalVirtualTrade.symbol.label("symbol"),
             USStockSignalVirtualTrade.price.label("price"),
+            USStockSignalVirtualTrade.execution_price.label("execution_price"),
             USStockSignalVirtualTrade.quantity.label("quantity"),
             USStockSignalVirtualTrade.amount.label("amount"),
             USStockSignalVirtualTrade.commission.label("commission"),
@@ -715,6 +1137,7 @@ def get_detail(
             USStockSignalVirtualTrade.symbol_market_value_after.label("symbol_market_value_after"),
             USStockSignalVirtualTrade.symbol_weight_pct_after.label("symbol_weight_pct_after"),
             USStockSignalVirtualTrade.price_source.label("price_source"),
+            USStockSignalVirtualTrade.quote_timestamp.label("quote_timestamp"),
         )
         .filter(USStockSignalVirtualTrade.config_id == config.id)
         .order_by(USStockSignalVirtualTrade.date.desc(), USStockSignalVirtualTrade.id.desc())
@@ -810,6 +1233,7 @@ def get_detail(
                 "action": item.action,
                 "symbol": item.symbol,
                 "price": item.price,
+                "execution_price": item.execution_price,
                 "quantity": item.quantity,
                 "amount": item.amount,
                 "commission": item.commission,
@@ -822,6 +1246,7 @@ def get_detail(
                 "symbol_market_value_after": item.symbol_market_value_after,
                 "symbol_weight_pct_after": item.symbol_weight_pct_after,
                 "price_source": item.price_source,
+                "quote_timestamp": item.quote_timestamp.isoformat() if item.quote_timestamp else None,
             }
             for item in trades
         ],

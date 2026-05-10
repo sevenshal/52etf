@@ -1,7 +1,7 @@
 import bisect
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Callable, Dict, List, Optional, Set
 
@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session as ORMSession
 
 from ..core.database import ETFHolding
 from ..core.services.factor_backtest_engine import (
+    append_execution_price_rows,
     make_virtual_signal_backtest_config,
+    prepare_factor_backtest_base_data,
+    resolve_factor_legs,
     run_factor_backtest as run_shared_factor_backtest,
 )
 from ..core.utils import normalize_us_equity_symbol
@@ -621,35 +624,73 @@ class USStockSignalVirtualEngine:
         db: ORMSession,
         config,
         progress_callback: Optional[Callable[[int, str], None]] = None,
+        execution_price_overrides: Optional[Dict[str, Dict[str, float]]] = None,
+        execution_price_source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        execution_quote_timestamp_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        execution_depth_overrides: Optional[Dict[str, Dict[str, Dict]]] = None,
+        live_execution_date: Optional[date] = None,
     ):
         self.db = db
         self.config = config
         self.progress_callback = progress_callback
+        self.execution_price_overrides = execution_price_overrides or {}
+        self.execution_price_source_overrides = execution_price_source_overrides or {}
+        self.execution_quote_timestamp_overrides = execution_quote_timestamp_overrides or {}
+        self.execution_depth_overrides = execution_depth_overrides or {}
+        self.live_execution_date = live_execution_date
 
     def report(self, progress: int, message: str):
         if self.progress_callback:
             self.progress_callback(int(max(0, min(100, progress))), message)
 
     def run(self) -> Dict:
-        shared_config = make_virtual_signal_backtest_config(self.config)
+        shared_config = replace(
+            make_virtual_signal_backtest_config(self.config),
+            execution_price_overrides=self.execution_price_overrides,
+            execution_price_source_overrides=self.execution_price_source_overrides,
+            execution_quote_timestamp_overrides=self.execution_quote_timestamp_overrides,
+            execution_depth_overrides=self.execution_depth_overrides,
+        )
         candidate_etfs = self.config.candidate_etfs or DEFAULT_CANDIDATE_ETFS
 
         self.report(1, "使用共享因子回测引擎从DuckDB读取历史行情")
-        result = run_shared_factor_backtest(shared_config, self.db)
+        resolved_legs = resolve_factor_legs(shared_config.legs)
+        prepared_data = prepare_factor_backtest_base_data(shared_config, self.db, resolved_legs)
+        if self.live_execution_date:
+            live_date_key = self.live_execution_date.isoformat()
+            live_row_prices = dict(self.execution_price_overrides.get(live_date_key) or {})
+            for symbol, depth in (self.execution_depth_overrides.get(live_date_key) or {}).items():
+                if symbol in live_row_prices:
+                    continue
+                ask = (depth or {}).get("ask") or []
+                bid = (depth or {}).get("bid") or []
+                best_price = None
+                if ask and ask[0].get("price"):
+                    best_price = ask[0].get("price")
+                elif bid and bid[0].get("price"):
+                    best_price = bid[0].get("price")
+                if best_price:
+                    live_row_prices[symbol] = best_price
+            append_execution_price_rows(
+                prepared_data,
+                self.live_execution_date,
+                live_row_prices,
+            )
+        result = run_shared_factor_backtest(shared_config, self.db, prepared_data=prepared_data)
         metadata = result.get("metadata") or result.get("meta") or {}
         metadata.update(
             {
                 "candidate_etfs": candidate_etfs,
                 "min_listing_days": shared_config.min_listing_days,
                 "max_positions": shared_config.max_positions,
-                "sell_rank_threshold": max(shared_config.max_positions, int(round(shared_config.max_positions * shared_config.sell_rank_multiplier))),
+                "sell_rank_threshold": max(shared_config.max_positions, int(math.ceil(shared_config.max_positions * shared_config.sell_rank_multiplier))),
                 "sell_rank_multiplier": shared_config.sell_rank_multiplier,
                 "rebalance_frequency": shared_config.rebalance_frequency,
                 "execution_rule": "signal_close_next_open",
                 "rotation_rule": "hold_until_out_of_sell_rank",
                 "strategy": shared_config.strategy,
                 "signal_price_source": DAILY_PRICE_SOURCE,
-                "execution_price_source": NEXT_OPEN_PRICE_SOURCE,
+                "execution_price_source": "depth_or_quote_realtime_or_next_open",
                 "price_source": DAILY_PRICE_SOURCE,
                 "data_source": "duckdb.us_stock_daily",
             }
