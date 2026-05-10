@@ -122,11 +122,23 @@ const DEFAULT_TIMING_VALUES = {
   start_date: dayjs('2020-01-02'),
   end_date: null,
   forward_window: 20,
+  heatmap_metric: 'annualized_low_minus_high_avg_return_pct',
   heatmap_forward_windows: [5, 20, 60],
   heatmap_ma_windows: [1, 5, 20],
 };
 
 const DEFAULT_HEATMAP_METRIC = 'non_overlap_annualized_median_pct';
+const DEFAULT_TIMING_HEATMAP_METRIC = 'annualized_low_minus_high_avg_return_pct';
+const DEFAULT_TIMING_HEATMAP_METRICS = [
+  { key: 'annualized_low_minus_high_avg_return_pct', label: '年化低-高桶差', kind: 'percent' },
+  { key: 'low_minus_high_avg_return_pct', label: 'T+n 低-高桶差', kind: 'percent' },
+  { key: 'annualized_top_minus_bottom_avg_return_pct', label: '年化高-低桶差', kind: 'percent' },
+  { key: 'top_minus_bottom_avg_return_pct', label: 'T+n 高-低桶差', kind: 'percent' },
+  { key: 'rank_ic_mean', label: '时间序列 IC', kind: 'ic' },
+  { key: 'rank_ic_t_stat', label: 'IC t-stat', kind: 'ic' },
+  { key: 'monotonicity_spearman', label: '单调性 Spearman', kind: 'ic' },
+  { key: 'adjacent_hit_rate_pct', label: '相邻命中率', kind: 'percent' },
+];
 const DEFAULT_MIN_LISTING_DAYS = 365;
 const MIXED_WINDOW_KEY = 'mixed';
 const DEFAULT_MOMENTUM_WEIGHTS = DEFAULT_FORM_VALUES.momentum_weights;
@@ -252,6 +264,7 @@ const normalizeTimingDefaultRequest = (payload = {}) => ({
   ma_window: payload.ma_window || DEFAULT_TIMING_VALUES.ma_window,
   bucket_count: payload.bucket_count || DEFAULT_TIMING_VALUES.bucket_count,
   forward_window: payload.forward_window || DEFAULT_TIMING_VALUES.forward_window,
+  heatmap_metric: payload.heatmap_metric || DEFAULT_TIMING_VALUES.heatmap_metric,
   heatmap_forward_windows: payload.heatmap_forward_windows || DEFAULT_TIMING_VALUES.heatmap_forward_windows,
   heatmap_ma_windows: payload.heatmap_ma_windows || DEFAULT_TIMING_VALUES.heatmap_ma_windows,
 });
@@ -451,6 +464,7 @@ const buildTimingPayload = values => ({
   start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_TIMING_VALUES.start_date.format('YYYY-MM-DD'),
   end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
   forward_window: Number(values.forward_window || DEFAULT_TIMING_VALUES.forward_window),
+  heatmap_metric: values.heatmap_metric || DEFAULT_TIMING_HEATMAP_METRIC,
   heatmap_forward_windows: normalizeNumberArray(
     values.heatmap_forward_windows,
     DEFAULT_TIMING_VALUES.heatmap_forward_windows,
@@ -751,14 +765,32 @@ const getHeatmapOption = (rows, selectedCombo, metric = DEFAULT_HEATMAP_METRIC, 
   };
 };
 
-const getTimingHeatmapOption = (rows, selectedCombo) => {
-  const validRows = (rows || []).filter(item => item.heatmap_value !== null && item.heatmap_value !== undefined);
+const getTimingHeatmapValue = (item, metric = DEFAULT_TIMING_HEATMAP_METRIC) => (
+  item?.[metric]
+  ?? (metric === DEFAULT_TIMING_HEATMAP_METRIC ? item?.heatmap_value : undefined)
+  ?? item?.selected_heatmap_value
+  ?? item?.heatmap_value
+  ?? item?.annualized_low_minus_high_avg_return_pct
+  ?? item?.low_minus_high_avg_return_pct
+);
+
+const getTimingHeatmapOption = (
+  rows,
+  selectedCombo,
+  metric = DEFAULT_TIMING_HEATMAP_METRIC,
+  metrics = DEFAULT_TIMING_HEATMAP_METRICS,
+) => {
+  const metricMeta = getHeatmapMetricMeta(metric, metrics);
+  const validRows = (rows || []).filter(item => (
+    getTimingHeatmapValue(item, metric) !== null
+    && getTimingHeatmapValue(item, metric) !== undefined
+  ));
   const maItems = [...new Map(validRows.map(item => [item.ma_window, item.ma_window_label || `${item.ma_window}日均值`])).entries()]
     .sort((left, right) => Number(left[0]) - Number(right[0]));
   const maKeys = maItems.map(item => item[0]);
   const maLabels = maItems.map(item => item[1]);
   const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
-  const values = validRows.map(item => Number(item.heatmap_value)).filter(Number.isFinite);
+  const values = validRows.map(item => Number(getTimingHeatmapValue(item, metric))).filter(Number.isFinite);
   const min = values.length ? Math.min(...values) : -1;
   const max = values.length ? Math.max(...values) : 1;
   return {
@@ -770,15 +802,19 @@ const getTimingHeatmapOption = (rows, selectedCombo) => {
           row.forward_window === forwards[params.value[0]] && Number(row.ma_window) === Number(maKeys[params.value[1]])
         ));
         if (!item) return '';
-        return [
+        const lines = [
           `贪恐均线: ${item.ma_window_label || `${item.ma_window}日均值`}`,
           `T+${item.forward_window}`,
+          `${metricMeta.label}: ${formatHeatmapMetricValue(metric, getTimingHeatmapValue(item, metric), metrics)}`,
           `年化低-高桶差: ${percentFormatter(item.annualized_low_minus_high_avg_return_pct)}`,
           `T+n低-高桶差: ${percentFormatter(item.low_minus_high_avg_return_pct)}`,
-          `高-低桶差: ${percentFormatter(item.top_minus_bottom_avg_return_pct)}`,
+          `年化高-低桶差: ${percentFormatter(item.annualized_top_minus_bottom_avg_return_pct)}`,
+          `T+n高-低桶差: ${percentFormatter(item.top_minus_bottom_avg_return_pct)}`,
           `时间序列IC: ${icFormatter(item.rank_ic_mean)}`,
+          `IC t-stat: ${icFormatter(item.rank_ic_t_stat)}`,
           `样本: ${numberFormatter(item.samples)}`,
-        ].join('<br/>');
+        ];
+        return lines.join('<br/>');
       },
     },
     xAxis: { type: 'category', data: forwards.map(item => `T+${item}`), splitArea: { show: true } },
@@ -791,17 +827,17 @@ const getTimingHeatmapOption = (rows, selectedCombo) => {
       right: 8,
       top: 40,
       inRange: { color: ['#2f70b7', '#f6f7f9', '#cb3a31'] },
-      formatter: value => percentFormatter(value),
+      formatter: value => formatHeatmapMetricValue(metric, value, metrics),
     },
     series: [
       {
-        name: '年化低-高桶差',
+        name: metricMeta.label,
         type: 'heatmap',
         data: validRows.map(item => ({
           value: [
             forwards.indexOf(item.forward_window),
             maKeys.findIndex(value => Number(value) === Number(item.ma_window)),
-            item.heatmap_value,
+            getTimingHeatmapValue(item, metric),
           ],
           itemStyle: selectedCombo
             && Number(selectedCombo.ma_window) === Number(item.ma_window)
@@ -811,7 +847,7 @@ const getTimingHeatmapOption = (rows, selectedCombo) => {
         })),
         label: {
           show: true,
-          formatter: params => percentFormatter(params.value[2]),
+          formatter: params => formatHeatmapMetricValue(metric, params.value[2], metrics),
         },
       },
     ],
@@ -1196,6 +1232,7 @@ const FactorLab = () => {
 
   const selectedFactorKey = Form.useWatch('factor', form);
   const selectedHeatmapMetric = Form.useWatch('heatmap_metric', form);
+  const selectedTimingHeatmapMetric = Form.useWatch('heatmap_metric', timingForm);
   const selectedHeatmapWindows = Form.useWatch('heatmap_windows', form);
   const compositeLegs = Form.useWatch('legs', compositeForm);
   const backtestLegs = Form.useWatch('legs', backtestForm);
@@ -1656,6 +1693,10 @@ const FactorLab = () => {
     (options?.heatmap_metrics || [{ key: DEFAULT_HEATMAP_METRIC, label: '非重叠年化多空差' }])
       .map(item => ({ label: item.label, value: item.key }))
   ), [options]);
+  const timingHeatmapMetricOptions = useMemo(() => (
+    (options?.timing_heatmap_metrics || DEFAULT_TIMING_HEATMAP_METRICS)
+      .map(item => ({ label: item.label, value: item.key }))
+  ), [options]);
   const neutralizationOptions = useMemo(() => (
     (options?.neutralization_options || [
       { key: 'none', label: '不做中性化' },
@@ -1753,6 +1794,10 @@ const FactorLab = () => {
   const timingFactorDistributionRows = timingResult?.factor_distribution || [];
   const timingIcRows = timingResult?.rank_ic_series || [];
   const timingHeatmapRows = timingResult?.parameter_heatmap || [];
+  const timingHeatmapMetrics = options?.timing_heatmap_metrics || DEFAULT_TIMING_HEATMAP_METRICS;
+  const timingHeatmapMetric = selectedTimingHeatmapMetric
+    || timingMetadata.heatmap_metric
+    || DEFAULT_TIMING_HEATMAP_METRIC;
   const timingNonOverlapSummary = timingResult?.non_overlapping_summary || {};
   const timingNonOverlapRows = timingResult?.non_overlapping_offsets || [];
   const timingYearlyRows = timingResult?.yearly_stability || [];
@@ -1763,9 +1808,13 @@ const FactorLab = () => {
   const timingHeatmapEvents = useMemo(() => ({
     click: params => {
       if (params.seriesType !== 'heatmap' || !Array.isArray(params.value)) return;
-      const maWindows = [...new Set(timingHeatmapRows.map(item => item.ma_window))].sort((a, b) => Number(a) - Number(b));
-      const forwards = [...new Set(timingHeatmapRows.map(item => item.forward_window))].sort((a, b) => a - b);
-      const row = timingHeatmapRows.find(item => (
+      const validRows = timingHeatmapRows.filter(item => (
+        getTimingHeatmapValue(item, timingHeatmapMetric) !== null
+        && getTimingHeatmapValue(item, timingHeatmapMetric) !== undefined
+      ));
+      const maWindows = [...new Set(validRows.map(item => item.ma_window))].sort((a, b) => Number(a) - Number(b));
+      const forwards = [...new Set(validRows.map(item => item.forward_window))].sort((a, b) => a - b);
+      const row = validRows.find(item => (
         Number(item.ma_window) === Number(maWindows[params.value[1]])
         && Number(item.forward_window) === Number(forwards[params.value[0]])
       ));
@@ -1773,7 +1822,7 @@ const FactorLab = () => {
         void runSelectedTimingComboAnalysis(row);
       }
     },
-  }), [timingHeatmapRows, runSelectedTimingComboAnalysis]);
+  }), [timingHeatmapRows, timingHeatmapMetric, runSelectedTimingComboAnalysis]);
   const backtestSearchSummary = backtestSearchJob?.summary || {};
   const backtestSearchRunning = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
   const effectiveBacktestSearchObjective = backtestSearchJob?.objective || backtestSearchObjective;
@@ -2444,6 +2493,7 @@ const FactorLab = () => {
             </Row>
             <Form.Item name="ma_window" hidden><InputNumber /></Form.Item>
             <Form.Item name="forward_window" hidden><InputNumber /></Form.Item>
+            <Form.Item name="heatmap_metric" hidden><Input /></Form.Item>
             <div className="factor-lab-factor-note">
               <Text type="secondary">择时因子按日期分桶。热力图会先比较“贪恐均线窗口 × T+n”，详情由当前选中的格子驱动；低桶代表恐慌，高桶代表贪婪。</Text>
             </div>
@@ -2462,13 +2512,30 @@ const FactorLab = () => {
         <Spin spinning={timingRunning}>
           <Card
             className="factor-lab-heatmap-card"
-            title={<Space><FireOutlined />择时参数热力图（年化低-高桶差）</Space>}
+            title={(
+              <Space className="factor-lab-heatmap-title" size={8}>
+                <FireOutlined />
+                <span>择时参数热力图</span>
+                <Select
+                  size="small"
+                  className="factor-lab-heatmap-metric-select"
+                  value={timingHeatmapMetric}
+                  options={timingHeatmapMetricOptions}
+                  onChange={value => timingForm.setFieldsValue({ heatmap_metric: value })}
+                />
+              </Space>
+            )}
             extra={<Tag color="blue">当前：{timingMetadata.ma_window_label} × T+{timingMetadata.forward_window}</Tag>}
             bordered={false}
           >
             {timingHeatmapRows.length ? (
               <ReactECharts
-                option={getTimingHeatmapOption(timingHeatmapRows, timingSelectedCombo)}
+                option={getTimingHeatmapOption(
+                  timingHeatmapRows,
+                  timingSelectedCombo,
+                  timingHeatmapMetric,
+                  timingHeatmapMetrics,
+                )}
                 style={{ height: 340 }}
                 onEvents={timingHeatmapEvents}
               />
