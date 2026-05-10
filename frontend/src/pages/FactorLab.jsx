@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -25,6 +25,7 @@ import {
   BarChartOutlined,
   DeleteOutlined,
   ExperimentOutlined,
+  FilterOutlined,
   FireOutlined,
   PlusOutlined,
   PlayCircleOutlined,
@@ -36,16 +37,17 @@ import request from '../utils/request';
 import './FactorLab.css';
 
 const { Text } = Typography;
+const getLastYearStartDate = () => dayjs().subtract(1, 'year').startOf('year');
 
 const DEFAULT_FORM_VALUES = {
-  pool: 'SPY_QQQ',
+  pool: 'QQQ',
   factor: 'risk_adjusted_momentum',
   bucket_count: 10,
   start_date: dayjs('2020-01-02'),
   end_date: null,
   neutralization: 'none',
   standardization: 'zscore',
-  oos_start_date: null,
+  oos_start_date: getLastYearStartDate(),
   heatmap_metric: 'non_overlap_annualized_median_pct',
   heatmap_windows: [20, 60, 120],
   heatmap_forward_windows: [5, 20, 60],
@@ -53,11 +55,11 @@ const DEFAULT_FORM_VALUES = {
 };
 
 const DEFAULT_COMPOSITE_VALUES = {
-  pool: 'SPY_QQQ',
+  pool: 'QQQ',
   bucket_count: 10,
   start_date: dayjs('2020-01-02'),
   end_date: null,
-  oos_start_date: null,
+  oos_start_date: getLastYearStartDate(),
   forward_window: 20,
   legs: [
     {
@@ -80,9 +82,10 @@ const DEFAULT_COMPOSITE_VALUES = {
 };
 
 const DEFAULT_BACKTEST_VALUES = {
-  pool: 'SPY_QQQ',
+  pool: 'QQQ',
   start_date: dayjs('2020-01-02'),
   end_date: null,
+  oos_start_date: getLastYearStartDate(),
   initial_capital: 100000,
   max_positions: 7,
   sell_rank_multiplier: 2,
@@ -117,10 +120,18 @@ const MIXED_WINDOW_KEY = 'mixed';
 const DEFAULT_MOMENTUM_WEIGHTS = DEFAULT_FORM_VALUES.momentum_weights;
 const MOMENTUM_WEIGHT_WINDOWS = [20, 60, 120];
 const DEFAULT_BACKTEST_SEARCH_OBJECTIVES = [
-  { key: 'annualized_return', label: '年化收益最大' },
-  { key: 'total_return', label: '总收益最大' },
-  { key: 'sharpe', label: '夏普最大' },
-  { key: 'calmar', label: '卡玛最大' },
+  { key: 'annualized_return', label: '全区间年化收益最大' },
+  { key: 'total_return', label: '全区间总收益最大' },
+  { key: 'sharpe', label: '全区间夏普最大' },
+  { key: 'calmar', label: '全区间卡玛最大' },
+  { key: 'in_sample_annualized_return', label: '样本内年化收益最大' },
+  { key: 'in_sample_total_return', label: '样本内总收益最大' },
+  { key: 'in_sample_sharpe', label: '样本内夏普最大' },
+  { key: 'in_sample_calmar', label: '样本内卡玛最大' },
+  { key: 'oos_annualized_return', label: '样本外年化收益最大' },
+  { key: 'oos_total_return', label: '样本外总收益最大' },
+  { key: 'oos_sharpe', label: '样本外夏普最大' },
+  { key: 'oos_calmar', label: '样本外卡玛最大' },
 ];
 const BACKTEST_SEARCH_RUNNING_STATUSES = ['queued', 'running'];
 const BACKTEST_SEARCH_STATUS_META = {
@@ -129,6 +140,7 @@ const BACKTEST_SEARCH_STATUS_META = {
   completed: { color: 'green', label: '已完成' },
   failed: { color: 'red', label: '失败' },
   cancelled: { color: 'orange', label: '已取消' },
+  interrupted: { color: 'orange', label: '已中断' },
 };
 
 const numberFormatter = value => {
@@ -158,7 +170,9 @@ const normalizeDefaultRequest = (payload = {}) => ({
   ...payload,
   start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_FORM_VALUES.start_date,
   end_date: payload.end_date ? dayjs(payload.end_date) : null,
-  oos_start_date: payload.oos_start_date ? dayjs(payload.oos_start_date) : null,
+  oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
+    ? (payload.oos_start_date ? dayjs(payload.oos_start_date) : null)
+    : DEFAULT_FORM_VALUES.oos_start_date,
   neutralization: payload.neutralization || DEFAULT_FORM_VALUES.neutralization,
   standardization: payload.standardization || DEFAULT_FORM_VALUES.standardization,
   heatmap_metric: payload.heatmap_metric || DEFAULT_FORM_VALUES.heatmap_metric,
@@ -172,7 +186,9 @@ const normalizeCompositeDefaultRequest = (payload = {}) => ({
   ...payload,
   start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_COMPOSITE_VALUES.start_date,
   end_date: payload.end_date ? dayjs(payload.end_date) : null,
-  oos_start_date: payload.oos_start_date ? dayjs(payload.oos_start_date) : null,
+  oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
+    ? (payload.oos_start_date ? dayjs(payload.oos_start_date) : null)
+    : DEFAULT_COMPOSITE_VALUES.oos_start_date,
   forward_window: payload.forward_window || DEFAULT_COMPOSITE_VALUES.forward_window,
   legs: (payload.legs?.length ? payload.legs : DEFAULT_COMPOSITE_VALUES.legs).map(leg => ({
     ...leg,
@@ -187,6 +203,9 @@ const normalizeBacktestDefaultRequest = (payload = {}) => ({
   ...payload,
   start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_BACKTEST_VALUES.start_date,
   end_date: payload.end_date ? dayjs(payload.end_date) : null,
+  oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
+    ? (payload.oos_start_date ? dayjs(payload.oos_start_date) : null)
+    : DEFAULT_BACKTEST_VALUES.oos_start_date,
   legs: (payload.legs?.length ? payload.legs : DEFAULT_BACKTEST_VALUES.legs).map(leg => ({
     ...leg,
     neutralization: leg.neutralization || 'none',
@@ -352,7 +371,7 @@ const buildCompositePayload = values => {
     end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
     oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
     forward_window: Number(values.forward_window || DEFAULT_COMPOSITE_VALUES.forward_window),
-    min_listing_days: DEFAULT_MIN_LISTING_DAYS,
+    min_listing_days: Number(values.min_listing_days ?? DEFAULT_MIN_LISTING_DAYS),
     legs,
   };
 };
@@ -361,6 +380,7 @@ const buildBacktestPayload = values => ({
   pool: values.pool,
   start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
   end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
+  oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
   initial_capital: Number(values.initial_capital || DEFAULT_BACKTEST_VALUES.initial_capital),
   max_positions: Number(values.max_positions || DEFAULT_BACKTEST_VALUES.max_positions),
   sell_rank_multiplier: Number(values.sell_rank_multiplier || DEFAULT_BACKTEST_VALUES.sell_rank_multiplier),
@@ -769,41 +789,126 @@ const parseCandidateNumbers = (value, { integer = false, min = -Infinity, max = 
   return normalized;
 };
 
-const getBacktestSearchColumns = (objective, onApply, applyingCaseIndex) => [
-  { title: '排名', dataIndex: 'rank', width: 76, fixed: 'left' },
+const getNumericValue = (record, key) => {
+  const value = Number(record?.[key]);
+  return Number.isFinite(value) ? value : null;
+};
+
+const setNumericFilterValue = (setSelectedKeys, current, key, value) => {
+  const next = { ...(current || {}), [key]: value };
+  const hasMin = next.min !== null && next.min !== undefined && next.min !== '';
+  const hasMax = next.max !== null && next.max !== undefined && next.max !== '';
+  setSelectedKeys(hasMin || hasMax ? [next] : []);
+};
+
+const numericColumn = ({ title, dataIndex, width, render = numberFormatter, fixed }) => ({
+  title,
+  dataIndex,
+  width,
+  fixed,
+  align: 'right',
+  render,
+  sorter: true,
+  filterIcon: filtered => <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />,
+  filterDropdown: ({ setSelectedKeys, selectedKeys, confirm, clearFilters }) => {
+    const value = selectedKeys[0] || {};
+    return (
+      <div style={{ padding: 8, width: 180 }} onKeyDown={event => event.stopPropagation()}>
+        <Space direction="vertical" size={8} className="factor-lab-full">
+          <InputNumber
+            placeholder="最小值"
+            value={value.min}
+            onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'min', nextValue)}
+            className="factor-lab-full"
+          />
+          <InputNumber
+            placeholder="最大值"
+            value={value.max}
+            onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'max', nextValue)}
+            className="factor-lab-full"
+          />
+          <Space>
+            <Button size="small" type="primary" onClick={() => confirm()}>过滤</Button>
+            <Button
+              size="small"
+              onClick={() => {
+                clearFilters?.();
+                confirm();
+              }}
+            >
+              重置
+            </Button>
+          </Space>
+        </Space>
+      </div>
+    );
+  },
+});
+
+const normalizeSearchTableFilters = filters => {
+  const normalized = {};
+  Object.entries(filters || {}).forEach(([key, value]) => {
+    const item = Array.isArray(value) ? value[0] : value;
+    if (!item || typeof item !== 'object') return;
+    const next = {};
+    const min = Number(item.min);
+    const max = Number(item.max);
+    if (Number.isFinite(min)) next.min = min;
+    if (Number.isFinite(max)) next.max = max;
+    if (Object.keys(next).length) normalized[key] = next;
+  });
+  return normalized;
+};
+
+const getBacktestSearchColumns = (objective, onApply, onAnalyze, applyingCaseIndex, analyzingCaseIndex) => [
+  { title: '排名', dataIndex: 'rank', width: 76, fixed: 'left', align: 'right', render: numberFormatter },
   {
     title: '操作',
     dataIndex: 'action',
-    width: 104,
+    width: 176,
     fixed: 'left',
     render: (_, row) => (
-      <Button
-        size="small"
-        loading={applyingCaseIndex === row.case_index}
-        onClick={() => onApply(row)}
-      >
-        应用回测
-      </Button>
+      <Space size={6}>
+        <Button
+          size="small"
+          loading={applyingCaseIndex === row.case_index}
+          onClick={() => onApply(row)}
+        >
+          应用回测
+        </Button>
+        <Button
+          size="small"
+          icon={<BarChartOutlined />}
+          loading={analyzingCaseIndex === row.case_index}
+          onClick={() => onAnalyze(row)}
+        >
+          看分析
+        </Button>
+      </Space>
     ),
   },
-  {
-    title: '目标值',
-    dataIndex: 'objective_value',
-    width: 112,
-    align: 'right',
-    render: value => formatBacktestSearchObjective(value, objective),
-  },
-  { title: '年化收益', dataIndex: 'annualized_return', width: 112, align: 'right', render: percentFormatter },
-  { title: '总收益', dataIndex: 'total_return', width: 112, align: 'right', render: percentFormatter },
-  { title: '夏普', dataIndex: 'sharpe', width: 90, align: 'right', render: icFormatter },
-  { title: '卡玛', dataIndex: 'calmar', width: 90, align: 'right', render: icFormatter },
-  { title: '年化波动', dataIndex: 'annualized_volatility', width: 112, align: 'right', render: percentFormatter },
-  { title: '最大回撤', dataIndex: 'max_drawdown', width: 112, align: 'right', render: percentFormatter },
-  { title: '持仓', dataIndex: 'max_positions', width: 76, align: 'right', render: numberFormatter },
-  { title: '卖出倍数', dataIndex: 'sell_rank_multiplier', width: 96, align: 'right', render: icFormatter },
-  { title: '胜率', dataIndex: 'win_rate', width: 90, align: 'right', render: percentFormatter },
-  { title: '交易', dataIndex: 'trade_count', width: 82, align: 'right', render: numberFormatter },
-  { title: '参数', dataIndex: 'params_label', width: 520, ellipsis: true },
+  numericColumn({ title: '目标值', dataIndex: 'objective_value', width: 112, render: value => formatBacktestSearchObjective(value, objective) }),
+  numericColumn({ title: '全区间年化', dataIndex: 'annualized_return', width: 116, render: percentFormatter }),
+  numericColumn({ title: '全区间总收益', dataIndex: 'total_return', width: 126, render: percentFormatter }),
+  numericColumn({ title: '全区间夏普', dataIndex: 'sharpe', width: 112, render: icFormatter }),
+  numericColumn({ title: '全区间卡玛', dataIndex: 'calmar', width: 112, render: icFormatter }),
+  numericColumn({ title: '全区间回撤', dataIndex: 'max_drawdown', width: 116, render: percentFormatter }),
+  numericColumn({ title: '样本内年化', dataIndex: 'in_sample_annualized_return', width: 116, render: percentFormatter }),
+  numericColumn({ title: '样本内总收益', dataIndex: 'in_sample_total_return', width: 126, render: percentFormatter }),
+  numericColumn({ title: '样本内夏普', dataIndex: 'in_sample_sharpe', width: 112, render: icFormatter }),
+  numericColumn({ title: '样本内卡玛', dataIndex: 'in_sample_calmar', width: 112, render: icFormatter }),
+  numericColumn({ title: '样本内回撤', dataIndex: 'in_sample_max_drawdown', width: 116, render: percentFormatter }),
+  numericColumn({ title: '样本外年化', dataIndex: 'oos_annualized_return', width: 116, render: percentFormatter }),
+  numericColumn({ title: '样本外总收益', dataIndex: 'oos_total_return', width: 126, render: percentFormatter }),
+  numericColumn({ title: '样本外夏普', dataIndex: 'oos_sharpe', width: 112, render: icFormatter }),
+  numericColumn({ title: '样本外卡玛', dataIndex: 'oos_calmar', width: 112, render: icFormatter }),
+  numericColumn({ title: '样本外回撤', dataIndex: 'oos_max_drawdown', width: 116, render: percentFormatter }),
+  numericColumn({ title: '年化波动', dataIndex: 'annualized_volatility', width: 112, render: percentFormatter }),
+  numericColumn({ title: '持仓', dataIndex: 'max_positions', width: 76, render: numberFormatter }),
+  numericColumn({ title: '卖出倍数', dataIndex: 'sell_rank_multiplier', width: 96, render: icFormatter }),
+  numericColumn({ title: '胜率', dataIndex: 'win_rate', width: 90, render: percentFormatter }),
+  numericColumn({ title: '交易', dataIndex: 'trade_count', width: 82, render: numberFormatter }),
+  { title: '参数', dataIndex: 'params_label', width: 800 },
 ];
 
 const getCorrelationColumns = components => [
@@ -831,14 +936,26 @@ const FactorLab = () => {
   const [backtestSearchFactorBucketCount, setBacktestSearchFactorBucketCount] = useState(20);
   const [backtestSearchMaxPositions, setBacktestSearchMaxPositions] = useState('7');
   const [backtestSearchSellMultipliers, setBacktestSearchSellMultipliers] = useState('2');
-  const [backtestSearchTopN, setBacktestSearchTopN] = useState(200);
+  const [backtestSearchRows, setBacktestSearchRows] = useState([]);
+  const [backtestSearchResultsLoading, setBacktestSearchResultsLoading] = useState(false);
+  const [backtestSearchTableState, setBacktestSearchTableState] = useState({
+    current: 1,
+    pageSize: 20,
+    sortField: 'objective_value',
+    sortOrder: 'descend',
+    filters: {},
+    total: 0,
+  });
+  const backtestSearchTableStateRef = useRef(backtestSearchTableState);
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
   const [compositeRunning, setCompositeRunning] = useState(false);
   const [backtestRunning, setBacktestRunning] = useState(false);
   const [backtestSearchStarting, setBacktestSearchStarting] = useState(false);
+  const [backtestSearchHistoryLoading, setBacktestSearchHistoryLoading] = useState(false);
   const [applyingSearchCaseIndex, setApplyingSearchCaseIndex] = useState(null);
+  const [analyzingSearchCaseIndex, setAnalyzingSearchCaseIndex] = useState(null);
   const [selectingCombo, setSelectingCombo] = useState(false);
 
   const selectedFactorKey = Form.useWatch('factor', form);
@@ -853,6 +970,10 @@ const FactorLab = () => {
     selectedFactor?.supports_mixed_windows
     && normalizeHeatmapWindows(selectedHeatmapWindows, []).some(isMixedWindow)
   );
+
+  useEffect(() => {
+    backtestSearchTableStateRef.current = backtestSearchTableState;
+  }, [backtestSearchTableState]);
 
   const loadOptions = useCallback(async () => {
     setLoadingOptions(true);
@@ -869,19 +990,80 @@ const FactorLab = () => {
     }
   }, [form, compositeForm, backtestForm]);
 
-  useEffect(() => {
-    loadOptions();
-  }, [loadOptions]);
+  const loadBacktestSearchResults = useCallback(async (nextState = {}) => {
+    const queryState = {
+      ...backtestSearchTableStateRef.current,
+      ...nextState,
+    };
+    setBacktestSearchResultsLoading(true);
+    try {
+      const { data } = await request.get('/api/factor-lab/backtest-search/results', {
+        params: {
+          page: queryState.current || 1,
+          page_size: queryState.pageSize || 20,
+          sort_field: queryState.sortField || 'objective_value',
+          sort_order: queryState.sortOrder || 'descend',
+          filters: JSON.stringify(queryState.filters || {}),
+        },
+      });
+      setBacktestSearchRows(data.rows || []);
+      const tableState = {
+        ...backtestSearchTableStateRef.current,
+        ...queryState,
+        current: data.page || queryState.current || 1,
+        pageSize: data.page_size || queryState.pageSize || 20,
+        sortField: data.sort_field || queryState.sortField || 'objective_value',
+        sortOrder: data.sort_order || queryState.sortOrder || 'descend',
+        filters: data.filters || queryState.filters || {},
+        total: data.total || 0,
+      };
+      backtestSearchTableStateRef.current = tableState;
+      setBacktestSearchTableState(tableState);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载批量搜索结果失败'));
+    } finally {
+      setBacktestSearchResultsLoading(false);
+    }
+  }, []);
+
+  const loadBacktestSearchHistory = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setBacktestSearchHistoryLoading(true);
+    try {
+      const { data } = await request.get('/api/factor-lab/backtest-search/history');
+      if (data?.status === 'idle' && !data?.total_cases) {
+        setBacktestSearchJob(null);
+        setBacktestSearchRows([]);
+        const tableState = { ...backtestSearchTableStateRef.current, current: 1, total: 0 };
+        backtestSearchTableStateRef.current = tableState;
+        setBacktestSearchTableState(tableState);
+        if (!silent) message.info('还没有历史搜索结果');
+      } else {
+        setBacktestSearchJob(data);
+        await loadBacktestSearchResults({ current: 1 });
+        if (!silent) message.success('已加载最近一次搜索结果');
+      }
+    } catch (error) {
+      if (!silent) {
+        message.error(getErrorMessage(error, '加载批量搜索历史失败'));
+      }
+    } finally {
+      if (!silent) setBacktestSearchHistoryLoading(false);
+    }
+  }, [loadBacktestSearchResults]);
 
   useEffect(() => {
-    const jobId = backtestSearchJob?.job_id;
-    const shouldPoll = jobId && BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
+    loadOptions();
+    loadBacktestSearchHistory({ silent: true });
+  }, [loadOptions, loadBacktestSearchHistory]);
+
+  useEffect(() => {
+    const shouldPoll = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
     if (!shouldPoll) return undefined;
 
     let disposed = false;
     const timer = window.setInterval(async () => {
       try {
-        const { data } = await request.get(`/api/factor-lab/backtest-search/${jobId}`);
+        const { data } = await request.get('/api/factor-lab/backtest-search/status');
         if (!disposed) {
           setBacktestSearchJob(data);
         }
@@ -896,7 +1078,12 @@ const FactorLab = () => {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [backtestSearchJob?.job_id, backtestSearchJob?.status]);
+  }, [backtestSearchJob?.status]);
+
+  useEffect(() => {
+    if (!backtestSearchJob || backtestSearchJob.status === 'idle') return;
+    loadBacktestSearchResults();
+  }, [backtestSearchJob?.completed_cases, backtestSearchJob?.status, loadBacktestSearchResults]);
 
   const handleFactorChange = value => {
     const factor = (options?.factors || []).find(item => item.key === value);
@@ -1026,6 +1213,13 @@ const FactorLab = () => {
   const startBacktestSearch = async () => {
     const values = await backtestForm.validateFields();
     const baseRequest = buildBacktestPayload(values);
+    if (
+      (String(backtestSearchObjective).startsWith('in_sample_') || String(backtestSearchObjective).startsWith('oos_'))
+      && !baseRequest.oos_start_date
+    ) {
+      message.warning('选择样本内/样本外目标时，请先设置样本外起始日期');
+      return;
+    }
     let maxPositionsCandidates;
     let sellMultiplierCandidates;
     try {
@@ -1048,14 +1242,24 @@ const FactorLab = () => {
     }
     setBacktestSearchStarting(true);
     try {
+      const resetTableState = {
+        ...backtestSearchTableStateRef.current,
+        current: 1,
+        sortField: 'objective_value',
+        sortOrder: 'descend',
+        filters: {},
+        total: 0,
+      };
+      backtestSearchTableStateRef.current = resetTableState;
+      setBacktestSearchTableState(resetTableState);
+      setBacktestSearchRows([]);
       const payload = {
         request: baseRequest,
         objective: backtestSearchObjective,
-        window_weight_bucket_count: Number(backtestSearchWindowBucketCount || 20),
-        factor_weight_bucket_count: Number(backtestSearchFactorBucketCount || 20),
+        window_weight_bucket_count: Number(backtestSearchWindowBucketCount ?? 20),
+        factor_weight_bucket_count: Number(backtestSearchFactorBucketCount ?? 20),
         max_positions_candidates: maxPositionsCandidates,
         sell_rank_multiplier_candidates: sellMultiplierCandidates,
-        top_n: Number(backtestSearchTopN || 200),
       };
       const { data } = await request.post('/api/factor-lab/backtest-search/start', payload, { timeout: 60000 });
       setBacktestSearchJob(data);
@@ -1068,9 +1272,9 @@ const FactorLab = () => {
   };
 
   const cancelBacktestSearch = async () => {
-    if (!backtestSearchJob?.job_id) return;
+    if (!backtestSearchRunning) return;
     try {
-      const { data } = await request.post(`/api/factor-lab/backtest-search/${backtestSearchJob.job_id}/cancel`);
+      const { data } = await request.post('/api/factor-lab/backtest-search/cancel');
       setBacktestSearchJob(data);
       message.success('已请求取消批量搜索');
     } catch (error) {
@@ -1090,6 +1294,64 @@ const FactorLab = () => {
       await executeBacktestPayload(row.request, '已应用参数并完成回测');
     } finally {
       setApplyingSearchCaseIndex(null);
+    }
+  };
+
+  const analyzeBacktestSearchRow = async row => {
+    if (!row?.request) {
+      message.warning('该搜索结果缺少可分析参数');
+      return;
+    }
+    setAnalyzingSearchCaseIndex(row.case_index);
+    try {
+      const legs = row.request.legs || [];
+      if (legs.length === 1) {
+        const [leg] = legs;
+        const currentValues = form.getFieldsValue();
+        const currentCompositeValues = compositeForm.getFieldsValue();
+        const heatmapWindow = isMixedWindow(leg.window) ? MIXED_WINDOW_KEY : Number(leg.window);
+        const nextValues = normalizeDefaultRequest({
+          ...row.request,
+          factor: leg.factor,
+          bucket_count: currentValues.bucket_count || DEFAULT_FORM_VALUES.bucket_count,
+          neutralization: leg.neutralization || 'none',
+          standardization: leg.standardization || 'rank_percentile',
+          heatmap_metric: currentValues.heatmap_metric || DEFAULT_HEATMAP_METRIC,
+          heatmap_windows: [heatmapWindow],
+          heatmap_forward_windows: [currentCompositeValues.forward_window || DEFAULT_COMPOSITE_VALUES.forward_window],
+          momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
+        });
+        form.setFieldsValue(nextValues);
+        setActiveTab('single');
+        setRunning(true);
+        const payload = buildAnalyzePayload(nextValues);
+        const { data } = await request.post('/api/factor-lab/analyze', payload, { timeout: 300000 });
+        setResult(data);
+        setSelectedCombo(data?.metadata?.selected_combo || null);
+        message.success('已按该参数组合完成因子分析');
+        return;
+      }
+
+      const currentCompositeValues = compositeForm.getFieldsValue();
+      const nextValues = normalizeCompositeDefaultRequest({
+        ...row.request,
+        bucket_count: currentCompositeValues.bucket_count || DEFAULT_COMPOSITE_VALUES.bucket_count,
+        forward_window: currentCompositeValues.forward_window || DEFAULT_COMPOSITE_VALUES.forward_window,
+        min_listing_days: row.request.min_listing_days ?? DEFAULT_MIN_LISTING_DAYS,
+      });
+      compositeForm.setFieldsValue(nextValues);
+      setActiveTab('composite');
+      setCompositeRunning(true);
+      const payload = buildCompositePayload(nextValues);
+      const { data } = await request.post('/api/factor-lab/analyze-composite', payload, { timeout: 300000 });
+      setCompositeResult(data);
+      message.success('已按该参数组合完成因子分析');
+    } catch (error) {
+      message.error(getErrorMessage(error, '查看该参数组合的因子分析失败'));
+    } finally {
+      setRunning(false);
+      setCompositeRunning(false);
+      setAnalyzingSearchCaseIndex(null);
     }
   };
 
@@ -1183,13 +1445,18 @@ const FactorLab = () => {
   const backtestYearlyRows = backtestResult?.yearly_stats || [];
   const backtestHoldingRows = backtestResult?.current_holdings || [];
   const backtestTradeRows = backtestResult?.trades || [];
-  const backtestSearchRows = backtestSearchJob?.rows || [];
   const backtestSearchSummary = backtestSearchJob?.summary || {};
   const backtestSearchRunning = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
   const effectiveBacktestSearchObjective = backtestSearchJob?.objective || backtestSearchObjective;
   const backtestSearchColumns = useMemo(
-    () => getBacktestSearchColumns(effectiveBacktestSearchObjective, applyBacktestSearchRow, applyingSearchCaseIndex),
-    [effectiveBacktestSearchObjective, applyingSearchCaseIndex],
+    () => getBacktestSearchColumns(
+      effectiveBacktestSearchObjective,
+      applyBacktestSearchRow,
+      analyzeBacktestSearchRow,
+      applyingSearchCaseIndex,
+      analyzingSearchCaseIndex,
+    ),
+    [effectiveBacktestSearchObjective, applyingSearchCaseIndex, analyzingSearchCaseIndex],
   );
   const backtestSearchObjectiveOptions = useMemo(() => (
     (options?.backtest_search_objectives || DEFAULT_BACKTEST_SEARCH_OBJECTIVES)
@@ -1795,6 +2062,11 @@ const FactorLab = () => {
                   <DatePicker className="factor-lab-full" allowClear />
                 </Form.Item>
               </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="oos_start_date" label="样本外起始">
+                  <DatePicker className="factor-lab-full" allowClear />
+                </Form.Item>
+              </Col>
               <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item name="initial_capital" label="初始资金" rules={[{ required: true }]}>
                   <InputNumber min={1000} step={10000} precision={2} controls className="factor-lab-full" />
@@ -1952,12 +2224,12 @@ const FactorLab = () => {
               <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item label="窗口权重分桶">
                   <InputNumber
-                    min={1}
+                    min={0}
                     max={100}
                     precision={0}
                     controls
                     value={backtestSearchWindowBucketCount}
-                    onChange={value => setBacktestSearchWindowBucketCount(value || 20)}
+                    onChange={value => setBacktestSearchWindowBucketCount(value ?? 20)}
                     className="factor-lab-full"
                   />
                 </Form.Item>
@@ -1965,12 +2237,12 @@ const FactorLab = () => {
               <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item label="因子权重分桶">
                   <InputNumber
-                    min={1}
+                    min={0}
                     max={100}
                     precision={0}
                     controls
                     value={backtestSearchFactorBucketCount}
-                    onChange={value => setBacktestSearchFactorBucketCount(value || 20)}
+                    onChange={value => setBacktestSearchFactorBucketCount(value ?? 20)}
                     className="factor-lab-full"
                   />
                 </Form.Item>
@@ -1994,19 +2266,6 @@ const FactorLab = () => {
                 </Form.Item>
               </Col>
               <Col xs={12} sm={6} md={4} lg={3}>
-                <Form.Item label="Top N">
-                  <InputNumber
-                    min={1}
-                    max={1000}
-                    precision={0}
-                    controls
-                    value={backtestSearchTopN}
-                    onChange={value => setBacktestSearchTopN(value || 200)}
-                    className="factor-lab-full"
-                  />
-                </Form.Item>
-              </Col>
-              <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item label=" ">
                   <Button
                     loading={backtestSearchStarting}
@@ -2015,6 +2274,17 @@ const FactorLab = () => {
                     className="factor-lab-full"
                   >
                     启动搜索
+                  </Button>
+                </Form.Item>
+              </Col>
+              <Col xs={12} sm={6} md={4} lg={3}>
+                <Form.Item label=" ">
+                  <Button
+                    loading={backtestSearchHistoryLoading}
+                    onClick={() => loadBacktestSearchHistory()}
+                    className="factor-lab-full"
+                  >
+                    查看历史
                   </Button>
                 </Form.Item>
               </Col>
@@ -2058,16 +2328,15 @@ const FactorLab = () => {
         >
           <Progress
             percent={Number(backtestSearchJob.progress_pct || 0)}
-            status={backtestSearchJob.status === 'failed' ? 'exception' : (backtestSearchJob.status === 'completed' ? 'success' : (backtestSearchRunning ? 'active' : 'normal'))}
+            status={['failed', 'interrupted'].includes(backtestSearchJob.status) ? 'exception' : (backtestSearchJob.status === 'completed' ? 'success' : (backtestSearchRunning ? 'active' : 'normal'))}
           />
           <div className="factor-lab-compact-stats">
             <span>完成 {numberFormatter(backtestSearchJob.completed_cases)} / {numberFormatter(backtestSearchJob.total_cases)}</span>
             <span>失败 {numberFormatter(backtestSearchJob.failed_cases)}</span>
+            <span>结果 {numberFormatter(backtestSearchJob.result_count)}</span>
             <span>并发 {numberFormatter(backtestSearchJob.worker_count)}</span>
             <span>目标 {backtestSearchJob.objective_label}</span>
-            <span>Top {numberFormatter(backtestSearchJob.top_n || backtestSearchTopN)}</span>
             <span>{numberFormatter(backtestSearchSummary.elapsed_ms)} ms</span>
-            <span>最佳 {formatBacktestSearchObjective(backtestSearchSummary.best_objective_value, backtestSearchJob.objective)}</span>
           </div>
           {backtestSearchJob.current_case && (
             <Text className="factor-lab-search-current" type="secondary" ellipsis={{ tooltip: backtestSearchJob.current_case }}>
@@ -2078,10 +2347,34 @@ const FactorLab = () => {
           <Table
             rowKey="case_index"
             size="small"
+            loading={backtestSearchResultsLoading}
             columns={backtestSearchColumns}
             dataSource={backtestSearchRows}
-            pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
-            scroll={{ x: 1540 }}
+            pagination={{
+              current: backtestSearchTableState.current,
+              pageSize: backtestSearchTableState.pageSize,
+              total: backtestSearchTableState.total,
+              showSizeChanger: true,
+              pageSizeOptions: [20, 50, 100, 200],
+              showTotal: total => `共 ${numberFormatter(total)} 条`,
+            }}
+            onChange={(pagination, filters, sorter) => {
+              const sorterItem = Array.isArray(sorter) ? sorter[0] : sorter;
+              const nextState = {
+                current: pagination.current || 1,
+                pageSize: pagination.pageSize || 20,
+                sortField: sorterItem?.field || 'objective_value',
+                sortOrder: sorterItem?.order || 'descend',
+                filters: normalizeSearchTableFilters(filters),
+              };
+              backtestSearchTableStateRef.current = {
+                ...backtestSearchTableStateRef.current,
+                ...nextState,
+              };
+              setBacktestSearchTableState(previous => ({ ...previous, ...nextState }));
+              loadBacktestSearchResults(nextState);
+            }}
+            scroll={{ x: 2940 }}
           />
         </Card>
       )}
