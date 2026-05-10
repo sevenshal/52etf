@@ -98,6 +98,7 @@ const DEFAULT_FORM_VALUES = {
   legs: DEFAULT_VIRTUAL_LEGS,
   auto_sync_enabled: true,
   auto_sync_time: '16:15',
+  auto_trade_time: '09:31',
 };
 
 const formatPercent = value => {
@@ -450,12 +451,14 @@ const USStockSignalLive = () => {
     },
     { title: '股票', dataIndex: 'symbol', width: 100 },
     { title: '价格', dataIndex: 'price', width: 90, align: 'right', render: value => formatNumber(value, 2) },
+    { title: '原始成交价', dataIndex: 'execution_price', width: 110, align: 'right', render: value => formatNumber(value, 2) },
     { title: '股数', dataIndex: 'quantity', width: 90, align: 'right' },
     { title: '金额', dataIndex: 'amount', width: 120, align: 'right', render: formatMoney },
     { title: '佣金', dataIndex: 'commission', width: 90, align: 'right', render: value => formatNumber(value, 2) },
     { title: '收益', dataIndex: 'profit', width: 100, align: 'right', render: value => value === null || value === undefined ? '-' : formatMoney(value) },
     { title: '收益率', dataIndex: 'profit_pct', width: 90, align: 'right', render: formatPercent },
     { title: '成交来源', dataIndex: 'price_source', width: 100 },
+    { title: '报价时间', dataIndex: 'quote_timestamp', width: 170, render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
     { title: '原因', dataIndex: 'reason_detail', width: 260, ellipsis: true },
   ];
 
@@ -799,11 +802,14 @@ const USStockSignalLive = () => {
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="auto_sync_enabled" label="自动同步" valuePropName="checked">
-                    <Switch />
+                  <Form.Item name="auto_trade_time" label="自动交易时间(ET)" rules={[{ required: true }]}>
+                    <Input />
                   </Form.Item>
                 </Col>
               </Row>
+              <Form.Item name="auto_sync_enabled" label="开关" valuePropName="checked">
+                <Switch />
+              </Form.Item>
             </Form>
           </Card>
         </Col>
@@ -849,7 +855,7 @@ const USStockSignalLive = () => {
                       {
                         key: 'trades',
                         label: '交易',
-                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1450 }} />,
+                        children: <Table rowKey="id" size="small" columns={tradeColumns} dataSource={detail?.trades || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1730 }} />,
                       },
                       {
                         key: 'yearly',
