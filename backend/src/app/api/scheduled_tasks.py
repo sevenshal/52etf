@@ -76,6 +76,7 @@ def run_scheduled_task_now(
             "a_stock_base_data_sync",
             "etf_historical_holdings_backfill",
             "soxx_fear_greed_backfill",
+            "a_stock_etf_fear_greed_backfill",
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
         if task_key == "etf_put_call_ratio_sync":

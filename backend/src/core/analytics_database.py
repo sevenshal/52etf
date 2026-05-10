@@ -20,6 +20,8 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_index_daily",
         "a_stock_market_daily",
         "a_stock_name_changes",
+        "a_stock_chinabond_yield_curve_daily",
+        "a_stock_chinabond_yield_curve_defs",
         "a_stock_option_basic",
         "a_stock_option_daily",
         "a_stock_repo_daily",
@@ -186,6 +188,31 @@ class AStockRepoDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockChinaBondYieldCurveDef(AnalyticsBase):
+    """中债收益率曲线定义，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_chinabond_yield_curve_defs"
+
+    curve_id = Column(String(64), primary_key=True)
+    curve_name = Column(String(128), nullable=False)
+    category = Column(String(64), index=True)
+    rating = Column(String(16), index=True)
+    pair_key = Column(String(64), index=True)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockChinaBondYieldCurveDaily(AnalyticsBase):
+    """中债收益率曲线每日期限点，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_chinabond_yield_curve_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    curve_id = Column(String(64), primary_key=True)
+    curve_name = Column(String(128))
+    term = Column(Float, primary_key=True)
+    yield_rate = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class USStockDaily(AnalyticsBase):
     """LongPort 美股日K行情，存放在 DuckDB 分析库。"""
     __tablename__ = "us_stock_daily"
@@ -219,6 +246,9 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_date_exchange ON a_stock_option_daily(trade_date, exchange)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_symbol_date ON a_stock_option_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_repo_daily_maturity_date ON a_stock_repo_daily(repo_maturity, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_defs_pair ON a_stock_chinabond_yield_curve_defs(pair_key, rating)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_daily_curve_date ON a_stock_chinabond_yield_curve_daily(curve_id, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_daily_date_term ON a_stock_chinabond_yield_curve_daily(trade_date, term)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_symbol_date ON us_stock_daily(symbol, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]

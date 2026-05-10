@@ -23,6 +23,14 @@ TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
 )
+TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE", "420")),
+)
+TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE", "420")),
+)
 
 
 class TushareUnsupportedError(NotImplementedError):
@@ -55,6 +63,14 @@ class TushareService(QuoteProvider):
     _instances = {}
     _income_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _option_daily_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _repo_daily_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
 
@@ -594,52 +610,130 @@ class TushareService(QuoteProvider):
         exchange_value = str(exchange or "").strip().upper()
         if not trade_value or exchange_value not in {"SSE", "SZSE"}:
             return pd.DataFrame()
+        return self.get_option_daily_range_frame(trade_value, trade_value, exchange_value)
+
+    def get_option_daily_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        exchange: str,
+        limit: int = 15000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """批量获取某交易所 ETF 期权日线行情。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        exchange_value = str(exchange or "").strip().upper()
+        if not start_value or not end_value or start_value > end_value or exchange_value not in {"SSE", "SZSE"}:
+            return pd.DataFrame()
         fields = (
             "ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,"
             "close,settle,vol,amount,oi"
         )
-        try:
-            frame = self.pro.opt_daily(
-                trade_date=trade_value.strftime("%Y%m%d"),
-                exchange=exchange_value,
-                fields=fields,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Tushare opt_daily fetch failed for %s %s: %s",
-                exchange_value,
-                trade_value,
-                exc,
-            )
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 15000))
+        while True:
+            try:
+                self._option_daily_rate_limiter.wait()
+                frame = self.pro.opt_daily(
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    exchange=exchange_value,
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare opt_daily range fetch failed for %s %s~%s offset=%s: %s",
+                    exchange_value,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                if raise_on_error:
+                    raise
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
             return pd.DataFrame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return pd.DataFrame()
-        frame = frame.copy()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
-        return frame.dropna(subset=["ts_code", "trade_date"])
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "trade_date"],
+            keep="last",
+        )
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
     def get_repo_daily_frame(self, trade_date: date) -> pd.DataFrame:
         """获取某交易日交易所债券回购行情。"""
         trade_value = self._to_date(trade_date)
         if not trade_value:
             return pd.DataFrame()
+        return self.get_repo_daily_range_frame(trade_value, trade_value)
+
+    def get_repo_daily_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        limit: int = 2000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """批量获取交易所债券回购日行情。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
         fields = (
             "ts_code,trade_date,repo_maturity,pre_close,open,high,low,close,"
             "weight,weight_r,amount,num"
         )
-        try:
-            frame = self.pro.repo_daily(
-                trade_date=trade_value.strftime("%Y%m%d"),
-                fields=fields,
-            )
-        except Exception as exc:
-            self.logger.warning("Tushare repo_daily fetch failed for %s: %s", trade_value, exc)
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 2000))
+        while True:
+            try:
+                self._repo_daily_rate_limiter.wait()
+                frame = self.pro.repo_daily(
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare repo_daily range fetch failed for %s~%s offset=%s: %s",
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                if raise_on_error:
+                    raise
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
             return pd.DataFrame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return pd.DataFrame()
-        frame = frame.copy()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
-        return frame.dropna(subset=["ts_code", "trade_date"])
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "trade_date"],
+            keep="last",
+        )
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
     def _load_fund_basic_frame(self) -> pd.DataFrame:
         if self._fund_basic_frame is None:

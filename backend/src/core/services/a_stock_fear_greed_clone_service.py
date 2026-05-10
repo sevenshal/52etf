@@ -76,10 +76,10 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "junk_bond_demand": ComponentSpec(
         key="junk_bond_demand",
-        name="Funding Pressure Proxy",
-        raw_label="-GC007 close",
-        source="Tushare repo_daily in DuckDB",
-        proxy_note="Temporary funding-pressure proxy for credit risk appetite; lower repo stress is greed.",
+        name="Credit Spread Demand",
+        raw_label="-mean 3Y AA-AAA credit spread across medium-note, enterprise-bond and urban-investment curves",
+        source="ChinaBond yield curves in DuckDB",
+        proxy_note="ChinaBond AA/AAA credit spread proxy for risk appetite; narrower spread is greed.",
     ),
 }
 
@@ -365,7 +365,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         market_frames = self._load_constituent_market_frames(holdings_by_date, index, start_date, end_date)
         bond_close = self._load_index_close(A_STOCK_INNO100_SAFE_HAVEN_INDEX, start_date, end_date).reindex(index).ffill()
         option_pcr = self._load_option_volume_pcr(start_date, end_date).reindex(index).ffill(limit=3)
-        repo_rate = self._load_repo_rate(start_date, end_date).reindex(index).ffill(limit=3)
+        credit_spread = self._load_credit_spread(start_date, end_date).reindex(index).ffill(limit=3)
 
         df = pd.DataFrame(index=index)
         df["market_momentum"] = level / level.rolling(125).mean() - 1.0
@@ -374,7 +374,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
         df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
-        df["junk_bond_demand"] = -repo_rate
+        df["junk_bond_demand"] = -credit_spread
         df["etf_open"] = level
         df["etf_high"] = level
         df["etf_low"] = level
@@ -517,39 +517,53 @@ class AStockInnovation100FearGreedCloneCalculator:
         ratio = put_volume / call_volume.replace(0, np.nan)
         return ratio.sort_index()
 
-    def _load_repo_rate(self, start_date: date, end_date: date) -> pd.Series:
+    def _load_credit_spread(self, start_date: date, end_date: date, term: float = 3.0) -> pd.Series:
         analytics_db = AnalyticsSession()
         try:
             rows = analytics_db.execute(
                 text(
                     """
-                    SELECT trade_date, repo_maturity, close
-                    FROM a_stock_repo_daily
-                    WHERE trade_date >= :start_date
-                      AND trade_date <= :end_date
-                      AND repo_maturity IN ('GC007', 'R007')
-                    ORDER BY trade_date
+                    SELECT
+                        d.trade_date,
+                        defs.pair_key,
+                        defs.rating,
+                        d.yield_rate
+                    FROM a_stock_chinabond_yield_curve_daily d
+                    JOIN a_stock_chinabond_yield_curve_defs defs
+                      ON defs.curve_id = d.curve_id
+                    WHERE d.trade_date >= :start_date
+                      AND d.trade_date <= :end_date
+                      AND ABS(d.term - :term) < 0.000001
+                      AND defs.pair_key IN ('medium_note', 'enterprise_bond', 'urban_investment_bond')
+                      AND defs.rating IN ('AAA', 'AA')
+                    ORDER BY d.trade_date
                     """
                 ),
                 {
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
+                    "term": term,
                 },
             ).fetchall()
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError("A股回购利率缺失，请先执行 A股基础数据同步")
-        frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "repo_maturity", "close"])
+            raise FearGreedCloneError("中债信用收益率曲线缺失，请先执行 A股基础数据同步")
+        frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "pair_key", "rating", "yield_rate"])
         frame["date"] = pd.to_datetime(frame["date"])
-        pivot = frame.pivot_table(index="date", columns="repo_maturity", values="close", aggfunc="last")
-        if "GC007" in pivot.columns:
-            series = pivot["GC007"]
-        elif "R007" in pivot.columns:
-            series = pivot["R007"]
-        else:
-            raise FearGreedCloneError("A股回购利率缺少 GC007/R007")
-        return pd.to_numeric(series, errors="coerce").sort_index()
+        frame["yield_rate"] = pd.to_numeric(frame["yield_rate"], errors="coerce")
+        pivot = frame.pivot_table(
+            index=["date", "pair_key"],
+            columns="rating",
+            values="yield_rate",
+            aggfunc="last",
+        )
+        if "AA" not in pivot.columns or "AAA" not in pivot.columns:
+            raise FearGreedCloneError("中债信用曲线缺少 AA/AAA 配对数据")
+        spread_by_pair = (pivot["AA"] - pivot["AAA"]).dropna()
+        if spread_by_pair.empty:
+            raise FearGreedCloneError("中债 AA-AAA 信用利差为空")
+        return spread_by_pair.groupby(level="date").mean().sort_index()
 
     def _weighted_range_position(
         self,
@@ -664,6 +678,6 @@ class AStockInnovation100FearGreedCloneCalculator:
             "This is an independent A创100-specific clone, not CNN's undisclosed calculation.",
             "Scores use rolling z-score/CDF and equal-weighted components.",
             "The option component uses related A-share ETF option volume put/call ratios from Tushare.",
-            "The funding-pressure component uses GC007 as a temporary credit-risk proxy, not a true AA/AAA credit spread.",
+            "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

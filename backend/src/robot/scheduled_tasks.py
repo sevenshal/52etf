@@ -308,7 +308,9 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     logging.getLogger("ScheduledTaskManager").info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
-            "option_basic_saved=%s option_daily_saved=%s repo_daily_saved=%s "
+            "option_basic_saved=%s option_daily_saved=%s option_refresh_dates=%s option_chunks=%s option_errors=%s "
+            "repo_daily_saved=%s repo_refresh_dates=%s repo_chunks=%s repo_errors=%s "
+            "chinabond_defs_saved=%s chinabond_daily_saved=%s chinabond_refresh_dates=%s chinabond_chunks=%s chinabond_errors=%s "
             "income_fetched_rows=%s income_saved_rows=%s income_fetch_seconds=%s "
             "income_insert_seconds=%s income_total_seconds=%s income_insert_batches=%s "
             "income_skipped_symbols=%s income_backfill_symbols=%s income_incremental_symbols=%s income_full_symbols=%s"
@@ -319,7 +321,18 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         result.get("tables"),
         result.get("option_basic_rows_saved"),
         result.get("option_daily_saved_rows"),
+        result.get("option_daily_refresh_dates"),
+        result.get("option_daily_chunks"),
+        result.get("option_daily_errors"),
         result.get("repo_daily_saved_rows"),
+        result.get("repo_daily_refresh_dates"),
+        result.get("repo_daily_chunks"),
+        result.get("repo_daily_errors"),
+        result.get("chinabond_curve_defs_saved"),
+        result.get("chinabond_curve_daily_saved_rows"),
+        result.get("chinabond_curve_refresh_dates"),
+        result.get("chinabond_curve_chunks"),
+        result.get("chinabond_curve_errors"),
         result.get("income_fetched_rows"),
         result.get("income_saved_rows"),
         result.get("income_fetch_seconds"),
@@ -336,9 +349,21 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         f"start={result.get('start_date')} "
         f"market_start={result.get('market_start_date')} "
         f"option_start={result.get('option_start_date')} "
+        f"repo_start={result.get('repo_start_date')} "
         f"option_basic_saved={result.get('option_basic_rows_saved')} "
         f"option_daily_saved={result.get('option_daily_saved_rows')} "
+        f"option_refresh_dates={result.get('option_daily_refresh_dates')} "
+        f"option_chunks={result.get('option_daily_chunks')} "
+        f"option_errors={result.get('option_daily_errors')} "
         f"repo_daily_saved={result.get('repo_daily_saved_rows')} "
+        f"repo_refresh_dates={result.get('repo_daily_refresh_dates')} "
+        f"repo_chunks={result.get('repo_daily_chunks')} "
+        f"repo_errors={result.get('repo_daily_errors')} "
+        f"chinabond_start={result.get('chinabond_start_date')} "
+        f"chinabond_daily_saved={result.get('chinabond_curve_daily_saved_rows')} "
+        f"chinabond_refresh_dates={result.get('chinabond_curve_refresh_dates')} "
+        f"chinabond_chunks={result.get('chinabond_curve_chunks')} "
+        f"chinabond_errors={result.get('chinabond_curve_errors')} "
         f"income_mode={result.get('income_sync_mode')} "
         f"income_scope={result.get('income_symbol_scope')} "
         f"income_symbols={result.get('income_symbols')} "
@@ -597,7 +622,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情、期权/回购行情和利润表到DuckDB分析库。",
+                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情、期权/回购行情、中债信用曲线和利润表到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,

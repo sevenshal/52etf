@@ -1,6 +1,5 @@
 import hashlib
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -13,6 +12,8 @@ from sqlalchemy.orm import Session
 from ..core.analytics_database import (
     ANALYTICS_DB_PATH,
     AStockBasic,
+    AStockChinaBondYieldCurveDaily,
+    AStockChinaBondYieldCurveDef,
     AStockIncome,
     AStockIndexDaily,
     AStockMarketDaily,
@@ -22,10 +23,12 @@ from ..core.analytics_database import (
     AStockRepoDaily,
     AnalyticsSession,
 )
+from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
     A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
     BENCHMARK_INDEXES,
+    CHINABOND_CREDIT_CURVES,
     DEFAULT_START_DATE,
     MAX_MARKET_DAILY_OHL_ZERO_PCT,
     MIN_MARKET_DAILY_ROWS,
@@ -37,28 +40,19 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[Dict], None]
 
-MARKET_FETCH_WORKERS = max(
-    1,
-    int(
-        os.getenv(
-            "A_STOCK_BASE_DATA_SYNC_FETCH_WORKERS",
-            os.getenv("A_STOCK_INNOVATION100_FETCH_WORKERS", "3"),
-        )
-    ),
-)
-INCOME_HISTORY_LOOKBACK_DAYS = max(365, int(os.getenv("A_STOCK_INCOME_HISTORY_LOOKBACK_DAYS", str(365 * 6))))
-INCOME_SYNC_REFRESH_OVERLAP_DAYS = max(0, int(os.getenv("A_STOCK_INCOME_SYNC_REFRESH_OVERLAP_DAYS", "45")))
-INCOME_SYNC_WORKERS = max(1, int(os.getenv("A_STOCK_INCOME_SYNC_WORKERS", "4")))
-INCOME_INSERT_BATCH_ROWS = max(1, int(os.getenv("A_STOCK_INCOME_INSERT_BATCH_ROWS", "5000")))
-INCOME_INSERT_BATCH_FRAMES = max(1, int(os.getenv("A_STOCK_INCOME_INSERT_BATCH_FRAMES", "500")))
-A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS = max(
-    0,
-    int(os.getenv("A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS", "45")),
-)
-A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS = max(
-    550,
-    int(os.getenv("A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS", "900")),
-)
+SYNC_WORKERS = 5
+SYNC_REFRESH_OVERLAP_DAYS = 45
+INCOME_HISTORY_LOOKBACK_DAYS = 365 * 6
+INCOME_INSERT_BATCH_ROWS = 5000
+INCOME_INSERT_BATCH_FRAMES = 500
+A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS = 900
+A_STOCK_OPTION_DAILY_CHUNK_TRADING_DAYS = 20
+A_STOCK_OPTION_DAILY_CHUNK_CALENDAR_DAYS = 45
+A_STOCK_REPO_DAILY_CHUNK_TRADING_DAYS = 30
+A_STOCK_REPO_DAILY_CHUNK_CALENDAR_DAYS = 70
+A_STOCK_CHINABOND_HISTORY_LOOKBACK_DAYS = A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS
+A_STOCK_CHINABOND_CHUNK_TRADING_DAYS = 10
+A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS = 30
 A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
 
 
@@ -190,6 +184,26 @@ def _chunks(items: List, size: int):
         yield items[index:index + size]
 
 
+def _date_chunks_by_span(
+    dates: List[date],
+    max_items: int,
+    max_calendar_span_days: int,
+) -> List[List[date]]:
+    chunks: List[List[date]] = []
+    current_chunk: List[date] = []
+    for current_date in dates:
+        if current_chunk and (
+            len(current_chunk) >= max_items
+            or (current_date - current_chunk[0]).days > max_calendar_span_days
+        ):
+            chunks.append(current_chunk)
+            current_chunk = []
+        current_chunk.append(current_date)
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
 def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     if not day_stats:
         return True
@@ -199,6 +213,30 @@ def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     ohl_zero_rows = int(day_stats.get("ohl_zero_rows") or 0)
     ohl_zero_pct = ohl_zero_rows / row_count * 100 if row_count else 100.0
     return ohl_zero_pct > MAX_MARKET_DAILY_OHL_ZERO_PCT
+
+
+def _option_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
+    if not day_stats:
+        return True
+    row_count = int(day_stats.get("row_count") or 0)
+    if row_count <= 0:
+        return True
+    exchange_count = int(day_stats.get("exchange_count") or 0)
+    return exchange_count < len(A_STOCK_OPTION_DAILY_SYNC_EXCHANGES)
+
+
+def _repo_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
+    if not day_stats:
+        return True
+    return int(day_stats.get("row_count") or 0) <= 0
+
+
+def _chinabond_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
+    if not day_stats:
+        return True
+    row_count = int(day_stats.get("row_count") or 0)
+    curve_count = int(day_stats.get("curve_count") or 0)
+    return row_count <= 0 or curve_count < len(CHINABOND_CREDIT_CURVES)
 
 
 class AStockBaseDataSyncService:
@@ -211,6 +249,7 @@ class AStockBaseDataSyncService:
         self.analytics_db = analytics_db or AnalyticsSession()
         self._owns_analytics_db = analytics_db is None
         self.tushare = tushare_service or TushareService.getInstance()
+        self.chinabond = ChinaBondYieldCurveService()
         self.progress_callback = progress_callback
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -410,7 +449,7 @@ class AStockBaseDataSyncService:
             return chunk_start, chunk_end, frame
 
         completed = 0
-        workers = min(MARKET_FETCH_WORKERS, len(chunks))
+        workers = min(SYNC_WORKERS, len(chunks))
         if workers <= 1:
             for chunk in chunks:
                 chunk_start, chunk_end, frame = fetch_chunk(chunk)
@@ -440,6 +479,66 @@ class AStockBaseDataSyncService:
                 )
                 if not frame.empty:
                     self._upsert_market_frame(frame)
+
+    def _existing_option_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
+        rows = self.analytics_db.execute(
+            text("""
+                SELECT
+                    trade_date,
+                    COUNT(*) AS row_count,
+                    COUNT(DISTINCT exchange) AS exchange_count
+                FROM a_stock_option_daily
+                WHERE trade_date >= :start_date AND trade_date <= :end_date
+                GROUP BY trade_date
+            """),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        ).fetchall()
+        return {
+            _parse_date(row[0]): {
+                "row_count": int(row[1] or 0),
+                "exchange_count": int(row[2] or 0),
+            }
+            for row in rows
+            if _parse_date(row[0])
+        }
+
+    def _existing_repo_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
+        rows = self.analytics_db.execute(
+            text("""
+                SELECT trade_date, COUNT(*) AS row_count
+                FROM a_stock_repo_daily
+                WHERE trade_date >= :start_date AND trade_date <= :end_date
+                GROUP BY trade_date
+            """),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        ).fetchall()
+        return {
+            _parse_date(row[0]): {"row_count": int(row[1] or 0)}
+            for row in rows
+            if _parse_date(row[0])
+        }
+
+    def _existing_chinabond_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
+        rows = self.analytics_db.execute(
+            text("""
+                SELECT
+                    trade_date,
+                    COUNT(*) AS row_count,
+                    COUNT(DISTINCT curve_id) AS curve_count
+                FROM a_stock_chinabond_yield_curve_daily
+                WHERE trade_date >= :start_date AND trade_date <= :end_date
+                GROUP BY trade_date
+            """),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        ).fetchall()
+        return {
+            _parse_date(row[0]): {
+                "row_count": int(row[1] or 0),
+                "curve_count": int(row[2] or 0),
+            }
+            for row in rows
+            if _parse_date(row[0])
+        }
 
     def _upsert_market_frame(self, frame: pd.DataFrame, trade_date: Optional[date] = None):
         market_frame = self._normalize_market_frame(frame, trade_date=trade_date)
@@ -545,16 +644,318 @@ class AStockBaseDataSyncService:
         combined = pd.concat(frames, ignore_index=True)
         return _bulk_upsert_option_basic_frame(self.analytics_db, combined)
 
-    def sync_option_and_repo_daily(self, start_date: date, end_date: date) -> Dict:
+    def sync_option_and_repo_daily(
+        self,
+        start_date: date,
+        end_date: date,
+        repo_start_date: Optional[date] = None,
+    ) -> Dict:
+        option_start_value = _parse_date(start_date)
+        repo_start_value = _parse_date(repo_start_date) or option_start_value
+        end_value = _parse_date(end_date)
+        if not option_start_value or not repo_start_value or not end_value:
+            return {
+                "start_date": option_start_value.isoformat() if option_start_value else None,
+                "repo_start_date": repo_start_value.isoformat() if repo_start_value else None,
+                "end_date": end_value.isoformat() if end_value else None,
+                "trading_days": 0,
+                "option_trading_days": 0,
+                "repo_trading_days": 0,
+                "option_refresh_dates": 0,
+                "repo_refresh_dates": 0,
+                "option_saved_rows": 0,
+                "repo_saved_rows": 0,
+            }
+        if option_start_value > end_value and repo_start_value > end_value:
+            return {
+                "start_date": option_start_value.isoformat(),
+                "repo_start_date": repo_start_value.isoformat(),
+                "end_date": end_value.isoformat() if end_value else None,
+                "trading_days": 0,
+                "option_trading_days": 0,
+                "repo_trading_days": 0,
+                "option_refresh_dates": 0,
+                "repo_refresh_dates": 0,
+                "option_saved_rows": 0,
+                "repo_saved_rows": 0,
+            }
+
+        calendar_start = min(option_start_value, repo_start_value)
+        calendar = self.tushare.get_trade_calendar_frame(calendar_start, end_value)
+        trading_dates = [
+            item
+            for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
+            if item <= end_value
+        ] if not calendar.empty else []
+
+        option_trading_dates = [item for item in trading_dates if option_start_value <= item <= end_value]
+        repo_trading_dates = [item for item in trading_dates if repo_start_value <= item <= end_value]
+
+        option_refresh_dates = self._option_daily_dates_needing_refresh(option_trading_dates)
+        repo_refresh_dates = self._repo_daily_dates_needing_refresh(repo_trading_dates)
+
+        if option_refresh_dates:
+            self._progress(
+                (
+                    f"A股期权日行情待补 {len(option_refresh_dates)} 个交易日 "
+                    f"{min(option_refresh_dates).isoformat()} ~ {max(option_refresh_dates).isoformat()}"
+                ),
+                72,
+                refresh_dates=len(option_refresh_dates),
+                total_dates=len(option_trading_dates),
+            )
+        else:
+            self._progress(
+                "A股期权日行情缓存已就绪",
+                74,
+                processed_dates=len(option_trading_dates),
+                total_dates=len(option_trading_dates),
+            )
+        if repo_refresh_dates:
+            self._progress(
+                (
+                    f"A股回购日行情待补 {len(repo_refresh_dates)} 个交易日 "
+                    f"{min(repo_refresh_dates).isoformat()} ~ {max(repo_refresh_dates).isoformat()}"
+                ),
+                76,
+                refresh_dates=len(repo_refresh_dates),
+                total_dates=len(repo_trading_dates),
+            )
+        else:
+            self._progress(
+                "A股回购日行情缓存已就绪",
+                78,
+                processed_dates=len(repo_trading_dates),
+                total_dates=len(repo_trading_dates),
+            )
+
+        option_result = self._sync_option_daily_ranges(option_refresh_dates)
+        repo_result = self._sync_repo_daily_dates(repo_refresh_dates)
+
+        return {
+            "start_date": option_start_value.isoformat(),
+            "repo_start_date": repo_start_value.isoformat(),
+            "end_date": end_value.isoformat(),
+            "trading_days": len(set(option_trading_dates + repo_trading_dates)),
+            "option_trading_days": len(option_trading_dates),
+            "repo_trading_days": len(repo_trading_dates),
+            "option_refresh_dates": len(option_refresh_dates),
+            "repo_refresh_dates": len(repo_refresh_dates),
+            "option_saved_rows": option_result.get("saved_rows", 0),
+            "repo_saved_rows": repo_result.get("saved_rows", 0),
+            "option_chunks": option_result.get("chunks", 0),
+            "repo_chunks": repo_result.get("chunks", 0),
+            "option_errors": len(option_result.get("errors") or []),
+            "repo_errors": len(repo_result.get("errors") or []),
+        }
+
+    def _option_daily_dates_needing_refresh(self, trading_dates: List[date]) -> List[date]:
+        if not trading_dates:
+            return []
+        stats_by_date = self._existing_option_day_stats(min(trading_dates), max(trading_dates))
+        return [item for item in trading_dates if _option_day_needs_refresh(stats_by_date.get(item))]
+
+    def _repo_daily_dates_needing_refresh(self, trading_dates: List[date]) -> List[date]:
+        if not trading_dates:
+            return []
+        stats_by_date = self._existing_repo_day_stats(min(trading_dates), max(trading_dates))
+        return [item for item in trading_dates if _repo_day_needs_refresh(stats_by_date.get(item))]
+
+    def _sync_option_daily_ranges(self, trading_dates: List[date]) -> Dict:
+        chunks = _date_chunks_by_span(
+            trading_dates,
+            A_STOCK_OPTION_DAILY_CHUNK_TRADING_DAYS,
+            A_STOCK_OPTION_DAILY_CHUNK_CALENDAR_DAYS,
+        )
+        if not chunks:
+            return {"chunks": 0, "saved_rows": 0, "errors": []}
+
+        def fetch_chunk(chunk: List[date]) -> Tuple[date, date, pd.DataFrame]:
+            chunk_start = min(chunk)
+            chunk_end = max(chunk)
+            frames = []
+            for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
+                frame = self.tushare.get_option_daily_range_frame(
+                    chunk_start,
+                    chunk_end,
+                    exchange,
+                    raise_on_error=True,
+                )
+                if not frame.empty:
+                    frames.append(frame)
+            combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            return chunk_start, chunk_end, combined
+
+        def save_chunk(chunk_start: date, chunk_end: date, frame: pd.DataFrame) -> int:
+            if frame.empty:
+                return 0
+            return _bulk_replace_option_daily_frame(self.analytics_db, frame)
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        processed_chunks = 0
+        total_chunks = len(chunks)
+        workers = min(SYNC_WORKERS, total_chunks)
+        refresh_start = min(trading_dates)
+        refresh_end = max(trading_dates)
+
+        def report_progress(chunk_start: date, chunk_end: date):
+            self._progress(
+                (
+                    f"批量同步A股期权日行情 {processed_chunks}/{total_chunks}，"
+                    f"待补范围 {refresh_start.isoformat()} ~ {refresh_end.isoformat()}，"
+                    f"最近完成 {chunk_start.isoformat()} ~ {chunk_end.isoformat()}"
+                ),
+                72 + int(processed_chunks / max(total_chunks, 1) * 4),
+                processed_chunks=processed_chunks,
+                total_chunks=total_chunks,
+                option_saved_rows=saved_rows,
+                option_errors=len(errors),
+            )
+
+        if workers <= 1:
+            for chunk in chunks:
+                chunk_start, chunk_end = min(chunk), max(chunk)
+                try:
+                    chunk_start, chunk_end, frame = fetch_chunk(chunk)
+                    saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock option daily sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                    errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                processed_chunks += 1
+                if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                    report_progress(chunk_start, chunk_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    chunk_start, chunk_end = min(chunk), max(chunk)
+                    try:
+                        chunk_start, chunk_end, frame = future.result()
+                        saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock option daily sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                        errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                    processed_chunks += 1
+                    if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                        report_progress(chunk_start, chunk_end)
+
+        return {"chunks": total_chunks, "saved_rows": saved_rows, "errors": errors}
+
+    def _sync_repo_daily_dates(self, trading_dates: List[date]) -> Dict:
+        chunks = _date_chunks_by_span(
+            trading_dates,
+            A_STOCK_REPO_DAILY_CHUNK_TRADING_DAYS,
+            A_STOCK_REPO_DAILY_CHUNK_CALENDAR_DAYS,
+        )
+        if not trading_dates:
+            return {"chunks": 0, "saved_rows": 0, "errors": []}
+
+        def fetch_chunk(chunk: List[date]) -> Tuple[date, date, pd.DataFrame]:
+            chunk_start = min(chunk)
+            chunk_end = max(chunk)
+            frame = self.tushare.get_repo_daily_range_frame(
+                chunk_start,
+                chunk_end,
+                raise_on_error=True,
+            )
+            return chunk_start, chunk_end, frame
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        processed_chunks = 0
+        total_chunks = len(chunks)
+        workers = min(SYNC_WORKERS, total_chunks)
+        refresh_start = min(trading_dates)
+        refresh_end = max(trading_dates)
+
+        def save_chunk(chunk_start: date, chunk_end: date, frame: pd.DataFrame) -> int:
+            if frame.empty:
+                return 0
+            return _bulk_replace_repo_daily_frame(self.analytics_db, frame)
+
+        def report_progress(chunk_start: date, chunk_end: date):
+            self._progress(
+                (
+                    f"批量同步A股回购日行情 {processed_chunks}/{total_chunks}，"
+                    f"待补范围 {refresh_start.isoformat()} ~ {refresh_end.isoformat()}，"
+                    f"最近完成 {chunk_start.isoformat()} ~ {chunk_end.isoformat()}"
+                ),
+                76 + int(processed_chunks / max(total_chunks, 1) * 2),
+                processed_chunks=processed_chunks,
+                total_chunks=total_chunks,
+                repo_saved_rows=saved_rows,
+                repo_errors=len(errors),
+            )
+
+        if workers <= 1:
+            for chunk in chunks:
+                chunk_start, chunk_end = min(chunk), max(chunk)
+                try:
+                    chunk_start, chunk_end, frame = fetch_chunk(chunk)
+                    saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock repo daily sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                    errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                processed_chunks += 1
+                if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                    report_progress(chunk_start, chunk_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    chunk_start, chunk_end = min(chunk), max(chunk)
+                    try:
+                        chunk_start, chunk_end, frame = future.result()
+                        saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock repo daily sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                        errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                    processed_chunks += 1
+                    if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                        report_progress(chunk_start, chunk_end)
+
+        return {"chunks": total_chunks, "saved_rows": saved_rows, "errors": errors}
+
+    def sync_chinabond_curve_defs(self) -> int:
+        now = datetime.now()
+        frame = pd.DataFrame(
+            [
+                {
+                    "curve_id": item["curve_id"],
+                    "curve_name": item["curve_name"],
+                    "category": item["category"],
+                    "rating": item["rating"],
+                    "pair_key": item["pair_key"],
+                    "updated_at": now,
+                }
+                for item in CHINABOND_CREDIT_CURVES
+            ]
+        )
+        if frame.empty:
+            return 0
+        columns = ["curve_id", "curve_name", "category", "rating", "pair_key", "updated_at"]
+        self.analytics_db.commit()
+        _insert_or_replace_analytics_frame(
+            AStockChinaBondYieldCurveDef.__tablename__,
+            columns,
+            frame.loc[:, columns],
+        )
+        return len(frame)
+
+    def sync_chinabond_yield_curves(self, start_date: date, end_date: date) -> Dict:
         start_value = _parse_date(start_date)
         end_value = _parse_date(end_date)
-        if not start_value or not end_value or start_value > end_value:
+        curve_ids = [item["curve_id"] for item in CHINABOND_CREDIT_CURVES]
+        if not start_value or not end_value or start_value > end_value or not curve_ids:
             return {
                 "start_date": start_value.isoformat() if start_value else None,
                 "end_date": end_value.isoformat() if end_value else None,
                 "trading_days": 0,
-                "option_saved_rows": 0,
-                "repo_saved_rows": 0,
+                "saved_rows": 0,
+                "errors": [],
             }
 
         calendar = self.tushare.get_trade_calendar_frame(start_value, end_value)
@@ -563,47 +964,123 @@ class AStockBaseDataSyncService:
             for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
             if item <= end_value
         ] if not calendar.empty else []
+        refresh_dates = self._chinabond_yield_curve_dates_needing_refresh(trading_dates)
+        if refresh_dates:
+            self._progress(
+                (
+                    f"中债信用曲线待补 {len(refresh_dates)} 个交易日 "
+                    f"{min(refresh_dates).isoformat()} ~ {max(refresh_dates).isoformat()}"
+                ),
+                79,
+                refresh_dates=len(refresh_dates),
+                total_dates=len(trading_dates),
+            )
+        else:
+            self._progress(
+                "中债信用曲线缓存已就绪",
+                82,
+                processed_dates=len(trading_dates),
+                total_dates=len(trading_dates),
+            )
+            return {
+                "start_date": start_value.isoformat(),
+                "end_date": end_value.isoformat(),
+                "trading_days": len(trading_dates),
+                "refresh_dates": 0,
+                "chunks": 0,
+                "saved_rows": 0,
+                "errors": [],
+            }
 
-        option_saved_rows = 0
-        repo_saved_rows = 0
-        total_dates = len(trading_dates)
-        for index, current_date in enumerate(trading_dates, start=1):
-            daily_frames = []
-            for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
-                frame = self.tushare.get_option_daily_frame(current_date, exchange)
-                if not frame.empty:
-                    daily_frames.append(frame)
-            if daily_frames:
-                option_frame = pd.concat(daily_frames, ignore_index=True)
-                option_saved_rows += _bulk_replace_option_daily_frame(
-                    self.analytics_db,
-                    option_frame,
-                )
-
-            repo_frame = self.tushare.get_repo_daily_frame(current_date)
-            if not repo_frame.empty:
-                repo_saved_rows += _bulk_replace_repo_daily_frame(
-                    self.analytics_db,
-                    repo_frame,
-                )
-
-            if total_dates and (index == total_dates or index % 20 == 0):
-                self._progress(
-                    f"同步A股期权/回购日行情 {current_date.isoformat()}",
-                    72 + int(index / max(total_dates, 1) * 6),
-                    processed_dates=index,
-                    total_dates=total_dates,
-                    option_saved_rows=option_saved_rows,
-                    repo_saved_rows=repo_saved_rows,
-                )
-
+        result = self._sync_chinabond_yield_curve_dates(refresh_dates, curve_ids)
         return {
             "start_date": start_value.isoformat(),
             "end_date": end_value.isoformat(),
-            "trading_days": total_dates,
-            "option_saved_rows": option_saved_rows,
-            "repo_saved_rows": repo_saved_rows,
+            "trading_days": len(trading_dates),
+            "refresh_dates": len(refresh_dates),
+            "chunks": result.get("chunks", 0),
+            "saved_rows": result.get("saved_rows", 0),
+            "errors": result.get("errors") or [],
         }
+
+    def _chinabond_yield_curve_dates_needing_refresh(self, trading_dates: List[date]) -> List[date]:
+        if not trading_dates:
+            return []
+        stats_by_date = self._existing_chinabond_day_stats(min(trading_dates), max(trading_dates))
+        return [item for item in trading_dates if _chinabond_day_needs_refresh(stats_by_date.get(item))]
+
+    def _sync_chinabond_yield_curve_dates(self, trading_dates: List[date], curve_ids: List[str]) -> Dict:
+        chunks = _date_chunks_by_span(
+            trading_dates,
+            A_STOCK_CHINABOND_CHUNK_TRADING_DAYS,
+            A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS,
+        )
+        if not chunks:
+            return {"chunks": 0, "saved_rows": 0, "errors": []}
+
+        def fetch_chunk(chunk: List[date]) -> Tuple[date, date, pd.DataFrame]:
+            chunk_start = min(chunk)
+            chunk_end = max(chunk)
+            chinabond = ChinaBondYieldCurveService(timeout=self.chinabond.timeout)
+            frame = chinabond.get_yield_curve_dates_frame(chunk, curve_ids)
+            return chunk_start, chunk_end, frame
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        processed_chunks = 0
+        total_chunks = len(chunks)
+        workers = min(SYNC_WORKERS, total_chunks)
+        refresh_start = min(trading_dates)
+        refresh_end = max(trading_dates)
+
+        def save_chunk(chunk_start: date, chunk_end: date, frame: pd.DataFrame) -> int:
+            if frame.empty:
+                return 0
+            return _bulk_replace_chinabond_yield_curve_frame(self.analytics_db, frame)
+
+        def report_progress(chunk_start: date, chunk_end: date):
+            self._progress(
+                (
+                    f"批量同步中债信用曲线 {processed_chunks}/{total_chunks}，"
+                    f"待补范围 {refresh_start.isoformat()} ~ {refresh_end.isoformat()}，"
+                    f"最近完成 {chunk_start.isoformat()} ~ {chunk_end.isoformat()}"
+                ),
+                79 + int(processed_chunks / max(total_chunks, 1) * 3),
+                processed_chunks=processed_chunks,
+                total_chunks=total_chunks,
+                saved_rows=saved_rows,
+                errors=len(errors),
+            )
+
+        if workers <= 1:
+            for chunk in chunks:
+                chunk_start, chunk_end = min(chunk), max(chunk)
+                try:
+                    chunk_start, chunk_end, frame = fetch_chunk(chunk)
+                    saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                except Exception as exc:
+                    self.logger.warning("ChinaBond yield curve sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                    errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                processed_chunks += 1
+                if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                    report_progress(chunk_start, chunk_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    chunk_start, chunk_end = min(chunk), max(chunk)
+                    try:
+                        chunk_start, chunk_end, frame = future.result()
+                        saved_rows += save_chunk(chunk_start, chunk_end, frame)
+                    except Exception as exc:
+                        self.logger.warning("ChinaBond yield curve sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                        errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                    processed_chunks += 1
+                    if processed_chunks == 1 or processed_chunks == total_chunks or processed_chunks % 5 == 0:
+                        report_progress(chunk_start, chunk_end)
+
+        return {"chunks": total_chunks, "saved_rows": saved_rows, "errors": errors}
 
     def sync_base_data(
         self,
@@ -620,6 +1097,7 @@ class AStockBaseDataSyncService:
         latest_index_date = _latest_analytics_date(self.analytics_db, AStockIndexDaily, "trade_date")
         latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
+        latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
         name_change_rows_before = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         self.analytics_db.commit()
 
@@ -666,14 +1144,13 @@ class AStockBaseDataSyncService:
         option_default_start = max(DEFAULT_START_DATE, end_value - timedelta(days=A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS))
         if explicit_start:
             option_start = explicit_start
+            repo_start = explicit_start
         elif incremental:
-            latest_option_or_repo_date = min(
-                [item for item in (latest_option_date, latest_repo_date) if item],
-                default=None,
-            )
-            option_start = _overlap_start(option_default_start, latest_option_or_repo_date)
+            option_start = _overlap_start(option_default_start, latest_option_date)
+            repo_start = _overlap_start(option_default_start, latest_repo_date)
         else:
             option_start = option_default_start
+            repo_start = option_default_start
 
         self._progress("同步A股期权合约基础信息", 68)
         option_basic_rows_saved = self.sync_option_basic()
@@ -682,9 +1159,33 @@ class AStockBaseDataSyncService:
             "同步A股期权/回购日行情缓存",
             72,
             start_date=option_start.isoformat(),
+            repo_start_date=repo_start.isoformat(),
             end_date=end_value.isoformat(),
         )
-        option_repo_result = self.sync_option_and_repo_daily(option_start, end_value)
+        option_repo_result = self.sync_option_and_repo_daily(
+            option_start,
+            end_value,
+            repo_start_date=repo_start,
+        )
+
+        chinabond_default_start = max(DEFAULT_START_DATE, end_value - timedelta(days=A_STOCK_CHINABOND_HISTORY_LOOKBACK_DAYS))
+        if explicit_start:
+            chinabond_start = explicit_start
+        elif incremental:
+            chinabond_start = _overlap_start(chinabond_default_start, latest_chinabond_date)
+        else:
+            chinabond_start = chinabond_default_start
+
+        self._progress("同步中债信用曲线定义", 78)
+        chinabond_curve_defs_saved = self.sync_chinabond_curve_defs()
+
+        self._progress(
+            "同步中债信用收益率曲线",
+            79,
+            start_date=chinabond_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        chinabond_result = self.sync_chinabond_yield_curves(chinabond_start, end_value)
 
         requested_income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
         income_start = requested_income_start
@@ -723,6 +1224,8 @@ class AStockBaseDataSyncService:
         option_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionBasic.__tablename__)
         option_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionDaily.__tablename__)
         repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
+        chinabond_curve_def_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDef.__tablename__)
+        chinabond_curve_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDaily.__tablename__)
         self.analytics_db.commit()
 
         self._progress("A股基础数据同步完成", 100)
@@ -736,11 +1239,28 @@ class AStockBaseDataSyncService:
             "market_trade_days": len(trading_dates),
             "index_start_date": index_start.isoformat(),
             "option_start_date": option_start.isoformat(),
+            "repo_start_date": repo_start.isoformat(),
             "option_end_date": end_value.isoformat(),
             "option_basic_rows_saved": option_basic_rows_saved,
             "option_daily_saved_rows": option_repo_result.get("option_saved_rows"),
             "repo_daily_saved_rows": option_repo_result.get("repo_saved_rows"),
             "option_repo_trading_days": option_repo_result.get("trading_days"),
+            "option_daily_trading_days": option_repo_result.get("option_trading_days"),
+            "repo_daily_trading_days": option_repo_result.get("repo_trading_days"),
+            "option_daily_refresh_dates": option_repo_result.get("option_refresh_dates"),
+            "repo_daily_refresh_dates": option_repo_result.get("repo_refresh_dates"),
+            "option_daily_chunks": option_repo_result.get("option_chunks"),
+            "repo_daily_chunks": option_repo_result.get("repo_chunks"),
+            "option_daily_errors": option_repo_result.get("option_errors"),
+            "repo_daily_errors": option_repo_result.get("repo_errors"),
+            "chinabond_start_date": chinabond_start.isoformat(),
+            "chinabond_end_date": end_value.isoformat(),
+            "chinabond_curve_defs_saved": chinabond_curve_defs_saved,
+            "chinabond_curve_daily_saved_rows": chinabond_result.get("saved_rows"),
+            "chinabond_curve_trading_days": chinabond_result.get("trading_days"),
+            "chinabond_curve_refresh_dates": chinabond_result.get("refresh_dates"),
+            "chinabond_curve_chunks": chinabond_result.get("chunks"),
+            "chinabond_curve_errors": len(chinabond_result.get("errors") or []),
             "income_start_date": income_result.get("start_date"),
             "income_end_date": income_result.get("end_date"),
             "income_sync_mode": income_sync_mode,
@@ -771,6 +1291,8 @@ class AStockBaseDataSyncService:
                 AStockOptionBasic.__tablename__: option_basic_rows,
                 AStockOptionDaily.__tablename__: option_daily_rows,
                 AStockRepoDaily.__tablename__: repo_daily_rows,
+                AStockChinaBondYieldCurveDef.__tablename__: chinabond_curve_def_rows,
+                AStockChinaBondYieldCurveDaily.__tablename__: chinabond_curve_daily_rows,
             },
         }
 
@@ -1028,6 +1550,51 @@ def _bulk_replace_repo_daily_frame(analytics_db: Session, frame: pd.DataFrame) -
     return len(normalized)
 
 
+def _normalize_chinabond_yield_curve_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "curve_id",
+        "curve_name",
+        "term",
+        "yield_rate",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["curve_id"] = _clean_text_series(frame, "curve_id")
+    normalized["curve_name"] = _clean_text_series(frame, "curve_name")
+    normalized["term"] = _numeric_series(frame, "term", 6)
+    normalized["yield_rate"] = _numeric_series(frame, "yield_rate", 6)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["trade_date", "curve_id", "term"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["trade_date", "curve_id", "term"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_chinabond_yield_curve_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_chinabond_yield_curve_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    replace_dates = sorted(normalized["trade_date"].dropna().unique().tolist())
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockChinaBondYieldCurveDaily.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+        replace_dates=replace_dates,
+    )
+    return len(normalized)
+
+
 def _income_ann_date_bounds(analytics_db: Session) -> Tuple[Optional[date], Optional[date]]:
     row = analytics_db.execute(
         text("""
@@ -1056,6 +1623,21 @@ def _income_ann_date_bounds_by_symbol(analytics_db: Session) -> Dict[str, Tuple[
         if not symbol:
             continue
         result[symbol] = (_parse_date(row[1]), _parse_date(row[2]))
+    return result
+
+
+def _income_list_dates_by_symbol(analytics_db: Session) -> Dict[str, Optional[date]]:
+    rows = (
+        analytics_db.query(AStockBasic.ts_code, AStockBasic.list_date)
+        .filter(AStockBasic.ts_code.isnot(None))
+        .all()
+    )
+    result: Dict[str, Optional[date]] = {}
+    for row in rows:
+        symbol = str(row[0] or "").strip().upper()
+        if not symbol:
+            continue
+        result[symbol] = _parse_date(row[1])
     return result
 
 
@@ -1094,8 +1676,11 @@ def _plan_income_symbol_ranges(
     *,
     incremental: bool,
     symbol_bounds: Dict[str, Tuple[Optional[date], Optional[date]]],
+    symbol_list_dates: Optional[Dict[str, Optional[date]]] = None,
 ) -> Tuple[List[Tuple[str, date, date, str]], Dict[str, int]]:
     default_start = DEFAULT_START_DATE - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS)
+    refresh_cutoff = end_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS)
+    list_dates = symbol_list_dates or {}
     jobs: List[Tuple[str, date, date, str]] = []
     stats = {
         "skipped": 0,
@@ -1106,27 +1691,44 @@ def _plan_income_symbol_ranges(
 
     for symbol in symbols:
         earliest_ann_date, latest_ann_date = symbol_bounds.get(symbol, (None, None))
+        list_date = list_dates.get(symbol)
+        latest_is_fresh = bool(latest_ann_date and latest_ann_date >= refresh_cutoff)
         symbol_start: Optional[date] = None
         symbol_end = end_date
         sync_kind = "incremental"
 
         if start_date:
             if earliest_ann_date is None:
-                symbol_start = start_date
+                symbol_start = max(start_date, list_date) if list_date and list_date > start_date else start_date
                 sync_kind = "backfill"
             elif start_date < earliest_ann_date:
-                symbol_start = start_date
-                symbol_end = min(end_date, earliest_ann_date - timedelta(days=1))
-                sync_kind = "backfill"
+                if list_date and list_date > start_date:
+                    if latest_is_fresh:
+                        stats["skipped"] += 1
+                        continue
+                    if latest_ann_date:
+                        symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+                        sync_kind = "incremental"
+                    else:
+                        symbol_start = list_date
+                        sync_kind = "backfill"
+                else:
+                    symbol_start = start_date
+                    symbol_end = min(end_date, earliest_ann_date - timedelta(days=1))
+                    sync_kind = "backfill"
             elif latest_ann_date:
-                symbol_start = max(default_start, latest_ann_date - timedelta(days=INCOME_SYNC_REFRESH_OVERLAP_DAYS))
-                sync_kind = "incremental"
+                if latest_is_fresh:
+                    stats["skipped"] += 1
+                    continue
+                else:
+                    symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+                    sync_kind = "incremental"
             else:
                 symbol_start = start_date
                 sync_kind = "backfill"
         elif incremental:
             if latest_ann_date:
-                symbol_start = max(default_start, latest_ann_date - timedelta(days=INCOME_SYNC_REFRESH_OVERLAP_DAYS))
+                symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
                 sync_kind = "incremental"
             else:
                 symbol_start = default_start
@@ -1163,6 +1765,7 @@ def sync_a_stock_income_data(
         explicit_start = _parse_date(start_date)
         earliest_ann_date, latest_ann_date = _income_ann_date_bounds(analytics_session)
         symbol_bounds = _income_ann_date_bounds_by_symbol(analytics_session)
+        symbol_list_dates = _income_list_dates_by_symbol(analytics_session)
         analytics_session.commit()
         start_value = explicit_start or default_start
 
@@ -1234,6 +1837,7 @@ def sync_a_stock_income_data(
             end_value,
             incremental=incremental,
             symbol_bounds=symbol_bounds,
+            symbol_list_dates=symbol_list_dates,
         )
         skipped_symbols = job_stats["skipped"]
         backfill_symbols = job_stats["backfill"]
@@ -1266,7 +1870,7 @@ def sync_a_stock_income_data(
             }
 
         tushare = tushare_service or TushareService.getInstance()
-        workers = min(INCOME_SYNC_WORKERS, len(income_jobs))
+        workers = min(SYNC_WORKERS, len(income_jobs))
         sync_started_at = time.perf_counter()
         fetch_seconds = 0.0
         insert_seconds = 0.0
@@ -1496,7 +2100,7 @@ def _latest_analytics_date(analytics_db: Session, model, column_name: str) -> Op
 def _overlap_start(default_start: date, latest_date: Optional[date]) -> date:
     if not latest_date:
         return default_start
-    return max(default_start, latest_date - timedelta(days=A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS))
+    return max(default_start, latest_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
 
 
 def sync_a_stock_base_data(
