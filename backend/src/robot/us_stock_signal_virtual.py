@@ -28,7 +28,7 @@ SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 DEFAULT_REBALANCE_FREQUENCY = "weekly"
-SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly"]
+SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "semiannual"]
 CANDIDATE_ETF_OPTIONS = [
     {"label": "标普500", "value": "SPY.US", "description": "SPDR S&P 500 ETF Trust 成分股"},
     {"label": "纳指100", "value": "QQQ.US", "description": "Invesco QQQ Trust 成分股"},
@@ -382,6 +382,14 @@ def _is_rebalance_day(dates: List[date], index: int, frequency: str = DEFAULT_RE
         return current_date.isocalendar()[:2] != next_date.isocalendar()[:2]
     if frequency == "monthly":
         return (current_date.year, current_date.month) != (next_date.year, next_date.month)
+    if frequency == "quarterly":
+        current_quarter = (current_date.month - 1) // 3
+        next_quarter = (next_date.month - 1) // 3
+        return (current_date.year, current_quarter) != (next_date.year, next_quarter)
+    if frequency == "semiannual":
+        current_half = (current_date.month - 1) // 6
+        next_half = (next_date.month - 1) // 6
+        return (current_date.year, current_half) != (next_date.year, next_half)
     return False
 
 

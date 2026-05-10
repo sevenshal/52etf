@@ -84,7 +84,7 @@ class VirtualFactorLegPayload(BaseModel):
         except (TypeError, ValueError):
             raise ValueError("窗口必须是数字或 mixed")
         if window not in SUPPORTED_MOMENTUM_WINDOWS:
-            raise ValueError("窗口只支持 20、60、120 或 mixed")
+            raise ValueError(f"窗口只支持 {', '.join(str(item) for item in SUPPORTED_MOMENTUM_WINDOWS)} 或 mixed")
         return window
 
     @validator("neutralization")
@@ -187,7 +187,7 @@ class USStockSignalConfigPayload(BaseModel):
     def validate_rebalance_frequency(cls, value):
         text = str(value or DEFAULT_REBALANCE_FREQUENCY).strip().lower()
         if text not in SUPPORTED_REBALANCE_FREQUENCIES:
-            raise ValueError("调仓周期必须是 daily、weekly 或 monthly")
+            raise ValueError(f"调仓周期必须是: {', '.join(SUPPORTED_REBALANCE_FREQUENCIES)}")
         return text
 
     @validator("min_listing_days")

@@ -31,7 +31,7 @@ MIXED_WINDOW_KEY = "mixed"
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 DEFAULT_REBALANCE_FREQUENCY = "weekly"
-SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly"]
+SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "semiannual"]
 DEFAULT_MIN_LISTING_DAYS = 365
 DEFAULT_VIRTUAL_FACTOR_LEGS = [
     {
@@ -370,6 +370,14 @@ def is_rebalance_day(dates: List[date], index: int, frequency: str = DEFAULT_REB
         return current_date.isocalendar()[:2] != next_date.isocalendar()[:2]
     if frequency == "monthly":
         return (current_date.year, current_date.month) != (next_date.year, next_date.month)
+    if frequency == "quarterly":
+        current_quarter = (current_date.month - 1) // 3
+        next_quarter = (next_date.month - 1) // 3
+        return (current_date.year, current_quarter) != (next_date.year, next_quarter)
+    if frequency == "semiannual":
+        current_half = (current_date.month - 1) // 6
+        next_half = (next_date.month - 1) // 6
+        return (current_date.year, current_half) != (next_date.year, next_half)
     return False
 
 
@@ -1037,7 +1045,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="动量：原始动量",
         group="动量",
         description="与风险调整动量同源：ln(close) 回归斜率 * R2，不除以波动率，用来和风险调整版直接对照。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",
@@ -1048,7 +1056,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="动量：风险调整动量",
         group="动量",
         description="ln(close) 回归斜率 * R2 / 年化波动。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",
@@ -1103,7 +1111,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="自定义：动量+成交量示例",
         group="自定义",
         description="风险调整混合动量截面排名 + 0.25 * 成交量Z分数截面排名。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",

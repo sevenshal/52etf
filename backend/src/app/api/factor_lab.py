@@ -1406,7 +1406,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="动量：原始动量",
         group="动量",
         description="与风险调整动量同源：ln(close) 回归斜率 * R2，不除以波动率，用来和风险调整版直接对照。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",
@@ -1417,7 +1417,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="动量：风险调整动量",
         group="动量",
         description="与美股多因子策略虚拟盘默认动量腿同源：ln(close) 回归斜率 * R2 / 年化波动；热力图按每个滑动窗口单独测试。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",
@@ -1472,7 +1472,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="自定义：动量+成交量示例",
         group="自定义",
         description="示例注册因子：风险调整混合动量截面排名 + 0.25 * 成交量Z分数截面排名。",
-        default_windows=[20, 60, 120],
+        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=True,
         direction="higher_is_better",
@@ -3239,11 +3239,15 @@ def _run_factor_backtest(
     prepared_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     try:
-        return shared_run_factor_backtest(
+        result = shared_run_factor_backtest(
             _to_shared_backtest_config(request),
             db,
             prepared_data=prepared_data,
         )
+        metadata = result.setdefault("metadata", {})
+        metadata["oos_start_date"] = request.oos_start_date.isoformat() if request.oos_start_date else None
+        result["meta"] = metadata
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
