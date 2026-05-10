@@ -30,21 +30,72 @@ import { formatNumber } from '../utils/format';
 
 const { Text, Title } = Typography;
 const DEFAULT_MOMENTUM_WEIGHTS = { 20: 0.05, 60: 0.2, 120: 0.75 };
+const MOMENTUM_WEIGHT_WINDOWS = [20, 60, 120];
+const MIXED_WINDOW_KEY = 'mixed';
+const DEFAULT_VIRTUAL_LEGS = [
+  {
+    factor: 'risk_adjusted_momentum',
+    window: MIXED_WINDOW_KEY,
+    weight: 0.6,
+    neutralization: 'none',
+    standardization: 'rank_percentile',
+    momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+  },
+  {
+    factor: 'index_weight',
+    window: 20,
+    weight: 0.4,
+    neutralization: 'none',
+    standardization: 'rank_percentile',
+    momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+  },
+];
+const POOL_OPTIONS = [
+  { label: 'SPY+QQQ', value: 'SPY_QQQ', etfs: ['SPY.US', 'QQQ.US'] },
+  { label: 'QQQ', value: 'QQQ', etfs: ['QQQ.US'] },
+  { label: 'SPY', value: 'SPY', etfs: ['SPY.US'] },
+];
+const FALLBACK_FACTOR_OPTIONS = [
+  {
+    key: 'risk_adjusted_momentum',
+    label: '动量：风险调整动量',
+    group: '动量',
+    default_windows: [20, 60, 120],
+    supports_windows: true,
+    supports_mixed_windows: true,
+  },
+  {
+    key: 'raw_momentum',
+    label: '动量：原始动量',
+    group: '动量',
+    default_windows: [20, 60, 120],
+    supports_windows: true,
+    supports_mixed_windows: true,
+  },
+  {
+    key: 'index_weight',
+    label: '指数：成分权重',
+    group: '指数',
+    default_windows: [20],
+    supports_windows: false,
+    supports_mixed_windows: false,
+  },
+];
 
 const DEFAULT_FORM_VALUES = {
-  name: '美股风险调整混合动量虚拟盘',
+  name: '美股多因子策略虚拟盘',
   enabled: true,
-  candidate_etfs: ['SPY.US', 'QQQ.US'],
+  pool: 'SPY_QQQ',
   initial_capital: 100000,
-  start_date: dayjs().subtract(3, 'year'),
+  start_date: dayjs('2020-01-02'),
   min_listing_days: 365,
-  momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
   max_positions: 7,
   sell_rank_multiplier: 2,
-  index_weight_blend: 0.4,
   rebalance_frequency: 'weekly',
   slippage_pct: 0.02,
   commission_pct: 0.03,
+  lot_size: 1,
+  legs: DEFAULT_VIRTUAL_LEGS,
   auto_sync_enabled: true,
   auto_sync_time: '16:15',
 };
@@ -72,43 +123,134 @@ const getErrorMessage = (error, fallback) => (
 );
 
 const normalizeMomentumWeights = weights => ({
-  ...DEFAULT_MOMENTUM_WEIGHTS,
-  ...(weights || {}),
+  ...MOMENTUM_WEIGHT_WINDOWS.reduce((acc, window) => {
+    const rawValue = weights?.[String(window)] ?? weights?.[window] ?? DEFAULT_MOMENTUM_WEIGHTS[window] ?? 0;
+    const numberValue = Number(rawValue);
+    acc[String(window)] = Number.isFinite(numberValue) ? Math.max(0, numberValue) : 0;
+    return acc;
+  }, {}),
 });
 
+const cloneLeg = leg => ({
+  ...leg,
+  neutralization: leg.neutralization || 'none',
+  standardization: leg.standardization || 'rank_percentile',
+  momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
+});
+
+const cloneDefaultFormValues = () => ({
+  ...DEFAULT_FORM_VALUES,
+  legs: DEFAULT_VIRTUAL_LEGS.map(cloneLeg),
+});
+
+const isMixedWindow = value => String(value).toLowerCase() === MIXED_WINDOW_KEY;
+
+const getEtfsForPool = pool => (
+  POOL_OPTIONS.find(item => item.value === pool)?.etfs || POOL_OPTIONS[0].etfs
+);
+
+const getPoolFromCandidateEtfs = candidateEtfs => {
+  const normalized = [...(candidateEtfs || [])].sort().join(',');
+  const matched = POOL_OPTIONS.find(item => [...item.etfs].sort().join(',') === normalized);
+  return matched?.value || 'SPY_QQQ';
+};
+
+const getFactorByKey = (factors, key) => (
+  (factors || FALLBACK_FACTOR_OPTIONS).find(item => item.key === key)
+);
+
+const getDefaultWindowForFactor = factor => {
+  if (!factor?.supports_windows) return factor?.default_windows?.[0] || 20;
+  if (factor.supports_mixed_windows) return MIXED_WINDOW_KEY;
+  return factor.default_windows?.[0] || 20;
+};
+
+const getWindowOptionsForFactor = (factor, baseWindows = [20, 60, 120]) => {
+  const numericWindows = factor?.supports_windows
+    ? (factor.default_windows?.length ? factor.default_windows : baseWindows)
+    : (factor?.default_windows || [20]);
+  const options = numericWindows.map(item => ({ label: `${item}日`, value: item }));
+  if (factor?.supports_mixed_windows) {
+    options.push({ label: '多窗口合成', value: MIXED_WINDOW_KEY });
+  }
+  return options;
+};
+
+const buildFactorSelectOptions = factors => {
+  const groups = {};
+  (factors?.length ? factors : FALLBACK_FACTOR_OPTIONS).forEach(factor => {
+    const group = factor.group || '因子';
+    if (!groups[group]) groups[group] = [];
+    groups[group].push({ label: factor.label, value: factor.key });
+  });
+  return Object.entries(groups).map(([label, options]) => ({ label, options }));
+};
+
+const buildDefaultLeg = (factorKey = 'raw_momentum', factor = null) => ({
+  factor: factorKey,
+  window: factor ? getDefaultWindowForFactor(factor) : 120,
+  weight: 1,
+  neutralization: 'none',
+  standardization: 'rank_percentile',
+  momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+});
+
+const normalizeLegs = legs => (
+  (legs?.length ? legs : DEFAULT_VIRTUAL_LEGS)
+    .filter(leg => leg?.factor)
+    .map(leg => ({
+      factor: leg.factor,
+      window: isMixedWindow(leg.window) ? MIXED_WINDOW_KEY : Number(leg.window || 20),
+      weight: Number(leg.weight || 0),
+      neutralization: leg.neutralization || 'none',
+      standardization: leg.standardization || 'rank_percentile',
+      momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
+    }))
+);
+
 const normalizeConfigForForm = config => {
+  const defaults = cloneDefaultFormValues();
   const merged = {
-    ...DEFAULT_FORM_VALUES,
+    ...defaults,
     ...config,
-    start_date: config?.start_date ? dayjs(config.start_date) : DEFAULT_FORM_VALUES.start_date,
+    pool: getPoolFromCandidateEtfs(config?.candidate_etfs || getEtfsForPool(defaults.pool)),
+    start_date: config?.start_date ? dayjs(config.start_date) : defaults.start_date,
   };
-  merged.momentum_weights = normalizeMomentumWeights(config?.momentum_weights);
+  merged.legs = (config?.legs?.length ? config.legs : defaults.legs).map(cloneLeg);
   return merged;
 };
 
-const buildPayload = values => ({
-  ...values,
-  momentum_weights: normalizeMomentumWeights(values.momentum_weights),
-  start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
-});
+const buildPayload = values => {
+  const legs = normalizeLegs(values.legs);
+  const { pool, ...rest } = values;
+  return {
+    ...rest,
+    candidate_etfs: getEtfsForPool(pool),
+    start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_FORM_VALUES.start_date.format('YYYY-MM-DD'),
+    lot_size: Number(values.lot_size || DEFAULT_FORM_VALUES.lot_size),
+    legs,
+  };
+};
 
 const USStockSignalLive = () => {
   const [form] = Form.useForm();
+  const virtualLegs = Form.useWatch('legs', form);
   const [configs, setConfigs] = useState([]);
   const [selectedConfig, setSelectedConfig] = useState(null);
   const [detail, setDetail] = useState(null);
-  const [candidateEtfs, setCandidateEtfs] = useState([]);
+  const [factorOptions, setFactorOptions] = useState(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  const loadCandidateEtfs = useCallback(async () => {
+  const loadFactorOptions = useCallback(async () => {
     try {
-      const { data } = await request.get('/api/us-stock-signal-live/candidate-etfs');
-      setCandidateEtfs(data || []);
+      const { data } = await request.get('/api/us-stock-signal-live/factor-options');
+      setFactorOptions(data || null);
     } catch (error) {
-      message.error(getErrorMessage(error, '加载候选ETF失败'));
+      setFactorOptions({ factors: FALLBACK_FACTOR_OPTIONS });
+      message.error(getErrorMessage(error, '加载因子选项失败'));
     }
   }, []);
 
@@ -145,9 +287,9 @@ const USStockSignalLive = () => {
   }, []);
 
   useEffect(() => {
-    loadCandidateEtfs();
+    loadFactorOptions();
     loadConfigs();
-  }, [loadCandidateEtfs, loadConfigs]);
+  }, [loadFactorOptions, loadConfigs]);
 
   useEffect(() => {
     if (selectedConfig?.id) {
@@ -159,7 +301,7 @@ const USStockSignalLive = () => {
   const handleNew = () => {
     setSelectedConfig(null);
     setDetail(null);
-    form.setFieldsValue(DEFAULT_FORM_VALUES);
+    form.setFieldsValue(cloneDefaultFormValues());
   };
 
   const handleSelectConfig = (config) => {
@@ -194,11 +336,46 @@ const USStockSignalLive = () => {
       message.success('虚拟盘配置已删除');
       setSelectedConfig(null);
       setDetail(null);
-      form.setFieldsValue(DEFAULT_FORM_VALUES);
+      form.setFieldsValue(cloneDefaultFormValues());
       await loadConfigs();
     } catch (error) {
       message.error(getErrorMessage(error, '删除虚拟盘配置失败'));
     }
+  };
+
+  const factorSelectOptions = useMemo(() => buildFactorSelectOptions(factorOptions?.factors), [factorOptions]);
+  const neutralizationOptions = useMemo(() => (
+    (factorOptions?.neutralization_options || [
+      { key: 'none', label: '不做中性化' },
+      { key: 'sector', label: '行业大类中性化（Sector）' },
+      { key: 'sector_market_cap', label: '行业大类+市值中性化' },
+      { key: 'fine_industry', label: '细行业中性化（Industry，小样本回退Sector）' },
+      { key: 'fine_industry_market_cap', label: '细行业+市值中性化（小样本回退Sector）' },
+    ]).map(item => ({ label: item.label, value: item.key }))
+  ), [factorOptions]);
+  const standardizationOptions = useMemo(() => (
+    (factorOptions?.standardization_options || [
+      { key: 'none', label: '不标准化' },
+      { key: 'zscore', label: '截面 Z-Score' },
+      { key: 'rank_percentile', label: '截面排名分位' },
+    ]).map(item => ({ label: item.label, value: item.key }))
+  ), [factorOptions]);
+  const rebalanceFrequencyOptions = useMemo(() => ([
+    { label: '每日', value: 'daily' },
+    { label: '每周', value: 'weekly' },
+    { label: '每月', value: 'monthly' },
+  ]), []);
+
+  const handleLegFactorChange = (index, value) => {
+    const factor = getFactorByKey(factorOptions?.factors, value);
+    const legs = [...(form.getFieldValue('legs') || [])];
+    legs[index] = {
+      ...(legs[index] || {}),
+      factor: value,
+      window: getDefaultWindowForFactor(factor),
+      momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+    };
+    form.setFieldsValue({ legs });
   };
 
   const handleSync = async () => {
@@ -283,42 +460,48 @@ const USStockSignalLive = () => {
   ];
 
   const eventColumns = [
-    { title: '日期', dataIndex: 'date', width: 110 },
+    { title: '日期', dataIndex: 'date', width: 80 },
+    { title: '股票', dataIndex: 'symbol', width: 80 },
     {
-      title: '类型',
-      dataIndex: 'direction',
-      width: 80,
-      render: value => <Tag color={value === 'RANK' ? 'blue' : value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
+      title: '状态',
+      dataIndex: 'payload',
+      width: 150,
+      render: value => (
+        <Space size={[4, 4]} wrap>
+          {value?.is_holding && <Tag color="gold">持仓</Tag>}
+          {value?.is_selected && <Tag color="green">TopN</Tag>}
+          {value?.in_sell_rank_threshold && <Tag color="blue">卖出线内</Tag>}
+          {value?.is_holding && !value?.in_sell_rank_threshold && <Tag color="red">卖出</Tag>}
+        </Space>
+      ),
     },
-    { title: '股票', dataIndex: 'symbol', width: 100 },
     {
       title: '排名',
       dataIndex: ['payload', 'rank'],
-      width: 80,
+      width: 50,
       align: 'right',
+      render: value => value ?? '-',
     },
-    { title: '价格', dataIndex: 'signal_price', width: 90, align: 'right', render: value => formatNumber(value, 2) },
-    { title: '成交额', dataIndex: 'turnover', width: 130, align: 'right', render: formatMoney },
-    { title: '排名分数', dataIndex: ['payload', 'rank_score'], width: 100, align: 'right', render: formatScore },
-    { title: '动量分数', dataIndex: 'threshold_pct', width: 100, align: 'right', render: formatScore },
-    { title: '权重', dataIndex: ['payload', 'index_weight_pct'], width: 90, align: 'right', render: formatPercent },
-    { title: '20日分数', dataIndex: ['payload', 'components', '20', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
-    { title: '60日分数', dataIndex: ['payload', 'components', '60', 'risk_adjusted_score'], width: 100, align: 'right', render: formatScore },
-    { title: '120日分数', dataIndex: ['payload', 'components', '120', 'risk_adjusted_score'], width: 110, align: 'right', render: formatScore },
-    { title: '混合波动', dataIndex: 'annualized_volatility_pct', width: 110, align: 'right', render: formatPercent },
+    { title: '价格', dataIndex: 'signal_price', width: 80, align: 'right', render: value => formatNumber(value, 2) },
+    { title: '成交额', dataIndex: 'turnover', width: 100, align: 'right', render: formatMoney },
+    { title: '排名分数', dataIndex: ['payload', 'rank_score'], width: 50, align: 'right', render: formatScore },
     {
-      title: '混合涨跌',
-      dataIndex: ['payload', 'window_return_pct'],
-      width: 100,
-      align: 'right',
-      render: formatPercent,
-    },
-    {
-      title: '混合R²',
-      dataIndex: ['payload', 'r_squared'],
-      width: 80,
-      align: 'right',
-      render: value => value === null || value === undefined ? '-' : Number(value).toFixed(3),
+      title: '因子明细',
+      dataIndex: ['payload', 'component_scores'],
+      width: 360,
+      render: value => {
+        const items = Object.values(value || {});
+        if (!items.length) return '-';
+        return (
+          <Space size={[4, 4]} wrap>
+            {items.map(item => (
+              <Tag key={item.component_key || `${item.factor}-${item.window}`}>
+                {item.factor_label || item.factor}: {formatScore(item.score)}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -332,6 +515,16 @@ const USStockSignalLive = () => {
   const summary = detail?.summary || {};
   const metrics = summary.metrics || {};
   const yearlyStats = detail?.yearly_stats || summary.yearly_stats || [];
+  const eventRows = useMemo(() => (
+    [...(detail?.events || [])].sort((left, right) => {
+      const dateCompare = String(right.date || '').localeCompare(String(left.date || ''));
+      if (dateCompare !== 0) return dateCompare;
+      const leftRank = left.payload?.rank ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = right.payload?.rank ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return String(left.symbol || '').localeCompare(String(right.symbol || ''));
+    })
+  ), [detail]);
   const yearlyColumns = useMemo(() => {
     const benchmarkSymbols = selectedConfig?.candidate_etfs || [];
     const primarySymbol = benchmarkSymbols[0];
@@ -370,7 +563,7 @@ const USStockSignalLive = () => {
     <div style={{ padding: 24 }}>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Col>
-          <Title level={4} style={{ margin: 0 }}>美股风险调整混合动量虚拟盘</Title>
+          <Title level={4} style={{ margin: 0 }}>美股多因子策略虚拟盘</Title>
         </Col>
         <Col>
           <Space>
@@ -387,7 +580,7 @@ const USStockSignalLive = () => {
       </Row>
 
       <Row gutter={16}>
-        <Col xs={24} lg={7}>
+        <Col xs={24} lg={9}>
           <Card title="配置" style={{ marginBottom: 16 }}>
             <Spin spinning={loading}>
               <List
@@ -419,115 +612,203 @@ const USStockSignalLive = () => {
           </Card>
 
           <Card title={selectedConfig?.id ? '参数' : '新增参数'}>
-            <Form form={form} layout="vertical" initialValues={DEFAULT_FORM_VALUES}>
+            <Form form={form} layout="vertical" initialValues={cloneDefaultFormValues()}>
               <Form.Item name="name" label="名称" rules={[{ required: true }]}>
                 <Input />
               </Form.Item>
               <Form.Item name="enabled" label="启用" valuePropName="checked">
                 <Switch />
               </Form.Item>
-              <Form.Item name="candidate_etfs" label="候选ETF" rules={[{ required: true }]}>
+              <Form.Item name="pool" label="股票池" rules={[{ required: true }]}>
                 <Select
-                  mode="multiple"
-                  options={(candidateEtfs.length ? candidateEtfs : [
-                    { label: '标普500', value: 'SPY.US' },
-                    { label: '纳指100', value: 'QQQ.US' },
-                  ]).map(item => ({ label: `${item.label} (${item.value})`, value: item.value }))}
+                  options={POOL_OPTIONS.map(item => ({ label: item.label, value: item.value }))}
                 />
               </Form.Item>
-              <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="策略">风险调整混合动量 Top N</Descriptions.Item>
-                <Descriptions.Item label="轮换规则">持仓跌出卖出排名才卖出</Descriptions.Item>
-                <Descriptions.Item label="买入规则">现金等分补位新票</Descriptions.Item>
-                <Descriptions.Item label="排名规则">混合动量 + 成分权重倾斜</Descriptions.Item>
-                <Descriptions.Item label="检查频率">按调仓周期最后一个交易日</Descriptions.Item>
-                <Descriptions.Item label="执行方式">收盘出信号，次日开盘成交</Descriptions.Item>
-              </Descriptions>
               <Row gutter={12}>
-                <Col span={8}>
-                  <Form.Item name={['momentum_weights', '20']} label="20日权重" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name={['momentum_weights', '60']} label="60日权重" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name={['momentum_weights', '120']} label="120日权重" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+                <Col span={24}>
+                  <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
+                    <DatePicker style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
               </Row>
-              <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
               <Row gutter={12}>
                 <Col span={12}>
                   <Form.Item name="initial_capital" label="初始资金" rules={[{ required: true }]}>
-                    <InputNumber min={1} step={10000} style={{ width: '100%' }} />
+                    <InputNumber min={1} step={10000} precision={2} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="max_positions" label="最大持仓数" rules={[{ required: true }]}>
-                    <InputNumber min={1} max={50} step={1} style={{ width: '100%' }} />
+                  <Form.Item name="max_positions" label="持仓数" rules={[{ required: true }]}>
+                    <InputNumber min={1} max={100} step={1} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
               </Row>
               <Row gutter={12}>
                 <Col span={12}>
-                  <Form.Item name="sell_rank_multiplier" label="卖出排名倍数" rules={[{ required: true }]}>
-                    <InputNumber min={1} max={10} step={0.1} style={{ width: '100%' }} />
+                  <Form.Item name="sell_rank_multiplier" label="卖出倍数" rules={[{ required: true }]}>
+                    <InputNumber min={1} max={10} step={0.1} precision={2} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="index_weight_blend" label="成分权重倾斜" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
+                  <Form.Item name="rebalance_frequency" label="调仓频率" rules={[{ required: true }]}>
+                    <Select options={rebalanceFrequencyOptions} />
                   </Form.Item>
                 </Col>
               </Row>
-              <Form.Item name="rebalance_frequency" label="调仓周期" rules={[{ required: true }]}>
-                <Select
-                  options={[
-                    { label: '日调仓', value: 'daily' },
-                    { label: '周调仓', value: 'weekly' },
-                    { label: '月调仓', value: 'monthly' },
-                  ]}
-                />
-              </Form.Item>
               <Row gutter={12}>
                 <Col span={12}>
-                  <Form.Item name="min_listing_days" label="最少上市天数" rules={[{ required: true }]}>
+                  <Form.Item name="commission_pct" label="手续费%" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={10} step={0.01} precision={4} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="slippage_pct" label="滑点%" rules={[{ required: true }]}>
+                    <InputNumber min={0} max={10} step={0.01} precision={4} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="lot_size" label="交易单位" rules={[{ required: true }]}>
+                    <InputNumber min={1} step={1} precision={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="min_listing_days" label="上市天数" rules={[{ required: true }]}>
                     <InputNumber min={0} max={3650} step={30} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
-                <Col span={12}>
-                  <Form.Item name="slippage_pct" label="滑点(%)" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={10} step={0.01} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
               </Row>
+              <Form.List name="legs">
+                {(fields, { add, remove }) => (
+                  <div style={{ marginBottom: 16 }}>
+                    <Row justify="space-between" align="middle" style={{ marginBottom: 8 }}>
+                      <Col><Text strong>回测因子</Text></Col>
+                      <Col>
+                        <Button
+                          size="small"
+                          icon={<PlusOutlined />}
+                          onClick={() => add(buildDefaultLeg('raw_momentum', getFactorByKey(factorOptions?.factors, 'raw_momentum')))}
+                        >
+                          添加因子
+                        </Button>
+                      </Col>
+                    </Row>
+                    {fields.map(field => {
+                      const leg = (virtualLegs || [])[field.name] || {};
+                      const factor = getFactorByKey(factorOptions?.factors, leg.factor);
+                      return (
+                        <div
+                          key={field.key}
+                          style={{
+                            border: '1px solid #f0f0f0',
+                            borderRadius: 6,
+                            padding: 12,
+                            marginBottom: 10,
+                            background: '#fafafa',
+                          }}
+                        >
+                          <Row gutter={12}>
+                            <Col span={24}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'factor']}
+                                label="因子"
+                                rules={[{ required: true, message: '请选择因子' }]}
+                              >
+                                <Select
+                                  options={factorSelectOptions}
+                                  onChange={value => handleLegFactorChange(field.name, value)}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'window']}
+                                label="窗口"
+                                rules={[{ required: true, message: '请选择窗口' }]}
+                              >
+                                <Select
+                                  options={getWindowOptionsForFactor(factor, factorOptions?.windows)}
+                                  disabled={factor && !factor.supports_windows}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'weight']}
+                                label="权重"
+                                rules={[{ required: true, message: '请输入权重' }]}
+                              >
+                                <InputNumber min={-100} max={100} step={0.1} precision={4} style={{ width: '100%' }} />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'neutralization']}
+                                label="中性化"
+                                rules={[{ required: true, message: '请选择中性化' }]}
+                              >
+                                <Select options={neutralizationOptions} />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'standardization']}
+                                label="标准化"
+                                rules={[{ required: true, message: '请选择标准化' }]}
+                              >
+                                <Select options={standardizationOptions} />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                          {isMixedWindow(leg.window) && (
+                            <Row gutter={12}>
+                              {MOMENTUM_WEIGHT_WINDOWS.map(window => (
+                                <Col span={8} key={window}>
+                                  <Form.Item name={[field.name, 'momentum_weights', String(window)]} label={`${window}日权重`}>
+                                    <InputNumber min={0} step={0.05} precision={4} style={{ width: '100%' }} />
+                                  </Form.Item>
+                                </Col>
+                              ))}
+                            </Row>
+                          )}
+                          <Button
+                            danger
+                            block
+                            icon={<DeleteOutlined />}
+                            disabled={fields.length <= 1}
+                            onClick={() => remove(field.name)}
+                          >
+                            删除因子
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </Form.List>
               <Row gutter={12}>
-                <Col span={12}>
-                  <Form.Item name="commission_pct" label="佣金(%)" rules={[{ required: true }]}>
-                    <InputNumber min={0} max={10} step={0.01} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
                 <Col span={12}>
                   <Form.Item name="auto_sync_time" label="自动同步时间(ET)" rules={[{ required: true }]}>
                     <Input />
                   </Form.Item>
                 </Col>
+                <Col span={12}>
+                  <Form.Item name="auto_sync_enabled" label="自动同步" valuePropName="checked">
+                    <Switch />
+                  </Form.Item>
+                </Col>
               </Row>
-              <Form.Item name="auto_sync_enabled" label="自动同步" valuePropName="checked">
-                <Switch />
-              </Form.Item>
             </Form>
           </Card>
         </Col>
 
-        <Col xs={24} lg={17}>
+        <Col xs={24} lg={15}>
           <Spin spinning={detailLoading || syncing}>
             {!selectedConfig?.id ? (
               <Card>
@@ -578,7 +859,7 @@ const USStockSignalLive = () => {
                       {
                         key: 'events',
                         label: '排名',
-                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={detail?.events || []} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1450 }} />,
+                        children: <Table rowKey="id" size="small" columns={eventColumns} dataSource={eventRows} pagination={{ defaultPageSize: 20 }} scroll={{ x: 1580 }} />,
                       },
                       {
                         key: 'logs',

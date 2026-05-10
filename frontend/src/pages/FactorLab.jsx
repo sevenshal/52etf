@@ -2033,7 +2033,7 @@ const FactorLab = () => {
             </Row>
 
             <div className="factor-lab-factor-note">
-              <Text type="secondary">默认参数用于复现“美股风险调整混合动量虚拟盘”：风险调整动量 60% + 指数成分权重 40%，默认标准化为截面排名分位，因子间按标准化结果加权。</Text>
+              <Text type="secondary">默认参数用于复现“美股多因子策略虚拟盘”：风险调整动量 60% + 指数成分权重 40%，默认标准化为截面排名分位，因子间按标准化结果加权。</Text>
             </div>
           </Form>
         </Spin>

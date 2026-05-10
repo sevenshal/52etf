@@ -84,7 +84,7 @@ const Profile = () => {
           arrow: true
         },
         {
-          title: '美股风险调整混合动量虚拟盘',
+          title: '美股多因子策略虚拟盘',
           onClick: () => navigate('/us-stock-signal-live'),
           arrow: true
         },
