@@ -45,12 +45,10 @@ SYNC_REFRESH_OVERLAP_DAYS = 45
 INCOME_HISTORY_LOOKBACK_DAYS = 365 * 6
 INCOME_INSERT_BATCH_ROWS = 5000
 INCOME_INSERT_BATCH_FRAMES = 500
-A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS = 900
 A_STOCK_OPTION_DAILY_CHUNK_TRADING_DAYS = 20
 A_STOCK_OPTION_DAILY_CHUNK_CALENDAR_DAYS = 45
 A_STOCK_REPO_DAILY_CHUNK_TRADING_DAYS = 30
 A_STOCK_REPO_DAILY_CHUNK_CALENDAR_DAYS = 70
-A_STOCK_CHINABOND_HISTORY_LOOKBACK_DAYS = A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS
 A_STOCK_CHINABOND_CHUNK_TRADING_DAYS = 10
 A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS = 30
 A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
@@ -1141,7 +1139,7 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
-        option_default_start = max(DEFAULT_START_DATE, end_value - timedelta(days=A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS))
+        option_default_start = DEFAULT_START_DATE
         if explicit_start:
             option_start = explicit_start
             repo_start = explicit_start
@@ -1168,7 +1166,7 @@ class AStockBaseDataSyncService:
             repo_start_date=repo_start,
         )
 
-        chinabond_default_start = max(DEFAULT_START_DATE, end_value - timedelta(days=A_STOCK_CHINABOND_HISTORY_LOOKBACK_DAYS))
+        chinabond_default_start = DEFAULT_START_DATE
         if explicit_start:
             chinabond_start = explicit_start
         elif incremental:
