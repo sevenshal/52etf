@@ -132,6 +132,14 @@
   margin-top: 12px;
 }
 
+.factor-lab-heatmap-title {
+  max-width: 100%;
+}
+
+.factor-lab-heatmap-metric-select {
+  width: 220px;
+}
+
 .factor-lab-oos-card {
   margin-bottom: 12px;
 }
@@ -230,5 +238,9 @@
   .factor-lab-param-component {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .factor-lab-heatmap-metric-select {
+    width: min(220px, 100%);
   }
 }

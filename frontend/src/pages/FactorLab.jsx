@@ -181,6 +181,11 @@ const icFormatter = value => {
   return Number(value).toFixed(4);
 };
 
+const factorValueFormatter = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+};
+
 const getErrorMessage = (error, fallback) => (
   error?.response?.data?.detail
   || error?.response?.data?.message
@@ -497,6 +502,94 @@ const getBucketChartOption = rows => {
         itemStyle: { color: '#2f9e6d' },
       },
     ],
+  };
+};
+
+const getFactorDistributionOption = rows => {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const bucketIds = [...new Set(safeRows.map(item => Number(item.bucket_id)).filter(Number.isFinite))]
+    .sort((a, b) => a - b);
+  const rowBySeriesBucket = new Map(
+    safeRows.map(item => [`${item.series}:${Number(item.bucket_id)}`, item]),
+  );
+  const seriesSpecs = [
+    { key: 'raw', fallbackName: '原始因子值', color: '#7a5ccf' },
+    { key: 'analysis', fallbackName: '标准化/分析值', color: '#2477b3' },
+  ].map(spec => {
+    const seriesRows = safeRows
+      .filter(item => item.series === spec.key)
+      .sort((left, right) => Number(left.bucket_id) - Number(right.bucket_id));
+    const firstRow = seriesRows[0] || {};
+    return {
+      ...spec,
+      rows: seriesRows,
+      name: firstRow.series_label || spec.fallbackName,
+      meanValue: firstRow.mean_value,
+      stdValue: firstRow.std_value,
+    };
+  }).filter(spec => spec.rows.length);
+  const statText = seriesSpecs
+    .map(spec => `${spec.name} 均值 ${factorValueFormatter(spec.meanValue)} / 标准差 ${factorValueFormatter(spec.stdValue)}`)
+    .join('    ');
+
+  return {
+    title: {
+      text: statText,
+      left: 4,
+      top: 0,
+      textStyle: { fontSize: 12, fontWeight: 500, color: '#334155' },
+    },
+    grid: { top: 58, right: 38, bottom: 42, left: 56 },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: params => {
+        const items = Array.isArray(params) ? params : [params];
+        const first = items[0] || {};
+        const lines = [first.axisValue || ''];
+        items.forEach(item => {
+          const itemRow = item.data?.row || {};
+          lines.push(
+            `${item.marker}样本占比: ${percentFormatter(itemRow.pct)}（${numberFormatter(itemRow.samples)}）`
+          );
+          lines.push(`${item.seriesName} 区间: ${factorValueFormatter(itemRow.value_from)} ~ ${factorValueFormatter(itemRow.value_to)}`);
+        });
+        return lines.join('<br/>');
+      },
+    },
+    legend: { top: 24 },
+    xAxis: {
+      type: 'category',
+      data: bucketIds.map(item => `B${item}`),
+      axisTick: { alignWithLabel: true },
+      axisLabel: {
+        hideOverlap: true,
+        formatter: (_, labelIndex) => {
+          const bucketId = bucketIds[labelIndex];
+          if (!bucketId) return '';
+          const isEdge = labelIndex === 0 || labelIndex === bucketIds.length - 1;
+          return isEdge || labelIndex % 8 === 0 ? `B${bucketId}` : '';
+        },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      name: '样本占比%',
+      axisLabel: { formatter: value => `${value}%` },
+      splitLine: { lineStyle: { color: '#edf1f7' } },
+    },
+    series: seriesSpecs.map(spec => (
+      {
+        name: spec.name,
+        type: 'bar',
+        data: bucketIds.map(bucketId => {
+          const row = rowBySeriesBucket.get(`${spec.key}:${bucketId}`);
+          return { value: row?.pct ?? 0, row };
+        }),
+        itemStyle: { color: spec.color },
+        barMaxWidth: 14,
+      }
+    )),
   };
 };
 
@@ -1606,6 +1699,7 @@ const FactorLab = () => {
   const oosSummary = result?.oos_summary || {};
   const hasOosSummary = Number(oosSummary.samples || 0) > 0;
   const bucketRows = result?.bucket_returns || [];
+  const factorDistributionRows = result?.factor_distribution || [];
   const icRows = result?.rank_ic_series || [];
   const heatmapRows = result?.parameter_heatmap || [];
   const nonOverlapSummary = result?.non_overlapping_summary || {};
@@ -1637,6 +1731,7 @@ const FactorLab = () => {
   const compositeOosSummary = compositeResult?.oos_summary || {};
   const hasCompositeOosSummary = Number(compositeOosSummary.samples || 0) > 0;
   const compositeBucketRows = compositeResult?.bucket_returns || [];
+  const compositeFactorDistributionRows = compositeResult?.factor_distribution || [];
   const compositeIcRows = compositeResult?.rank_ic_series || [];
   const compositeNonOverlapSummary = compositeResult?.non_overlapping_summary || {};
   const compositeNonOverlapRows = compositeResult?.non_overlapping_offsets || [];
@@ -1655,6 +1750,7 @@ const FactorLab = () => {
   const timingSummary = timingResult?.summary || {};
   const timingMetadata = timingResult?.metadata || {};
   const timingBucketRows = timingResult?.bucket_returns || [];
+  const timingFactorDistributionRows = timingResult?.factor_distribution || [];
   const timingIcRows = timingResult?.rank_ic_series || [];
   const timingHeatmapRows = timingResult?.parameter_heatmap || [];
   const timingNonOverlapSummary = timingResult?.non_overlapping_summary || {};
@@ -1771,11 +1867,6 @@ const FactorLab = () => {
                 </Form.Item>
               </Col>
               <Col xs={24} sm={12} md={8} lg={5}>
-                <Form.Item name="heatmap_metric" label="热力图指标" rules={[{ required: true }]}>
-                  <Select options={heatmapMetricOptions} />
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12} md={8} lg={5}>
                 <Form.Item name="heatmap_windows" label="滑动窗口" rules={[{ required: true }]}>
                   <Select
                     mode="multiple"
@@ -1804,6 +1895,9 @@ const FactorLab = () => {
                 </Col>
               ))}
             </Row>
+            <Form.Item name="heatmap_metric" hidden>
+              <Input />
+            </Form.Item>
 
             {selectedFactor?.description && (
               <div className="factor-lab-factor-note">
@@ -1825,7 +1919,18 @@ const FactorLab = () => {
         <Spin spinning={running || selectingCombo}>
           <Card
             className="factor-lab-heatmap-card"
-            title={<Space><FireOutlined />参数热力图（{heatmapMetricMeta.label}）</Space>}
+            title={(
+              <Space className="factor-lab-heatmap-title" size={8} wrap>
+                <span><FireOutlined /> 参数热力图</span>
+                <Select
+                  size="small"
+                  className="factor-lab-heatmap-metric-select"
+                  value={heatmapMetric}
+                  options={heatmapMetricOptions}
+                  onChange={value => form.setFieldsValue({ heatmap_metric: value })}
+                />
+              </Space>
+            )}
             extra={<Tag color="blue">当前：{selectedComboText}</Tag>}
             bordered={false}
           >
@@ -1888,7 +1993,7 @@ const FactorLab = () => {
                 {metadata.oos_start_date && <span>样本外自 {metadata.oos_start_date}</span>}
                 <span>{metadata.price_rows?.toLocaleString?.('zh-CN') || metadata.price_rows} 行行情</span>
                 <span>{selectedComboText}</span>
-                {metadata.heatmap_metric_label && <span>热力图：{metadata.heatmap_metric_label}</span>}
+                {heatmapMetricMeta.label && <span>热力图：{heatmapMetricMeta.label}</span>}
                 {metadata.neutralization_label && <span>{metadata.neutralization_label}</span>}
                 {metadata.standardization_label && <span>{metadata.standardization_label}</span>}
                 {metadata.industry_snapshot_mode && <span>行业快照 {numberFormatter(metadata.industry_rows)} 行</span>}
@@ -1898,6 +2003,16 @@ const FactorLab = () => {
               </Space>
             )}
           />
+
+          <Row gutter={[12, 12]}>
+            <Col xs={24}>
+              <Card title={<Space><BarChartOutlined />因子值分布（等宽）</Space>} bordered={false}>
+                {factorDistributionRows.length ? (
+                  <ReactECharts option={getFactorDistributionOption(factorDistributionRows)} style={{ height: 420 }} />
+                ) : <Empty />}
+              </Card>
+            </Col>
+          </Row>
 
           <Row gutter={[12, 12]}>
             <Col xs={24} xl={12}>
@@ -2204,6 +2319,16 @@ const FactorLab = () => {
           </Row>
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title={<Space><BarChartOutlined />组合因子值分布（等宽）</Space>} bordered={false}>
+                {compositeFactorDistributionRows.length ? (
+                  <ReactECharts option={getFactorDistributionOption(compositeFactorDistributionRows)} style={{ height: 420 }} />
+                ) : <Empty />}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
             <Col xs={24} xl={12}>
               <Card title={<Space><BarChartOutlined />组合分桶收益</Space>} bordered={false}>
                 {compositeBucketRows.length ? <ReactECharts option={getBucketChartOption(compositeBucketRows)} style={{ height: 340 }} /> : <Empty />}
@@ -2382,6 +2507,16 @@ const FactorLab = () => {
               </Space>
             )}
           />
+
+          <Row gutter={[12, 12]}>
+            <Col xs={24}>
+              <Card title={<Space><BarChartOutlined />择时因子值分布（等宽）</Space>} bordered={false}>
+                {timingFactorDistributionRows.length ? (
+                  <ReactECharts option={getFactorDistributionOption(timingFactorDistributionRows)} style={{ height: 420 }} />
+                ) : <Empty />}
+              </Card>
+            </Col>
+          </Row>
 
           <Row gutter={[12, 12]}>
             <Col xs={24} xl={12}>
