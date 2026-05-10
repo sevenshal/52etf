@@ -20,6 +20,9 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_index_daily",
         "a_stock_market_daily",
         "a_stock_name_changes",
+        "a_stock_option_basic",
+        "a_stock_option_daily",
+        "a_stock_repo_daily",
         "us_stock_daily",
     }
 )
@@ -117,6 +120,72 @@ class AStockIndexDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockOptionBasic(AnalyticsBase):
+    """Tushare A股ETF期权合约基础信息，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_option_basic"
+
+    ts_code = Column(String(32), primary_key=True)
+    exchange = Column(String(16))
+    name = Column(String(128))
+    per_unit = Column(Float)
+    opt_code = Column(String(32), index=True)
+    opt_type = Column(String(32))
+    call_put = Column(String(8), index=True)
+    exercise_type = Column(String(32))
+    exercise_price = Column(Float)
+    s_month = Column(String(16))
+    maturity_date = Column(Date)
+    list_price = Column(Float)
+    list_date = Column(Date)
+    delist_date = Column(Date, index=True)
+    last_edate = Column(Date)
+    last_ddate = Column(Date)
+    quote_unit = Column(String(32))
+    min_price_chg = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockOptionDaily(AnalyticsBase):
+    """Tushare A股ETF期权日行情，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_option_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(32), primary_key=True)
+    exchange = Column(String(16))
+    pre_settle = Column(Float)
+    pre_close = Column(Float)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    settle = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    oi = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockRepoDaily(AnalyticsBase):
+    """Tushare 债券回购日行情，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_repo_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(32), primary_key=True)
+    repo_maturity = Column(String(32), index=True)
+    pre_close = Column(Float)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    weight = Column(Float)
+    weight_r = Column(Float)
+    amount = Column(Float)
+    num = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class USStockDaily(AnalyticsBase):
     """LongPort 美股日K行情，存放在 DuckDB 分析库。"""
     __tablename__ = "us_stock_daily"
@@ -146,6 +215,10 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_option_basic_underlying ON a_stock_option_basic(opt_code, call_put, delist_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_date_exchange ON a_stock_option_daily(trade_date, exchange)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_symbol_date ON a_stock_option_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_repo_daily_maturity_date ON a_stock_repo_daily(repo_maturity, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_symbol_date ON us_stock_daily(symbol, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]

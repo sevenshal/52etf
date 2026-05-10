@@ -17,10 +17,14 @@ from ..core.analytics_database import (
     AStockIndexDaily,
     AStockMarketDaily,
     AStockNameChange,
+    AStockOptionBasic,
+    AStockOptionDaily,
+    AStockRepoDaily,
     AnalyticsSession,
 )
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
+    A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
     BENCHMARK_INDEXES,
     DEFAULT_START_DATE,
     MAX_MARKET_DAILY_OHL_ZERO_PCT,
@@ -51,6 +55,11 @@ A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS = max(
     0,
     int(os.getenv("A_STOCK_BASE_DATA_SYNC_REFRESH_OVERLAP_DAYS", "45")),
 )
+A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS = max(
+    550,
+    int(os.getenv("A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS", "900")),
+)
+A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
 
 
 def _clean_text(value) -> Optional[str]:
@@ -525,6 +534,77 @@ class AStockBaseDataSyncService:
             replace_dates=replace_dates,
         )
 
+    def sync_option_basic(self) -> int:
+        frames = []
+        for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
+            frame = self.tushare.get_option_basic_frame(exchange)
+            if not frame.empty:
+                frames.append(frame)
+        if not frames:
+            return 0
+        combined = pd.concat(frames, ignore_index=True)
+        return _bulk_upsert_option_basic_frame(self.analytics_db, combined)
+
+    def sync_option_and_repo_daily(self, start_date: date, end_date: date) -> Dict:
+        start_value = _parse_date(start_date)
+        end_value = _parse_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return {
+                "start_date": start_value.isoformat() if start_value else None,
+                "end_date": end_value.isoformat() if end_value else None,
+                "trading_days": 0,
+                "option_saved_rows": 0,
+                "repo_saved_rows": 0,
+            }
+
+        calendar = self.tushare.get_trade_calendar_frame(start_value, end_value)
+        trading_dates = [
+            item
+            for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
+            if item <= end_value
+        ] if not calendar.empty else []
+
+        option_saved_rows = 0
+        repo_saved_rows = 0
+        total_dates = len(trading_dates)
+        for index, current_date in enumerate(trading_dates, start=1):
+            daily_frames = []
+            for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
+                frame = self.tushare.get_option_daily_frame(current_date, exchange)
+                if not frame.empty:
+                    daily_frames.append(frame)
+            if daily_frames:
+                option_frame = pd.concat(daily_frames, ignore_index=True)
+                option_saved_rows += _bulk_replace_option_daily_frame(
+                    self.analytics_db,
+                    option_frame,
+                )
+
+            repo_frame = self.tushare.get_repo_daily_frame(current_date)
+            if not repo_frame.empty:
+                repo_saved_rows += _bulk_replace_repo_daily_frame(
+                    self.analytics_db,
+                    repo_frame,
+                )
+
+            if total_dates and (index == total_dates or index % 20 == 0):
+                self._progress(
+                    f"同步A股期权/回购日行情 {current_date.isoformat()}",
+                    72 + int(index / max(total_dates, 1) * 6),
+                    processed_dates=index,
+                    total_dates=total_dates,
+                    option_saved_rows=option_saved_rows,
+                    repo_saved_rows=repo_saved_rows,
+                )
+
+        return {
+            "start_date": start_value.isoformat(),
+            "end_date": end_value.isoformat(),
+            "trading_days": total_dates,
+            "option_saved_rows": option_saved_rows,
+            "repo_saved_rows": repo_saved_rows,
+        }
+
     def sync_base_data(
         self,
         start_date: Optional[date] = None,
@@ -538,6 +618,8 @@ class AStockBaseDataSyncService:
 
         latest_market_date = _latest_analytics_date(self.analytics_db, AStockMarketDaily, "trade_date")
         latest_index_date = _latest_analytics_date(self.analytics_db, AStockIndexDaily, "trade_date")
+        latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
+        latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         name_change_rows_before = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         self.analytics_db.commit()
 
@@ -581,6 +663,29 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
+        option_default_start = max(DEFAULT_START_DATE, end_value - timedelta(days=A_STOCK_OPTION_HISTORY_LOOKBACK_DAYS))
+        if explicit_start:
+            option_start = explicit_start
+        elif incremental:
+            latest_option_or_repo_date = min(
+                [item for item in (latest_option_date, latest_repo_date) if item],
+                default=None,
+            )
+            option_start = _overlap_start(option_default_start, latest_option_or_repo_date)
+        else:
+            option_start = option_default_start
+
+        self._progress("同步A股期权合约基础信息", 68)
+        option_basic_rows_saved = self.sync_option_basic()
+
+        self._progress(
+            "同步A股期权/回购日行情缓存",
+            72,
+            start_date=option_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        option_repo_result = self.sync_option_and_repo_daily(option_start, end_value)
+
         requested_income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
         income_start = requested_income_start
         income_end = end_value
@@ -590,7 +695,7 @@ class AStockBaseDataSyncService:
         income_symbol_scope = "a_stock_basic"
         self._progress(
             "同步A股利润表财务数据缓存",
-            76,
+            82,
             start_date=income_start.isoformat() if income_start else None,
             end_date=income_end.isoformat(),
             lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
@@ -615,6 +720,9 @@ class AStockBaseDataSyncService:
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
+        option_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionBasic.__tablename__)
+        option_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionDaily.__tablename__)
+        repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
         self.analytics_db.commit()
 
         self._progress("A股基础数据同步完成", 100)
@@ -627,6 +735,12 @@ class AStockBaseDataSyncService:
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
             "index_start_date": index_start.isoformat(),
+            "option_start_date": option_start.isoformat(),
+            "option_end_date": end_value.isoformat(),
+            "option_basic_rows_saved": option_basic_rows_saved,
+            "option_daily_saved_rows": option_repo_result.get("option_saved_rows"),
+            "repo_daily_saved_rows": option_repo_result.get("repo_saved_rows"),
+            "option_repo_trading_days": option_repo_result.get("trading_days"),
             "income_start_date": income_result.get("start_date"),
             "income_end_date": income_result.get("end_date"),
             "income_sync_mode": income_sync_mode,
@@ -654,6 +768,9 @@ class AStockBaseDataSyncService:
                 AStockIndexDaily.__tablename__: index_rows,
                 AStockMarketDaily.__tablename__: market_rows,
                 AStockNameChange.__tablename__: name_change_rows,
+                AStockOptionBasic.__tablename__: option_basic_rows,
+                AStockOptionDaily.__tablename__: option_daily_rows,
+                AStockRepoDaily.__tablename__: repo_daily_rows,
             },
         }
 
@@ -724,6 +841,189 @@ def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int
         table.name,
         columns,
         normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+def _normalize_option_basic_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ts_code",
+        "exchange",
+        "name",
+        "per_unit",
+        "opt_code",
+        "opt_type",
+        "call_put",
+        "exercise_type",
+        "exercise_price",
+        "s_month",
+        "maturity_date",
+        "list_price",
+        "list_date",
+        "delist_date",
+        "last_edate",
+        "last_ddate",
+        "quote_unit",
+        "min_price_chg",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["exchange"] = _clean_text_series(frame, "exchange")
+    normalized["name"] = _clean_text_series(frame, "name")
+    normalized["per_unit"] = _numeric_series(frame, "per_unit", 6)
+    normalized["opt_code"] = _clean_text_series(frame, "opt_code")
+    normalized["opt_type"] = _clean_text_series(frame, "opt_type")
+    normalized["call_put"] = _clean_text_series(frame, "call_put")
+    normalized["exercise_type"] = _clean_text_series(frame, "exercise_type")
+    normalized["exercise_price"] = _numeric_series(frame, "exercise_price", 6)
+    normalized["s_month"] = _clean_text_series(frame, "s_month")
+    normalized["maturity_date"] = _date_series(frame, "maturity_date")
+    normalized["list_price"] = _numeric_series(frame, "list_price", 6)
+    normalized["list_date"] = _date_series(frame, "list_date")
+    normalized["delist_date"] = _date_series(frame, "delist_date")
+    normalized["last_edate"] = _date_series(frame, "last_edate")
+    normalized["last_ddate"] = _date_series(frame, "last_ddate")
+    normalized["quote_unit"] = _clean_text_series(frame, "quote_unit")
+    normalized["min_price_chg"] = _numeric_series(frame, "min_price_chg", 6)
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["ts_code"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["ts_code"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_option_basic_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_option_basic_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockOptionBasic.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+def _normalize_option_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "ts_code",
+        "exchange",
+        "pre_settle",
+        "pre_close",
+        "open",
+        "high",
+        "low",
+        "close",
+        "settle",
+        "vol",
+        "amount",
+        "oi",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["exchange"] = _clean_text_series(frame, "exchange")
+    for column in (
+        "pre_settle",
+        "pre_close",
+        "open",
+        "high",
+        "low",
+        "close",
+        "settle",
+        "vol",
+        "amount",
+        "oi",
+    ):
+        normalized[column] = _numeric_series(frame, column, 6)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["trade_date", "ts_code"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["trade_date", "ts_code"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_option_daily_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_option_daily_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    replace_dates = sorted(normalized["trade_date"].dropna().unique().tolist())
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockOptionDaily.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+        replace_dates=replace_dates,
+    )
+    return len(normalized)
+
+
+def _normalize_repo_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "trade_date",
+        "ts_code",
+        "repo_maturity",
+        "pre_close",
+        "open",
+        "high",
+        "low",
+        "close",
+        "weight",
+        "weight_r",
+        "amount",
+        "num",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["repo_maturity"] = _clean_text_series(frame, "repo_maturity")
+    for column in ("pre_close", "open", "high", "low", "close", "weight", "weight_r", "amount", "num"):
+        normalized[column] = _numeric_series(frame, column, 6)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["trade_date", "ts_code"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["trade_date", "ts_code"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_repo_daily_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_repo_daily_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    replace_dates = sorted(normalized["trade_date"].dropna().unique().tolist())
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockRepoDaily.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+        replace_dates=replace_dates,
     )
     return len(normalized)
 
@@ -1284,7 +1584,11 @@ def sync_benchmark_index_daily(
     owns_analytics_db = analytics_db is None
     analytics_session = analytics_db or AnalyticsSession()
     try:
-        for benchmark in BENCHMARK_INDEXES:
+        index_map = {
+            item["ts_code"]: item
+            for item in [*BENCHMARK_INDEXES, *A_STOCK_FEAR_SAFE_HAVEN_INDEXES]
+        }
+        for benchmark in index_map.values():
             ts_code = benchmark["ts_code"]
             frame = tushare.get_index_daily_range_frame(ts_code, start_value, end_value)
             _upsert_index_daily_frame(analytics_session, frame)

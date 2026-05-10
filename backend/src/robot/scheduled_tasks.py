@@ -308,6 +308,7 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     logging.getLogger("ScheduledTaskManager").info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
+            "option_basic_saved=%s option_daily_saved=%s repo_daily_saved=%s "
             "income_fetched_rows=%s income_saved_rows=%s income_fetch_seconds=%s "
             "income_insert_seconds=%s income_total_seconds=%s income_insert_batches=%s "
             "income_skipped_symbols=%s income_backfill_symbols=%s income_incremental_symbols=%s income_full_symbols=%s"
@@ -316,6 +317,9 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         result.get("mode"),
         result.get("end_date"),
         result.get("tables"),
+        result.get("option_basic_rows_saved"),
+        result.get("option_daily_saved_rows"),
+        result.get("repo_daily_saved_rows"),
         result.get("income_fetched_rows"),
         result.get("income_saved_rows"),
         result.get("income_fetch_seconds"),
@@ -331,6 +335,10 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         "A stock base data sync "
         f"start={result.get('start_date')} "
         f"market_start={result.get('market_start_date')} "
+        f"option_start={result.get('option_start_date')} "
+        f"option_basic_saved={result.get('option_basic_rows_saved')} "
+        f"option_daily_saved={result.get('option_daily_saved_rows')} "
+        f"repo_daily_saved={result.get('repo_daily_saved_rows')} "
         f"income_mode={result.get('income_sync_mode')} "
         f"income_scope={result.get('income_symbol_scope')} "
         f"income_symbols={result.get('income_symbols')} "
@@ -363,6 +371,44 @@ def _run_a_stock_innovation100_rebuild():
         result.get("levels_saved"),
         result.get("rebalances_saved"),
     )
+
+
+def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
+    from ..core.services.a_stock_fear_greed_clone_service import (
+        A_STOCK_INNO100_FEAR_SYMBOL,
+        AStockInnovation100FearGreedCloneCalculator,
+    )
+
+    end_date = date.today()
+    if start_date:
+        output_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    else:
+        output_start_date = end_date - timedelta(days=3)
+
+    calculation_start_date = output_start_date - timedelta(days=550)
+    calculator = AStockInnovation100FearGreedCloneCalculator()
+    result = calculator.backfill_to_db(
+        start_date=calculation_start_date,
+        end_date=end_date,
+        output_start_date=output_start_date,
+        history_days=550,
+        score_window=252,
+        min_periods=120,
+    )
+    logging.getLogger("ScheduledTaskManager").info(
+        "%s fear greed backfill saved %s rows, range=%s~%s",
+        A_STOCK_INNO100_FEAR_SYMBOL,
+        result.get("saved"),
+        result.get("start_date"),
+        result.get("end_date"),
+    )
+    return (
+        "A stock ETF fear greed backfill "
+        f"symbol={A_STOCK_INNO100_FEAR_SYMBOL} "
+        f"range={result.get('start_date')}~{result.get('end_date')} "
+        f"saved={result.get('saved')}"
+    )
+
 
 def _run_a_stock_innovation_momentum_live_sync():
     from ..app.api.a_stock_innovation_momentum_live import sync_all_enabled_a_stock_innovation_momentum_configs_for_scheduler
@@ -551,7 +597,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情和利润表到DuckDB分析库。",
+                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情、期权/回购行情和利润表到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,
@@ -566,13 +612,22 @@ class ScheduledTaskManager:
                 sort_order=75,
                 runner=_run_a_stock_innovation100_rebuild,
             ),
+            "a_stock_etf_fear_greed_backfill": TaskDefinition(
+                task_key="a_stock_etf_fear_greed_backfill",
+                name="A股ETF贪恐回跑入库",
+                description="计算 INNO100.CN A创100 贪恐复刻指数并保存到 etf_fear_greed_clone_history。",
+                default_time="18:40",
+                default_enabled=True,
+                sort_order=76,
+                runner=_run_a_stock_etf_fear_greed_backfill,
+            ),
             "a_stock_innovation_momentum_live_sync": TaskDefinition(
                 task_key="a_stock_innovation_momentum_live_sync",
                 name="A股创新100动量虚拟盘同步",
                 description="同步所有启用的A股创新100风险调整混合动量虚拟盘，生成排名信号、模拟成交、刷新净值和持仓。",
                 default_time="18:45",
                 default_enabled=True,
-                sort_order=76,
+                sort_order=77,
                 runner=_run_a_stock_innovation_momentum_live_sync,
             ),
             "snowball_ptrade_heartbeat_check": TaskDefinition(
@@ -870,6 +925,7 @@ class ScheduledTaskManager:
                 "a_stock_base_data_sync",
                 "etf_historical_holdings_backfill",
                 "soxx_fear_greed_backfill",
+                "a_stock_etf_fear_greed_backfill",
             },
             "is_running": is_running,
             "next_run_at": job.next_run.isoformat() if job and job.next_run else None,

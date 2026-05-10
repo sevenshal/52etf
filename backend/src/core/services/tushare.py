@@ -569,6 +569,78 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
+    def get_option_basic_frame(self, exchange: str) -> pd.DataFrame:
+        """获取交易所 ETF 期权合约基础信息。"""
+        exchange_value = str(exchange or "").strip().upper()
+        if exchange_value not in {"SSE", "SZSE"}:
+            return pd.DataFrame()
+        fields = (
+            "ts_code,exchange,name,per_unit,opt_code,opt_type,call_put,exercise_type,"
+            "exercise_price,s_month,maturity_date,list_price,list_date,delist_date,"
+            "last_edate,last_ddate,quote_unit,min_price_chg"
+        )
+        try:
+            frame = self.pro.opt_basic(exchange=exchange_value, fields=fields)
+        except Exception as exc:
+            self.logger.warning("Tushare opt_basic fetch failed for %s: %s", exchange_value, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        return frame.copy().drop_duplicates(subset=["ts_code"], keep="last")
+
+    def get_option_daily_frame(self, trade_date: date, exchange: str) -> pd.DataFrame:
+        """获取某交易所某交易日 ETF 期权行情。"""
+        trade_value = self._to_date(trade_date)
+        exchange_value = str(exchange or "").strip().upper()
+        if not trade_value or exchange_value not in {"SSE", "SZSE"}:
+            return pd.DataFrame()
+        fields = (
+            "ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,"
+            "close,settle,vol,amount,oi"
+        )
+        try:
+            frame = self.pro.opt_daily(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                exchange=exchange_value,
+                fields=fields,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Tushare opt_daily fetch failed for %s %s: %s",
+                exchange_value,
+                trade_value,
+                exc,
+            )
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["ts_code", "trade_date"])
+
+    def get_repo_daily_frame(self, trade_date: date) -> pd.DataFrame:
+        """获取某交易日交易所债券回购行情。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        fields = (
+            "ts_code,trade_date,repo_maturity,pre_close,open,high,low,close,"
+            "weight,weight_r,amount,num"
+        )
+        try:
+            frame = self.pro.repo_daily(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields=fields,
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare repo_daily fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["ts_code", "trade_date"])
+
     def _load_fund_basic_frame(self) -> pd.DataFrame:
         if self._fund_basic_frame is None:
             try:

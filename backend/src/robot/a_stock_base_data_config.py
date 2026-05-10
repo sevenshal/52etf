@@ -6,6 +6,9 @@ BENCHMARK_INDEXES = [
     {"ts_code": "000300.SH", "name": "沪深300"},
     {"ts_code": "000905.SH", "name": "中证500"},
 ]
+A_STOCK_FEAR_SAFE_HAVEN_INDEXES = [
+    {"ts_code": "H11006.CSI", "name": "中证国债"},
+]
 MIN_MARKET_DAILY_ROWS = 3500
 MAX_MARKET_DAILY_OHL_ZERO_PCT = 1.0
 RAW_FETCH_LOOKBACK_DAYS = 180

@@ -1067,6 +1067,8 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
 def _fear_source_label(symbol: str) -> str:
     if symbol == CNN_HISTORY_SYMBOL:
         return "CNN Fear & Greed"
+    if symbol == "INNO100.CN":
+        return "A创100 自算贪恐"
     if symbol.endswith(".US"):
         return f"{symbol[:-3]} 自算贪恐"
     return symbol
