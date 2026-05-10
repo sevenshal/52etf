@@ -967,6 +967,71 @@ class USStockSignalVirtualLog(Base):
     message = Column(String(1000))
     payload = Column(JSON)
 
+
+class FactorBacktestSearchState(Base):
+    """因子回测批量搜索全局状态。只保留最近一次搜索。"""
+    __tablename__ = "factor_backtest_search_state"
+
+    id = Column(Integer, primary_key=True, default=1)
+    account_id = Column(String, index=True)
+    status = Column(String(16), nullable=False, default="idle")
+    objective = Column(String(64), nullable=False, default="annualized_return")
+    request_payload = Column(JSON)
+    search_params = Column(JSON)
+    total_cases = Column(Integer, default=0)
+    submitted_cases = Column(Integer, default=0)
+    completed_cases = Column(Integer, default=0)
+    failed_cases = Column(Integer, default=0)
+    top_n = Column(Integer, default=200)
+    worker_count = Column(Integer, default=1)
+    current_case = Column(String(1000))
+    error = Column(String(1000))
+    cancel_requested = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class FactorBacktestSearchResult(Base):
+    """因子回测批量搜索结果。只保留最近一次搜索的完整结果。"""
+    __tablename__ = "factor_backtest_search_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    search_id = Column(Integer, index=True, default=1)
+    rank = Column(Integer, index=True)
+    case_index = Column(Integer, index=True)
+    objective = Column(String(64))
+    objective_value = Column(Float)
+    params_label = Column(String(1000))
+    max_positions = Column(Integer)
+    sell_rank_multiplier = Column(Float)
+    total_return = Column(Float)
+    annualized_return = Column(Float)
+    sharpe = Column(Float)
+    calmar = Column(Float)
+    annualized_volatility = Column(Float)
+    max_drawdown = Column(Float)
+    in_sample_total_return = Column(Float)
+    in_sample_annualized_return = Column(Float)
+    in_sample_sharpe = Column(Float)
+    in_sample_calmar = Column(Float)
+    in_sample_annualized_volatility = Column(Float)
+    in_sample_max_drawdown = Column(Float)
+    oos_total_return = Column(Float)
+    oos_annualized_return = Column(Float)
+    oos_sharpe = Column(Float)
+    oos_calmar = Column(Float)
+    oos_annualized_volatility = Column(Float)
+    oos_max_drawdown = Column(Float)
+    ending_value = Column(Float)
+    trade_count = Column(Integer)
+    win_rate = Column(Float)
+    rebalance_count = Column(Integer)
+    holding_count = Column(Integer)
+    request_payload = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now)
+
 class AStockInnovationMomentumConfig(Base):
     """A股创新100风险调整混合动量虚拟盘配置"""
     __tablename__ = "a_stock_innovation_momentum_configs"
@@ -1119,6 +1184,14 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_events_config_date ON us_stock_signal_virtual_events(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_trades_config_date ON us_stock_signal_virtual_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_logs_config_time ON us_stock_signal_virtual_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_rank ON factor_backtest_search_results(search_id, rank)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_case ON factor_backtest_search_results(search_id, case_index)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_objective ON factor_backtest_search_results(search_id, objective_value)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_return ON factor_backtest_search_results(search_id, annualized_return)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_sharpe ON factor_backtest_search_results(search_id, sharpe)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_calmar ON factor_backtest_search_results(search_id, calmar)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_oos_return ON factor_backtest_search_results(search_id, oos_annualized_return)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_oos_sharpe ON factor_backtest_search_results(search_id, oos_sharpe)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_configs_account ON a_stock_innovation_momentum_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_events_config_date ON a_stock_innovation_momentum_events(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_trades_config_date ON a_stock_innovation_momentum_trades(config_id, date)",

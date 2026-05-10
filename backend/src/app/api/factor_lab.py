@@ -1,10 +1,10 @@
 import logging
+import json
 import math
 import os
 import re
 import threading
 import time
-import uuid
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -14,12 +14,19 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import numpy as np
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import Session as DBSession
-from ...core.database import StockEVC, USStockIndustrySnapshot, get_db
+from ...core.database import (
+    FactorBacktestSearchResult,
+    FactorBacktestSearchState,
+    StockEVC,
+    USStockIndustrySnapshot,
+    get_db,
+)
 from ...core.services.factor_backtest_engine import (
     FactorBacktestConfig as SharedFactorBacktestConfig,
     FactorBacktestLeg as SharedFactorBacktestLeg,
@@ -55,6 +62,7 @@ SUPPORTED_WINDOWS = [20, 60, 120]
 MIXED_WINDOW_KEY = "mixed"
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
 DEFAULT_START_DATE = date(2020, 1, 2)
+DEFAULT_OOS_START_DATE = date(date.today().year - 1, 1, 1)
 DEFAULT_MIN_LISTING_DAYS = 365
 DEFAULT_NEUTRALIZATION = "none"
 DEFAULT_STANDARDIZATION = "zscore"
@@ -119,15 +127,25 @@ HEATMAP_METRIC_OPTIONS = {
 }
 
 BACKTEST_SEARCH_OBJECTIVE_OPTIONS = {
-    "annualized_return": {"label": "年化收益最大"},
-    "total_return": {"label": "总收益最大"},
-    "sharpe": {"label": "夏普最大"},
-    "calmar": {"label": "卡玛最大"},
+    "annualized_return": {"label": "全区间年化收益最大"},
+    "total_return": {"label": "全区间总收益最大"},
+    "sharpe": {"label": "全区间夏普最大"},
+    "calmar": {"label": "全区间卡玛最大"},
+    "in_sample_annualized_return": {"label": "样本内年化收益最大"},
+    "in_sample_total_return": {"label": "样本内总收益最大"},
+    "in_sample_sharpe": {"label": "样本内夏普最大"},
+    "in_sample_calmar": {"label": "样本内卡玛最大"},
+    "oos_annualized_return": {"label": "样本外年化收益最大"},
+    "oos_total_return": {"label": "样本外总收益最大"},
+    "oos_sharpe": {"label": "样本外夏普最大"},
+    "oos_calmar": {"label": "样本外卡玛最大"},
 }
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
-BACKTEST_SEARCH_JOBS: Dict[str, Dict[str, Any]] = {}
 BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
+BACKTEST_SEARCH_STATE_ID = 1
+BACKTEST_SEARCH_ACTIVE_JOB: Optional[Dict[str, Any]] = None
+BACKTEST_SEARCH_ACTIVE_THREAD: Optional[threading.Thread] = None
 MOMENTUM_FACTOR_SCORE_PREFIX = {
     "risk_adjusted_momentum": "_ram",
     "raw_momentum": "_raw_mom",
@@ -393,6 +411,7 @@ class FactorBacktestRequest(BaseModel):
     pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
+    oos_start_date: Optional[date] = None
     initial_capital: float = 100_000.0
     max_positions: int = 7
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
@@ -478,6 +497,18 @@ class FactorBacktestRequest(BaseModel):
             raise ValueError("结束日期必须晚于开始日期")
         return value
 
+    @validator("oos_start_date")
+    def validate_oos_start_date(cls, value, values):
+        if value is None:
+            return value
+        start = values.get("start_date")
+        end = values.get("end_date") or date.today()
+        if start is not None and value <= start:
+            raise ValueError("样本外起始日期必须晚于开始日期")
+        if end is not None and value >= end:
+            raise ValueError("样本外起始日期必须早于结束日期")
+        return value
+
     @validator("legs")
     def validate_legs(cls, value):
         if len(value) < 1:
@@ -491,18 +522,30 @@ class FactorBacktestRequest(BaseModel):
 
 class FactorBacktestSearchRequest(BaseModel):
     request: FactorBacktestRequest
-    objective: Literal["annualized_return", "total_return", "sharpe", "calmar"] = "annualized_return"
+    objective: Literal[
+        "annualized_return",
+        "total_return",
+        "sharpe",
+        "calmar",
+        "in_sample_annualized_return",
+        "in_sample_total_return",
+        "in_sample_sharpe",
+        "in_sample_calmar",
+        "oos_annualized_return",
+        "oos_total_return",
+        "oos_sharpe",
+        "oos_calmar",
+    ] = "annualized_return"
     window_weight_bucket_count: int = 20
     factor_weight_bucket_count: int = 20
     max_positions_candidates: Optional[List[int]] = None
     sell_rank_multiplier_candidates: Optional[List[float]] = None
-    top_n: int = 200
 
     @validator("window_weight_bucket_count", "factor_weight_bucket_count")
     def validate_bucket_count(cls, value):
         number = int(value)
-        if number < 1 or number > 100:
-            raise ValueError("权重分桶数必须在1到100之间")
+        if number < 0 or number > 100:
+            raise ValueError("权重分桶数必须在0到100之间")
         return number
 
     @validator("max_positions_candidates", pre=True, always=True)
@@ -543,12 +586,16 @@ class FactorBacktestSearchRequest(BaseModel):
             raise ValueError("卖出倍数候选项最多支持50个")
         return normalized
 
-    @validator("top_n")
-    def validate_top_n(cls, value):
-        number = int(value)
-        if number < 1 or number > 1000:
-            raise ValueError("Top N 必须在1到1000之间")
-        return number
+    @validator("objective")
+    def validate_objective(cls, value, values):
+        request = values.get("request")
+        if (
+            request is not None
+            and value.startswith(("in_sample_", "oos_"))
+            and not request.oos_start_date
+        ):
+            raise ValueError("选择样本内/样本外目标时，请先设置样本外起始日期")
+        return value
 
 
 class FactorLabOptionsResponse(BaseModel):
@@ -3648,6 +3695,10 @@ def _composition_count(total: int, parts: int) -> int:
     return math.comb(int(total) + int(parts) - 1, int(parts) - 1)
 
 
+def _fixed_factor_weights(legs: List[CompositeFactorLeg]) -> List[float]:
+    return [float(leg.weight or 0) for leg in legs]
+
+
 def _simplex_weight_grid(parts: int, bucket_count: int) -> List[List[float]]:
     parts = int(parts)
     bucket_count = int(bucket_count)
@@ -3678,20 +3729,30 @@ def _estimate_backtest_search_cases(request: FactorBacktestSearchRequest) -> int
         for index, leg in enumerate(legs)
         if leg.window == MIXED_WINDOW_KEY
     }
-    window_case_count = _composition_count(
-        request.window_weight_bucket_count,
-        len(SUPPORTED_MOMENTUM_WINDOWS),
+    window_case_count = (
+        1
+        if int(request.window_weight_bucket_count) <= 0
+        else _composition_count(request.window_weight_bucket_count, len(SUPPORTED_MOMENTUM_WINDOWS))
     )
     factor_bucket_count = int(request.factor_weight_bucket_count)
-    total = 0
+    if factor_bucket_count <= 0:
+        fixed_weights = _fixed_factor_weights(legs)
+        active_mixed_count = sum(
+            1
+            for index in mixed_indexes
+            if abs(float(fixed_weights[index])) > 1e-12
+        )
+        total = window_case_count ** active_mixed_count
+    else:
+        total = 0
 
-    for active_count in range(1, leg_count + 1):
-        factor_cases_for_subset = math.comb(factor_bucket_count - 1, active_count - 1)
-        if factor_cases_for_subset <= 0:
-            continue
-        for active_indexes in combinations(range(leg_count), active_count):
-            active_mixed_count = sum(1 for index in active_indexes if index in mixed_indexes)
-            total += factor_cases_for_subset * (window_case_count ** active_mixed_count)
+        for active_count in range(1, leg_count + 1):
+            factor_cases_for_subset = math.comb(factor_bucket_count - 1, active_count - 1)
+            if factor_cases_for_subset <= 0:
+                continue
+            for active_indexes in combinations(range(leg_count), active_count):
+                active_mixed_count = sum(1 for index in active_indexes if index in mixed_indexes)
+                total += factor_cases_for_subset * (window_case_count ** active_mixed_count)
     return int(
         total
         * max(1, len(request.max_positions_candidates or []))
@@ -3700,11 +3761,13 @@ def _estimate_backtest_search_cases(request: FactorBacktestSearchRequest) -> int
 
 
 def _backtest_request_payload(request: FactorBacktestRequest) -> Dict[str, Any]:
-    return request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    return jsonable_encoder(payload)
 
 
 def _backtest_leg_payload(leg: CompositeFactorLeg) -> Dict[str, Any]:
-    return leg.model_dump() if hasattr(leg, "model_dump") else leg.dict()
+    payload = leg.model_dump() if hasattr(leg, "model_dump") else leg.dict()
+    return jsonable_encoder(payload)
 
 
 def _format_weight(value: float) -> str:
@@ -3747,7 +3810,9 @@ def _iter_backtest_search_requests(
     leg_payloads = [_backtest_leg_payload(leg) for leg in search_request.request.legs]
     leg_count = len(leg_payloads)
     factor_weight_grid = (
-        _simplex_weight_grid(leg_count, search_request.factor_weight_bucket_count)
+        [_fixed_factor_weights(search_request.request.legs)]
+        if search_request.factor_weight_bucket_count <= 0
+        else _simplex_weight_grid(leg_count, search_request.factor_weight_bucket_count)
         if leg_count > 1
         else [[1.0]]
     )
@@ -3756,7 +3821,11 @@ def _iter_backtest_search_requests(
     for factor_weights in factor_weight_grid:
         window_grids = []
         for index, leg in enumerate(leg_payloads):
-            if leg.get("window") == MIXED_WINDOW_KEY and abs(float(factor_weights[index])) > 1e-12:
+            if (
+                leg.get("window") == MIXED_WINDOW_KEY
+                and abs(float(factor_weights[index])) > 1e-12
+                and search_request.window_weight_bucket_count > 0
+            ):
                 window_grids.append(_simplex_weight_grid(len(SUPPORTED_MOMENTUM_WINDOWS), search_request.window_weight_bucket_count))
             else:
                 window_grids.append([None])
@@ -3780,6 +3849,104 @@ def _iter_backtest_search_requests(
                 yield FactorBacktestRequest(**next_payload), next_legs
 
 
+def _equity_segment_metrics(
+    equity_curve: List[Dict[str, Any]],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> Dict[str, Optional[float]]:
+    rows = []
+    for item in equity_curve or []:
+        raw_date = item.get("date")
+        raw_value = item.get("value")
+        if raw_date is None or raw_value is None:
+            continue
+        try:
+            item_date = date.fromisoformat(str(raw_date))
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value <= 0:
+            continue
+        if start_date is not None and item_date < start_date:
+            continue
+        if end_date is not None and item_date > end_date:
+            continue
+        rows.append((item_date, value))
+
+    if len(rows) < 2:
+        return {
+            "total_return": None,
+            "annualized_return": None,
+            "annualized_volatility": None,
+            "sharpe": None,
+            "calmar": None,
+            "max_drawdown": None,
+        }
+
+    start_dt, start_value = rows[0]
+    end_dt, end_value = rows[-1]
+    total_return = (end_value / start_value - 1) * 100 if start_value > 0 else None
+    elapsed_days = max(0, (end_dt - start_dt).days)
+    annualized_return = None
+    if total_return is not None and elapsed_days > 0 and total_return > -100:
+        annualized_return = ((1 + total_return / 100) ** (365 / elapsed_days) - 1) * 100
+
+    peak = start_value
+    max_drawdown = 0.0
+    returns = []
+    previous_value = start_value
+    for _, value in rows[1:]:
+        peak = max(peak, value)
+        if peak > 0:
+            max_drawdown = min(max_drawdown, (value / peak - 1) * 100)
+        if previous_value > 0:
+            returns.append(value / previous_value - 1)
+        previous_value = value
+
+    annualized_volatility = None
+    sharpe = None
+    if len(returns) > 1:
+        mean_return = sum(returns) / len(returns)
+        std_return = float(np.std(returns, ddof=1))
+        if std_return > 0:
+            annualized_volatility = std_return * math.sqrt(TRADING_DAYS_PER_YEAR) * 100
+            sharpe = mean_return / std_return * math.sqrt(TRADING_DAYS_PER_YEAR)
+
+    calmar = None
+    if annualized_return is not None and max_drawdown < 0:
+        calmar = annualized_return / abs(max_drawdown)
+
+    return {
+        "total_return": _safe_float(total_return, 4),
+        "annualized_return": _safe_float(annualized_return, 4),
+        "annualized_volatility": _safe_float(annualized_volatility, 4),
+        "sharpe": _safe_float(sharpe, 6),
+        "calmar": _safe_float(calmar, 6),
+        "max_drawdown": _safe_float(max_drawdown, 4),
+    }
+
+
+def _split_backtest_metrics(result: Dict[str, Any], request: FactorBacktestRequest) -> Dict[str, Optional[float]]:
+    oos_start = request.oos_start_date
+    if not oos_start:
+        return {}
+    in_sample_end = oos_start - timedelta(days=1)
+    equity_curve = result.get("equity_curve") or []
+    in_sample = _equity_segment_metrics(equity_curve, request.start_date, in_sample_end)
+    oos = _equity_segment_metrics(equity_curve, oos_start, request.end_date)
+    return {
+        **{f"in_sample_{key}": value for key, value in in_sample.items()},
+        **{f"oos_{key}": value for key, value in oos.items()},
+    }
+
+
+def _objective_value_from_row(row: Dict[str, Any], objective: str) -> Optional[float]:
+    value = row.get(objective)
+    if value is None:
+        return None
+    return _safe_float(value, 6)
+
+
 def _search_row_from_backtest_result(
     index: int,
     request: FactorBacktestRequest,
@@ -3788,11 +3955,10 @@ def _search_row_from_backtest_result(
     objective: str,
 ) -> Dict[str, Any]:
     metrics = result.get("metrics") or {}
-    objective_value = _safe_float(metrics.get(objective), 6)
-    return {
+    split_metrics = _split_backtest_metrics(result, request)
+    row = {
         "case_index": index,
         "objective": objective,
-        "objective_value": objective_value,
         "params_label": _format_backtest_search_params(request, legs),
         "max_positions": request.max_positions,
         "sell_rank_multiplier": request.sell_rank_multiplier,
@@ -3809,76 +3975,449 @@ def _search_row_from_backtest_result(
         "holding_count": metrics.get("holding_count"),
         "request": _backtest_request_payload(request),
     }
+    row.update(split_metrics)
+    row["objective_value"] = _objective_value_from_row(row, objective)
+    return row
 
 
-def _serialize_backtest_search_job(job: Dict[str, Any]) -> Dict[str, Any]:
+def _backtest_search_row_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "job_id": job["job_id"],
-        "status": job["status"],
-        "created_at": job["created_at"],
-        "started_at": job.get("started_at"),
-        "finished_at": job.get("finished_at"),
-        "objective": job["objective"],
-        "objective_label": BACKTEST_SEARCH_OBJECTIVE_OPTIONS[job["objective"]]["label"],
-        "window_weight_bucket_count": job.get("window_weight_bucket_count"),
-        "factor_weight_bucket_count": job.get("factor_weight_bucket_count"),
-        "max_positions_candidates": job.get("max_positions_candidates"),
-        "sell_rank_multiplier_candidates": job.get("sell_rank_multiplier_candidates"),
-        "top_n": job.get("top_n"),
-        "worker_count": job.get("worker_count"),
-        "total_cases": job["total_cases"],
-        "submitted_cases": job.get("submitted_cases", 0),
-        "completed_cases": job["completed_cases"],
-        "failed_cases": job["failed_cases"],
-        "progress_pct": _safe_float(job["completed_cases"] * 100 / job["total_cases"], 2) if job["total_cases"] else 0,
-        "current_case": job.get("current_case"),
-        "error": job.get("error"),
-        "summary": {
-            "cases": job["completed_cases"],
-            "total_cases": job["total_cases"],
-            "submitted_cases": job.get("submitted_cases", 0),
-            "failed_cases": job["failed_cases"],
-            "worker_count": job.get("worker_count"),
-            "elapsed_ms": _safe_float((time.time() - job["started_monotonic"]) * 1000, 1) if job.get("started_monotonic") else None,
-            "best_case": job["rows"][0]["params_label"] if job.get("rows") else None,
-            "best_objective_value": job["rows"][0]["objective_value"] if job.get("rows") else None,
-            "objective": job["objective"],
-            "objective_label": BACKTEST_SEARCH_OBJECTIVE_OPTIONS[job["objective"]]["label"],
-        },
-        "rows": job.get("rows", []),
+        "rank": row.get("rank"),
+        "case_index": row.get("case_index"),
+        "objective": row.get("objective"),
+        "objective_value": row.get("objective_value"),
+        "params_label": row.get("params_label"),
+        "max_positions": row.get("max_positions"),
+        "sell_rank_multiplier": row.get("sell_rank_multiplier"),
+        "total_return": row.get("total_return"),
+        "annualized_return": row.get("annualized_return"),
+        "sharpe": row.get("sharpe"),
+        "calmar": row.get("calmar"),
+        "annualized_volatility": row.get("annualized_volatility"),
+        "max_drawdown": row.get("max_drawdown"),
+        "in_sample_total_return": row.get("in_sample_total_return"),
+        "in_sample_annualized_return": row.get("in_sample_annualized_return"),
+        "in_sample_sharpe": row.get("in_sample_sharpe"),
+        "in_sample_calmar": row.get("in_sample_calmar"),
+        "in_sample_annualized_volatility": row.get("in_sample_annualized_volatility"),
+        "in_sample_max_drawdown": row.get("in_sample_max_drawdown"),
+        "oos_total_return": row.get("oos_total_return"),
+        "oos_annualized_return": row.get("oos_annualized_return"),
+        "oos_sharpe": row.get("oos_sharpe"),
+        "oos_calmar": row.get("oos_calmar"),
+        "oos_annualized_volatility": row.get("oos_annualized_volatility"),
+        "oos_max_drawdown": row.get("oos_max_drawdown"),
+        "ending_value": row.get("ending_value"),
+        "trade_count": row.get("trade_count"),
+        "win_rate": row.get("win_rate"),
+        "rebalance_count": row.get("rebalance_count"),
+        "holding_count": row.get("holding_count"),
+        "request": row.get("request"),
     }
 
 
-def _update_backtest_search_top_rows(job: Dict[str, Any], row: Dict[str, Any]):
-    objective_value = row.get("objective_value")
-    if objective_value is None:
-        return
-    rows = [*job.get("rows", []), row]
-    rows.sort(
-        key=lambda item: (
-            _record_float(item, "objective_value", -1e18),
-            _record_float(item, "annualized_return", -1e18),
-            _record_float(item, "total_return", -1e18),
-        ),
-        reverse=True,
+def _db_search_row_to_dict(row: FactorBacktestSearchResult) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "rank": row.rank,
+        "case_index": row.case_index,
+        "objective": row.objective,
+        "objective_value": row.objective_value,
+        "params_label": row.params_label,
+        "max_positions": row.max_positions,
+        "sell_rank_multiplier": row.sell_rank_multiplier,
+        "total_return": row.total_return,
+        "annualized_return": row.annualized_return,
+        "sharpe": row.sharpe,
+        "calmar": row.calmar,
+        "annualized_volatility": row.annualized_volatility,
+        "max_drawdown": row.max_drawdown,
+        "in_sample_total_return": row.in_sample_total_return,
+        "in_sample_annualized_return": row.in_sample_annualized_return,
+        "in_sample_sharpe": row.in_sample_sharpe,
+        "in_sample_calmar": row.in_sample_calmar,
+        "in_sample_annualized_volatility": row.in_sample_annualized_volatility,
+        "in_sample_max_drawdown": row.in_sample_max_drawdown,
+        "oos_total_return": row.oos_total_return,
+        "oos_annualized_return": row.oos_annualized_return,
+        "oos_sharpe": row.oos_sharpe,
+        "oos_calmar": row.oos_calmar,
+        "oos_annualized_volatility": row.oos_annualized_volatility,
+        "oos_max_drawdown": row.oos_max_drawdown,
+        "ending_value": row.ending_value,
+        "trade_count": row.trade_count,
+        "win_rate": row.win_rate,
+        "rebalance_count": row.rebalance_count,
+        "holding_count": row.holding_count,
+        "request": row.request_payload,
+    }
+
+
+def _get_backtest_search_state(db: ORMSession) -> Optional[FactorBacktestSearchState]:
+    return db.query(FactorBacktestSearchState).filter(FactorBacktestSearchState.id == BACKTEST_SEARCH_STATE_ID).first()
+
+
+def _persist_backtest_search_job(
+    db: ORMSession,
+    job: Dict[str, Any],
+):
+    now = datetime.now()
+    state = _get_backtest_search_state(db)
+    if not state:
+        state = FactorBacktestSearchState(id=BACKTEST_SEARCH_STATE_ID, created_at=now)
+        db.add(state)
+    state.account_id = job.get("account_id")
+    state.status = job.get("status", "idle")
+    state.objective = job.get("objective", "annualized_return")
+    state.request_payload = job.get("request_payload")
+    state.search_params = job.get("search_params")
+    state.total_cases = int(job.get("total_cases") or 0)
+    state.submitted_cases = int(job.get("submitted_cases") or 0)
+    state.completed_cases = int(job.get("completed_cases") or 0)
+    state.failed_cases = int(job.get("failed_cases") or 0)
+    state.top_n = None
+    state.worker_count = int(job.get("worker_count") or 1)
+    state.current_case = job.get("current_case")
+    state.error = job.get("error")
+    state.cancel_requested = bool(job.get("cancel_requested"))
+    state.created_at = job.get("created_at") or state.created_at or now
+    state.started_at = job.get("started_at")
+    state.finished_at = job.get("finished_at")
+    state.updated_at = now
+    db.commit()
+
+
+def _clear_backtest_search_results(db: ORMSession):
+    db.query(FactorBacktestSearchResult).filter(
+        FactorBacktestSearchResult.search_id == BACKTEST_SEARCH_STATE_ID
+    ).delete()
+    db.commit()
+
+
+def _insert_backtest_search_result(db: ORMSession, row: Dict[str, Any]):
+    payload = _backtest_search_row_payload(row)
+    db.add(FactorBacktestSearchResult(
+        search_id=BACKTEST_SEARCH_STATE_ID,
+        rank=None,
+        case_index=payload.get("case_index"),
+        objective=payload.get("objective"),
+        objective_value=payload.get("objective_value"),
+        params_label=payload.get("params_label"),
+        max_positions=payload.get("max_positions"),
+        sell_rank_multiplier=payload.get("sell_rank_multiplier"),
+        total_return=payload.get("total_return"),
+        annualized_return=payload.get("annualized_return"),
+        sharpe=payload.get("sharpe"),
+        calmar=payload.get("calmar"),
+        annualized_volatility=payload.get("annualized_volatility"),
+        max_drawdown=payload.get("max_drawdown"),
+        in_sample_total_return=payload.get("in_sample_total_return"),
+        in_sample_annualized_return=payload.get("in_sample_annualized_return"),
+        in_sample_sharpe=payload.get("in_sample_sharpe"),
+        in_sample_calmar=payload.get("in_sample_calmar"),
+        in_sample_annualized_volatility=payload.get("in_sample_annualized_volatility"),
+        in_sample_max_drawdown=payload.get("in_sample_max_drawdown"),
+        oos_total_return=payload.get("oos_total_return"),
+        oos_annualized_return=payload.get("oos_annualized_return"),
+        oos_sharpe=payload.get("oos_sharpe"),
+        oos_calmar=payload.get("oos_calmar"),
+        oos_annualized_volatility=payload.get("oos_annualized_volatility"),
+        oos_max_drawdown=payload.get("oos_max_drawdown"),
+        ending_value=payload.get("ending_value"),
+        trade_count=payload.get("trade_count"),
+        win_rate=payload.get("win_rate"),
+        rebalance_count=payload.get("rebalance_count"),
+        holding_count=payload.get("holding_count"),
+        request_payload=payload.get("request"),
+    ))
+
+
+def _serialize_backtest_search_status_from_record(state: Optional[FactorBacktestSearchState]) -> Dict[str, Any]:
+    if not state:
+        return {
+            "status": "idle",
+            "objective": "annualized_return",
+            "objective_label": BACKTEST_SEARCH_OBJECTIVE_OPTIONS["annualized_return"]["label"],
+            "total_cases": 0,
+            "submitted_cases": 0,
+            "completed_cases": 0,
+            "failed_cases": 0,
+            "result_count": 0,
+            "progress_pct": 0,
+            "summary": {},
+        }
+    objective_label = BACKTEST_SEARCH_OBJECTIVE_OPTIONS.get(state.objective, {}).get("label", state.objective)
+    elapsed_ms = None
+    if state.started_at:
+        end_time = state.finished_at or datetime.now()
+        elapsed_ms = _safe_float((end_time - state.started_at).total_seconds() * 1000, 1)
+    return {
+        "status": state.status,
+        "created_at": state.created_at.isoformat() if state.created_at else None,
+        "started_at": state.started_at.isoformat() if state.started_at else None,
+        "finished_at": state.finished_at.isoformat() if state.finished_at else None,
+        "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+        "objective": state.objective,
+        "objective_label": objective_label,
+        "search_params": state.search_params or {},
+        "request": state.request_payload,
+        "window_weight_bucket_count": (state.search_params or {}).get("window_weight_bucket_count"),
+        "factor_weight_bucket_count": (state.search_params or {}).get("factor_weight_bucket_count"),
+        "max_positions_candidates": (state.search_params or {}).get("max_positions_candidates"),
+        "sell_rank_multiplier_candidates": (state.search_params or {}).get("sell_rank_multiplier_candidates"),
+        "worker_count": state.worker_count,
+        "total_cases": state.total_cases,
+        "submitted_cases": state.submitted_cases,
+        "completed_cases": state.completed_cases,
+        "failed_cases": state.failed_cases,
+        "result_count": max(0, (state.completed_cases or 0) - (state.failed_cases or 0)),
+        "progress_pct": _safe_float((state.completed_cases or 0) * 100 / state.total_cases, 2) if state.total_cases else 0,
+        "current_case": state.current_case,
+        "error": state.error,
+        "summary": {
+            "cases": state.completed_cases,
+            "total_cases": state.total_cases,
+            "submitted_cases": state.submitted_cases,
+            "failed_cases": state.failed_cases,
+            "worker_count": state.worker_count,
+            "elapsed_ms": elapsed_ms,
+            "objective": state.objective,
+            "objective_label": objective_label,
+        },
+    }
+
+
+def _job_datetime_iso(value: Any) -> Optional[str]:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _serialize_backtest_search_status_from_job(job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not job:
+        return _serialize_backtest_search_status_from_record(None)
+    objective = job.get("objective", "annualized_return")
+    objective_label = BACKTEST_SEARCH_OBJECTIVE_OPTIONS.get(objective, {}).get("label", objective)
+    started_at = job.get("started_at")
+    finished_at = job.get("finished_at")
+    elapsed_ms = None
+    if isinstance(started_at, datetime):
+        end_time = finished_at if isinstance(finished_at, datetime) else datetime.now()
+        elapsed_ms = _safe_float((end_time - started_at).total_seconds() * 1000, 1)
+    total_cases = int(job.get("total_cases") or 0)
+    completed_cases = int(job.get("completed_cases") or 0)
+    failed_cases = int(job.get("failed_cases") or 0)
+    return {
+        "status": job.get("status", "idle"),
+        "created_at": _job_datetime_iso(job.get("created_at")),
+        "started_at": _job_datetime_iso(started_at),
+        "finished_at": _job_datetime_iso(finished_at),
+        "updated_at": _job_datetime_iso(job.get("updated_at")),
+        "objective": objective,
+        "objective_label": objective_label,
+        "search_params": job.get("search_params") or {},
+        "request": job.get("request_payload"),
+        "window_weight_bucket_count": (job.get("search_params") or {}).get("window_weight_bucket_count"),
+        "factor_weight_bucket_count": (job.get("search_params") or {}).get("factor_weight_bucket_count"),
+        "max_positions_candidates": (job.get("search_params") or {}).get("max_positions_candidates"),
+        "sell_rank_multiplier_candidates": (job.get("search_params") or {}).get("sell_rank_multiplier_candidates"),
+        "worker_count": int(job.get("worker_count") or 1),
+        "total_cases": total_cases,
+        "submitted_cases": int(job.get("submitted_cases") or 0),
+        "completed_cases": completed_cases,
+        "failed_cases": failed_cases,
+        "result_count": int(job.get("result_count") or max(0, completed_cases - failed_cases)),
+        "progress_pct": _safe_float(completed_cases * 100 / total_cases, 2) if total_cases else 0,
+        "current_case": job.get("current_case"),
+        "error": job.get("error"),
+        "summary": {
+            "cases": completed_cases,
+            "total_cases": total_cases,
+            "submitted_cases": int(job.get("submitted_cases") or 0),
+            "failed_cases": failed_cases,
+            "worker_count": int(job.get("worker_count") or 1),
+            "elapsed_ms": elapsed_ms,
+            "objective": objective,
+            "objective_label": objective_label,
+        },
+    }
+
+
+def _serialize_backtest_search_status(db: ORMSession) -> Dict[str, Any]:
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        active_job = BACKTEST_SEARCH_ACTIVE_JOB
+        active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
+        if active_job and active_job.get("status") not in {"queued", "running"}:
+            return _serialize_backtest_search_status_from_job(dict(active_job))
+        if (
+            active_job
+            and active_job.get("status") in {"queued", "running"}
+            and active_thread
+            and active_thread.is_alive()
+        ):
+            return _serialize_backtest_search_status_from_job(dict(active_job))
+    state = _get_backtest_search_state(db)
+    if state and state.status in {"queued", "running"}:
+        now = datetime.now()
+        state.status = "interrupted"
+        state.cancel_requested = False
+        state.current_case = None
+        state.finished_at = state.finished_at or now
+        state.updated_at = now
+        state.error = state.error or "任务进程已中断，请重新启动搜索"
+        db.commit()
+    return _serialize_backtest_search_status_from_record(state)
+
+
+BACKTEST_SEARCH_RESULT_SORT_COLUMNS = {
+    "rank": FactorBacktestSearchResult.id,
+    "case_index": FactorBacktestSearchResult.case_index,
+    "objective_value": FactorBacktestSearchResult.objective_value,
+    "max_positions": FactorBacktestSearchResult.max_positions,
+    "sell_rank_multiplier": FactorBacktestSearchResult.sell_rank_multiplier,
+    "total_return": FactorBacktestSearchResult.total_return,
+    "annualized_return": FactorBacktestSearchResult.annualized_return,
+    "sharpe": FactorBacktestSearchResult.sharpe,
+    "calmar": FactorBacktestSearchResult.calmar,
+    "annualized_volatility": FactorBacktestSearchResult.annualized_volatility,
+    "max_drawdown": FactorBacktestSearchResult.max_drawdown,
+    "in_sample_total_return": FactorBacktestSearchResult.in_sample_total_return,
+    "in_sample_annualized_return": FactorBacktestSearchResult.in_sample_annualized_return,
+    "in_sample_sharpe": FactorBacktestSearchResult.in_sample_sharpe,
+    "in_sample_calmar": FactorBacktestSearchResult.in_sample_calmar,
+    "in_sample_annualized_volatility": FactorBacktestSearchResult.in_sample_annualized_volatility,
+    "in_sample_max_drawdown": FactorBacktestSearchResult.in_sample_max_drawdown,
+    "oos_total_return": FactorBacktestSearchResult.oos_total_return,
+    "oos_annualized_return": FactorBacktestSearchResult.oos_annualized_return,
+    "oos_sharpe": FactorBacktestSearchResult.oos_sharpe,
+    "oos_calmar": FactorBacktestSearchResult.oos_calmar,
+    "oos_annualized_volatility": FactorBacktestSearchResult.oos_annualized_volatility,
+    "oos_max_drawdown": FactorBacktestSearchResult.oos_max_drawdown,
+    "ending_value": FactorBacktestSearchResult.ending_value,
+    "trade_count": FactorBacktestSearchResult.trade_count,
+    "win_rate": FactorBacktestSearchResult.win_rate,
+    "rebalance_count": FactorBacktestSearchResult.rebalance_count,
+    "holding_count": FactorBacktestSearchResult.holding_count,
+}
+
+
+def _parse_backtest_search_filters(raw_filters: Optional[str]) -> Dict[str, Dict[str, float]]:
+    if not raw_filters:
+        return {}
+    try:
+        data = json.loads(raw_filters)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="过滤条件格式不正确") from exc
+    if not isinstance(data, dict):
+        return {}
+    normalized: Dict[str, Dict[str, float]] = {}
+    for field, bounds in data.items():
+        if field not in BACKTEST_SEARCH_RESULT_SORT_COLUMNS or not isinstance(bounds, dict):
+            continue
+        item: Dict[str, float] = {}
+        for key in ("min", "max"):
+            value = bounds.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{field} 过滤值必须是数字") from exc
+            if math.isfinite(number):
+                item[key] = number
+        if item:
+            normalized[field] = item
+    return normalized
+
+
+def _query_backtest_search_results(
+    db: ORMSession,
+    page: int,
+    page_size: int,
+    sort_field: Optional[str],
+    sort_order: Optional[str],
+    raw_filters: Optional[str],
+) -> Dict[str, Any]:
+    page = max(1, int(page or 1))
+    page_size = min(500, max(1, int(page_size or 20)))
+    query = db.query(FactorBacktestSearchResult).filter(
+        FactorBacktestSearchResult.search_id == BACKTEST_SEARCH_STATE_ID
     )
-    top_n = int(job.get("top_n") or 200)
-    job["rows"] = rows[:top_n]
-    for rank, item in enumerate(job["rows"], start=1):
-        item["rank"] = rank
+    filters = _parse_backtest_search_filters(raw_filters)
+    for field, bounds in filters.items():
+        column = BACKTEST_SEARCH_RESULT_SORT_COLUMNS[field]
+        if "min" in bounds:
+            query = query.filter(column >= bounds["min"])
+        if "max" in bounds:
+            query = query.filter(column <= bounds["max"])
+
+    total = query.count()
+    column = BACKTEST_SEARCH_RESULT_SORT_COLUMNS.get(sort_field or "objective_value")
+    if column is None:
+        column = FactorBacktestSearchResult.objective_value
+    order = (sort_order or "descend").lower()
+    descending = order not in {"asc", "ascend"}
+    order_by = [column.is_(None).asc(), column.desc() if descending else column.asc()]
+    if column is not FactorBacktestSearchResult.id:
+        if column is not FactorBacktestSearchResult.annualized_return:
+            order_by.extend([
+                FactorBacktestSearchResult.annualized_return.is_(None).asc(),
+                FactorBacktestSearchResult.annualized_return.desc(),
+            ])
+        if column is not FactorBacktestSearchResult.total_return:
+            order_by.extend([
+                FactorBacktestSearchResult.total_return.is_(None).asc(),
+                FactorBacktestSearchResult.total_return.desc(),
+            ])
+    order_by.append(FactorBacktestSearchResult.id.asc())
+    rows = (
+        query.order_by(*order_by)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    records = []
+    for index, row in enumerate(rows, start=(page - 1) * page_size + 1):
+        item = _db_search_row_to_dict(row)
+        item["rank"] = index
+        records.append(item)
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "sort_field": sort_field or "objective_value",
+        "sort_order": "descend" if descending else "ascend",
+        "filters": filters,
+        "rows": records,
+    }
 
 
-def _run_backtest_search_job(job_id: str, search_request: FactorBacktestSearchRequest):
+def _snapshot_backtest_search_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = dict(job)
+    return snapshot
+
+
+def _persist_active_backtest_search_job(
+    db: ORMSession,
+    job: Dict[str, Any],
+):
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        snapshot = _snapshot_backtest_search_job(job)
+    _persist_backtest_search_job(db, snapshot)
+
+
+def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: Dict[str, Any]):
     db = DBSession()
     prepared_data: Optional[Dict[str, Any]] = None
     try:
         with BACKTEST_SEARCH_JOBS_LOCK:
-            job = BACKTEST_SEARCH_JOBS[job_id]
             job["status"] = "running"
-            job["started_at"] = datetime.now().isoformat()
+            job["started_at"] = datetime.now()
             job["started_monotonic"] = time.time()
             job["worker_count"] = 1
             job["current_case"] = "准备基础数据和基础因子"
+            job["updated_at"] = datetime.now()
+        _persist_active_backtest_search_job(db, job)
 
         base_resolved_legs = _resolve_factor_legs(search_request.request.legs)
         prepared_data = _prepare_factor_backtest_base_data(search_request.request, db, base_resolved_legs)
@@ -3886,43 +4425,63 @@ def _run_backtest_search_job(job_id: str, search_request: FactorBacktestSearchRe
 
         for index, (case_request, legs) in enumerate(_iter_backtest_search_requests(search_request), start=1):
             with BACKTEST_SEARCH_JOBS_LOCK:
-                job = BACKTEST_SEARCH_JOBS[job_id]
                 if job.get("cancel_requested"):
                     job["status"] = "cancelled"
-                    job["finished_at"] = datetime.now().isoformat()
+                    job["finished_at"] = datetime.now()
+                    job["updated_at"] = datetime.now()
                     job["current_case"] = None
-                    return
+                    job["cancel_requested"] = False
+                    cancel_snapshot = _snapshot_backtest_search_job(job)
+                else:
+                    cancel_snapshot = None
+            if cancel_snapshot is not None:
+                _persist_backtest_search_job(db, cancel_snapshot)
+                return
+
+            with BACKTEST_SEARCH_JOBS_LOCK:
                 job["submitted_cases"] = index
+                job["updated_at"] = datetime.now()
                 job["current_case"] = _format_backtest_search_params(case_request, legs)
+            _persist_active_backtest_search_job(db, job)
 
             try:
                 result = _run_factor_backtest(case_request, db, prepared_data=prepared_data)
                 row = _search_row_from_backtest_result(index, case_request, legs, result, search_request.objective)
+                _insert_backtest_search_result(db, row)
                 with BACKTEST_SEARCH_JOBS_LOCK:
-                    job = BACKTEST_SEARCH_JOBS[job_id]
                     job["completed_cases"] += 1
-                    _update_backtest_search_top_rows(job, row)
+                    job["result_count"] += 1
+                    job["updated_at"] = datetime.now()
             except Exception as exc:
                 detail = getattr(exc, "detail", None)
                 logger.warning("Factor backtest search case %s failed: %s", index, detail or exc)
                 with BACKTEST_SEARCH_JOBS_LOCK:
-                    job = BACKTEST_SEARCH_JOBS[job_id]
                     job["completed_cases"] += 1
                     job["failed_cases"] += 1
+                    job["updated_at"] = datetime.now()
+            _persist_active_backtest_search_job(db, job)
 
         with BACKTEST_SEARCH_JOBS_LOCK:
-            job = BACKTEST_SEARCH_JOBS[job_id]
             if job.get("status") != "cancelled":
                 job["status"] = "completed"
-                job["finished_at"] = datetime.now().isoformat()
+                job["finished_at"] = datetime.now()
+                job["updated_at"] = datetime.now()
                 job["current_case"] = None
+                job["cancel_requested"] = False
+        _persist_active_backtest_search_job(db, job)
     except Exception as exc:
         logger.exception("Factor backtest search job failed")
         with BACKTEST_SEARCH_JOBS_LOCK:
-            job = BACKTEST_SEARCH_JOBS[job_id]
             job["status"] = "failed"
             job["error"] = str(exc)
-            job["finished_at"] = datetime.now().isoformat()
+            job["finished_at"] = datetime.now()
+            job["updated_at"] = datetime.now()
+            job["current_case"] = None
+            job["cancel_requested"] = False
+        try:
+            _persist_active_backtest_search_job(db, job)
+        except Exception:
+            logger.exception("Persist factor backtest search failure state failed")
     finally:
         if prepared_data is not None:
             prepared_data.clear()
@@ -3930,38 +4489,66 @@ def _run_backtest_search_job(job_id: str, search_request: FactorBacktestSearchRe
         DBSession.remove()
 
 
-def _start_backtest_search_job(search_request: FactorBacktestSearchRequest) -> Dict[str, Any]:
+def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, account_id: str) -> Dict[str, Any]:
+    global BACKTEST_SEARCH_ACTIVE_JOB, BACKTEST_SEARCH_ACTIVE_THREAD
+
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        active_job = BACKTEST_SEARCH_ACTIVE_JOB
+        active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
+        if (
+            active_job
+            and active_job.get("status") in {"queued", "running"}
+            and active_thread
+            and active_thread.is_alive()
+        ):
+            raise HTTPException(status_code=409, detail="批量搜索正在运行，请先取消或等待完成")
+
     total_cases = _estimate_backtest_search_cases(search_request)
-    job_id = uuid.uuid4().hex
     job = {
-        "job_id": job_id,
+        "account_id": account_id,
         "status": "queued",
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now(),
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": datetime.now(),
         "objective": search_request.objective,
-        "window_weight_bucket_count": search_request.window_weight_bucket_count,
-        "factor_weight_bucket_count": search_request.factor_weight_bucket_count,
-        "max_positions_candidates": search_request.max_positions_candidates,
-        "sell_rank_multiplier_candidates": search_request.sell_rank_multiplier_candidates,
+        "request_payload": _backtest_request_payload(search_request.request),
+        "search_params": {
+            "window_weight_bucket_count": search_request.window_weight_bucket_count,
+            "factor_weight_bucket_count": search_request.factor_weight_bucket_count,
+            "max_positions_candidates": search_request.max_positions_candidates,
+            "sell_rank_multiplier_candidates": search_request.sell_rank_multiplier_candidates,
+        },
         "total_cases": total_cases,
+        "submitted_cases": 0,
         "completed_cases": 0,
         "failed_cases": 0,
-        "top_n": search_request.top_n,
+        "result_count": 0,
         "worker_count": 1,
-        "rows": [],
+        "current_case": None,
         "error": None,
         "cancel_requested": False,
-        "submitted_cases": 0,
     }
-    with BACKTEST_SEARCH_JOBS_LOCK:
-        BACKTEST_SEARCH_JOBS[job_id] = job
+    db = DBSession()
+    try:
+        _persist_backtest_search_job(db, job)
+        _clear_backtest_search_results(db)
+        response = _serialize_backtest_search_status_from_job(job)
+    finally:
+        db.close()
+        DBSession.remove()
+
     thread = threading.Thread(
         target=_run_backtest_search_job,
-        args=(job_id, search_request),
+        args=(search_request, job),
         daemon=True,
-        name=f"factor-backtest-search-{job_id[:8]}",
+        name="factor-backtest-search",
     )
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        BACKTEST_SEARCH_ACTIVE_JOB = job
+        BACKTEST_SEARCH_ACTIVE_THREAD = thread
     thread.start()
-    return _serialize_backtest_search_job(job)
+    return response
 
 
 def _run_composite_factor_analysis(
@@ -4311,13 +4898,13 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             for key, value in STANDARDIZATION_OPTIONS.items()
         ],
         default_request={
-            "pool": "SPY_QQQ",
+            "pool": "QQQ",
             "factor": "risk_adjusted_momentum",
             "bucket_count": 10,
             "start_date": DEFAULT_START_DATE.isoformat(),
             "neutralization": DEFAULT_NEUTRALIZATION,
             "standardization": DEFAULT_STANDARDIZATION,
-            "oos_start_date": None,
+            "oos_start_date": DEFAULT_OOS_START_DATE.isoformat(),
             "heatmap_metric": DEFAULT_HEATMAP_METRIC,
             "momentum_weights": DEFAULT_MOMENTUM_WEIGHTS,
             "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
@@ -4326,10 +4913,10 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             "heatmap_forward_windows": DEFAULT_FORWARD_WINDOWS,
         },
         default_composite_request={
-            "pool": "SPY_QQQ",
+            "pool": "QQQ",
             "bucket_count": 10,
             "start_date": DEFAULT_START_DATE.isoformat(),
-            "oos_start_date": None,
+            "oos_start_date": DEFAULT_OOS_START_DATE.isoformat(),
             "forward_window": 20,
             "min_listing_days": DEFAULT_MIN_LISTING_DAYS,
             "legs": [
@@ -4352,9 +4939,10 @@ async def get_factor_lab_options(_: str = Depends(valid_account)):
             ],
         },
         default_backtest_request={
-            "pool": "SPY_QQQ",
+            "pool": "QQQ",
             "start_date": DEFAULT_START_DATE.isoformat(),
             "end_date": None,
+            "oos_start_date": DEFAULT_OOS_START_DATE.isoformat(),
             "initial_capital": 100_000.0,
             "max_positions": 7,
             "sell_rank_multiplier": DEFAULT_SELL_RANK_MULTIPLIER,
@@ -4415,32 +5003,72 @@ async def backtest_factor_strategy(
 @router.post("/backtest-search/start")
 async def start_factor_backtest_search(
     payload: FactorBacktestSearchRequest,
-    _: str = Depends(valid_account),
+    account_id: str = Depends(valid_account),
 ):
-    return _start_backtest_search_job(payload)
+    return _start_backtest_search_job(payload, account_id)
 
 
-@router.get("/backtest-search/{job_id}")
-async def get_factor_backtest_search_job(
-    job_id: str,
+@router.get("/backtest-search/status")
+async def get_factor_backtest_search_status(
     _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
 ):
-    with BACKTEST_SEARCH_JOBS_LOCK:
-        job = BACKTEST_SEARCH_JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="批量回测任务不存在")
-        return _serialize_backtest_search_job(job)
+    return _serialize_backtest_search_status(db)
 
 
-@router.post("/backtest-search/{job_id}/cancel")
+@router.get("/backtest-search/history")
+async def get_factor_backtest_search_history(
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _serialize_backtest_search_status(db)
+
+
+@router.get("/backtest-search/results")
+async def get_factor_backtest_search_results(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    sort_field: Optional[str] = None,
+    sort_order: Optional[str] = None,
+    filters: Optional[str] = None,
+    _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _query_backtest_search_results(
+        db,
+        page=page,
+        page_size=page_size,
+        sort_field=sort_field,
+        sort_order=sort_order,
+        raw_filters=filters,
+    )
+
+
+@router.post("/backtest-search/cancel")
 async def cancel_factor_backtest_search_job(
-    job_id: str,
     _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
 ):
+    active_thread_alive = False
     with BACKTEST_SEARCH_JOBS_LOCK:
-        job = BACKTEST_SEARCH_JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="批量回测任务不存在")
-        if job["status"] in {"queued", "running"}:
-            job["cancel_requested"] = True
-        return _serialize_backtest_search_job(job)
+        if BACKTEST_SEARCH_ACTIVE_THREAD:
+            active_thread_alive = BACKTEST_SEARCH_ACTIVE_THREAD.is_alive()
+        if (
+            BACKTEST_SEARCH_ACTIVE_JOB
+            and BACKTEST_SEARCH_ACTIVE_JOB.get("status") in {"queued", "running"}
+            and active_thread_alive
+        ):
+            BACKTEST_SEARCH_ACTIVE_JOB["cancel_requested"] = True
+
+    state = _get_backtest_search_state(db)
+    if state and state.status in {"queued", "running"}:
+        if active_thread_alive:
+            state.cancel_requested = True
+        else:
+            state.status = "cancelled"
+            state.cancel_requested = False
+            state.current_case = None
+            state.finished_at = datetime.now()
+        state.updated_at = datetime.now()
+        db.commit()
+    return _serialize_backtest_search_status(db)
