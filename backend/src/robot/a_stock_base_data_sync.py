@@ -42,6 +42,11 @@ ProgressCallback = Callable[[Dict], None]
 
 SYNC_WORKERS = 5
 SYNC_REFRESH_OVERLAP_DAYS = 45
+A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
+A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220
+A_STOCK_OPTION_DAILY_WARMUP_DAYS = 200
+A_STOCK_REPO_DAILY_WARMUP_DAYS = 200
+A_STOCK_CHINABOND_WARMUP_DAYS = 200
 INCOME_HISTORY_LOOKBACK_DAYS = 365 * 6
 INCOME_INSERT_BATCH_ROWS = 5000
 INCOME_INSERT_BATCH_FRAMES = 500
@@ -200,6 +205,10 @@ def _date_chunks_by_span(
     if current_chunk:
         chunks.append(current_chunk)
     return chunks
+
+
+def _warmup_start(anchor_date: date, warmup_days: int) -> date:
+    return anchor_date - timedelta(days=warmup_days)
 
 
 def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
@@ -1106,9 +1115,10 @@ class AStockBaseDataSyncService:
         else:
             self.sync_reference_data_incremental(reference_start, end_value)
 
-        market_default_start = DEFAULT_START_DATE - timedelta(days=RAW_FETCH_LOOKBACK_DAYS)
+        market_warmup_days = max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS)
+        market_default_start = _warmup_start(DEFAULT_START_DATE, market_warmup_days)
         if explicit_start:
-            market_start = explicit_start
+            market_start = _warmup_start(explicit_start, market_warmup_days)
         elif incremental:
             market_start = _overlap_start(market_default_start, latest_market_date)
         else:
@@ -1124,9 +1134,9 @@ class AStockBaseDataSyncService:
         if trading_dates:
             self._ensure_market_days(trading_dates)
 
-        index_default_start = DEFAULT_START_DATE
+        index_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
         if explicit_start:
-            index_start = explicit_start
+            index_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
         elif incremental:
             index_start = _overlap_start(index_default_start, latest_index_date)
         else:
@@ -1139,16 +1149,17 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
-        option_default_start = DEFAULT_START_DATE
+        option_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
+        repo_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         if explicit_start:
-            option_start = explicit_start
-            repo_start = explicit_start
+            option_start = _warmup_start(explicit_start, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
+            repo_start = _warmup_start(explicit_start, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         elif incremental:
             option_start = _overlap_start(option_default_start, latest_option_date)
-            repo_start = _overlap_start(option_default_start, latest_repo_date)
+            repo_start = _overlap_start(repo_default_start, latest_repo_date)
         else:
             option_start = option_default_start
-            repo_start = option_default_start
+            repo_start = repo_default_start
 
         self._progress("同步A股期权合约基础信息", 68)
         option_basic_rows_saved = self.sync_option_basic()
@@ -1166,9 +1177,9 @@ class AStockBaseDataSyncService:
             repo_start_date=repo_start,
         )
 
-        chinabond_default_start = DEFAULT_START_DATE
+        chinabond_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_CHINABOND_WARMUP_DAYS)
         if explicit_start:
-            chinabond_start = explicit_start
+            chinabond_start = _warmup_start(explicit_start, A_STOCK_CHINABOND_WARMUP_DAYS)
         elif incremental:
             chinabond_start = _overlap_start(chinabond_default_start, latest_chinabond_date)
         else:
@@ -1232,6 +1243,14 @@ class AStockBaseDataSyncService:
             "mode": "incremental" if incremental else "full",
             "start_date": explicit_start.isoformat() if explicit_start else None,
             "end_date": end_value.isoformat(),
+            "warmup_days": {
+                "market_daily": market_warmup_days,
+                "index_daily": A_STOCK_INDEX_DAILY_WARMUP_DAYS,
+                "option_daily": A_STOCK_OPTION_DAILY_WARMUP_DAYS,
+                "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
+                "chinabond": A_STOCK_CHINABOND_WARMUP_DAYS,
+                "income": INCOME_HISTORY_LOOKBACK_DAYS,
+            },
             "reference_full_refresh": reference_full_refresh,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
