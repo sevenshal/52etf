@@ -941,18 +941,56 @@ def _momentum_score_source_frame(
 
 def _compute_volume_z(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     window = int(context.windows[0])
+    short_window = max(int(window / 20), 1)
     result = _ensure_base_columns(df)
     return (
         result.with_columns(
-            pl.col("_log_volume").shift(1).rolling_mean(window, min_samples=window).over("symbol").alias("_volume_avg"),
-            pl.col("_log_volume").shift(1).rolling_std(window, min_samples=window).over("symbol").alias("_volume_std"),
+            pl.col("_log_volume").rolling_mean(short_window, min_samples=short_window).over("symbol").alias("_volume_short_avg"),
+            pl.col("_log_volume").shift(short_window).rolling_mean(window, min_samples=window).over("symbol").alias("_volume_long_avg"),
+            pl.col("_log_volume").shift(short_window).rolling_std(window, min_samples=window).over("symbol").alias("_volume_long_std"),
         )
         .with_columns(
-            pl.when(pl.col("_volume_std") > 0)
-            .then((pl.col("_log_volume") - pl.col("_volume_avg")) / pl.col("_volume_std"))
+            pl.when(pl.col("_volume_long_std") > 0)
+            .then((pl.col("_volume_short_avg") - pl.col("_volume_long_avg")) / pl.col("_volume_long_std"))
             .otherwise(None)
             .alias("factor_value")
         )
+    )
+
+
+def _compute_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    window = int(context.windows[0])
+    short_window = max(int(window / 20), 1)
+    result = _ensure_base_columns(df)
+    return (
+        result.with_columns(
+            pl.when(pl.col("volume").is_not_null() & (pl.col("volume") > 0))
+            .then(pl.col("volume").cast(pl.Float64))
+            .otherwise(None)
+            .alias("_volume_for_ratio")
+        )
+        .with_columns(
+            pl.col("_volume_for_ratio").rolling_mean(short_window, min_samples=short_window).over("symbol").alias("_volume_short_avg"),
+            pl.col("_volume_for_ratio").shift(short_window).rolling_mean(window, min_samples=window).over("symbol").alias("_volume_long_avg"),
+        )
+        .with_columns(
+            pl.when(pl.col("_volume_long_avg") > 0)
+            .then(pl.col("_volume_short_avg") / pl.col("_volume_long_avg"))
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_log_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    ratio_df = _compute_volume_ratio(df, context)
+    if ratio_df.is_empty() or "factor_value" not in ratio_df.columns:
+        return ratio_df
+    return ratio_df.with_columns(
+        pl.when(pl.col("factor_value") > 0)
+        .then(pl.col("factor_value").log10())
+        .otherwise(None)
+        .alias("factor_value")
     )
 
 
@@ -1066,12 +1104,34 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="volume_z",
         label="成交量：对数成交量Z分数",
         group="成交量",
-        description="log10(volume) 相对过去窗口均值和标准差的异常程度，窗口不含当天。",
-        default_windows=[20],
+        description="短窗口均值相对长窗口均值的 log10(volume) Z 分数；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=False,
         direction="exploratory",
         compute=_compute_volume_z,
+    ),
+    "volume_ratio": FactorDefinition(
+        key="volume_ratio",
+        label="成交量：均量比",
+        group="成交量",
+        description="短窗口平均成交量 / 长窗口平均成交量；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
+        supports_windows=True,
+        supports_mixed_windows=False,
+        direction="exploratory",
+        compute=_compute_volume_ratio,
+    ),
+    "log_volume_ratio": FactorDefinition(
+        key="log_volume_ratio",
+        label="成交量：log均量比",
+        group="成交量",
+        description="log10(短窗口平均成交量 / 长窗口平均成交量)；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
+        supports_windows=True,
+        supports_mixed_windows=False,
+        direction="exploratory",
+        compute=_compute_log_volume_ratio,
     ),
     "volatility": FactorDefinition(
         key="volatility",
@@ -1360,22 +1420,34 @@ def _prepare_momentum_factor_frame_from_source(
     base_columns = [column for column in ["symbol", "trade_date", "close", "volume", "turnover", "_first_trade_date"] if column in source_df.columns]
     result = source_df.select(base_columns).unique(subset=["symbol", "trade_date"])
     factor_expr = None
+    raw_factor_expr = None
     for window, weight in context.momentum_weights.items():
         column = f"{prefix}_{int(window)}_score"
         if column not in source_df.columns:
             continue
         window_factor_column = f"_window_factor_{int(window)}"
+        window_raw_factor_column = f"_window_factor_raw_{int(window)}"
         window_df = source_df.select([*base_columns, column]).with_columns(pl.col(column).alias("factor_value"))
         window_df = _apply_factor_transformations(
             _apply_factor_direction(window_df, factor_definition),
             request,
             context,
-        ).select("symbol", "trade_date", pl.col("factor_value").alias(window_factor_column))
+        ).select(
+            "symbol",
+            "trade_date",
+            pl.col("factor_value").alias(window_factor_column),
+            pl.col("factor_value_raw").alias(window_raw_factor_column),
+        )
         result = result.join(window_df, on=["symbol", "trade_date"], how="left")
         expr = pl.col(window_factor_column) * float(weight)
         factor_expr = expr if factor_expr is None else factor_expr + expr
-    result = result.with_columns((factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value"))
-    return result.select([*base_columns, "factor_value"])
+        raw_expr = pl.col(window_raw_factor_column) * float(weight)
+        raw_factor_expr = raw_expr if raw_factor_expr is None else raw_factor_expr + raw_expr
+    result = result.with_columns(
+        (factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value"),
+        (raw_factor_expr if raw_factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value_raw"),
+    )
+    return result.select([*base_columns, "factor_value", "factor_value_raw"])
 
 
 def _backtest_leg_factor_cache_key(leg: Dict[str, Any]) -> Any:

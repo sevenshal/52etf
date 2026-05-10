@@ -72,6 +72,7 @@ DEFAULT_STANDARDIZATION = "zscore"
 DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
 MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE = 10
 MAX_HEATMAP_CELLS = 20
+FACTOR_DISTRIBUTION_BIN_COUNT = 40
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FEAR_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
 FACTOR_DIRECTION_OPTIONS = {
@@ -1793,11 +1794,13 @@ def _prepare_momentum_factor_frame_from_source(
     ]
     result = source_df.select(base_columns).unique(subset=["symbol", "trade_date"])
     factor_expr = None
+    raw_factor_expr = None
     for window, weight in context.momentum_weights.items():
         column = f"{prefix}_{int(window)}_score"
         if column not in source_df.columns:
             continue
         window_factor_column = f"_window_factor_{int(window)}"
+        window_raw_factor_column = f"_window_factor_raw_{int(window)}"
         window_df = (
             source_df.select([*base_columns, column])
             .with_columns(pl.col(column).alias("factor_value"))
@@ -1810,15 +1813,19 @@ def _prepare_momentum_factor_frame_from_source(
             "symbol",
             "trade_date",
             pl.col("factor_value").alias(window_factor_column),
+            pl.col("factor_value_raw").alias(window_raw_factor_column),
         )
         result = result.join(window_df, on=["symbol", "trade_date"], how="left")
         expr = pl.col(window_factor_column) * float(weight)
         factor_expr = expr if factor_expr is None else factor_expr + expr
+        raw_expr = pl.col(window_raw_factor_column) * float(weight)
+        raw_factor_expr = raw_expr if raw_factor_expr is None else raw_factor_expr + raw_expr
 
     result = result.with_columns(
-        (factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value")
+        (factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value"),
+        (raw_factor_expr if raw_factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value_raw"),
     )
-    return result.select([*base_columns, "factor_value"])
+    return result.select([*base_columns, "factor_value", "factor_value_raw"])
 
 
 def _compute_volume_z(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
@@ -1826,18 +1833,77 @@ def _compute_volume_z(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
 
     window = int(context.windows[0])
+    short_window = max(int(window / 20), 1)
     result = _ensure_base_columns(df)
     return (
         result.with_columns(
-            pl.col("_log_volume").shift(1).rolling_mean(window, min_samples=window).over("symbol").alias("_volume_avg"),
-            pl.col("_log_volume").shift(1).rolling_std(window, min_samples=window).over("symbol").alias("_volume_std"),
+            pl.col("_log_volume")
+            .rolling_mean(short_window, min_samples=short_window)
+            .over("symbol")
+            .alias("_volume_short_avg"),
+            pl.col("_log_volume")
+            .shift(short_window)
+            .rolling_mean(window, min_samples=window)
+            .over("symbol")
+            .alias("_volume_long_avg"),
+            pl.col("_log_volume")
+            .shift(short_window)
+            .rolling_std(window, min_samples=window)
+            .over("symbol")
+            .alias("_volume_long_std"),
         )
         .with_columns(
-            pl.when(pl.col("_volume_std") > 0)
-            .then((pl.col("_log_volume") - pl.col("_volume_avg")) / pl.col("_volume_std"))
+            pl.when(pl.col("_volume_long_std") > 0)
+            .then((pl.col("_volume_short_avg") - pl.col("_volume_long_avg")) / pl.col("_volume_long_std"))
             .otherwise(None)
             .alias("factor_value")
         )
+    )
+
+
+def _compute_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+
+    window = int(context.windows[0])
+    short_window = max(int(window / 20), 1)
+    result = _ensure_base_columns(df)
+    return (
+        result.with_columns(
+            pl.when(pl.col("volume").is_not_null() & (pl.col("volume") > 0))
+            .then(pl.col("volume").cast(pl.Float64))
+            .otherwise(None)
+            .alias("_volume_for_ratio")
+        )
+        .with_columns(
+            pl.col("_volume_for_ratio")
+            .rolling_mean(short_window, min_samples=short_window)
+            .over("symbol")
+            .alias("_volume_short_avg"),
+            pl.col("_volume_for_ratio")
+            .shift(short_window)
+            .rolling_mean(window, min_samples=window)
+            .over("symbol")
+            .alias("_volume_long_avg"),
+        )
+        .with_columns(
+            pl.when(pl.col("_volume_long_avg") > 0)
+            .then(pl.col("_volume_short_avg") / pl.col("_volume_long_avg"))
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_log_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    ratio_df = _compute_volume_ratio(df, context)
+    if ratio_df.is_empty() or "factor_value" not in ratio_df.columns:
+        return ratio_df
+    return ratio_df.with_columns(
+        pl.when(pl.col("factor_value") > 0)
+        .then(pl.col("factor_value").log10())
+        .otherwise(None)
+        .alias("factor_value")
     )
 
 
@@ -2003,12 +2069,34 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="volume_z",
         label="成交量：对数成交量Z分数",
         group="成交量",
-        description="log10(volume) 相对过去窗口均值和标准差的异常程度，窗口不含当天；方向先作为探索项观察。",
-        default_windows=[20],
+        description="短窗口均值相对长窗口均值的 log10(volume) Z 分数；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=False,
         direction="exploratory",
         compute=_compute_volume_z,
+    ),
+    "volume_ratio": FactorDefinition(
+        key="volume_ratio",
+        label="成交量：均量比",
+        group="成交量",
+        description="短窗口平均成交量 / 长窗口平均成交量；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
+        supports_windows=True,
+        supports_mixed_windows=False,
+        direction="exploratory",
+        compute=_compute_volume_ratio,
+    ),
+    "log_volume_ratio": FactorDefinition(
+        key="log_volume_ratio",
+        label="成交量：log均量比",
+        group="成交量",
+        description="log10(短窗口平均成交量 / 长窗口平均成交量)；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
+        default_windows=SUPPORTED_WINDOWS.copy(),
+        supports_windows=True,
+        supports_mixed_windows=False,
+        direction="exploratory",
+        compute=_compute_log_volume_ratio,
     ),
     "volatility": FactorDefinition(
         key="volatility",
@@ -2461,6 +2549,131 @@ def _compute_bucket_report(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _compute_factor_value_distribution(
+    df: pl.DataFrame,
+    bin_count: int = FACTOR_DISTRIBUTION_BIN_COUNT,
+) -> List[Dict[str, Any]]:
+    if df.is_empty() or "factor_value" not in df.columns:
+        return []
+
+    effective_bin_count = max(1, int(bin_count))
+    series_specs = [
+        ("raw", "原始因子值", "factor_value_raw" if "factor_value_raw" in df.columns else "factor_value"),
+        ("analysis", "标准化/分析值", "factor_value"),
+    ]
+    series_frames: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
+
+    for series_key, series_label, column in series_specs:
+        if column not in df.columns:
+            continue
+
+        value_df = (
+            df.select(pl.col(column).cast(pl.Float64, strict=False).alias("value"))
+            .filter(pl.col("value").is_not_null() & pl.col("value").is_finite())
+        )
+        total = value_df.height
+        if total <= 0:
+            continue
+
+        stats = value_df.select(
+            pl.min("value").alias("min_value"),
+            pl.max("value").alias("max_value"),
+            pl.mean("value").alias("mean_value"),
+            pl.std("value").alias("std_value"),
+        ).to_dicts()[0]
+        min_value = _safe_float(stats.get("min_value"))
+        max_value = _safe_float(stats.get("max_value"))
+        mean_value = _safe_float(stats.get("mean_value"), 6)
+        std_value = _safe_float(stats.get("std_value"), 6)
+        if min_value is None or max_value is None:
+            continue
+
+        series_frames.append(
+            {
+                "series_key": series_key,
+                "series_label": series_label,
+                "value_df": value_df,
+                "total": int(total),
+                "min_value": min_value,
+                "max_value": max_value,
+                "mean_value": mean_value,
+                "std_value": std_value,
+            }
+        )
+
+    if not series_frames:
+        return []
+
+    for item in series_frames:
+        series_key = item["series_key"]
+        series_label = item["series_label"]
+        value_df = item["value_df"]
+        total = item["total"]
+        min_value = item["min_value"]
+        max_value = item["max_value"]
+        mean_value = item["mean_value"]
+        std_value = item["std_value"]
+
+        if max_value == min_value:
+            records.append(
+                {
+                    "series": series_key,
+                    "series_label": series_label,
+                    "bucket_id": 1,
+                    "bucket_count": 1,
+                    "value_from": _safe_float(min_value, 6),
+                    "value_to": _safe_float(max_value, 6),
+                    "samples": int(total),
+                    "pct": 100.0,
+                    "total_samples": int(total),
+                    "mean_value": mean_value,
+                    "std_value": std_value,
+                }
+            )
+            continue
+
+        width = (max_value - min_value) / effective_bin_count
+        count_df = (
+            value_df.with_columns(
+                (
+                    ((pl.col("value") - min_value) / width).floor() + 1
+                )
+                .clip(1, effective_bin_count)
+                .cast(pl.Int64)
+                .alias("bucket_id")
+            )
+            .group_by("bucket_id")
+            .agg(pl.len().alias("samples"))
+        )
+        counts = {
+            int(row["bucket_id"]): int(row["samples"])
+            for row in count_df.to_dicts()
+        }
+
+        for bucket_id in range(1, effective_bin_count + 1):
+            bucket_from = min_value + (bucket_id - 1) * width
+            bucket_to = min_value + bucket_id * width
+            samples = counts.get(bucket_id, 0)
+            records.append(
+                {
+                    "series": series_key,
+                    "series_label": series_label,
+                    "bucket_id": bucket_id,
+                    "bucket_count": effective_bin_count,
+                    "value_from": _safe_float(bucket_from, 6),
+                    "value_to": _safe_float(bucket_to, 6),
+                    "samples": samples,
+                    "pct": _safe_float(samples * 100.0 / total, 4),
+                    "total_samples": int(total),
+                    "mean_value": mean_value,
+                    "std_value": std_value,
+                }
+            )
+
+    return records
+
+
 def _compute_rank_ic(df: pl.DataFrame) -> pl.DataFrame:
     if df.is_empty():
         return pl.DataFrame()
@@ -2834,6 +3047,7 @@ def _compute_sample_artifacts(
             "non_overlapping_summary": {},
             "non_overlapping_offsets": [],
             "yearly_stability": pl.DataFrame(),
+            "factor_distribution": [],
             "summary": {},
         }
 
@@ -2851,6 +3065,7 @@ def _compute_sample_artifacts(
         int(request.bucket_count),
         int(forward_window),
     )
+    factor_distribution = _compute_factor_value_distribution(factor_sample)
 
     non_overlap_summary = non_overlap["summary"]
     if non_overlap_summary:
@@ -2883,6 +3098,7 @@ def _compute_sample_artifacts(
         "non_overlapping_summary": non_overlap_summary,
         "non_overlapping_offsets": non_overlap["offsets"],
         "yearly_stability": yearly_df,
+        "factor_distribution": factor_distribution,
         "summary": summary,
     }
 
@@ -3091,6 +3307,7 @@ def _compute_factor_analysis_for_combo(
         "oos_non_overlapping_summary": oos_result["non_overlapping_summary"],
         "oos_non_overlapping_offsets": oos_result["non_overlapping_offsets"],
         "oos_yearly_stability": oos_result["yearly_stability"],
+        "oos_factor_distribution": oos_result["factor_distribution"],
     }
 
 
@@ -5247,6 +5464,7 @@ def _run_timing_factor_analysis(
         "metadata": metadata,
         "summary": summary,
         "bucket_returns": _records(bucket_df),
+        "factor_distribution": _compute_factor_value_distribution(sample),
         "rank_ic_series": _records(ic_df),
         "non_overlapping_summary": non_overlap.get("summary") or {},
         "non_overlapping_offsets": non_overlap.get("offsets") or [],
@@ -5411,12 +5629,14 @@ def _run_composite_factor_analysis(
         "metadata": metadata,
         "summary": analysis_result["summary"],
         "bucket_returns": _records(analysis_result["bucket_df"]),
+        "factor_distribution": analysis_result["factor_distribution"],
         "rank_ic_series": _records(analysis_result["ic_df"]),
         "non_overlapping_summary": analysis_result["non_overlapping_summary"],
         "non_overlapping_offsets": analysis_result["non_overlapping_offsets"],
         "yearly_stability": _records(analysis_result["yearly_stability"]),
         "oos_summary": oos_result["summary"],
         "oos_bucket_returns": _records(oos_result["bucket_df"]),
+        "oos_factor_distribution": oos_result["factor_distribution"],
         "oos_rank_ic_series": _records(oos_result["ic_df"]),
         "oos_non_overlapping_summary": oos_result["non_overlapping_summary"],
         "oos_non_overlapping_offsets": oos_result["non_overlapping_offsets"],
@@ -5564,12 +5784,14 @@ def _run_factor_analysis(
         "metadata": metadata,
         "summary": factor_analysis["summary"],
         "bucket_returns": _records(factor_analysis["bucket_df"]),
+        "factor_distribution": factor_analysis["factor_distribution"],
         "rank_ic_series": _records(factor_analysis["ic_df"]),
         "non_overlapping_summary": factor_analysis["non_overlapping_summary"],
         "non_overlapping_offsets": factor_analysis["non_overlapping_offsets"],
         "yearly_stability": _records(factor_analysis["yearly_stability"]),
         "oos_summary": factor_analysis["oos_summary"],
         "oos_bucket_returns": _records(factor_analysis["oos_bucket_df"]),
+        "oos_factor_distribution": factor_analysis["oos_factor_distribution"],
         "oos_rank_ic_series": _records(factor_analysis["oos_ic_df"]),
         "oos_non_overlapping_summary": factor_analysis["oos_non_overlapping_summary"],
         "oos_non_overlapping_offsets": factor_analysis["oos_non_overlapping_offsets"],
