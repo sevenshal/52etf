@@ -2,9 +2,10 @@ import logging
 import re
 import threading
 import traceback
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, date, time as dtime, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import schedule
@@ -530,6 +531,16 @@ class TaskDefinition:
     runner: Callable[..., None]
 
 
+@dataclass(frozen=True)
+class QueuedTaskRun:
+    task: TaskDefinition
+    trigger_source: str
+    triggered_by: Optional[str]
+    runner_kwargs: dict
+    queued_at: datetime
+    done_event: Optional[threading.Event] = None
+
+
 class ScheduledTaskManager:
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -537,7 +548,10 @@ class ScheduledTaskManager:
         self._lock = threading.RLock()
         self._bootstrapped = False
         self._jobs: Dict[str, schedule.Job] = {}
+        self._task_queue: Deque[QueuedTaskRun] = deque()
+        self._queued_tasks = set()
         self._running_tasks = set()
+        self._worker_thread: Optional[threading.Thread] = None
         self.task_definitions: Dict[str, TaskDefinition] = {
             "evc_stock_fetch": TaskDefinition(
                 task_key="evc_stock_fetch",
@@ -731,6 +745,32 @@ class ScheduledTaskManager:
     def is_valid_time(self, value: str) -> bool:
         return bool(value and TIME_PATTERN.match(value))
 
+    @staticmethod
+    def _schedule_sort_minutes(value: Optional[str]) -> int:
+        if not value or not TIME_PATTERN.match(value):
+            return 24 * 60 + 1
+        hour, minute = [int(part) for part in value.split(":")]
+        return hour * 60 + minute
+
+    def _task_time_sort_key(self, task: TaskDefinition) -> tuple:
+        try:
+            snapshot = self._get_task_snapshot(task.task_key)
+            schedule_time = snapshot.get("schedule_time")
+        except KeyError:
+            schedule_time = task.default_time
+        return (
+            self._schedule_sort_minutes(schedule_time),
+            task.sort_order,
+            task.task_key,
+        )
+
+    def _config_time_sort_key(self, config: dict) -> tuple:
+        return (
+            self._schedule_sort_minutes(config.get("schedule_time")),
+            config.get("sort_order") or 0,
+            config.get("task_key") or "",
+        )
+
     def reload_jobs(self):
         self.ensure_task_configs()
         configs = self._list_task_snapshots()
@@ -738,7 +778,7 @@ class ScheduledTaskManager:
         with self._lock:
             self.scheduler.clear("managed-task")
             self._jobs = {}
-            for config in configs:
+            for config in sorted(configs, key=self._config_time_sort_key):
                 if not config["enabled"] or not self.is_valid_time(config["schedule_time"]):
                     continue
                 task = self.task_definitions.get(config["task_key"])
@@ -770,6 +810,7 @@ class ScheduledTaskManager:
 
         with self._lock:
             running_tasks = set(self._running_tasks)
+            queued_tasks = set(self._queued_tasks)
             jobs = dict(self._jobs)
 
         return [
@@ -777,6 +818,7 @@ class ScheduledTaskManager:
                 config,
                 jobs.get(config["task_key"]),
                 config["task_key"] in running_tasks,
+                config["task_key"] in queued_tasks,
             )
             for config in configs
         ]
@@ -788,7 +830,8 @@ class ScheduledTaskManager:
         with self._lock:
             job = self._jobs.get(task_key)
             is_running = task_key in self._running_tasks
-        return self._serialize_task(config, job, is_running)
+            is_queued = task_key in self._queued_tasks
+        return self._serialize_task(config, job, is_running, is_queued)
 
     def is_task_enabled(self, task_key: str) -> bool:
         self.bootstrap()
@@ -861,27 +904,70 @@ class ScheduledTaskManager:
     ) -> bool:
         self.bootstrap()
         task = self._require_task(task_key)
+        done_event = None if background else threading.Event()
 
         with self._lock:
-            if task_key in self._running_tasks:
+            if task_key in self._running_tasks or task_key in self._queued_tasks:
                 if raise_if_running:
-                    raise RuntimeError(f"任务 {task.name} 正在执行中，请稍后再试")
-                self.logger.info("Skip triggering %s because it is already running", task_key)
+                    raise RuntimeError(f"任务 {task.name} 正在执行或排队中，请稍后再试")
+                self.logger.info("Skip triggering %s because it is already running or queued", task_key)
                 return False
-            self._running_tasks.add(task_key)
-
-        if background:
-            thread = threading.Thread(
-                target=self._execute_task,
-                args=(task, trigger_source, triggered_by, runner_kwargs),
-                daemon=True,
-                name=f"task-{task_key}",
+            queued_run = QueuedTaskRun(
+                task=task,
+                trigger_source=trigger_source,
+                triggered_by=triggered_by,
+                runner_kwargs=dict(runner_kwargs),
+                queued_at=datetime.now(),
+                done_event=done_event,
             )
-            thread.start()
-            return True
+            self._task_queue.append(queued_run)
+            self._queued_tasks.add(task_key)
+            queue_size = len(self._task_queue)
+            self._ensure_worker_locked()
 
-        self._execute_task(task, trigger_source, triggered_by, runner_kwargs)
+        self.logger.info(
+            "Queued scheduled task %s, source=%s, queue_size=%s",
+            task_key,
+            trigger_source,
+            queue_size,
+        )
+
+        if done_event:
+            done_event.wait()
+
         return True
+
+    def _ensure_worker_locked(self):
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        self._worker_thread = threading.Thread(
+            target=self._run_background_queue,
+            daemon=True,
+            name="scheduled-task-worker",
+        )
+        self._worker_thread.start()
+
+    def _run_background_queue(self):
+        while True:
+            queued_run = None
+            with self._lock:
+                if not self._task_queue:
+                    self._worker_thread = None
+                    return
+                queued_run = self._task_queue.popleft()
+                self._queued_tasks.discard(queued_run.task.task_key)
+                self._running_tasks.add(queued_run.task.task_key)
+
+            try:
+                self._execute_task(
+                    queued_run.task,
+                    queued_run.trigger_source,
+                    queued_run.triggered_by,
+                    queued_run.runner_kwargs,
+                )
+            finally:
+                if queued_run.done_event:
+                    queued_run.done_event.set()
 
     def _execute_task(
         self,
@@ -947,7 +1033,13 @@ class ScheduledTaskManager:
                 duration_seconds,
             )
 
-    def _serialize_task(self, config: dict, job: Optional[schedule.Job], is_running: bool) -> dict:
+    def _serialize_task(
+        self,
+        config: dict,
+        job: Optional[schedule.Job],
+        is_running: bool,
+        is_queued: bool = False,
+    ) -> dict:
         return {
             "task_key": config["task_key"],
             "name": config["name"],
@@ -963,6 +1055,7 @@ class ScheduledTaskManager:
                 "a_stock_etf_fear_greed_backfill",
             },
             "is_running": is_running,
+            "is_queued": is_queued,
             "next_run_at": job.next_run.isoformat() if job and job.next_run else None,
             "last_trigger_source": config["last_trigger_source"],
             "last_run_started_at": config["last_run_started_at"].isoformat() if config["last_run_started_at"] else None,
@@ -1022,13 +1115,16 @@ scheduled_task_manager = ScheduledTaskManager()
 
 def run_startup_tasks():
     scheduled_task_manager.bootstrap()
+    now = datetime.now()
     tasks = sorted(
-        scheduled_task_manager.task_definitions.values(),
-        key=lambda task: task.sort_order,
+        (
+            task
+            for task in scheduled_task_manager.task_definitions.values()
+            if scheduled_task_manager.should_run_on_startup(task.task_key, now=now)
+        ),
+        key=scheduled_task_manager._task_time_sort_key,
     )
     for task in tasks:
-        if not scheduled_task_manager.should_run_on_startup(task.task_key):
-            continue
         scheduled_task_manager.trigger_task(
             task.task_key,
             trigger_source="startup",

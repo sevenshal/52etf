@@ -34,6 +34,7 @@ class ScheduledTaskResponse(BaseModel):
     last_run_status: Optional[str] = None
     last_run_message: Optional[str] = None
     last_duration_seconds: Optional[float] = None
+    is_queued: bool = False
     updated_by: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
