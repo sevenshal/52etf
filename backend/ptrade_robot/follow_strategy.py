@@ -312,6 +312,8 @@ def handle_ws_message(loop, conn, raw_message):
 def execute_command(action, payload):
     if action in ("get_quotes", "get_bid_ask", "quote.batch"):
         return get_quotes(payload.get("symbols") or [])
+    if action in ("get_snapshots", "snapshot.batch", "quote.snapshot"):
+        return get_snapshots_payload(payload.get("symbols") or [])
     if action in ("place_orders", "order.batch"):
         return place_order_batch(payload.get("orders") or [])
     if action in ("get_account_snapshot", "account.snapshot"):
@@ -401,10 +403,93 @@ def normalize_depth_group(group):
     return levels
 
 
-def get_quotes(symbols):
+def first_numeric_value(obj, keys):
+    for key in keys:
+        value = value_of(obj, key)
+        try:
+            if value is not None and float(value) > 0:
+                return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def get_snapshot_map(client_symbols):
+    if not client_symbols:
+        return {}
+
+    query = client_symbols if len(client_symbols) > 1 else client_symbols[0]
+    snapshot = get_snapshot(query) or {}
+    if not snapshot:
+        return {}
+
+    if value_of(snapshot, "bid_grp") is not None or value_of(snapshot, "offer_grp") is not None:
+        return {client_symbols[0]: snapshot}
+
+    return snapshot
+
+
+def get_single_snapshot(client_symbol):
+    snapshots = get_snapshot_map([client_symbol])
+    return (
+        snapshots.get(client_symbol)
+        or snapshots.get(convert_to_api_code(client_symbol))
+        or snapshots.get(str(client_symbol).upper())
+        or {}
+    )
+
+
+def normalize_quote_from_snapshot(client_symbol, snapshot):
+    bid_levels = normalize_depth_group(value_of(snapshot, "bid_grp"))
+    ask_levels = normalize_depth_group(value_of(snapshot, "offer_grp"))
+    best_bid = bid_levels[0] if bid_levels else {}
+    best_ask = ask_levels[0] if ask_levels else {}
+    return {
+        "symbol": convert_to_api_code(client_symbol),
+        "client_symbol": client_symbol,
+        "ok": True,
+        "price": first_numeric_value(snapshot, ("last_px",)),
+        "bid": best_bid.get("price"),
+        "bid_size": best_bid.get("volume"),
+        "ask": best_ask.get("price"),
+        "ask_size": best_ask.get("volume"),
+        "bid_levels": bid_levels,
+        "ask_levels": ask_levels,
+        "trade_status": value_of(snapshot, "trade_status"),
+        "timestamp": value_of(snapshot, "hsTimeStamp", datetime.now().isoformat()),
+    }
+
+
+def get_snapshots_payload(symbols):
+    client_symbols = [convert_to_client_code(symbol) for symbol in symbols if symbol]
+    snapshots = get_snapshot_map(client_symbols)
     results = []
-    for symbol in symbols:
-        client_symbol = convert_to_client_code(symbol)
+    for client_symbol in client_symbols:
+        api_symbol = convert_to_api_code(client_symbol)
+        snapshot = (
+            snapshots.get(client_symbol)
+            or snapshots.get(api_symbol)
+            or snapshots.get(str(client_symbol).upper())
+        )
+        if not snapshot:
+            results.append({
+                "symbol": api_symbol,
+                "client_symbol": client_symbol,
+                "ok": False,
+                "error": "snapshot not found",
+            })
+            continue
+        item = normalize_quote_from_snapshot(client_symbol, snapshot)
+        item["raw"] = stringify_unknown_fields(snapshot)
+        results.append(item)
+    return {"snapshots": results}
+
+
+def get_quotes(symbols):
+    client_symbols = [convert_to_client_code(symbol) for symbol in symbols if symbol]
+    snapshots = get_snapshot_map(client_symbols)
+    results = []
+    for client_symbol in client_symbols:
         api_symbol = convert_to_api_code(client_symbol)
         item = {
             "symbol": api_symbol,
@@ -412,20 +497,14 @@ def get_quotes(symbols):
             "ok": True,
         }
         try:
-            gear_price = get_gear_price(client_symbol)
-            bid_levels = normalize_depth_group((gear_price or {}).get("bid_grp"))
-            ask_levels = normalize_depth_group((gear_price or {}).get("offer_grp"))
-            best_bid = bid_levels[0] if bid_levels else {}
-            best_ask = ask_levels[0] if ask_levels else {}
-            item.update({
-                "bid": best_bid.get("price"),
-                "bid_size": best_bid.get("volume"),
-                "ask": best_ask.get("price"),
-                "ask_size": best_ask.get("volume"),
-                "bid_levels": bid_levels,
-                "ask_levels": ask_levels,
-                "timestamp": datetime.now().isoformat(),
-            })
+            snapshot = (
+                snapshots.get(client_symbol)
+                or snapshots.get(api_symbol)
+                or snapshots.get(str(client_symbol).upper())
+            )
+            if not snapshot:
+                raise Exception("snapshot not found")
+            item.update(normalize_quote_from_snapshot(client_symbol, snapshot))
         except Exception as e:
             item["ok"] = False
             item["error"] = str(e)
@@ -433,13 +512,12 @@ def get_quotes(symbols):
     return {"quotes": results}
 
 
-def get_limit_price(symbol, side, quantity):
+def get_limit_price_from_snapshot(symbol, side, quantity, snapshot):
     """Use the order book to pick a limit price that covers the requested quantity."""
-    gear_price = get_gear_price(symbol)
-    if not gear_price or not gear_price.get("bid_grp") or not gear_price.get("offer_grp"):
+    if not snapshot or not value_of(snapshot, "bid_grp") or not value_of(snapshot, "offer_grp"):
         raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
 
-    group = gear_price["offer_grp"] if side == "BUY" else gear_price["bid_grp"]
+    group = value_of(snapshot, "offer_grp") if side == "BUY" else value_of(snapshot, "bid_grp")
     levels = normalize_depth_group(group)
     if not levels:
         raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
@@ -469,6 +547,57 @@ def get_limit_price(symbol, side, quantity):
     return target_price
 
 
+def get_limit_price(symbol, side, quantity):
+    return get_limit_price_from_snapshot(symbol, side, quantity, get_single_snapshot(symbol))
+
+
+def get_int_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def calculate_order_price(symbol, side, quantity, price_level):
+    snapshot = get_single_snapshot(symbol)
+    if not snapshot:
+        raise Exception("获取 %s 快照失败: 数据为空" % symbol)
+
+    quote = normalize_quote_from_snapshot(symbol, snapshot)
+    level = get_int_or_none(price_level)
+    if level is None or level == -1:
+        price = get_limit_price_from_snapshot(symbol, side, quantity, snapshot)
+        source = "ptrade_depth_fallback"
+    elif level == 0:
+        price = first_numeric_value(snapshot, ("last_px",))
+        source = "last_px"
+    elif 1 <= level <= 5:
+        levels = quote.get("ask_levels") if side == "BUY" else quote.get("bid_levels")
+        price = None
+        for item in levels or []:
+            if int(item.get("level") or 0) == level:
+                price = item.get("price")
+                break
+        source = "%s_level_%d" % ("ask" if side == "BUY" else "bid", level)
+    else:
+        raise Exception("不支持的价格档位: %s" % price_level)
+
+    if price is None or float(price) <= 0:
+        raise Exception("获取 %s 执行价格失败: %s 无可用价格" % (symbol, source))
+
+    return {
+        "price": float(price),
+        "price_source": source,
+        "price_level": level,
+        "snapshot_time": quote.get("timestamp"),
+        "last_price": quote.get("price"),
+        "bid": quote.get("bid"),
+        "ask": quote.get("ask"),
+    }
+
+
 def place_order_batch(orders):
     results = []
     for index, order_request in enumerate(orders):
@@ -484,22 +613,130 @@ def place_order_batch(orders):
     return {"orders": results}
 
 
-def place_single_order(order_request, index):
-    symbol = order_request.get("symbol")
-    client_symbol = convert_to_client_code(symbol)
-    api_symbol = convert_to_api_code(client_symbol)
-    side = str(order_request.get("side") or "").upper()
-    quantity = int(order_request.get("quantity") or 0)
+def normalize_order_type(order_request):
+    order_type = str(order_request.get("order_type") or "LIMIT").upper()
+    if order_type in ("MARKET", "MKT"):
+        return "MARKET"
+    return "LIMIT"
 
-    if side not in ("BUY", "SELL"):
-        raise Exception("orders[%d].side must be BUY or SELL" % index)
-    if quantity <= 0:
-        raise Exception("orders[%d].quantity must be greater than 0" % index)
 
+def is_sh_market_symbol(client_symbol):
+    return str(client_symbol or "").upper().endswith((".SS", ".SH"))
+
+
+def validate_market_order_type(client_symbol, market_type):
+    market_type = int(market_type)
+    allowed = (0, 1, 2, 4) if is_sh_market_symbol(client_symbol) else (0, 2, 3, 4, 5)
+    if market_type not in allowed:
+        raise Exception("%s 不支持市价委托类型 %s" % (client_symbol, market_type))
+    return market_type
+
+
+def get_market_protection_price(order_request, client_symbol, side, quantity):
+    price = (
+        order_request.get("protection_limit_price")
+        or order_request.get("market_limit_price")
+        or order_request.get("limit_price")
+        or order_request.get("price")
+    )
+    if price is not None:
+        return {
+            "price": float(price),
+            "price_source": "explicit_protection_limit_price",
+            "price_level": None,
+            "snapshot_time": None,
+        }
+
+    if "price_level" not in order_request and not is_sh_market_symbol(client_symbol):
+        return None
+
+    price_level = order_request.get("price_level", -1)
+    calculated = calculate_order_price(client_symbol, side, quantity, price_level)
+    calculated["price_source"] = "protection_%s" % calculated["price_source"]
+    return calculated
+
+
+def place_market_order(order_request, client_symbol, api_symbol, side, quantity):
+    market_type_value = order_request.get("market_type")
+    market_type = validate_market_order_type(client_symbol, 0 if market_type_value is None else market_type_value)
+    protection = get_market_protection_price(order_request, client_symbol, side, quantity)
+    protection_price = protection.get("price") if protection else None
+    signed_quantity = quantity if side == "BUY" else -quantity
+
+    if protection_price is None:
+        order_sn = order_market(client_symbol, signed_quantity, market_type)
+    else:
+        order_sn = order_market(client_symbol, signed_quantity, market_type, protection_price)
+
+    message = "%s %s 市价单, 数量: %d, 市价类型: %s" % (side, client_symbol, quantity, market_type)
+    if protection_price is not None:
+        message += ", 保护限价: %s" % protection_price
+    log.info("交易指令已提交: %s" % message)
+
+    raw_status = None
+    if order_sn:
+        order_info = get_first_order(order_sn)
+        raw_status = str(value_of(order_info, "status", ""))
+        if raw_status == "9":
+            log.error("交易失败: %s失败(被拒绝)" % message)
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "symbol": api_symbol,
+                "client_symbol": client_symbol,
+                "side": side,
+                "quantity": quantity,
+                "order_type": "MARKET",
+                "market_type": market_type,
+                "protection_limit_price": protection_price,
+                "calculated_price": protection_price,
+                "price_source": protection.get("price_source") if protection else None,
+                "price_level": protection.get("price_level") if protection else order_request.get("price_level"),
+                "snapshot_time": protection.get("snapshot_time") if protection else None,
+                "submitted_price": protection_price,
+                "order_id": order_sn,
+                "raw_status": raw_status,
+                "message": "%s失败(被拒绝)" % message,
+            }
+
+    return {
+        "ok": True,
+        "status": "SUCCESS",
+        "symbol": api_symbol,
+        "client_symbol": client_symbol,
+        "side": side,
+        "quantity": quantity,
+        "order_type": "MARKET",
+        "market_type": market_type,
+        "protection_limit_price": protection_price,
+        "calculated_price": protection_price,
+        "price_source": protection.get("price_source") if protection else None,
+        "price_level": protection.get("price_level") if protection else order_request.get("price_level"),
+        "snapshot_time": protection.get("snapshot_time") if protection else None,
+        "submitted_price": protection_price,
+        "order_id": order_sn,
+        "raw_status": raw_status,
+        "message": message,
+    }
+
+
+def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
     limit_price = order_request.get("limit_price") or order_request.get("price")
-    if limit_price is None:
-        limit_price = get_limit_price(client_symbol, side, quantity)
-    limit_price = float(limit_price)
+    if limit_price is not None:
+        calculated = {
+            "price": float(limit_price),
+            "price_source": "explicit_limit_price",
+            "price_level": None,
+            "snapshot_time": None,
+        }
+    else:
+        calculated = calculate_order_price(
+            client_symbol,
+            side,
+            quantity,
+            order_request.get("price_level", -1),
+        )
+    limit_price = float(calculated["price"])
 
     signed_quantity = quantity if side == "BUY" else -quantity
     order_sn = order(client_symbol, signed_quantity, limit_price=limit_price)
@@ -530,11 +767,33 @@ def place_single_order(order_request, index):
         "client_symbol": client_symbol,
         "side": side,
         "quantity": quantity,
+        "order_type": "LIMIT",
+        "calculated_price": limit_price,
+        "price_source": calculated.get("price_source"),
+        "price_level": calculated.get("price_level"),
+        "snapshot_time": calculated.get("snapshot_time"),
         "submitted_price": limit_price,
         "order_id": order_sn,
         "raw_status": raw_status,
         "message": message,
     }
+
+
+def place_single_order(order_request, index):
+    symbol = order_request.get("symbol")
+    client_symbol = convert_to_client_code(symbol)
+    api_symbol = convert_to_api_code(client_symbol)
+    side = str(order_request.get("side") or "").upper()
+    quantity = int(order_request.get("quantity") or 0)
+
+    if side not in ("BUY", "SELL"):
+        raise Exception("orders[%d].side must be BUY or SELL" % index)
+    if quantity <= 0:
+        raise Exception("orders[%d].quantity must be greater than 0" % index)
+
+    if normalize_order_type(order_request) == "MARKET":
+        return place_market_order(order_request, client_symbol, api_symbol, side, quantity)
+    return place_limit_order(order_request, client_symbol, api_symbol, side, quantity)
 
 
 def get_first_order(order_sn):

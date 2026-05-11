@@ -77,8 +77,11 @@ class OrderInstruction(BaseModel):
     side: str
     quantity: int = Field(..., gt=0)
     order_type: Optional[str] = "LIMIT"
+    market_type: Optional[int] = Field(default=0, ge=0, le=5)
     price: Optional[float] = Field(default=None, gt=0)
     limit_price: Optional[float] = Field(default=None, gt=0)
+    protection_limit_price: Optional[float] = Field(default=None, gt=0)
+    market_limit_price: Optional[float] = Field(default=None, gt=0)
     remark: Optional[str] = None
 
     @validator("side")
@@ -86,6 +89,15 @@ class OrderInstruction(BaseModel):
         upper = (value or "").upper()
         if upper not in ("BUY", "SELL"):
             raise ValueError("side must be BUY or SELL")
+        return upper
+
+    @validator("order_type")
+    def normalize_order_type(cls, value):
+        upper = (value or "LIMIT").upper()
+        if upper in ("MKT", "MARKET"):
+            return "MARKET"
+        if upper != "LIMIT":
+            raise ValueError("order_type must be LIMIT or MARKET")
         return upper
 
 
@@ -250,6 +262,26 @@ async def get_external_quotes(
         raise HTTPException(status_code=400, detail="External trading account is disabled")
     try:
         return await external_trading_hub.get_quotes(
+            account.id,
+            payload.symbols,
+            timeout=payload.timeout_seconds,
+        )
+    except ExternalTradingConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{external_account_id}/snapshots")
+async def get_external_snapshots(
+    external_account_id: int,
+    payload: QuoteRequest,
+    db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    if not account.enabled:
+        raise HTTPException(status_code=400, detail="External trading account is disabled")
+    try:
+        return await external_trading_hub.get_snapshots(
             account.id,
             payload.symbols,
             timeout=payload.timeout_seconds,

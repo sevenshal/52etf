@@ -290,17 +290,6 @@ def _run_etf_fear_greed_backfill(start_date: Optional[str] = None):
         )
 
 
-def _run_w20_momentum_live_sync():
-    from ..app.api.w20_momentum_live import sync_all_enabled_w20_momentum_live_configs_for_scheduler
-
-    result = sync_all_enabled_w20_momentum_live_configs_for_scheduler()
-    logging.getLogger("ScheduledTaskManager").info(
-        "W20 momentum virtual strategies synced: success=%s, errors=%s",
-        len(result.get("synced") or []),
-        len(result.get("errors") or []),
-    )
-
-
 def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     from .a_stock_base_data_sync import sync_a_stock_base_data
 
@@ -634,15 +623,6 @@ class ScheduledTaskManager:
                 sort_order=60,
                 runner=_run_etf_fear_greed_backfill,
             ),
-            "w20_momentum_live_sync": TaskDefinition(
-                task_key="w20_momentum_live_sync",
-                name="A股ETF W20动量虚拟盘同步",
-                description="同步所有启用的 W20 风险调整 ETF 动量虚拟盘，生成信号、模拟成交、刷新净值和持仓。",
-                default_time="09:35",
-                default_enabled=True,
-                sort_order=70,
-                runner=_run_w20_momentum_live_sync,
-            ),
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
@@ -717,6 +697,7 @@ class ScheduledTaskManager:
                 ScheduledTaskConfig.task_key.in_([
                     "a_stock_income_sync",
                     "etf_nport_holdings_import",
+                    "w20_momentum_live_sync",
                 ])
             ).delete(synchronize_session=False)
             for task in self.task_definitions.values():

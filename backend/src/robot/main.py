@@ -12,6 +12,41 @@ pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
 
+_last_w20_strategy_automation_check = 0.0
+
+
+def _process_w20_strategy_automation():
+  global _last_w20_strategy_automation_check
+  now = time.time()
+  if now - _last_w20_strategy_automation_check < 30:
+    return
+  _last_w20_strategy_automation_check = now
+
+  try:
+    from ..app.api.w20_momentum_live import (
+      process_pending_w20_live_trade_executions_for_robot,
+      process_w20_momentum_live_strategy_automation_for_robot,
+    )
+
+    automation_result = process_w20_momentum_live_strategy_automation_for_robot()
+    if (
+      automation_result.get("signals")
+      or automation_result.get("signal_waiting")
+      or automation_result.get("virtual_trades")
+      or automation_result.get("virtual_trade_waiting")
+      or automation_result.get("plan_emails")
+      or automation_result.get("plan_skipped")
+      or automation_result.get("errors")
+    ):
+      logging.info("W20 strategy automation result: %s", automation_result)
+
+    execution_result = process_pending_w20_live_trade_executions_for_robot()
+    if execution_result.get("processed") or execution_result.get("failed") or execution_result.get("deferred"):
+      logging.info("W20 pending live trade execution result: %s", execution_result)
+  except Exception:
+    logging.exception("W20 strategy automation check failed")
+
+
 def robot():
   run_startup_tasks()
   logging.info("listening deal")
@@ -30,6 +65,7 @@ def robot():
   while True:
     try:
       scheduled_task_manager.run_pending()
+      _process_w20_strategy_automation()
     except Exception as e:
       import traceback
       from ..core.utils import send_alert_email

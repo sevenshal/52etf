@@ -186,6 +186,14 @@ class ExternalTradingHub:
             timeout=timeout,
         )
 
+    async def get_snapshots(self, account_pk: int, symbols: List[str], timeout: float = 10.0) -> Dict[str, Any]:
+        return await self.send_command(
+            account_pk,
+            "get_snapshots",
+            {"symbols": symbols},
+            timeout=timeout,
+        )
+
     async def place_orders(self, account_pk: int, orders: List[Dict[str, Any]], timeout: float = 30.0) -> Dict[str, Any]:
         return await self.send_command(
             account_pk,
@@ -274,6 +282,17 @@ async def get_external_quotes(
 ) -> Dict[str, Any]:
     account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
     return await external_trading_hub.get_quotes(account_pk, symbols, timeout=timeout)
+
+
+async def get_external_snapshots(
+    account_id: str,
+    identifier: str,
+    symbols: List[str],
+    name: Optional[str] = None,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
+    return await external_trading_hub.get_snapshots(account_pk, symbols, timeout=timeout)
 
 
 async def place_external_orders(

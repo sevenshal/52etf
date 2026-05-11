@@ -783,6 +783,18 @@ class W20MomentumLiveConfig(Base):
     commission_pct = Column(Float, nullable=False, default=0.03)
     slippage_pct = Column(Float, nullable=False, default=0.02)
     lot_size = Column(Integer, nullable=False, default=100)
+    auto_signal_enabled = Column(Boolean, default=True, nullable=False)
+    auto_signal_time = Column(String(5), default="18:35", nullable=False)
+    auto_virtual_trade_enabled = Column(Boolean, default=True, nullable=False)
+    auto_virtual_trade_time = Column(String(5), default="09:31", nullable=False)
+    last_auto_signal_at = Column(DateTime)
+    last_auto_virtual_trade_at = Column(DateTime)
+    live_trade_enabled = Column(Boolean, default=False, nullable=False)
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_trade_total_amount = Column(Float, nullable=True)
+    live_trade_order_type = Column(String(10), default="LIMIT", nullable=False)
+    live_trade_price_level = Column(Integer, default=1, nullable=False)
+    live_trade_market_type = Column(Integer, default=0, nullable=False)
     last_sync_at = Column(DateTime)
     last_sync_status = Column(String(16))
     last_sync_message = Column(String(500))
@@ -858,6 +870,28 @@ class W20MomentumLiveLog(Base):
     action = Column(String(32), nullable=False)
     message = Column(String(1000))
     payload = Column(JSON)
+
+class W20MomentumLiveExecution(Base):
+    """W20 实盘确认后的自动执行队列"""
+    __tablename__ = "w20_momentum_live_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), index=True, nullable=False)
+    account_id = Column(String, index=True, nullable=False)
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    status = Column(String(16), default="PENDING", index=True, nullable=False)
+    approved_at = Column(DateTime, default=datetime.now, index=True)
+    execute_after = Column(DateTime, index=True)
+    started_at = Column(DateTime)
+    executed_at = Column(DateTime)
+    last_attempt_at = Column(DateTime)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    approved_plan = Column(JSON)
+    execution_plan = Column(JSON)
+    execution_result = Column(JSON)
+    error_message = Column(String(1000))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualConfig(Base):
     """美股多因子策略虚拟盘配置"""
@@ -1201,6 +1235,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_executions_status_time ON w20_momentum_live_executions(status, execute_after)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_configs_account ON us_stock_signal_virtual_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_events_config_date ON us_stock_signal_virtual_events(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_trades_config_date ON us_stock_signal_virtual_trades(config_id, date)",
@@ -1260,6 +1295,20 @@ def ensure_table_columns():
         "a_stock_innovation_momentum_configs": {
             "fundamental_weights": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_weights JSON NOT NULL DEFAULT '{\"circ_mv\":0.34,\"revenue_growth_3y\":0.33,\"rd_exp_ratio\":0.33}'",
             "fundamental_blend": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_blend FLOAT NOT NULL DEFAULT 0.0",
+        },
+        "w20_momentum_live_configs": {
+            "auto_signal_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_signal_enabled BOOLEAN NOT NULL DEFAULT 1",
+            "auto_signal_time": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_signal_time VARCHAR(5) NOT NULL DEFAULT '18:35'",
+            "auto_virtual_trade_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_virtual_trade_enabled BOOLEAN NOT NULL DEFAULT 1",
+            "auto_virtual_trade_time": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_virtual_trade_time VARCHAR(5) NOT NULL DEFAULT '09:31'",
+            "last_auto_signal_at": "ALTER TABLE w20_momentum_live_configs ADD COLUMN last_auto_signal_at DATETIME",
+            "last_auto_virtual_trade_at": "ALTER TABLE w20_momentum_live_configs ADD COLUMN last_auto_virtual_trade_at DATETIME",
+            "live_trade_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
+            "external_trading_account_id": "ALTER TABLE w20_momentum_live_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_trade_total_amount": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_total_amount FLOAT",
+            "live_trade_order_type": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_order_type VARCHAR(10) NOT NULL DEFAULT 'LIMIT'",
+            "live_trade_price_level": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_price_level INTEGER NOT NULL DEFAULT 1",
+            "live_trade_market_type": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_market_type INTEGER NOT NULL DEFAULT 0",
         },
     }
 
