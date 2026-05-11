@@ -18,6 +18,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_basic",
         "a_stock_income",
         "a_stock_index_daily",
+        "a_stock_index_weight",
         "a_stock_market_daily",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
@@ -118,6 +119,18 @@ class AStockIndexDaily(AnalyticsBase):
     pct_chg = Column(Float)
     vol = Column(Float)
     amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockIndexWeight(AnalyticsBase):
+    """Tushare 指数历史成分权重，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_index_weight"
+
+    index_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    con_code = Column(String(16), primary_key=True)
+    weight = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -242,6 +255,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_index_date ON a_stock_index_weight(index_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_constituent ON a_stock_index_weight(con_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_option_basic_underlying ON a_stock_option_basic(opt_code, call_put, delist_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_date_exchange ON a_stock_option_daily(trade_date, exchange)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_option_daily_symbol_date ON a_stock_option_daily(ts_code, trade_date)",

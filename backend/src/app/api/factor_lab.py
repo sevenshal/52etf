@@ -40,6 +40,7 @@ from ...core.services.factor_backtest_engine import (
     run_factor_backtest as shared_run_factor_backtest,
     warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
 )
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_CANDIDATE_ETFS,
     DEFAULT_MOMENTUM_WEIGHTS,
@@ -80,6 +81,24 @@ MAX_HEATMAP_CELLS = 20
 FACTOR_DISTRIBUTION_BIN_COUNT = 40
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FEAR_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
+A_STOCK_FEAR_SOURCE_LABELS = {
+    A_STOCK_INNO100_SYMBOL: "A创100 自算贪恐",
+    **{
+        str(item["symbol"]).upper(): (
+            f"{item.get('ticker') or item.get('label') or item['symbol']} 自算贪恐"
+        )
+        for item in A_STOCK_ETF_FEAR_GREED_TARGETS
+    },
+}
+A_STOCK_FEAR_SOURCE_ORDER = {
+    symbol: index
+    for index, symbol in enumerate(
+        [
+            A_STOCK_INNO100_SYMBOL,
+            *[str(item["symbol"]).upper() for item in A_STOCK_ETF_FEAR_GREED_TARGETS],
+        ]
+    )
+}
 FACTOR_DIRECTION_OPTIONS = {
     "higher_is_better": {"sign": 1.0, "label": "高值更好"},
     "lower_is_better": {"sign": -1.0, "label": "低值更好"},
@@ -1218,10 +1237,11 @@ def _load_target_price_frame(db: ORMSession, symbol: str, start_date: date, end_
 
 
 def _fear_source_label(symbol: str) -> str:
+    symbol = str(symbol or "").strip().upper()
     if symbol == CNN_HISTORY_SYMBOL:
         return "CNN Fear & Greed"
-    if symbol == "INNO100.CN":
-        return "A创100 自算贪恐"
+    if symbol in A_STOCK_FEAR_SOURCE_LABELS:
+        return A_STOCK_FEAR_SOURCE_LABELS[symbol]
     if symbol.endswith(".US"):
         return f"{symbol[:-3]} 自算贪恐"
     return symbol
@@ -1690,7 +1710,13 @@ def _get_timing_fear_sources(db: ORMSession) -> List[Dict[str, Any]]:
         }
         for row in rows
     ]
-    sources.sort(key=lambda item: (0 if item["symbol"] == CNN_HISTORY_SYMBOL else 1, item["symbol"]))
+    sources.sort(
+        key=lambda item: (
+            0 if str(item["symbol"] or "").upper() == CNN_HISTORY_SYMBOL else 1,
+            A_STOCK_FEAR_SOURCE_ORDER.get(str(item["symbol"] or "").upper(), 10_000),
+            item["label"],
+        )
+    )
     return sources
 
 

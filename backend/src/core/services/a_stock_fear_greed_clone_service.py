@@ -17,6 +17,7 @@ from ..database import (
     ETFFearGreedCloneHistory,
     Session,
 )
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_FEAR_GREED_TARGETS
 
 
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
@@ -29,50 +30,64 @@ A_STOCK_INNO100_OPTION_UNDERLYINGS = (
     "OP510500.SH",
     "OP159922.SZ",
 )
+A_STOCK_INNO100_TARGET = {
+    "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
+    "ticker": "A创100",
+    "label": "A创100",
+    "index_code": A_STOCK_INNO100_INDEX_CODE,
+    "index_name": "A股创新100",
+    "option_underlyings": list(A_STOCK_INNO100_OPTION_UNDERLYINGS),
+    "custom_inno100": True,
+}
+A_STOCK_FEAR_GREED_TARGETS = [A_STOCK_INNO100_TARGET, *A_STOCK_ETF_FEAR_GREED_TARGETS]
+A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL = {
+    str(item["symbol"]).upper(): item
+    for item in A_STOCK_FEAR_GREED_TARGETS
+}
 
 
 A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     "market_momentum": ComponentSpec(
         key="market_momentum",
-        name="A创100 Momentum",
-        raw_label="A创100 level / 125-day moving average - 1",
-        source="a_stock_innovation100_levels",
-        proxy_note="Same momentum idea as CNN, applied to the custom A创100 index.",
+        name="A-share Index Momentum",
+        raw_label="tracked index level / 125-day moving average - 1",
+        source="A-share index level daily data",
+        proxy_note="Same momentum idea as CNN, applied to the target A-share index.",
     ),
     "stock_price_strength": ComponentSpec(
         key="stock_price_strength",
         name="Constituent Price Strength",
         raw_label="Constituent-weighted 52-week range position",
-        source="a_stock_innovation100_constituents + a_stock_market_daily",
+        source="index constituents/weights + a_stock_market_daily",
         proxy_note="A-share constituent proxy for new-high/new-low strength.",
     ),
     "stock_price_breadth": ComponentSpec(
         key="stock_price_breadth",
         name="Constituent Price Breadth",
         raw_label="5-day average constituent-weighted advancing amount ratio",
-        source="a_stock_innovation100_constituents + a_stock_market_daily",
-        proxy_note="Advancing/declining turnover breadth across A创100 constituents.",
+        source="index constituents/weights + a_stock_market_daily",
+        proxy_note="Advancing/declining turnover breadth across target index constituents.",
     ),
     "put_call_options": ComponentSpec(
         key="put_call_options",
         name="A-share ETF Put/Call Options",
         raw_label="-5-day average related ETF option put/call volume ratio",
         source="Tushare opt_basic + opt_daily in DuckDB",
-        proxy_note="Uses related 科创/创业/中证500 ETF option volume PCR as A创100 option-sentiment proxy.",
+        proxy_note="Uses related A-share ETF option volume PCR as target-index option-sentiment proxy.",
     ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
-        name="A创100 Volatility",
+        name="A-share Index Volatility",
         raw_label="-(20-day realized volatility / 50-day average - 1)",
-        source="a_stock_innovation100_levels",
+        source="A-share index level daily data",
         proxy_note="Realized-volatility replacement for CNN's VIX component.",
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",
         name="Safe Haven Demand",
-        raw_label="20-day A创100 return - 20-day 中证国债 return",
-        source="a_stock_innovation100_levels + a_stock_index_daily",
-        proxy_note="Compares A创100 with a China bond index as the risk-on/risk-off proxy.",
+        raw_label="20-day target index return - 20-day 中证国债 return",
+        source="A-share index level daily data + a_stock_index_daily",
+        proxy_note="Compares target index with a China bond index as the risk-on/risk-off proxy.",
     ),
     "junk_bond_demand": ComponentSpec(
         key="junk_bond_demand",
@@ -85,7 +100,21 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
 
 
 class AStockInnovation100FearGreedCloneCalculator:
-    """A创100-specific Fear & Greed clone using local A-share DuckDB data."""
+    """A-share index/ETF Fear & Greed clone using local A-share DuckDB data."""
+
+    def __init__(self, target_symbol: str = A_STOCK_INNO100_FEAR_SYMBOL):
+        symbol = str(target_symbol or A_STOCK_INNO100_FEAR_SYMBOL).strip().upper()
+        self.target = A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL.get(symbol)
+        if not self.target:
+            supported = ", ".join(sorted(A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL))
+            raise FearGreedCloneError(f"unsupported A-share ETF fear greed symbol {symbol}; supported: {supported}")
+        self.target_symbol = str(self.target["symbol"]).upper()
+        self.ticker = str(self.target.get("ticker") or self.target_symbol)
+        self.label = str(self.target.get("label") or self.ticker)
+        self.index_code = str(self.target["index_code"]).upper()
+        self.index_name = str(self.target.get("index_name") or self.index_code)
+        self.option_underlyings = tuple(self.target.get("option_underlyings") or A_STOCK_INNO100_OPTION_UNDERLYINGS)
+        self.custom_inno100 = bool(self.target.get("custom_inno100"))
 
     def calculate_history(
         self,
@@ -105,7 +134,7 @@ class AStockInnovation100FearGreedCloneCalculator:
 
         levels = self._load_levels(calc_start, end_value)
         if levels.empty:
-            raise FearGreedCloneError("A创100 index levels are empty; run A股创新100指数刷新 first")
+            raise FearGreedCloneError(f"{self.label} index levels are empty; run A股基础数据同步 first")
 
         index = pd.DatetimeIndex(levels.index, name="date")
         holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(index)
@@ -116,7 +145,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         score_df["fear_greed_clone"] = score_df[score_columns].mean(axis=1)
         valid = score_df.dropna(subset=score_columns + ["fear_greed_clone"])
         if valid.empty:
-            raise FearGreedCloneError("not enough data to calculate A创100 Fear & Greed")
+            raise FearGreedCloneError(f"not enough data to calculate {self.label} Fear & Greed")
 
         warnings = self._warnings()
         records: List[Dict[str, Any]] = []
@@ -129,7 +158,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             holdings_as_of = holdings_as_of_by_date.get(timestamp)
             records.append(
                 {
-                    "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
+                    "symbol": self.target_symbol,
                     "date": day.isoformat(),
                     "score": round(score, 4),
                     "rating": FearGreedCloneCalculator.rating(score),
@@ -148,7 +177,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             )
 
         return {
-            "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
+            "symbol": self.target_symbol,
             "start_date": records[0]["date"] if records else None,
             "end_date": records[-1]["date"] if records else None,
             "count": len(records),
@@ -244,6 +273,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         }
 
     def _load_levels(self, start_date: date, end_date: date) -> pd.DataFrame:
+        if not self.custom_inno100:
+            return self._load_duckdb_index_levels(start_date, end_date)
+
         db = Session()
         try:
             rows = (
@@ -274,12 +306,50 @@ class AStockInnovation100FearGreedCloneCalculator:
         frame["date"] = pd.to_datetime(frame["date"])
         return frame.set_index("date").sort_index()
 
+    def _load_duckdb_index_levels(self, start_date: date, end_date: date) -> pd.DataFrame:
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(
+                text(
+                    """
+                    SELECT trade_date, open, high, low, close, pct_chg, vol, amount
+                    FROM a_stock_index_daily
+                    WHERE ts_code = :index_code
+                      AND trade_date >= :start_date
+                      AND trade_date <= :end_date
+                    ORDER BY trade_date
+                    """
+                ),
+                {
+                    "index_code": self.index_code,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                },
+            ).fetchall()
+        finally:
+            AnalyticsSession.remove()
+        if not rows:
+            return pd.DataFrame()
+
+        frame = pd.DataFrame(
+            [tuple(row) for row in rows],
+            columns=["date", "open", "high", "low", "level", "daily_return_pct", "volume", "turnover"],
+        )
+        frame["date"] = pd.to_datetime(frame["date"])
+        for column in ["open", "high", "low", "level", "daily_return_pct", "volume", "turnover"]:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=["date", "level"])
+        return frame.set_index("date").sort_index()
+
     def _build_holdings_by_date(
         self,
         index: pd.DatetimeIndex,
     ) -> Tuple[Dict[pd.Timestamp, List[Dict[str, Any]]], Dict[pd.Timestamp, date]]:
         if index.empty:
             return {}, {}
+
+        if not self.custom_inno100:
+            return self._build_duckdb_index_weight_holdings_by_date(index)
 
         db = Session()
         try:
@@ -347,7 +417,72 @@ class AStockInnovation100FearGreedCloneCalculator:
                 holdings_as_of_by_date[timestamp] = current_as_of
 
         if not holdings_by_date:
-            raise FearGreedCloneError("A创100 constituent snapshots are empty; run A股创新100指数刷新 first")
+            raise FearGreedCloneError(f"{self.label} constituent snapshots are empty; run A股创新100指数刷新 first")
+        return holdings_by_date, holdings_as_of_by_date
+
+    def _build_duckdb_index_weight_holdings_by_date(
+        self,
+        index: pd.DatetimeIndex,
+    ) -> Tuple[Dict[pd.Timestamp, List[Dict[str, Any]]], Dict[pd.Timestamp, date]]:
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(
+                text(
+                    """
+                    SELECT
+                        w.trade_date,
+                        w.con_code,
+                        b.name,
+                        w.weight
+                    FROM a_stock_index_weight w
+                    LEFT JOIN a_stock_basic b ON b.ts_code = w.con_code
+                    WHERE w.index_code = :index_code
+                      AND w.trade_date <= :end_date
+                    ORDER BY w.trade_date ASC, w.weight DESC
+                    """
+                ),
+                {
+                    "index_code": self.index_code,
+                    "end_date": index.max().date().isoformat(),
+                },
+            ).fetchall()
+        finally:
+            AnalyticsSession.remove()
+        if not rows:
+            raise FearGreedCloneError(f"{self.index_code} 指数成分权重缺失，请先执行 A股基础数据同步")
+
+        by_date: Dict[pd.Timestamp, List[Dict[str, Any]]] = {}
+        for row in rows:
+            snapshot_date = pd.Timestamp(row[0])
+            symbol = str(row[1] or "").strip().upper()
+            weight = float(row[3] or 0.0) / 100.0
+            if not symbol or weight <= 0:
+                continue
+            by_date.setdefault(snapshot_date, []).append(
+                {
+                    "symbol": symbol,
+                    "name": row[2],
+                    "weight": weight,
+                }
+            )
+
+        effective_dates = sorted(by_date)
+        holdings_by_date: Dict[pd.Timestamp, List[Dict[str, Any]]] = {}
+        holdings_as_of_by_date: Dict[pd.Timestamp, date] = {}
+        cursor = -1
+        current_date: Optional[pd.Timestamp] = None
+        current_holdings: List[Dict[str, Any]] = []
+        for timestamp in index:
+            while cursor + 1 < len(effective_dates) and effective_dates[cursor + 1] <= timestamp:
+                cursor += 1
+                current_date = effective_dates[cursor]
+                current_holdings = by_date[current_date]
+            if current_date is not None and current_holdings:
+                holdings_by_date[timestamp] = current_holdings
+                holdings_as_of_by_date[timestamp] = current_date.date()
+
+        if not holdings_by_date:
+            raise FearGreedCloneError(f"{self.index_code} 指数成分权重没有覆盖 {self.label} 的行情日期")
         return holdings_by_date, holdings_as_of_by_date
 
     def _build_raw_signals(
@@ -375,12 +510,12 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
         df["junk_bond_demand"] = -credit_spread
-        df["etf_open"] = level
-        df["etf_high"] = level
-        df["etf_low"] = level
+        df["etf_open"] = pd.to_numeric(levels["open"], errors="coerce").reindex(index).ffill() if "open" in levels.columns else level
+        df["etf_high"] = pd.to_numeric(levels["high"], errors="coerce").reindex(index).ffill() if "high" in levels.columns else level
+        df["etf_low"] = pd.to_numeric(levels["low"], errors="coerce").reindex(index).ffill() if "low" in levels.columns else level
         df["etf_close"] = level
-        df["etf_volume"] = np.nan
-        df["etf_turnover"] = np.nan
+        df["etf_volume"] = pd.to_numeric(levels["volume"], errors="coerce").reindex(index).ffill() if "volume" in levels.columns else np.nan
+        df["etf_turnover"] = pd.to_numeric(levels["turnover"], errors="coerce").reindex(index).ffill() if "turnover" in levels.columns else np.nan
         return df.replace([np.inf, -np.inf], np.nan)
 
     def _load_constituent_market_frames(
@@ -418,7 +553,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError("A股全市场日行情缓存中没有 A创100 成分股数据")
+            raise FearGreedCloneError(f"A股全市场日行情缓存中没有 {self.label} 成分股数据")
 
         frame = pd.DataFrame(
             [tuple(row) for row in rows],
@@ -436,7 +571,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             if symbol_frame["close"].notna().sum() >= 120:
                 frames[str(symbol)] = symbol_frame
         if not frames:
-            raise FearGreedCloneError("A创100 成分股可用行情不足")
+            raise FearGreedCloneError(f"{self.label} 成分股可用行情不足")
         return frames
 
     def _load_index_close(self, ts_code: str, start_date: date, end_date: date) -> pd.Series:
@@ -473,7 +608,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             "end_date": end_date.isoformat(),
         }
         placeholders = []
-        for idx, opt_code in enumerate(A_STOCK_INNO100_OPTION_UNDERLYINGS):
+        for idx, opt_code in enumerate(self.option_underlyings):
             key = f"opt_code_{idx}"
             placeholders.append(f":{key}")
             params[key] = opt_code
@@ -501,7 +636,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError("A股期权行情缺失，请先执行 A股基础数据同步")
+            raise FearGreedCloneError(f"{self.label} A股期权行情缺失，请先执行 A股基础数据同步")
 
         frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "call_put", "volume"])
         frame["date"] = pd.to_datetime(frame["date"])
@@ -672,12 +807,11 @@ class AStockInnovation100FearGreedCloneCalculator:
             payload[payload_key] = None if pd.isna(value) else round(float(value), 6)
         return payload
 
-    @staticmethod
-    def _warnings() -> List[str]:
+    def _warnings(self) -> List[str]:
         return [
-            "This is an independent A创100-specific clone, not CNN's undisclosed calculation.",
+            f"This is an independent {self.label}-specific clone, not CNN's undisclosed calculation.",
             "Scores use rolling z-score/CDF and equal-weighted components.",
-            "The option component uses related A-share ETF option volume put/call ratios from Tushare.",
+            f"The option component uses related A-share ETF option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}.",
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

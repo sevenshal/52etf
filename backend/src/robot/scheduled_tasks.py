@@ -400,7 +400,7 @@ def _run_a_stock_innovation100_rebuild():
 
 def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
     from ..core.services.a_stock_fear_greed_clone_service import (
-        A_STOCK_INNO100_FEAR_SYMBOL,
+        A_STOCK_FEAR_GREED_TARGETS,
         AStockInnovation100FearGreedCloneCalculator,
     )
 
@@ -411,27 +411,37 @@ def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
         output_start_date = end_date - timedelta(days=3)
 
     calculation_start_date = output_start_date - timedelta(days=550)
-    calculator = AStockInnovation100FearGreedCloneCalculator()
-    result = calculator.backfill_to_db(
-        start_date=calculation_start_date,
-        end_date=end_date,
-        output_start_date=output_start_date,
-        history_days=550,
-        score_window=252,
-        min_periods=120,
-    )
-    logging.getLogger("ScheduledTaskManager").info(
-        "%s fear greed backfill saved %s rows, range=%s~%s",
-        A_STOCK_INNO100_FEAR_SYMBOL,
-        result.get("saved"),
-        result.get("start_date"),
-        result.get("end_date"),
-    )
+    logger = logging.getLogger("ScheduledTaskManager")
+    results = []
+    errors = []
+    for target in A_STOCK_FEAR_GREED_TARGETS:
+        symbol = target["symbol"]
+        try:
+            calculator = AStockInnovation100FearGreedCloneCalculator(symbol)
+            result = calculator.backfill_to_db(
+                start_date=calculation_start_date,
+                end_date=end_date,
+                output_start_date=output_start_date,
+                history_days=550,
+                score_window=252,
+                min_periods=120,
+            )
+            results.append(result)
+            logger.info(
+                "%s fear greed backfill saved %s rows, range=%s~%s",
+                symbol,
+                result.get("saved"),
+                result.get("start_date"),
+                result.get("end_date"),
+            )
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+            logger.warning("%s fear greed backfill failed: %s", symbol, exc)
+    saved = sum(int(item.get("saved") or 0) for item in results)
+    symbols = ",".join(str(item.get("symbol")) for item in results)
     return (
         "A stock ETF fear greed backfill "
-        f"symbol={A_STOCK_INNO100_FEAR_SYMBOL} "
-        f"range={result.get('start_date')}~{result.get('end_date')} "
-        f"saved={result.get('saved')}"
+        f"symbols={symbols} saved={saved} errors={len(errors)}"
     )
 
 
@@ -622,7 +632,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、名称变更、全市场日行情、基准指数日行情、期权/回购行情、中债信用曲线和利润表到DuckDB分析库。",
+                description="同步A股基础信息、名称变更、全市场日行情、基准/贪恐目标指数日行情、ETF对应指数成分权重、期权/回购行情、中债信用曲线和利润表到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,
@@ -640,7 +650,7 @@ class ScheduledTaskManager:
             "a_stock_etf_fear_greed_backfill": TaskDefinition(
                 task_key="a_stock_etf_fear_greed_backfill",
                 name="A股ETF贪恐回跑入库",
-                description="计算 INNO100.CN A创100 贪恐复刻指数并保存到 etf_fear_greed_clone_history。",
+                description="增量或回跑计算 A创100、A500ETF、中证500ETF、科创200ETF、创业板ETF、煤炭ETF、红利ETF 的贪恐复刻指数，并保存到 etf_fear_greed_clone_history。",
                 default_time="18:40",
                 default_enabled=True,
                 sort_order=76,

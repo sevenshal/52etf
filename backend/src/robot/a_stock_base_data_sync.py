@@ -16,6 +16,7 @@ from ..core.analytics_database import (
     AStockChinaBondYieldCurveDef,
     AStockIncome,
     AStockIndexDaily,
+    AStockIndexWeight,
     AStockMarketDaily,
     AStockNameChange,
     AStockOptionBasic,
@@ -27,6 +28,7 @@ from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
     A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
+    A_STOCK_ETF_FEAR_GREED_TARGETS,
     BENCHMARK_INDEXES,
     CHINABOND_CREDIT_CURVES,
     DEFAULT_START_DATE,
@@ -44,6 +46,7 @@ SYNC_WORKERS = 5
 SYNC_REFRESH_OVERLAP_DAYS = 45
 A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
 A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220
+A_STOCK_INDEX_WEIGHT_WARMUP_DAYS = 200
 A_STOCK_OPTION_DAILY_WARMUP_DAYS = 200
 A_STOCK_REPO_DAILY_WARMUP_DAYS = 200
 A_STOCK_CHINABOND_WARMUP_DAYS = 200
@@ -640,6 +643,129 @@ class AStockBaseDataSyncService:
             replace_dates=replace_dates,
         )
 
+    def _latest_index_weight_dates(self, index_codes: List[str]) -> Dict[str, Optional[date]]:
+        if not index_codes:
+            return {}
+        params = {f"code_{idx}": code for idx, code in enumerate(index_codes)}
+        placeholders = ", ".join(f":{key}" for key in params)
+        rows = self.analytics_db.execute(
+            text(
+                f"""
+                SELECT index_code, MAX(trade_date)
+                FROM a_stock_index_weight
+                WHERE index_code IN ({placeholders})
+                GROUP BY index_code
+                """
+            ),
+            params,
+        ).fetchall()
+        latest = {code: None for code in index_codes}
+        for row in rows:
+            latest[str(row[0])] = _parse_date(row[1])
+        return latest
+
+    def sync_index_weight(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        end_value = _parse_date(end_date)
+        if not end_value:
+            return {"index_count": 0, "jobs": 0, "saved_rows": 0, "errors": []}
+
+        index_items = list({item["index_code"]: item for item in A_STOCK_ETF_FEAR_GREED_TARGETS}.values())
+        latest_by_index = self._latest_index_weight_dates([item["index_code"] for item in index_items])
+        default_start = _parse_date(start_date) or _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
+        jobs: List[Tuple[str, date, date]] = []
+        for item in index_items:
+            index_code = item["index_code"]
+            if explicit_start:
+                index_start = _warmup_start(explicit_start, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
+            elif incremental:
+                index_start = _overlap_start(default_start, latest_by_index.get(index_code))
+            else:
+                index_start = default_start
+            if index_start > end_value:
+                continue
+            for chunk_start, chunk_end in _year_chunks(index_start, end_value):
+                jobs.append((index_code, chunk_start, chunk_end))
+
+        if not jobs:
+            return {
+                "index_count": len(index_items),
+                "jobs": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": None,
+                "end_date": end_value.isoformat(),
+            }
+
+        saved_rows = 0
+        errors = []
+        completed = 0
+        total_jobs = len(jobs)
+
+        def fetch_job(index_code: str, chunk_start: date, chunk_end: date) -> Tuple[str, date, date, pd.DataFrame]:
+            frame = self.tushare.get_index_weight_range_frame(index_code, chunk_start, chunk_end, raise_on_error=True)
+            return index_code, chunk_start, chunk_end, frame
+
+        def save_frame(frame: pd.DataFrame) -> int:
+            return _bulk_replace_index_weight_frame(self.analytics_db, frame)
+
+        def report_progress(index_code: str, chunk_start: date, chunk_end: date):
+            self._progress(
+                f"批量同步A股指数成分权重 {completed}/{total_jobs}，{index_code} {chunk_start.isoformat()} ~ {chunk_end.isoformat()}",
+                66,
+                processed_jobs=completed,
+                total_jobs=total_jobs,
+                index_code=index_code,
+                chunk_start=chunk_start.isoformat(),
+                chunk_end=chunk_end.isoformat(),
+                index_weight_saved_rows=saved_rows,
+                index_weight_errors=len(errors),
+            )
+
+        workers = min(SYNC_WORKERS, total_jobs)
+        if workers <= 1:
+            for index_code, chunk_start, chunk_end in jobs:
+                try:
+                    _, _, _, frame = fetch_job(index_code, chunk_start, chunk_end)
+                    saved_rows += save_frame(frame)
+                except Exception as exc:
+                    self.logger.warning("A stock index_weight sync failed for %s %s~%s: %s", index_code, chunk_start, chunk_end, exc)
+                    errors.append({"index_code": index_code, "start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                completed += 1
+                if completed == 1 or completed == total_jobs or completed % 5 == 0:
+                    report_progress(index_code, chunk_start, chunk_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(fetch_job, index_code, chunk_start, chunk_end): (index_code, chunk_start, chunk_end)
+                    for index_code, chunk_start, chunk_end in jobs
+                }
+                for future in as_completed(futures):
+                    index_code, chunk_start, chunk_end = futures[future]
+                    try:
+                        _, _, _, frame = future.result()
+                        saved_rows += save_frame(frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock index_weight sync failed for %s %s~%s: %s", index_code, chunk_start, chunk_end, exc)
+                        errors.append({"index_code": index_code, "start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                    completed += 1
+                    if completed == 1 or completed == total_jobs or completed % 5 == 0:
+                        report_progress(index_code, chunk_start, chunk_end)
+
+        return {
+            "index_count": len(index_items),
+            "jobs": total_jobs,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "start_date": min(job[1] for job in jobs).isoformat(),
+            "end_date": end_value.isoformat(),
+        }
+
     def sync_option_basic(self) -> int:
         frames = []
         for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
@@ -1149,6 +1275,26 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
+        index_weight_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
+        if explicit_start:
+            index_weight_start = _warmup_start(explicit_start, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
+        elif incremental:
+            index_weight_start = index_weight_default_start
+        else:
+            index_weight_start = index_weight_default_start
+        self._progress(
+            "同步A股指数成分权重缓存",
+            66,
+            start_date=index_weight_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        index_weight_result = self.sync_index_weight(
+            index_weight_start,
+            end_value,
+            incremental=incremental,
+            explicit_start=explicit_start,
+        )
+
         option_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
         repo_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         if explicit_start:
@@ -1229,6 +1375,7 @@ class AStockBaseDataSyncService:
         name_change_rows = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
+        index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
         option_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionBasic.__tablename__)
         option_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionDaily.__tablename__)
@@ -1246,6 +1393,7 @@ class AStockBaseDataSyncService:
             "warmup_days": {
                 "market_daily": market_warmup_days,
                 "index_daily": A_STOCK_INDEX_DAILY_WARMUP_DAYS,
+                "index_weight": A_STOCK_INDEX_WEIGHT_WARMUP_DAYS,
                 "option_daily": A_STOCK_OPTION_DAILY_WARMUP_DAYS,
                 "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
                 "chinabond": A_STOCK_CHINABOND_WARMUP_DAYS,
@@ -1255,6 +1403,12 @@ class AStockBaseDataSyncService:
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
             "index_start_date": index_start.isoformat(),
+            "index_weight_start_date": index_weight_result.get("start_date") or index_weight_start.isoformat(),
+            "index_weight_end_date": index_weight_result.get("end_date"),
+            "index_weight_index_count": index_weight_result.get("index_count"),
+            "index_weight_jobs": index_weight_result.get("jobs"),
+            "index_weight_saved_rows": index_weight_result.get("saved_rows"),
+            "index_weight_errors": len(index_weight_result.get("errors") or []),
             "option_start_date": option_start.isoformat(),
             "repo_start_date": repo_start.isoformat(),
             "option_end_date": end_value.isoformat(),
@@ -1303,6 +1457,7 @@ class AStockBaseDataSyncService:
                 AStockBasic.__tablename__: basic_rows,
                 AStockIncome.__tablename__: income_rows,
                 AStockIndexDaily.__tablename__: index_rows,
+                AStockIndexWeight.__tablename__: index_weight_rows,
                 AStockMarketDaily.__tablename__: market_rows,
                 AStockNameChange.__tablename__: name_change_rows,
                 AStockOptionBasic.__tablename__: option_basic_rows,
@@ -1448,6 +1603,79 @@ def _bulk_upsert_option_basic_frame(analytics_db: Session, frame: pd.DataFrame) 
         columns,
         normalized.loc[:, columns],
     )
+    return len(normalized)
+
+
+def _normalize_index_weight_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "index_code",
+        "trade_date",
+        "con_code",
+        "weight",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["index_code"] = _clean_text_series(frame, "index_code")
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["con_code"] = _clean_text_series(frame, "con_code")
+    normalized["weight"] = _numeric_series(frame, "weight", 6)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["index_code", "trade_date", "con_code"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["index_code", "trade_date", "con_code"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_index_weight_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_index_weight_frame(frame)
+    if normalized.empty:
+        return 0
+
+    import duckdb  # type: ignore
+
+    columns = list(normalized.columns)
+    key_frame = normalized.loc[:, ["index_code", "trade_date"]].drop_duplicates()
+    temp_frame_name = "analytics_index_weight_insert_frame"
+    temp_keys_name = "analytics_index_weight_replace_keys"
+    quoted_table = _quote_duckdb_identifier(AStockIndexWeight.__tablename__)
+    quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
+    analytics_db.commit()
+    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+    try:
+        connection.execute("BEGIN TRANSACTION")
+        connection.register(temp_keys_name, key_frame)
+        connection.execute(
+            f"""
+            DELETE FROM {quoted_table}
+            USING {_quote_duckdb_identifier(temp_keys_name)}
+            WHERE {quoted_table}.index_code = {_quote_duckdb_identifier(temp_keys_name)}.index_code
+              AND {quoted_table}.trade_date = {_quote_duckdb_identifier(temp_keys_name)}.trade_date
+            """
+        )
+        connection.register(temp_frame_name, normalized.loc[:, columns])
+        connection.execute(
+            f"""
+            INSERT INTO {quoted_table} ({quoted_columns})
+            SELECT {quoted_columns}
+            FROM {_quote_duckdb_identifier(temp_frame_name)}
+            """
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
     return len(normalized)
 
 
@@ -2207,7 +2435,14 @@ def sync_benchmark_index_daily(
     try:
         index_map = {
             item["ts_code"]: item
-            for item in [*BENCHMARK_INDEXES, *A_STOCK_FEAR_SAFE_HAVEN_INDEXES]
+            for item in [
+                *BENCHMARK_INDEXES,
+                *A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
+                *[
+                    {"ts_code": item["index_code"], "name": item["index_name"]}
+                    for item in A_STOCK_ETF_FEAR_GREED_TARGETS
+                ],
+            ]
         }
         for benchmark in index_map.values():
             ts_code = benchmark["ts_code"]

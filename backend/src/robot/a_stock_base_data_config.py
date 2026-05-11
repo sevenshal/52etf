@@ -6,6 +6,56 @@ BENCHMARK_INDEXES = [
     {"ts_code": "000300.SH", "name": "沪深300"},
     {"ts_code": "000905.SH", "name": "中证500"},
 ]
+A_STOCK_ETF_FEAR_GREED_TARGETS = [
+    {
+        "symbol": "563360.SH",
+        "ticker": "A500ETF",
+        "label": "A500ETF",
+        "index_code": "000510.SH",
+        "index_name": "中证A500",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+    },
+    {
+        "symbol": "510500.SH",
+        "ticker": "中证500ETF",
+        "label": "中证500",
+        "index_code": "000905.SH",
+        "index_name": "中证500",
+        "option_underlyings": ["OP510500.SH", "OP159922.SZ"],
+    },
+    {
+        "symbol": "588230.SH",
+        "ticker": "科创200ETF",
+        "label": "科创200",
+        "index_code": "000699.SH",
+        "index_name": "上证科创板200",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH"],
+    },
+    {
+        "symbol": "159915.SZ",
+        "ticker": "创业板ETF",
+        "label": "创业板",
+        "index_code": "399006.SZ",
+        "index_name": "创业板指",
+        "option_underlyings": ["OP159915.SZ"],
+    },
+    {
+        "symbol": "515220.SH",
+        "ticker": "煤炭ETF",
+        "label": "煤炭",
+        "index_code": "399998.SZ",
+        "index_name": "中证煤炭",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+    },
+    {
+        "symbol": "510880.SH",
+        "ticker": "红利ETF",
+        "label": "红利",
+        "index_code": "000015.SH",
+        "index_name": "上证红利",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+    },
+]
 A_STOCK_FEAR_SAFE_HAVEN_INDEXES = [
     {"ts_code": "H11006.CSI", "name": "中证国债"},
 ]
