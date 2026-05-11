@@ -238,7 +238,7 @@ const AStockInnovationMomentumLive = () => {
       dataZoom: [{ type: 'inside' }, { type: 'slider', height: 24 }],
       series: [
         { name: '净值', type: 'line', data: equity.map(item => item.value), showSymbol: false },
-        { name: 'A股创新100基准', type: 'line', data: dates.map(date => benchmarkByDate[date]?.CNINNO100 ?? null), showSymbol: false },
+        { name: 'A股创新100基准', type: 'line', data: dates.map(date => benchmarkByDate[date]?.['INNO100.CN'] ?? null), showSymbol: false },
         { name: '回撤', type: 'line', yAxisIndex: 1, data: equity.map(item => item.drawdown), showSymbol: false },
       ],
     };
@@ -319,11 +319,11 @@ const AStockInnovationMomentumLive = () => {
     { title: '年份', dataIndex: 'year', width: 90 },
     { title: '区间', width: 210, render: (_, row) => `${row.start_date || '-'} ~ ${row.end_date || '-'}` },
     { title: '策略收益', dataIndex: 'strategy_return_pct', width: 110, align: 'right', render: formatPercent },
-    { title: '创新100基准', dataIndex: ['benchmark_returns_pct', 'CNINNO100'], width: 120, align: 'right', render: formatPercent },
-    { title: '超额', dataIndex: ['excess_returns_pct', 'CNINNO100'], width: 110, align: 'right', render: formatPercent },
+    { title: '创新100基准', dataIndex: ['benchmark_returns_pct', 'INNO100.CN'], width: 120, align: 'right', render: formatPercent },
+    { title: '超额', dataIndex: ['excess_returns_pct', 'INNO100.CN'], width: 110, align: 'right', render: formatPercent },
     {
       title: '跑赢',
-      dataIndex: ['outperformed_by_symbol', 'CNINNO100'],
+      dataIndex: ['outperformed_by_symbol', 'INNO100.CN'],
       width: 90,
       render: value => (
         value === null || value === undefined

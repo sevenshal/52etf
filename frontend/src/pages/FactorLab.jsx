@@ -177,6 +177,8 @@ const BACKTEST_SEARCH_STATUS_META = {
   cancelled: { color: 'orange', label: '已取消' },
   interrupted: { color: 'orange', label: '已中断' },
 };
+const A_STOCK_INNO100_POOL = 'INNO100';
+const A_STOCK_INNO100_SYMBOL = 'INNO100.CN';
 
 const numberFormatter = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -1451,6 +1453,18 @@ const FactorLab = () => {
     backtestForm.setFieldsValue({ legs });
   };
 
+  const handleBacktestPoolChange = value => {
+    if (value === A_STOCK_INNO100_POOL) {
+      backtestForm.setFieldsValue({ lot_size: 100 });
+    }
+  };
+
+  const handleTimingTargetChange = value => {
+    if (String(value || '').toUpperCase() === A_STOCK_INNO100_SYMBOL) {
+      timingForm.setFieldsValue({ fear_symbol: A_STOCK_INNO100_SYMBOL });
+    }
+  };
+
   const runCompositeAnalysis = async () => {
     const values = await compositeForm.validateFields();
     setCompositeRunning(true);
@@ -2457,7 +2471,7 @@ const FactorLab = () => {
             <Row gutter={[12, 8]}>
               <Col xs={24} sm={12} md={5} lg={4}>
                 <Form.Item name="target_symbol" label="目标标的" rules={[{ required: true }]}>
-                  <Select showSearch options={timingTargetOptions} />
+                  <Select showSearch options={timingTargetOptions} onChange={handleTimingTargetChange} />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={12} md={7} lg={6}>
@@ -2664,7 +2678,10 @@ const FactorLab = () => {
             <Row gutter={[12, 8]}>
               <Col xs={24} sm={12} md={6} lg={4}>
                 <Form.Item name="pool" label="股票池" rules={[{ required: true }]}>
-                  <Select options={(options?.pools || []).map(item => ({ label: item.label, value: item.key }))} />
+                  <Select
+                    options={(options?.pools || []).map(item => ({ label: item.label, value: item.key }))}
+                    onChange={handleBacktestPoolChange}
+                  />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={12} md={6} lg={4}>
