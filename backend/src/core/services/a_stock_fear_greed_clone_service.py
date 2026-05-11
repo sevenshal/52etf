@@ -134,6 +134,10 @@ class AStockInnovation100FearGreedCloneCalculator:
         levels = self._load_levels(calc_start, end_value)
         if levels.empty:
             raise FearGreedCloneError(f"{self.label} index levels are empty; run A股基础数据同步 first")
+        if len(levels) < min_periods:
+            raise FearGreedCloneError(
+                f"{self.label} 指数行情可用交易日不足: {len(levels)}/{min_periods}，请先执行 A股基础数据同步补齐指数日行情"
+            )
 
         index = pd.DatetimeIndex(levels.index, name="date")
         holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(index)
