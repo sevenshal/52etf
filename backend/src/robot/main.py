@@ -13,6 +13,7 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
 
 _last_w20_strategy_automation_check = 0.0
+_last_external_trading_monitor_check = 0.0
 
 
 def _process_w20_strategy_automation():
@@ -47,6 +48,25 @@ def _process_w20_strategy_automation():
     logging.exception("W20 strategy automation check failed")
 
 
+def _process_external_trading_connection_monitor():
+  global _last_external_trading_monitor_check
+  now = time.time()
+  if now - _last_external_trading_monitor_check < 30:
+    return
+  _last_external_trading_monitor_check = now
+
+  try:
+    from ..core.services.external_trading_monitor import (
+      process_external_trading_connection_monitor_for_robot,
+    )
+
+    monitor_result = process_external_trading_connection_monitor_for_robot()
+    if monitor_result.get("alerts"):
+      logging.warning("External trading connection monitor result: %s", monitor_result)
+  except Exception:
+    logging.exception("External trading connection monitor failed")
+
+
 def robot():
   run_startup_tasks()
   logging.info("listening deal")
@@ -66,6 +86,7 @@ def robot():
     try:
       scheduled_task_manager.run_pending()
       _process_w20_strategy_automation()
+      _process_external_trading_connection_monitor()
     except Exception as e:
       import traceback
       from ..core.utils import send_alert_email
