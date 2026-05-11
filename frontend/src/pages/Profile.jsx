@@ -109,6 +109,11 @@ const Profile = () => {
           arrow: true
         },
         {
+          title: '外部交易账号',
+          onClick: () => navigate('/external-trading-accounts'),
+          arrow: true
+        },
+        {
           title: 'EVC账户',
           onClick: () => navigate('/evc-account-manager'),
           arrow: true

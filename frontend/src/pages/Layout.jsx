@@ -17,6 +17,7 @@ const PROFILE_ROUTES = [
   '/a-stock-innovation-momentum-live',
   '/ib-account-manager',
   '/longport-account-manager',
+  '/external-trading-accounts',
   '/evc-account-manager',
   '/lev-etf-backtest',
   '/all-weather-backtest',

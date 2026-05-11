@@ -20,6 +20,7 @@ import IBKRAccountManager from './pages/IBKRAccountManager';
 import AllWeatherBacktest from './pages/AllWeatherBacktest';
 import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 import LongPortAccountManager from './pages/LongPortAccountManager';
+import ExternalTradingAccountManager from './pages/ExternalTradingAccountManager';
 import SZDTAutoTrading from './pages/SZDTAutoTrading';
 import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
@@ -61,6 +62,7 @@ function App() {
           <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
           <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
+          <Route path="/external-trading-accounts" element={<ExternalTradingAccountManager />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
