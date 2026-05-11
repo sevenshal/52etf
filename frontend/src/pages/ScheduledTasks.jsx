@@ -69,6 +69,9 @@ const buildStatusTag = (task) => {
   if (task.is_running) {
     return <Tag color="processing">执行中</Tag>;
   }
+  if (task.is_queued) {
+    return <Tag color="blue">排队中</Tag>;
+  }
   if (task.last_run_status === 'SUCCESS') {
     return <Tag color="success">最近成功</Tag>;
   }
@@ -212,7 +215,7 @@ const ScheduledTasks = () => {
     try {
       const { data } = await request.post(`/api/scheduled-tasks/${task.task_key}/run`, options);
       updateTaskField(task.task_key, data);
-      message.success('任务已开始执行');
+      message.success(data.is_queued ? '任务已加入执行队列' : '任务已开始执行');
       setTimeout(() => fetchTasks(false), 3000);
       setTimeout(() => fetchTasks(false), 12000);
     } catch (error) {
@@ -375,6 +378,7 @@ const ScheduledTasks = () => {
             <Button
               icon={<PlayCircleOutlined />}
               loading={runningTaskKey === task.task_key}
+              disabled={task.is_running || task.is_queued}
               onClick={() => handleRunButtonClick(task)}
               aria-label="立即执行一次"
             />
