@@ -1,14 +1,16 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket
 
-from ..database import ExternalTradingAccount, get_db_ctx
+from ..database import DB_PATH, ExternalTradingAccount, get_db_ctx
+from .external_trading_ledger import process_order_events, process_trade_events
 from .external_trading_crypto import decrypt_message, encrypt_message
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ class ExternalTradingHub:
     def __init__(self):
         self._connections: Dict[int, ExternalTradingConnection] = {}
         self._lock = asyncio.Lock()
+        self._last_seen_persisted_at: Dict[int, datetime] = {}
+        self._seen_persist_interval = timedelta(seconds=30)
 
     async def connect(self, websocket: WebSocket, account: ExternalTradingAccount) -> ExternalTradingConnection:
         account_pk = int(account.id)
@@ -119,7 +123,7 @@ class ExternalTradingHub:
 
         now = datetime.now()
         conn.last_seen_at = now
-        self._mark_seen(account_pk, now)
+        self._mark_seen_if_due(account_pk, now)
 
         message = decrypt_message(raw_message)
 
@@ -133,6 +137,26 @@ class ExternalTradingHub:
             future = conn.pending.pop(request_id, None) if request_id else None
             if future and not future.done():
                 future.set_result(message)
+            return
+
+        if message_type == "order_event":
+            with get_db_ctx() as db:
+                updated = process_order_events(
+                    db,
+                    external_trading_account_id=conn.account_pk,
+                    orders=message.get("orders") or [],
+                )
+            logger.info("Processed external order events from %s: %s", conn.name, updated)
+            return
+
+        if message_type == "trade_event":
+            with get_db_ctx() as db:
+                inserted = process_trade_events(
+                    db,
+                    external_trading_account_id=conn.account_pk,
+                    trades=message.get("trades") or [],
+                )
+            logger.info("Processed external trade events from %s: %s", conn.name, inserted)
             return
 
         logger.debug("Ignored external trading message from %s: %s", conn.name, message)
@@ -207,6 +231,14 @@ class ExternalTradingHub:
             timeout=timeout,
         )
 
+    async def cancel_orders(self, account_pk: int, orders: List[Dict[str, Any]], timeout: float = 15.0) -> Dict[str, Any]:
+        return await self.send_command(
+            account_pk,
+            "cancel_orders",
+            {"orders": orders},
+            timeout=timeout,
+        )
+
     async def get_account_snapshot(self, account_pk: int, timeout: float = 10.0) -> Dict[str, Any]:
         return await self.send_command(account_pk, "get_account_snapshot", {}, timeout=timeout)
 
@@ -231,28 +263,66 @@ class ExternalTradingHub:
             "connection_id": conn.connection_id,
         }
 
+    def _execute_status_update(self, description: str, sql: str, params: Dict[str, Any]):
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=0.1)
+            conn.execute(sql, params)
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            logger.warning("Skipped external trading status persistence (%s): %s", description, exc)
+        except Exception:
+            logger.exception("Failed to persist external trading status (%s)", description)
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _mark_connected(self, account_pk: int):
         now = datetime.now()
-        with get_db_ctx() as db:
-            account = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.id == account_pk).first()
-            if account:
-                account.last_connected_at = now
-                account.last_seen_at = now
-                account.last_disconnect_reason = None
+        self._last_seen_persisted_at[account_pk] = now
+        self._execute_status_update(
+            "connected",
+            """
+            UPDATE external_trading_accounts
+            SET last_connected_at = :now,
+                last_seen_at = :now,
+                last_disconnect_reason = NULL,
+                updated_at = :now
+            WHERE id = :account_pk
+            """,
+            {"now": now, "account_pk": account_pk},
+        )
 
-    def _mark_seen(self, account_pk: int, seen_at: datetime):
-        with get_db_ctx() as db:
-            account = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.id == account_pk).first()
-            if account:
-                account.last_seen_at = seen_at
+    def _mark_seen_if_due(self, account_pk: int, seen_at: datetime):
+        last_persisted = self._last_seen_persisted_at.get(account_pk)
+        if last_persisted and seen_at - last_persisted < self._seen_persist_interval:
+            return
+        self._last_seen_persisted_at[account_pk] = seen_at
+        self._execute_status_update(
+            "seen",
+            """
+            UPDATE external_trading_accounts
+            SET last_seen_at = :seen_at,
+                updated_at = :seen_at
+            WHERE id = :account_pk
+            """,
+            {"seen_at": seen_at, "account_pk": account_pk},
+        )
 
     def _mark_disconnected(self, account_pk: int, reason: str):
         now = datetime.now()
-        with get_db_ctx() as db:
-            account = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.id == account_pk).first()
-            if account:
-                account.last_disconnected_at = now
-                account.last_disconnect_reason = reason[:500] if reason else None
+        self._last_seen_persisted_at.pop(account_pk, None)
+        self._execute_status_update(
+            "disconnected",
+            """
+            UPDATE external_trading_accounts
+            SET last_disconnected_at = :now,
+                last_disconnect_reason = :reason,
+                updated_at = :now
+            WHERE id = :account_pk
+            """,
+            {"now": now, "reason": reason[:500] if reason else None, "account_pk": account_pk},
+        )
 
 
 external_trading_hub = ExternalTradingHub()
@@ -309,6 +379,17 @@ async def place_external_orders(
 ) -> Dict[str, Any]:
     account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
     return await external_trading_hub.place_orders(account_pk, orders, timeout=timeout)
+
+
+async def cancel_external_orders(
+    account_id: str,
+    identifier: str,
+    orders: List[Dict[str, Any]],
+    name: Optional[str] = None,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
+    return await external_trading_hub.cancel_orders(account_pk, orders, timeout=timeout)
 
 
 async def get_external_positions(

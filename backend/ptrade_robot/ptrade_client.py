@@ -66,6 +66,9 @@ def initialize(context):
     backtest = is_backtest_mode()
     g.external_account_identifier = DEFAULT_IDENTIFIER + ("B" if backtest else "")
     g.current_context = context
+    g.ws_loop = None
+    g.ws_conn = None
+    g.order_client_id_by_order_id = {}
 
     if DISABLE_AUTO_WEBSOCKET:
         log.info("External trading WebSocket autostart disabled.")
@@ -231,6 +234,8 @@ def run_ws_client():
             log.info("Connecting external trading WebSocket: %s" % ws_url)
             future = websocket.websocket_connect(ws_url, connect_timeout=10)
             conn = loop.run_sync(lambda: future)
+            g.ws_loop = loop
+            g.ws_conn = conn
             log.info("External trading WebSocket connected.")
 
             while True:
@@ -260,6 +265,9 @@ def run_ws_client():
                     conn.close()
                 except Exception:
                     pass
+            if getattr(g, "ws_conn", None) is conn:
+                g.ws_conn = None
+                g.ws_loop = None
             if loop:
                 try:
                     loop.close()
@@ -272,6 +280,18 @@ def run_ws_client():
 def send_ws_json(loop, conn, payload):
     text = encrypt_message(payload)
     loop.run_sync(lambda: conn.write_message(text))
+
+
+def send_ws_event(payload):
+    loop = getattr(g, "ws_loop", None)
+    conn = getattr(g, "ws_conn", None)
+    if not loop or not conn:
+        log_warn("External trading WebSocket unavailable, dropped event: %s" % payload.get("type"))
+        return
+    try:
+        loop.add_callback(conn.write_message, encrypt_message(payload))
+    except Exception as e:
+        log_warn("Failed to enqueue external trading event: %s" % str(e))
 
 
 def handle_ws_message(loop, conn, raw_message):
@@ -320,6 +340,8 @@ def execute_command(action, payload):
         return get_snapshots_payload(payload.get("symbols") or [])
     if action in ("place_orders", "order.batch"):
         return place_order_batch(payload.get("orders") or [])
+    if action in ("cancel_orders", "order.cancel"):
+        return cancel_order_batch(payload.get("orders") or payload.get("order_ids") or [])
     if action in ("get_account_snapshot", "account.snapshot"):
         return get_account_snapshot()
     if action in ("get_positions", "positions"):
@@ -617,6 +639,28 @@ def place_order_batch(orders):
     return {"orders": results}
 
 
+def cancel_order_batch(orders):
+    results = []
+    for item in orders:
+        order_id = item.get("order_id") if isinstance(item, dict) else item
+        client_order_id = item.get("client_order_id") if isinstance(item, dict) else None
+        result = {
+            "client_order_id": client_order_id,
+            "order_id": order_id,
+            "ok": False,
+            "status": "FAILED",
+        }
+        try:
+            cancel_order(order_id)
+            result["ok"] = True
+            result["status"] = "CANCEL_REQUESTED"
+            result["message"] = "撤单指令已提交"
+        except Exception as e:
+            result["message"] = str(e)
+        results.append(result)
+    return {"orders": results}
+
+
 def normalize_order_type(order_request):
     order_type = str(order_request.get("order_type") or "LIMIT").upper()
     if order_type in ("MARKET", "MKT"):
@@ -661,6 +705,7 @@ def get_market_protection_price(order_request, client_symbol, side, quantity):
 
 
 def place_market_order(order_request, client_symbol, api_symbol, side, quantity):
+    client_order_id = order_request.get("client_order_id")
     market_type_value = order_request.get("market_type")
     market_type = validate_market_order_type(client_symbol, 0 if market_type_value is None else market_type_value)
     protection = get_market_protection_price(order_request, client_symbol, side, quantity)
@@ -671,6 +716,8 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
         order_sn = order_market(client_symbol, signed_quantity, market_type)
     else:
         order_sn = order_market(client_symbol, signed_quantity, market_type, protection_price)
+    remember_client_order_id(order_sn, client_order_id)
+    emit_simulated_reports_if_available(order_sn)
 
     message = "%s %s 市价单, 数量: %d, 市价类型: %s" % (side, client_symbol, quantity, market_type)
     if protection_price is not None:
@@ -685,6 +732,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
             log.error("交易失败: %s失败(被拒绝)" % message)
             return {
                 "ok": False,
+                "client_order_id": client_order_id,
                 "status": "FAILED",
                 "symbol": api_symbol,
                 "client_symbol": client_symbol,
@@ -705,6 +753,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
 
     return {
         "ok": True,
+        "client_order_id": client_order_id,
         "status": "SUCCESS",
         "symbol": api_symbol,
         "client_symbol": client_symbol,
@@ -725,6 +774,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
 
 
 def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
+    client_order_id = order_request.get("client_order_id")
     limit_price = order_request.get("limit_price") or order_request.get("price")
     if limit_price is not None:
         calculated = {
@@ -744,6 +794,8 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
 
     signed_quantity = quantity if side == "BUY" else -quantity
     order_sn = order(client_symbol, signed_quantity, limit_price=limit_price)
+    remember_client_order_id(order_sn, client_order_id)
+    emit_simulated_reports_if_available(order_sn)
 
     status = "FAILED"
     message = ""
@@ -766,6 +818,7 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
 
     return {
         "ok": status == "SUCCESS",
+        "client_order_id": client_order_id,
         "status": status,
         "symbol": api_symbol,
         "client_symbol": client_symbol,
@@ -810,6 +863,30 @@ def get_first_order(order_sn):
         return None
 
 
+def remember_client_order_id(order_sn, client_order_id):
+    if not order_sn or not client_order_id:
+        return
+    if not hasattr(g, "order_client_id_by_order_id"):
+        g.order_client_id_by_order_id = {}
+    g.order_client_id_by_order_id[str(order_sn)] = client_order_id
+
+
+def emit_simulated_reports_if_available(order_sn):
+    simulator_hook = globals().get("emit_simulated_order_reports")
+    if not simulator_hook or not order_sn:
+        return
+    try:
+        simulator_hook(order_sn)
+    except Exception as e:
+        log_warn("Simulated order report hook failed: %s" % str(e))
+
+
+def lookup_client_order_id(order_id):
+    if not order_id:
+        return None
+    return getattr(g, "order_client_id_by_order_id", {}).get(str(order_id))
+
+
 def stringify_unknown_fields(obj):
     if isinstance(obj, dict):
         result = {}
@@ -844,19 +921,72 @@ def normalize_order(order_item, current_dt):
     except Exception:
         pass
 
+    order_id = value_of(order_item, "order_id", value_of(order_item, "id"))
+    entrust_no = value_of(order_item, "entrust_no")
     return {
+        "client_order_id": value_of(order_item, "client_order_id", lookup_client_order_id(order_id) or lookup_client_order_id(entrust_no)),
         "symbol": convert_to_api_code(value_of(order_item, "symbol")),
         "client_symbol": value_of(order_item, "symbol"),
         "side": get_order_side(order_item),
         "quantity": quantity,
         "price": value_of(order_item, "price", value_of(order_item, "business_price")),
         "status": value_of(order_item, "status"),
-        "entrust_no": value_of(order_item, "entrust_no", value_of(order_item, "order_id")),
+        "order_id": order_id,
+        "entrust_no": value_of(order_item, "entrust_no", order_id),
         "entrust_bs": value_of(order_item, "entrust_bs"),
-        "filled_quantity": value_of(order_item, "business_amount", value_of(order_item, "filled_quantity")),
+        "filled_quantity": value_of(order_item, "business_amount", value_of(order_item, "filled_amount", value_of(order_item, "filled_quantity"))),
+        "avg_fill_price": value_of(order_item, "business_price", value_of(order_item, "avg_fill_price")),
         "submitted_at": value_of(order_item, "entrust_time", current_dt.isoformat()),
+        "event_time": current_dt.isoformat(),
         "raw": stringify_unknown_fields(order_item),
     }
+
+
+def normalize_trade(trade_item, current_dt):
+    order_id = value_of(trade_item, "order_id", value_of(trade_item, "entrust_no"))
+    quantity = value_of(trade_item, "business_amount", value_of(trade_item, "filled_amount", value_of(trade_item, "quantity", 0))) or 0
+    try:
+        quantity = abs(int(quantity))
+    except Exception:
+        pass
+
+    return {
+        "client_order_id": value_of(trade_item, "client_order_id", lookup_client_order_id(order_id)),
+        "symbol": convert_to_api_code(value_of(trade_item, "symbol")),
+        "client_symbol": value_of(trade_item, "symbol"),
+        "side": get_order_side(trade_item),
+        "quantity": quantity,
+        "price": value_of(trade_item, "business_price", value_of(trade_item, "price")),
+        "amount": value_of(trade_item, "business_balance", value_of(trade_item, "amount")),
+        "order_id": order_id,
+        "entrust_no": value_of(trade_item, "entrust_no", order_id),
+        "business_no": value_of(trade_item, "business_no", value_of(trade_item, "deal_no", value_of(trade_item, "match_no"))),
+        "business_time": value_of(trade_item, "business_time", value_of(trade_item, "trade_time", current_dt.isoformat())),
+        "traded_at": value_of(trade_item, "business_time", value_of(trade_item, "trade_time", current_dt.isoformat())),
+        "raw": stringify_unknown_fields(trade_item),
+    }
+
+
+def on_order_response(context, order_list):
+    g.current_context = context
+    current_dt = get_current_dt()
+    orders = [normalize_order(item, current_dt) for item in (order_list or [])]
+    send_ws_event({
+        "type": "order_event",
+        "orders": orders,
+        "ts": datetime.now().isoformat(),
+    })
+
+
+def on_trade_response(context, trade_list):
+    g.current_context = context
+    current_dt = get_current_dt()
+    trades = [normalize_trade(item, current_dt) for item in (trade_list or [])]
+    send_ws_event({
+        "type": "trade_event",
+        "trades": trades,
+        "ts": datetime.now().isoformat(),
+    })
 
 
 def get_today_orders_payload():

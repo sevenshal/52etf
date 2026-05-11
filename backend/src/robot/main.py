@@ -14,6 +14,7 @@ pd.set_option("display.width", 10000)
 
 _last_w20_strategy_automation_check = 0.0
 _last_external_trading_monitor_check = 0.0
+_last_external_trading_executor_check = 0.0
 
 
 def _process_w20_strategy_automation():
@@ -25,7 +26,6 @@ def _process_w20_strategy_automation():
 
   try:
     from ..app.api.w20_momentum_live import (
-      process_pending_w20_live_trade_executions_for_robot,
       process_w20_momentum_live_strategy_automation_for_robot,
     )
 
@@ -41,9 +41,6 @@ def _process_w20_strategy_automation():
     ):
       logging.info("W20 strategy automation result: %s", automation_result)
 
-    execution_result = process_pending_w20_live_trade_executions_for_robot()
-    if execution_result.get("processed") or execution_result.get("failed") or execution_result.get("deferred"):
-      logging.info("W20 pending live trade execution result: %s", execution_result)
   except Exception:
     logging.exception("W20 strategy automation check failed")
 
@@ -67,6 +64,25 @@ def _process_external_trading_connection_monitor():
     logging.exception("External trading connection monitor failed")
 
 
+def _process_external_trading_executor():
+  global _last_external_trading_executor_check
+  now = time.time()
+  if now - _last_external_trading_executor_check < 15:
+    return
+  _last_external_trading_executor_check = now
+
+  try:
+    from ..core.services.external_trading_executor import (
+      process_external_trading_executor_for_robot,
+    )
+
+    executor_result = process_external_trading_executor_for_robot()
+    if executor_result.get("processed") or executor_result.get("failed"):
+      logging.info("External trading executor result: %s", executor_result)
+  except Exception:
+    logging.exception("External trading executor failed")
+
+
 def robot():
   run_startup_tasks()
   logging.info("listening deal")
@@ -86,6 +102,7 @@ def robot():
     try:
       scheduled_task_manager.run_pending()
       _process_w20_strategy_automation()
+      _process_external_trading_executor()
       _process_external_trading_connection_monitor()
     except Exception as e:
       import traceback

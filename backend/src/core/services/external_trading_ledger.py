@@ -1,0 +1,1345 @@
+import hashlib
+import json
+import logging
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy.orm import Session
+
+from ..database import (
+    ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
+    ExternalTradingOrder,
+    ExternalTradingOrderFill,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+)
+from .external_trading_execution_policy import (
+    DEFAULT_EXECUTOR_LOT_SIZE,
+    DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
+    DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    DEFAULT_EXECUTOR_PRICE_LEVEL,
+    aggregate_execution_policy,
+    resolve_execution_policy,
+)
+
+logger = logging.getLogger(__name__)
+
+STRATEGY_W20 = "w20_momentum_live"
+STRATEGY_NETTED_EXECUTOR = "netted_executor"
+ACTIVE_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
+TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "PARTIALLY_CANCELED", "REJECTED", "FAILED", "EXPIRED"}
+PASSIVE_CHILD_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
+
+PTRADE_STATUS_MAP = {
+    "0": "SUBMITTED",
+    "1": "SUBMITTED",
+    "2": "ACKNOWLEDGED",
+    "3": "CANCEL_PENDING",
+    "4": "CANCEL_PENDING",
+    "5": "PARTIALLY_CANCELED",
+    "6": "CANCELED",
+    "7": "PARTIALLY_FILLED",
+    "8": "FILLED",
+    "9": "REJECTED",
+    "+": "ACKNOWLEDGED",
+    "-": "FAILED",
+    "V": "ACKNOWLEDGED",
+}
+
+
+def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
+    if not symbol:
+        return None
+    parts = str(symbol).strip().upper().split(".")
+    if len(parts) != 2:
+        return str(symbol).strip().upper()
+    first, second = parts
+    if first in {"SH", "SS", "SZ", "BJ"}:
+        market = "SH" if first in {"SH", "SS"} else first
+        return f"{parts[1]}.{market}"
+    market = "SH" if second in {"SH", "SS"} else second
+    return f"{parts[0]}.{market}"
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def parse_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text_value = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S", "%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text_value, fmt)
+            if fmt == "%H:%M:%S":
+                now = datetime.now()
+                return parsed.replace(year=now.year, month=now.month, day=now.day)
+            return parsed
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(text_value)
+    except Exception:
+        return None
+
+
+def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quantity: int = 0) -> str:
+    raw = "" if raw_status is None else str(raw_status)
+    mapped = PTRADE_STATUS_MAP.get(raw)
+    if mapped:
+        return mapped
+    if quantity > 0 and filled_quantity >= quantity:
+        return "FILLED"
+    if filled_quantity > 0:
+        return "PARTIALLY_FILLED"
+    return "ACKNOWLEDGED"
+
+
+def merge_lifecycle_status(current_status: Optional[str], incoming_status: str) -> str:
+    current = str(current_status or "").upper()
+    incoming = str(incoming_status or "").upper()
+    if current == "FILLED":
+        return current
+    if current == "PARTIALLY_FILLED" and incoming in {"CREATED", "SUBMITTED", "ACKNOWLEDGED"}:
+        return current
+    if current in TERMINAL_ORDER_STATUSES and incoming in ACTIVE_ORDER_STATUSES:
+        return current
+    return incoming
+
+
+def ensure_strategy_sub_account(
+    db: Session,
+    *,
+    account_id: str,
+    external_trading_account_id: int,
+    strategy_type: str,
+    strategy_config_id: int,
+    name: str,
+    cash_allocated: float,
+) -> ExternalTradingSubAccount:
+    sub_account = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == external_trading_account_id,
+            ExternalTradingSubAccount.strategy_type == strategy_type,
+            ExternalTradingSubAccount.strategy_config_id == strategy_config_id,
+        )
+        .first()
+    )
+    now = datetime.now()
+    if sub_account:
+        sub_account.name = name
+        sub_account.cash_allocated = float(cash_allocated or 0)
+        if not sub_account.cash_available and float(cash_allocated or 0) > 0:
+            sub_account.cash_available = float(cash_allocated or 0)
+        sub_account.enabled = True
+        sub_account.updated_at = now
+        return sub_account
+
+    sub_account = ExternalTradingSubAccount(
+        account_id=account_id,
+        external_trading_account_id=external_trading_account_id,
+        name=name,
+        strategy_type=strategy_type,
+        strategy_config_id=strategy_config_id,
+        cash_allocated=float(cash_allocated or 0),
+        cash_available=float(cash_allocated or 0),
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(sub_account)
+    db.flush()
+    return sub_account
+
+
+def serialize_sub_account(sub_account: Optional[ExternalTradingSubAccount]) -> Optional[Dict[str, Any]]:
+    if not sub_account:
+        return None
+    return {
+        "id": sub_account.id,
+        "account_id": sub_account.account_id,
+        "external_trading_account_id": sub_account.external_trading_account_id,
+        "name": sub_account.name,
+        "strategy_type": sub_account.strategy_type,
+        "strategy_config_id": sub_account.strategy_config_id,
+        "cash_allocated": sub_account.cash_allocated,
+        "cash_available": sub_account.cash_available,
+        "enabled": sub_account.enabled,
+        "executor_price_level": sub_account.executor_price_level,
+        "executor_lot_size": sub_account.executor_lot_size,
+        "executor_order_timeout_seconds": sub_account.executor_order_timeout_seconds,
+        "executor_max_replace_count": sub_account.executor_max_replace_count,
+        "executor_price_level_sequence": sub_account.executor_price_level_sequence,
+        "remark": sub_account.remark,
+        "created_at": sub_account.created_at.isoformat() if sub_account.created_at else None,
+        "updated_at": sub_account.updated_at.isoformat() if sub_account.updated_at else None,
+    }
+
+
+def get_ledger_positions(db: Session, sub_account_id: Optional[int]) -> Dict[str, ExternalTradingLedgerPosition]:
+    if not sub_account_id:
+        return {}
+    rows = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account_id)
+        .all()
+    )
+    return {normalize_symbol(row.symbol): row for row in rows if row.symbol}
+
+
+def serialize_ledger_position(row: ExternalTradingLedgerPosition) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "sub_account_id": row.sub_account_id,
+        "symbol": row.symbol,
+        "quantity": row.quantity,
+        "available_quantity": row.available_quantity,
+        "avg_cost": row.avg_cost,
+        "market_price": row.market_price,
+        "market_value": row.market_value,
+        "realized_pnl": row.realized_pnl,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def sync_target_positions(
+    db: Session,
+    *,
+    sub_account: ExternalTradingSubAccount,
+    targets: List[Dict[str, Any]],
+    signal_id: Optional[str] = None,
+    signal_version: Optional[str] = None,
+    source_execution_id: Optional[int] = None,
+) -> None:
+    now = datetime.now()
+    target_symbols = set()
+    for target in targets:
+        symbol = normalize_symbol(target.get("symbol"))
+        if not symbol:
+            continue
+        target_symbols.add(symbol)
+        row = (
+            db.query(ExternalTradingTargetPosition)
+            .filter(
+                ExternalTradingTargetPosition.sub_account_id == sub_account.id,
+                ExternalTradingTargetPosition.symbol == symbol,
+            )
+            .first()
+        )
+        if not row:
+            row = ExternalTradingTargetPosition(
+                account_id=sub_account.account_id,
+                external_trading_account_id=sub_account.external_trading_account_id,
+                sub_account_id=sub_account.id,
+                strategy_type=sub_account.strategy_type,
+                strategy_config_id=sub_account.strategy_config_id,
+                symbol=symbol,
+                created_at=now,
+            )
+            db.add(row)
+        row.target_quantity = safe_int(target.get("target_quantity"))
+        row.target_weight_pct = safe_float(target.get("target_weight_pct"), None)
+        row.target_value = safe_float(target.get("target_value"), None)
+        row.signal_id = signal_id
+        row.signal_version = signal_version
+        row.source_execution_id = source_execution_id
+        row.status = "ACTIVE"
+        row.updated_at = now
+
+    stale_rows = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(ExternalTradingTargetPosition.sub_account_id == sub_account.id)
+        .all()
+    )
+    for row in stale_rows:
+        if row.symbol not in target_symbols:
+            row.target_quantity = 0
+            row.target_weight_pct = 0
+            row.target_value = 0
+            row.signal_id = signal_id
+            row.signal_version = signal_version
+            row.source_execution_id = source_execution_id
+            row.status = "ACTIVE"
+            row.updated_at = now
+
+
+def get_open_order_quantities(db: Session, sub_account_id: Optional[int]) -> Dict[str, Dict[str, int]]:
+    if not sub_account_id:
+        return {}
+    rows = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.sub_account_id == sub_account_id,
+            ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
+        )
+        .all()
+    )
+    result: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        symbol = normalize_symbol(row.symbol)
+        if not symbol:
+            continue
+        bucket = result.setdefault(symbol, {"BUY": 0, "SELL": 0})
+        remaining = max(safe_int(row.remaining_quantity, row.quantity - row.filled_quantity), 0)
+        if row.side in ("BUY", "SELL"):
+            bucket[row.side] += remaining
+    return result
+
+
+def create_execution_orders(
+    db: Session,
+    *,
+    account_id: str,
+    external_trading_account_id: int,
+    sub_account_id: Optional[int],
+    strategy_type: Optional[str],
+    strategy_config_id: Optional[int],
+    execution_id: Optional[int],
+    orders: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    enriched: List[Dict[str, Any]] = []
+    now = datetime.now()
+    for order in orders:
+        client_order_id = uuid.uuid4().hex
+        symbol = normalize_symbol(order.get("symbol"))
+        quantity = safe_int(order.get("quantity"))
+        side = str(order.get("side") or "").upper()
+        order_type = str(order.get("order_type") or "LIMIT").upper()
+        row = ExternalTradingOrder(
+            account_id=account_id,
+            external_trading_account_id=external_trading_account_id,
+            sub_account_id=sub_account_id,
+            strategy_type=strategy_type,
+            strategy_config_id=strategy_config_id,
+            execution_id=execution_id,
+            allocation_role="DIRECT",
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            price_level=order.get("price_level"),
+            quantity=quantity,
+            filled_quantity=0,
+            remaining_quantity=quantity,
+            status="CREATED",
+            raw_request=order,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+        enriched_order = dict(order)
+        enriched_order["client_order_id"] = client_order_id
+        enriched_order["sub_account_id"] = sub_account_id
+        enriched.append(enriched_order)
+    db.flush()
+    return enriched
+
+
+def _role(row: ExternalTradingOrder) -> str:
+    return str(getattr(row, "allocation_role", None) or "DIRECT").upper()
+
+
+def _child_orders(db: Session, parent_order_id: Optional[int]) -> List[ExternalTradingOrder]:
+    if not parent_order_id:
+        return []
+    return (
+        db.query(ExternalTradingOrder)
+        .filter(ExternalTradingOrder.parent_order_id == parent_order_id)
+        .order_by(ExternalTradingOrder.id.asc())
+        .all()
+    )
+
+
+def _pick_event_order(candidates: List[ExternalTradingOrder]) -> Optional[ExternalTradingOrder]:
+    if not candidates:
+        return None
+    role_rank = {"PARENT": 0, "DIRECT": 1, "INTERNAL": 1, "CHILD": 2}
+    return sorted(candidates, key=lambda row: (role_rank.get(_role(row), 3), row.id or 0))[0]
+
+
+def _propagate_parent_order_state(db: Session, parent: ExternalTradingOrder) -> None:
+    if _role(parent) != "PARENT":
+        return
+    children = _child_orders(db, parent.id)
+    if not children:
+        return
+    now = datetime.now()
+    parent_status = parent.status
+    parent_terminal = parent_status in TERMINAL_ORDER_STATUSES
+    for child in children:
+        child.broker_order_id = parent.broker_order_id or child.broker_order_id
+        child.entrust_no = parent.entrust_no or child.entrust_no
+        child.ptrade_status = parent.ptrade_status or child.ptrade_status
+        child.submitted_price = parent.submitted_price or child.submitted_price
+        child.submitted_at = parent.submitted_at or child.submitted_at
+        child.last_event_at = parent.last_event_at or child.last_event_at
+        child.raw_submit_result = parent.raw_submit_result or child.raw_submit_result
+        child.raw_order_event = parent.raw_order_event or child.raw_order_event
+        if parent_terminal:
+            if safe_int(child.remaining_quantity) <= 0:
+                child.status = "FILLED"
+            elif parent_status == "FILLED":
+                child.status = child.status if child.status == "PARTIALLY_FILLED" else "SUBMITTED"
+            elif safe_int(child.filled_quantity) > 0 and parent_status in {"CANCELED", "PARTIALLY_CANCELED"}:
+                child.status = "PARTIALLY_CANCELED"
+            else:
+                child.status = parent_status
+        elif child.status in PASSIVE_CHILD_ORDER_STATUSES:
+            child.status = parent_status
+        child.updated_at = now
+
+
+def _collect_related_execution_ids(db: Session, row: Optional[ExternalTradingOrder]) -> set:
+    execution_ids = set()
+    if not row:
+        return execution_ids
+    if row.execution_id:
+        execution_ids.add(row.execution_id)
+    if _role(row) == "PARENT":
+        for child in _child_orders(db, row.id):
+            if child.execution_id:
+                execution_ids.add(child.execution_id)
+    return execution_ids
+
+
+def record_submission_result(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    response_orders: List[Dict[str, Any]],
+) -> None:
+    now = datetime.now()
+    execution_ids = set()
+    for item in response_orders or []:
+        client_order_id = item.get("client_order_id")
+        row = None
+        if client_order_id:
+            row = (
+                db.query(ExternalTradingOrder)
+                .filter(ExternalTradingOrder.client_order_id == client_order_id)
+                .first()
+            )
+        if not row and item.get("order_id"):
+            row = (
+                db.query(ExternalTradingOrder)
+                .filter(
+                    ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                    ExternalTradingOrder.broker_order_id == str(item.get("order_id")),
+                )
+                .first()
+            )
+        if not row:
+            continue
+
+        raw_status = item.get("raw_status")
+        filled_quantity = safe_int(item.get("filled_quantity"), row.filled_quantity)
+        lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
+        if item.get("ok") is False and lifecycle not in TERMINAL_ORDER_STATUSES:
+            lifecycle = "FAILED"
+        lifecycle = merge_lifecycle_status(row.status, lifecycle)
+
+        row.status = lifecycle
+        row.ptrade_status = None if raw_status is None else str(raw_status)
+        row.broker_order_id = str(item.get("order_id")) if item.get("order_id") else row.broker_order_id
+        row.entrust_no = str(item.get("entrust_no")) if item.get("entrust_no") else row.entrust_no
+        row.submitted_price = safe_float(item.get("submitted_price"), row.submitted_price)
+        row.message = item.get("message")
+        row.submitted_at = now if row.status not in {"FAILED", "REJECTED"} else row.submitted_at
+        row.last_event_at = now
+        row.raw_submit_result = item
+        row.updated_at = now
+        _propagate_parent_order_state(db, row)
+        execution_ids.update(_collect_related_execution_ids(db, row))
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+
+
+def record_cancel_result(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    response_orders: List[Dict[str, Any]],
+) -> None:
+    now = datetime.now()
+    execution_ids = set()
+    for item in response_orders or []:
+        client_order_id = item.get("client_order_id")
+        row = None
+        if client_order_id:
+            row = (
+                db.query(ExternalTradingOrder)
+                .filter(ExternalTradingOrder.client_order_id == client_order_id)
+                .first()
+            )
+        for key in ("order_id", "entrust_no", "broker_order_id"):
+            if row:
+                break
+            value = item.get(key)
+            if not value:
+                continue
+            row = (
+                db.query(ExternalTradingOrder)
+                .filter(
+                    ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                    ExternalTradingOrder.broker_order_id == str(value),
+                )
+                .first()
+            )
+            if not row:
+                row = (
+                    db.query(ExternalTradingOrder)
+                    .filter(
+                        ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                        ExternalTradingOrder.entrust_no == str(value),
+                    )
+                    .first()
+                )
+        if not row:
+            continue
+
+        if item.get("ok") is False:
+            row.message = item.get("message") or item.get("error") or "撤单失败"
+        else:
+            row.status = "CANCEL_PENDING"
+            row.message = item.get("message") or "撤单指令已提交"
+            row.last_event_at = now
+        row.raw_order_event = item
+        row.updated_at = now
+        _propagate_parent_order_state(db, row)
+        execution_ids.update(_collect_related_execution_ids(db, row))
+
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+
+
+def _find_order_for_event(db: Session, external_trading_account_id: int, event: Dict[str, Any]) -> Optional[ExternalTradingOrder]:
+    client_order_id = event.get("client_order_id")
+    if client_order_id:
+        row = db.query(ExternalTradingOrder).filter(ExternalTradingOrder.client_order_id == client_order_id).first()
+        if row:
+            return row
+    for key in ("order_id", "entrust_no", "broker_order_id"):
+        value = event.get(key)
+        if not value:
+            continue
+        rows = (
+            db.query(ExternalTradingOrder)
+            .filter(
+                ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                ExternalTradingOrder.broker_order_id == str(value),
+            )
+            .all()
+        )
+        row = _pick_event_order(rows)
+        if row:
+            return row
+        rows = (
+            db.query(ExternalTradingOrder)
+            .filter(
+                ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                ExternalTradingOrder.entrust_no == str(value),
+            )
+            .all()
+        )
+        row = _pick_event_order(rows)
+        if row:
+            return row
+    return None
+
+
+def process_order_events(db: Session, *, external_trading_account_id: int, orders: List[Dict[str, Any]]) -> int:
+    updated = 0
+    now = datetime.now()
+    execution_ids = set()
+    for event in orders or []:
+        row = _find_order_for_event(db, external_trading_account_id, event)
+        if not row:
+            logger.warning("Unmatched external order event: %s", event)
+            continue
+        raw_status = event.get("status")
+        filled_quantity = safe_int(
+            event.get("filled_quantity", event.get("business_amount", event.get("filled_amount"))),
+            row.filled_quantity,
+        )
+        row.ptrade_status = None if raw_status is None else str(raw_status)
+        row.status = merge_lifecycle_status(
+            row.status,
+            ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity),
+        )
+        row.broker_order_id = str(event.get("order_id")) if event.get("order_id") else row.broker_order_id
+        row.entrust_no = str(event.get("entrust_no")) if event.get("entrust_no") else row.entrust_no
+        row.filled_quantity = max(row.filled_quantity or 0, filled_quantity)
+        row.remaining_quantity = max(row.quantity - row.filled_quantity, 0)
+        row.avg_fill_price = safe_float(event.get("avg_fill_price", event.get("business_price")), row.avg_fill_price)
+        row.last_event_at = parse_dt(event.get("event_time") or event.get("submitted_at")) or now
+        row.raw_order_event = event
+        row.updated_at = now
+        _propagate_parent_order_state(db, row)
+        execution_ids.update(_collect_related_execution_ids(db, row))
+        updated += 1
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+    return updated
+
+
+def _trade_fill_key(event: Dict[str, Any]) -> str:
+    for key in ("fill_key", "business_no", "deal_no", "match_no", "serial_no"):
+        if event.get(key):
+            return str(event.get(key))
+    stable = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _get_or_create_ledger_position(db: Session, order: ExternalTradingOrder) -> ExternalTradingLedgerPosition:
+    row = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.sub_account_id == order.sub_account_id,
+            ExternalTradingLedgerPosition.symbol == order.symbol,
+        )
+        .first()
+    )
+    if row:
+        return row
+    row = ExternalTradingLedgerPosition(
+        account_id=order.account_id,
+        external_trading_account_id=order.external_trading_account_id,
+        sub_account_id=order.sub_account_id,
+        symbol=order.symbol,
+        quantity=0,
+        available_quantity=0,
+        avg_cost=0.0,
+        realized_pnl=0.0,
+        updated_at=datetime.now(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _apply_fill_to_ledger(db: Session, order: ExternalTradingOrder, fill_quantity: int, fill_price: float) -> None:
+    if not order.sub_account_id or fill_quantity <= 0:
+        return
+    pos = _get_or_create_ledger_position(db, order)
+    sub_account = db.query(ExternalTradingSubAccount).filter(ExternalTradingSubAccount.id == order.sub_account_id).first()
+    amount = round(fill_quantity * fill_price, 2)
+    now = datetime.now()
+
+    if order.side == "BUY":
+        old_qty = max(pos.quantity or 0, 0)
+        new_qty = old_qty + fill_quantity
+        old_cost_value = old_qty * safe_float(pos.avg_cost)
+        pos.avg_cost = round((old_cost_value + amount) / new_qty, 6) if new_qty else 0.0
+        pos.quantity = new_qty
+        pos.available_quantity = max(pos.available_quantity or 0, 0) + fill_quantity
+        if sub_account:
+            sub_account.cash_available = round(safe_float(sub_account.cash_available) - amount, 2)
+    else:
+        old_qty = max(pos.quantity or 0, 0)
+        sell_qty = min(fill_quantity, old_qty)
+        pos.quantity = max(old_qty - fill_quantity, 0)
+        pos.available_quantity = max(safe_int(pos.available_quantity) - fill_quantity, 0)
+        pos.realized_pnl = round(safe_float(pos.realized_pnl) + (fill_price - safe_float(pos.avg_cost)) * sell_qty, 2)
+        if pos.quantity <= 0:
+            pos.avg_cost = 0.0
+        if sub_account:
+            sub_account.cash_available = round(safe_float(sub_account.cash_available) + amount, 2)
+
+    pos.market_price = fill_price
+    pos.market_value = round(pos.quantity * fill_price, 2)
+    pos.updated_at = now
+    if sub_account:
+        sub_account.updated_at = now
+
+
+def _order_fill_totals(db: Session, order_id: Optional[int]) -> Tuple[int, float]:
+    if not order_id:
+        return 0, 0.0
+    rows = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.order_id == order_id).all()
+    quantity = sum(safe_int(row.quantity) for row in rows)
+    amount = sum(safe_float(row.amount) for row in rows)
+    return quantity, amount
+
+
+def _refresh_order_from_fill_totals(db: Session, order: ExternalTradingOrder) -> None:
+    filled_quantity, filled_amount = _order_fill_totals(db, order.id)
+    if filled_quantity > 0:
+        order.avg_fill_price = round(filled_amount / filled_quantity, 6)
+    order.filled_quantity = max(safe_int(order.filled_quantity), filled_quantity)
+    order.remaining_quantity = max(safe_int(order.quantity) - safe_int(order.filled_quantity), 0)
+    if order.remaining_quantity <= 0:
+        order.status = "FILLED"
+    elif safe_int(order.filled_quantity) > 0:
+        order.status = "PARTIALLY_FILLED"
+
+
+def _insert_fill_row(
+    db: Session,
+    *,
+    order: ExternalTradingOrder,
+    fill_key: str,
+    quantity: int,
+    price: float,
+    traded_at: datetime,
+    event: Dict[str, Any],
+) -> ExternalTradingOrderFill:
+    fill = ExternalTradingOrderFill(
+        account_id=order.account_id,
+        external_trading_account_id=order.external_trading_account_id,
+        sub_account_id=order.sub_account_id,
+        order_id=order.id,
+        client_order_id=order.client_order_id,
+        broker_order_id=order.broker_order_id,
+        fill_key=fill_key,
+        symbol=order.symbol,
+        side=order.side,
+        quantity=quantity,
+        price=price,
+        amount=round(quantity * price, 2),
+        traded_at=traded_at,
+        raw_event=event,
+        created_at=datetime.now(),
+    )
+    db.add(fill)
+    db.flush()
+    return fill
+
+
+def _allocate_quantity_to_child_orders(
+    db: Session,
+    parent: ExternalTradingOrder,
+    fill_key: str,
+    quantity: int,
+    price: float,
+    traded_at: datetime,
+    event: Dict[str, Any],
+) -> List[ExternalTradingOrder]:
+    children = [
+        child
+        for child in _child_orders(db, parent.id)
+        if safe_int(child.remaining_quantity, child.quantity - child.filled_quantity) > 0
+    ]
+    if not children or quantity <= 0:
+        return []
+
+    total_remaining = sum(max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0) for child in children)
+    if total_remaining <= 0:
+        return []
+
+    raw_allocations = []
+    allocated_quantity = 0
+    for child in children:
+        remaining = max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0)
+        exact = quantity * remaining / total_remaining
+        base = min(int(exact), remaining)
+        raw_allocations.append({
+            "child": child,
+            "remaining": remaining,
+            "quantity": base,
+            "remainder": exact - base,
+        })
+        allocated_quantity += base
+
+    leftover = min(quantity - allocated_quantity, total_remaining - allocated_quantity)
+    for item in sorted(raw_allocations, key=lambda data: data["remainder"], reverse=True):
+        if leftover <= 0:
+            break
+        if item["quantity"] < item["remaining"]:
+            item["quantity"] += 1
+            leftover -= 1
+
+    updated_children: List[ExternalTradingOrder] = []
+    now = datetime.now()
+    for item in raw_allocations:
+        child = item["child"]
+        child_quantity = item["quantity"]
+        if child_quantity <= 0:
+            continue
+        child_fill_key = f"{fill_key}:child:{child.id}"
+        if db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == child_fill_key).first():
+            continue
+        _insert_fill_row(
+            db,
+            order=child,
+            fill_key=child_fill_key,
+            quantity=child_quantity,
+            price=price,
+            traded_at=traded_at,
+            event={**event, "parent_fill_key": fill_key, "allocated_from_parent_order_id": parent.id},
+        )
+        _apply_fill_to_ledger(db, child, child_quantity, price)
+        _refresh_order_from_fill_totals(db, child)
+        child.last_event_at = traded_at
+        child.updated_at = now
+        updated_children.append(child)
+    return updated_children
+
+
+def process_trade_events(db: Session, *, external_trading_account_id: int, trades: List[Dict[str, Any]]) -> int:
+    inserted = 0
+    now = datetime.now()
+    execution_ids = set()
+    for event in trades or []:
+        order = _find_order_for_event(db, external_trading_account_id, event)
+        if not order:
+            logger.warning("Unmatched external trade event: %s", event)
+            continue
+        fill_key = _trade_fill_key(event)
+        existing = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == fill_key).first()
+        if existing:
+            continue
+        quantity = safe_int(event.get("quantity", event.get("business_amount", event.get("filled_quantity"))))
+        price = safe_float(event.get("price", event.get("business_price", event.get("avg_fill_price"))))
+        if quantity <= 0 or price <= 0:
+            logger.warning("Ignored invalid external trade event: %s", event)
+            continue
+
+        traded_at = parse_dt(event.get("traded_at") or event.get("trade_time") or event.get("business_time")) or now
+        fill = _insert_fill_row(
+            db,
+            order=order,
+            fill_key=fill_key,
+            quantity=quantity,
+            price=price,
+            traded_at=traded_at,
+            event=event,
+        )
+        if _role(order) == "PARENT":
+            updated_children = _allocate_quantity_to_child_orders(
+                db,
+                order,
+                fill_key,
+                quantity,
+                price,
+                traded_at,
+                event,
+            )
+            for child in updated_children:
+                if child.execution_id:
+                    execution_ids.add(child.execution_id)
+        else:
+            _apply_fill_to_ledger(db, order, quantity, price)
+
+        _refresh_order_from_fill_totals(db, order)
+        _propagate_parent_order_state(db, order)
+        order.last_event_at = fill.traded_at
+        order.updated_at = now
+        if order.execution_id:
+            execution_ids.add(order.execution_id)
+        inserted += 1
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+    return inserted
+
+
+def _reference_price_for_symbol(reference_prices: Dict[str, float], symbol: str) -> float:
+    normalized = normalize_symbol(symbol)
+    return safe_float(
+        reference_prices.get(normalized),
+        safe_float(reference_prices.get(str(symbol or "").upper())),
+    )
+
+
+def _subtract_from_demands(demands: List[Dict[str, Any]], quantity: int) -> List[Dict[str, Any]]:
+    allocations = []
+    remaining = max(quantity, 0)
+    for demand in demands:
+        if remaining <= 0:
+            break
+        available = safe_int(demand.get("remaining_quantity"), demand.get("quantity"))
+        matched = min(available, remaining)
+        if matched <= 0:
+            continue
+        demand["remaining_quantity"] = available - matched
+        allocation = dict(demand)
+        allocation["quantity"] = matched
+        allocation["remaining_quantity"] = matched
+        allocations.append(allocation)
+        remaining -= matched
+    return allocations
+
+
+def _build_demand_rows(
+    db: Session,
+    *,
+    account_id: Optional[str],
+    external_trading_account_id: int,
+    sub_account_ids: Optional[List[int]] = None,
+    execution_policy_fallback: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    external_account = (
+        db.query(ExternalTradingAccount)
+        .filter(ExternalTradingAccount.id == external_trading_account_id)
+        .first()
+    )
+    sub_query = db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.external_trading_account_id == external_trading_account_id,
+        ExternalTradingSubAccount.enabled == True,  # noqa: E712
+    )
+    if account_id:
+        sub_query = sub_query.filter(ExternalTradingSubAccount.account_id == account_id)
+    if sub_account_ids:
+        sub_query = sub_query.filter(ExternalTradingSubAccount.id.in_(sub_account_ids))
+    sub_accounts = {row.id: row for row in sub_query.all()}
+    if not sub_accounts:
+        return []
+
+    target_rows = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(
+            ExternalTradingTargetPosition.external_trading_account_id == external_trading_account_id,
+            ExternalTradingTargetPosition.sub_account_id.in_(list(sub_accounts.keys())),
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+        .order_by(ExternalTradingTargetPosition.sub_account_id.asc(), ExternalTradingTargetPosition.symbol.asc())
+        .all()
+    )
+    ledger_by_sub_account = {
+        sub_account_id: get_ledger_positions(db, sub_account_id)
+        for sub_account_id in sub_accounts.keys()
+    }
+    open_by_sub_account = {
+        sub_account_id: get_open_order_quantities(db, sub_account_id)
+        for sub_account_id in sub_accounts.keys()
+    }
+    demands: List[Dict[str, Any]] = []
+    for target in target_rows:
+        sub_account = sub_accounts.get(target.sub_account_id)
+        symbol = normalize_symbol(target.symbol)
+        if not sub_account or not symbol:
+            continue
+        ledger_position = ledger_by_sub_account.get(sub_account.id, {}).get(symbol)
+        current_quantity = safe_int(getattr(ledger_position, "quantity", 0))
+        open_quantities = open_by_sub_account.get(sub_account.id, {}).get(symbol, {})
+        pending_buy = safe_int(open_quantities.get("BUY"))
+        pending_sell = safe_int(open_quantities.get("SELL"))
+        effective_quantity = current_quantity + pending_buy - pending_sell
+        target_quantity = safe_int(target.target_quantity)
+        delta = target_quantity - effective_quantity
+        if delta == 0:
+            continue
+        side = "BUY" if delta > 0 else "SELL"
+        quantity = abs(delta)
+        if side == "SELL":
+            available_quantity = max(safe_int(getattr(ledger_position, "available_quantity", current_quantity)) - pending_sell, 0)
+            quantity = min(quantity, available_quantity)
+        if quantity <= 0:
+            continue
+        execution_policy = resolve_execution_policy(
+            external_account,
+            sub_account,
+            fallback=execution_policy_fallback,
+        )
+        demands.append({
+            "account_id": sub_account.account_id,
+            "external_trading_account_id": external_trading_account_id,
+            "sub_account_id": sub_account.id,
+            "sub_account_name": sub_account.name,
+            "strategy_type": sub_account.strategy_type,
+            "strategy_config_id": sub_account.strategy_config_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "remaining_quantity": quantity,
+            "current_quantity": current_quantity,
+            "target_quantity": target_quantity,
+            "effective_quantity": effective_quantity,
+            "pending_buy_quantity": pending_buy,
+            "pending_sell_quantity": pending_sell,
+            "signal_id": target.signal_id,
+            "signal_version": target.signal_version,
+            "source_execution_id": target.source_execution_id,
+            "target_updated_at": target.updated_at.isoformat() if target.updated_at else None,
+            "execution_policy": execution_policy,
+            "price_level": execution_policy.get("price_level"),
+            "lot_size": execution_policy.get("lot_size"),
+            "order_timeout_seconds": execution_policy.get("order_timeout_seconds"),
+            "max_replace_count": execution_policy.get("max_replace_count"),
+            "price_level_sequence": execution_policy.get("price_level_sequence"),
+        })
+    return demands
+
+
+def build_netted_target_execution_plan(
+    db: Session,
+    *,
+    account_id: Optional[str],
+    external_trading_account_id: int,
+    sub_account_ids: Optional[List[int]] = None,
+    price_level: int = 1,
+    lot_size: int = 100,
+    order_timeout_seconds: int = DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    max_replace_count: int = DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
+    price_level_sequence: Optional[List[int]] = None,
+    reference_prices: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    reference_prices = reference_prices or {}
+    lot_size = max(safe_int(lot_size, 100), 1)
+    demands = _build_demand_rows(
+        db,
+        account_id=account_id,
+        external_trading_account_id=external_trading_account_id,
+        sub_account_ids=sub_account_ids,
+        execution_policy_fallback={
+            "price_level": price_level,
+            "lot_size": lot_size,
+            "order_timeout_seconds": order_timeout_seconds,
+            "max_replace_count": max_replace_count,
+            "price_level_sequence": price_level_sequence,
+        },
+    )
+    demands_by_symbol: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for demand in demands:
+        symbol_bucket = demands_by_symbol.setdefault(demand["symbol"], {"BUY": [], "SELL": []})
+        symbol_bucket[demand["side"]].append(dict(demand))
+
+    internal_crosses = []
+    external_orders = []
+    skipped = []
+    for symbol in sorted(demands_by_symbol.keys()):
+        bucket = demands_by_symbol[symbol]
+        buy_demands = bucket["BUY"]
+        sell_demands = bucket["SELL"]
+        total_buy = sum(safe_int(item.get("remaining_quantity")) for item in buy_demands)
+        total_sell = sum(safe_int(item.get("remaining_quantity")) for item in sell_demands)
+        cross_quantity = min(total_buy, total_sell)
+        if cross_quantity > 0:
+            price = _reference_price_for_symbol(reference_prices, symbol)
+            buy_allocations = _subtract_from_demands(buy_demands, cross_quantity)
+            sell_allocations = _subtract_from_demands(sell_demands, cross_quantity)
+            internal_crosses.append({
+                "symbol": symbol,
+                "quantity": cross_quantity,
+                "price": price or None,
+                "buy_allocations": buy_allocations,
+                "sell_allocations": sell_allocations,
+                "status": "READY" if price > 0 else "MISSING_PRICE",
+                "message": "" if price > 0 else "内部撮合缺少参考价，执行时会跳过",
+            })
+
+        for side, side_demands in (("BUY", buy_demands), ("SELL", sell_demands)):
+            allocations = [
+                {**item, "quantity": safe_int(item.get("remaining_quantity"))}
+                for item in side_demands
+                if safe_int(item.get("remaining_quantity")) > 0
+            ]
+            order_policy = aggregate_execution_policy(
+                [item.get("execution_policy") or {} for item in allocations],
+                fallback={
+                    "price_level": price_level,
+                    "lot_size": lot_size,
+                    "order_timeout_seconds": order_timeout_seconds,
+                    "max_replace_count": max_replace_count,
+                    "price_level_sequence": price_level_sequence,
+                },
+            )
+            order_lot_size = max(safe_int(order_policy.get("lot_size"), lot_size), 1)
+            quantity = sum(safe_int(item.get("quantity")) for item in allocations)
+            if side == "BUY":
+                quantity = (quantity // order_lot_size) * order_lot_size
+                if quantity <= 0 and allocations:
+                    skipped.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": sum(safe_int(item.get("quantity")) for item in allocations),
+                        "message": "净买入数量不足最小交易单位",
+                    })
+                    continue
+                remaining_to_keep = quantity
+                trimmed_allocations = []
+                for allocation in allocations:
+                    if remaining_to_keep <= 0:
+                        break
+                    kept = min(safe_int(allocation.get("quantity")), remaining_to_keep)
+                    if kept > 0:
+                        trimmed = dict(allocation)
+                        trimmed["quantity"] = kept
+                        trimmed_allocations.append(trimmed)
+                        remaining_to_keep -= kept
+                allocations = trimmed_allocations
+            if quantity <= 0:
+                continue
+            external_orders.append({
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price_level": order_policy.get("price_level"),
+                "execution_pricing": "PTRATE_SNAPSHOT_AT_ORDER_TIME",
+                "remark": "netted target position execution",
+                "execution_policy": order_policy,
+                "allocations": allocations,
+            })
+
+    return {
+        "external_trading_account_id": external_trading_account_id,
+        "price_level": price_level,
+        "lot_size": lot_size,
+        "order_timeout_seconds": order_timeout_seconds,
+        "max_replace_count": max_replace_count,
+        "price_level_sequence": price_level_sequence,
+        "symbols": sorted(demands_by_symbol.keys()),
+        "demands": demands,
+        "internal_crosses": internal_crosses,
+        "external_orders": external_orders,
+        "skipped": skipped,
+    }
+
+
+def apply_internal_crosses(db: Session, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    applied = []
+    execution_ids = set()
+    now = datetime.now()
+    for cross in plan.get("internal_crosses") or []:
+        price = safe_float(cross.get("price"))
+        if price <= 0:
+            continue
+        for side_key, side in (("sell_allocations", "SELL"), ("buy_allocations", "BUY")):
+            for allocation in cross.get(side_key) or []:
+                quantity = safe_int(allocation.get("quantity"))
+                if quantity <= 0:
+                    continue
+                client_order_id = uuid.uuid4().hex
+                order = ExternalTradingOrder(
+                    account_id=allocation.get("account_id"),
+                    external_trading_account_id=safe_int(allocation.get("external_trading_account_id")),
+                    sub_account_id=safe_int(allocation.get("sub_account_id")),
+                    strategy_type=allocation.get("strategy_type"),
+                    strategy_config_id=allocation.get("strategy_config_id"),
+                    execution_id=safe_int(allocation.get("source_execution_id") or allocation.get("execution_id"), None),
+                    allocation_role="INTERNAL",
+                    client_order_id=client_order_id,
+                    symbol=normalize_symbol(allocation.get("symbol")),
+                    side=side,
+                    order_type="INTERNAL",
+                    signal_version=allocation.get("signal_version"),
+                    submitted_price=price,
+                    quantity=quantity,
+                    filled_quantity=0,
+                    remaining_quantity=quantity,
+                    avg_fill_price=price,
+                    status="FILLED",
+                    submitted_at=now,
+                    last_event_at=now,
+                    raw_request={
+                        "type": "internal_cross",
+                        "cross": {
+                            "symbol": cross.get("symbol"),
+                            "quantity": cross.get("quantity"),
+                            "price": price,
+                        },
+                        "allocation": allocation,
+                    },
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(order)
+                db.flush()
+                _insert_fill_row(
+                    db,
+                    order=order,
+                    fill_key=f"internal:{client_order_id}",
+                    quantity=quantity,
+                    price=price,
+                    traded_at=now,
+                    event={"type": "internal_cross", "allocation": allocation, "cross_symbol": cross.get("symbol")},
+                )
+                _apply_fill_to_ledger(db, order, quantity, price)
+                _refresh_order_from_fill_totals(db, order)
+                if order.execution_id:
+                    execution_ids.add(order.execution_id)
+                applied.append(serialize_order(order))
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+    return applied
+
+
+def create_netted_execution_orders(
+    db: Session,
+    *,
+    account_id: str,
+    external_trading_account_id: int,
+    orders: List[Dict[str, Any]],
+    deadline_at: Optional[datetime] = None,
+    executor_trigger: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[ExternalTradingOrder]]:
+    enriched_orders: List[Dict[str, Any]] = []
+    parent_rows: List[ExternalTradingOrder] = []
+    now = datetime.now()
+    for order in orders:
+        parent_client_order_id = uuid.uuid4().hex
+        symbol = normalize_symbol(order.get("symbol"))
+        side = str(order.get("side") or "").upper()
+        quantity = safe_int(order.get("quantity"))
+        order_deadline_at = parse_dt(order.get("deadline_at")) or deadline_at
+        signal_versions = sorted({
+            str(allocation.get("signal_version"))
+            for allocation in (order.get("allocations") or [])
+            if allocation.get("signal_version")
+        })
+        parent_signal_version = ",".join(signal_versions)[:64] if signal_versions else order.get("signal_version")
+        replace_count = safe_int(order.get("replace_count"))
+        parent = ExternalTradingOrder(
+            account_id=account_id,
+            external_trading_account_id=external_trading_account_id,
+            strategy_type=STRATEGY_NETTED_EXECUTOR,
+            allocation_role="PARENT",
+            client_order_id=parent_client_order_id,
+            symbol=symbol,
+            side=side,
+            order_type="LIMIT",
+            price_level=order.get("price_level"),
+            signal_version=parent_signal_version,
+            replace_count=replace_count,
+            deadline_at=order_deadline_at,
+            executor_trigger=executor_trigger,
+            quantity=quantity,
+            filled_quantity=0,
+            remaining_quantity=quantity,
+            status="CREATED",
+            raw_request=order,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(parent)
+        db.flush()
+        child_summaries = []
+        for allocation in order.get("allocations") or []:
+            child_quantity = safe_int(allocation.get("quantity"))
+            if child_quantity <= 0:
+                continue
+            child_client_order_id = uuid.uuid4().hex
+            child = ExternalTradingOrder(
+                account_id=allocation.get("account_id") or account_id,
+                external_trading_account_id=external_trading_account_id,
+                sub_account_id=safe_int(allocation.get("sub_account_id")),
+                strategy_type=allocation.get("strategy_type"),
+                strategy_config_id=allocation.get("strategy_config_id"),
+                execution_id=safe_int(allocation.get("source_execution_id") or allocation.get("execution_id"), None),
+                parent_order_id=parent.id,
+                allocation_role="CHILD",
+                client_order_id=child_client_order_id,
+                symbol=symbol,
+                side=side,
+                order_type="LIMIT",
+                price_level=order.get("price_level"),
+                signal_version=allocation.get("signal_version"),
+                replace_count=replace_count,
+                deadline_at=order_deadline_at,
+                executor_trigger=executor_trigger,
+                quantity=child_quantity,
+                filled_quantity=0,
+                remaining_quantity=child_quantity,
+                status="CREATED",
+                raw_request=allocation,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(child)
+            child_summaries.append({
+                "client_order_id": child_client_order_id,
+                "sub_account_id": child.sub_account_id,
+                "strategy_type": child.strategy_type,
+                "strategy_config_id": child.strategy_config_id,
+                "quantity": child_quantity,
+            })
+        enriched = {
+            key: value
+            for key, value in dict(order).items()
+            if key != "allocations"
+        }
+        enriched["client_order_id"] = parent_client_order_id
+        enriched["order_type"] = "LIMIT"
+        enriched["replace_count"] = replace_count
+        enriched["allocations"] = child_summaries
+        enriched_orders.append(enriched)
+        parent_rows.append(parent)
+    db.flush()
+    return enriched_orders, parent_rows
+
+
+def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "sub_account_id": row.sub_account_id,
+        "strategy_type": row.strategy_type,
+        "strategy_config_id": row.strategy_config_id,
+        "execution_id": row.execution_id,
+        "parent_order_id": row.parent_order_id,
+        "allocation_role": row.allocation_role,
+        "client_order_id": row.client_order_id,
+        "broker_order_id": row.broker_order_id,
+        "entrust_no": row.entrust_no,
+        "symbol": row.symbol,
+        "side": row.side,
+        "order_type": row.order_type,
+        "price_level": row.price_level,
+        "signal_version": row.signal_version,
+        "replace_count": row.replace_count,
+        "replaced_by_order_id": row.replaced_by_order_id,
+        "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
+        "cancel_reason": row.cancel_reason,
+        "executor_trigger": row.executor_trigger,
+        "submitted_price": row.submitted_price,
+        "quantity": row.quantity,
+        "filled_quantity": row.filled_quantity,
+        "remaining_quantity": row.remaining_quantity,
+        "avg_fill_price": row.avg_fill_price,
+        "status": row.status,
+        "ptrade_status": row.ptrade_status,
+        "message": row.message,
+        "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+        "last_event_at": row.last_event_at.isoformat() if row.last_event_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def summarize_execution_orders(db: Session, execution_id: Optional[int]) -> Tuple[str, List[Dict[str, Any]]]:
+    if not execution_id:
+        return "SUBMITTED", []
+    orders = (
+        db.query(ExternalTradingOrder)
+        .filter(ExternalTradingOrder.execution_id == execution_id)
+        .order_by(ExternalTradingOrder.id.asc())
+        .all()
+    )
+    if not orders:
+        return "SUBMITTED", []
+    statuses = {order.status for order in orders}
+    has_filled_quantity = any(safe_int(order.filled_quantity) > 0 for order in orders)
+    if statuses <= {"FILLED"}:
+        status = "FILLED"
+    elif statuses.intersection({"PARTIALLY_FILLED"}) or has_filled_quantity:
+        status = "PARTIALLY_FILLED"
+    elif statuses <= {"REJECTED", "FAILED", "CANCELED"}:
+        status = "FAILED"
+    elif statuses.intersection({"REJECTED", "FAILED", "CANCELED", "PARTIALLY_CANCELED"}):
+        status = "PARTIALLY_FAILED"
+    else:
+        status = "SUBMITTED"
+    return status, [serialize_order(order) for order in orders]
+
+
+def refresh_execution_status(db: Session, execution_id: Optional[int]) -> Optional[str]:
+    return None

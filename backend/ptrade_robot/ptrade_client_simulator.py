@@ -3,7 +3,8 @@
 
 Example:
     python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000
-    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --demo-positions
+    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --empty-positions
+    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --quote-provider longport
 
 Create an enabled external trading account in the web UI with the printed
 identifier before starting the connection. The backend owns the account name.
@@ -56,11 +57,13 @@ def env_bool(name, default=False):
     return raw.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def parse_positions(raw, demo_positions=False):
+def parse_positions(raw, demo_positions=False, empty_positions=False):
+    if empty_positions:
+        return []
     if demo_positions:
         return DEMO_POSITIONS
     if not raw:
-        return []
+        return DEMO_POSITIONS
     if raw.strip().lower() in ("none", "empty", "[]"):
         return []
     data = json.loads(raw)
@@ -116,6 +119,192 @@ class SimPosition:
         self.profit_ratio = round(self.profit / base_value, 6) if base_value else 0.0
 
 
+class LongPortMarketDataProvider:
+    """Use project LongPortService for simulator quotes/depth when available."""
+
+    def __init__(self, client, account_id, logger):
+        self.client = client
+        self.account_id = account_id
+        self.logger = logger
+        self.service = None
+        self.enabled = False
+        self.name = "longport"
+        self._missing_symbols = set()
+        self._init_service()
+
+    def _init_service(self):
+        api_root = Path(__file__).resolve().parents[1]
+        repo_root = api_root.parent
+        for path in (str(api_root), str(repo_root)):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+
+        try:
+            from src.core.services.longport import LongPortService
+
+            service = LongPortService.get_instance(self.account_id)
+            if not getattr(service, "initialized", False):
+                raise RuntimeError("LongPortService 未初始化")
+            self.service = service
+            self.enabled = True
+            self.logger.info("LongPort market data enabled: account=%s", self.account_id)
+        except Exception as exc:
+            self.enabled = False
+            self.service = None
+            self.logger.warning(
+                "LongPort market data unavailable, falling back to local simulated quotes: %s",
+                exc,
+            )
+
+    def _client_symbol(self, symbol):
+        return str(self.client.convert_to_client_code(symbol) or symbol).upper()
+
+    def _longport_symbol_variants(self, client_symbol):
+        client_symbol = self._client_symbol(client_symbol)
+        variants = []
+
+        parts = client_symbol.split(".")
+        if len(parts) == 2:
+            code = parts[0].upper()
+            market = parts[1].upper()
+            longport_market = "SH" if market in ("SS", "SH") else market
+            variants.append("%s.%s" % (code, longport_market))
+            variants.append("%s.%s" % (longport_market, code))
+            variants.append(client_symbol)
+
+        api_symbol = self.client.convert_to_api_code(client_symbol)
+        if api_symbol:
+            variants.append(str(api_symbol).upper())
+            api_parts = str(api_symbol).split(".")
+            if len(api_parts) == 2 and api_parts[0].upper() in ("SH", "SS", "SZ", "BJ"):
+                market = "SH" if api_parts[0].upper() == "SS" else api_parts[0].upper()
+                variants.append("%s.%s" % (api_parts[1].upper(), market))
+
+        result = []
+        seen = set()
+        for item in variants:
+            if item and item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    def _get_quote(self, longport_symbol):
+        quotes = self.service.get_quote_batch([longport_symbol]) or []
+        if not quotes:
+            return None
+        return quotes[0] or None
+
+    def _get_depth(self, longport_symbol):
+        return self.service.get_depth(longport_symbol) or {}
+
+    def _float_or_none(self, value):
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _int_or_zero(self, value):
+        try:
+            if value is None or value == "":
+                return 0
+            return int(float(value))
+        except Exception:
+            return 0
+
+    def _format_timestamp(self, value):
+        if value is None:
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        return str(value)
+
+    def _depth_group(self, levels):
+        group = {}
+        for index, item in enumerate(levels or [], 1):
+            if not isinstance(item, dict):
+                continue
+            price = self._float_or_none(item.get("price"))
+            volume = self._int_or_zero(item.get("volume"))
+            if price is None or price <= 0 or volume <= 0:
+                continue
+            position = self._int_or_zero(item.get("position")) or index
+            if position <= 0:
+                position = index
+            if position > 5:
+                continue
+            group[position] = [price, volume]
+        return group
+
+    def _synthetic_depth(self, last_price, side):
+        step = max(0.001, round(float(last_price) * 0.0006, 3))
+        group = {}
+        for level in range(1, 6):
+            price = float(last_price) + step * level if side == "ask" else float(last_price) - step * level
+            group[level] = [round(max(0.001, price), 3), 20000 + level * 5000]
+        return group
+
+    def _build_snapshot(self, client_symbol, quote, depth):
+        quote = quote or {}
+        depth = depth or {}
+        last_price = self._float_or_none(quote.get("price"))
+        bid_grp = self._depth_group(depth.get("bid"))
+        offer_grp = self._depth_group(depth.get("ask"))
+
+        best_bid = bid_grp.get(1, [None, None])[0]
+        best_ask = offer_grp.get(1, [None, None])[0]
+        if last_price is None:
+            if best_bid and best_ask:
+                last_price = round((float(best_bid) + float(best_ask)) / 2, 3)
+            elif best_bid:
+                last_price = float(best_bid)
+            elif best_ask:
+                last_price = float(best_ask)
+
+        if last_price is None or last_price <= 0:
+            return None
+
+        if not bid_grp:
+            bid_grp = self._synthetic_depth(last_price, "bid")
+        if not offer_grp:
+            offer_grp = self._synthetic_depth(last_price, "ask")
+
+        return {
+            "prod_code": client_symbol,
+            "last_px": float(last_price),
+            "bid_grp": bid_grp,
+            "offer_grp": offer_grp,
+            "trade_status": "TRADE",
+            "business_amount": self._int_or_zero(quote.get("volume")),
+            "business_balance": self._float_or_none(quote.get("turnover")) or 0.0,
+            "hsTimeStamp": self._format_timestamp(quote.get("timestamp")),
+            "market_data_source": "longport",
+            "longport_symbol": quote.get("symbol") or depth.get("symbol"),
+        }
+
+    def get_snapshot(self, client_symbol):
+        if not self.enabled or not self.service:
+            return None
+
+        client_symbol = self._client_symbol(client_symbol)
+        for longport_symbol in self._longport_symbol_variants(client_symbol):
+            try:
+                quote = self._get_quote(longport_symbol)
+                depth = self._get_depth(longport_symbol)
+                snapshot = self._build_snapshot(client_symbol, quote, depth)
+                if snapshot:
+                    snapshot["longport_symbol"] = snapshot.get("longport_symbol") or longport_symbol
+                    return snapshot
+            except Exception as exc:
+                self.logger.debug("LongPort quote failed for %s: %s", longport_symbol, exc)
+
+        if client_symbol not in self._missing_symbols:
+            self._missing_symbols.add(client_symbol)
+            self.logger.warning("LongPort quote not found for %s, using local simulated quote", client_symbol)
+        return None
+
+
 class SimPortfolio:
     def __init__(self, cash):
         self.starting_cash = float(cash)
@@ -144,11 +333,13 @@ class SimContext:
 
 
 class SimBroker:
-    def __init__(self, client, context, positions, logger):
+    def __init__(self, client, context, positions, logger, market_data_provider=None):
         self.client = client
         self.context = context
         self.logger = logger
+        self.market_data_provider = market_data_provider
         self.orders = []
+        self.pending_report_order_ids = []
         self.order_seq = 1
         self.tick = 0
         self.price_book = dict(DEFAULT_PRICE_BOOK)
@@ -189,8 +380,39 @@ class SimBroker:
     def _depth_step(self, last_price):
         return max(0.001, round(last_price * 0.0006, 3))
 
+    def _provider_snapshot(self, client_symbol):
+        provider = self.market_data_provider
+        if not provider:
+            return None
+        client_symbol = self._client_symbol(client_symbol)
+        snapshot = provider.get_snapshot(client_symbol)
+        if not snapshot:
+            return None
+        try:
+            last_price = float(snapshot.get("last_px") or 0)
+            if last_price > 0:
+                self.price_book[client_symbol] = last_price
+        except Exception:
+            pass
+        return snapshot
+
+    def _market_price(self, client_symbol):
+        snapshot = self._provider_snapshot(client_symbol)
+        if snapshot:
+            try:
+                price = float(snapshot.get("last_px") or 0)
+                if price > 0:
+                    return price
+            except Exception:
+                pass
+        return self._last_price(client_symbol)
+
     def _snapshot_for(self, client_symbol):
         client_symbol = self._client_symbol(client_symbol)
+        provider_snapshot = self._provider_snapshot(client_symbol)
+        if provider_snapshot:
+            return provider_snapshot
+
         last_price = self._last_price(client_symbol)
         step = self._depth_step(last_price)
         seed = self._symbol_seed(client_symbol)
@@ -213,7 +435,7 @@ class SimBroker:
 
     def _refresh_portfolio(self):
         self.context.current_dt = datetime.now()
-        self.context.portfolio.update(self._last_price)
+        self.context.portfolio.update(self._market_price)
 
     def get_snapshot(self, security):
         self.tick += 1
@@ -384,6 +606,18 @@ class SimBroker:
             submitted_price=submitted_price,
         )
 
+    def cancel_order(self, order_id):
+        matches = self.get_order(order_id)
+        if not matches:
+            raise ValueError("order not found")
+        order_item = matches[0]
+        if str(order_item.get("status")) == "0" and int(order_item.get("business_amount") or 0) >= int(order_item.get("quantity") or 0):
+            raise ValueError("order already filled")
+        order_item["status"] = "6"
+        order_item["message"] = "canceled"
+        self.emit_order_reports(order_id)
+        return None
+
     def get_order(self, order_id):
         return [order for order in self.orders if str(order.get("order_id")) == str(order_id)]
 
@@ -394,6 +628,10 @@ class SimBroker:
         self._refresh_portfolio()
         return self.context.portfolio.positions
 
+    def emit_order_reports(self, order_id):
+        if order_id:
+            self.pending_report_order_ids.append(order_id)
+
 
 def build_parser(client):
     parser = argparse.ArgumentParser(description="Local PTrade WebSocket client simulator")
@@ -402,8 +640,20 @@ def build_parser(client):
     parser.add_argument("--account-id", default=os.getenv("PTRADE_SIM_ACCOUNT_ID", client.DEFAULT_ACCOUNT_ID))
     parser.add_argument("--identifier", default=os.getenv("PTRADE_SIM_IDENTIFIER", client.DEFAULT_IDENTIFIER))
     parser.add_argument("--cash", type=float, default=float(os.getenv("PTRADE_SIM_CASH", "1000000")))
+    parser.add_argument(
+        "--quote-provider",
+        choices=("auto", "longport", "local"),
+        default=os.getenv("PTRADE_SIM_QUOTE_PROVIDER", "auto"),
+        help="market data provider for quotes/depth: auto, longport, or local",
+    )
+    parser.add_argument(
+        "--longport-account-id",
+        default=os.getenv("PTRADE_SIM_LONGPORT_ACCOUNT_ID", "LBPT10001248"),
+        help="LongPort account id used only for simulated market data",
+    )
     parser.add_argument("--positions-json", default=os.getenv("PTRADE_SIM_POSITIONS_JSON"))
     parser.add_argument("--demo-positions", action="store_true", default=env_bool("PTRADE_SIM_DEMO_POSITIONS", False))
+    parser.add_argument("--empty-positions", action="store_true", default=env_bool("PTRADE_SIM_EMPTY_POSITIONS", False))
     parser.add_argument("--backtest", action="store_true", default=env_bool("PTRADE_SIM_BACKTEST", False))
     parser.add_argument("--heartbeat", type=int, default=int(os.getenv("PTRADE_SIM_HEARTBEAT", "20")))
     parser.add_argument("--reconnect-delay", type=float, default=float(os.getenv("PTRADE_SIM_RECONNECT_DELAY", "5")))
@@ -413,11 +663,27 @@ def build_parser(client):
     return parser
 
 
+def build_market_data_provider(client, args, logger):
+    provider_mode = str(args.quote_provider or "auto").lower()
+    if provider_mode == "local":
+        logger.info("market data provider: local simulated quotes")
+        return None
+
+    provider = LongPortMarketDataProvider(client, args.longport_account_id, logger)
+    if provider.enabled:
+        return provider
+
+    if provider_mode == "longport":
+        logger.warning("requested LongPort quote provider is unavailable; simulator will use local quotes")
+    return None
+
+
 def configure_client(client, args):
     logger = logging.getLogger("ptrade-sim")
-    positions = parse_positions(args.positions_json, args.demo_positions)
+    positions = parse_positions(args.positions_json, args.demo_positions, args.empty_positions)
     context = SimContext(args.cash)
-    broker = SimBroker(client, context, positions, logger)
+    market_data_provider = build_market_data_provider(client, args, logger)
+    broker = SimBroker(client, context, positions, logger, market_data_provider=market_data_provider)
 
     client.log = SimLog(logging.getLogger("ptrade-client"))
     client.g = SimpleNamespace()
@@ -425,9 +691,11 @@ def configure_client(client, args):
     client.get_snapshot = broker.get_snapshot
     client.order = broker.order
     client.order_market = broker.order_market
+    client.cancel_order = broker.cancel_order
     client.get_order = broker.get_order
     client.get_all_orders = broker.get_all_orders
     client.get_positions = broker.get_positions
+    client.emit_simulated_order_reports = broker.emit_order_reports
     client.API_HOST = args.host
     client.USE_HTTPS = bool(args.https)
     client.DEFAULT_ACCOUNT_ID = args.account_id
@@ -438,6 +706,7 @@ def configure_client(client, args):
 
     client.DISABLE_AUTO_WEBSOCKET = True
     client.initialize(context)
+    client.g.sim_broker = broker
     return context, broker
 
 
@@ -446,6 +715,10 @@ def print_account_setup(client, broker):
     logger.info("simulated account_id: %s", client.g.account_id)
     logger.info("simulated identifier: %s", client.g.external_account_identifier)
     logger.info("simulated starting positions: %s", len(broker.context.portfolio.positions))
+    logger.info(
+        "simulated market data provider: %s",
+        getattr(getattr(broker, "market_data_provider", None), "name", "local"),
+    )
     logger.info("backend WS target: %s", client.build_ws_url().split("?")[0])
     logger.info("backend resolves account name by account_id + identifier")
     logger.info("create an enabled external trading account with identifier=%r", client.g.external_account_identifier)
@@ -476,6 +749,31 @@ def run_self_test(client):
 
 async def send_secure(ws, client, payload):
     await ws.send(client.encrypt_message(payload))
+
+
+async def flush_simulated_reports(ws, client):
+    broker = getattr(client.g, "sim_broker", None)
+    if not broker:
+        return
+    order_ids = list(getattr(broker, "pending_report_order_ids", []))
+    broker.pending_report_order_ids = []
+    for order_id in order_ids:
+        matches = broker.get_order(order_id)
+        if not matches:
+            continue
+        order_item = matches[0]
+        current_dt = datetime.now()
+        await send_secure(ws, client, {
+            "type": "order_event",
+            "orders": [client.normalize_order(order_item, current_dt)],
+            "ts": datetime.now().isoformat(),
+        })
+        if str(order_item.get("status")) != "9" and int(order_item.get("business_amount") or 0) > 0:
+            await send_secure(ws, client, {
+                "type": "trade_event",
+                "trades": [client.normalize_trade(order_item, current_dt)],
+                "ts": datetime.now().isoformat(),
+            })
 
 
 async def handle_ws_message(ws, client, raw_message):
@@ -518,6 +816,8 @@ async def handle_ws_message(ws, client, raw_message):
         response["error"] = str(exc)
 
     await send_secure(ws, client, response)
+    if action in ("place_orders", "order.batch", "cancel_orders", "order.cancel"):
+        await flush_simulated_reports(ws, client)
 
 
 async def connect_once(client, args):
