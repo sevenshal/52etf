@@ -117,7 +117,7 @@ def order(symbol, amount, limit_price):
     # In reality, need real prices. simulation uses last trade price.
     return "sim_order_id_123"
 
-# --- Client Logic (Copied/Adapted from follow_strategy.py) ---
+# --- Client Logic (Copied/Adapted from ptrade_client.py) ---
 
 def report_execution(op_id, status, message, price=None):
     """上报执行结果到后端"""

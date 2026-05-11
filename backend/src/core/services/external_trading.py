@@ -39,18 +39,23 @@ class ExternalTradingHub:
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket, account: ExternalTradingAccount) -> ExternalTradingConnection:
+        account_pk = int(account.id)
+        account_id = account.account_id
+        account_name = account.name
+        account_identifier = account.identifier
+
         await websocket.accept()
         conn = ExternalTradingConnection(
-            account_pk=account.id,
-            account_id=account.account_id,
-            name=account.name,
-            identifier=account.identifier,
+            account_pk=account_pk,
+            account_id=account_id,
+            name=account_name,
+            identifier=account_identifier,
             websocket=websocket,
         )
 
         async with self._lock:
-            old_conn = self._connections.get(account.id)
-            self._connections[account.id] = conn
+            old_conn = self._connections.get(account_pk)
+            self._connections[account_pk] = conn
 
         if old_conn:
             await self._finish_connection(
@@ -59,15 +64,15 @@ class ExternalTradingHub:
                 close_code=4000,
             )
 
-        self._mark_connected(account.id)
+        self._mark_connected(account_pk)
         await websocket.send_text(encrypt_message({
             "type": "connected",
-            "account_id": account.account_id,
-            "name": account.name,
-            "identifier": account.identifier,
+            "account_id": account_id,
+            "name": account_name,
+            "identifier": account_identifier,
             "connected_at": conn.connected_at.isoformat(),
         }))
-        logger.info("External trading account connected: %s/%s", account.account_id, account.name)
+        logger.info("External trading account connected: %s/%s", account_id, account_name)
         return conn
 
     async def disconnect(self, account_pk: int, connection_id: str, reason: str = "disconnected"):

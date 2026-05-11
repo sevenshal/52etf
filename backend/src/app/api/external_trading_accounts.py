@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -17,6 +18,7 @@ from ...core.services.external_trading_crypto import (
 from .account import is_valid_account, valid_account
 
 router = APIRouter(prefix="/api/external-trading-accounts", tags=["external-trading-accounts"])
+logger = logging.getLogger(__name__)
 
 
 class ExternalTradingAccountBase(BaseModel):
@@ -377,25 +379,32 @@ async def get_external_today_orders(
 @router.websocket("/ws")
 async def external_trading_websocket(websocket: WebSocket):
     account_id = websocket.query_params.get("account_id")
-    name = websocket.query_params.get("name") or websocket.query_params.get("account_name")
-    identifier = (
-        websocket.query_params.get("identifier")
-        or websocket.query_params.get("uid")
-        or websocket.query_params.get("client_id")
-    )
+    identifier = websocket.query_params.get("identifier")
     ts = websocket.query_params.get("ts")
     nonce = websocket.query_params.get("nonce")
     signature = websocket.query_params.get("signature")
 
-    if not account_id or not name or not identifier:
-        await websocket.close(code=1008, reason="account_id, name and identifier are required")
+    if not account_id or not identifier:
+        logger.warning(
+            "Rejected external trading WebSocket: missing account_id/identifier account_id=%r identifier=%r",
+            account_id,
+            identifier,
+        )
+        await websocket.close(code=1008, reason="account_id and identifier are required")
         return
     if not is_valid_account(account_id):
+        logger.warning("Rejected external trading WebSocket: invalid account_id=%r identifier=%r", account_id, identifier)
         await websocket.close(code=1008, reason="invalid account_id")
         return
     try:
-        verify_handshake_signature(account_id, name, identifier, ts, nonce, signature)
+        verify_handshake_signature(account_id, identifier, ts, nonce, signature)
     except ExternalTradingCryptoError as exc:
+        logger.warning(
+            "Rejected external trading WebSocket: signature failed account_id=%r identifier=%r reason=%s",
+            account_id,
+            identifier,
+            exc,
+        )
         await websocket.close(code=1008, reason=str(exc))
         return
 
@@ -403,13 +412,23 @@ async def external_trading_websocket(websocket: WebSocket):
     try:
         account = db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.account_id == account_id,
-            ExternalTradingAccount.name == name,
             ExternalTradingAccount.identifier == identifier,
         ).first()
         if not account:
+            logger.warning(
+                "Rejected external trading WebSocket: account not found account_id=%r identifier=%r",
+                account_id,
+                identifier,
+            )
             await websocket.close(code=1008, reason="external trading account not found")
             return
         if not account.enabled:
+            logger.warning(
+                "Rejected external trading WebSocket: account disabled id=%s account_id=%r identifier=%r",
+                account.id,
+                account_id,
+                identifier,
+            )
             await websocket.close(code=1008, reason="external trading account disabled")
             return
 
