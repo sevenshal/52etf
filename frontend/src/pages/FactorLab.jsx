@@ -179,6 +179,10 @@ const BACKTEST_SEARCH_STATUS_META = {
 };
 const A_STOCK_INNO100_POOL = 'INNO100';
 const A_STOCK_INNO100_SYMBOL = 'INNO100.CN';
+const isAStockPoolValue = value => (
+  String(value || '').toUpperCase() === A_STOCK_INNO100_POOL
+  || /\.(SH|SZ|BJ)$/.test(String(value || '').toUpperCase())
+);
 
 const numberFormatter = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -1454,14 +1458,16 @@ const FactorLab = () => {
   };
 
   const handleBacktestPoolChange = value => {
-    if (value === A_STOCK_INNO100_POOL) {
-      backtestForm.setFieldsValue({ lot_size: 100 });
-    }
+    backtestForm.setFieldsValue({ lot_size: isAStockPoolValue(value) ? 100 : 1 });
   };
 
   const handleTimingTargetChange = value => {
-    if (String(value || '').toUpperCase() === A_STOCK_INNO100_SYMBOL) {
-      timingForm.setFieldsValue({ fear_symbol: A_STOCK_INNO100_SYMBOL });
+    const symbol = String(value || '').toUpperCase();
+    const fearSymbols = new Set(
+      (options?.timing_fear_sources || []).map(item => String(item.value || item.symbol || '').toUpperCase())
+    );
+    if (symbol === A_STOCK_INNO100_SYMBOL || fearSymbols.has(symbol)) {
+      timingForm.setFieldsValue({ fear_symbol: symbol });
     }
   };
 
