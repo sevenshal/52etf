@@ -10,6 +10,12 @@ const ETF_OPTIONS = [
   { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100' },
   { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯' },
   { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '563360.SH', ticker: 'A500ETF', label: '中证A500', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '510500.SH', ticker: '中证500ETF', label: '中证500', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '588230.SH', ticker: '科创200ETF', label: '科创200', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '159915.SZ', ticker: '创业板ETF', label: '创业板', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '515220.SH', ticker: '煤炭ETF', label: '煤炭', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '510880.SH', ticker: '红利ETF', label: '红利', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
 
 const SOXXFearGreed = () => {
