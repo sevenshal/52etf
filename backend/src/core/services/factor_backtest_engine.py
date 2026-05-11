@@ -23,6 +23,7 @@ from ..database import (
     USStockIndustrySnapshot,
 )
 from ..utils import normalize_us_equity_symbol
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_FACTOR_INDEX_POOLS
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
 A_STOCK_INNO100_POOL = "INNO100"
 A_STOCK_INNO100_SYMBOL = "INNO100.CN"
 A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_SYMBOL
+A_STOCK_INDEX_POOL_CODES = tuple(item["index_code"] for item in A_STOCK_FACTOR_INDEX_POOLS)
+A_STOCK_INDEX_POOL_CODE_SET = set(A_STOCK_INDEX_POOL_CODES)
+A_STOCK_ETF_DAILY_SYMBOL_SET = {str(symbol).upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS}
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 SUPPORTED_WINDOWS = [20, 60, 120]
 MIXED_WINDOW_KEY = "mixed"
@@ -68,6 +72,15 @@ POOL_OPTIONS = [
     {"key": "SPY", "label": "SPY", "description": "标普500成分股", "etfs": ["SPY.US"]},
     {"key": "SPY_QQQ", "label": "SPY+QQQ", "description": "标普500与纳指100成分股并集", "etfs": ["SPY.US", "QQQ.US"]},
     {"key": A_STOCK_INNO100_POOL, "label": "A创100", "description": "自编A股创新100历史成分股", "etfs": [A_STOCK_INNO100_SYMBOL]},
+    *[
+        {
+            "key": item["index_code"],
+            "label": f"{item['index_code']} {item['name']}",
+            "description": f"{item['name']}历史成分股",
+            "etfs": [item["index_code"]],
+        }
+        for item in A_STOCK_FACTOR_INDEX_POOLS
+    ],
 ]
 POOL_ETFS = {item["key"]: item["etfs"] for item in POOL_OPTIONS}
 
@@ -248,15 +261,31 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
+def _coerce_date(value) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)).date()
+
+
 def _is_a_stock_symbol(symbol: str) -> bool:
     text = str(symbol or "").strip().upper()
     return text.endswith((".SH", ".SZ", ".BJ"))
 
 
+def _is_a_stock_index_pool_symbol(symbol: str) -> bool:
+    return str(symbol or "").strip().upper() in A_STOCK_INDEX_POOL_CODE_SET
+
+
 def _is_a_stock_pool(pool: Optional[str], candidate_etfs: Optional[List[str]] = None) -> bool:
-    if str(pool or "").strip().upper() == A_STOCK_INNO100_POOL:
+    pool_key = str(pool or "").strip().upper()
+    if pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET:
         return True
-    return A_STOCK_INNO100_SYMBOL in set(str(item).strip().upper() for item in (candidate_etfs or []))
+    candidates = set(str(item).strip().upper() for item in (candidate_etfs or []))
+    return bool(candidates.intersection({A_STOCK_INNO100_SYMBOL, *A_STOCK_INDEX_POOL_CODE_SET}))
 
 
 def _import_duckdb():
@@ -331,14 +360,30 @@ def _get_max_a_stock_market_date() -> Optional[date]:
         row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
     finally:
         connection.close()
-    value = row[0] if row else None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if value:
-        return datetime.fromisoformat(str(value)).date()
-    return None
+    return _coerce_date(row[0] if row else None)
+
+
+def get_max_a_stock_index_daily_date(index_codes: Optional[List[str]] = None) -> Optional[date]:
+    safe_codes = [
+        str(item or "").strip().upper()
+        for item in (index_codes or list(A_STOCK_INDEX_POOL_CODES))
+        if item and SYMBOL_PATTERN.match(str(item).strip().upper())
+    ]
+    if not safe_codes:
+        return None
+    code_sql = ", ".join(_quote_sql_string(code) for code in list(dict.fromkeys(safe_codes)))
+    connection = _connect_duckdb()
+    try:
+        row = connection.execute(
+            f"""
+            SELECT MAX(trade_date)
+            FROM a_stock_index_daily
+            WHERE ts_code IN ({code_sql})
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    return _coerce_date(row[0] if row else None)
 
 
 def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
@@ -359,10 +404,21 @@ def _resolve_backtest_end_date(request: FactorBacktestConfig, db: ORMSession) ->
         return request.end_date
     if not _is_a_stock_pool(request.pool, request.candidate_etfs):
         return get_max_trade_date()
-    candidates = [
-        item for item in [_get_max_a_stock_market_date(), _get_latest_inno100_level_date(db)]
-        if item is not None
-    ]
+    pool_key = str(request.pool or "").strip().upper()
+    candidate_etfs = list(
+        dict.fromkeys(
+            str(item or "").strip().upper()
+            for item in (request.candidate_etfs or POOL_ETFS.get(pool_key, []))
+            if item
+        )
+    )
+    candidates = [_get_max_a_stock_market_date()]
+    if pool_key == A_STOCK_INNO100_POOL or A_STOCK_INNO100_SYMBOL in candidate_etfs:
+        candidates.append(_get_latest_inno100_level_date(db))
+    index_codes = [item for item in candidate_etfs if _is_a_stock_index_pool_symbol(item)]
+    if index_codes:
+        candidates.append(get_max_a_stock_index_daily_date(index_codes))
+    candidates = [item for item in candidates if item is not None]
     return min(candidates) if candidates else date.today()
 
 
@@ -407,7 +463,57 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                 pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
             )
 
-        a_symbols = [symbol for symbol in safe_symbols if _is_a_stock_symbol(symbol)]
+        a_index_symbols = [symbol for symbol in safe_symbols if _is_a_stock_index_pool_symbol(symbol)]
+        if a_index_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_index_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_index_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(
+                pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+            )
+
+        a_fund_symbols = [symbol for symbol in safe_symbols if symbol in A_STOCK_ETF_DAILY_SYMBOL_SET]
+        if a_fund_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_fund_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_fund_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(
+                pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+            )
+
+        a_symbols = [
+            symbol
+            for symbol in safe_symbols
+            if _is_a_stock_symbol(symbol)
+            and not _is_a_stock_index_pool_symbol(symbol)
+            and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
+        ]
         if a_symbols:
             symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
             query = f"""
@@ -713,13 +819,63 @@ def build_yearly_stats(
     return yearly_stats
 
 
+def _selected_a_stock_index_weight_dates(index_code: str, start_date: date, end_date: date) -> List[date]:
+    connection = _connect_duckdb()
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT CAST(trade_date AS DATE) AS trade_date
+            FROM a_stock_index_weight
+            WHERE index_code = ?
+              AND trade_date <= ?
+            ORDER BY trade_date ASC
+            """,
+            [index_code, end_date],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    all_dates = [_coerce_date(row[0]) for row in rows]
+    all_dates = [item for item in all_dates if item is not None]
+    pre_start_dates = [item for item in all_dates if item < start_date]
+    selected_dates = {item for item in all_dates if start_date <= item <= end_date}
+    if pre_start_dates:
+        selected_dates.add(pre_start_dates[-1])
+    return sorted(selected_dates)
+
+
+def _load_a_stock_index_weight_rows(index_code: str, selected_dates: List[date]):
+    if not selected_dates:
+        return []
+    date_sql = ", ".join(_quote_sql_string(item.isoformat()) for item in selected_dates)
+    connection = _connect_duckdb()
+    try:
+        return connection.execute(
+            f"""
+            SELECT
+                CAST(trade_date AS DATE) AS trade_date,
+                con_code,
+                CAST(weight AS DOUBLE) AS weight
+            FROM a_stock_index_weight
+            WHERE index_code = ?
+              AND trade_date IN ({date_sql})
+            ORDER BY trade_date ASC, weight DESC
+            """,
+            [index_code],
+        ).fetchall()
+    finally:
+        connection.close()
+
+
 def load_universe_history(
     db: ORMSession,
     candidate_etfs: List[str],
     start_date: date,
     end_date: date,
 ) -> UniverseHistory:
-    candidate_etfs = list(dict.fromkeys(candidate_etfs or DEFAULT_CANDIDATE_ETFS))
+    candidate_etfs = list(
+        dict.fromkeys(str(item or "").strip().upper() for item in (candidate_etfs or DEFAULT_CANDIDATE_ETFS) if item)
+    )
     snapshot_dates_by_etf: Dict[str, List[date]] = {}
     symbols_by_etf_date: Dict[str, Dict[date, List[str]]] = {}
     all_symbols: Set[str] = set()
@@ -751,6 +907,23 @@ def load_universe_history(
                 symbols_by_etf_date[etf_symbol].setdefault(snapshot_date, [])
                 if symbol not in symbols_by_etf_date[etf_symbol][snapshot_date]:
                     symbols_by_etf_date[etf_symbol][snapshot_date].append(symbol)
+                all_symbols.add(symbol)
+            continue
+
+        if _is_a_stock_index_pool_symbol(etf_symbol):
+            index_code = str(etf_symbol).strip().upper()
+            selected_dates = _selected_a_stock_index_weight_dates(index_code, start_date, end_date)
+            snapshot_dates_by_etf[index_code] = selected_dates
+            holdings_date_count[index_code] = len(selected_dates)
+            symbols_by_etf_date[index_code] = {}
+            for row in _load_a_stock_index_weight_rows(index_code, selected_dates):
+                snapshot_date = _coerce_date(row[0])
+                symbol = str(row[1] or "").strip().upper()
+                if not snapshot_date or not symbol:
+                    continue
+                symbols_by_etf_date[index_code].setdefault(snapshot_date, [])
+                if symbol not in symbols_by_etf_date[index_code][snapshot_date]:
+                    symbols_by_etf_date[index_code][snapshot_date].append(symbol)
                 all_symbols.add(symbol)
             continue
 
@@ -808,7 +981,9 @@ def load_universe_weight_history(
     start_date: date,
     end_date: date,
 ) -> Dict[str, Dict[date, Dict[str, float]]]:
-    candidate_etfs = list(dict.fromkeys(candidate_etfs or DEFAULT_CANDIDATE_ETFS))
+    candidate_etfs = list(
+        dict.fromkeys(str(item or "").strip().upper() for item in (candidate_etfs or DEFAULT_CANDIDATE_ETFS) if item)
+    )
     weight_history: Dict[str, Dict[date, Dict[str, float]]] = {}
     for etf_symbol in candidate_etfs:
         if etf_symbol == A_STOCK_INNO100_SYMBOL:
@@ -833,6 +1008,24 @@ def load_universe_weight_history(
                     continue
                 weight_history[etf_symbol].setdefault(snapshot_date, {})
                 weight_history[etf_symbol][snapshot_date][symbol] = float(row.weight_pct or 0) / 100.0
+            continue
+
+        if _is_a_stock_index_pool_symbol(etf_symbol):
+            index_code = str(etf_symbol).strip().upper()
+            selected_dates = _selected_a_stock_index_weight_dates(index_code, start_date, end_date)
+            if not selected_dates:
+                continue
+            weight_history[index_code] = {}
+            for row in _load_a_stock_index_weight_rows(index_code, selected_dates):
+                snapshot_date = _coerce_date(row[0])
+                symbol = str(row[1] or "").strip().upper()
+                if not snapshot_date or not symbol:
+                    continue
+                weight = _safe_float(row[2])
+                if weight is None or weight <= 0:
+                    continue
+                weight_history[index_code].setdefault(snapshot_date, {})
+                weight_history[index_code][snapshot_date][symbol] = weight / 100.0
             continue
 
         all_dates = [
@@ -1826,6 +2019,63 @@ def _load_inno100_benchmark_rows(db: ORMSession, start_date: date, end_date: dat
     return {A_STOCK_INNO100_SYMBOL: result_rows} if result_rows else {}
 
 
+def _load_a_stock_index_benchmark_rows(index_codes: List[str], start_date: date, end_date: date) -> Dict[str, List[Dict[str, Any]]]:
+    safe_codes = [
+        str(item or "").strip().upper()
+        for item in list(dict.fromkeys(index_codes or []))
+        if item and _is_a_stock_index_pool_symbol(str(item).strip().upper())
+    ]
+    if not safe_codes:
+        return {}
+    code_sql = ", ".join(_quote_sql_string(code) for code in safe_codes)
+    query = f"""
+        SELECT
+            ts_code AS symbol,
+            CAST(trade_date AS DATE) AS trade_date,
+            CAST(open AS DOUBLE) AS open,
+            CAST(close AS DOUBLE) AS close,
+            CAST(vol AS DOUBLE) AS volume,
+            CAST(amount AS DOUBLE) AS turnover
+        FROM a_stock_index_daily
+        WHERE ts_code IN ({code_sql})
+          AND trade_date BETWEEN ? AND ?
+          AND close IS NOT NULL
+          AND close > 0
+        ORDER BY ts_code, trade_date
+    """
+    connection = _connect_duckdb()
+    try:
+        frame = pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+    finally:
+        connection.close()
+    return _price_frame_to_rows_by_symbol(frame) if not frame.is_empty() else {}
+
+
+def load_benchmark_rows_by_symbol(
+    db: ORMSession,
+    benchmark_symbols: List[str],
+    start_date: date,
+    end_date: date,
+) -> Dict[str, List[Dict[str, Any]]]:
+    symbols = [str(item or "").strip().upper() for item in list(dict.fromkeys(benchmark_symbols or [])) if item]
+    rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    if A_STOCK_INNO100_SYMBOL in symbols:
+        rows_by_symbol.update(_load_inno100_benchmark_rows(db, start_date, end_date))
+
+    index_symbols = [symbol for symbol in symbols if _is_a_stock_index_pool_symbol(symbol)]
+    if index_symbols:
+        rows_by_symbol.update(_load_a_stock_index_benchmark_rows(index_symbols, start_date, end_date))
+
+    regular_symbols = [
+        symbol
+        for symbol in symbols
+        if symbol != A_STOCK_INNO100_SYMBOL and not _is_a_stock_index_pool_symbol(symbol)
+    ]
+    if regular_symbols:
+        rows_by_symbol.update(_price_frame_to_rows_by_symbol(load_price_frame(regular_symbols, start_date, end_date)))
+    return rows_by_symbol
+
+
 def append_execution_price_rows(
     prepared_data: Dict[str, Any],
     execution_date: date,
@@ -1979,8 +2229,13 @@ def prepare_factor_backtest_base_data(
 ) -> Dict[str, Any]:
     resolved_legs = resolved_legs or resolve_factor_legs(request.legs)
     end_date = _resolve_backtest_end_date(request, db)
-    candidate_etfs = list(dict.fromkeys(request.candidate_etfs or POOL_ETFS.get(request.pool, DEFAULT_CANDIDATE_ETFS)))
-    is_a_stock_pool = _is_a_stock_pool(request.pool, candidate_etfs)
+    candidate_etfs = list(
+        dict.fromkeys(
+            str(item or "").strip().upper()
+            for item in (request.candidate_etfs or POOL_ETFS.get(request.pool, DEFAULT_CANDIDATE_ETFS))
+            if item
+        )
+    )
     required_windows = required_windows_for_legs(resolved_legs)
     max_factor_window = max(required_windows)
     fetch_padding_days = max(370, int(request.min_listing_days) + 30, int(max_factor_window * 3))
@@ -2012,10 +2267,11 @@ def prepare_factor_backtest_base_data(
     industry_df = _load_industry_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=3650), end_date) if needs_industry else None
     valuation_df = _load_valuation_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=540), end_date) if "valuation_gap" in factor_keys else None
     weight_history = load_universe_weight_history(db, candidate_etfs, request.start_date, end_date) if "index_weight" in factor_keys else None
-    benchmark_rows = (
-        _load_inno100_benchmark_rows(db, request.start_date - timedelta(days=10), end_date)
-        if is_a_stock_pool
-        else _price_frame_to_rows_by_symbol(load_price_frame(candidate_etfs, request.start_date - timedelta(days=10), end_date))
+    benchmark_rows = load_benchmark_rows_by_symbol(
+        db,
+        candidate_etfs,
+        request.start_date - timedelta(days=10),
+        end_date,
     )
 
     return {

@@ -441,7 +441,7 @@ def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
     saved = sum(int(item.get("saved") or 0) for item in results)
     symbols = ",".join(str(item.get("symbol")) for item in results)
     return (
-        "A stock ETF fear greed backfill "
+        "A stock index fear greed backfill "
         f"symbols={symbols} saved={saved} errors={len(errors)}"
     )
 
@@ -646,7 +646,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、名称变更、全市场日行情、基准/贪恐目标指数日行情、ETF对应指数成分权重、期权/回购行情、中债信用曲线和利润表到DuckDB分析库。",
+                description="同步A股基础信息、名称变更、全市场日行情、基准/贪恐目标指数日行情、A股ETF日行情、贪恐/因子指数成分权重、期权/回购行情、中债信用曲线和利润表到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,
@@ -663,8 +663,8 @@ class ScheduledTaskManager:
             ),
             "a_stock_etf_fear_greed_backfill": TaskDefinition(
                 task_key="a_stock_etf_fear_greed_backfill",
-                name="A股ETF贪恐回跑入库",
-                description="增量或回跑计算 A创100、A500ETF、中证500ETF、科创200ETF、创业板ETF、煤炭ETF、红利ETF 的贪恐复刻指数，并保存到 etf_fear_greed_clone_history。",
+                name="A股指数贪恐回跑入库",
+                description="增量或回跑计算 A创100、中证A500、中证500、科创200、创业板指、中证煤炭、上证红利的指数贪恐复刻值，并保存到 etf_fear_greed_clone_history。",
                 default_time="18:40",
                 default_enabled=True,
                 sort_order=76,

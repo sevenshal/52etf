@@ -260,7 +260,7 @@ class FetchLog(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 class ETFFearGreedCloneHistory(Base):
-    """ETF恐贪复刻指数历史记录"""
+    """ETF/指数恐贪复刻值历史记录"""
     __tablename__ = 'etf_fear_greed_clone_history'
 
     symbol = Column(String(32), primary_key=True)

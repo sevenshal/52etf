@@ -17,6 +17,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
     {
         "a_stock_basic",
         "a_stock_income",
+        "a_stock_fund_daily",
         "a_stock_index_daily",
         "a_stock_index_weight",
         "a_stock_market_daily",
@@ -107,6 +108,25 @@ class AStockMarketDaily(AnalyticsBase):
 class AStockIndexDaily(AnalyticsBase):
     """A股指数日行情缓存，存放在 DuckDB 分析库。"""
     __tablename__ = "a_stock_index_daily"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    pre_close = Column(Float)
+    change = Column(Float)
+    pct_chg = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFundDaily(AnalyticsBase):
+    """Tushare A股ETF/场内基金日行情缓存，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_fund_daily"
 
     ts_code = Column(String(16), primary_key=True)
     trade_date = Column(Date, primary_key=True)
@@ -254,6 +274,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_symbol_date ON a_stock_fund_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_date_symbol ON a_stock_fund_daily(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_index_date ON a_stock_index_weight(index_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_constituent ON a_stock_index_weight(con_code, trade_date)",

@@ -6,56 +6,77 @@ BENCHMARK_INDEXES = [
     {"ts_code": "000300.SH", "name": "沪深300"},
     {"ts_code": "000905.SH", "name": "中证500"},
 ]
-A_STOCK_ETF_FEAR_GREED_TARGETS = [
+A_STOCK_FACTOR_INDEX_POOLS = [
+    {"index_code": "000510.SH", "name": "中证A500"},
+    {"index_code": "000905.SH", "name": "中证500"},
+    {"index_code": "000699.SH", "name": "科创200"},
+    {"index_code": "399006.SZ", "name": "创业板指"},
+    {"index_code": "399998.SZ", "name": "中证煤炭"},
+    {"index_code": "000015.SH", "name": "上证红利"},
+]
+A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {
-        "symbol": "563360.SH",
-        "ticker": "A500ETF",
-        "label": "A500ETF",
-        "index_code": "000510.SH",
+        "symbol": "000510.SH",
+        "ticker": "中证A500",
+        "label": "中证A500",
         "index_name": "中证A500",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
     },
     {
-        "symbol": "510500.SH",
-        "ticker": "中证500ETF",
+        "symbol": "000905.SH",
+        "ticker": "中证500",
         "label": "中证500",
-        "index_code": "000905.SH",
         "index_name": "中证500",
         "option_underlyings": ["OP510500.SH", "OP159922.SZ"],
     },
     {
-        "symbol": "588230.SH",
-        "ticker": "科创200ETF",
+        "symbol": "000699.SH",
+        "ticker": "科创200",
         "label": "科创200",
-        "index_code": "000699.SH",
         "index_name": "上证科创板200",
         "option_underlyings": ["OP588000.SH", "OP588080.SH"],
     },
     {
-        "symbol": "159915.SZ",
-        "ticker": "创业板ETF",
+        "symbol": "399006.SZ",
+        "ticker": "创业板指",
         "label": "创业板",
-        "index_code": "399006.SZ",
         "index_name": "创业板指",
         "option_underlyings": ["OP159915.SZ"],
     },
     {
-        "symbol": "515220.SH",
-        "ticker": "煤炭ETF",
+        "symbol": "399998.SZ",
+        "ticker": "中证煤炭",
         "label": "煤炭",
-        "index_code": "399998.SZ",
         "index_name": "中证煤炭",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
     },
     {
-        "symbol": "510880.SH",
-        "ticker": "红利ETF",
+        "symbol": "000015.SH",
+        "ticker": "上证红利",
         "label": "红利",
-        "index_code": "000015.SH",
         "index_name": "上证红利",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
     },
 ]
+A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
+    "563360.SH",
+    "510500.SH",
+    "588230.SH",
+    "159915.SZ",
+    "515220.SH",
+    "510880.SH",
+)
+A_STOCK_ETF_DAILY_SYMBOLS = tuple(
+    dict.fromkeys(
+        [
+            *A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
+            # W20 风险调整动量虚拟盘默认标的和基准。
+            "513100.SH",
+            "518880.SH",
+            "510300.SH",
+        ]
+    )
+)
 A_STOCK_FEAR_SAFE_HAVEN_INDEXES = [
     {"ts_code": "H11006.CSI", "name": "中证国债"},
 ]

@@ -17,7 +17,7 @@ from ..database import (
     ETFFearGreedCloneHistory,
     Session,
 )
-from ...robot.a_stock_base_data_config import A_STOCK_ETF_FEAR_GREED_TARGETS
+from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
 
 
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
@@ -34,12 +34,11 @@ A_STOCK_INNO100_TARGET = {
     "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
     "ticker": "A创100",
     "label": "A创100",
-    "index_code": A_STOCK_INNO100_INDEX_CODE,
     "index_name": "A股创新100",
     "option_underlyings": list(A_STOCK_INNO100_OPTION_UNDERLYINGS),
     "custom_inno100": True,
 }
-A_STOCK_FEAR_GREED_TARGETS = [A_STOCK_INNO100_TARGET, *A_STOCK_ETF_FEAR_GREED_TARGETS]
+A_STOCK_FEAR_GREED_TARGETS = [A_STOCK_INNO100_TARGET, *A_STOCK_INDEX_FEAR_GREED_TARGETS]
 A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL = {
     str(item["symbol"]).upper(): item
     for item in A_STOCK_FEAR_GREED_TARGETS
@@ -100,18 +99,18 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
 
 
 class AStockInnovation100FearGreedCloneCalculator:
-    """A-share index/ETF Fear & Greed clone using local A-share DuckDB data."""
+    """A-share index Fear & Greed clone using local A-share DuckDB data."""
 
     def __init__(self, target_symbol: str = A_STOCK_INNO100_FEAR_SYMBOL):
         symbol = str(target_symbol or A_STOCK_INNO100_FEAR_SYMBOL).strip().upper()
         self.target = A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL.get(symbol)
         if not self.target:
             supported = ", ".join(sorted(A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL))
-            raise FearGreedCloneError(f"unsupported A-share ETF fear greed symbol {symbol}; supported: {supported}")
+            raise FearGreedCloneError(f"unsupported A-share index fear greed symbol {symbol}; supported: {supported}")
         self.target_symbol = str(self.target["symbol"]).upper()
         self.ticker = str(self.target.get("ticker") or self.target_symbol)
         self.label = str(self.target.get("label") or self.ticker)
-        self.index_code = str(self.target["index_code"]).upper()
+        self.index_code = str(self.target.get("index_code") or self.target_symbol).upper()
         self.index_name = str(self.target.get("index_name") or self.index_code)
         self.option_underlyings = tuple(self.target.get("option_underlyings") or A_STOCK_INNO100_OPTION_UNDERLYINGS)
         self.custom_inno100 = bool(self.target.get("custom_inno100"))

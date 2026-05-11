@@ -14,6 +14,7 @@ from ..core.analytics_database import (
     AStockBasic,
     AStockChinaBondYieldCurveDaily,
     AStockChinaBondYieldCurveDef,
+    AStockFundDaily,
     AStockIncome,
     AStockIndexDaily,
     AStockIndexWeight,
@@ -28,7 +29,9 @@ from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
     A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
-    A_STOCK_ETF_FEAR_GREED_TARGETS,
+    A_STOCK_FACTOR_INDEX_POOLS,
+    A_STOCK_ETF_DAILY_SYMBOLS,
+    A_STOCK_INDEX_FEAR_GREED_TARGETS,
     BENCHMARK_INDEXES,
     CHINABOND_CREDIT_CURVES,
     DEFAULT_START_DATE,
@@ -46,6 +49,7 @@ SYNC_WORKERS = 5
 SYNC_REFRESH_OVERLAP_DAYS = 45
 A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
 A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220
+A_STOCK_FUND_DAILY_WARMUP_DAYS = 220
 A_STOCK_INDEX_WEIGHT_WARMUP_DAYS = 200
 A_STOCK_OPTION_DAILY_WARMUP_DAYS = 200
 A_STOCK_REPO_DAILY_WARMUP_DAYS = 200
@@ -643,6 +647,127 @@ class AStockBaseDataSyncService:
             replace_dates=replace_dates,
         )
 
+    def _latest_fund_daily_dates(self, symbols: List[str]) -> Dict[str, Optional[date]]:
+        if not symbols:
+            return {}
+        normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if symbol]
+        params = {f"symbol_{idx}": symbol for idx, symbol in enumerate(normalized_symbols)}
+        placeholders = ", ".join(f":{key}" for key in params)
+        rows = self.analytics_db.execute(
+            text(
+                f"""
+                SELECT ts_code, MAX(trade_date)
+                FROM a_stock_fund_daily
+                WHERE ts_code IN ({placeholders})
+                GROUP BY ts_code
+                """
+            ),
+            params,
+        ).fetchall()
+        latest = {symbol: None for symbol in normalized_symbols}
+        for row in rows:
+            latest[str(row[0]).upper()] = _parse_date(row[1])
+        return latest
+
+    def sync_fund_daily(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        end_value = _parse_date(end_date)
+        default_start = _parse_date(start_date)
+        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
+        if not default_start or not end_value or default_start > end_value or not symbols:
+            return {"symbol_count": len(symbols), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
+
+        latest_by_symbol = self._latest_fund_daily_dates(symbols)
+        jobs: List[Tuple[str, date, date]] = []
+        for symbol in symbols:
+            if explicit_start:
+                symbol_start = _warmup_start(explicit_start, A_STOCK_FUND_DAILY_WARMUP_DAYS)
+            elif incremental:
+                symbol_start = _overlap_start(default_start, latest_by_symbol.get(symbol))
+            else:
+                symbol_start = default_start
+            if symbol_start <= end_value:
+                jobs.append((symbol, symbol_start, end_value))
+
+        if not jobs:
+            return {
+                "symbol_count": len(symbols),
+                "jobs": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": None,
+                "end_date": end_value.isoformat(),
+            }
+
+        def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
+            frame = self.tushare.get_a_stock_fund_daily_range_frame(
+                symbol,
+                symbol_start,
+                symbol_end,
+                raise_on_error=True,
+            )
+            return symbol, symbol_start, symbol_end, frame
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        completed = 0
+        total_jobs = len(jobs)
+        workers = min(SYNC_WORKERS, total_jobs)
+
+        def report_progress(symbol: str, symbol_start: date, symbol_end: date):
+            self._progress(
+                (
+                    f"批量同步A股ETF日行情 {completed}/{total_jobs}，"
+                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                ),
+                64,
+                processed_jobs=completed,
+                total_jobs=total_jobs,
+                fund_daily_saved_rows=saved_rows,
+                fund_daily_errors=len(errors),
+            )
+
+        if workers <= 1:
+            for symbol, symbol_start, symbol_end in jobs:
+                try:
+                    _, _, _, frame = fetch_job(symbol, symbol_start, symbol_end)
+                    saved_rows += _bulk_upsert_fund_daily_frame(self.analytics_db, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock ETF daily sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
+                    errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
+                completed += 1
+                report_progress(symbol, symbol_start, symbol_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(fetch_job, symbol, symbol_start, symbol_end): (symbol, symbol_start, symbol_end)
+                    for symbol, symbol_start, symbol_end in jobs
+                }
+                for future in as_completed(futures):
+                    symbol, symbol_start, symbol_end = futures[future]
+                    try:
+                        _, _, _, frame = future.result()
+                        saved_rows += _bulk_upsert_fund_daily_frame(self.analytics_db, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock ETF daily sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
+                        errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
+                    completed += 1
+                    report_progress(symbol, symbol_start, symbol_end)
+
+        return {
+            "symbol_count": len(symbols),
+            "jobs": total_jobs,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "start_date": min(job[1] for job in jobs).isoformat(),
+            "end_date": end_value.isoformat(),
+        }
+
     def _latest_index_weight_dates(self, index_codes: List[str]) -> Dict[str, Optional[date]]:
         if not index_codes:
             return {}
@@ -675,7 +800,21 @@ class AStockBaseDataSyncService:
         if not end_value:
             return {"index_count": 0, "jobs": 0, "saved_rows": 0, "errors": []}
 
-        index_items = list({item["index_code"]: item for item in A_STOCK_ETF_FEAR_GREED_TARGETS}.values())
+        index_items = list(
+            {
+                str(item.get("index_code") or item["symbol"]).upper(): {
+                    "index_code": str(item.get("index_code") or item["symbol"]).upper(),
+                    "index_name": item.get("index_name") or item.get("name") or item.get("label"),
+                }
+                for item in [
+                    *A_STOCK_INDEX_FEAR_GREED_TARGETS,
+                    *[
+                        {"index_code": item["index_code"], "index_name": item["name"]}
+                        for item in A_STOCK_FACTOR_INDEX_POOLS
+                    ],
+                ]
+            }.values()
+        )
         latest_by_index = self._latest_index_weight_dates([item["index_code"] for item in index_items])
         default_start = _parse_date(start_date) or _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
         jobs: List[Tuple[str, date, date]] = []
@@ -1275,6 +1414,21 @@ class AStockBaseDataSyncService:
             analytics_db=self.analytics_db,
         )
 
+        fund_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_FUND_DAILY_WARMUP_DAYS)
+        fund_display_start = _warmup_start(explicit_start, A_STOCK_FUND_DAILY_WARMUP_DAYS) if explicit_start else fund_default_start
+        self._progress(
+            "同步A股ETF日行情缓存",
+            64,
+            start_date=fund_display_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        fund_daily_result = self.sync_fund_daily(
+            fund_default_start,
+            end_value,
+            incremental=incremental,
+            explicit_start=explicit_start,
+        )
+
         index_weight_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
         if explicit_start:
             index_weight_start = _warmup_start(explicit_start, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
@@ -1374,6 +1528,7 @@ class AStockBaseDataSyncService:
         basic_rows = _count_analytics_table_rows(self.analytics_db, AStockBasic.__tablename__)
         name_change_rows = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
+        fund_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockFundDaily.__tablename__)
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
@@ -1393,6 +1548,7 @@ class AStockBaseDataSyncService:
             "warmup_days": {
                 "market_daily": market_warmup_days,
                 "index_daily": A_STOCK_INDEX_DAILY_WARMUP_DAYS,
+                "fund_daily": A_STOCK_FUND_DAILY_WARMUP_DAYS,
                 "index_weight": A_STOCK_INDEX_WEIGHT_WARMUP_DAYS,
                 "option_daily": A_STOCK_OPTION_DAILY_WARMUP_DAYS,
                 "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
@@ -1403,6 +1559,12 @@ class AStockBaseDataSyncService:
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
             "index_start_date": index_start.isoformat(),
+            "fund_daily_start_date": fund_daily_result.get("start_date") or fund_display_start.isoformat(),
+            "fund_daily_end_date": fund_daily_result.get("end_date"),
+            "fund_daily_symbol_count": fund_daily_result.get("symbol_count"),
+            "fund_daily_jobs": fund_daily_result.get("jobs"),
+            "fund_daily_saved_rows": fund_daily_result.get("saved_rows"),
+            "fund_daily_errors": len(fund_daily_result.get("errors") or []),
             "index_weight_start_date": index_weight_result.get("start_date") or index_weight_start.isoformat(),
             "index_weight_end_date": index_weight_result.get("end_date"),
             "index_weight_index_count": index_weight_result.get("index_count"),
@@ -1456,6 +1618,7 @@ class AStockBaseDataSyncService:
             "tables": {
                 AStockBasic.__tablename__: basic_rows,
                 AStockIncome.__tablename__: income_rows,
+                AStockFundDaily.__tablename__: fund_daily_rows,
                 AStockIndexDaily.__tablename__: index_rows,
                 AStockIndexWeight.__tablename__: index_weight_rows,
                 AStockMarketDaily.__tablename__: market_rows,
@@ -2371,6 +2534,61 @@ def sync_a_stock_base_data(
         service.close()
 
 
+def _normalize_fund_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["open"] = _numeric_series(frame, "open", 6)
+    normalized["high"] = _numeric_series(frame, "high", 6)
+    normalized["low"] = _numeric_series(frame, "low", 6)
+    normalized["close"] = _numeric_series(frame, "close", 6)
+    normalized["pre_close"] = _numeric_series(frame, "pre_close", 6)
+    normalized["change"] = _numeric_series(frame, "change", 6)
+    normalized["pct_chg"] = _numeric_series(frame, "pct_chg", 6)
+    normalized["vol"] = _numeric_series(frame, "vol", 4)
+    normalized["amount"] = _numeric_series(frame, "amount", 4)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["ts_code", "trade_date"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_fund_daily_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_fund_daily_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockFundDaily.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
 def _upsert_index_daily_frame(analytics_db: Session, frame: pd.DataFrame):
     if frame.empty:
         return
@@ -2439,8 +2657,15 @@ def sync_benchmark_index_daily(
                 *BENCHMARK_INDEXES,
                 *A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
                 *[
-                    {"ts_code": item["index_code"], "name": item["index_name"]}
-                    for item in A_STOCK_ETF_FEAR_GREED_TARGETS
+                    {
+                        "ts_code": str(item.get("index_code") or item["symbol"]).upper(),
+                        "name": item.get("index_name") or item.get("label"),
+                    }
+                    for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+                ],
+                *[
+                    {"ts_code": item["index_code"], "name": item["name"]}
+                    for item in A_STOCK_FACTOR_INDEX_POOLS
                 ],
             ]
         }

@@ -31,16 +31,22 @@ from ...core.database import (
     get_db,
 )
 from ...core.services.factor_backtest_engine import (
+    A_STOCK_INDEX_POOL_CODES,
     A_STOCK_INNO100_INDEX_CODE,
     A_STOCK_INNO100_POOL,
     A_STOCK_INNO100_SYMBOL,
     FactorBacktestConfig as SharedFactorBacktestConfig,
     FactorBacktestLeg as SharedFactorBacktestLeg,
+    POOL_ETFS as SHARED_POOL_ETFS,
+    POOL_OPTIONS as SHARED_POOL_OPTIONS,
+    get_max_a_stock_index_daily_date,
+    load_universe_history,
+    load_universe_weight_history,
     prepare_factor_backtest_base_data as shared_prepare_factor_backtest_base_data,
     run_factor_backtest as shared_run_factor_backtest,
     warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
 )
-from ...robot.a_stock_base_data_config import A_STOCK_ETF_FEAR_GREED_TARGETS
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_CANDIDATE_ETFS,
     DEFAULT_MOMENTUM_WEIGHTS,
@@ -54,8 +60,6 @@ from ...robot.us_stock_signal_virtual import (
     _is_rebalance_day,
     _normalize_rebalance_frequency,
     _portfolio_value,
-    load_universe_history,
-    load_universe_weight_history,
 )
 from .account import valid_account
 
@@ -81,21 +85,23 @@ MAX_HEATMAP_CELLS = 20
 FACTOR_DISTRIBUTION_BIN_COUNT = 40
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FEAR_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
+A_STOCK_INDEX_POOL_CODE_SET = set(A_STOCK_INDEX_POOL_CODES)
 A_STOCK_FEAR_SOURCE_LABELS = {
-    A_STOCK_INNO100_SYMBOL: "A创100 自算贪恐",
+    A_STOCK_INNO100_SYMBOL: "A创100 指数贪恐",
     **{
         str(item["symbol"]).upper(): (
-            f"{item.get('ticker') or item.get('label') or item['symbol']} 自算贪恐"
+            f"{item.get('ticker') or item.get('label') or item['symbol']} 指数贪恐"
         )
-        for item in A_STOCK_ETF_FEAR_GREED_TARGETS
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
     },
 }
+A_STOCK_ETF_DAILY_SYMBOL_SET = {str(symbol).upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS}
 A_STOCK_FEAR_SOURCE_ORDER = {
     symbol: index
     for index, symbol in enumerate(
         [
             A_STOCK_INNO100_SYMBOL,
-            *[str(item["symbol"]).upper() for item in A_STOCK_ETF_FEAR_GREED_TARGETS],
+            *[str(item["symbol"]).upper() for item in A_STOCK_INDEX_FEAR_GREED_TARGETS],
         ]
     )
 }
@@ -211,6 +217,12 @@ DEFAULT_TIMING_TARGET_OPTIONS = [
     {"label": "SPY", "value": "SPY.US"},
     {"label": "SOXX", "value": "SOXX.US"},
     {"label": "A创100", "value": A_STOCK_INNO100_SYMBOL},
+    {"label": "A500ETF 563360.SH", "value": "563360.SH"},
+    {"label": "中证500ETF 510500.SH", "value": "510500.SH"},
+    {"label": "科创200ETF 588230.SH", "value": "588230.SH"},
+    {"label": "创业板ETF 159915.SZ", "value": "159915.SZ"},
+    {"label": "煤炭ETF 515220.SH", "value": "515220.SH"},
+    {"label": "红利ETF 510880.SH", "value": "510880.SH"},
 ]
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
@@ -224,38 +236,20 @@ MOMENTUM_FACTOR_SCORE_PREFIX = {
 }
 
 
-POOL_OPTIONS = [
-    {
-        "key": "QQQ",
-        "label": "QQQ",
-        "description": "纳指100成分股",
-        "etfs": ["QQQ.US"],
-    },
-    {
-        "key": "SPY",
-        "label": "SPY",
-        "description": "标普500成分股",
-        "etfs": ["SPY.US"],
-    },
-    {
-        "key": "SPY_QQQ",
-        "label": "SPY+QQQ",
-        "description": "标普500与纳指100成分股并集",
-        "etfs": ["SPY.US", "QQQ.US"],
-    },
-    {
-        "key": A_STOCK_INNO100_POOL,
-        "label": "A创100",
-        "description": "自编A股创新100历史成分股",
-        "etfs": [A_STOCK_INNO100_SYMBOL],
-    },
-]
+POOL_OPTIONS = SHARED_POOL_OPTIONS
+POOL_ETFS = SHARED_POOL_ETFS
+POOL_KEYS = set(POOL_ETFS)
 
-POOL_ETFS = {item["key"]: item["etfs"] for item in POOL_OPTIONS}
+
+def _validate_pool_key(value) -> str:
+    pool = str(value or "SPY_QQQ").strip().upper()
+    if pool not in POOL_KEYS:
+        raise ValueError(f"股票池仅支持: {', '.join(sorted(POOL_KEYS))}")
+    return pool
 
 
 class FactorLabAnalyzeRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
+    pool: str = "SPY_QQQ"
     factor: str = "risk_adjusted_momentum"
     bucket_count: int = 10
     start_date: date = DEFAULT_START_DATE
@@ -269,6 +263,10 @@ class FactorLabAnalyzeRequest(BaseModel):
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
     min_listing_days: int = DEFAULT_MIN_LISTING_DAYS
     include_heatmap: bool = True
+
+    @validator("pool", pre=True)
+    def validate_pool(cls, value):
+        return _validate_pool_key(value)
 
     @validator("heatmap_windows", pre=True)
     def validate_windows(cls, value):
@@ -514,7 +512,7 @@ class CompositeFactorLeg(BaseModel):
 
 
 class CompositeFactorAnalyzeRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
+    pool: str = "SPY_QQQ"
     bucket_count: int = 10
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
@@ -527,6 +525,10 @@ class CompositeFactorAnalyzeRequest(BaseModel):
             CompositeFactorLeg(factor="volume_z", window=20, weight=0.3, standardization="rank_percentile"),
         ]
     )
+
+    @validator("pool", pre=True)
+    def validate_pool(cls, value):
+        return _validate_pool_key(value)
 
     @validator("bucket_count")
     def validate_bucket_count(cls, value):
@@ -582,7 +584,7 @@ class CompositeFactorAnalyzeRequest(BaseModel):
 
 
 class FactorBacktestRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
+    pool: str = "SPY_QQQ"
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
     oos_start_date: Optional[date] = None
@@ -614,6 +616,10 @@ class FactorBacktestRequest(BaseModel):
             ),
         ]
     )
+
+    @validator("pool", pre=True)
+    def validate_pool(cls, value):
+        return _validate_pool_key(value)
 
     @validator("initial_capital")
     def validate_initial_capital(cls, value):
@@ -843,7 +849,8 @@ def _is_a_stock_symbol(symbol: str) -> bool:
 
 
 def _is_a_stock_pool(pool: Optional[str]) -> bool:
-    return str(pool or "").strip().upper() == A_STOCK_INNO100_POOL
+    pool_key = str(pool or "").strip().upper()
+    return pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET
 
 
 def _normalize_momentum_weights(raw_weights: Dict[str, float], active_windows: List[int]) -> Dict[int, float]:
@@ -1063,6 +1070,36 @@ def _get_max_a_stock_market_date() -> Optional[date]:
     return None
 
 
+def _get_max_a_stock_fund_date(symbols: Optional[List[str]] = None) -> Optional[date]:
+    safe_symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or list(A_STOCK_ETF_DAILY_SYMBOL_SET))
+        if symbol and SYMBOL_PATTERN.match(str(symbol).strip().upper())
+    ]
+    if not safe_symbols:
+        return None
+    symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in list(dict.fromkeys(safe_symbols)))
+    connection = _connect_duckdb()
+    try:
+        row = connection.execute(
+            f"""
+            SELECT MAX(trade_date)
+            FROM a_stock_fund_daily
+            WHERE ts_code IN ({symbol_sql})
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    value = row[0] if row else None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value:
+        return datetime.fromisoformat(str(value)).date()
+    return None
+
+
 def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
     row = (
         db.query(AStockInnovation100Level.date)
@@ -1079,12 +1116,15 @@ def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
 def _resolve_analysis_end_date(pool: str, requested_end: Optional[date], db: ORMSession) -> date:
     if requested_end:
         return requested_end
-    if not _is_a_stock_pool(pool):
+    pool_key = str(pool or "").strip().upper()
+    if not _is_a_stock_pool(pool_key):
         return _get_max_trade_date()
-    candidates = [
-        item for item in [_get_max_a_stock_market_date(), _get_latest_inno100_level_date(db)]
-        if item is not None
-    ]
+    candidates = [_get_max_a_stock_market_date()]
+    if pool_key == A_STOCK_INNO100_POOL:
+        candidates.append(_get_latest_inno100_level_date(db))
+    if pool_key in A_STOCK_INDEX_POOL_CODE_SET:
+        candidates.append(get_max_a_stock_index_daily_date([pool_key]))
+    candidates = [item for item in candidates if item is not None]
     return min(candidates) if candidates else date.today()
 
 
@@ -1092,14 +1132,14 @@ def _resolve_timing_end_date(request: TimingFactorAnalyzeRequest, db: ORMSession
     if request.end_date:
         return request.end_date
     target = str(request.target_symbol or "").strip().upper()
-    if target == A_STOCK_INNO100_SYMBOL or _is_a_stock_symbol(target):
-        candidates = [
-            item for item in [
-                _get_latest_inno100_level_date(db) if target == A_STOCK_INNO100_SYMBOL else _get_max_a_stock_market_date(),
-                _get_max_a_stock_market_date(),
-            ]
-            if item is not None
-        ]
+    if target == A_STOCK_INNO100_SYMBOL:
+        candidates = [item for item in [_get_latest_inno100_level_date(db), _get_max_a_stock_market_date()] if item is not None]
+        return min(candidates) if candidates else date.today()
+    if target in A_STOCK_ETF_DAILY_SYMBOL_SET:
+        candidates = [item for item in [_get_max_a_stock_fund_date([target]), _get_max_a_stock_market_date()] if item is not None]
+        return min(candidates) if candidates else date.today()
+    if _is_a_stock_symbol(target):
+        candidates = [item for item in [_get_max_a_stock_market_date()] if item is not None]
         return min(candidates) if candidates else date.today()
     return _get_max_trade_date()
 
@@ -1143,7 +1183,56 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
             """
             frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
 
-        a_symbols = [symbol for symbol in safe_symbols if _is_a_stock_symbol(symbol)]
+        a_index_symbols = [symbol for symbol in safe_symbols if symbol in A_STOCK_INDEX_POOL_CODE_SET]
+        if a_index_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_index_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_index_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
+
+        a_fund_symbols = [
+            symbol
+            for symbol in safe_symbols
+            if symbol in A_STOCK_ETF_DAILY_SYMBOL_SET
+        ]
+        if a_fund_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_fund_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_fund_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
+
+        a_symbols = [
+            symbol
+            for symbol in safe_symbols
+            if _is_a_stock_symbol(symbol) and symbol not in A_STOCK_INDEX_POOL_CODE_SET
+            and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
+        ]
         if a_symbols:
             symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
             query = f"""
@@ -5617,7 +5706,7 @@ def _run_timing_factor_analysis(
     db: ORMSession,
 ) -> Dict[str, Any]:
     started_at = time.perf_counter()
-    end_date = request.end_date or _get_max_trade_date()
+    end_date = _resolve_timing_end_date(request, db)
     if request.start_date >= end_date:
         raise HTTPException(status_code=400, detail="开始日期必须早于实际结束日期")
 

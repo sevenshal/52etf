@@ -32,6 +32,7 @@ TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE = max(
     int(os.getenv("TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE", "420")),
 )
 TUSHARE_INDEX_WEIGHT_MAX_REQUESTS_PER_MINUTE = 420
+TUSHARE_FUND_DAILY_MAX_REQUESTS_PER_MINUTE = 420
 
 
 class TushareUnsupportedError(NotImplementedError):
@@ -76,6 +77,10 @@ class TushareService(QuoteProvider):
     )
     _index_weight_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_INDEX_WEIGHT_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _fund_daily_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_FUND_DAILY_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
 
@@ -586,6 +591,76 @@ class TushareService(QuoteProvider):
 
         if not frames:
             return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
+
+    def get_a_stock_fund_daily_range_frame(
+        self,
+        ts_code: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 5000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """分页获取A股ETF/场内基金日行情。"""
+        fund_code = self.normalize_symbol(ts_code)
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not fund_code or not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 5000))
+        fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+        first_error = None
+        while True:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = self.pro.fund_daily(
+                    ts_code=fund_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning("Tushare fund_daily fetch failed for %s %s~%s offset=%s: %s", fund_code, start_value, end_value, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = ts.pro_bar(
+                    api=self.pro,
+                    ts_code=fund_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    freq="D",
+                    asset="FD",
+                    fields="ts_code,trade_date,open,high,low,close,vol,amount",
+                )
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frames.append(frame)
+            except Exception as exc:
+                self.logger.warning("Tushare pro_bar fund fetch failed for %s %s~%s: %s", fund_code, start_value, end_value, exc)
+                if raise_on_error and first_error is None:
+                    first_error = exc
+
+        if not frames:
+            if raise_on_error and first_error is not None:
+                raise first_error
+            return pd.DataFrame()
+
         result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
