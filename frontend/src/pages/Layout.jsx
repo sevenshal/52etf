@@ -5,7 +5,7 @@ import { useAccount } from '../contexts/AccountContext';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/options', '/a-stock-innovation100', '/db', '/factor-lab', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/a-stock-innovation100', '/factor-lab', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -15,6 +15,7 @@ const PROFILE_ROUTES = [
   '/w20-momentum-live',
   '/us-stock-signal-live',
   '/a-stock-innovation-momentum-live',
+  '/options',
   '/ib-account-manager',
   '/longport-account-manager',
   '/external-trading-accounts',
@@ -45,10 +46,6 @@ const getActiveTabKey = (pathname, state) => {
     return '/evc';
   }
 
-  if (isRouteOrChild(pathname, '/options')) {
-    return '/options';
-  }
-
   if (
     isRouteOrChild(pathname, '/fear') &&
     !PROFILE_ROUTES.some(route => isRouteOrChild(pathname, route))
@@ -61,7 +58,7 @@ const getActiveTabKey = (pathname, state) => {
   }
 
   if (isRouteOrChild(pathname, '/db')) {
-    return '/db';
+    return '/factor-lab';
   }
 
   if (isRouteOrChild(pathname, '/factor-lab')) {
@@ -93,23 +90,13 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
-      key: '/options',
-      label: '持仓',
-      disabled: !accountId
-    },
-    {
       key: '/a-stock-innovation100',
       label: 'A创100',
       disabled: !accountId
     },
     {
-      key: '/db',
-      label: 'DB',
-      disabled: !accountId
-    },
-    {
       key: '/factor-lab',
-      label: '因子',
+      label: '研究',
       disabled: !accountId
     },
     {

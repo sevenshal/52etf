@@ -34,6 +34,7 @@ import {
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import request from '../utils/request';
+import DatabaseManager from './DatabaseManager';
 import './FactorLab.css';
 
 const { Text } = Typography;
@@ -1196,12 +1197,12 @@ const formatFactorWeight = value => {
 
 const getRebalanceFrequencyLabel = value => REBALANCE_FREQUENCY_LABELS[value] || value || '-';
 
-const FactorLab = () => {
+const FactorLab = ({ initialTab = 'single' }) => {
   const [form] = Form.useForm();
   const [compositeForm] = Form.useForm();
   const [backtestForm] = Form.useForm();
   const [timingForm] = Form.useForm();
-  const [activeTab, setActiveTab] = useState('single');
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [options, setOptions] = useState(null);
   const [result, setResult] = useState(null);
   const [compositeResult, setCompositeResult] = useState(null);
@@ -1860,6 +1861,7 @@ const FactorLab = () => {
     (options?.backtest_search_objectives || DEFAULT_BACKTEST_SEARCH_OBJECTIVES)
       .map(item => ({ label: item.label, value: item.key }))
   ), [options]);
+  const isDatabaseTab = activeTab === 'db';
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
     : (activeTab === 'backtest' ? runBacktest : (activeTab === 'timing' ? runTimingAnalysis : runAnalysis));
@@ -1879,15 +1881,20 @@ const FactorLab = () => {
             { key: 'composite', label: '组合因子' },
             { key: 'timing', label: '择时因子' },
             { key: 'backtest', label: '因子回测' },
+            { key: 'db', label: 'DB' },
           ]}
         />
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
-          <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
-            运行
-          </Button>
-        </Space>
+        {!isDatabaseTab && (
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
+            <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
+              运行
+            </Button>
+          </Space>
+        )}
       </div>
+
+      {activeTab === 'db' && <DatabaseManager />}
 
       {activeTab === 'single' && (
       <>

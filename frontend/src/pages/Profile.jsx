@@ -99,6 +99,11 @@ const Profile = () => {
       title: '账户管理',
       items: [
         {
+          title: '持仓',
+          onClick: () => navigate('/options'),
+          arrow: true
+        },
+        {
           title: 'IBKR 账户管理',
           onClick: () => navigate('/ib-account-manager'),
           arrow: true
