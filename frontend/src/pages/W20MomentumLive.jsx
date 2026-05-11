@@ -163,38 +163,19 @@ const getRebalanceFrequencyLabel = (value) => (
   rebalanceFrequencyOptions.find(item => item.value === value)?.label || value || '-'
 );
 
-const liveTradeOrderTypeOptions = [
-  { label: '限价单', value: 'LIMIT' },
-  { label: '市价单', value: 'MARKET' },
-];
-const getLiveTradeOrderTypeLabel = (value) => (
-  liveTradeOrderTypeOptions.find(item => item.value === String(value || 'LIMIT').toUpperCase())?.label || '-'
-);
-
-const liveTradePriceLevelOptions = [
-  { label: '一档限价', value: 1 },
-  { label: '二档限价', value: 2 },
-  { label: '三档限价', value: 3 },
-  { label: '四档限价', value: 4 },
-  { label: '五档限价', value: 5 },
-  { label: '最新成交价', value: 0 },
-  { label: 'PTrade深度兜底', value: -1 },
-];
-const getLiveTradePriceLevelLabel = (value) => (
-  liveTradePriceLevelOptions.find(item => item.value === Number(value))?.label || '-'
-);
-
-const liveTradeMarketTypeOptions = [
-  { label: '对手方最优价格', value: 0 },
-  { label: '最优五档即时成交剩余转限价', value: 1 },
-  { label: '本方最优价格', value: 2 },
-  { label: '即时成交剩余撤销', value: 3 },
-  { label: '最优五档即时成交剩余撤销', value: 4 },
-  { label: '全额成交或撤单', value: 5 },
-];
-const getLiveTradeMarketTypeLabel = (value) => (
-  liveTradeMarketTypeOptions.find(item => item.value === Number(value))?.label || '-'
-);
+const getExecutorPriceLevelLabel = (value) => {
+  if (value === -1) return 'PTrade兜底';
+  if (value === 0) return '最新价';
+  if (value === undefined || value === null) return '-';
+  return `${value}档`;
+};
+const formatExecutorPolicy = (policy) => {
+  if (!policy) return '-';
+  const sequence = Array.isArray(policy.price_level_sequence) && policy.price_level_sequence.length
+    ? policy.price_level_sequence.map(getExecutorPriceLevelLabel).join(' -> ')
+    : '-';
+  return `${getExecutorPriceLevelLabel(policy.price_level)} / ${policy.order_timeout_seconds || '-'}s / 重定价${policy.max_replace_count ?? '-'}次 / ${sequence}`;
+};
 
 const tradeReasonMeta = {
   initial_entry: { label: '首次建仓', color: 'purple' },
@@ -228,10 +209,8 @@ const defaultValues = {
   auto_virtual_trade_time: '09:31',
   live_trade_enabled: false,
   external_trading_account_id: undefined,
+  live_sub_account_id: undefined,
   live_trade_total_amount: undefined,
-  live_trade_order_type: 'LIMIT',
-  live_trade_price_level: 1,
-  live_trade_market_type: 0,
 };
 
 const normalizeConfigForForm = (config) => ({
@@ -257,7 +236,9 @@ const W20MomentumLive = () => {
   const [latestPlanLoading, setLatestPlanLoading] = useState(false);
   const [liveTradePlan, setLiveTradePlan] = useState(null);
   const [externalAccounts, setExternalAccounts] = useState([]);
+  const [liveSubAccounts, setLiveSubAccounts] = useState([]);
   const [formError, setFormError] = useState(null);
+  const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
 
   useEffect(() => {
     fetchConfigs();
@@ -273,6 +254,22 @@ const W20MomentumLive = () => {
     }
   };
 
+  const fetchLiveSubAccounts = async (externalAccountId) => {
+    if (!externalAccountId) {
+      setLiveSubAccounts([]);
+      return [];
+    }
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+      setLiveSubAccounts(data || []);
+      return data || [];
+    } catch (error) {
+      message.error(formatErrorMessage(error, '加载虚拟子账户失败'));
+      setLiveSubAccounts([]);
+      return [];
+    }
+  };
+
   const fetchConfigs = async () => {
     setListLoading(true);
     try {
@@ -284,6 +281,10 @@ const W20MomentumLive = () => {
       setListLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchLiveSubAccounts(selectedExternalTradingAccountId);
+  }, [selectedExternalTradingAccountId]);
 
   const fetchDetail = async (configId) => {
     if (!configId) {
@@ -416,10 +417,8 @@ const W20MomentumLive = () => {
       auto_virtual_trade_time: values.auto_virtual_trade_time || defaultValues.auto_virtual_trade_time,
       live_trade_enabled: !!values.live_trade_enabled,
       external_trading_account_id: values.external_trading_account_id || null,
+      live_sub_account_id: values.live_sub_account_id || null,
       live_trade_total_amount: values.live_trade_total_amount || null,
-      live_trade_order_type: values.live_trade_order_type || defaultValues.live_trade_order_type,
-      live_trade_price_level: values.live_trade_price_level ?? defaultValues.live_trade_price_level,
-      live_trade_market_type: values.live_trade_market_type ?? defaultValues.live_trade_market_type,
     };
   };
 
@@ -493,14 +492,13 @@ const W20MomentumLive = () => {
       const { data } = await request.post(`/api/w20-momentum-live/configs/${selectedConfig.id}/live-trade`, {
         dry_run: dryRun,
         sync_before: true,
-        defer_until_market_open: true,
       });
       setLiveTradePlan(data);
-      message.success(data.message || (dryRun ? '实盘计划已生成' : '实盘订单已提交'));
+      message.success(data.message || (dryRun ? '实盘计划已生成' : '已确认并触发执行器'));
       await fetchConfigs();
       await fetchDetail(selectedConfig.id);
     } catch (error) {
-      message.error(formatErrorMessage(error, dryRun ? '生成实盘计划失败' : '执行实盘交易失败'));
+      message.error(formatErrorMessage(error, dryRun ? '生成实盘计划失败' : '确认目标仓位失败'));
     } finally {
       setLiveTradeLoading(false);
     }
@@ -580,6 +578,27 @@ const W20MomentumLive = () => {
     acc[account.id] = `${account.name} (${account.identifier})`;
     return acc;
   }, {}), [externalAccounts]);
+
+  const liveSubAccountOptions = useMemo(() => {
+    const currentConfigId = Number(selectedConfig?.id || 0);
+    return (liveSubAccounts || [])
+      .filter(item => item.enabled)
+      .map(item => {
+        const isFree = !item.strategy_type && !item.strategy_config_id;
+        const isCurrentBinding = (
+          item.strategy_type === 'w20_momentum_live'
+          && currentConfigId > 0
+          && Number(item.strategy_config_id) === currentConfigId
+        );
+        const disabled = !(isFree || isCurrentBinding);
+        const statusText = isFree ? '空闲' : `已绑定：${item.strategy_name || item.binding_label || item.strategy_type || '其他策略'}`;
+        return {
+          value: item.id,
+          disabled,
+          label: `${item.name} / ${formatMoney(item.cash_allocated, 2)} / ${statusText}`,
+        };
+      });
+  }, [liveSubAccounts, selectedConfig]);
 
   const configColumns = [
     {
@@ -935,7 +954,7 @@ const W20MomentumLive = () => {
             <Switch checkedChildren="开启" unCheckedChildren="关闭" />
           </Form.Item>
         </Col>
-        <Col xs={24} md={10}>
+        <Col xs={24} md={8}>
           <Form.Item
             name="external_trading_account_id"
             label="外部交易账户"
@@ -956,38 +975,40 @@ const W20MomentumLive = () => {
               optionFilterProp="label"
               showSearch
               placeholder="选择外部交易账户"
+              onChange={() => form.setFieldsValue({ live_sub_account_id: undefined })}
             />
           </Form.Item>
         </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} md={6}>
+          <Form.Item
+            name="live_sub_account_id"
+            label="虚拟子账户"
+            rules={[
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (!getFieldValue('live_trade_enabled') || value) {
+                    return Promise.resolve();
+                  }
+                  return Promise.reject(new Error('请选择虚拟子账户'));
+                },
+              }),
+            ]}
+          >
+            <Select
+              allowClear
+              options={liveSubAccountOptions}
+              optionFilterProp="label"
+              showSearch
+              placeholder={selectedExternalTradingAccountId ? '选择虚拟子账户' : '先选择外部账户'}
+              disabled={!selectedExternalTradingAccountId}
+            />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={6}>
           <Form.Item name="live_trade_total_amount" label="实盘目标资金">
             <InputNumber min={0} step={10000} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
-      </Row>
-
-      <Row gutter={16}>
-        <Col xs={24} md={8}>
-          <Form.Item name="live_trade_order_type" label="实盘下单方式" rules={[{ required: true }]}>
-            <Select options={liveTradeOrderTypeOptions} />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item name="live_trade_price_level" label="执行价格规则" rules={[{ required: true }]}>
-            <Select options={liveTradePriceLevelOptions} />
-          </Form.Item>
-        </Col>
-        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.live_trade_order_type !== cur.live_trade_order_type}>
-          {({ getFieldValue }) => (
-            getFieldValue('live_trade_order_type') === 'MARKET' ? (
-              <Col xs={24} md={8}>
-                <Form.Item name="live_trade_market_type" label="市价委托类型" rules={[{ required: true }]}>
-                  <Select options={liveTradeMarketTypeOptions} />
-                </Form.Item>
-              </Col>
-            ) : null
-          )}
-        </Form.Item>
       </Row>
 
       <Form.Item>
@@ -1138,8 +1159,13 @@ const W20MomentumLive = () => {
 
   const livePlanRows = liveTradePlan?.plan?.rows || [];
   const liveOrderRows = liveTradePlan?.plan?.orders || [];
-  const liveExecutionRows = liveTradePlan?.execution?.orders || [];
-  const queuedExecution = liveTradePlan?.queued_execution;
+  const executorAccountResult = liveTradePlan?.execution?.accounts?.[0] || {};
+  const liveExecutionRows = liveTradePlan?.execution?.orders || executorAccountResult?.result?.orders || [];
+  const liveLifecycleRows = liveTradePlan?.execution?.lifecycle_orders || executorAccountResult?.parent_orders || detail?.live_orders || [];
+  const liveLedgerRows = detail?.live_ledger_positions || [];
+  const liveSubAccount = liveTradePlan?.plan?.sub_account || detail?.live_sub_account;
+  const liveApproval = liveTradePlan?.approval;
+  const hasLiveTradePlan = !!liveTradePlan?.plan;
   const livePlanSourceLabel = {
     schedule: '定时任务',
     auto_signal: '盘后信号',
@@ -1152,6 +1178,9 @@ const W20MomentumLive = () => {
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 160, render: formatSymbolLabel },
     { title: '目标仓位', dataIndex: 'target_weight_pct', key: 'target_weight_pct', width: 100, render: value => formatPercent(value) },
     { title: '当前数量', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatMoney(value, 0) },
+    { title: '挂买', dataIndex: 'pending_buy_quantity', key: 'pending_buy_quantity', width: 90, render: value => value ? formatMoney(value, 0) : '-' },
+    { title: '挂卖', dataIndex: 'pending_sell_quantity', key: 'pending_sell_quantity', width: 90, render: value => value ? formatMoney(value, 0) : '-' },
+    { title: '执行后预期', dataIndex: 'effective_quantity', key: 'effective_quantity', width: 110, render: value => formatMoney(value, 0) },
     { title: '目标数量', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatMoney(value, 0) },
     { title: '委托数量', dataIndex: 'order_quantity', key: 'order_quantity', width: 100, render: value => value ? formatMoney(value, 0) : '-' },
     {
@@ -1161,7 +1190,6 @@ const W20MomentumLive = () => {
       width: 90,
       render: value => <Tag color={value === 'BUY' ? 'red' : value === 'SELL' ? 'green' : 'default'}>{value}</Tag>,
     },
-    { title: '单据类型', dataIndex: 'order_type', key: 'order_type', width: 90, render: getLiveTradeOrderTypeLabel },
     { title: '买一', dataIndex: 'bid', key: 'bid', width: 90, render: value => formatNumber(value, 4) },
     { title: '卖一', dataIndex: 'ask', key: 'ask', width: 90, render: value => formatNumber(value, 4) },
     { title: '最新', dataIndex: 'last_price', key: 'last_price', width: 90, render: value => formatNumber(value, 4) },
@@ -1178,30 +1206,8 @@ const W20MomentumLive = () => {
       width: 90,
       render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
     },
-    { title: '类型', dataIndex: 'order_type', key: 'order_type', width: 90, render: getLiveTradeOrderTypeLabel },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatMoney(value, 0) },
-    {
-      title: '执行价格',
-      dataIndex: 'limit_price',
-      key: 'limit_price',
-      width: 130,
-      render: (value, record) => {
-        if (String(record.order_type || 'LIMIT').toUpperCase() === 'MARKET') {
-          return record.protection_limit_price === undefined || record.protection_limit_price === null
-            ? 'PTrade现场保护价'
-            : formatNumber(record.protection_limit_price, 4);
-        }
-        return value === undefined || value === null ? 'PTrade现场限价' : formatNumber(value, 4);
-      },
-    },
     { title: '估算价', dataIndex: 'estimated_price', key: 'estimated_price', width: 100, render: value => formatNumber(value, 4) },
-    {
-      title: '市价类型',
-      dataIndex: 'market_type',
-      key: 'market_type',
-      width: 170,
-      render: (value, record) => (String(record.order_type || 'LIMIT').toUpperCase() === 'MARKET' ? getLiveTradeMarketTypeLabel(value) : '-'),
-    },
     { title: '估算来源', dataIndex: 'price_source', key: 'price_source', width: 120 },
     { title: '备注', dataIndex: 'remark', key: 'remark' },
   ];
@@ -1215,7 +1221,7 @@ const W20MomentumLive = () => {
       width: 90,
       render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag>,
     },
-    { title: '类型', dataIndex: 'order_type', key: 'order_type', width: 90, render: getLiveTradeOrderTypeLabel },
+    { title: '类型', dataIndex: 'order_type', key: 'order_type', width: 90, render: value => value || '-' },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatMoney(value, 0) },
     {
       title: '提交价',
@@ -1229,6 +1235,29 @@ const W20MomentumLive = () => {
     { title: '状态', dataIndex: 'status', key: 'status', width: 100, render: value => <Tag color={value === 'SUCCESS' ? 'success' : 'error'}>{value}</Tag> },
     { title: '订单号', dataIndex: 'order_id', key: 'order_id', width: 160 },
     { title: '消息', dataIndex: 'message', key: 'message' },
+  ];
+
+  const liveLedgerColumns = [
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 160, render: formatSymbolLabel },
+    { title: '账本数量', dataIndex: 'quantity', key: 'quantity', width: 110, render: value => formatMoney(value, 0) },
+    { title: '可用数量', dataIndex: 'available_quantity', key: 'available_quantity', width: 110, render: value => formatMoney(value, 0) },
+    { title: '成本价', dataIndex: 'avg_cost', key: 'avg_cost', width: 100, render: value => formatNumber(value, 4) },
+    { title: '市值', dataIndex: 'market_value', key: 'market_value', width: 120, render: value => formatMoney(value, 2) },
+    { title: '已实现盈亏', dataIndex: 'realized_pnl', key: 'realized_pnl', width: 120, render: value => formatMoney(value, 2) },
+    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatDateTime },
+  ];
+
+  const liveLifecycleColumns = [
+    { title: '状态', dataIndex: 'status', key: 'status', width: 120, render: value => <Tag color={value === 'FILLED' ? 'success' : value === 'REJECTED' || value === 'FAILED' ? 'error' : 'processing'}>{value}</Tag> },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: formatSymbolLabel },
+    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
+    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatMoney(value, 0) },
+    { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatMoney(value, 0) },
+    { title: '未成', dataIndex: 'remaining_quantity', key: 'remaining_quantity', width: 100, render: value => formatMoney(value, 0) },
+    { title: '均价', dataIndex: 'avg_fill_price', key: 'avg_fill_price', width: 100, render: value => formatNumber(value, 4) },
+    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100 },
+    { title: '订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170 },
+    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatDateTime },
   ];
 
   const renderLiveTrade = () => (
@@ -1245,17 +1274,12 @@ const W20MomentumLive = () => {
         <Descriptions.Item label="目标资金">
           {selectedConfig?.live_trade_total_amount ? formatMoney(selectedConfig.live_trade_total_amount, 2) : '账户总资产'}
         </Descriptions.Item>
-        <Descriptions.Item label="下单方式">
-          {getLiveTradeOrderTypeLabel(selectedConfig?.live_trade_order_type)}
+        <Descriptions.Item label="虚拟子账户">
+          {liveSubAccount ? `${liveSubAccount.name} / 可用 ${formatMoney(liveSubAccount.cash_available, 2)}` : '请先在策略配置中选择'}
         </Descriptions.Item>
-        <Descriptions.Item label="执行价格规则">
-          {getLiveTradePriceLevelLabel(selectedConfig?.live_trade_price_level)}
+        <Descriptions.Item label="执行策略">
+          {formatExecutorPolicy(liveSubAccount?.effective_executor_policy)}
         </Descriptions.Item>
-        {selectedConfig?.live_trade_order_type === 'MARKET' ? (
-          <Descriptions.Item label="市价委托类型">
-            {getLiveTradeMarketTypeLabel(selectedConfig?.live_trade_market_type)}
-          </Descriptions.Item>
-        ) : null}
       </Descriptions>
       <Space wrap>
         <Button
@@ -1275,45 +1299,52 @@ const W20MomentumLive = () => {
           加载最近计划
         </Button>
         <Popconfirm
-          title="确认实盘交易？"
-          description="交易时段内会立即提交；非交易时段会进入队列，等 A 股开盘后自动执行。"
+          title="确认目标仓位？"
+          description="确认后会写入虚拟子账户目标仓位；交易时段立即触发通用执行器，非交易时段由通用执行器在下个 A 股交易时段自动巡检执行。"
           okText="确认"
           cancelText="取消"
           onConfirm={() => handleLiveTrade({ dryRun: false })}
-          disabled={!selectedConfig?.live_trade_enabled || !liveOrderRows.length}
+          disabled={!selectedConfig?.live_trade_enabled || !hasLiveTradePlan}
         >
           <Button
             type="primary"
             danger
             loading={liveTradeLoading}
-            disabled={!selectedConfig?.live_trade_enabled || !liveOrderRows.length}
+            disabled={!selectedConfig?.live_trade_enabled || !hasLiveTradePlan}
           >
-            确认实盘交易
+            确认目标仓位
           </Button>
         </Popconfirm>
       </Space>
-      {queuedExecution ? (
+      {liveApproval ? (
         <Alert
-          type="warning"
+          type={liveApproval.executor_triggered ? 'success' : 'warning'}
           showIcon
-          message={`已确认实盘交易，状态 ${queuedExecution.status}，预计执行时间 ${formatDateTime(queuedExecution.execute_after)}`}
+          message={liveApproval.executor_triggered
+            ? `目标仓位已确认，并已触发通用执行器（${formatDateTime(liveApproval.timestamp)}）`
+            : `目标仓位已确认，通用执行器将在下个 A 股交易时段自动巡检执行（${formatDateTime(liveApproval.timestamp)}）`}
         />
       ) : null}
       {liveTradePlan?.plan ? (
         <Descriptions bordered size="small" column={{ xs: 1, md: 4 }}>
           <Descriptions.Item label="计划账户">{liveTradePlan.plan.external_account?.name || '-'}</Descriptions.Item>
+          <Descriptions.Item label="虚拟子账户">{liveTradePlan.plan.sub_account?.name || '-'}</Descriptions.Item>
           <Descriptions.Item label="可用现金">{formatMoney(liveTradePlan.plan.available_cash, 2)}</Descriptions.Item>
           <Descriptions.Item label="目标资金">{formatMoney(liveTradePlan.plan.trade_base_value, 2)}</Descriptions.Item>
           <Descriptions.Item label="预计剩余现金">{formatMoney(liveTradePlan.plan.projected_cash, 2)}</Descriptions.Item>
-          <Descriptions.Item label="下单方式">{getLiveTradeOrderTypeLabel(liveTradePlan.plan.order_type)}</Descriptions.Item>
-          <Descriptions.Item label="执行价格规则">{getLiveTradePriceLevelLabel(liveTradePlan.plan.price_level)}</Descriptions.Item>
-          {liveTradePlan.plan.order_type === 'MARKET' ? (
-            <Descriptions.Item label="市价委托类型">{getLiveTradeMarketTypeLabel(liveTradePlan.plan.market_type)}</Descriptions.Item>
-          ) : null}
+          <Descriptions.Item label="执行策略">{formatExecutorPolicy(liveTradePlan.plan.sub_account?.effective_executor_policy)}</Descriptions.Item>
           <Descriptions.Item label="计划时间">{formatDateTime(liveTradePlan.timestamp)}</Descriptions.Item>
           <Descriptions.Item label="计划来源">{livePlanSourceLabel}</Descriptions.Item>
         </Descriptions>
       ) : null}
+      <Table
+        title={() => '策略账本持仓'}
+        rowKey="symbol"
+        columns={liveLedgerColumns}
+        dataSource={liveLedgerRows}
+        pagination={false}
+        scroll={{ x: 880 }}
+      />
       <Table
         title={() => '实盘调仓计划'}
         rowKey="symbol"
@@ -1323,7 +1354,7 @@ const W20MomentumLive = () => {
         scroll={{ x: 1200 }}
       />
       <Table
-        title={() => '待提交订单'}
+        title={() => '确认后目标动作'}
         rowKey={(record, index) => `${record.symbol}-${record.side}-${index}`}
         columns={liveOrderColumns}
         dataSource={liveOrderRows}
@@ -1338,6 +1369,16 @@ const W20MomentumLive = () => {
           dataSource={liveExecutionRows}
           pagination={false}
           scroll={{ x: 1260 }}
+        />
+      ) : null}
+      {liveLifecycleRows.length ? (
+        <Table
+          title={() => '订单生命周期'}
+          rowKey={record => record.id || record.client_order_id}
+          columns={liveLifecycleColumns}
+          dataSource={liveLifecycleRows}
+          pagination={{ pageSize: 8 }}
+          scroll={{ x: 1220 }}
         />
       ) : null}
     </Space>
