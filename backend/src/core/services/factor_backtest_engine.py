@@ -14,7 +14,14 @@ import polars as pl
 from sqlalchemy import distinct, or_
 from sqlalchemy.orm import Session as ORMSession
 
-from ..database import ETFHolding, StockEVC, USStockIndustrySnapshot
+from ..database import (
+    AStockInnovation100Constituent,
+    AStockInnovation100Level,
+    AStockInnovation100Rebalance,
+    ETFHolding,
+    StockEVC,
+    USStockIndustrySnapshot,
+)
 from ..utils import normalize_us_equity_symbol
 
 logger = logging.getLogger(__name__)
@@ -25,6 +32,9 @@ ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analyti
 DAILY_PRICE_SOURCE = "daily_close"
 NEXT_OPEN_PRICE_SOURCE = "next_open"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
+A_STOCK_INNO100_POOL = "INNO100"
+A_STOCK_INNO100_SYMBOL = "INNO100.CN"
+A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_SYMBOL
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 SUPPORTED_WINDOWS = [20, 60, 120]
 MIXED_WINDOW_KEY = "mixed"
@@ -57,6 +67,7 @@ POOL_OPTIONS = [
     {"key": "QQQ", "label": "QQQ", "description": "纳指100成分股", "etfs": ["QQQ.US"]},
     {"key": "SPY", "label": "SPY", "description": "标普500成分股", "etfs": ["SPY.US"]},
     {"key": "SPY_QQQ", "label": "SPY+QQQ", "description": "标普500与纳指100成分股并集", "etfs": ["SPY.US", "QQQ.US"]},
+    {"key": A_STOCK_INNO100_POOL, "label": "A创100", "description": "自编A股创新100历史成分股", "etfs": [A_STOCK_INNO100_SYMBOL]},
 ]
 POOL_ETFS = {item["key"]: item["etfs"] for item in POOL_OPTIONS}
 
@@ -237,6 +248,17 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
+def _is_a_stock_symbol(symbol: str) -> bool:
+    text = str(symbol or "").strip().upper()
+    return text.endswith((".SH", ".SZ", ".BJ"))
+
+
+def _is_a_stock_pool(pool: Optional[str], candidate_etfs: Optional[List[str]] = None) -> bool:
+    if str(pool or "").strip().upper() == A_STOCK_INNO100_POOL:
+        return True
+    return A_STOCK_INNO100_SYMBOL in set(str(item).strip().upper() for item in (candidate_etfs or []))
+
+
 def _import_duckdb():
     try:
         import duckdb
@@ -251,6 +273,40 @@ def _connect_duckdb():
         return duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
     except Exception as exc:
         raise RuntimeError(f"DuckDB分析库当前不可读，可能正在同步写入或被其他进程占用: {exc}") from exc
+
+
+def _selected_inno100_rebalance_ids_by_date(
+    db: ORMSession,
+    start_date: date,
+    end_date: date,
+) -> Dict[date, int]:
+    rows = (
+        db.query(AStockInnovation100Rebalance)
+        .filter(AStockInnovation100Rebalance.index_code == A_STOCK_INNO100_INDEX_CODE)
+        .order_by(
+            AStockInnovation100Rebalance.effective_date.asc(),
+            AStockInnovation100Rebalance.rebalance_date.asc(),
+            AStockInnovation100Rebalance.id.asc(),
+        )
+        .all()
+    )
+    dated_rows: List[tuple[date, int]] = []
+    for row in rows:
+        snapshot_date = row.effective_date or row.rebalance_date
+        if snapshot_date and snapshot_date <= end_date:
+            dated_rows.append((snapshot_date, int(row.id)))
+    if not dated_rows:
+        return {}
+
+    id_by_date: Dict[date, int] = {}
+    for snapshot_date, rebalance_id in dated_rows:
+        if start_date <= snapshot_date <= end_date:
+            id_by_date[snapshot_date] = rebalance_id
+    pre_start = [(snapshot_date, rebalance_id) for snapshot_date, rebalance_id in dated_rows if snapshot_date < start_date]
+    if pre_start:
+        snapshot_date, rebalance_id = pre_start[-1]
+        id_by_date[snapshot_date] = rebalance_id
+    return dict(sorted(id_by_date.items(), key=lambda item: item[0]))
 
 
 def get_max_trade_date() -> date:
@@ -269,6 +325,47 @@ def get_max_trade_date() -> date:
     return date.today()
 
 
+def _get_max_a_stock_market_date() -> Optional[date]:
+    connection = _connect_duckdb()
+    try:
+        row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
+    finally:
+        connection.close()
+    value = row[0] if row else None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value:
+        return datetime.fromisoformat(str(value)).date()
+    return None
+
+
+def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
+    row = (
+        db.query(AStockInnovation100Level.date)
+        .filter(AStockInnovation100Level.index_code == A_STOCK_INNO100_INDEX_CODE)
+        .order_by(AStockInnovation100Level.date.desc())
+        .first()
+    )
+    value = row[0] if row else None
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
+
+
+def _resolve_backtest_end_date(request: FactorBacktestConfig, db: ORMSession) -> date:
+    if request.end_date:
+        return request.end_date
+    if not _is_a_stock_pool(request.pool, request.candidate_etfs):
+        return get_max_trade_date()
+    candidates = [
+        item for item in [_get_max_a_stock_market_date(), _get_latest_inno100_level_date(db)]
+        if item is not None
+    ]
+    return min(candidates) if candidates else date.today()
+
+
 def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl.DataFrame:
     safe_symbols = [
         symbol for symbol in list(dict.fromkeys(symbols))
@@ -285,32 +382,59 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
     if not safe_symbols:
         return pl.DataFrame(schema=schema)
 
-    symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in safe_symbols)
-    query = f"""
-        SELECT
-            symbol,
-            CAST(trade_date AS DATE) AS trade_date,
-            CAST(open AS DOUBLE) AS open,
-            CAST(close AS DOUBLE) AS close,
-            CAST(volume AS DOUBLE) AS volume,
-            CAST(turnover AS DOUBLE) AS turnover
-        FROM us_stock_daily
-        WHERE symbol IN ({symbol_sql})
-          AND trade_date BETWEEN ? AND ?
-          AND close IS NOT NULL
-          AND close > 0
-        ORDER BY symbol, trade_date
-    """
+    frames: List[pl.DataFrame] = []
     connection = _connect_duckdb()
     try:
-        df = pl.read_database(
-            query,
-            connection,
-            execute_options={"parameters": [start_date, end_date]},
-        )
+        us_symbols = [symbol for symbol in safe_symbols if str(symbol).upper().endswith(".US")]
+        if us_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in us_symbols)
+            query = f"""
+                SELECT
+                    symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(volume AS DOUBLE) AS volume,
+                    CAST(turnover AS DOUBLE) AS turnover
+                FROM us_stock_daily
+                WHERE symbol IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY symbol, trade_date
+            """
+            frames.append(
+                pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+            )
+
+        a_symbols = [symbol for symbol in safe_symbols if _is_a_stock_symbol(symbol)]
+        if a_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_market_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(
+                pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+            )
     finally:
         connection.close()
 
+    non_empty_frames = [frame for frame in frames if frame is not None and not frame.is_empty()]
+    if not non_empty_frames:
+        return pl.DataFrame(schema=schema)
+    df = pl.concat(non_empty_frames, how="vertical_relaxed")
     if df.is_empty():
         return pl.DataFrame(schema=schema)
     return df.with_columns(
@@ -602,6 +726,34 @@ def load_universe_history(
     holdings_date_count: Dict[str, int] = {}
 
     for etf_symbol in candidate_etfs:
+        if etf_symbol == A_STOCK_INNO100_SYMBOL:
+            selected_ids_by_date = _selected_inno100_rebalance_ids_by_date(db, start_date, end_date)
+            snapshot_dates_by_etf[etf_symbol] = sorted(selected_ids_by_date)
+            holdings_date_count[etf_symbol] = len(selected_ids_by_date)
+            symbols_by_etf_date[etf_symbol] = {}
+            if not selected_ids_by_date:
+                continue
+            date_by_id = {rebalance_id: snapshot_date for snapshot_date, rebalance_id in selected_ids_by_date.items()}
+            rows = (
+                db.query(AStockInnovation100Constituent)
+                .filter(
+                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                    AStockInnovation100Constituent.rebalance_id.in_(list(date_by_id)),
+                )
+                .order_by(AStockInnovation100Constituent.rebalance_id.asc(), AStockInnovation100Constituent.weight_pct.desc())
+                .all()
+            )
+            for row in rows:
+                symbol = str(row.ts_code or "").strip().upper()
+                snapshot_date = date_by_id.get(int(row.rebalance_id))
+                if not symbol or not snapshot_date:
+                    continue
+                symbols_by_etf_date[etf_symbol].setdefault(snapshot_date, [])
+                if symbol not in symbols_by_etf_date[etf_symbol][snapshot_date]:
+                    symbols_by_etf_date[etf_symbol][snapshot_date].append(symbol)
+                all_symbols.add(symbol)
+            continue
+
         all_dates = [
             row[0]
             for row in (
@@ -659,6 +811,30 @@ def load_universe_weight_history(
     candidate_etfs = list(dict.fromkeys(candidate_etfs or DEFAULT_CANDIDATE_ETFS))
     weight_history: Dict[str, Dict[date, Dict[str, float]]] = {}
     for etf_symbol in candidate_etfs:
+        if etf_symbol == A_STOCK_INNO100_SYMBOL:
+            selected_ids_by_date = _selected_inno100_rebalance_ids_by_date(db, start_date, end_date)
+            if not selected_ids_by_date:
+                continue
+            date_by_id = {rebalance_id: snapshot_date for snapshot_date, rebalance_id in selected_ids_by_date.items()}
+            weight_history[etf_symbol] = {}
+            rows = (
+                db.query(AStockInnovation100Constituent)
+                .filter(
+                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                    AStockInnovation100Constituent.rebalance_id.in_(list(date_by_id)),
+                )
+                .order_by(AStockInnovation100Constituent.rebalance_id.asc(), AStockInnovation100Constituent.weight_pct.desc())
+                .all()
+            )
+            for row in rows:
+                symbol = str(row.ts_code or "").strip().upper()
+                snapshot_date = date_by_id.get(int(row.rebalance_id))
+                if not symbol or not snapshot_date:
+                    continue
+                weight_history[etf_symbol].setdefault(snapshot_date, {})
+                weight_history[etf_symbol][snapshot_date][symbol] = float(row.weight_pct or 0) / 100.0
+            continue
+
         all_dates = [
             row[0]
             for row in (
@@ -761,42 +937,79 @@ def _load_industry_frame(
 ) -> pl.DataFrame:
     if not symbols:
         return pl.DataFrame()
-    rows = (
-        db.query(
-            USStockIndustrySnapshot.symbol,
-            USStockIndustrySnapshot.date,
-            USStockIndustrySnapshot.sector,
-            USStockIndustrySnapshot.industry_group,
-            USStockIndustrySnapshot.industry,
-            USStockIndustrySnapshot.sub_industry,
-            USStockIndustrySnapshot.market_cap,
+    frames: List[pl.DataFrame] = []
+    us_symbols = [symbol for symbol in symbols if str(symbol).upper().endswith(".US")]
+    if us_symbols:
+        rows = (
+            db.query(
+                USStockIndustrySnapshot.symbol,
+                USStockIndustrySnapshot.date,
+                USStockIndustrySnapshot.sector,
+                USStockIndustrySnapshot.industry_group,
+                USStockIndustrySnapshot.industry,
+                USStockIndustrySnapshot.sub_industry,
+                USStockIndustrySnapshot.market_cap,
+            )
+            .filter(
+                USStockIndustrySnapshot.symbol.in_(us_symbols),
+                USStockIndustrySnapshot.provider == "fmp",
+            )
+            .all()
         )
-        .filter(
-            USStockIndustrySnapshot.symbol.in_(symbols),
-            USStockIndustrySnapshot.provider == "fmp",
-        )
-        .all()
-    )
-    if not rows:
+        if rows:
+            frames.append(
+                pl.DataFrame(
+                    {
+                        "symbol": [row.symbol for row in rows],
+                        "industry_date": [row.date for row in rows],
+                        "sector": [row.sector for row in rows],
+                        "industry_group": [row.industry_group for row in rows],
+                        "industry": [row.industry for row in rows],
+                        "sub_industry": [row.sub_industry for row in rows],
+                        "market_cap": [row.market_cap for row in rows],
+                    }
+                )
+                .with_columns(
+                    pl.col("industry_date").cast(pl.Date),
+                    pl.col("market_cap").cast(pl.Float64),
+                )
+                .sort(["symbol", "industry_date"])
+                .unique(subset=["symbol"], keep="last")
+            )
+
+    a_symbols = [symbol for symbol in symbols if _is_a_stock_symbol(symbol)]
+    if a_symbols:
+        symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
+        query = f"""
+            SELECT
+                ts_code AS symbol,
+                industry AS sector,
+                industry AS industry_group,
+                industry AS industry,
+                industry AS sub_industry,
+                CAST(NULL AS DOUBLE) AS market_cap
+            FROM a_stock_basic
+            WHERE ts_code IN ({symbol_sql})
+        """
+        connection = _connect_duckdb()
+        try:
+            a_frame = pl.read_database(query, connection)
+        finally:
+            connection.close()
+        if not a_frame.is_empty():
+            frames.append(
+                a_frame.with_columns(
+                    pl.lit(end_date).cast(pl.Date).alias("industry_date"),
+                    pl.col("market_cap").cast(pl.Float64),
+                )
+            )
+
+    non_empty_frames = [frame for frame in frames if frame is not None and not frame.is_empty()]
+    if not non_empty_frames:
         return pl.DataFrame()
     return (
-        pl.DataFrame(
-            {
-                "symbol": [row.symbol for row in rows],
-                "industry_date": [row.date for row in rows],
-                "sector": [row.sector for row in rows],
-                "industry_group": [row.industry_group for row in rows],
-                "industry": [row.industry for row in rows],
-                "sub_industry": [row.sub_industry for row in rows],
-                "market_cap": [row.market_cap for row in rows],
-            }
-        )
-        .with_columns(
-            pl.col("industry_date").cast(pl.Date),
-            pl.col("market_cap").cast(pl.Float64),
-        )
-        .sort(["symbol", "industry_date"])
-        .unique(subset=["symbol"], keep="last")
+        pl.concat(non_empty_frames, how="vertical_relaxed")
+        .select(["symbol", "industry_date", "sector", "industry_group", "industry", "sub_industry", "market_cap"])
         .sort("symbol")
     )
 
@@ -1584,6 +1797,35 @@ def _price_frame_to_rows_by_symbol(price_df: pl.DataFrame) -> Dict[str, List[Dic
     return rows_by_symbol
 
 
+def _load_inno100_benchmark_rows(db: ORMSession, start_date: date, end_date: date) -> Dict[str, List[Dict[str, Any]]]:
+    rows = (
+        db.query(AStockInnovation100Level.date, AStockInnovation100Level.level)
+        .filter(
+            AStockInnovation100Level.index_code == A_STOCK_INNO100_INDEX_CODE,
+            AStockInnovation100Level.date >= start_date,
+            AStockInnovation100Level.date <= end_date,
+            AStockInnovation100Level.level.isnot(None),
+        )
+        .order_by(AStockInnovation100Level.date.asc())
+        .all()
+    )
+    result_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        level = _safe_float(row.level)
+        if level is None or level <= 0:
+            continue
+        result_rows.append(
+            {
+                "date": row.date,
+                "open": level,
+                "close": level,
+                "volume": 0.0,
+                "turnover": 0.0,
+            }
+        )
+    return {A_STOCK_INNO100_SYMBOL: result_rows} if result_rows else {}
+
+
 def append_execution_price_rows(
     prepared_data: Dict[str, Any],
     execution_date: date,
@@ -1736,8 +1978,9 @@ def prepare_factor_backtest_base_data(
     resolved_legs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     resolved_legs = resolved_legs or resolve_factor_legs(request.legs)
-    end_date = request.end_date or get_max_trade_date()
+    end_date = _resolve_backtest_end_date(request, db)
     candidate_etfs = list(dict.fromkeys(request.candidate_etfs or POOL_ETFS.get(request.pool, DEFAULT_CANDIDATE_ETFS)))
+    is_a_stock_pool = _is_a_stock_pool(request.pool, candidate_etfs)
     required_windows = required_windows_for_legs(resolved_legs)
     max_factor_window = max(required_windows)
     fetch_padding_days = max(370, int(request.min_listing_days) + 30, int(max_factor_window * 3))
@@ -1769,7 +2012,11 @@ def prepare_factor_backtest_base_data(
     industry_df = _load_industry_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=3650), end_date) if needs_industry else None
     valuation_df = _load_valuation_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=540), end_date) if "valuation_gap" in factor_keys else None
     weight_history = load_universe_weight_history(db, candidate_etfs, request.start_date, end_date) if "index_weight" in factor_keys else None
-    benchmark_rows = _price_frame_to_rows_by_symbol(load_price_frame(candidate_etfs, request.start_date - timedelta(days=10), end_date))
+    benchmark_rows = (
+        _load_inno100_benchmark_rows(db, request.start_date - timedelta(days=10), end_date)
+        if is_a_stock_pool
+        else _price_frame_to_rows_by_symbol(load_price_frame(candidate_etfs, request.start_date - timedelta(days=10), end_date))
+    )
 
     return {
         "end_date": end_date,

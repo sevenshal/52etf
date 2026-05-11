@@ -9,7 +9,11 @@ import numpy as np
 from sqlalchemy import distinct, or_
 from sqlalchemy.orm import Session as ORMSession
 
-from ..core.database import ETFHolding
+from ..core.database import (
+    AStockInnovation100Constituent,
+    AStockInnovation100Rebalance,
+    ETFHolding,
+)
 from ..core.services.factor_backtest_engine import (
     append_execution_price_rows,
     make_virtual_signal_backtest_config,
@@ -24,6 +28,8 @@ logger = logging.getLogger(__name__)
 DAILY_PRICE_SOURCE = "daily_close"
 NEXT_OPEN_PRICE_SOURCE = "next_open"
 DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
+A_STOCK_INNO100_SYMBOL = "INNO100.CN"
+A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_SYMBOL
 SUPPORTED_MOMENTUM_WINDOWS = [20, 60, 120]
 DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
@@ -393,6 +399,40 @@ def _is_rebalance_day(dates: List[date], index: int, frequency: str = DEFAULT_RE
     return False
 
 
+def _selected_inno100_rebalance_ids_by_date(
+    db: ORMSession,
+    start_date: date,
+    end_date: date,
+) -> Dict[date, int]:
+    rows = (
+        db.query(AStockInnovation100Rebalance)
+        .filter(AStockInnovation100Rebalance.index_code == A_STOCK_INNO100_INDEX_CODE)
+        .order_by(
+            AStockInnovation100Rebalance.effective_date.asc(),
+            AStockInnovation100Rebalance.rebalance_date.asc(),
+            AStockInnovation100Rebalance.id.asc(),
+        )
+        .all()
+    )
+    dated_rows = []
+    for row in rows:
+        snapshot_date = row.effective_date or row.rebalance_date
+        if snapshot_date and snapshot_date <= end_date:
+            dated_rows.append((snapshot_date, int(row.id)))
+    if not dated_rows:
+        return {}
+
+    id_by_date: Dict[date, int] = {}
+    for snapshot_date, rebalance_id in dated_rows:
+        if start_date <= snapshot_date <= end_date:
+            id_by_date[snapshot_date] = rebalance_id
+    pre_start = [(snapshot_date, rebalance_id) for snapshot_date, rebalance_id in dated_rows if snapshot_date < start_date]
+    if pre_start:
+        snapshot_date, rebalance_id = pre_start[-1]
+        id_by_date[snapshot_date] = rebalance_id
+    return dict(sorted(id_by_date.items(), key=lambda item: item[0]))
+
+
 def load_universe_history(
     db: ORMSession,
     candidate_etfs: List[str],
@@ -406,6 +446,34 @@ def load_universe_history(
     holdings_date_count: Dict[str, int] = {}
 
     for etf_symbol in candidate_etfs:
+        if etf_symbol == A_STOCK_INNO100_SYMBOL:
+            selected_ids_by_date = _selected_inno100_rebalance_ids_by_date(db, start_date, end_date)
+            snapshot_dates_by_etf[etf_symbol] = sorted(selected_ids_by_date)
+            holdings_date_count[etf_symbol] = len(selected_ids_by_date)
+            symbols_by_etf_date[etf_symbol] = {}
+            if not selected_ids_by_date:
+                continue
+            date_by_id = {rebalance_id: snapshot_date for snapshot_date, rebalance_id in selected_ids_by_date.items()}
+            rows = (
+                db.query(AStockInnovation100Constituent)
+                .filter(
+                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                    AStockInnovation100Constituent.rebalance_id.in_(list(date_by_id)),
+                )
+                .order_by(AStockInnovation100Constituent.rebalance_id.asc(), AStockInnovation100Constituent.weight_pct.desc())
+                .all()
+            )
+            for row in rows:
+                symbol = str(row.ts_code or "").strip().upper()
+                snapshot_date = date_by_id.get(int(row.rebalance_id))
+                if not symbol or not snapshot_date:
+                    continue
+                symbols_by_etf_date[etf_symbol].setdefault(snapshot_date, [])
+                if symbol not in symbols_by_etf_date[etf_symbol][snapshot_date]:
+                    symbols_by_etf_date[etf_symbol][snapshot_date].append(symbol)
+                all_symbols.add(symbol)
+            continue
+
         all_dates = [
             row[0]
             for row in (
@@ -463,6 +531,30 @@ def load_universe_weight_history(
     candidate_etfs = list(dict.fromkeys(candidate_etfs or DEFAULT_CANDIDATE_ETFS))
     weight_history: Dict[str, Dict[date, Dict[str, float]]] = {}
     for etf_symbol in candidate_etfs:
+        if etf_symbol == A_STOCK_INNO100_SYMBOL:
+            selected_ids_by_date = _selected_inno100_rebalance_ids_by_date(db, start_date, end_date)
+            if not selected_ids_by_date:
+                continue
+            date_by_id = {rebalance_id: snapshot_date for snapshot_date, rebalance_id in selected_ids_by_date.items()}
+            weight_history[etf_symbol] = {}
+            rows = (
+                db.query(AStockInnovation100Constituent)
+                .filter(
+                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                    AStockInnovation100Constituent.rebalance_id.in_(list(date_by_id)),
+                )
+                .order_by(AStockInnovation100Constituent.rebalance_id.asc(), AStockInnovation100Constituent.weight_pct.desc())
+                .all()
+            )
+            for row in rows:
+                symbol = str(row.ts_code or "").strip().upper()
+                snapshot_date = date_by_id.get(int(row.rebalance_id))
+                if not symbol or not snapshot_date:
+                    continue
+                weight_history[etf_symbol].setdefault(snapshot_date, {})
+                weight_history[etf_symbol][snapshot_date][symbol] = float(row.weight_pct or 0) / 100.0
+            continue
+
         all_dates = [
             row[0]
             for row in (

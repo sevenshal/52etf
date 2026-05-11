@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import Session as DBSession
 from ...core.database import (
+    AStockInnovation100Level,
     ETFFearGreedCloneHistory,
     FactorBacktestSearchResult,
     FactorBacktestSearchState,
@@ -30,6 +31,9 @@ from ...core.database import (
     get_db,
 )
 from ...core.services.factor_backtest_engine import (
+    A_STOCK_INNO100_INDEX_CODE,
+    A_STOCK_INNO100_POOL,
+    A_STOCK_INNO100_SYMBOL,
     FactorBacktestConfig as SharedFactorBacktestConfig,
     FactorBacktestLeg as SharedFactorBacktestLeg,
     prepare_factor_backtest_base_data as shared_prepare_factor_backtest_base_data,
@@ -187,6 +191,7 @@ DEFAULT_TIMING_TARGET_OPTIONS = [
     {"label": "QQQ", "value": "QQQ.US"},
     {"label": "SPY", "value": "SPY.US"},
     {"label": "SOXX", "value": "SOXX.US"},
+    {"label": "A创100", "value": A_STOCK_INNO100_SYMBOL},
 ]
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
@@ -219,13 +224,19 @@ POOL_OPTIONS = [
         "description": "标普500与纳指100成分股并集",
         "etfs": ["SPY.US", "QQQ.US"],
     },
+    {
+        "key": A_STOCK_INNO100_POOL,
+        "label": "A创100",
+        "description": "自编A股创新100历史成分股",
+        "etfs": [A_STOCK_INNO100_SYMBOL],
+    },
 ]
 
 POOL_ETFS = {item["key"]: item["etfs"] for item in POOL_OPTIONS}
 
 
 class FactorLabAnalyzeRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
+    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
     factor: str = "risk_adjusted_momentum"
     bucket_count: int = 10
     start_date: date = DEFAULT_START_DATE
@@ -484,7 +495,7 @@ class CompositeFactorLeg(BaseModel):
 
 
 class CompositeFactorAnalyzeRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
+    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
     bucket_count: int = 10
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
@@ -552,7 +563,7 @@ class CompositeFactorAnalyzeRequest(BaseModel):
 
 
 class FactorBacktestRequest(BaseModel):
-    pool: Literal["QQQ", "SPY", "SPY_QQQ"] = "SPY_QQQ"
+    pool: Literal["QQQ", "SPY", "SPY_QQQ", "INNO100"] = "SPY_QQQ"
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
     oos_start_date: Optional[date] = None
@@ -807,6 +818,15 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
+def _is_a_stock_symbol(symbol: str) -> bool:
+    text = str(symbol or "").strip().upper()
+    return text.endswith((".SH", ".SZ", ".BJ"))
+
+
+def _is_a_stock_pool(pool: Optional[str]) -> bool:
+    return str(pool or "").strip().upper() == A_STOCK_INNO100_POOL
+
+
 def _normalize_momentum_weights(raw_weights: Dict[str, float], active_windows: List[int]) -> Dict[int, float]:
     active = list(dict.fromkeys(int(item) for item in active_windows))
     weights: Dict[int, float] = {}
@@ -1008,51 +1028,130 @@ def _get_max_trade_date() -> date:
     return date.today()
 
 
+def _get_max_a_stock_market_date() -> Optional[date]:
+    connection = _connect_duckdb()
+    try:
+        row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
+    finally:
+        connection.close()
+    value = row[0] if row else None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value:
+        return datetime.fromisoformat(str(value)).date()
+    return None
+
+
+def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
+    row = (
+        db.query(AStockInnovation100Level.date)
+        .filter(AStockInnovation100Level.index_code == A_STOCK_INNO100_INDEX_CODE)
+        .order_by(AStockInnovation100Level.date.desc())
+        .first()
+    )
+    value = row[0] if row else None
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
+
+
+def _resolve_analysis_end_date(pool: str, requested_end: Optional[date], db: ORMSession) -> date:
+    if requested_end:
+        return requested_end
+    if not _is_a_stock_pool(pool):
+        return _get_max_trade_date()
+    candidates = [
+        item for item in [_get_max_a_stock_market_date(), _get_latest_inno100_level_date(db)]
+        if item is not None
+    ]
+    return min(candidates) if candidates else date.today()
+
+
+def _resolve_timing_end_date(request: TimingFactorAnalyzeRequest, db: ORMSession) -> date:
+    if request.end_date:
+        return request.end_date
+    target = str(request.target_symbol or "").strip().upper()
+    if target == A_STOCK_INNO100_SYMBOL or _is_a_stock_symbol(target):
+        candidates = [
+            item for item in [
+                _get_latest_inno100_level_date(db) if target == A_STOCK_INNO100_SYMBOL else _get_max_a_stock_market_date(),
+                _get_max_a_stock_market_date(),
+            ]
+            if item is not None
+        ]
+        return min(candidates) if candidates else date.today()
+    return _get_max_trade_date()
+
+
 def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl.DataFrame:
     safe_symbols = [
         symbol for symbol in list(dict.fromkeys(symbols))
         if symbol and SYMBOL_PATTERN.match(symbol)
     ]
+    schema = {
+        "symbol": pl.Utf8,
+        "trade_date": pl.Date,
+        "open": pl.Float64,
+        "close": pl.Float64,
+        "volume": pl.Float64,
+        "turnover": pl.Float64,
+    }
     if not safe_symbols:
-        return pl.DataFrame(
-            schema={
-                "symbol": pl.Utf8,
-                "trade_date": pl.Date,
-                "open": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Float64,
-                "turnover": pl.Float64,
-            }
-        )
+        return pl.DataFrame(schema=schema)
 
-    symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in safe_symbols)
-    query = f"""
-        SELECT
-            symbol,
-            CAST(trade_date AS DATE) AS trade_date,
-            CAST(open AS DOUBLE) AS open,
-            CAST(close AS DOUBLE) AS close,
-            CAST(volume AS DOUBLE) AS volume,
-            CAST(turnover AS DOUBLE) AS turnover
-        FROM us_stock_daily
-        WHERE symbol IN ({symbol_sql})
-          AND trade_date BETWEEN ? AND ?
-          AND close IS NOT NULL
-          AND close > 0
-        ORDER BY symbol, trade_date
-    """
+    frames: List[pl.DataFrame] = []
     connection = _connect_duckdb()
     try:
-        df = pl.read_database(
-            query,
-            connection,
-            execute_options={"parameters": [start_date, end_date]},
-        )
+        us_symbols = [symbol for symbol in safe_symbols if str(symbol).upper().endswith(".US")]
+        if us_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in us_symbols)
+            query = f"""
+                SELECT
+                    symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(volume AS DOUBLE) AS volume,
+                    CAST(turnover AS DOUBLE) AS turnover
+                FROM us_stock_daily
+                WHERE symbol IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY symbol, trade_date
+            """
+            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
+
+        a_symbols = [symbol for symbol in safe_symbols if _is_a_stock_symbol(symbol)]
+        if a_symbols:
+            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
+            query = f"""
+                SELECT
+                    ts_code AS symbol,
+                    CAST(trade_date AS DATE) AS trade_date,
+                    CAST(open AS DOUBLE) AS open,
+                    CAST(close AS DOUBLE) AS close,
+                    CAST(vol AS DOUBLE) AS volume,
+                    CAST(amount AS DOUBLE) AS turnover
+                FROM a_stock_market_daily
+                WHERE ts_code IN ({symbol_sql})
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY ts_code, trade_date
+            """
+            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
     finally:
         connection.close()
 
+    non_empty_frames = [frame for frame in frames if frame is not None and not frame.is_empty()]
+    if not non_empty_frames:
+        return pl.DataFrame(schema=schema)
+    df = pl.concat(non_empty_frames, how="vertical_relaxed")
     if df.is_empty():
-        return df
+        return pl.DataFrame(schema=schema)
     return df.with_columns(
         pl.col("trade_date").cast(pl.Date),
         pl.col("open").cast(pl.Float64),
@@ -1062,6 +1161,60 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
     ).sort(["symbol", "trade_date"]).with_columns(
         pl.min("trade_date").over("symbol").alias("_first_trade_date")
     )
+
+
+def _load_inno100_level_price_frame(db: ORMSession, start_date: date, end_date: date) -> pl.DataFrame:
+    rows = (
+        db.query(AStockInnovation100Level.date, AStockInnovation100Level.level)
+        .filter(
+            AStockInnovation100Level.index_code == A_STOCK_INNO100_INDEX_CODE,
+            AStockInnovation100Level.date >= start_date,
+            AStockInnovation100Level.date <= end_date,
+            AStockInnovation100Level.level.isnot(None),
+        )
+        .order_by(AStockInnovation100Level.date.asc())
+        .all()
+    )
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "trade_date": pl.Date,
+                "open": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Float64,
+                "turnover": pl.Float64,
+                "_first_trade_date": pl.Date,
+            }
+        )
+    return (
+        pl.DataFrame(
+            {
+                "symbol": [A_STOCK_INNO100_SYMBOL for _ in rows],
+                "trade_date": [row.date for row in rows],
+                "open": [row.level for row in rows],
+                "close": [row.level for row in rows],
+                "volume": [0.0 for _ in rows],
+                "turnover": [0.0 for _ in rows],
+            }
+        )
+        .with_columns(
+            pl.col("trade_date").cast(pl.Date),
+            pl.col("open").cast(pl.Float64),
+            pl.col("close").cast(pl.Float64),
+            pl.col("volume").cast(pl.Float64),
+            pl.col("turnover").cast(pl.Float64),
+        )
+        .sort(["symbol", "trade_date"])
+        .with_columns(pl.min("trade_date").over("symbol").alias("_first_trade_date"))
+    )
+
+
+def _load_target_price_frame(db: ORMSession, symbol: str, start_date: date, end_date: date) -> pl.DataFrame:
+    target = str(symbol or "").strip().upper()
+    if target == A_STOCK_INNO100_SYMBOL:
+        return _load_inno100_level_price_frame(db, start_date, end_date)
+    return _load_price_frame([target], start_date, end_date)
 
 
 def _fear_source_label(symbol: str) -> str:
@@ -1610,43 +1763,80 @@ def _load_industry_frame(
     if not symbols:
         return pl.DataFrame()
 
-    rows = (
-        db.query(
-            USStockIndustrySnapshot.symbol,
-            USStockIndustrySnapshot.date,
-            USStockIndustrySnapshot.sector,
-            USStockIndustrySnapshot.industry_group,
-            USStockIndustrySnapshot.industry,
-            USStockIndustrySnapshot.sub_industry,
-            USStockIndustrySnapshot.market_cap,
+    frames: List[pl.DataFrame] = []
+    us_symbols = [symbol for symbol in symbols if str(symbol).upper().endswith(".US")]
+    if us_symbols:
+        rows = (
+            db.query(
+                USStockIndustrySnapshot.symbol,
+                USStockIndustrySnapshot.date,
+                USStockIndustrySnapshot.sector,
+                USStockIndustrySnapshot.industry_group,
+                USStockIndustrySnapshot.industry,
+                USStockIndustrySnapshot.sub_industry,
+                USStockIndustrySnapshot.market_cap,
+            )
+            .filter(
+                USStockIndustrySnapshot.symbol.in_(us_symbols),
+                USStockIndustrySnapshot.provider == "fmp",
+            )
+            .all()
         )
-        .filter(
-            USStockIndustrySnapshot.symbol.in_(symbols),
-            USStockIndustrySnapshot.provider == "fmp",
-        )
-        .all()
-    )
-    if not rows:
+        if rows:
+            frames.append(
+                pl.DataFrame(
+                    {
+                        "symbol": [row.symbol for row in rows],
+                        "industry_date": [row.date for row in rows],
+                        "sector": [row.sector for row in rows],
+                        "industry_group": [row.industry_group for row in rows],
+                        "industry": [row.industry for row in rows],
+                        "sub_industry": [row.sub_industry for row in rows],
+                        "market_cap": [row.market_cap for row in rows],
+                    }
+                )
+                .with_columns(
+                    pl.col("industry_date").cast(pl.Date),
+                    pl.col("market_cap").cast(pl.Float64),
+                )
+                .sort(["symbol", "industry_date"])
+                .unique(subset=["symbol"], keep="last")
+            )
+
+    a_symbols = [symbol for symbol in symbols if _is_a_stock_symbol(symbol)]
+    if a_symbols:
+        symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
+        query = f"""
+            SELECT
+                ts_code AS symbol,
+                industry AS sector,
+                industry AS industry_group,
+                industry AS industry,
+                industry AS sub_industry,
+                CAST(NULL AS DOUBLE) AS market_cap
+            FROM a_stock_basic
+            WHERE ts_code IN ({symbol_sql})
+        """
+        connection = _connect_duckdb()
+        try:
+            a_frame = pl.read_database(query, connection)
+        finally:
+            connection.close()
+        if not a_frame.is_empty():
+            frames.append(
+                a_frame.with_columns(
+                    pl.lit(end_date).cast(pl.Date).alias("industry_date"),
+                    pl.col("market_cap").cast(pl.Float64),
+                )
+            )
+
+    non_empty_frames = [frame for frame in frames if frame is not None and not frame.is_empty()]
+    if not non_empty_frames:
         return pl.DataFrame()
 
     return (
-        pl.DataFrame(
-            {
-                "symbol": [row.symbol for row in rows],
-                "industry_date": [row.date for row in rows],
-                "sector": [row.sector for row in rows],
-                "industry_group": [row.industry_group for row in rows],
-                "industry": [row.industry for row in rows],
-                "sub_industry": [row.sub_industry for row in rows],
-                "market_cap": [row.market_cap for row in rows],
-            }
-        )
-        .with_columns(
-            pl.col("industry_date").cast(pl.Date),
-            pl.col("market_cap").cast(pl.Float64),
-        )
-        .sort(["symbol", "industry_date"])
-        .unique(subset=["symbol"], keep="last")
+        pl.concat(non_empty_frames, how="vertical_relaxed")
+        .select(["symbol", "industry_date", "sector", "industry_group", "industry", "sub_industry", "market_cap"])
         .sort("symbol")
     )
 
@@ -3913,7 +4103,7 @@ def _prepare_factor_backtest_base_data(
         db,
     )
 
-    end_date = request.end_date or _get_max_trade_date()
+    end_date = _resolve_analysis_end_date(request.pool, request.end_date, db)
     candidate_etfs = POOL_ETFS[request.pool]
     required_windows = _required_windows_for_composite_legs(resolved_legs)
     max_factor_window = max(required_windows)
@@ -5407,7 +5597,7 @@ def _run_timing_factor_analysis(
 
     max_forward_window = max([request.forward_window, *request.heatmap_forward_windows])
     fetch_end = end_date + timedelta(days=max(30, max_forward_window * 4))
-    price_df = _load_price_frame([request.target_symbol], request.start_date, fetch_end)
+    price_df = _load_target_price_frame(db, request.target_symbol, request.start_date, fetch_end)
     if price_df.is_empty():
         raise HTTPException(status_code=400, detail=f"{request.target_symbol} 没有可用日行情数据")
 
@@ -5533,7 +5723,7 @@ def _run_composite_factor_analysis(
     required_windows = _required_windows_for_composite_legs(resolved_legs)
 
     started_at = time.perf_counter()
-    end_date = request.end_date or _get_max_trade_date()
+    end_date = _resolve_analysis_end_date(request.pool, request.end_date, db)
     if request.oos_start_date and request.oos_start_date >= end_date:
         raise HTTPException(status_code=400, detail="样本外起始日期必须早于实际结束日期")
 
@@ -5710,7 +5900,7 @@ def _run_factor_analysis(
         raise HTTPException(status_code=400, detail=f"{factor_definition.label} 不支持多窗口合成")
 
     started_at = time.perf_counter()
-    end_date = request.end_date or _get_max_trade_date()
+    end_date = _resolve_analysis_end_date(request.pool, request.end_date, db)
     if request.oos_start_date and request.oos_start_date >= end_date:
         raise HTTPException(status_code=400, detail="样本外起始日期必须早于实际结束日期")
     max_forward_window = max(request.heatmap_forward_windows)
