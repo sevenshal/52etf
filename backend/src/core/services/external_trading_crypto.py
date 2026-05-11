@@ -35,11 +35,10 @@ def b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode((data + padding).encode("ascii"))
 
 
-def canonical_handshake_payload(account_id: str, name: str, identifier: str, ts: str, nonce: str) -> bytes:
+def canonical_handshake_payload(account_id: str, identifier: str, ts: str, nonce: str) -> bytes:
     payload = {
         "account_id": account_id,
         "identifier": identifier,
-        "name": name,
         "nonce": nonce,
         "ts": str(ts),
     }
@@ -72,7 +71,6 @@ def verify_rsa_sha256_signature(message: bytes, signature_b64: str) -> bool:
 
 def verify_handshake_signature(
     account_id: str,
-    name: str,
     identifier: str,
     ts: str,
     nonce: str,
@@ -95,7 +93,7 @@ def verify_handshake_signature(
     if nonce_key in _USED_NONCES:
         raise ExternalTradingCryptoError("signature nonce replayed")
 
-    message = canonical_handshake_payload(account_id, name, identifier, str(ts), nonce)
+    message = canonical_handshake_payload(account_id, identifier, str(ts), nonce)
     if not verify_rsa_sha256_signature(message, signature):
         raise ExternalTradingCryptoError("invalid signature")
 

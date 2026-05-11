@@ -5,18 +5,29 @@ import hmac
 import json
 import os
 import struct
+import threading
+import time
+
+try:
+    from urllib.parse import quote
+except ImportError:
+    from urllib import quote
 
 # HTTP mode: set to False to use ws and avoid TLS certificate validation.
-USE_HTTPS = False
-API_HOST = "api.52etf.vip"
+USE_HTTPS = os.getenv("PTRADE_USE_HTTPS", "0").strip().lower() in ("1", "true", "yes", "wss")
+API_HOST = os.getenv("PTRADE_API_HOST", "api.52etf.vip").strip() or "api.52etf.vip"
 
 # The backend validates account_id + account name + unique identifier.
 # Create the same account in the web "外部交易账号" page before starting this script.
-DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
-DEFAULT_IDENTIFIER = "GS66301027527"
+DEFAULT_ACCOUNT_ID = (
+    os.getenv("PTRADE_ACCOUNT_ID", "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl").strip()
+    or "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
+)
+DEFAULT_IDENTIFIER = os.getenv("PTRADE_IDENTIFIER", "GS66301027527").strip() or "GS66301027527"
 
 HEARTBEAT_INTERVAL_SECONDS = 20
 RECONNECT_DELAY_SECONDS = 5
+DISABLE_AUTO_WEBSOCKET = os.getenv("PTRADE_DISABLE_AUTO_WS", "0").strip().lower() in ("1", "true", "yes")
 RSA_N_HEX = (
     "d10e83e0f75ddef1fa41d524bbf4ff76dc9f28a1d1d376f09a9920b0e66362503b5fba39003215f68a911bb33d160745f9f452bfa775c73ca9a3741509b1e5f0e74f35fe2f7e09e4da3bd0eefdea5765322b62a90c080e0ab500853ce8147d7e837dd3cda9c089fe47934065a0da0f3e00cb9de406bd254e0e585d5c67f7af3e0d0729847ca04e69b9ce81e598cdde04e50305e7ecdd0fbeba18a30f307ac795f8145bb149e8a855eaff687077f95305b6419fbf3878dca91edef4666f51fdcdd1c70495fa94f74bdd2733261e04cffaa24a8b040d46897e940ad25756093538d85b321b115cd29970cd51fba8b18c48b2b6e406a71d72a9b58b402d0025854b"
 )
@@ -31,12 +42,6 @@ _MAC_KEY = hashlib.sha256(b"external-trading-mac:" + _SHARED_KEY).digest()
 
 try:
     from tornado import gen, ioloop, websocket
-    import threading
-    import time
-    try:
-        from urllib.parse import quote
-    except ImportError:
-        from urllib import quote
     HAS_WEBSOCKET = True
 except ImportError:
     HAS_WEBSOCKET = False
@@ -60,10 +65,11 @@ def initialize(context):
     g.account_id = DEFAULT_ACCOUNT_ID
     backtest = is_backtest_mode()
     g.external_account_identifier = DEFAULT_IDENTIFIER + ("B" if backtest else "")
-    g.external_account_name = "PTrade-%s" % g.external_account_identifier
     g.current_context = context
 
-    if HAS_WEBSOCKET:
+    if DISABLE_AUTO_WEBSOCKET:
+        log.info("External trading WebSocket autostart disabled.")
+    elif HAS_WEBSOCKET:
         log.info("Starting external trading WebSocket client...")
         thread = threading.Thread(target=run_ws_client)
         thread.daemon = True
@@ -89,11 +95,10 @@ def b64url_decode(data):
     return base64.urlsafe_b64decode((data + padding).encode("ascii"))
 
 
-def canonical_handshake_payload(account_id, name, identifier, ts, nonce):
+def canonical_handshake_payload(account_id, identifier, ts, nonce):
     payload = {
         "account_id": account_id,
         "identifier": identifier,
-        "name": name,
         "nonce": nonce,
         "ts": str(ts),
     }
@@ -113,8 +118,8 @@ def rsa_sha256_sign(message):
     return b64url_encode(signature_int.to_bytes(key_size, "big"))
 
 
-def sign_handshake(account_id, name, identifier, ts, nonce):
-    message = canonical_handshake_payload(account_id, name, identifier, ts, nonce)
+def sign_handshake(account_id, identifier, ts, nonce):
+    message = canonical_handshake_payload(account_id, identifier, ts, nonce)
     return rsa_sha256_sign(message)
 
 
@@ -201,10 +206,9 @@ def build_ws_url():
     ws_scheme = "wss" if USE_HTTPS else "ws"
     ts = str(int(time.time()))
     nonce = b64url_encode(os.urandom(16))
-    signature = sign_handshake(g.account_id, g.external_account_name, g.external_account_identifier, ts, nonce)
-    query = "account_id=%s&name=%s&identifier=%s&ts=%s&nonce=%s&signature=%s" % (
+    signature = sign_handshake(g.account_id, g.external_account_identifier, ts, nonce)
+    query = "account_id=%s&identifier=%s&ts=%s&nonce=%s&signature=%s" % (
         quote(str(g.account_id), safe=""),
-        quote(str(g.external_account_name), safe=""),
         quote(str(g.external_account_identifier), safe=""),
         quote(ts, safe=""),
         quote(nonce, safe=""),
@@ -923,7 +927,6 @@ def get_account_snapshot():
 
     return {
         "account_id": getattr(g, "account_id", None),
-        "name": getattr(g, "external_account_name", None),
         "identifier": getattr(g, "external_account_identifier", None),
         "backtest": is_backtest_mode(),
         "current_time": current_dt.strftime("%Y-%m-%d %H:%M:%S"),
