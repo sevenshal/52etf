@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, w20_momentum_backtest, w20_momentum_live, us_stock_signal_live, a_stock_innovation100, a_stock_innovation_momentum_live, db_manager, factor_lab
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, w20_momentum_backtest, w20_momentum_live, us_stock_signal_live, a_stock_innovation100, a_stock_innovation_momentum_live, db_manager, factor_lab
 from ..robot.main import robot
 from ..core.utils import send_alert_email
 import traceback
@@ -85,6 +85,7 @@ app.include_router(ib_copy_trading.router)
 app.include_router(snowball.router)
 app.include_router(monitor.router)
 app.include_router(longport_accounts.router)
+app.include_router(external_trading_accounts.router)
 app.include_router(szdt_configs.router)
 app.include_router(scheduled_tasks.router)
 app.include_router(evc_accounts.router)

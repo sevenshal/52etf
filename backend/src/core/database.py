@@ -711,6 +711,27 @@ class LongPortAccount(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class ExternalTradingAccount(Base):
+    """外部交易账号：通过一条反向 WebSocket 连接到券商/PTrade 客户端。"""
+    __tablename__ = "external_trading_accounts"
+    __table_args__ = (
+        UniqueConstraint("account_id", "identifier", name="uq_external_trading_account_identifier"),
+        UniqueConstraint("account_id", "name", name="uq_external_trading_account_name"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    identifier = Column(String(128), nullable=False)
+    remark = Column(String(1000))
+    enabled = Column(Boolean, default=True, nullable=False)
+    last_connected_at = Column(DateTime)
+    last_disconnected_at = Column(DateTime)
+    last_seen_at = Column(DateTime)
+    last_disconnect_reason = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class EVCAccountConfig(Base):
     """EVC 账户配置"""
     __tablename__ = "evc_account_configs"
@@ -1199,6 +1220,8 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
+        "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_account ON external_trading_accounts(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_identifier ON external_trading_accounts(account_id, identifier)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:

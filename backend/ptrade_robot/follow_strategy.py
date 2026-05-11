@@ -1,376 +1,674 @@
-from datetime import datetime
-import requests
+from datetime import datetime, timedelta
+import base64
+import hashlib
+import hmac
+import json
+import os
+import struct
 
-# HTTP mode: set to False to use http/ws and avoid TLS certificate validation.
+# HTTP mode: set to False to use ws and avoid TLS certificate validation.
 USE_HTTPS = False
 API_HOST = "api.52etf.vip"
-API_PREFIX = "/api/snowball"
 
-# --- WebSocket Client Logic (Tornado Implementation) ---
+# The backend validates account_id + account name + unique identifier.
+# Create the same account in the web "外部交易账号" page before starting this script.
+DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
+DEFAULT_IDENTIFIER = "GS66301027527"
+
+HEARTBEAT_INTERVAL_SECONDS = 20
+RECONNECT_DELAY_SECONDS = 5
+RSA_N_HEX = (
+    "d10e83e0f75ddef1fa41d524bbf4ff76dc9f28a1d1d376f09a9920b0e66362503b5fba39003215f68a911bb33d160745f9f452bfa775c73ca9a3741509b1e5f0e74f35fe2f7e09e4da3bd0eefdea5765322b62a90c080e0ab500853ce8147d7e837dd3cda9c089fe47934065a0da0f3e00cb9de406bd254e0e585d5c67f7af3e0d0729847ca04e69b9ce81e598cdde04e50305e7ecdd0fbeba18a30f307ac795f8145bb149e8a855eaff687077f95305b6419fbf3878dca91edef4666f51fdcdd1c70495fa94f74bdd2733261e04cffaa24a8b040d46897e940ad25756093538d85b321b115cd29970cd51fba8b18c48b2b6e406a71d72a9b58b402d0025854b"
+)
+RSA_D_HEX = (
+    "50a13bf9be2542eb05b2853f1dc3b1a3fc15bd906bf516c4ea3702cf131ef64b06f6c8443614d213bc92740ffe7e4acd9148f013ab33e9d2ecf175e53e2b6dc0bd63ae7bf780b1b27cb4979fa7e83b4f2b4b8992fe1fcf78589052d322e1f1f7362219a21320f53c9a09eb5d9036aed12328d2fba0b499c2301634be3968e3d54067e300fe5649a64b5fbe49cdc20e944c8265c5523628777c0802fd86784a6ce007ddb48cb9e3db14061ccd3e28331ac04fed8289395d553308ee90bbbf17d5cd84889caeb11520a3e238783133aa84c9c0da9bf5cef9982325c2ae13be182cb4d58e2d59ea7def87f93874759e7360218f0df56d7556547f0163fba1e93a1"
+)
+SHARED_KEY_B64 = "W4YVL+KUu7gcLlAuMGf/oD5T4y0RXjNvxVgAWrHVNe4="
+_SHA256_DIGESTINFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+_SHARED_KEY = base64.b64decode(SHARED_KEY_B64)
+_ENC_KEY = hashlib.sha256(b"external-trading-enc:" + _SHARED_KEY).digest()
+_MAC_KEY = hashlib.sha256(b"external-trading-mac:" + _SHARED_KEY).digest()
+
 try:
-    from tornado import websocket, ioloop
+    from tornado import gen, ioloop, websocket
     import threading
     import time
-    import json
+    try:
+        from urllib.parse import quote
+    except ImportError:
+        from urllib import quote
     HAS_WEBSOCKET = True
 except ImportError:
     HAS_WEBSOCKET = False
-    
-# Global Signal Flag
-g.ws_trigger_signal = None 
 
-def run_ws_client():
-    if not HAS_WEBSOCKET:
-        log.info("Tornado library not found, skipping WebSocket client")
-        return
-        
-    cli_id = g.cli_id
-    ws_scheme = "wss" if USE_HTTPS else "ws"
-    ws_url = "%s://%s/api/monitor/ws/%s" % (ws_scheme, API_HOST, cli_id)
-    
-    async def msg_handler(msg):
-        if not msg: return
-        log.info("WebSocket Message Received: %s" % msg)
-        if msg.startswith("TRIGGER:"):
-            comb_id = msg.split(":")[1]
-            g.ws_trigger_signal = {
-                "combination_id": comb_id,
-                "timestamp": datetime.now()
-            }
-            log.info("Signal Set for Combination: %s" % comb_id)
 
-    def start_tornado_client():
-        loop = ioloop.IOLoop.current() # PTrade thread likely has no loop, create one
-        
-        # Use simple callback based client if available or standard connect
-        # Tornado's websocket_connect returns a Future
-        log.info("Connecting to %s..." % ws_url)
-        
-        headers = None # Add headers if needed
-        conn = None
+def log_warn(message):
+    if hasattr(log, "warning"):
+        log.warning(message)
+    else:
+        log.warn(message)
 
-        try:
-            # Synchronous-like wrapper for the connection loop
-            # Since we are in a dedicated thread, we can block or run loop
-            
-            # Use websocket_connect
-            future = websocket.websocket_connect(ws_url, connect_timeout=10)
-            conn = loop.run_sync(lambda: future)
-            log.info("WebSocket Connected")
-            
-            # Message Loop
-            while True:
-                msg = loop.run_sync(conn.read_message)
-                if msg is None: # Connection closed
-                    log.info("WebSocket Closed by Server")
-                    break
-                loop.run_sync(lambda: msg_handler(msg))
-                
-        except Exception as e:
-            log.error("WebSocket Connection Error: %s" % e)
-        finally:
-             if conn: 
-                 conn.close() 
 
-    while True:
-        try:
-            # Create a fresh IOLoop for this thread
-            asyncio_loop = ioloop.IOLoop()
-            asyncio_loop.make_current()
-            start_tornado_client()
-        except Exception as e:
-            log.error("WebSocket Client Loop Crash: %s" % e)
-        
-        time.sleep(5) # Reconnect delay
+def is_backtest_mode():
+    try:
+        return not is_trade()
+    except Exception:
+        return False
 
-# --- End WebSocket Client Logic ---
 
 def initialize(context):
-    # 全局变量初始化
-    api_scheme = "https" if USE_HTTPS else "http"
-    g.api_base_url = "%s://%s%s" % (api_scheme, API_HOST, API_PREFIX)
-    g.account_id = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
-    g.headers = {"x-account-id": g.account_id}
-    
-    # Initialize CLI ID
-    backtest = not is_trade()
-    g.cli_id = 'GS66301027527' + ('B' if backtest else '')
-    
-    g.ws_trigger_signal = None
-    
-    # Start WebSocket thread if supported
+    g.account_id = DEFAULT_ACCOUNT_ID
+    backtest = is_backtest_mode()
+    g.external_account_identifier = DEFAULT_IDENTIFIER + ("B" if backtest else "")
+    g.external_account_name = "PTrade-%s" % g.external_account_identifier
+    g.current_context = context
+
     if HAS_WEBSOCKET:
-        log.info("Starting WebSocket Client Thread...")
-        t = threading.Thread(target=run_ws_client, daemon=True)
-        t.start()
+        log.info("Starting external trading WebSocket client...")
+        thread = threading.Thread(target=run_ws_client)
+        thread.daemon = True
+        thread.start()
     else:
-        log.warn("WebSocket library (websocket-client) not installed. Real-time trigger disabled.")
-
-def convert_to_api_code(client_code):
-    """转换股票代码格式（客户端格式转API格式）
-    从 513478.SS 格式转换为 SH.513478 或 SS.513478 格式
-    """
-    if not client_code:
-        return None
-    parts = client_code.split('.')
-    if len(parts) != 2:
-        return None
-    code, market = parts
-    # 如果市场代码是 SS，转换为 SH
-    if market.upper() == 'SS':
-        market = 'SH'
-    return "{0}.{1}".format(market.upper(), code)
-
-def convert_to_client_code(api_code):
-    """转换股票代码格式（API格式转客户端格式）
-    从 SH.513478 或 SS.513478 格式转换为 513478.SS 格式
-    """
-    if not api_code:
-        return None
-    parts = api_code.split('.')
-    if len(parts) != 2:
-        return None
-    market, code = parts
-    # 如果市场代码是 SH，转换为 SS
-    if market.upper() == 'SH':
-        market = 'SS'
-    return "{0}.{1}".format(code, market.upper())
-
-def get_limit_price(symbol: str, side: str, quantity: int) -> float:
-    """获取限价 - 智能深度撮合
-    Args:
-        symbol: 股票代码
-        side: 交易方向，"BUY" 或 "SELL"
-        quantity: 需要执行的数量
-    Returns:
-        float: 满足数量的限价
-    """
-    gear_price = get_gear_price(symbol)
-    if not gear_price or not gear_price.get('bid_grp') or not gear_price.get('offer_grp'):
-        raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
-        
-    # BUY: 看卖盘 (offer_grp), SELL: 看买盘 (bid_grp)
-    grp = gear_price['offer_grp'] if side == "BUY" else gear_price['bid_grp']
-    
-    accumulated_vol = 0
-    target_price = 0.0
-    
-    # 遍历档位 1-3
-    sorted_levels = [1, 2, 3]
-    
-    # 初始化为第1档价格，防止返回0
-    # 先检查是否有第1档
-    if 1 in grp:
-        target_price = grp[1][0]
-    else:
-        raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
-
-    for level in sorted_levels:
-        price_vol = grp.get(level)
-        if not price_vol: continue
-        
-        p = price_vol[0]
-        v = price_vol[1]
-        
-        accumulated_vol += v
-        target_price = p
-        
-        if accumulated_vol >= quantity:
-            log.info("%s %s 数量%d, 档位%d满足 (累积%d), 价格%s" % (symbol, side, quantity, level, accumulated_vol, p))
-            return p
-            
-    # 如果深度不够（或超过5档仍不够），就用当前遍历到的最后一档价格
-    log.info("%s 前5档深度不足以覆盖数量%d (累积%d), 使用最终价格 %s" % (symbol, quantity, accumulated_vol, target_price))
-    if target_price == 0:
-        raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
-    return target_price
-
-
-# ... (Keep WebSocket and Helper functions above) ...
-
-def check_and_trade(context, trigger_combination_id=None):
-    """核心交易逻辑，供 handle_data 和 tick_data 调用"""
-    try:
-        # 1. 撤销所有未完成订单
-        today_orders = get_all_orders() or []
-        pending_orders = [
-            o for o in today_orders 
-            if str(o['status']) not in ["5", "6", "8", "9"]
-        ]
-        
-        if pending_orders:
-            log.info("检测到 %d 个未完成订单，准备撤单..." % len(pending_orders))
-            for po in pending_orders:
-                try:
-                    cancel_order_ex(po)
-                    log.info("已请求撤单: %s (订单号: %s)" % (po['symbol'], po['entrust_no']))
-                except Exception as e:
-                    log.error("撤单失败 %s (订单号: %s): %s" % (po['symbol'], po['entrust_no'], str(e)))
-        
-        # 重新获取持仓
-        positions_dict = get_positions()
-        
-        # 重新获取今日订单状态
-        today_orders = get_all_orders() or []
-
-        backtest = not is_trade()
-        
-        # Prepare payload
-        payload = {
-                "cli_id": g.cli_id,
-                "backtest": backtest,
-                "current_time": context.current_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "orders": [
-                    {
-                        "symbol": convert_to_api_code(order['symbol']),
-                        "side": "BUY" if order['entrust_bs'] == 1 else "SELL",
-                        "quantity": order['amount'],
-                        "status": order['status'],
-                        "submitted_at": context.current_dt.isoformat()
-                    }
-                    for order in today_orders
-                ],
-                "positions": [
-                    {
-                        "symbol": convert_to_api_code(pos.sid),
-                        "quantity": pos.amount,
-                        "cost_price": pos.cost_basis,
-                        "available_quantity": pos.enable_amount
-                    }
-                    for pos in positions_dict.values()
-                    if pos.amount > 0
-                ],
-                "portfolio": {
-                    "portfolio_value": context.portfolio.portfolio_value,  # 总资产（现金+持仓）
-                    "available_cash": context.portfolio.cash,  # 可用资金
-                    "locked_cash": context.portfolio.portfolio_value - context.portfolio.positions_value - context.portfolio.cash,  
-                    "total_cash": context.portfolio.cash,  # 总现金就是可用现金
-                    "total_positions_value": context.portfolio.positions_value  # 持仓市值
-                }
-            }
-        
-        # Add trigger info if present
-        if trigger_combination_id:
-             payload["trigger_combination_id"] = trigger_combination_id
-             log.info("Including trigger_combination_id %s in request" % trigger_combination_id)
-
-        # 请求交易机会
-        response = requests.post(
-            g.api_base_url + "/opportunities",
-            headers=g.headers,
-            json=payload
-        )
-        
-        if response.status_code != 200:
-            log.error("获取交易机会失败: %s" % response.text)
-            return
-        
-        result = response.json()
-        log.info("获取交易机会成功 %s" % str(result["msg"]))
-        opportunities = result["opportunities"]
-        
-        # 执行交易机会
-        for opp in opportunities:
-            op_id = opp.get("op_id")
-            try:
-                symbol = convert_to_client_code(opp["symbol"])
-                qty = int(opp["quantity"])
-                action = opp["action"]
-                
-                # 获取限价 (带数量)
-                limit_price = get_limit_price(symbol, action, qty)
-                
-                status = "FAILED"
-                msg = ""
-                order_sn = None
-                
-                if action == "BUY":
-                    order_sn = order(symbol, qty, limit_price=limit_price)
-                    if order_sn:
-                        orders = get_order(order_sn)
-                        o = orders[0] if orders else None
-                        if o and str(o.status) == "9":
-                            status = "FAILED"
-                            msg = "买入%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
-                        else:
-                            status = "SUCCESS"
-                            msg = "买入%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, qty, limit_price)
-                    else:
-                        msg = "买入%s %s失败(无订单号)" % (opp.get('name',''), symbol)
-                elif action == "SELL":
-                    order_sn = order(symbol, -qty, limit_price=limit_price)
-                    if order_sn:
-                        orders = get_order(order_sn)
-                        o = orders[0] if orders else None
-                        if o and str(o.status) == "9":
-                            status = "FAILED"
-                            msg = "卖出%s %s失败(被拒绝)" % (opp.get('name',''), symbol)
-                        else:
-                            status = "SUCCESS"
-                            msg = "卖出%s %s, 数量: %d, 价格: %s" % (opp.get('name',''), symbol, qty, limit_price)
-                    else:
-                        msg = "卖出%s %s失败(无订单号)" % (opp.get('name',''), symbol)
-                
-                # 优先使用结构化日志上报
-                report_execution(op_id, status, msg, price=limit_price if order_sn else None)
-                
-                # 本地日志
-                if order_sn:
-                    log.info("交易成功: " + msg)
-                else:
-                    log.error("交易失败: " + msg)
-
-            except Exception as e:
-                log.error("处理单笔交易失败(op_id=%s): %s" % (op_id, str(e)))
-                report_execution(op_id, "FAILED", "策略执行异常: " + str(e))
-                
-    except Exception as e:
-        log.error("处理交易时发生异常: %s" % str(e))
+        log_warn("Tornado library not found, external trading WebSocket disabled.")
 
 
 def handle_data(context, data):
-    """每分钟执行一次 (保底)"""
-    # 正常分钟级轮询，不带 WebSocket Trigger 参数
-    check_and_trade(context, trigger_combination_id=None)
+    g.current_context = context
+
 
 def tick_data(context, data):
-    """Tick 级回调 (仅在有 WebSocket 信号时触发交易)"""
-    trigger_combination_id = None
-    
-    # Check for WebSocket trigger signal
-    if hasattr(g, 'ws_trigger_signal') and g.ws_trigger_signal:
-        trigger = g.ws_trigger_signal
-        # Check if signal is fresh (e.g., within last 60 seconds)
-        if (datetime.now() - trigger['timestamp']).total_seconds() < 60:
-            log.info("[Tick Trigger] Processing WebSocket Signal for %s" % trigger['combination_id'])
-            trigger_combination_id = trigger['combination_id']
-            # Clear signal immediately to prevent duplicate processing
-            g.ws_trigger_signal = None
-            
-            # 立即触发核心交易逻辑
-            check_and_trade(context, trigger_combination_id=trigger_combination_id)
-        else:
-             # Stale signal, clear it
-             g.ws_trigger_signal = None
+    g.current_context = context
 
-def report_execution(op_id, status, message, price=None):
-    """上报执行结果到后端"""
-    if not op_id:
+
+def b64url_encode(data):
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(data):
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode((data + padding).encode("ascii"))
+
+
+def canonical_handshake_payload(account_id, name, identifier, ts, nonce):
+    payload = {
+        "account_id": account_id,
+        "identifier": identifier,
+        "name": name,
+        "nonce": nonce,
+        "ts": str(ts),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def rsa_sha256_sign(message):
+    n = int(RSA_N_HEX, 16)
+    d = int(RSA_D_HEX, 16)
+    key_size = (n.bit_length() + 7) // 8
+    digest_info = _SHA256_DIGESTINFO_PREFIX + hashlib.sha256(message).digest()
+    padding_len = key_size - len(digest_info) - 3
+    if padding_len < 8:
+        raise Exception("invalid rsa key size")
+    encoded = b"\x00\x01" + (b"\xff" * padding_len) + b"\x00" + digest_info
+    signature_int = pow(int.from_bytes(encoded, "big"), d, n)
+    return b64url_encode(signature_int.to_bytes(key_size, "big"))
+
+
+def sign_handshake(account_id, name, identifier, ts, nonce):
+    message = canonical_handshake_payload(account_id, name, identifier, ts, nonce)
+    return rsa_sha256_sign(message)
+
+
+def rotl32(value, shift):
+    return ((value << shift) & 0xffffffff) | (value >> (32 - shift))
+
+
+def quarter_round(state, a, b, c, d):
+    state[a] = (state[a] + state[b]) & 0xffffffff
+    state[d] ^= state[a]
+    state[d] = rotl32(state[d], 16)
+    state[c] = (state[c] + state[d]) & 0xffffffff
+    state[b] ^= state[c]
+    state[b] = rotl32(state[b], 12)
+    state[a] = (state[a] + state[b]) & 0xffffffff
+    state[d] ^= state[a]
+    state[d] = rotl32(state[d], 8)
+    state[c] = (state[c] + state[d]) & 0xffffffff
+    state[b] ^= state[c]
+    state[b] = rotl32(state[b], 7)
+
+
+def chacha20_block(key, counter, nonce):
+    constants = b"expand 32-byte k"
+    state = list(struct.unpack("<4I", constants))
+    state.extend(struct.unpack("<8I", key))
+    state.append(counter & 0xffffffff)
+    state.extend(struct.unpack("<3I", nonce))
+    working = state[:]
+    for _ in range(10):
+        quarter_round(working, 0, 4, 8, 12)
+        quarter_round(working, 1, 5, 9, 13)
+        quarter_round(working, 2, 6, 10, 14)
+        quarter_round(working, 3, 7, 11, 15)
+        quarter_round(working, 0, 5, 10, 15)
+        quarter_round(working, 1, 6, 11, 12)
+        quarter_round(working, 2, 7, 8, 13)
+        quarter_round(working, 3, 4, 9, 14)
+    output = [(working[i] + state[i]) & 0xffffffff for i in range(16)]
+    return struct.pack("<16I", *output)
+
+
+def chacha20_xor(data, nonce):
+    result = bytearray()
+    counter = 1
+    for offset in range(0, len(data), 64):
+        block = chacha20_block(_ENC_KEY, counter, nonce)
+        chunk = data[offset:offset + 64]
+        result.extend(bytes([chunk[i] ^ block[i] for i in range(len(chunk))]))
+        counter += 1
+    return bytes(result)
+
+
+def encrypt_message(message):
+    nonce = os.urandom(12)
+    plaintext = json.dumps(message, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    ciphertext = chacha20_xor(plaintext, nonce)
+    mac = hmac.new(_MAC_KEY, nonce + ciphertext, hashlib.sha256).digest()
+    envelope = {
+        "type": "secure",
+        "alg": "CHACHA20-HMAC-SHA256",
+        "nonce": b64url_encode(nonce),
+        "ciphertext": b64url_encode(ciphertext),
+        "mac": b64url_encode(mac),
+    }
+    return json.dumps(envelope, separators=(",", ":"))
+
+
+def decrypt_message(raw_message):
+    envelope = json.loads(raw_message)
+    if envelope.get("type") != "secure":
+        raise Exception("message is not encrypted")
+    nonce = b64url_decode(envelope.get("nonce", ""))
+    ciphertext = b64url_decode(envelope.get("ciphertext", ""))
+    mac = b64url_decode(envelope.get("mac", ""))
+    expected_mac = hmac.new(_MAC_KEY, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise Exception("message authentication failed")
+    plaintext = chacha20_xor(ciphertext, nonce)
+    return json.loads(plaintext.decode("utf-8"))
+
+
+def build_ws_url():
+    ws_scheme = "wss" if USE_HTTPS else "ws"
+    ts = str(int(time.time()))
+    nonce = b64url_encode(os.urandom(16))
+    signature = sign_handshake(g.account_id, g.external_account_name, g.external_account_identifier, ts, nonce)
+    query = "account_id=%s&name=%s&identifier=%s&ts=%s&nonce=%s&signature=%s" % (
+        quote(str(g.account_id), safe=""),
+        quote(str(g.external_account_name), safe=""),
+        quote(str(g.external_account_identifier), safe=""),
+        quote(ts, safe=""),
+        quote(nonce, safe=""),
+        quote(signature, safe=""),
+    )
+    return "%s://%s/api/external-trading-accounts/ws?%s" % (ws_scheme, API_HOST, query)
+
+
+def run_ws_client():
+    if not HAS_WEBSOCKET:
         return
+
+    while True:
+        conn = None
+        loop = None
+        try:
+            loop = ioloop.IOLoop()
+            loop.make_current()
+            ws_url = build_ws_url()
+            log.info("Connecting external trading WebSocket: %s" % ws_url)
+            future = websocket.websocket_connect(ws_url, connect_timeout=10)
+            conn = loop.run_sync(lambda: future)
+            log.info("External trading WebSocket connected.")
+
+            while True:
+                try:
+                    msg = loop.run_sync(
+                        lambda: gen.with_timeout(
+                            timedelta(seconds=HEARTBEAT_INTERVAL_SECONDS),
+                            conn.read_message(),
+                        )
+                    )
+                except gen.TimeoutError:
+                    send_ws_json(loop, conn, {
+                        "type": "heartbeat",
+                        "ts": datetime.now().isoformat(),
+                    })
+                    continue
+
+                if msg is None:
+                    log_warn("External trading WebSocket closed by server.")
+                    break
+                handle_ws_message(loop, conn, msg)
+        except Exception as e:
+            log.error("External trading WebSocket error: %s" % str(e))
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if loop:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        time.sleep(RECONNECT_DELAY_SECONDS)
+
+
+def send_ws_json(loop, conn, payload):
+    text = encrypt_message(payload)
+    loop.run_sync(lambda: conn.write_message(text))
+
+
+def handle_ws_message(loop, conn, raw_message):
     try:
-        payload = {
-            "id": op_id,
-            "status": status,
-            "message": str(message)
-        }
-        if price:
-            payload["price"] = price
-            
-        requests.post(
-            g.api_base_url + "/logs/status",
-            headers=g.headers,
-            json=payload,
-            timeout=5
-        )
+        message = decrypt_message(raw_message)
+    except Exception:
+        log_warn("Ignored invalid secure WebSocket message")
+        return
+
+    message_type = message.get("type")
+    if message_type == "connected":
+        log.info("External trading account accepted by backend: %s" % message.get("name"))
+        return
+    if message_type == "pong":
+        return
+    if message_type != "command":
+        log.info("Ignored WebSocket message: %s" % raw_message)
+        return
+
+    request_id = message.get("id")
+    action = message.get("action")
+    payload = message.get("payload") or {}
+    response = {
+        "type": "result",
+        "id": request_id,
+        "ok": True,
+        "data": {},
+        "ts": datetime.now().isoformat(),
+    }
+
+    try:
+        log.info("Executing external command: %s id=%s" % (action, request_id))
+        response["data"] = execute_command(action, payload)
     except Exception as e:
-        log.error("上报执行结果失败: %s" % str(e))
+        log.error("External command failed: %s id=%s error=%s" % (action, request_id, str(e)))
+        response["ok"] = False
+        response["error"] = str(e)
+
+    send_ws_json(loop, conn, response)
+
+
+def execute_command(action, payload):
+    if action in ("get_quotes", "get_bid_ask", "quote.batch"):
+        return get_quotes(payload.get("symbols") or [])
+    if action in ("place_orders", "order.batch"):
+        return place_order_batch(payload.get("orders") or [])
+    if action in ("get_account_snapshot", "account.snapshot"):
+        return get_account_snapshot()
+    if action in ("get_positions", "positions"):
+        return get_positions_payload()
+    if action in ("get_assets", "assets"):
+        return get_assets_payload()
+    if action in ("get_today_orders", "today_orders", "orders.today"):
+        return get_today_orders_payload()
+    raise Exception("Unsupported command action: %s" % action)
+
+
+def convert_to_api_code(symbol):
+    """Convert PTrade client code (600000.SS) to backend code (SH.600000)."""
+    if not symbol:
+        return None
+    parts = str(symbol).split(".")
+    if len(parts) != 2:
+        return symbol
+
+    first = parts[0].upper()
+    second = parts[1].upper()
+    if first in ("SH", "SS", "SZ", "BJ"):
+        market = "SH" if first == "SS" else first
+        return "%s.%s" % (market, parts[1])
+
+    market = "SH" if second == "SS" else second
+    return "%s.%s" % (market, parts[0])
+
+
+def convert_to_client_code(symbol):
+    """Convert backend code (SH.600000) to PTrade client code (600000.SS)."""
+    if not symbol:
+        return None
+    parts = str(symbol).split(".")
+    if len(parts) != 2:
+        return symbol
+
+    first = parts[0].upper()
+    second = parts[1].upper()
+    if first not in ("SH", "SS", "SZ", "BJ"):
+        return "%s.%s" % (parts[0], "SS" if second == "SH" else second)
+
+    market = "SS" if first in ("SH", "SS") else first
+    return "%s.%s" % (parts[1], market)
+
+
+def value_of(obj, key, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def get_current_dt():
+    context = getattr(g, "current_context", None)
+    if context is not None and hasattr(context, "current_dt"):
+        return context.current_dt
+    return datetime.now()
+
+
+def normalize_depth_group(group):
+    levels = []
+    if not group:
+        return levels
+
+    if isinstance(group, list):
+        iterator = enumerate(group, 1)
+    else:
+        iterator = [(level, group.get(level) or group.get(str(level))) for level in range(1, 6)]
+
+    for level, price_volume in iterator:
+        if not price_volume:
+            continue
+        try:
+            price = float(price_volume[0])
+            volume = int(price_volume[1])
+        except Exception:
+            continue
+        levels.append({
+            "level": int(level),
+            "price": price,
+            "volume": volume,
+        })
+    return levels
+
+
+def get_quotes(symbols):
+    results = []
+    for symbol in symbols:
+        client_symbol = convert_to_client_code(symbol)
+        api_symbol = convert_to_api_code(client_symbol)
+        item = {
+            "symbol": api_symbol,
+            "client_symbol": client_symbol,
+            "ok": True,
+        }
+        try:
+            gear_price = get_gear_price(client_symbol)
+            bid_levels = normalize_depth_group((gear_price or {}).get("bid_grp"))
+            ask_levels = normalize_depth_group((gear_price or {}).get("offer_grp"))
+            best_bid = bid_levels[0] if bid_levels else {}
+            best_ask = ask_levels[0] if ask_levels else {}
+            item.update({
+                "bid": best_bid.get("price"),
+                "bid_size": best_bid.get("volume"),
+                "ask": best_ask.get("price"),
+                "ask_size": best_ask.get("volume"),
+                "bid_levels": bid_levels,
+                "ask_levels": ask_levels,
+                "timestamp": datetime.now().isoformat(),
+            })
+        except Exception as e:
+            item["ok"] = False
+            item["error"] = str(e)
+        results.append(item)
+    return {"quotes": results}
+
+
+def get_limit_price(symbol, side, quantity):
+    """Use the order book to pick a limit price that covers the requested quantity."""
+    gear_price = get_gear_price(symbol)
+    if not gear_price or not gear_price.get("bid_grp") or not gear_price.get("offer_grp"):
+        raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
+
+    group = gear_price["offer_grp"] if side == "BUY" else gear_price["bid_grp"]
+    levels = normalize_depth_group(group)
+    if not levels:
+        raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
+
+    accumulated_volume = 0
+    target_price = levels[0]["price"]
+    for level in levels:
+        accumulated_volume += level["volume"]
+        target_price = level["price"]
+        if accumulated_volume >= quantity:
+            log.info("%s %s 数量%d, 档位%d满足 (累积%d), 价格%s" % (
+                symbol,
+                side,
+                quantity,
+                level["level"],
+                accumulated_volume,
+                target_price,
+            ))
+            return target_price
+
+    log.info("%s 档位深度不足以覆盖数量%d (累积%d), 使用最终价格 %s" % (
+        symbol,
+        quantity,
+        accumulated_volume,
+        target_price,
+    ))
+    return target_price
+
+
+def place_order_batch(orders):
+    results = []
+    for index, order_request in enumerate(orders):
+        try:
+            results.append(place_single_order(order_request, index))
+        except Exception as e:
+            results.append({
+                "ok": False,
+                "status": "FAILED",
+                "symbol": order_request.get("symbol") if isinstance(order_request, dict) else None,
+                "message": str(e),
+            })
+    return {"orders": results}
+
+
+def place_single_order(order_request, index):
+    symbol = order_request.get("symbol")
+    client_symbol = convert_to_client_code(symbol)
+    api_symbol = convert_to_api_code(client_symbol)
+    side = str(order_request.get("side") or "").upper()
+    quantity = int(order_request.get("quantity") or 0)
+
+    if side not in ("BUY", "SELL"):
+        raise Exception("orders[%d].side must be BUY or SELL" % index)
+    if quantity <= 0:
+        raise Exception("orders[%d].quantity must be greater than 0" % index)
+
+    limit_price = order_request.get("limit_price") or order_request.get("price")
+    if limit_price is None:
+        limit_price = get_limit_price(client_symbol, side, quantity)
+    limit_price = float(limit_price)
+
+    signed_quantity = quantity if side == "BUY" else -quantity
+    order_sn = order(client_symbol, signed_quantity, limit_price=limit_price)
+
+    status = "FAILED"
+    message = ""
+    raw_status = None
+    if order_sn:
+        order_info = get_first_order(order_sn)
+        raw_status = str(value_of(order_info, "status", ""))
+        if raw_status == "9":
+            message = "%s %s失败(被拒绝)" % (side, client_symbol)
+        else:
+            status = "SUCCESS"
+            message = "%s %s, 数量: %d, 价格: %s" % (side, client_symbol, quantity, limit_price)
+    else:
+        message = "%s %s失败(无订单号)" % (side, client_symbol)
+
+    if status == "SUCCESS":
+        log.info("交易成功: %s" % message)
+    else:
+        log.error("交易失败: %s" % message)
+
+    return {
+        "ok": status == "SUCCESS",
+        "status": status,
+        "symbol": api_symbol,
+        "client_symbol": client_symbol,
+        "side": side,
+        "quantity": quantity,
+        "submitted_price": limit_price,
+        "order_id": order_sn,
+        "raw_status": raw_status,
+        "message": message,
+    }
+
+
+def get_first_order(order_sn):
+    try:
+        orders = get_order(order_sn)
+        if isinstance(orders, list):
+            return orders[0] if orders else None
+        return orders
+    except Exception:
+        return None
+
+
+def stringify_unknown_fields(obj):
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            try:
+                json.dumps(value)
+                result[key] = value
+            except Exception:
+                result[key] = str(value)
+        return result
+    return {}
+
+
+def get_order_side(order_item):
+    entrust_bs = value_of(order_item, "entrust_bs")
+    if str(entrust_bs) == "1":
+        return "BUY"
+    if str(entrust_bs) == "2":
+        return "SELL"
+
+    quantity = value_of(order_item, "amount", value_of(order_item, "quantity", 0))
+    try:
+        return "BUY" if float(quantity) >= 0 else "SELL"
+    except Exception:
+        return None
+
+
+def normalize_order(order_item, current_dt):
+    quantity = value_of(order_item, "amount", value_of(order_item, "quantity", 0)) or 0
+    try:
+        quantity = abs(quantity)
+    except Exception:
+        pass
+
+    return {
+        "symbol": convert_to_api_code(value_of(order_item, "symbol")),
+        "client_symbol": value_of(order_item, "symbol"),
+        "side": get_order_side(order_item),
+        "quantity": quantity,
+        "price": value_of(order_item, "price", value_of(order_item, "business_price")),
+        "status": value_of(order_item, "status"),
+        "entrust_no": value_of(order_item, "entrust_no", value_of(order_item, "order_id")),
+        "entrust_bs": value_of(order_item, "entrust_bs"),
+        "filled_quantity": value_of(order_item, "business_amount", value_of(order_item, "filled_quantity")),
+        "submitted_at": value_of(order_item, "entrust_time", current_dt.isoformat()),
+        "raw": stringify_unknown_fields(order_item),
+    }
+
+
+def get_today_orders_payload():
+    current_dt = get_current_dt()
+    today_orders = get_all_orders() or []
+    return {
+        "current_time": current_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "orders": [normalize_order(item, current_dt) for item in today_orders],
+    }
+
+
+def normalize_position(pos):
+    symbol = value_of(pos, "sid", value_of(pos, "symbol"))
+    return {
+        "symbol": convert_to_api_code(symbol),
+        "client_symbol": symbol,
+        "quantity": value_of(pos, "amount", value_of(pos, "quantity", 0)),
+        "available_quantity": value_of(pos, "enable_amount", value_of(pos, "available_quantity")),
+        "cost_price": value_of(pos, "cost_basis", value_of(pos, "cost_price", 0)),
+        "last_price": value_of(pos, "last_sale_price", value_of(pos, "price")),
+        "market_value": value_of(pos, "market_value"),
+        "profit": value_of(pos, "profit"),
+        "profit_ratio": value_of(pos, "profit_ratio"),
+    }
+
+
+def get_positions_payload():
+    positions = get_positions() or {}
+    position_values = positions.values() if isinstance(positions, dict) else positions
+    return {
+        "current_time": get_current_dt().strftime("%Y-%m-%d %H:%M:%S"),
+        "positions": [
+            normalize_position(pos)
+            for pos in position_values
+            if value_of(pos, "amount", value_of(pos, "quantity", 0)) != 0
+        ],
+    }
+
+
+def get_assets_payload():
+    context = getattr(g, "current_context", None)
+    portfolio = {}
+    if context is not None and hasattr(context, "portfolio"):
+        portfolio_value = value_of(context.portfolio, "portfolio_value", 0)
+        positions_value = value_of(context.portfolio, "positions_value", 0)
+        cash = value_of(context.portfolio, "cash", 0)
+        portfolio = {
+            "portfolio_value": portfolio_value,
+            "available_cash": cash,
+            "locked_cash": portfolio_value - positions_value - cash,
+            "total_cash": cash,
+            "total_positions_value": positions_value,
+            "returns": value_of(context.portfolio, "returns"),
+            "starting_cash": value_of(context.portfolio, "starting_cash"),
+        }
+
+    return {
+        "current_time": get_current_dt().strftime("%Y-%m-%d %H:%M:%S"),
+        "assets": portfolio,
+    }
+
+
+def get_account_snapshot():
+    current_dt = get_current_dt()
+    orders_payload = get_today_orders_payload()
+    positions_payload = get_positions_payload()
+    assets_payload = get_assets_payload()
+
+    return {
+        "account_id": getattr(g, "account_id", None),
+        "name": getattr(g, "external_account_name", None),
+        "identifier": getattr(g, "external_account_identifier", None),
+        "backtest": is_backtest_mode(),
+        "current_time": current_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "orders": orders_payload["orders"],
+        "positions": positions_payload["positions"],
+        "portfolio": assets_payload["assets"],
+    }
