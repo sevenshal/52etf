@@ -309,6 +309,7 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     logging.getLogger("ScheduledTaskManager").info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
+            "index_daily_saved=%s index_daily_jobs=%s index_daily_errors=%s "
             "option_basic_saved=%s option_daily_saved=%s option_refresh_dates=%s option_chunks=%s option_errors=%s "
             "repo_daily_saved=%s repo_refresh_dates=%s repo_chunks=%s repo_errors=%s "
             "chinabond_defs_saved=%s chinabond_daily_saved=%s chinabond_refresh_dates=%s chinabond_chunks=%s chinabond_errors=%s "
@@ -320,6 +321,9 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         result.get("mode"),
         result.get("end_date"),
         result.get("tables"),
+        result.get("index_daily_saved_rows"),
+        result.get("index_daily_jobs"),
+        result.get("index_daily_errors"),
         result.get("option_basic_rows_saved"),
         result.get("option_daily_saved_rows"),
         result.get("option_daily_refresh_dates"),
@@ -349,6 +353,10 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
         "A stock base data sync "
         f"start={result.get('start_date')} "
         f"market_start={result.get('market_start_date')} "
+        f"index_start={result.get('index_start_date')} "
+        f"index_daily_saved={result.get('index_daily_saved_rows')} "
+        f"index_daily_jobs={result.get('index_daily_jobs')} "
+        f"index_daily_errors={result.get('index_daily_errors')} "
         f"option_start={result.get('option_start_date')} "
         f"repo_start={result.get('repo_start_date')} "
         f"option_basic_saved={result.get('option_basic_rows_saved')} "

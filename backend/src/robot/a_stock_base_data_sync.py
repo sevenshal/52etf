@@ -253,6 +253,29 @@ def _chinabond_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     return row_count <= 0 or curve_count < len(CHINABOND_CREDIT_CURVES)
 
 
+def _a_stock_index_daily_items() -> List[Dict[str, Optional[str]]]:
+    return list(
+        {
+            str(item["ts_code"]).upper(): item
+            for item in [
+                *BENCHMARK_INDEXES,
+                *A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
+                *[
+                    {
+                        "ts_code": str(item.get("index_code") or item["symbol"]).upper(),
+                        "name": item.get("index_name") or item.get("label"),
+                    }
+                    for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+                ],
+                *[
+                    {"ts_code": item["index_code"], "name": item["name"]}
+                    for item in A_STOCK_FACTOR_INDEX_POOLS
+                ],
+            ]
+        }.values()
+    )
+
+
 class AStockBaseDataSyncService:
     def __init__(
         self,
@@ -646,6 +669,137 @@ class AStockBaseDataSyncService:
             frame,
             replace_dates=replace_dates,
         )
+
+    def _index_daily_stats(self, index_codes: List[str]) -> Dict[str, Dict[str, Optional[date]]]:
+        if not index_codes:
+            return {}
+        normalized_codes = [str(code or "").strip().upper() for code in index_codes if code]
+        params = {f"code_{idx}": code for idx, code in enumerate(normalized_codes)}
+        placeholders = ", ".join(f":{key}" for key in params)
+        rows = self.analytics_db.execute(
+            text(
+                f"""
+                SELECT ts_code, MIN(trade_date), MAX(trade_date), COUNT(*)
+                FROM a_stock_index_daily
+                WHERE ts_code IN ({placeholders})
+                GROUP BY ts_code
+                """
+            ),
+            params,
+        ).fetchall()
+        stats = {
+            code: {"min_date": None, "max_date": None, "rows": 0}
+            for code in normalized_codes
+        }
+        for row in rows:
+            code = str(row[0]).upper()
+            stats[code] = {
+                "min_date": _parse_date(row[1]),
+                "max_date": _parse_date(row[2]),
+                "rows": int(row[3] or 0),
+            }
+        return stats
+
+    def sync_index_daily(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        default_start = _parse_date(start_date)
+        end_value = _parse_date(end_date)
+        index_items = _a_stock_index_daily_items()
+        if not default_start or not end_value or default_start > end_value or not index_items:
+            return {"index_count": len(index_items), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
+
+        index_codes = [str(item["ts_code"]).upper() for item in index_items if item.get("ts_code")]
+        stats_by_index = self._index_daily_stats(index_codes)
+        jobs: List[Tuple[str, date, date]] = []
+        for index_code in index_codes:
+            stats = stats_by_index.get(index_code) or {}
+            min_date = stats.get("min_date")
+            max_date = stats.get("max_date")
+            if explicit_start:
+                index_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
+            elif incremental:
+                if not min_date or min_date > default_start:
+                    index_start = default_start
+                else:
+                    index_start = _overlap_start(default_start, max_date)
+            else:
+                index_start = default_start
+            if index_start <= end_value:
+                jobs.append((index_code, index_start, end_value))
+
+        if not jobs:
+            return {
+                "index_count": len(index_items),
+                "jobs": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": None,
+                "end_date": end_value.isoformat(),
+            }
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        completed = 0
+        total_jobs = len(jobs)
+
+        def fetch_job(index_code: str, index_start: date, index_end: date) -> Tuple[str, date, date, pd.DataFrame]:
+            frame = self.tushare.get_index_daily_range_frame(index_code, index_start, index_end)
+            return index_code, index_start, index_end, frame
+
+        def report_progress(index_code: str, index_start: date, index_end: date):
+            self._progress(
+                (
+                    f"批量同步A股指数日行情 {completed}/{total_jobs}，"
+                    f"最近完成 {index_code} {index_start.isoformat()} ~ {index_end.isoformat()}"
+                ),
+                62,
+                processed_jobs=completed,
+                total_jobs=total_jobs,
+                index_daily_saved_rows=saved_rows,
+                index_daily_errors=len(errors),
+            )
+
+        workers = min(SYNC_WORKERS, total_jobs)
+        if workers <= 1:
+            for index_code, index_start, index_end in jobs:
+                try:
+                    _, _, _, frame = fetch_job(index_code, index_start, index_end)
+                    saved_rows += _upsert_index_daily_frame(self.analytics_db, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock index daily sync failed for %s %s~%s: %s", index_code, index_start, index_end, exc)
+                    errors.append({"index_code": index_code, "start_date": index_start.isoformat(), "end_date": index_end.isoformat(), "error": str(exc)})
+                completed += 1
+                report_progress(index_code, index_start, index_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(fetch_job, index_code, index_start, index_end): (index_code, index_start, index_end)
+                    for index_code, index_start, index_end in jobs
+                }
+                for future in as_completed(futures):
+                    index_code, index_start, index_end = futures[future]
+                    try:
+                        _, _, _, frame = future.result()
+                        saved_rows += _upsert_index_daily_frame(self.analytics_db, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock index daily sync failed for %s %s~%s: %s", index_code, index_start, index_end, exc)
+                        errors.append({"index_code": index_code, "start_date": index_start.isoformat(), "end_date": index_end.isoformat(), "error": str(exc)})
+                    completed += 1
+                    report_progress(index_code, index_start, index_end)
+
+        return {
+            "index_count": len(index_items),
+            "jobs": total_jobs,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "start_date": min(job[1] for job in jobs).isoformat(),
+            "end_date": end_value.isoformat(),
+        }
 
     def _latest_fund_daily_dates(self, symbols: List[str]) -> Dict[str, Optional[date]]:
         if not symbols:
@@ -1366,7 +1520,6 @@ class AStockBaseDataSyncService:
             raise ValueError("开始日期不能晚于结束日期")
 
         latest_market_date = _latest_analytics_date(self.analytics_db, AStockMarketDaily, "trade_date")
-        latest_index_date = _latest_analytics_date(self.analytics_db, AStockIndexDaily, "trade_date")
         latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
@@ -1400,18 +1553,13 @@ class AStockBaseDataSyncService:
             self._ensure_market_days(trading_dates)
 
         index_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
-        if explicit_start:
-            index_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
-        elif incremental:
-            index_start = _overlap_start(index_default_start, latest_index_date)
-        else:
-            index_start = index_default_start
-        self._progress("同步A股基准指数日行情缓存", 62, start_date=index_start.isoformat(), end_date=end_value.isoformat())
-        sync_benchmark_index_daily(
-            index_start,
+        index_display_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS) if explicit_start else index_default_start
+        self._progress("同步A股指数日行情缓存", 62, start_date=index_display_start.isoformat(), end_date=end_value.isoformat())
+        index_daily_result = self.sync_index_daily(
+            index_default_start,
             end_value,
-            tushare_service=self.tushare,
-            analytics_db=self.analytics_db,
+            incremental=incremental,
+            explicit_start=explicit_start,
         )
 
         fund_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_FUND_DAILY_WARMUP_DAYS)
@@ -1558,7 +1706,12 @@ class AStockBaseDataSyncService:
             "reference_full_refresh": reference_full_refresh,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
-            "index_start_date": index_start.isoformat(),
+            "index_start_date": index_daily_result.get("start_date") or index_display_start.isoformat(),
+            "index_end_date": index_daily_result.get("end_date"),
+            "index_daily_index_count": index_daily_result.get("index_count"),
+            "index_daily_jobs": index_daily_result.get("jobs"),
+            "index_daily_saved_rows": index_daily_result.get("saved_rows"),
+            "index_daily_errors": len(index_daily_result.get("errors") or []),
             "fund_daily_start_date": fund_daily_result.get("start_date") or fund_display_start.isoformat(),
             "fund_daily_end_date": fund_daily_result.get("end_date"),
             "fund_daily_symbol_count": fund_daily_result.get("symbol_count"),
@@ -2591,7 +2744,7 @@ def _bulk_upsert_fund_daily_frame(analytics_db: Session, frame: pd.DataFrame) ->
 
 def _upsert_index_daily_frame(analytics_db: Session, frame: pd.DataFrame):
     if frame.empty:
-        return
+        return 0
 
     now = datetime.now()
     columns = [
@@ -2625,7 +2778,7 @@ def _upsert_index_daily_frame(analytics_db: Session, frame: pd.DataFrame):
     normalized["updated_at"] = now
     normalized = normalized.dropna(subset=["ts_code", "trade_date"])
     if normalized.empty:
-        return
+        return 0
     normalized = normalized.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
     table = AStockIndexDaily.__table__
     analytics_db.commit()
@@ -2634,6 +2787,7 @@ def _upsert_index_daily_frame(analytics_db: Session, frame: pd.DataFrame):
         columns,
         normalized.loc[:, columns],
     )
+    return len(normalized)
 
 
 def sync_benchmark_index_daily(
