@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
     Space, Tag, message, Typography, Switch, Row, Col, List,
@@ -44,6 +44,9 @@ const PortfolioCopyTrading = () => {
     const [snowballModalVisible, setSnowballModalVisible] = useState(false);
     const [snowballForm] = Form.useForm();
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
+    const selectedSnowballExternalTradingAccountId = Form.useWatch('external_trading_account_id', snowballForm);
+    const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
+    const [snowballLiveSubAccounts, setSnowballLiveSubAccounts] = useState([]);
 
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
@@ -60,6 +63,38 @@ const PortfolioCopyTrading = () => {
             message.error('获取预览失败: ' + (error.response?.data?.detail || error.message));
         } finally {
             setPreviewLoading(false);
+        }
+    };
+
+    const formatMoney = (value, digits = 2) => Number(value || 0).toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+    });
+
+    const formatError = (error, fallback) => error.response?.data?.detail || error.message || fallback;
+
+    const fetchExternalTradingAccounts = async () => {
+        try {
+            const response = await request.get('/api/external-trading-accounts');
+            setExternalTradingAccounts(response.data || []);
+        } catch (error) {
+            message.error(formatError(error, '获取外部交易账户失败'));
+        }
+    };
+
+    const fetchSnowballLiveSubAccounts = async (externalAccountId) => {
+        if (!externalAccountId) {
+            setSnowballLiveSubAccounts([]);
+            return [];
+        }
+        try {
+            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+            setSnowballLiveSubAccounts(response.data || []);
+            return response.data || [];
+        } catch (error) {
+            message.error(formatError(error, '获取虚拟子账户失败'));
+            setSnowballLiveSubAccounts([]);
+            return [];
         }
     };
 
@@ -313,6 +348,38 @@ const PortfolioCopyTrading = () => {
         }
     };
 
+    const handleSnowballSyncExternalTargets = async (record) => {
+        try {
+            await request.post(`/api/snowball/configs/${record.id}/sync-external-targets`);
+            message.success('已同步目标仓位并触发通用执行器');
+            fetchSnowballConfigs();
+        } catch (error) {
+            message.error('同步失败: ' + formatError(error, '同步失败'));
+        }
+    };
+
+    const handleSnowballInitLedger = (record) => {
+        Modal.confirm({
+            title: '从旧快照初始化子账户账本？',
+            content: '会把当前雪球快照持仓写入绑定的虚拟子账户账本，并同步为当前目标仓位。建议只在切换到通用执行器前执行一次。',
+            okText: '初始化',
+            cancelText: '取消',
+            onOk: async () => {
+                try {
+                    await request.post(`/api/snowball/configs/${record.id}/sync-snapshot-to-ledger`);
+                    message.success('初始化账本成功');
+                    fetchSnowballConfigs();
+                } catch (error) {
+                    message.error('初始化失败: ' + formatError(error, '初始化失败'));
+                }
+            },
+        });
+    };
+
+    useEffect(() => {
+        fetchSnowballLiveSubAccounts(selectedSnowballExternalTradingAccountId);
+    }, [selectedSnowballExternalTradingAccountId]);
+
     useEffect(() => {
         if (accountId) {
             if (activeTab === 'ib_configs') {
@@ -323,8 +390,36 @@ const PortfolioCopyTrading = () => {
             // IB accounts and Longport accounts are always useful or global
             fetchIbAccounts();
             fetchLongportAccounts();
+            fetchExternalTradingAccounts();
         }
     }, [accountId, activeTab]);
+
+    const externalTradingAccountOptions = useMemo(() => externalTradingAccounts.map(account => ({
+        label: `${account.name} (${account.identifier})${account.connected ? ' 在线' : ' 离线'}`,
+        value: account.id,
+        disabled: !account.enabled,
+    })), [externalTradingAccounts]);
+
+    const snowballLiveSubAccountOptions = useMemo(() => {
+        const currentConfigId = Number(snowballEditingConfig?.id || 0);
+        return (snowballLiveSubAccounts || [])
+            .filter(item => item.enabled)
+            .map(item => {
+                const isFree = !item.strategy_type && !item.strategy_config_id;
+                const isCurrentBinding = (
+                    item.strategy_type === 'snowball_copy_live'
+                    && currentConfigId > 0
+                    && Number(item.strategy_config_id) === currentConfigId
+                );
+                const disabled = !(isFree || isCurrentBinding);
+                const statusText = isFree ? '空闲' : `已绑定：${item.strategy_name || item.binding_label || item.strategy_type || '其他策略'}`;
+                return {
+                    value: item.id,
+                    disabled,
+                    label: `${item.name} / ${formatMoney(item.cash_allocated, 2)} / ${statusText}`,
+                };
+            });
+    }, [snowballLiveSubAccounts, snowballEditingConfig]);
 
     const configColumns = [
         {
@@ -707,10 +802,36 @@ const PortfolioCopyTrading = () => {
                                     )
                                 },
                                 {
+                                    title: '实盘执行',
+                                    key: 'live',
+                                    render: (_, r) => (
+                                        <Space direction="vertical" size={0}>
+                                            <Tag color={r.live_trade_enabled ? 'green' : 'default'}>
+                                                {r.live_trade_enabled ? '通用执行器' : '未启用'}
+                                            </Tag>
+                                            {r.live_trade_enabled && (
+                                                <>
+                                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                                        {r.external_trading_account_name || '-'}
+                                                    </Text>
+                                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                                        子账户: {r.live_sub_account_name || '-'}
+                                                    </Text>
+                                                    {r.last_external_sync_status && (
+                                                        <Text type="secondary" style={{ fontSize: 12 }}>
+                                                            {r.last_external_sync_status}: {r.last_external_sync_message || ''}
+                                                        </Text>
+                                                    )}
+                                                </>
+                                            )}
+                                        </Space>
+                                    )
+                                },
+                                {
                                     title: '操作',
                                     key: 'action',
                                     render: (_, record) => (
-                                        <Space>
+                                        <Space wrap>
                                             <Button
                                                 icon={<HistoryOutlined />}
                                                 size="small"
@@ -721,9 +842,20 @@ const PortfolioCopyTrading = () => {
                                                 size="small"
                                                 onClick={() => handleViewSnapshot(record)}
                                             >详情</Button>
+                                            <Button
+                                                size="small"
+                                                disabled={!record.live_trade_enabled}
+                                                onClick={() => handleSnowballInitLedger(record)}
+                                            >初始化账本</Button>
+                                            <Button
+                                                size="small"
+                                                disabled={!record.live_trade_enabled}
+                                                onClick={() => handleSnowballSyncExternalTargets(record)}
+                                            >同步目标</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
                                                 setSnowballEditingConfig(record);
                                                 snowballForm.setFieldsValue(record);
+                                                fetchSnowballLiveSubAccounts(record.external_trading_account_id);
                                                 setSnowballModalVisible(true);
                                             }} />
                                             <Button icon={<DeleteOutlined />} size="small" danger onClick={() => handleSnowballDelete(record.id)} />
@@ -737,6 +869,7 @@ const PortfolioCopyTrading = () => {
                                 <Button type="primary" icon={<PlusOutlined />} onClick={() => {
                                     setSnowballEditingConfig(null);
                                     snowballForm.resetFields();
+                                    setSnowballLiveSubAccounts([]);
                                     setSnowballModalVisible(true);
                                 }}>添加雪球跟单配置</Button>
                             </div>
@@ -1081,7 +1214,7 @@ const PortfolioCopyTrading = () => {
                 onOk={() => snowballForm.submit()}
                 width={700}
             >
-                <Form form={snowballForm} layout="vertical" onFinish={handleSnowballSave} initialValues={{ enabled: true, total_position_ratio: 100, tracking_error_pct: 1 }}>
+                <Form form={snowballForm} layout="vertical" onFinish={handleSnowballSave} initialValues={{ enabled: true, total_position_ratio: 100, tracking_error_pct: 1, live_trade_enabled: false }}>
                     <Form.Item name="enabled" valuePropName="checked">
                         <Switch checkedChildren="开启" unCheckedChildren="关闭" />
                     </Form.Item>
@@ -1118,14 +1251,76 @@ const PortfolioCopyTrading = () => {
                         </Col>
                     </Row>
                     <Row gutter={16}>
-                        <Col span={12}>
+                        <Col span={8}>
                             <Form.Item name="total_amount" label="总金额">
                                 <InputNumber style={{ width: '100%' }} placeholder="为空则使用Portfolio" />
                             </Form.Item>
                         </Col>
-                        <Col span={12}>
+                        <Col span={8}>
+                            <Form.Item name="total_position_ratio" label="仓位比例 (%)">
+                                <InputNumber style={{ width: '100%' }} min={0} max={100} step={1} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={16}>
+                        <Col span={6}>
+                            <Form.Item name="live_trade_enabled" label="通用执行器实盘" valuePropName="checked">
+                                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+                            </Form.Item>
+                        </Col>
+                        <Col span={9}>
+                            <Form.Item
+                                name="external_trading_account_id"
+                                label="外部交易账户"
+                                rules={[
+                                    ({ getFieldValue }) => ({
+                                        validator(_, value) {
+                                            if (!getFieldValue('live_trade_enabled') || value) {
+                                                return Promise.resolve();
+                                            }
+                                            return Promise.reject(new Error('请选择外部交易账户'));
+                                        },
+                                    }),
+                                ]}
+                            >
+                                <Select
+                                    allowClear
+                                    showSearch
+                                    optionFilterProp="label"
+                                    options={externalTradingAccountOptions}
+                                    placeholder="选择外部交易账户"
+                                    onChange={() => snowballForm.setFieldsValue({ live_sub_account_id: undefined })}
+                                />
+                            </Form.Item>
+                        </Col>
+                        <Col span={9}>
+                            <Form.Item
+                                name="live_sub_account_id"
+                                label="虚拟子账户"
+                                rules={[
+                                    ({ getFieldValue }) => ({
+                                        validator(_, value) {
+                                            if (!getFieldValue('live_trade_enabled') || value) {
+                                                return Promise.resolve();
+                                            }
+                                            return Promise.reject(new Error('请选择虚拟子账户'));
+                                        },
+                                    }),
+                                ]}
+                            >
+                                <Select
+                                    allowClear
+                                    showSearch
+                                    optionFilterProp="label"
+                                    options={snowballLiveSubAccountOptions}
+                                    placeholder={selectedSnowballExternalTradingAccountId ? '选择虚拟子账户' : '先选择外部账户'}
+                                    disabled={!selectedSnowballExternalTradingAccountId}
+                                />
                             </Form.Item>
                         </Col>
                     </Row>

@@ -174,7 +174,8 @@ const formatExecutorPolicy = (policy) => {
   const sequence = Array.isArray(policy.price_level_sequence) && policy.price_level_sequence.length
     ? policy.price_level_sequence.map(getExecutorPriceLevelLabel).join(' -> ')
     : '-';
-  return `${getExecutorPriceLevelLabel(policy.price_level)} / ${policy.order_timeout_seconds || '-'}s / 重定价${policy.max_replace_count ?? '-'}次 / ${sequence}`;
+  const clipSell = policy.clip_sell_to_available !== false;
+  return `${getExecutorPriceLevelLabel(policy.price_level)} / ${policy.order_timeout_seconds || '-'}s / 重定价${policy.max_replace_count ?? '-'}次 / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
 
 const tradeReasonMeta = {
@@ -210,7 +211,6 @@ const defaultValues = {
   live_trade_enabled: false,
   external_trading_account_id: undefined,
   live_sub_account_id: undefined,
-  live_trade_total_amount: undefined,
 };
 
 const normalizeConfigForForm = (config) => ({
@@ -418,7 +418,6 @@ const W20MomentumLive = () => {
       live_trade_enabled: !!values.live_trade_enabled,
       external_trading_account_id: values.external_trading_account_id || null,
       live_sub_account_id: values.live_sub_account_id || null,
-      live_trade_total_amount: values.live_trade_total_amount || null,
     };
   };
 
@@ -979,7 +978,7 @@ const W20MomentumLive = () => {
             />
           </Form.Item>
         </Col>
-        <Col xs={24} md={6}>
+        <Col xs={24} md={10}>
           <Form.Item
             name="live_sub_account_id"
             label="虚拟子账户"
@@ -1002,11 +1001,6 @@ const W20MomentumLive = () => {
               placeholder={selectedExternalTradingAccountId ? '选择虚拟子账户' : '先选择外部账户'}
               disabled={!selectedExternalTradingAccountId}
             />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={6}>
-          <Form.Item name="live_trade_total_amount" label="实盘目标资金">
-            <InputNumber min={0} step={10000} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
       </Row>
@@ -1271,11 +1265,13 @@ const W20MomentumLive = () => {
         <Descriptions.Item label="外部交易账户">
           {externalAccountNameById[selectedConfig?.external_trading_account_id] || '-'}
         </Descriptions.Item>
-        <Descriptions.Item label="目标资金">
-          {selectedConfig?.live_trade_total_amount ? formatMoney(selectedConfig.live_trade_total_amount, 2) : '账户总资产'}
+        <Descriptions.Item label="分配资金">
+          {liveSubAccount ? formatMoney(liveSubAccount.cash_allocated, 2) : '-'}
         </Descriptions.Item>
         <Descriptions.Item label="虚拟子账户">
-          {liveSubAccount ? `${liveSubAccount.name} / 可用 ${formatMoney(liveSubAccount.cash_available, 2)}` : '请先在策略配置中选择'}
+          {liveSubAccount
+            ? `${liveSubAccount.name} / 分配 ${formatMoney(liveSubAccount.cash_allocated, 2)} / 可用 ${formatMoney(liveSubAccount.cash_available, 2)}`
+            : '请先在策略配置中选择'}
         </Descriptions.Item>
         <Descriptions.Item label="执行策略">
           {formatExecutorPolicy(liveSubAccount?.effective_executor_policy)}
@@ -1330,7 +1326,7 @@ const W20MomentumLive = () => {
           <Descriptions.Item label="计划账户">{liveTradePlan.plan.external_account?.name || '-'}</Descriptions.Item>
           <Descriptions.Item label="虚拟子账户">{liveTradePlan.plan.sub_account?.name || '-'}</Descriptions.Item>
           <Descriptions.Item label="可用现金">{formatMoney(liveTradePlan.plan.available_cash, 2)}</Descriptions.Item>
-          <Descriptions.Item label="目标资金">{formatMoney(liveTradePlan.plan.trade_base_value, 2)}</Descriptions.Item>
+          <Descriptions.Item label="分配资金">{formatMoney(liveTradePlan.plan.trade_base_value, 2)}</Descriptions.Item>
           <Descriptions.Item label="预计剩余现金">{formatMoney(liveTradePlan.plan.projected_cash, 2)}</Descriptions.Item>
           <Descriptions.Item label="执行策略">{formatExecutorPolicy(liveTradePlan.plan.sub_account?.effective_executor_policy)}</Descriptions.Item>
           <Descriptions.Item label="计划时间">{formatDateTime(liveTradePlan.timestamp)}</Descriptions.Item>
