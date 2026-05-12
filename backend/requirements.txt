@@ -11,7 +11,7 @@ polars
 watchgod
 setproctitle
 pandas
-schedule
+APScheduler>=3.11,<4
 requests
 ratelimit
 longport

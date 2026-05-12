@@ -45,6 +45,7 @@ from ...core.services.external_trading_execution_policy import (
     normalize_timeout_seconds,
     resolve_execution_policy,
 )
+from ...core.services.external_trading_fee_reconcile import reconcile_external_trading_account_fees
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STRATEGY_SNOWBALL,
@@ -54,7 +55,6 @@ from ...core.services.external_trading_ledger import (
     get_ledger_positions,
     get_open_order_quantities,
     normalize_symbol,
-    reconcile_deliver_records,
     safe_int,
     serialize_ledger_position,
     serialize_order,
@@ -1384,42 +1384,19 @@ async def reconcile_external_trading_fees(
     if payload.end_date < payload.start_date:
         raise HTTPException(status_code=400, detail="end_date must be greater than or equal to start_date")
     try:
-        deliver_response = await external_trading_hub.get_deliver(
-            account.id,
-            payload.start_date.isoformat(),
-            payload.end_date.isoformat(),
-            timeout=payload.timeout_seconds,
+        reconciled = await reconcile_external_trading_account_fees(
+            db,
+            account=account,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            timeout_seconds=payload.timeout_seconds,
         )
     except ExternalTradingConnectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-
-    records = (
-        deliver_response.get("records")
-        or deliver_response.get("deliver_records")
-        or deliver_response.get("delivers")
-        or deliver_response.get("deliveries")
-        or deliver_response.get("data")
-        or []
-    )
-    if isinstance(records, dict):
-        records = list(records.values())
-    if not isinstance(records, list):
-        raise HTTPException(status_code=500, detail="PTrade get_deliver returned invalid records")
-
-    default_trade_date = payload.start_date if payload.start_date == payload.end_date else None
-    result = reconcile_deliver_records(
-        db,
-        account=account,
-        records=records,
-        default_trade_date=default_trade_date,
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     db.commit()
-    return {
-        "start_date": payload.start_date.isoformat(),
-        "end_date": payload.end_date.isoformat(),
-        "deliver_response": deliver_response,
-        "result": result,
-    }
+    return reconciled
 
 
 @router.websocket("/ws")

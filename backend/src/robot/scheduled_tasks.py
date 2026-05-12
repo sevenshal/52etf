@@ -5,15 +5,19 @@ import traceback
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, date, time as dtime, timedelta
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-import schedule
+from apscheduler.triggers.cron import CronTrigger
 
 from ..core.database import ScheduledTaskConfig, SnowballApiHeartbeat, SnowballCopyConfig, get_db_ctx
 from ..core.utils import send_alert_email
 
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+CRON_RULE_SPLIT_PATTERN = re.compile(r"[;\n]+")
+DEFAULT_TASK_TIMEZONE = "Asia/Shanghai"
+SUPPORTED_TASK_TIMEZONES = {"Asia/Shanghai", "America/New_York"}
+SERVER_TZ = ZoneInfo("Asia/Shanghai")
 LAST_RUN_MESSAGE_MAX_LENGTH = 4000
 TASK_ERROR_PREVIEW_LIMIT = 20
 TASK_ERROR_PREVIEW_MAX_LENGTH = 3600
@@ -454,6 +458,53 @@ def _run_a_stock_innovation_momentum_live_sync():
     )
 
 
+def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
+    if result.get("status") == "SKIPPED":
+        return (
+            "外部交易费用对账跳过 "
+            f"reason={result.get('reason')} "
+            f"today={result.get('today')}"
+        )
+    return (
+        "外部交易费用对账 "
+        f"status={result.get('status')} "
+        f"trade_date={result.get('trade_date')} "
+        f"checked={result.get('checked')} "
+        f"processed={result.get('processed')} "
+        f"failed={result.get('failed')} "
+        f"matched={result.get('matched')} "
+        f"unmatched={result.get('unmatched')} "
+        f"applied_order_count={result.get('applied_order_count')}"
+    )
+
+
+def _run_external_trading_fee_reconcile():
+    if _external_trading_fee_reconcile_succeeded_today():
+        return "跳过费用对账: 今日早前对账已成功"
+
+    from ..core.services.external_trading_fee_reconcile import process_external_trading_fee_reconcile_for_robot
+
+    now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
+    strict = now_shanghai.time() >= dtime(9, 15)
+    result = process_external_trading_fee_reconcile_for_robot(strict=strict)
+    logging.getLogger("ScheduledTaskManager").info("External trading fee reconcile result: %s", result)
+    return _format_external_trading_fee_reconcile_result(result)
+
+
+def _external_trading_fee_reconcile_succeeded_today() -> bool:
+    with get_db_ctx() as db:
+        config = db.query(ScheduledTaskConfig).filter(
+            ScheduledTaskConfig.task_key == "external_trading_fee_reconcile"
+        ).first()
+        if not config or not config.last_run_started_at:
+            return False
+        today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        if config.last_run_started_at.date() != today_shanghai:
+            return False
+        message = config.last_run_message or ""
+        return config.last_run_status == "SUCCESS" and "status=OK" in message and "failed=0" in message
+
+
 def _is_china_trading_day(check_date: date) -> bool:
     if check_date.weekday() >= 5:
         return False
@@ -533,6 +584,9 @@ class TaskDefinition:
     default_enabled: bool
     sort_order: int
     runner: Callable[..., None]
+    default_cron_rule: Optional[str] = None
+    default_allow_queue: bool = True
+    default_timezone: str = DEFAULT_TASK_TIMEZONE
 
 
 @dataclass(frozen=True)
@@ -548,10 +602,9 @@ class QueuedTaskRun:
 class ScheduledTaskManager:
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.scheduler = schedule.Scheduler()
         self._lock = threading.RLock()
         self._bootstrapped = False
-        self._jobs: Dict[str, schedule.Job] = {}
+        self._jobs: Dict[str, List[Dict[str, Any]]] = {}
         self._task_queue: Deque[QueuedTaskRun] = deque()
         self._queued_tasks = set()
         self._running_tasks = set()
@@ -683,6 +736,16 @@ class ScheduledTaskManager:
                 sort_order=22,
                 runner=_run_snowball_ptrade_heartbeat_check,
             ),
+            "external_trading_fee_reconcile": TaskDefinition(
+                task_key="external_trading_fee_reconcile",
+                name="外部交易费用对账",
+                description="每个A股交易日开盘前拉取上一A股交易日PTrade交割单，把真实佣金/印花税补回外部交易订单、成交和策略账本；09:15 会在早前未成功时严格重试并告警。",
+                default_time="08:50",
+                default_enabled=True,
+                sort_order=23,
+                runner=_run_external_trading_fee_reconcile,
+                default_cron_rule="50 8 * * mon-fri;15 9 * * mon-fri",
+            ),
         }
 
     def bootstrap(self):
@@ -713,9 +776,11 @@ class ScheduledTaskManager:
                     "a_stock_income_sync",
                     "etf_nport_holdings_import",
                     "w20_momentum_live_sync",
+                    "external_trading_fee_reconcile_retry",
                 ])
             ).delete(synchronize_session=False)
             for task in self.task_definitions.values():
+                default_cron_rule = self._task_default_cron_rule(task)
                 config = db.query(ScheduledTaskConfig).filter(
                     ScheduledTaskConfig.task_key == task.task_key
                 ).first()
@@ -727,6 +792,9 @@ class ScheduledTaskManager:
                             description=task.description,
                             enabled=task.default_enabled,
                             schedule_time=task.default_time,
+                            cron_rule=default_cron_rule,
+                            timezone=task.default_timezone,
+                            allow_queue=task.default_allow_queue,
                             sort_order=task.sort_order,
                         )
                     )
@@ -737,32 +805,164 @@ class ScheduledTaskManager:
                 config.sort_order = task.sort_order
                 if not self.is_valid_time(config.schedule_time):
                     config.schedule_time = task.default_time
+                if not self.is_valid_cron_rule(config.cron_rule):
+                    config.cron_rule = default_cron_rule
+                if not self.is_valid_timezone(config.timezone):
+                    config.timezone = task.default_timezone
+                if config.allow_queue is None:
+                    config.allow_queue = task.default_allow_queue
 
     def is_valid_time(self, value: str) -> bool:
         return bool(value and TIME_PATTERN.match(value))
 
+    def is_valid_timezone(self, value: Optional[str]) -> bool:
+        return bool(value in SUPPORTED_TASK_TIMEZONES)
+
     @staticmethod
-    def _schedule_sort_minutes(value: Optional[str]) -> int:
+    def _time_to_cron(value: str) -> str:
         if not value or not TIME_PATTERN.match(value):
-            return 24 * 60 + 1
-        hour, minute = [int(part) for part in value.split(":")]
-        return hour * 60 + minute
+            raise ValueError("时间格式必须为 HH:MM")
+        hour, minute = value.split(":")
+        return f"{int(minute)} {int(hour)} * * *"
+
+    def _task_default_cron_rule(self, task: TaskDefinition) -> str:
+        return task.default_cron_rule or self._time_to_cron(task.default_time)
+
+    @staticmethod
+    def _split_cron_rules(value: Optional[str]) -> List[str]:
+        return [
+            item.strip()
+            for item in CRON_RULE_SPLIT_PATTERN.split(str(value or ""))
+            if item.strip()
+        ]
+
+    def _build_cron_trigger(self, rule: str, timezone: Optional[str]) -> CronTrigger:
+        fields = str(rule or "").split()
+        if len(fields) != 5:
+            raise ValueError("Cron 规则必须是 5 段格式")
+        if fields[4] != "*" and re.search(r"\d", fields[4]):
+            raise ValueError("Cron 周几字段请用 mon/tue/wed/thu/fri/sat/sun，避免数字周几语义差异")
+        return CronTrigger.from_crontab(rule, timezone=self._task_timezone(timezone))
+
+    def is_valid_cron_rule(self, value: Optional[str]) -> bool:
+        rules = self._split_cron_rules(value)
+        if not rules:
+            return False
+        for rule in rules:
+            try:
+                self._build_cron_trigger(rule, DEFAULT_TASK_TIMEZONE)
+            except Exception:
+                return False
+        return True
+
+    def _next_trigger_run(
+        self,
+        trigger: CronTrigger,
+        now: Optional[datetime] = None,
+        previous_fire_time: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        current = now or datetime.now(trigger.timezone)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=SERVER_TZ).astimezone(trigger.timezone)
+        else:
+            current = current.astimezone(trigger.timezone)
+        try:
+            return trigger.get_next_fire_time(previous_fire_time, current)
+        except Exception as exc:
+            self.logger.warning("Failed to calculate next cron run trigger=%s: %s", trigger, exc)
+            return None
+
+    def _cron_sort_minutes(self, value: Optional[str], timezone: Optional[str] = None) -> int:
+        best = 24 * 60 + 1
+        tz_name = self._task_timezone(timezone)
+        base = datetime(2026, 1, 1, 0, 0, tzinfo=ZoneInfo(tz_name)) - timedelta(seconds=1)
+        end = base + timedelta(days=366)
+        for rule in self._split_cron_rules(value):
+            try:
+                trigger = self._build_cron_trigger(rule, tz_name)
+                previous_fire_time = None
+                cursor = base
+                for _ in range(2000):
+                    next_run = self._next_trigger_run(
+                        trigger,
+                        now=cursor,
+                        previous_fire_time=previous_fire_time,
+                    )
+                    if not next_run or next_run > end:
+                        break
+                    best = min(best, next_run.hour * 60 + next_run.minute)
+                    if best == 0:
+                        return best
+                    previous_fire_time = next_run
+                    cursor = next_run + timedelta(seconds=1)
+            except Exception:
+                continue
+        return best
+
+    def _cron_sort_time_string(self, value: Optional[str], fallback: str, timezone: Optional[str] = None) -> str:
+        minutes = self._cron_sort_minutes(value, timezone=timezone)
+        if minutes > 24 * 60:
+            return fallback
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+    def _task_timezone(self, value: Optional[str]) -> str:
+        return value if self.is_valid_timezone(value) else DEFAULT_TASK_TIMEZONE
+
+    def _latest_due_cron_time_today(
+        self,
+        cron_rule: Optional[str],
+        timezone: Optional[str],
+        now: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        if not self.is_valid_cron_rule(cron_rule):
+            return None
+        tz = ZoneInfo(self._task_timezone(timezone))
+        current = now or datetime.now(tz)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=SERVER_TZ)
+        current = current.astimezone(tz)
+        start_of_day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        latest = None
+        for rule in self._split_cron_rules(cron_rule):
+            try:
+                trigger = self._build_cron_trigger(rule, timezone)
+                previous_fire_time = None
+                cursor = start_of_day - timedelta(seconds=1)
+                for _ in range(2000):
+                    scheduled_at = self._next_trigger_run(
+                        trigger,
+                        now=cursor,
+                        previous_fire_time=previous_fire_time,
+                    )
+                    if not scheduled_at or scheduled_at.date() != current.date() or scheduled_at > current:
+                        break
+                    if latest is None or scheduled_at > latest:
+                        latest = scheduled_at
+                    previous_fire_time = scheduled_at
+                    cursor = scheduled_at + timedelta(seconds=1)
+            except Exception:
+                continue
+        return latest
 
     def _task_time_sort_key(self, task: TaskDefinition) -> tuple:
         try:
             snapshot = self._get_task_snapshot(task.task_key)
-            schedule_time = snapshot.get("schedule_time")
+            cron_rule = snapshot.get("cron_rule")
+            timezone = snapshot.get("timezone")
         except KeyError:
-            schedule_time = task.default_time
+            cron_rule = self._task_default_cron_rule(task)
+            timezone = task.default_timezone
         return (
-            self._schedule_sort_minutes(schedule_time),
+            0 if self._task_timezone(timezone) == "Asia/Shanghai" else 1,
+            self._cron_sort_minutes(cron_rule, timezone=timezone),
             task.sort_order,
             task.task_key,
         )
 
     def _config_time_sort_key(self, config: dict) -> tuple:
         return (
-            self._schedule_sort_minutes(config.get("schedule_time")),
+            0 if self._task_timezone(config.get("timezone")) == "Asia/Shanghai" else 1,
+            self._cron_sort_minutes(config.get("cron_rule"), timezone=config.get("timezone")),
             config.get("sort_order") or 0,
             config.get("task_key") or "",
         )
@@ -772,33 +972,71 @@ class ScheduledTaskManager:
         configs = self._list_task_snapshots()
 
         with self._lock:
-            self.scheduler.clear("managed-task")
             self._jobs = {}
             for config in sorted(configs, key=self._config_time_sort_key):
-                if not config["enabled"] or not self.is_valid_time(config["schedule_time"]):
+                if not config["enabled"] or not self.is_valid_cron_rule(config.get("cron_rule")):
                     continue
                 task = self.task_definitions.get(config["task_key"])
                 if not task:
                     continue
-                job = self.scheduler.every().day.at(config["schedule_time"]).do(
-                    self.trigger_task,
-                    config["task_key"],
-                    trigger_source="schedule",
-                    background=True,
-                    raise_if_running=False,
-                )
-                job.tag("managed-task", config["task_key"])
-                self._jobs[config["task_key"]] = job
+                jobs = []
+                timezone = self._task_timezone(config.get("timezone"))
+                for rule in self._split_cron_rules(config.get("cron_rule")):
+                    trigger = self._build_cron_trigger(rule, timezone)
+                    jobs.append({
+                        "task_key": config["task_key"],
+                        "rule": rule,
+                        "timezone": timezone,
+                        "trigger": trigger,
+                        "previous_fire_time": None,
+                        "next_run": self._next_trigger_run(trigger),
+                    })
+                self._jobs[config["task_key"]] = jobs
                 self.logger.info(
-                    "Registered scheduled task %s at %s",
+                    "Registered scheduled task %s cron=%s timezone=%s",
                     config["task_key"],
-                    config["schedule_time"],
+                    config["cron_rule"],
+                    timezone,
                 )
 
     def run_pending(self):
         self.bootstrap()
+        due_jobs = []
+        due_task_keys = set()
+        now_by_timezone: Dict[str, datetime] = {}
         with self._lock:
-            self.scheduler.run_pending()
+            for task_key, jobs in self._jobs.items():
+                for job in jobs:
+                    timezone = self._task_timezone(job.get("timezone"))
+                    now = now_by_timezone.get(timezone)
+                    if now is None:
+                        now = datetime.now(ZoneInfo(timezone))
+                        now_by_timezone[timezone] = now
+                    trigger = job.get("trigger")
+                    if not trigger:
+                        continue
+                    next_run = job.get("next_run")
+                    if not next_run:
+                        job["next_run"] = self._next_trigger_run(trigger, now=now)
+                        continue
+                    if now < next_run:
+                        continue
+                    if task_key not in due_task_keys:
+                        due_jobs.append(task_key)
+                        due_task_keys.add(task_key)
+                    job["previous_fire_time"] = next_run
+                    job["next_run"] = self._next_trigger_run(
+                        trigger,
+                        now=now,
+                        previous_fire_time=next_run,
+                    )
+        for task_key in due_jobs:
+            self.trigger_task(
+                task_key,
+                trigger_source="schedule",
+                background=True,
+                raise_if_running=False,
+            )
 
     def list_tasks(self) -> List[dict]:
         self.bootstrap()
@@ -852,28 +1090,46 @@ class ScheduledTaskManager:
         self.bootstrap()
         self._require_task(task_key)
         task_snapshot = self._get_task_snapshot(task_key)
-        schedule_time = task_snapshot.get("schedule_time")
-        if not self.is_valid_time(schedule_time):
+        latest_due = self._latest_due_cron_time_today(
+            task_snapshot.get("cron_rule"),
+            task_snapshot.get("timezone"),
+            now=now,
+        )
+        if not latest_due:
             return False
-
-        now = now or datetime.now()
-        hour, minute = [int(part) for part in schedule_time.split(":")]
-        scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return now >= scheduled_at
+        last_run_started_at = task_snapshot.get("last_run_started_at")
+        if not last_run_started_at:
+            return True
+        latest_due_server = latest_due.astimezone(SERVER_TZ).replace(tzinfo=None)
+        return last_run_started_at < latest_due_server
 
     def should_run_on_startup(self, task_key: str, now: Optional[datetime] = None) -> bool:
         now = now or datetime.now()
         return (
             self.is_task_enabled(task_key)
-            and not self.has_run_today(task_key, target_date=now.date())
             and self.has_missed_schedule_today(task_key, now=now)
         )
 
-    def update_task(self, task_key: str, enabled: bool, schedule_time: str, updated_by: Optional[str] = None) -> dict:
+    def update_task(
+        self,
+        task_key: str,
+        enabled: bool,
+        cron_rule: Optional[str] = None,
+        allow_queue: Optional[bool] = None,
+        timezone: Optional[str] = None,
+        schedule_time: Optional[str] = None,
+        updated_by: Optional[str] = None,
+    ) -> dict:
         self.bootstrap()
-        self._require_task(task_key)
-        if not self.is_valid_time(schedule_time):
-            raise ValueError("时间格式必须为 HH:MM")
+        task = self._require_task(task_key)
+        if cron_rule is None:
+            if schedule_time is not None:
+                cron_rule = self._time_to_cron(schedule_time)
+            else:
+                cron_rule = self._task_default_cron_rule(task)
+        cron_rule = "\n".join(self._split_cron_rules(cron_rule))
+        if not self.is_valid_cron_rule(cron_rule):
+            raise ValueError("Cron 规则必须是 5 段格式，多个规则可用分号或换行分隔；周几字段请用 mon-fri 这种英文写法")
 
         with get_db_ctx() as db:
             config = db.query(ScheduledTaskConfig).filter(
@@ -881,8 +1137,19 @@ class ScheduledTaskManager:
             ).first()
             if not config:
                 raise KeyError(f"Task config not found: {task_key}")
+            timezone_value = timezone or config.timezone or task.default_timezone
+            if not self.is_valid_timezone(timezone_value):
+                raise ValueError("时区只支持 Asia/Shanghai 或 America/New_York")
             config.enabled = enabled
-            config.schedule_time = schedule_time
+            config.cron_rule = cron_rule
+            config.timezone = timezone_value
+            config.schedule_time = self._cron_sort_time_string(
+                cron_rule,
+                task.default_time,
+                timezone=timezone_value,
+            )
+            if allow_queue is not None:
+                config.allow_queue = bool(allow_queue)
             config.updated_by = updated_by
             config.updated_at = datetime.now()
 
@@ -900,7 +1167,10 @@ class ScheduledTaskManager:
     ) -> bool:
         self.bootstrap()
         task = self._require_task(task_key)
-        done_event = None if background else threading.Event()
+        config = self._get_task_snapshot(task_key)
+        allow_queue = bool(config.get("allow_queue"))
+        done_event = None if background or not allow_queue else threading.Event()
+        direct_run: Optional[QueuedTaskRun] = None
 
         with self._lock:
             if task_key in self._running_tasks or task_key in self._queued_tasks:
@@ -916,17 +1186,34 @@ class ScheduledTaskManager:
                 queued_at=datetime.now(),
                 done_event=done_event,
             )
-            self._task_queue.append(queued_run)
-            self._queued_tasks.add(task_key)
-            queue_size = len(self._task_queue)
-            self._ensure_worker_locked()
+            if allow_queue:
+                self._task_queue.append(queued_run)
+                self._queued_tasks.add(task_key)
+                queue_size = len(self._task_queue)
+                self._ensure_worker_locked()
+            else:
+                self._running_tasks.add(task_key)
+                queue_size = 0
+                direct_run = queued_run
 
-        self.logger.info(
-            "Queued scheduled task %s, source=%s, queue_size=%s",
-            task_key,
-            trigger_source,
-            queue_size,
-        )
+        if direct_run:
+            self.logger.info("Starting non-queued scheduled task %s, source=%s", task_key, trigger_source)
+            if background:
+                threading.Thread(
+                    target=self._run_direct_task,
+                    args=(direct_run,),
+                    daemon=True,
+                    name=f"scheduled-task-direct-{task_key}",
+                ).start()
+            else:
+                self._run_direct_task(direct_run)
+        else:
+            self.logger.info(
+                "Queued scheduled task %s, source=%s, queue_size=%s",
+                task_key,
+                trigger_source,
+                queue_size,
+            )
 
         if done_event:
             done_event.wait()
@@ -942,6 +1229,18 @@ class ScheduledTaskManager:
             name="scheduled-task-worker",
         )
         self._worker_thread.start()
+
+    def _run_direct_task(self, queued_run: QueuedTaskRun):
+        try:
+            self._execute_task(
+                queued_run.task,
+                queued_run.trigger_source,
+                queued_run.triggered_by,
+                queued_run.runner_kwargs,
+            )
+        finally:
+            if queued_run.done_event:
+                queued_run.done_event.set()
 
     def _run_background_queue(self):
         while True:
@@ -1032,16 +1331,26 @@ class ScheduledTaskManager:
     def _serialize_task(
         self,
         config: dict,
-        job: Optional[schedule.Job],
+        jobs: Optional[List[Dict[str, Any]]],
         is_running: bool,
         is_queued: bool = False,
     ) -> dict:
+        scheduled_jobs = jobs or []
+        next_runs = [job.get("next_run") for job in scheduled_jobs if job and job.get("next_run")]
+        next_run = min(next_runs) if next_runs else None
         return {
             "task_key": config["task_key"],
             "name": config["name"],
             "description": config["description"],
             "enabled": config["enabled"],
             "schedule_time": config["schedule_time"],
+            "cron_rule": config["cron_rule"],
+            "timezone": config["timezone"],
+            "allow_queue": config["allow_queue"],
+            "first_daily_trigger_minutes": self._cron_sort_minutes(
+                config.get("cron_rule"),
+                timezone=config.get("timezone"),
+            ),
             "sort_order": config["sort_order"],
             "supports_start_date": config["task_key"] in {
                 "evc_static_info_sync",
@@ -1052,7 +1361,7 @@ class ScheduledTaskManager:
             },
             "is_running": is_running,
             "is_queued": is_queued,
-            "next_run_at": job.next_run.isoformat() if job and job.next_run else None,
+            "next_run_at": next_run.isoformat() if next_run else None,
             "last_trigger_source": config["last_trigger_source"],
             "last_run_started_at": config["last_run_started_at"].isoformat() if config["last_run_started_at"] else None,
             "last_run_finished_at": config["last_run_finished_at"].isoformat() if config["last_run_finished_at"] else None,
@@ -1081,12 +1390,21 @@ class ScheduledTaskManager:
             return self._snapshot_config(config)
 
     def _snapshot_config(self, config: ScheduledTaskConfig) -> dict:
+        task = self.task_definitions.get(config.task_key)
+        fallback_cron_rule = self._task_default_cron_rule(task) if task else None
+        cron_rule = config.cron_rule or fallback_cron_rule or (
+            self._time_to_cron(config.schedule_time) if self.is_valid_time(config.schedule_time) else None
+        )
+        timezone = self._task_timezone(config.timezone or (task.default_timezone if task else None))
         return {
             "task_key": config.task_key,
             "name": config.name,
             "description": config.description,
             "enabled": config.enabled,
             "schedule_time": config.schedule_time,
+            "cron_rule": cron_rule,
+            "timezone": timezone,
+            "allow_queue": config.allow_queue is not False,
             "sort_order": config.sort_order,
             "last_trigger_source": config.last_trigger_source,
             "last_run_started_at": config.last_run_started_at,

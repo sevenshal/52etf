@@ -11,7 +11,10 @@ router = APIRouter(prefix="/api/scheduled-tasks", tags=["scheduled-tasks"])
 
 class ScheduledTaskUpdateRequest(BaseModel):
     enabled: bool
-    schedule_time: str
+    cron_rule: Optional[str] = None
+    schedule_time: Optional[str] = None
+    timezone: Optional[str] = None
+    allow_queue: Optional[bool] = None
 
 
 class ScheduledTaskRunRequest(BaseModel):
@@ -24,6 +27,10 @@ class ScheduledTaskResponse(BaseModel):
     description: Optional[str] = None
     enabled: bool
     schedule_time: str
+    cron_rule: Optional[str] = None
+    timezone: str = "Asia/Shanghai"
+    allow_queue: bool = True
+    first_daily_trigger_minutes: Optional[int] = None
     sort_order: int
     supports_start_date: bool = False
     is_running: bool
@@ -55,7 +62,10 @@ def update_scheduled_task(
         return scheduled_task_manager.update_task(
             task_key=task_key,
             enabled=payload.enabled,
+            cron_rule=payload.cron_rule,
             schedule_time=payload.schedule_time,
+            timezone=payload.timezone,
+            allow_queue=payload.allow_queue,
             updated_by=account_id,
         )
     except KeyError:

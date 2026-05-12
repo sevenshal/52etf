@@ -739,6 +739,9 @@ class ScheduledTaskConfig(Base):
     description = Column(String(255))
     enabled = Column(Boolean, default=True, nullable=False)
     schedule_time = Column(String(5), nullable=False)
+    cron_rule = Column(String(1000))
+    timezone = Column(String(64), default="Asia/Shanghai", nullable=False)
+    allow_queue = Column(Boolean, default=True, nullable=False)
     sort_order = Column(Integer, default=0, nullable=False)
     last_trigger_source = Column(String(32))
     last_run_started_at = Column(DateTime)
@@ -1284,6 +1287,11 @@ def ensure_table_columns():
             "last_external_sync_at": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_at DATETIME",
             "last_external_sync_status": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_status VARCHAR(16)",
             "last_external_sync_message": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_message VARCHAR(500)",
+        },
+        "scheduled_task_configs": {
+            "cron_rule": "ALTER TABLE scheduled_task_configs ADD COLUMN cron_rule VARCHAR(1000)",
+            "timezone": "ALTER TABLE scheduled_task_configs ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'",
+            "allow_queue": "ALTER TABLE scheduled_task_configs ADD COLUMN allow_queue BOOLEAN NOT NULL DEFAULT 1",
         },
     }
 
