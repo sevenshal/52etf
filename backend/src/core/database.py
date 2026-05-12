@@ -723,7 +723,6 @@ class ExternalTradingAccount(Base):
     account_id = Column(String, index=True, nullable=False)
     name = Column(String(100), nullable=False)
     identifier = Column(String(128), nullable=False)
-    remark = Column(String(1000))
     enabled = Column(Boolean, default=True, nullable=False)
     executor_enabled = Column(Boolean, default=True, nullable=False)
     executor_price_level = Column(Integer, default=1, nullable=False)

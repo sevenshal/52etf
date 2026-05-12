@@ -40,8 +40,12 @@ from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STRATEGY_W20,
     build_netted_target_execution_plan,
+    get_ledger_positions,
+    get_open_order_quantities,
     normalize_symbol,
+    safe_int,
     serialize_ledger_position,
+    serialize_order,
     serialize_sub_account,
 )
 from ...core.services.external_trading_crypto import (
@@ -57,7 +61,6 @@ logger = logging.getLogger(__name__)
 class ExternalTradingAccountBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     identifier: str = Field(..., min_length=1, max_length=128)
-    remark: Optional[str] = Field(default=None, max_length=1000)
     enabled: bool = True
     executor_enabled: bool = True
     executor_price_level: int = Field(default=DEFAULT_EXECUTOR_PRICE_LEVEL)
@@ -66,7 +69,7 @@ class ExternalTradingAccountBase(BaseModel):
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
 
-    @validator("name", "identifier", "remark", pre=True)
+    @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
         if isinstance(value, str):
             return value.strip()
@@ -93,7 +96,6 @@ class ExternalTradingAccountCreate(ExternalTradingAccountBase):
 class ExternalTradingAccountUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     identifier: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    remark: Optional[str] = Field(default=None, max_length=1000)
     enabled: Optional[bool] = None
     executor_enabled: Optional[bool] = None
     executor_price_level: Optional[int] = None
@@ -102,7 +104,7 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_price_level_sequence: Optional[List[int]] = None
 
-    @validator("name", "identifier", "remark", pre=True)
+    @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
         if isinstance(value, str):
             return value.strip()
@@ -246,7 +248,6 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "account_id": account.account_id,
         "name": account.name,
         "identifier": account.identifier,
-        "remark": account.remark,
         "enabled": account.enabled,
         "executor_enabled": getattr(account, "executor_enabled", True),
         "executor_price_level": executor_price_level,
@@ -351,6 +352,115 @@ def _quote_reference_price(quote: Dict[str, Any]) -> float:
     return bid or ask or 0.0
 
 
+def _iso(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _serialize_target_position_status(
+    row: ExternalTradingTargetPosition,
+    sub_account: Optional[ExternalTradingSubAccount],
+    ledger_position: Optional[ExternalTradingLedgerPosition],
+    open_quantities: Optional[Dict[str, int]],
+    strategy_name: Optional[str],
+) -> Dict[str, Any]:
+    symbol = normalize_symbol(row.symbol)
+    current_quantity = safe_int(getattr(ledger_position, "quantity", 0))
+    available_quantity = safe_int(getattr(ledger_position, "available_quantity", current_quantity))
+    pending_buy = safe_int((open_quantities or {}).get("BUY"))
+    pending_sell = safe_int((open_quantities or {}).get("SELL"))
+    effective_quantity = current_quantity + pending_buy - pending_sell
+    target_quantity = safe_int(row.target_quantity)
+    delta_quantity = target_quantity - effective_quantity
+    side = "BUY" if delta_quantity > 0 else "SELL" if delta_quantity < 0 else None
+    demand_quantity = abs(delta_quantity)
+    if side == "SELL":
+        demand_quantity = min(demand_quantity, max(available_quantity - pending_sell, 0))
+
+    return {
+        "id": row.id,
+        "sub_account_id": row.sub_account_id,
+        "sub_account_name": sub_account.name if sub_account else None,
+        "sub_account_enabled": sub_account.enabled if sub_account else None,
+        "strategy_type": row.strategy_type,
+        "strategy_config_id": row.strategy_config_id,
+        "strategy_name": strategy_name,
+        "symbol": symbol,
+        "target_quantity": target_quantity,
+        "current_quantity": current_quantity,
+        "available_quantity": available_quantity,
+        "pending_buy_quantity": pending_buy,
+        "pending_sell_quantity": pending_sell,
+        "effective_quantity": effective_quantity,
+        "delta_quantity": delta_quantity,
+        "side": side,
+        "demand_quantity": demand_quantity,
+        "target_weight_pct": row.target_weight_pct,
+        "target_value": row.target_value,
+        "signal_id": row.signal_id,
+        "signal_version": row.signal_version,
+        "source_execution_id": row.source_execution_id,
+        "status": row.status,
+        "valid_until": _iso(row.valid_until),
+        "updated_at": _iso(row.updated_at),
+        "created_at": _iso(row.created_at),
+    }
+
+
+def _serialize_ledger_position_status(
+    row: ExternalTradingLedgerPosition,
+    sub_account: Optional[ExternalTradingSubAccount],
+    strategy_name: Optional[str],
+) -> Dict[str, Any]:
+    item = serialize_ledger_position(row)
+    item["sub_account_name"] = sub_account.name if sub_account else None
+    item["sub_account_enabled"] = sub_account.enabled if sub_account else None
+    item["strategy_type"] = sub_account.strategy_type if sub_account else None
+    item["strategy_config_id"] = sub_account.strategy_config_id if sub_account else None
+    item["strategy_name"] = strategy_name
+    return item
+
+
+def _serialize_order_status(
+    row: ExternalTradingOrder,
+    sub_account: Optional[ExternalTradingSubAccount],
+    strategy_name: Optional[str],
+) -> Dict[str, Any]:
+    item = serialize_order(row)
+    item["sub_account_name"] = sub_account.name if sub_account else None
+    item["strategy_name"] = strategy_name
+    item["created_at"] = _iso(row.created_at)
+    return item
+
+
+def _serialize_fill_status(
+    row: ExternalTradingOrderFill,
+    sub_account: Optional[ExternalTradingSubAccount],
+    strategy_name: Optional[str],
+) -> Dict[str, Any]:
+    allocation_role = "CHILD" if row.sub_account_id else "PARENT"
+    return {
+        "id": row.id,
+        "allocation_role": allocation_role,
+        "allocation_role_label": "子账户分配成交" if allocation_role == "CHILD" else "净额父单成交",
+        "sub_account_id": row.sub_account_id,
+        "sub_account_name": sub_account.name if sub_account else "净额父单",
+        "strategy_name": strategy_name if sub_account else "券商原始成交",
+        "order_id": row.order_id,
+        "client_order_id": row.client_order_id,
+        "broker_order_id": row.broker_order_id,
+        "fill_key": row.fill_key,
+        "symbol": row.symbol,
+        "side": row.side,
+        "quantity": row.quantity,
+        "price": row.price,
+        "amount": row.amount,
+        "traded_at": _iso(row.traded_at),
+        "created_at": _iso(row.created_at),
+    }
+
+
 async def _build_netted_executor_plan(
     db: OrmSession,
     account: ExternalTradingAccount,
@@ -433,7 +543,6 @@ async def create_external_trading_account(
         account_id=account_id,
         name=payload.name,
         identifier=payload.identifier,
-        remark=payload.remark,
         enabled=payload.enabled,
         executor_enabled=payload.executor_enabled,
         executor_price_level=payload.executor_price_level,
@@ -681,6 +790,182 @@ async def execute_external_trading_netted_executor(
         db.rollback()
         logger.exception("External trading netted executor failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/{external_account_id}/executor/status")
+async def get_external_trading_executor_status(
+    external_account_id: int,
+    db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+
+    sub_accounts = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == account.id,
+        )
+        .order_by(ExternalTradingSubAccount.id.asc())
+        .all()
+    )
+    sub_account_by_id = {row.id: row for row in sub_accounts}
+    strategy_name_by_sub_account_id = {
+        row.id: _strategy_binding_name(db, row)
+        for row in sub_accounts
+    }
+    ledger_by_sub_account = {
+        sub_account_id: get_ledger_positions(db, sub_account_id)
+        for sub_account_id in sub_account_by_id.keys()
+    }
+    open_by_sub_account = {
+        sub_account_id: get_open_order_quantities(db, sub_account_id)
+        for sub_account_id in sub_account_by_id.keys()
+    }
+
+    target_rows = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(
+            ExternalTradingTargetPosition.account_id == account_id,
+            ExternalTradingTargetPosition.external_trading_account_id == account.id,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+        .order_by(
+            ExternalTradingTargetPosition.sub_account_id.asc(),
+            ExternalTradingTargetPosition.symbol.asc(),
+        )
+        .all()
+    )
+    target_positions = []
+    for row in target_rows:
+        sub_account = sub_account_by_id.get(row.sub_account_id)
+        symbol = normalize_symbol(row.symbol)
+        target_positions.append(_serialize_target_position_status(
+            row,
+            sub_account,
+            ledger_by_sub_account.get(row.sub_account_id, {}).get(symbol),
+            open_by_sub_account.get(row.sub_account_id, {}).get(symbol),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        ))
+
+    ledger_rows = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.account_id == account_id,
+            ExternalTradingLedgerPosition.external_trading_account_id == account.id,
+        )
+        .order_by(
+            ExternalTradingLedgerPosition.sub_account_id.asc(),
+            ExternalTradingLedgerPosition.market_value.desc(),
+            ExternalTradingLedgerPosition.symbol.asc(),
+        )
+        .all()
+    )
+    ledger_positions = [
+        _serialize_ledger_position_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        )
+        for row in ledger_rows
+    ]
+
+    order_rows = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+        )
+        .order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
+        .limit(300)
+        .all()
+    )
+    orders = [
+        _serialize_order_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        )
+        for row in order_rows
+    ]
+
+    fill_rows = (
+        db.query(ExternalTradingOrderFill)
+        .filter(
+            ExternalTradingOrderFill.account_id == account_id,
+            ExternalTradingOrderFill.external_trading_account_id == account.id,
+        )
+        .order_by(ExternalTradingOrderFill.created_at.desc(), ExternalTradingOrderFill.id.desc())
+        .limit(300)
+        .all()
+    )
+    fills = [
+        _serialize_fill_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        )
+        for row in fill_rows
+    ]
+
+    plan_error = None
+    try:
+        plan = await _build_netted_executor_plan(
+            db,
+            account,
+            account_id,
+            NettedExecutorRequest(),
+            require_connection=False,
+        )
+    except Exception as exc:
+        plan_error = str(exc)
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id=account_id,
+            external_trading_account_id=account.id,
+            price_level=normalize_price_level(account.executor_price_level),
+            lot_size=normalize_lot_size(account.executor_lot_size),
+            order_timeout_seconds=normalize_timeout_seconds(account.executor_order_timeout_seconds),
+            max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
+            price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
+        )
+        plan["connected"] = external_trading_hub.get_status(account.id).get("connected")
+        plan["reference_prices"] = {}
+        plan["account_executor_policy"] = resolve_execution_policy(account)
+
+    order_status_counts: Dict[str, int] = {}
+    for row in order_rows:
+        key = row.status or "UNKNOWN"
+        order_status_counts[key] = order_status_counts.get(key, 0) + 1
+
+    return {
+        "account": _serialize_account(account),
+        "sub_accounts": [
+            _serialize_sub_account_with_binding(db, row)
+            for row in sub_accounts
+        ],
+        "target_positions": target_positions,
+        "ledger_positions": ledger_positions,
+        "orders": orders,
+        "fills": fills,
+        "plan": plan,
+        "plan_error": plan_error,
+        "summary": {
+            "sub_account_count": len(sub_accounts),
+            "active_sub_account_count": len([row for row in sub_accounts if row.enabled]),
+            "target_position_count": len(target_positions),
+            "nonzero_target_count": len([row for row in target_positions if safe_int(row.get("target_quantity")) != 0]),
+            "pending_delta_count": len([row for row in target_positions if safe_int(row.get("demand_quantity")) > 0]),
+            "ledger_position_count": len(ledger_positions),
+            "active_order_count": len([row for row in order_rows if row.status in ACTIVE_ORDER_STATUSES]),
+            "order_count": len(order_rows),
+            "fill_count": len(fill_rows),
+            "order_status_counts": order_status_counts,
+            "external_order_count": len(plan.get("external_orders") or []),
+            "internal_cross_count": len(plan.get("internal_crosses") or []),
+            "demand_count": len(plan.get("demands") or []),
+        },
+    }
 
 
 @router.get("/{external_account_id}/status")
