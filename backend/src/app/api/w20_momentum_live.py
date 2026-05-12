@@ -15,11 +15,6 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 
 from ...core.database import (
-    ExternalTradingAccount,
-    ExternalTradingLedgerPosition,
-    ExternalTradingOrder,
-    ExternalTradingSubAccount,
-    ExternalTradingTargetPosition,
     W20MomentumLiveConfig,
     W20MomentumLiveEquity,
     W20MomentumLiveHolding,
@@ -27,6 +22,15 @@ from ...core.database import (
     W20MomentumLiveTrade,
     get_db,
     get_db_ctx,
+)
+from ...core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
+    ExternalTradingOrder,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+    get_external_trading_db,
+    get_external_trading_db_ctx,
 )
 from ...core.services.external_trading import ExternalTradingConnectionError, external_trading_hub
 from ...core.services.external_trading_executor import trigger_external_trading_executor
@@ -87,7 +91,6 @@ class W20MomentumLiveConfigPayload(BaseModel):
     live_trade_enabled: bool = False
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
-    live_trade_total_amount: Optional[float] = None
 
     @validator("name")
     def validate_name(cls, value):
@@ -136,12 +139,6 @@ class W20MomentumLiveConfigPayload(BaseModel):
     def validate_non_negative(cls, value):
         if value < 0:
             raise ValueError("参数不能为负数")
-        return value
-
-    @validator("live_trade_total_amount")
-    def validate_live_trade_total_amount(cls, value):
-        if value is not None and value <= 0:
-            raise ValueError("实盘目标资金必须大于 0")
         return value
 
     @validator("lot_size")
@@ -205,7 +202,6 @@ def _config_to_dict(config: W20MomentumLiveConfig) -> Dict:
         "live_trade_enabled": bool(getattr(config, "live_trade_enabled", False)),
         "external_trading_account_id": getattr(config, "external_trading_account_id", None),
         "live_sub_account_id": getattr(config, "live_sub_account_id", None),
-        "live_trade_total_amount": getattr(config, "live_trade_total_amount", None),
         "last_sync_at": config.last_sync_at,
         "last_sync_status": config.last_sync_status,
         "last_sync_message": config.last_sync_message,
@@ -723,7 +719,7 @@ def _mark_sync_failed(db: Session, config_id: int, account_id: str, exc: Excepti
 
 def _get_latest_sync_payload(db: Session, config: W20MomentumLiveConfig) -> Dict:
     latest_sync_log = (
-        db.query(W20MomentumLiveLog)
+        db.query(W20MomentumLiveLog.payload)
         .filter(
             W20MomentumLiveLog.config_id == config.id,
             W20MomentumLiveLog.action == "SYNC",
@@ -731,12 +727,12 @@ def _get_latest_sync_payload(db: Session, config: W20MomentumLiveConfig) -> Dict
         .order_by(W20MomentumLiveLog.timestamp.desc(), W20MomentumLiveLog.id.desc())
         .first()
     )
-    return latest_sync_log.payload if latest_sync_log and latest_sync_log.payload else {}
+    return latest_sync_log[0] if latest_sync_log and latest_sync_log[0] else {}
 
 
 def _get_latest_runtime_summary(db: Session, config: W20MomentumLiveConfig) -> Dict:
     latest_equity = (
-        db.query(W20MomentumLiveEquity)
+        db.query(W20MomentumLiveEquity.date, W20MomentumLiveEquity.value)
         .filter(W20MomentumLiveEquity.config_id == config.id)
         .order_by(W20MomentumLiveEquity.date.desc())
         .first()
@@ -1001,7 +997,6 @@ async def _build_live_trade_plan(
 
     account_available_cash = _safe_float(assets.get("available_cash"), _safe_float(assets.get("total_cash")))
     sub_account = _get_w20_live_sub_account(db, config, external_account)
-    configured_trade_amount = _safe_float(getattr(config, "live_trade_total_amount", None))
     sub_account_allocated_cash = _safe_float(sub_account.cash_allocated)
     sub_account_available_cash = _safe_float(sub_account.cash_available, sub_account_allocated_cash)
 
@@ -1034,9 +1029,9 @@ async def _build_live_trade_plan(
         sub_account_available_cash,
         account_available_cash,
     )
-    trade_base_value = configured_trade_amount if configured_trade_amount > 0 else sub_account_allocated_cash
+    trade_base_value = sub_account_allocated_cash
     if trade_base_value <= 0:
-        raise HTTPException(status_code=400, detail="实盘目标资金或虚拟子账户分配资金为空，无法生成实盘计划")
+        raise HTTPException(status_code=400, detail="虚拟子账户分配资金为空，无法生成实盘计划")
 
     rows = []
     sell_orders = []
@@ -1343,7 +1338,7 @@ def _build_live_trade_plan_email_body(
         f"信号日期: {latest_signal.get('date') or '-'}",
         f"目标持仓: {_format_live_trade_targets(latest_signal)}",
         f"外部交易账户: {external_account.name} ({external_account.identifier})",
-        f"目标资金: {_format_live_trade_money(plan.get('trade_base_value'))}",
+        f"分配资金: {_format_live_trade_money(plan.get('trade_base_value'))}",
         f"可用现金: {_format_live_trade_money(plan.get('available_cash'))}",
         f"预计剩余现金: {_format_live_trade_money(plan.get('projected_cash'))}",
         "执行策略: 真实下单价格、超时和重定价由外部交易账号/虚拟子账户的通用执行器配置决定",
@@ -1444,9 +1439,10 @@ def _generate_scheduled_live_trade_plan(
     if not getattr(config, "live_trade_enabled", False):
         return None
 
-    external_account = _get_external_account_for_live_trade(db, config)
     latest_signal = sync_result.get("latest_signal") or {}
-    plan = asyncio.run(_build_live_trade_plan(db, config, external_account, latest_signal))
+    with get_external_trading_db_ctx() as trading_db:
+        external_account = _get_external_account_for_live_trade(trading_db, config)
+        plan = asyncio.run(_build_live_trade_plan(trading_db, config, external_account, latest_signal))
     _add_live_trade_plan_log(
         db,
         config,
@@ -1488,6 +1484,7 @@ def _get_latest_live_trade_plan_log(
 
 async def _prepare_live_trade_plan(
     db: Session,
+    trading_db: Session,
     config: W20MomentumLiveConfig,
     external_account: ExternalTradingAccount,
     *,
@@ -1502,7 +1499,7 @@ async def _prepare_live_trade_plan(
         latest_signal = sync_result.get("latest_signal") or {}
     else:
         latest_signal = (_get_latest_sync_payload(db, config).get("latest_signal") or {})
-    return await _build_live_trade_plan(db, config, external_account, latest_signal)
+    return await _build_live_trade_plan(trading_db, config, external_account, latest_signal)
 
 
 def _get_latest_live_trade_approval_log(
@@ -1573,6 +1570,7 @@ def _add_live_trade_approval_log(
 
 def _approve_live_trade_plan(
     db: Session,
+    trading_db: Session,
     config: W20MomentumLiveConfig,
     plan: Dict,
     *,
@@ -1580,7 +1578,7 @@ def _approve_live_trade_plan(
     trigger_source: str,
     executor_result: Optional[Dict] = None,
 ) -> Dict:
-    activation = _activate_live_trade_targets(db, plan)
+    activation = _activate_live_trade_targets(trading_db, plan)
     return _add_live_trade_approval_log(
         db,
         config,
@@ -1819,13 +1817,15 @@ def create_w20_momentum_live_config(
     payload: W20MomentumLiveConfigPayload,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
-    _validate_external_account_selection(db, account_id, payload.external_trading_account_id)
+    _validate_external_account_selection(trading_db, account_id, payload.external_trading_account_id)
     config = W20MomentumLiveConfig(account_id=account_id, created_at=datetime.now())
     _apply_payload(config, payload)
     db.add(config)
     db.flush()
-    _sync_w20_live_sub_account_binding(db, config, previous_sub_account_id=None)
+    _sync_w20_live_sub_account_binding(trading_db, config, previous_sub_account_id=None)
+    trading_db.commit()
     db.commit()
     db.refresh(config)
     return _config_to_dict(config)
@@ -1847,12 +1847,14 @@ def update_w20_momentum_live_config(
     payload: W20MomentumLiveConfigPayload,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
     previous_sub_account_id = getattr(config, "live_sub_account_id", None)
-    _validate_external_account_selection(db, account_id, payload.external_trading_account_id)
+    _validate_external_account_selection(trading_db, account_id, payload.external_trading_account_id)
     _apply_payload(config, payload)
-    _sync_w20_live_sub_account_binding(db, config, previous_sub_account_id=previous_sub_account_id)
+    _sync_w20_live_sub_account_binding(trading_db, config, previous_sub_account_id=previous_sub_account_id)
+    trading_db.commit()
     db.commit()
     db.refresh(config)
     return _config_to_dict(config)
@@ -1863,15 +1865,16 @@ def delete_w20_momentum_live_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
     if getattr(config, "live_sub_account_id", None):
         _deactivate_w20_target_positions(
-            db,
+            trading_db,
             sub_account_id=config.live_sub_account_id,
             config_id=config.id,
         )
-        sub_account = db.query(ExternalTradingSubAccount).filter(
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
             ExternalTradingSubAccount.id == config.live_sub_account_id,
             ExternalTradingSubAccount.account_id == account_id,
             ExternalTradingSubAccount.strategy_type == STRATEGY_W20,
@@ -1886,6 +1889,7 @@ def delete_w20_momentum_live_config(
     db.query(W20MomentumLiveEquity).filter(W20MomentumLiveEquity.config_id == config.id).delete()
     db.query(W20MomentumLiveLog).filter(W20MomentumLiveLog.config_id == config.id).delete()
     db.delete(config)
+    trading_db.commit()
     db.commit()
     return {"message": "已删除 W20 虚拟盘配置"}
 
@@ -1918,15 +1922,17 @@ async def execute_w20_momentum_live_trade(
     payload: W20LiveTradeRequest,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
-    external_account = _get_external_account_for_live_trade(db, config)
+    external_account = _get_external_account_for_live_trade(trading_db, config)
 
     try:
         market_open = _is_china_live_trade_window()
         if payload.dry_run:
             plan = await _prepare_live_trade_plan(
                 db,
+                trading_db,
                 config,
                 external_account,
                 sync_before=payload.sync_before,
@@ -1971,12 +1977,14 @@ async def execute_w20_momentum_live_trade(
             _validate_live_trade_plan_binding(config, external_account, plan)
             activation = _approve_live_trade_plan(
                 db,
+                trading_db,
                 config,
                 plan,
                 market_open=False,
                 trigger_source="manual_confirm",
             )
             now = datetime.now()
+            trading_db.commit()
             db.commit()
             return {
                 "message": "目标仓位已确认，通用执行器将在下个 A 股交易时段自动执行",
@@ -1997,13 +2005,14 @@ async def execute_w20_momentum_live_trade(
 
         plan = await _prepare_live_trade_plan(
             db,
+            trading_db,
             config,
             external_account,
             sync_before=payload.sync_before,
             trigger_source="live_trade",
         )
-        activation = _activate_live_trade_targets(db, plan)
-        db.commit()
+        activation = _activate_live_trade_targets(trading_db, plan)
+        trading_db.commit()
         execution = await trigger_external_trading_executor(
             account_id=account_id,
             external_account_id=external_account.id,
@@ -2043,9 +2052,11 @@ async def execute_w20_momentum_live_trade(
             "trigger_source": "manual_confirm",
         }
     except HTTPException:
+        trading_db.rollback()
         db.rollback()
         raise
     except Exception as exc:
+        trading_db.rollback()
         db.rollback()
         logger.exception("W20 live trade execution failed")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -2159,6 +2170,7 @@ def get_w20_momentum_live_detail(
     trade_limit: int = Query(500, ge=1, le=5000),
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
     equity = (
@@ -2202,12 +2214,12 @@ def get_w20_momentum_live_detail(
     live_ledger_positions = []
     live_orders = []
     if getattr(config, "live_sub_account_id", None):
-        live_sub_account = db.query(ExternalTradingSubAccount).filter(
+        live_sub_account = trading_db.query(ExternalTradingSubAccount).filter(
             ExternalTradingSubAccount.id == config.live_sub_account_id,
             ExternalTradingSubAccount.account_id == account_id,
         ).first()
     if live_sub_account:
-        live_external_account = db.query(ExternalTradingAccount).filter(
+        live_external_account = trading_db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.id == live_sub_account.external_trading_account_id,
             ExternalTradingAccount.account_id == account_id,
         ).first()
@@ -2217,13 +2229,13 @@ def get_w20_momentum_live_detail(
             if live_external_account else None
         )
         live_ledger_positions = (
-            db.query(ExternalTradingLedgerPosition)
+            trading_db.query(ExternalTradingLedgerPosition)
             .filter(ExternalTradingLedgerPosition.sub_account_id == live_sub_account.id)
             .order_by(ExternalTradingLedgerPosition.market_value.desc(), ExternalTradingLedgerPosition.symbol.asc())
             .all()
         )
         live_orders = (
-            db.query(ExternalTradingOrder)
+            trading_db.query(ExternalTradingOrder)
             .filter(ExternalTradingOrder.sub_account_id == live_sub_account.id)
             .order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
             .limit(100)

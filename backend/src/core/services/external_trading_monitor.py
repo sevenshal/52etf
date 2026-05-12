@@ -3,7 +3,7 @@ from datetime import date, datetime, time as dtime
 from typing import Dict, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
-from ..database import ExternalTradingAccount, get_db_ctx
+from ..external_trading_database import ExternalTradingAccount, get_external_trading_db_ctx
 from ..utils import send_alert_email
 from .external_trading import external_trading_hub
 
@@ -161,7 +161,7 @@ def process_external_trading_connection_monitor_for_robot() -> Dict:
     if not market_session and not preopen_window:
         return {"checked": 0, "alerts": 0, "skipped": "outside_monitor_window"}
 
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         account_rows = (
             db.query(ExternalTradingAccount)
             .filter(ExternalTradingAccount.enabled == True)

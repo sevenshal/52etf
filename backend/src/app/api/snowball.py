@@ -9,8 +9,39 @@ import collections
 import fnmatch
 import asyncio
 import re
+import hashlib
+import json
 from sqlalchemy.orm import Session
-from ...core.database import get_db, get_db_ctx, Session, SnowballApiHeartbeat, SnowballCopyConfig, SnowballCopyLog, SnowballPortfolioSnapshot, SnowballAccountConfig
+from ...core.database import (
+    get_db,
+    get_db_ctx,
+    Session,
+    SnowballApiHeartbeat,
+    SnowballCopyConfig,
+    SnowballCopyLog,
+    SnowballPortfolioSnapshot,
+    SnowballAccountConfig,
+)
+from ...core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+    get_external_trading_db,
+    get_external_trading_db_ctx,
+)
+from ...core.services.external_trading_executor import (
+    is_a_share_trading_window,
+    next_a_share_trading_time,
+    trigger_external_trading_executor,
+)
+from ...core.services.external_trading_ledger import (
+    STRATEGY_SNOWBALL,
+    normalize_symbol as normalize_trading_symbol,
+    safe_float,
+    safe_int,
+    sync_target_positions,
+)
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -132,6 +163,9 @@ class SnowballConfigCreate(BaseModel):
     total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
     blacklisted_symbols: List[str] = []
+    live_trade_enabled: bool = False
+    external_trading_account_id: Optional[int] = None
+    live_sub_account_id: Optional[int] = None
 
 class SnowballConfigUpdate(BaseModel):
     cli_id: Optional[str] = None
@@ -142,11 +176,20 @@ class SnowballConfigUpdate(BaseModel):
     total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
     blacklisted_symbols: Optional[List[str]] = None
+    live_trade_enabled: Optional[bool] = None
+    external_trading_account_id: Optional[int] = None
+    live_sub_account_id: Optional[int] = None
 
 class SnowballConfigResponse(SnowballConfigCreate):
     id: int
     updated_at: datetime
     snapshot_value: Optional[float] = 0.0
+    external_trading_account_name: Optional[str] = None
+    live_sub_account_name: Optional[str] = None
+    live_sub_account_enabled: Optional[bool] = None
+    last_external_sync_at: Optional[datetime] = None
+    last_external_sync_status: Optional[str] = None
+    last_external_sync_message: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -337,6 +380,481 @@ async def fetch_xueqiu_batch_quotes(symbols: List[str], cookie: str = None) -> D
             logger.error(f"Failed to fetch Xueqiu batch quotes: {e}")
             return {}
 
+
+def _to_xueqiu_symbol(symbol: Optional[str]) -> Optional[str]:
+    """Convert common A-share formats to Xueqiu dotted format, e.g. 510500.SH -> SH.510500."""
+    if not symbol:
+        return None
+    value = str(symbol).strip().upper()
+    if not value:
+        return None
+    value = value.replace("_", ".")
+    if "." in value:
+        left, right = value.split(".", 1)
+        if left in {"SH", "SS", "SZ", "BJ"}:
+            market = "SH" if left in {"SH", "SS"} else left
+            return f"{market}.{right}"
+        if right in {"SH", "SS", "SZ", "BJ"}:
+            market = "SH" if right in {"SH", "SS"} else right
+            return f"{market}.{left}"
+        return value
+    if len(value) > 2 and value[:2] in {"SH", "SZ", "BJ", "SS"}:
+        market = "SH" if value[:2] in {"SH", "SS"} else value[:2]
+        return f"{market}.{value[2:]}"
+    if len(value) == 6:
+        market = "SH" if value[0] in {"5", "6", "9"} else "SZ"
+        return f"{market}.{value}"
+    return value
+
+
+def _to_trade_symbol(symbol: Optional[str]) -> Optional[str]:
+    return normalize_trading_symbol(_to_xueqiu_symbol(symbol))
+
+
+def _snowball_config_response(
+    db: Session,
+    config: SnowballCopyConfig,
+    trading_db: Session,
+) -> SnowballConfigResponse:
+    resp = SnowballConfigResponse.from_orm(config)
+    snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config.id).first()
+    resp.snapshot_value = snapshot.market_value if snapshot else config.total_amount
+
+    if getattr(config, "external_trading_account_id", None):
+        account = trading_db.query(ExternalTradingAccount).filter(
+            ExternalTradingAccount.id == config.external_trading_account_id,
+            ExternalTradingAccount.account_id == config.account_id,
+        ).first()
+        if account:
+            resp.external_trading_account_name = f"{account.name} ({account.identifier})"
+    if getattr(config, "live_sub_account_id", None):
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == config.live_sub_account_id,
+            ExternalTradingSubAccount.account_id == config.account_id,
+        ).first()
+        if sub_account:
+            resp.live_sub_account_name = sub_account.name
+            resp.live_sub_account_enabled = sub_account.enabled
+    return resp
+
+
+def _validate_snowball_external_account_selection(db: Session, account_id: str, external_account_id: Optional[int]):
+    if not external_account_id:
+        return None
+    account = db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == external_account_id,
+        ExternalTradingAccount.account_id == account_id,
+    ).first()
+    if not account:
+        raise HTTPException(status_code=400, detail="所选外部交易账户不存在")
+    if not account.enabled:
+        raise HTTPException(status_code=400, detail="所选外部交易账户未启用")
+    return account
+
+
+def _get_valid_snowball_live_sub_account_selection(
+    db: Session,
+    account_id: str,
+    external_account_id: Optional[int],
+    sub_account_id: Optional[int],
+    *,
+    config_id: Optional[int] = None,
+    require_enabled: bool = False,
+) -> Optional[ExternalTradingSubAccount]:
+    if not sub_account_id:
+        return None
+    if not external_account_id:
+        raise HTTPException(status_code=400, detail="选择实盘虚拟子账户前请先选择外部交易账户")
+    sub_account = db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == sub_account_id,
+        ExternalTradingSubAccount.account_id == account_id,
+        ExternalTradingSubAccount.external_trading_account_id == external_account_id,
+    ).first()
+    if not sub_account:
+        raise HTTPException(status_code=400, detail="所选实盘虚拟子账户不存在")
+    if require_enabled and not sub_account.enabled:
+        raise HTTPException(status_code=400, detail="所选实盘虚拟子账户未启用")
+    is_bound = bool(sub_account.strategy_type or sub_account.strategy_config_id)
+    is_current_binding = (
+        sub_account.strategy_type == STRATEGY_SNOWBALL
+        and config_id
+        and sub_account.strategy_config_id == config_id
+    )
+    if is_bound and not is_current_binding:
+        raise HTTPException(status_code=400, detail="所选实盘虚拟子账户已被其他策略绑定")
+    return sub_account
+
+
+def _deactivate_snowball_target_positions(
+    db: Session,
+    *,
+    sub_account_id: Optional[int],
+    config_id: Optional[int],
+) -> None:
+    if not sub_account_id:
+        return
+    query = db.query(ExternalTradingTargetPosition).filter(
+        ExternalTradingTargetPosition.sub_account_id == sub_account_id,
+        ExternalTradingTargetPosition.status == "ACTIVE",
+    )
+    if config_id:
+        query = query.filter(
+            ExternalTradingTargetPosition.strategy_type == STRATEGY_SNOWBALL,
+            ExternalTradingTargetPosition.strategy_config_id == config_id,
+        )
+    now = datetime.now()
+    for row in query.all():
+        row.status = "PREVIEW"
+        row.updated_at = now
+
+
+def _sync_snowball_live_sub_account_binding(
+    db: Session,
+    config: SnowballCopyConfig,
+    *,
+    previous_sub_account_id: Optional[int],
+) -> None:
+    if getattr(config, "live_trade_enabled", False):
+        if not config.external_trading_account_id:
+            raise HTTPException(status_code=400, detail="开启通用执行器实盘跟单时必须选择外部交易账户")
+        if not config.live_sub_account_id:
+            raise HTTPException(status_code=400, detail="开启通用执行器实盘跟单时必须选择虚拟子账户")
+
+    _validate_snowball_external_account_selection(db, config.account_id, config.external_trading_account_id)
+    selected_sub_account = _get_valid_snowball_live_sub_account_selection(
+        db,
+        config.account_id,
+        config.external_trading_account_id,
+        config.live_sub_account_id,
+        config_id=config.id,
+        require_enabled=bool(config.live_sub_account_id),
+    )
+
+    if previous_sub_account_id and previous_sub_account_id != config.live_sub_account_id:
+        _deactivate_snowball_target_positions(
+            db,
+            sub_account_id=previous_sub_account_id,
+            config_id=config.id,
+        )
+        previous = db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == previous_sub_account_id,
+            ExternalTradingSubAccount.account_id == config.account_id,
+            ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
+            ExternalTradingSubAccount.strategy_config_id == config.id,
+        ).first()
+        if previous:
+            previous.strategy_type = None
+            previous.strategy_config_id = None
+            previous.updated_at = datetime.now()
+
+    if not getattr(config, "enabled", True) or not getattr(config, "live_trade_enabled", False):
+        _deactivate_snowball_target_positions(
+            db,
+            sub_account_id=config.live_sub_account_id or previous_sub_account_id,
+            config_id=config.id,
+        )
+
+    if selected_sub_account:
+        selected_sub_account.strategy_type = STRATEGY_SNOWBALL
+        selected_sub_account.strategy_config_id = config.id
+        selected_sub_account.updated_at = datetime.now()
+
+
+def _load_snowball_external_sync_items(
+    *,
+    account_id: Optional[str] = None,
+    config_ids: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
+    with get_db_ctx() as db, get_external_trading_db_ctx() as trading_db:
+        query = db.query(SnowballCopyConfig).filter(
+            SnowballCopyConfig.enabled == True,  # noqa: E712
+            SnowballCopyConfig.live_trade_enabled == True,  # noqa: E712
+            SnowballCopyConfig.external_trading_account_id.isnot(None),
+            SnowballCopyConfig.live_sub_account_id.isnot(None),
+        )
+        if account_id:
+            query = query.filter(SnowballCopyConfig.account_id == account_id)
+        if config_ids:
+            query = query.filter(SnowballCopyConfig.id.in_(config_ids))
+
+        configs = query.order_by(SnowballCopyConfig.account_id.asc(), SnowballCopyConfig.id.asc()).all()
+        items = []
+        for config in configs:
+            external_account = trading_db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == config.external_trading_account_id,
+                ExternalTradingAccount.account_id == config.account_id,
+                ExternalTradingAccount.enabled == True,  # noqa: E712
+            ).first()
+            sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+                ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+                ExternalTradingSubAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not external_account or not sub_account:
+                continue
+            if sub_account.strategy_type != STRATEGY_SNOWBALL or sub_account.strategy_config_id != config.id:
+                continue
+
+            target_rows = trading_db.query(ExternalTradingTargetPosition).filter(
+                ExternalTradingTargetPosition.sub_account_id == sub_account.id,
+                ExternalTradingTargetPosition.status == "ACTIVE",
+            ).all()
+            current_targets = {}
+            for row in target_rows:
+                xq_symbol = _to_xueqiu_symbol(row.symbol)
+                if xq_symbol:
+                    current_targets[xq_symbol] = {
+                        "target_quantity": safe_int(row.target_quantity),
+                        "target_value": safe_float(row.target_value),
+                        "signal_version": row.signal_version,
+                    }
+
+            acc_config = db.query(SnowballAccountConfig).filter_by(account_id=config.account_id).first()
+            items.append({
+                "id": config.id,
+                "account_id": config.account_id,
+                "cli_id": config.cli_id,
+                "combination_id": config.combination_id,
+                "combination_name": config.combination_name,
+                "total_position_ratio": safe_float(config.total_position_ratio, 100.0),
+                "total_amount": safe_float(config.total_amount),
+                "tracking_error_pct": safe_float(config.tracking_error_pct, 1.0),
+                "blacklisted_symbols": config.blacklisted_symbols or [],
+                "external_trading_account_id": external_account.id,
+                "live_sub_account_id": sub_account.id,
+                "sub_account_cash_allocated": safe_float(sub_account.cash_allocated),
+                "current_targets": current_targets,
+                "cookie": acc_config.xueqiu_cookie if acc_config else None,
+            })
+        return items
+
+
+def _build_snowball_target_signal_version(item: Dict[str, Any], target_rows: List[Dict[str, Any]]) -> str:
+    payload = {
+        "strategy": STRATEGY_SNOWBALL,
+        "config_id": item.get("id"),
+        "combination_id": item.get("combination_id"),
+        "targets": [
+            {
+                "symbol": row.get("symbol"),
+                "target_quantity": safe_int(row.get("target_quantity")),
+            }
+            for row in sorted(target_rows, key=lambda data: str(data.get("symbol") or ""))
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"snowball:{item.get('id')}:{digest[:16]}"[:64]
+
+
+def _mark_snowball_external_sync_failure(config_id: int, message: str) -> None:
+    with get_db_ctx() as db:
+        config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == config_id).first()
+        if config:
+            config.last_external_sync_at = datetime.now()
+            config.last_external_sync_status = "FAILED"
+            config.last_external_sync_message = message[:500]
+            db.add(SnowballCopyLog(
+                cli_id=config.cli_id,
+                combination_id=config.combination_id,
+                action="TARGET_SYNC",
+                status="FAILED",
+                message=message[:1000],
+                account_id=config.account_id,
+            ))
+
+
+async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_source: str) -> Dict[str, Any]:
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
+        asyncio.create_task(_refresh_xueqiu_guest_token_task(item.get("account_id"), item.get("cookie")))
+
+    holdings = await fetch_xueqiu_holdings(item["combination_id"], item.get("cookie"))
+    current_targets = item.get("current_targets") or {}
+    target_weights = {}
+    all_symbols = set(current_targets.keys())
+    blacklist = item.get("blacklisted_symbols") or []
+    for holding in holdings:
+        symbol = _to_xueqiu_symbol(holding.get("symbol"))
+        if not symbol:
+            continue
+        all_symbols.add(symbol)
+        if any(fnmatch.fnmatch(symbol, pattern) or fnmatch.fnmatch(_to_trade_symbol(symbol) or "", pattern) for pattern in blacklist):
+            continue
+        target_weights[symbol] = safe_float(holding.get("weight"))
+
+    quotes = await fetch_xueqiu_quotes(sorted(all_symbols), item.get("cookie"))
+    allocated_cash = safe_float(item.get("sub_account_cash_allocated"))
+    configured_amount = safe_float(item.get("total_amount"))
+    position_ratio = max(safe_float(item.get("total_position_ratio"), 100.0), 0.0) / 100.0
+    base_value = (allocated_cash if allocated_cash > 0 else configured_amount) * position_ratio
+    if base_value <= 0:
+        raise ValueError("雪球通用执行器目标资金为空，请设置配置总金额或虚拟子账户分配资金")
+
+    threshold_pct = max(safe_float(item.get("tracking_error_pct"), 1.0), 0.0)
+    target_rows = []
+    skipped = []
+    changed = False
+    for xq_symbol in sorted(all_symbols):
+        trade_symbol = _to_trade_symbol(xq_symbol)
+        if not trade_symbol:
+            continue
+        old_target = current_targets.get(xq_symbol) or {}
+        old_quantity = safe_int(old_target.get("target_quantity"))
+        weight = safe_float(target_weights.get(xq_symbol))
+        price = safe_float(quotes.get(xq_symbol))
+        target_value = base_value * (weight / 100.0)
+        final_quantity = old_quantity
+
+        if weight <= 0:
+            final_quantity = 0
+        elif price <= 0:
+            skipped.append({"symbol": trade_symbol, "message": "缺少雪球行情价格，保留原目标仓位"})
+        else:
+            current_value = old_quantity * price
+            diff_pct = (abs(target_value - current_value) / base_value) * 100 if base_value > 0 else 100
+            if diff_pct >= threshold_pct:
+                final_quantity = int((target_value / price) / 100) * 100
+
+        if old_quantity != final_quantity:
+            changed = True
+
+        row_target_value = target_value if weight > 0 else 0.0
+        if price > 0 and final_quantity > 0:
+            row_target_value = final_quantity * price
+        target_rows.append({
+            "symbol": trade_symbol,
+            "target_quantity": final_quantity,
+            "target_weight_pct": weight,
+            "target_value": round(row_target_value, 2),
+        })
+
+    signal_version = _build_snowball_target_signal_version(item, target_rows)
+    old_versions = {
+        data.get("signal_version")
+        for data in current_targets.values()
+        if data.get("signal_version")
+    }
+    changed = changed or (bool(target_rows) and signal_version not in old_versions)
+
+    with get_db_ctx() as db, get_external_trading_db_ctx() as trading_db:
+        config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == item["id"]).first()
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == item["live_sub_account_id"],
+            ExternalTradingSubAccount.account_id == item["account_id"],
+            ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
+            ExternalTradingSubAccount.strategy_config_id == item["id"],
+        ).first()
+        if not config or not sub_account:
+            raise ValueError("雪球配置或绑定虚拟子账户不存在")
+
+        sync_target_positions(
+            trading_db,
+            sub_account=sub_account,
+            targets=target_rows,
+            signal_id=f"snowball:{item['combination_id']}",
+            signal_version=signal_version,
+            source_execution_id=None,
+        )
+        config.last_external_sync_at = datetime.now()
+        config.last_external_sync_status = "SYNCED"
+        config.last_external_sync_message = (
+            f"{trigger_source}: 同步目标仓位 {len(target_rows)} 个"
+            + (f"，跳过 {len(skipped)} 个缺价标的" if skipped else "")
+        )[:500]
+        if changed or trigger_source in {"manual", "notification"}:
+            db.add(SnowballCopyLog(
+                cli_id=config.cli_id,
+                combination_id=config.combination_id,
+                action="TARGET_SYNC",
+                quantity=len(target_rows),
+                status="TARGET_SYNCED",
+                message=config.last_external_sync_message,
+                account_id=config.account_id,
+            ))
+
+    return {
+        "config_id": item["id"],
+        "combination_id": item["combination_id"],
+        "external_trading_account_id": item["external_trading_account_id"],
+        "target_count": len(target_rows),
+        "changed": changed,
+        "signal_version": signal_version,
+        "skipped": skipped,
+    }
+
+
+async def sync_snowball_external_trading_config_ids(
+    config_ids: Optional[List[int]] = None,
+    *,
+    account_id: Optional[str] = None,
+    trigger_source: str = "manual",
+    trigger_executor: bool = True,
+) -> Dict[str, Any]:
+    if trigger_source in {"robot_timer", "notification"} and not is_a_share_trading_window():
+        return {
+            "status": "SKIPPED",
+            "reason": "market_closed",
+            "trigger_source": trigger_source,
+            "next_run_at": next_a_share_trading_time().isoformat(),
+            "checked": 0,
+            "synced": 0,
+            "changed": 0,
+            "failed": 0,
+            "items": [],
+            "executor_results": [],
+        }
+
+    items = _load_snowball_external_sync_items(account_id=account_id, config_ids=config_ids)
+    result = {
+        "status": "OK",
+        "trigger_source": trigger_source,
+        "checked": len(items),
+        "synced": 0,
+        "changed": 0,
+        "failed": 0,
+        "items": [],
+        "executor_results": [],
+    }
+    affected_accounts = {}
+    for item in items:
+        try:
+            sync_result = await _sync_one_snowball_external_target(item, trigger_source=trigger_source)
+            result["items"].append(sync_result)
+            result["synced"] += 1
+            if sync_result.get("changed"):
+                result["changed"] += 1
+            if sync_result.get("changed") or trigger_source == "manual":
+                affected_accounts[item["external_trading_account_id"]] = item["account_id"]
+        except Exception as exc:
+            logger.exception("Snowball external target sync failed: config=%s", item.get("id"))
+            result["failed"] += 1
+            error_message = str(exc)
+            result["items"].append({
+                "config_id": item.get("id"),
+                "combination_id": item.get("combination_id"),
+                "status": "FAILED",
+                "error": error_message,
+            })
+            _mark_snowball_external_sync_failure(item.get("id"), error_message)
+
+    if trigger_executor and affected_accounts:
+        for external_account_id, owner_account_id in affected_accounts.items():
+            executor_result = await trigger_external_trading_executor(
+                account_id=owner_account_id,
+                external_account_id=external_account_id,
+                trigger_source=f"snowball_{trigger_source}",
+            )
+            result["executor_results"].append(executor_result)
+
+    if result["failed"]:
+        result["status"] = "PARTIAL_FAILED" if result["synced"] else "FAILED"
+    return result
+
+
+def process_snowball_external_trading_sync_for_robot() -> Dict[str, Any]:
+    return asyncio.run(sync_snowball_external_trading_config_ids(trigger_source="robot_timer"))
+
 @router.get("/info/{symbol}")
 async def get_combination_info(
     symbol: str, 
@@ -409,26 +927,18 @@ async def get_snowball_heartbeat(
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
     account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     configs = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.account_id == account_id).all()
-    result = []
-    for c in configs:
-        resp = SnowballConfigResponse.from_orm(c)
-        # Fetch snapshot value
-        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=c.id).first()
-        if snapshot:
-            resp.snapshot_value = snapshot.market_value
-        else:
-            resp.snapshot_value = c.total_amount # Fallback or 0
-        result.append(resp)
-    return result
+    return [_snowball_config_response(db, c, trading_db) for c in configs]
 
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
     config: SnowballConfigCreate,
     account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     # Auto-fetch name if not provided
     if not config.combination_name:
@@ -443,16 +953,20 @@ async def create_config(
     db_config.account_id = account_id
 
     db.add(db_config)
+    db.flush()
+    _sync_snowball_live_sub_account_binding(trading_db, db_config, previous_sub_account_id=None)
+    trading_db.commit()
     db.commit()
     db.refresh(db_config)
-    return SnowballConfigResponse.from_orm(db_config)
+    return _snowball_config_response(db, db_config, trading_db)
 
 @router.put("/configs/{config_id}", response_model=SnowballConfigResponse)
 async def update_config(
     config_id: int,
     config_update: SnowballConfigUpdate,
     account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     db_config = db.query(SnowballCopyConfig).filter(
         SnowballCopyConfig.id == config_id,
@@ -472,18 +986,27 @@ async def update_config(
             if cube_info:
                 update_data["combination_name"] = cube_info.get("name")
                 
+    previous_sub_account_id = getattr(db_config, "live_sub_account_id", None)
+
     for key, value in update_data.items():
         setattr(db_config, key, value)
-        
+
+    _sync_snowball_live_sub_account_binding(
+        trading_db,
+        db_config,
+        previous_sub_account_id=previous_sub_account_id,
+    )
+    trading_db.commit()
     db.commit()
     db.refresh(db_config)
-    return SnowballConfigResponse.from_orm(db_config)
+    return _snowball_config_response(db, db_config, trading_db)
 
 @router.delete("/configs/{config_id}")
 async def delete_config(
     config_id: int,
     account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     db_config = db.query(SnowballCopyConfig).filter(
         SnowballCopyConfig.id == config_id,
@@ -493,7 +1016,25 @@ async def delete_config(
     if not db_config:
         raise HTTPException(status_code=404, detail="Config not found")
 
+    if getattr(db_config, "live_sub_account_id", None):
+        _deactivate_snowball_target_positions(
+            trading_db,
+            sub_account_id=db_config.live_sub_account_id,
+            config_id=db_config.id,
+        )
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == db_config.live_sub_account_id,
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
+            ExternalTradingSubAccount.strategy_config_id == db_config.id,
+        ).first()
+        if sub_account:
+            sub_account.strategy_type = None
+            sub_account.strategy_config_id = None
+            sub_account.updated_at = datetime.now()
+
     db.delete(db_config)
+    trading_db.commit()
     db.commit()
     return {"message": "Deleted successfully"}
 
@@ -666,6 +1207,166 @@ async def get_snapshot(
         holdings=detailed_holdings,
         updated_at=snapshot.updated_at or datetime.now()
     )
+
+
+@router.post("/configs/{config_id}/sync-external-targets")
+async def sync_config_external_targets(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+    if not getattr(config, "live_trade_enabled", False):
+        raise HTTPException(status_code=400, detail="该雪球配置未开启通用执行器实盘跟单")
+
+    return await sync_snowball_external_trading_config_ids(
+        [config_id],
+        account_id=account_id,
+        trigger_source="manual",
+        trigger_executor=True,
+    )
+
+
+@router.post("/configs/{config_id}/sync-snapshot-to-ledger")
+async def sync_snapshot_to_external_ledger(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db),
+):
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        raise HTTPException(status_code=400, detail="请先为雪球配置选择外部交易账户和虚拟子账户")
+
+    sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == account_id,
+        ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+    ).first()
+    if not sub_account:
+        raise HTTPException(status_code=400, detail="绑定的虚拟子账户不存在")
+    if sub_account.strategy_type != STRATEGY_SNOWBALL or sub_account.strategy_config_id != config.id:
+        raise HTTPException(status_code=400, detail="绑定的虚拟子账户尚未绑定当前雪球配置，请先保存配置")
+
+    snapshot = db.query(SnowballPortfolioSnapshot).filter(
+        SnowballPortfolioSnapshot.config_id == config_id,
+        SnowballPortfolioSnapshot.account_id == account_id,
+    ).first()
+    holdings = snapshot.holdings if snapshot else None
+    if not holdings:
+        raise HTTPException(status_code=400, detail="该雪球配置没有可同步的旧快照持仓")
+
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    cookie = acc_config.xueqiu_cookie if acc_config else None
+    xq_symbols = sorted({_to_xueqiu_symbol(symbol) for symbol in holdings.keys() if _to_xueqiu_symbol(symbol)})
+    quotes = await fetch_xueqiu_quotes(xq_symbols, cookie)
+
+    now = datetime.now()
+    existing_rows = {
+        normalize_trading_symbol(row.symbol): row
+        for row in trading_db.query(ExternalTradingLedgerPosition)
+        .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
+        .all()
+        if row.symbol
+    }
+    touched_symbols = set()
+    target_rows = []
+    total_market_value = safe_float(snapshot.market_value)
+    for raw_symbol, raw_quantity in holdings.items():
+        xq_symbol = _to_xueqiu_symbol(raw_symbol)
+        trade_symbol = _to_trade_symbol(raw_symbol)
+        quantity = safe_int(raw_quantity)
+        if not xq_symbol or not trade_symbol or quantity <= 0:
+            continue
+        touched_symbols.add(trade_symbol)
+        row = existing_rows.get(trade_symbol)
+        price = safe_float(quotes.get(xq_symbol))
+        if not row:
+            row = ExternalTradingLedgerPosition(
+                account_id=account_id,
+                external_trading_account_id=config.external_trading_account_id,
+                sub_account_id=sub_account.id,
+                symbol=trade_symbol,
+                quantity=0,
+                available_quantity=0,
+                avg_cost=0.0,
+                realized_pnl=0.0,
+                updated_at=now,
+            )
+            trading_db.add(row)
+            trading_db.flush()
+        if price <= 0:
+            price = safe_float(row.market_price, safe_float(row.avg_cost))
+        row.quantity = quantity
+        row.available_quantity = quantity
+        row.avg_cost = price if price > 0 else safe_float(row.avg_cost)
+        row.market_price = price if price > 0 else None
+        row.market_value = round(quantity * price, 2) if price > 0 else None
+        row.updated_at = now
+        market_value = safe_float(row.market_value)
+        target_rows.append({
+            "symbol": trade_symbol,
+            "target_quantity": quantity,
+            "target_weight_pct": round((market_value / total_market_value) * 100, 4) if total_market_value > 0 else None,
+            "target_value": market_value,
+        })
+
+    for symbol, row in existing_rows.items():
+        if symbol in touched_symbols:
+            continue
+        row.quantity = 0
+        row.available_quantity = 0
+        row.market_value = 0.0
+        row.updated_at = now
+
+    sub_account.cash_available = safe_float(snapshot.cash)
+    sub_account.updated_at = now
+
+    signal_version = _build_snowball_target_signal_version({
+        "id": config.id,
+        "combination_id": config.combination_id,
+    }, target_rows)
+    sync_target_positions(
+        trading_db,
+        sub_account=sub_account,
+        targets=target_rows,
+        signal_id=f"snowball:init:{config.combination_id}",
+        signal_version=signal_version,
+        source_execution_id=None,
+    )
+
+    config.last_external_sync_at = now
+    config.last_external_sync_status = "LEDGER_INIT"
+    config.last_external_sync_message = f"已从旧雪球快照初始化子账户账本和目标仓位，共 {len(target_rows)} 个标的"
+    db.add(SnowballCopyLog(
+        cli_id=config.cli_id,
+        combination_id=config.combination_id,
+        action="LEDGER_INIT",
+        quantity=len(target_rows),
+        status="SUCCESS",
+        message=config.last_external_sync_message,
+        account_id=account_id,
+    ))
+    trading_db.commit()
+    db.commit()
+
+    return {
+        "message": config.last_external_sync_message,
+        "sub_account_id": sub_account.id,
+        "position_count": len(target_rows),
+        "cash_available": sub_account.cash_available,
+        "signal_version": signal_version,
+    }
 
 # --- Core Logic ---
 

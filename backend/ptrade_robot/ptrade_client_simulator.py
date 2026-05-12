@@ -159,6 +159,19 @@ class LongPortMarketDataProvider:
     def _client_symbol(self, symbol):
         return str(self.client.convert_to_client_code(symbol) or symbol).upper()
 
+    def _normalize_longport_symbol(self, symbol):
+        if not symbol:
+            return None
+        parts = str(symbol).strip().upper().split(".")
+        if len(parts) != 2:
+            return str(symbol).strip().upper()
+        first, second = parts
+        if first == "SS":
+            first = "SH"
+        if second == "SS":
+            second = "SH"
+        return "%s.%s" % (first, second)
+
     def _longport_symbol_variants(self, client_symbol):
         client_symbol = self._client_symbol(client_symbol)
         variants = []
@@ -170,11 +183,10 @@ class LongPortMarketDataProvider:
             longport_market = "SH" if market in ("SS", "SH") else market
             variants.append("%s.%s" % (code, longport_market))
             variants.append("%s.%s" % (longport_market, code))
-            variants.append(client_symbol)
 
         api_symbol = self.client.convert_to_api_code(client_symbol)
         if api_symbol:
-            variants.append(str(api_symbol).upper())
+            variants.append(self._normalize_longport_symbol(api_symbol))
             api_parts = str(api_symbol).split(".")
             if len(api_parts) == 2 and api_parts[0].upper() in ("SH", "SS", "SZ", "BJ"):
                 market = "SH" if api_parts[0].upper() == "SS" else api_parts[0].upper()
@@ -183,6 +195,7 @@ class LongPortMarketDataProvider:
         result = []
         seen = set()
         for item in variants:
+            item = self._normalize_longport_symbol(item)
             if item and item not in seen:
                 seen.add(item)
                 result.append(item)

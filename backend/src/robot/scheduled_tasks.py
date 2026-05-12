@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import schedule
 
-from ..core.database import ScheduledTaskConfig, SnowballApiHeartbeat, get_db_ctx
+from ..core.database import ScheduledTaskConfig, SnowballApiHeartbeat, SnowballCopyConfig, get_db_ctx
 from ..core.utils import send_alert_email
 
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -484,6 +484,13 @@ def _run_snowball_ptrade_heartbeat_check():
     now = now_shanghai.replace(tzinfo=None)
     cutoff = now - timedelta(minutes=SNOWBALL_PTRADE_HEARTBEAT_WINDOW_MINUTES)
     with get_db_ctx() as db:
+        ptrade_config_count = db.query(SnowballCopyConfig).filter(
+            SnowballCopyConfig.enabled == True,  # noqa: E712
+            SnowballCopyConfig.live_trade_enabled != True,  # noqa: E712
+        ).count()
+        if ptrade_config_count <= 0:
+            return "跳过检查: 没有需要 PTrade /opportunities 拉取的启用雪球配置"
+
         heartbeat = db.query(SnowballApiHeartbeat).filter(
             SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
         ).first()

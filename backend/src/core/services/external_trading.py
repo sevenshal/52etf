@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket
 
-from ..database import DB_PATH, ExternalTradingAccount, get_db_ctx
+from ..external_trading_database import (
+    EXTERNAL_TRADING_DB_PATH,
+    ExternalTradingAccount,
+    get_external_trading_db_ctx,
+)
 from .external_trading_ledger import process_order_events, process_trade_events
 from .external_trading_crypto import decrypt_message, encrypt_message
 
@@ -140,7 +144,7 @@ class ExternalTradingHub:
             return
 
         if message_type == "order_event":
-            with get_db_ctx() as db:
+            with get_external_trading_db_ctx() as db:
                 updated = process_order_events(
                     db,
                     external_trading_account_id=conn.account_pk,
@@ -150,7 +154,7 @@ class ExternalTradingHub:
             return
 
         if message_type == "trade_event":
-            with get_db_ctx() as db:
+            with get_external_trading_db_ctx() as db:
                 inserted = process_trade_events(
                     db,
                     external_trading_account_id=conn.account_pk,
@@ -266,7 +270,7 @@ class ExternalTradingHub:
     def _execute_status_update(self, description: str, sql: str, params: Dict[str, Any]):
         conn = None
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=0.1)
+            conn = sqlite3.connect(EXTERNAL_TRADING_DB_PATH, timeout=0.1)
             conn.execute(sql, params)
             conn.commit()
         except sqlite3.OperationalError as exc:
@@ -333,7 +337,7 @@ def resolve_external_trading_account_pk(
     identifier: Optional[str] = None,
     name: Optional[str] = None,
 ) -> int:
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         query = db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.account_id == account_id,
             ExternalTradingAccount.enabled == True,

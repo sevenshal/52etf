@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
-from ..database import (
+from ..external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingOrder,
     ExternalTradingTargetPosition,
-    get_db_ctx,
+    get_external_trading_db_ctx,
 )
 from .external_trading import ExternalTradingConnectionError, external_trading_hub
 from .external_trading_execution_policy import (
@@ -19,6 +19,7 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
+    normalize_clip_sell_to_available,
     normalize_lot_size,
     normalize_max_replace_count,
     normalize_price_level,
@@ -32,6 +33,7 @@ from .external_trading_ledger import (
     apply_internal_crosses,
     build_netted_target_execution_plan,
     create_netted_execution_orders,
+    expire_insufficient_sellable_blocks,
     normalize_symbol,
     record_cancel_result,
     record_submission_result,
@@ -119,6 +121,16 @@ def next_a_share_trading_time(now: Optional[datetime] = None) -> datetime:
     return datetime.combine(next_day, A_SHARE_OPEN, tzinfo=CHINA_TZ)
 
 
+def next_a_share_trading_day_open(now: Optional[datetime] = None) -> datetime:
+    current = now or _china_now()
+    if current.tzinfo:
+        current = current.astimezone(CHINA_TZ)
+    next_day = current.date() + timedelta(days=1)
+    while not _is_china_trading_day(next_day):
+        next_day += timedelta(days=1)
+    return datetime.combine(next_day, A_SHARE_OPEN, tzinfo=CHINA_TZ)
+
+
 def _quote_reference_price(quote: Dict[str, Any]) -> float:
     price = safe_float(quote.get("price") or quote.get("last_price"))
     if price > 0:
@@ -148,7 +160,7 @@ def _load_accounts(
     account_id: Optional[str] = None,
     external_account_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         query = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.enabled == True)  # noqa: E712
         if account_id:
             query = query.filter(ExternalTradingAccount.account_id == account_id)
@@ -167,6 +179,7 @@ def _load_accounts(
                 "executor_lot_size": row.executor_lot_size,
                 "executor_order_timeout_seconds": row.executor_order_timeout_seconds,
                 "executor_max_replace_count": row.executor_max_replace_count,
+                "executor_clip_sell_to_available": getattr(row, "executor_clip_sell_to_available", True),
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }
             for row in rows
@@ -262,7 +275,7 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
     failed_without_broker = 0
     refreshed_execution_ids: Set[int] = set()
 
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         target_versions = _current_target_versions(db, account_pk)
         active_parents = (
             db.query(ExternalTradingOrder)
@@ -310,7 +323,7 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
         }
 
     response = await external_trading_hub.cancel_orders(account_pk, cancel_items, timeout=15.0)
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         for item in response.get("orders") or []:
             client_order_id = item.get("client_order_id")
             if not client_order_id:
@@ -456,7 +469,7 @@ def _apply_execution_metadata(
 def _mark_submission_error(parent_client_order_ids: List[str], message: str) -> None:
     if not parent_client_order_ids:
         return
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         rows = (
             db.query(ExternalTradingOrder)
             .filter(ExternalTradingOrder.client_order_id.in_(parent_client_order_ids))
@@ -489,9 +502,12 @@ async def _submit_current_targets(
         "price_level": price_level,
         "lot_size": lot_size,
         "order_timeout_seconds": order_timeout_seconds,
+        "clip_sell_to_available": normalize_clip_sell_to_available(
+            account.get("executor_clip_sell_to_available"),
+        ),
     })
 
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         plan = build_netted_target_execution_plan(
             db,
             account_id=account["account_id"],
@@ -500,6 +516,7 @@ async def _submit_current_targets(
             lot_size=account_policy.get("lot_size"),
             order_timeout_seconds=account_policy.get("order_timeout_seconds"),
             max_replace_count=account_policy.get("max_replace_count"),
+            clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
         )
         symbols = plan.get("symbols") or []
@@ -507,7 +524,7 @@ async def _submit_current_targets(
     if symbols:
         reference_prices = await _reference_prices_for_plan(account_pk, symbols)
 
-    with get_db_ctx() as db:
+    with get_external_trading_db_ctx() as db:
         plan = build_netted_target_execution_plan(
             db,
             account_id=account["account_id"],
@@ -516,6 +533,7 @@ async def _submit_current_targets(
             lot_size=account_policy.get("lot_size"),
             order_timeout_seconds=account_policy.get("order_timeout_seconds"),
             max_replace_count=account_policy.get("max_replace_count"),
+            clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
             reference_prices=reference_prices,
         )
@@ -547,11 +565,12 @@ async def _submit_current_targets(
                 execution_orders,
                 timeout=60.0,
             )
-            with get_db_ctx() as db:
+            with get_external_trading_db_ctx() as db:
                 record_submission_result(
                     db,
                     external_trading_account_id=account_pk,
                     response_orders=result.get("orders") or [],
+                    insufficient_sellable_block_until=next_a_share_trading_day_open().replace(tzinfo=None),
                 )
         except ExternalTradingConnectionError as exc:
             _mark_submission_error(parent_client_order_ids, str(exc))
@@ -589,6 +608,9 @@ async def _run_account_executor(
             "status": "SKIPPED",
             "reason": "external_account_disconnected",
         }
+
+    with get_external_trading_db_ctx() as db:
+        expire_insufficient_sellable_blocks(db, external_trading_account_id=account_pk, now=_naive_now())
 
     cancel_result = await _cancel_stale_or_timed_out_orders(account)
     if cancel_result.get("requested"):

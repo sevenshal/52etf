@@ -27,7 +27,8 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record):
 Base = declarative_base()
 
 # 创建EVC会话
-Session = scoped_session(sessionmaker(bind=engine))
+SessionLocal = sessionmaker(bind=engine)
+Session = scoped_session(SessionLocal)
 
 # 股票-标签关联表
 stock_tags = Table(
@@ -616,6 +617,12 @@ class SnowballCopyConfig(Base):
     total_amount = Column(Float) # 总金额 (优先)
     tracking_error_pct = Column(Float, default=1.0) # 跟踪误差 (%)
     blacklisted_symbols = Column(JSON, default=list) # 黑名单股票列表
+    live_trade_enabled = Column(Boolean, default=False, nullable=False) # 是否启用通用执行器实盘跟单
+    external_trading_account_id = Column(Integer, nullable=True) # 绑定的外部交易账号
+    live_sub_account_id = Column(Integer, nullable=True) # 绑定的虚拟子账户
+    last_external_sync_at = Column(DateTime)
+    last_external_sync_status = Column(String(16))
+    last_external_sync_message = Column(String(500))
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballAccountConfig(Base):
@@ -710,174 +717,6 @@ class LongPortAccount(Base):
     
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class ExternalTradingAccount(Base):
-    """外部交易账号：通过一条反向 WebSocket 连接到券商/PTrade 客户端。"""
-    __tablename__ = "external_trading_accounts"
-    __table_args__ = (
-        UniqueConstraint("account_id", "identifier", name="uq_external_trading_account_identifier"),
-        UniqueConstraint("account_id", "name", name="uq_external_trading_account_name"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    name = Column(String(100), nullable=False)
-    identifier = Column(String(128), nullable=False)
-    enabled = Column(Boolean, default=True, nullable=False)
-    executor_enabled = Column(Boolean, default=True, nullable=False)
-    executor_price_level = Column(Integer, default=1, nullable=False)
-    executor_lot_size = Column(Integer, default=100, nullable=False)
-    executor_order_timeout_seconds = Column(Integer, default=120, nullable=False)
-    executor_max_replace_count = Column(Integer, default=3, nullable=False)
-    executor_price_level_sequence = Column(JSON)
-    last_connected_at = Column(DateTime)
-    last_disconnected_at = Column(DateTime)
-    last_seen_at = Column(DateTime)
-    last_disconnect_reason = Column(String(500))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class ExternalTradingSubAccount(Base):
-    """外部交易账号下的虚拟子账户，用于隔离多个实盘策略的账本。"""
-    __tablename__ = "external_trading_sub_accounts"
-    __table_args__ = (
-        UniqueConstraint(
-            "account_id",
-            "external_trading_account_id",
-            "strategy_type",
-            "strategy_config_id",
-            name="uq_external_sub_account_strategy",
-        ),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    external_trading_account_id = Column(Integer, index=True, nullable=False)
-    name = Column(String(100), nullable=False)
-    strategy_type = Column(String(64), index=True)
-    strategy_config_id = Column(Integer, index=True)
-    cash_allocated = Column(Float, default=0.0, nullable=False)
-    cash_available = Column(Float, default=0.0, nullable=False)
-    enabled = Column(Boolean, default=True, nullable=False)
-    executor_price_level = Column(Integer)
-    executor_lot_size = Column(Integer)
-    executor_order_timeout_seconds = Column(Integer)
-    executor_max_replace_count = Column(Integer)
-    executor_price_level_sequence = Column(JSON)
-    remark = Column(String(1000))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class ExternalTradingLedgerPosition(Base):
-    """虚拟子账户的策略归属持仓账本。"""
-    __tablename__ = "external_trading_ledger_positions"
-    __table_args__ = (
-        UniqueConstraint("sub_account_id", "symbol", name="uq_external_ledger_position_symbol"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    external_trading_account_id = Column(Integer, index=True, nullable=False)
-    sub_account_id = Column(Integer, index=True, nullable=False)
-    symbol = Column(String(32), index=True, nullable=False)
-    quantity = Column(Integer, default=0, nullable=False)
-    available_quantity = Column(Integer, default=0, nullable=False)
-    avg_cost = Column(Float, default=0.0, nullable=False)
-    market_price = Column(Float)
-    market_value = Column(Float)
-    realized_pnl = Column(Float, default=0.0, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class ExternalTradingTargetPosition(Base):
-    """策略同步到执行器的目标仓位快照。"""
-    __tablename__ = "external_trading_target_positions"
-    __table_args__ = (
-        UniqueConstraint("sub_account_id", "symbol", name="uq_external_target_position_symbol"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    external_trading_account_id = Column(Integer, index=True, nullable=False)
-    sub_account_id = Column(Integer, index=True, nullable=False)
-    strategy_type = Column(String(64), index=True)
-    strategy_config_id = Column(Integer, index=True)
-    symbol = Column(String(32), index=True, nullable=False)
-    target_quantity = Column(Integer, default=0, nullable=False)
-    target_weight_pct = Column(Float)
-    target_value = Column(Float)
-    signal_id = Column(String(128), index=True)
-    signal_version = Column(String(64))
-    source_execution_id = Column(Integer, index=True)
-    valid_until = Column(DateTime)
-    status = Column(String(16), default="ACTIVE", index=True, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    created_at = Column(DateTime, default=datetime.now)
-
-class ExternalTradingOrder(Base):
-    """真实券商委托的本地生命周期记录。"""
-    __tablename__ = "external_trading_orders"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    external_trading_account_id = Column(Integer, index=True, nullable=False)
-    sub_account_id = Column(Integer, index=True)
-    strategy_type = Column(String(64), index=True)
-    strategy_config_id = Column(Integer, index=True)
-    execution_id = Column(Integer, index=True)
-    parent_order_id = Column(Integer, index=True)
-    allocation_role = Column(String(16), default="DIRECT", index=True, nullable=False)
-    client_order_id = Column(String(64), unique=True, index=True, nullable=False)
-    broker_order_id = Column(String(128), index=True)
-    entrust_no = Column(String(128), index=True)
-    symbol = Column(String(32), index=True, nullable=False)
-    side = Column(String(8), nullable=False)
-    order_type = Column(String(10), default="LIMIT", nullable=False)
-    price_level = Column(Integer)
-    signal_version = Column(String(64), index=True)
-    replace_count = Column(Integer, default=0, nullable=False)
-    replaced_by_order_id = Column(Integer, index=True)
-    deadline_at = Column(DateTime)
-    cancel_reason = Column(String(500))
-    executor_trigger = Column(String(64))
-    submitted_price = Column(Float)
-    quantity = Column(Integer, nullable=False)
-    filled_quantity = Column(Integer, default=0, nullable=False)
-    remaining_quantity = Column(Integer, default=0, nullable=False)
-    avg_fill_price = Column(Float)
-    status = Column(String(24), default="CREATED", index=True, nullable=False)
-    ptrade_status = Column(String(16), index=True)
-    message = Column(String(1000))
-    submitted_at = Column(DateTime)
-    last_event_at = Column(DateTime)
-    raw_request = Column(JSON)
-    raw_submit_result = Column(JSON)
-    raw_order_event = Column(JSON)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class ExternalTradingOrderFill(Base):
-    """成交回报流水。账本只根据这张表的去重成交增量更新。"""
-    __tablename__ = "external_trading_order_fills"
-    __table_args__ = (
-        UniqueConstraint("fill_key", name="uq_external_order_fill_key"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True, nullable=False)
-    external_trading_account_id = Column(Integer, index=True, nullable=False)
-    sub_account_id = Column(Integer, index=True)
-    order_id = Column(Integer, index=True)
-    client_order_id = Column(String(64), index=True)
-    broker_order_id = Column(String(128), index=True)
-    fill_key = Column(String(256), nullable=False)
-    symbol = Column(String(32), index=True, nullable=False)
-    side = Column(String(8), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    price = Column(Float, nullable=False)
-    amount = Column(Float, nullable=False)
-    traded_at = Column(DateTime)
-    raw_event = Column(JSON)
-    created_at = Column(DateTime, default=datetime.now)
 
 class EVCAccountConfig(Base):
     """EVC 账户配置"""
@@ -1337,9 +1176,19 @@ Base.metadata.create_all(engine)
 
 def drop_deprecated_tables():
     """删除已经迁移出 SQLite 的旧缓存表。"""
+    deprecated_tables = [
+        "stock_klines",
+        "etf_emotions",
+        "external_trading_order_fills",
+        "external_trading_orders",
+        "external_trading_target_positions",
+        "external_trading_ledger_positions",
+        "external_trading_sub_accounts",
+        "external_trading_accounts",
+    ]
     with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS stock_klines"))
-        conn.execute(text("DROP TABLE IF EXISTS etf_emotions"))
+        for table_name in deprecated_tables:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
 drop_deprecated_tables()
 
@@ -1377,14 +1226,6 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
-        "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_account ON external_trading_accounts(account_id)",
-        "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_identifier ON external_trading_accounts(account_id, identifier)",
-        "CREATE INDEX IF NOT EXISTS idx_external_sub_accounts_strategy ON external_trading_sub_accounts(strategy_type, strategy_config_id)",
-        "CREATE INDEX IF NOT EXISTS idx_external_ledger_positions_sub_symbol ON external_trading_ledger_positions(sub_account_id, symbol)",
-        "CREATE INDEX IF NOT EXISTS idx_external_target_positions_sub_symbol ON external_trading_target_positions(sub_account_id, symbol)",
-        "CREATE INDEX IF NOT EXISTS idx_external_orders_lifecycle ON external_trading_orders(status, updated_at)",
-        "CREATE INDEX IF NOT EXISTS idx_external_orders_broker ON external_trading_orders(external_trading_account_id, broker_order_id)",
-        "CREATE INDEX IF NOT EXISTS idx_external_order_fills_order ON external_trading_order_fills(order_id, created_at)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:
@@ -1436,33 +1277,13 @@ def ensure_table_columns():
             "live_trade_total_amount": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_total_amount FLOAT",
             "live_sub_account_id": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_sub_account_id INTEGER",
         },
-        "external_trading_orders": {
-            "parent_order_id": "ALTER TABLE external_trading_orders ADD COLUMN parent_order_id INTEGER",
-            "allocation_role": "ALTER TABLE external_trading_orders ADD COLUMN allocation_role VARCHAR(16) NOT NULL DEFAULT 'DIRECT'",
-            "signal_version": "ALTER TABLE external_trading_orders ADD COLUMN signal_version VARCHAR(64)",
-            "replace_count": "ALTER TABLE external_trading_orders ADD COLUMN replace_count INTEGER NOT NULL DEFAULT 0",
-            "replaced_by_order_id": "ALTER TABLE external_trading_orders ADD COLUMN replaced_by_order_id INTEGER",
-            "deadline_at": "ALTER TABLE external_trading_orders ADD COLUMN deadline_at DATETIME",
-            "cancel_reason": "ALTER TABLE external_trading_orders ADD COLUMN cancel_reason VARCHAR(500)",
-            "executor_trigger": "ALTER TABLE external_trading_orders ADD COLUMN executor_trigger VARCHAR(64)",
-        },
-        "external_trading_target_positions": {
-            "source_execution_id": "ALTER TABLE external_trading_target_positions ADD COLUMN source_execution_id INTEGER",
-        },
-        "external_trading_accounts": {
-            "executor_enabled": "ALTER TABLE external_trading_accounts ADD COLUMN executor_enabled BOOLEAN NOT NULL DEFAULT 1",
-            "executor_price_level": "ALTER TABLE external_trading_accounts ADD COLUMN executor_price_level INTEGER NOT NULL DEFAULT 1",
-            "executor_lot_size": "ALTER TABLE external_trading_accounts ADD COLUMN executor_lot_size INTEGER NOT NULL DEFAULT 100",
-            "executor_order_timeout_seconds": "ALTER TABLE external_trading_accounts ADD COLUMN executor_order_timeout_seconds INTEGER NOT NULL DEFAULT 120",
-            "executor_max_replace_count": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_replace_count INTEGER NOT NULL DEFAULT 3",
-            "executor_price_level_sequence": "ALTER TABLE external_trading_accounts ADD COLUMN executor_price_level_sequence JSON",
-        },
-        "external_trading_sub_accounts": {
-            "executor_price_level": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_price_level INTEGER",
-            "executor_lot_size": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_lot_size INTEGER",
-            "executor_order_timeout_seconds": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_order_timeout_seconds INTEGER",
-            "executor_max_replace_count": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_replace_count INTEGER",
-            "executor_price_level_sequence": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_price_level_sequence JSON",
+        "snowball_copy_configs": {
+            "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
+            "external_trading_account_id": "ALTER TABLE snowball_copy_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_sub_account_id": "ALTER TABLE snowball_copy_configs ADD COLUMN live_sub_account_id INTEGER",
+            "last_external_sync_at": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_at DATETIME",
+            "last_external_sync_status": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_status VARCHAR(16)",
+            "last_external_sync_message": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_message VARCHAR(500)",
         },
     }
 
@@ -1477,12 +1298,6 @@ def ensure_table_columns():
                     conn.exec_driver_sql(ddl)
 
 ensure_table_columns()
-
-with engine.begin() as conn:
-    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_external_orders_parent ON external_trading_orders(parent_order_id, allocation_role)"))
-    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_external_orders_deadline ON external_trading_orders(external_trading_account_id, deadline_at, status)"))
-    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_external_orders_signal ON external_trading_orders(sub_account_id, symbol, signal_version)"))
-    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_external_target_source_execution ON external_trading_target_positions(source_execution_id)"))
 
 def ensure_soxl_fear_strategy_multi_config_schema():
     """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""
@@ -1710,16 +1525,16 @@ ensure_soxl_fear_strategy_multi_config_schema()
 
 def get_db():
     """FastAPI dependency for database session"""
-    db = Session()
+    db = SessionLocal()
     try:
         yield db
     finally:
-        Session.remove()
+        db.close()
 
 @contextmanager
 def get_db_ctx():
     """Context manager for database session, for use in 'with' statements"""
-    db = Session()
+    db = SessionLocal()
     try:
         yield db
         db.commit()
@@ -1727,4 +1542,4 @@ def get_db_ctx():
         db.rollback()
         raise
     finally:
-        Session.remove()
+        db.close()

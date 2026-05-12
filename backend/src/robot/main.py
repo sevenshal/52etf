@@ -15,6 +15,7 @@ pd.set_option("display.width", 10000)
 _last_w20_strategy_automation_check = 0.0
 _last_external_trading_monitor_check = 0.0
 _last_external_trading_executor_check = 0.0
+_last_snowball_external_trading_sync_check = 0.0
 
 
 def _process_w20_strategy_automation():
@@ -83,6 +84,25 @@ def _process_external_trading_executor():
     logging.exception("External trading executor failed")
 
 
+def _process_snowball_external_trading_sync():
+  global _last_snowball_external_trading_sync_check
+  now = time.time()
+  if now - _last_snowball_external_trading_sync_check < 60:
+    return
+  _last_snowball_external_trading_sync_check = now
+
+  try:
+    from ..app.api.snowball import (
+      process_snowball_external_trading_sync_for_robot,
+    )
+
+    sync_result = process_snowball_external_trading_sync_for_robot()
+    if sync_result.get("changed") or sync_result.get("failed"):
+      logging.info("Snowball external trading sync result: %s", sync_result)
+  except Exception:
+    logging.exception("Snowball external trading sync failed")
+
+
 def robot():
   run_startup_tasks()
   logging.info("listening deal")
@@ -102,6 +122,7 @@ def robot():
     try:
       scheduled_task_manager.run_pending()
       _process_w20_strategy_automation()
+      _process_snowball_external_trading_sync()
       _process_external_trading_executor()
       _process_external_trading_connection_monitor()
     except Exception as e:

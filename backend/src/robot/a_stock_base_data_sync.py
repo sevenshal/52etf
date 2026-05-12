@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[Dict], None]
 
-SYNC_WORKERS = 5
+SYNC_WORKERS = 3
 SYNC_REFRESH_OVERLAP_DAYS = 45
 A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
 A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220

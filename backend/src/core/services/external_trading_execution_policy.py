@@ -7,6 +7,7 @@ DEFAULT_EXECUTOR_LOT_SIZE = 100
 DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS = 120
 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT = 3
 DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE = [1, 2, 3, 5, -1]
+DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE = True
 
 
 def safe_int_or_none(value: Any) -> Optional[int]:
@@ -16,6 +17,21 @@ def safe_int_or_none(value: Any) -> Optional[int]:
         return int(float(value))
     except Exception:
         return None
+
+
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def normalize_price_level(value: Any, default: int = DEFAULT_EXECUTOR_PRICE_LEVEL) -> int:
@@ -44,6 +60,13 @@ def normalize_max_replace_count(value: Any, default: int = DEFAULT_EXECUTOR_MAX_
     if parsed is not None and parsed >= 0:
         return parsed
     return default
+
+
+def normalize_clip_sell_to_available(
+    value: Any,
+    default: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
+) -> bool:
+    return normalize_bool(value, default)
 
 
 def normalize_price_level_sequence(value: Any, default: Optional[List[int]] = None) -> List[int]:
@@ -111,6 +134,13 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             getattr(account, "executor_max_replace_count", None),
             normalize_max_replace_count(fallback.get("max_replace_count"), DEFAULT_EXECUTOR_MAX_REPLACE_COUNT),
         ),
+        "clip_sell_to_available": normalize_clip_sell_to_available(
+            getattr(account, "executor_clip_sell_to_available", None),
+            normalize_clip_sell_to_available(
+                fallback.get("clip_sell_to_available"),
+                DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
+            ),
+        ),
         "price_level_sequence": account_sequence,
         "source": "account",
     }
@@ -131,6 +161,13 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             if value is not None:
                 policy[field] = normalizer(value, policy[field])
                 policy["source"] = "sub_account"
+        clip_value = getattr(sub_account, "executor_clip_sell_to_available", None)
+        if clip_value is not None:
+            policy["clip_sell_to_available"] = normalize_clip_sell_to_available(
+                clip_value,
+                policy["clip_sell_to_available"],
+            )
+            policy["source"] = "sub_account"
     return policy
 
 
@@ -148,6 +185,10 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
                 fallback.get("max_replace_count"),
                 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
             ),
+            "clip_sell_to_available": normalize_clip_sell_to_available(
+                fallback.get("clip_sell_to_available"),
+                DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
+            ),
             "price_level_sequence": normalize_price_level_sequence(fallback.get("price_level_sequence")),
             "source": "fallback",
         }
@@ -161,6 +202,16 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         "lot_size": max(normalize_lot_size(item.get("lot_size")) for item in policies),
         "order_timeout_seconds": min(normalize_timeout_seconds(item.get("order_timeout_seconds")) for item in policies),
         "max_replace_count": min(normalize_max_replace_count(item.get("max_replace_count")) for item in policies),
+        "clip_sell_to_available": any(
+            normalize_clip_sell_to_available(
+                item.get("clip_sell_to_available"),
+                normalize_clip_sell_to_available(
+                    fallback.get("clip_sell_to_available"),
+                    DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
+                ),
+            )
+            for item in policies
+        ),
         "price_level_sequence": normalize_price_level_sequence(base_sequence),
         "source": "aggregated",
     }

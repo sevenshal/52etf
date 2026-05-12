@@ -120,6 +120,7 @@ async def receive_notification(
              try:
                  # Fetch all active Snowball configs
                  configs = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.enabled == True).all()
+                 matched_external_config_ids = []
                  
                  for config in configs:
                      # Check if combination_name exists and is in content
@@ -133,6 +134,22 @@ async def receive_notification(
                                  # We send a specific command format
                                  cmd = f"TRIGGER:{config.combination_id}"
                                  await manager.send_message(config.cli_id, cmd)
+                             if (
+                                 getattr(config, "live_trade_enabled", False)
+                                 and getattr(config, "external_trading_account_id", None)
+                                 and getattr(config, "live_sub_account_id", None)
+                             ):
+                                 matched_external_config_ids.append(config.id)
+
+                 if matched_external_config_ids:
+                     from .snowball import sync_snowball_external_trading_config_ids
+
+                     background_tasks.add_task(
+                         sync_snowball_external_trading_config_ids,
+                         matched_external_config_ids,
+                         trigger_source="notification",
+                         trigger_executor=True,
+                     )
                                  
              except Exception as e:
                  logger.error(f"Error processing Snowball trigger: {e}")

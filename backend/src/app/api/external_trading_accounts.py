@@ -7,15 +7,19 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session as OrmSession
 
 from ...core.database import (
+    SnowballCopyConfig,
+    W20MomentumLiveConfig,
+    get_db,
+)
+from ...core.external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
     ExternalTradingSubAccount,
     ExternalTradingTargetPosition,
-    Session as DBSession,
-    W20MomentumLiveConfig,
-    get_db,
+    ExternalTradingSessionLocal as ExternalTradingDBSession,
+    get_external_trading_db,
 )
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
@@ -24,12 +28,14 @@ from ...core.services.external_trading import (
 from ...core.services.external_trading_executor import trigger_external_trading_executor
 from ...core.services.external_trading_execution_policy import (
     ALLOWED_EXECUTOR_PRICE_LEVELS,
+    DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
     DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     normalize_lot_size,
+    normalize_clip_sell_to_available,
     normalize_max_replace_count,
     normalize_price_level,
     normalize_price_level_sequence,
@@ -38,8 +44,10 @@ from ...core.services.external_trading_execution_policy import (
 )
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
+    STRATEGY_SNOWBALL,
     STRATEGY_W20,
     build_netted_target_execution_plan,
+    expire_insufficient_sellable_blocks,
     get_ledger_positions,
     get_open_order_quantities,
     normalize_symbol,
@@ -67,6 +75,7 @@ class ExternalTradingAccountBase(BaseModel):
     executor_lot_size: int = Field(default=DEFAULT_EXECUTOR_LOT_SIZE, ge=1)
     executor_order_timeout_seconds: int = Field(default=DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS, ge=10, le=3600)
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
+    executor_clip_sell_to_available: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
 
     @validator("name", "identifier", pre=True)
@@ -102,6 +111,7 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
     executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
+    executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
 
     @validator("name", "identifier", pre=True)
@@ -156,6 +166,7 @@ class OrderInstruction(BaseModel):
     limit_price: Optional[float] = Field(default=None, gt=0)
     protection_limit_price: Optional[float] = Field(default=None, gt=0)
     market_limit_price: Optional[float] = Field(default=None, gt=0)
+    clip_sell_to_available: Optional[bool] = None
     remark: Optional[str] = None
 
     @validator("side")
@@ -199,6 +210,7 @@ class ExternalTradingSubAccountPayload(BaseModel):
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
     executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
+    executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
 
     @validator("name", "remark", pre=True)
@@ -240,6 +252,9 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     executor_lot_size = normalize_lot_size(getattr(account, "executor_lot_size", None))
     executor_order_timeout_seconds = normalize_timeout_seconds(getattr(account, "executor_order_timeout_seconds", None))
     executor_max_replace_count = normalize_max_replace_count(getattr(account, "executor_max_replace_count", None))
+    executor_clip_sell_to_available = normalize_clip_sell_to_available(
+        getattr(account, "executor_clip_sell_to_available", None)
+    )
     executor_price_level_sequence = normalize_price_level_sequence(
         getattr(account, "executor_price_level_sequence", None)
     )
@@ -254,6 +269,7 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_lot_size": executor_lot_size,
         "executor_order_timeout_seconds": executor_order_timeout_seconds,
         "executor_max_replace_count": executor_max_replace_count,
+        "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
         "connected": runtime_status.get("connected", False),
         "pending_count": runtime_status.get("pending_count", 0),
@@ -268,15 +284,23 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     }
 
 
-def _strategy_binding_name(db: OrmSession, sub_account: ExternalTradingSubAccount) -> Optional[str]:
+def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubAccount) -> Optional[str]:
     if not sub_account.strategy_type or not sub_account.strategy_config_id:
         return None
     if sub_account.strategy_type == STRATEGY_W20:
-        config = db.query(W20MomentumLiveConfig).filter(
+        config = main_db.query(W20MomentumLiveConfig).filter(
             W20MomentumLiveConfig.id == sub_account.strategy_config_id,
             W20MomentumLiveConfig.account_id == sub_account.account_id,
         ).first()
         return config.name if config else "W20 风险调整动量虚拟盘（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_SNOWBALL:
+        config = main_db.query(SnowballCopyConfig).filter(
+            SnowballCopyConfig.id == sub_account.strategy_config_id,
+            SnowballCopyConfig.account_id == sub_account.account_id,
+        ).first()
+        if config:
+            return config.combination_name or config.combination_id or "A股雪球跟单"
+        return "A股雪球跟单（配置已删除）"
     return sub_account.strategy_type
 
 
@@ -284,9 +308,26 @@ def _serialize_sub_account_with_binding(
     db: OrmSession,
     sub_account: ExternalTradingSubAccount,
     positions: Optional[List[ExternalTradingLedgerPosition]] = None,
+    *,
+    main_db: OrmSession,
 ) -> Dict[str, Any]:
     item = serialize_sub_account(sub_account)
-    strategy_name = _strategy_binding_name(db, sub_account)
+    if positions is None:
+        positions = (
+            db.query(ExternalTradingLedgerPosition)
+            .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
+            .all()
+        )
+    position_market_value = 0.0
+    for position in positions:
+        market_value = _safe_float(position.market_value)
+        if market_value <= 0 and _safe_float(position.quantity) > 0:
+            reference_price = _safe_float(position.market_price, _safe_float(position.avg_cost))
+            market_value = _safe_float(position.quantity) * reference_price
+        position_market_value += market_value
+    item["position_market_value"] = round(position_market_value, 2)
+    item["net_asset"] = round(_safe_float(sub_account.cash_available) + position_market_value, 2)
+    strategy_name = _strategy_binding_name(main_db, sub_account)
     item["strategy_name"] = strategy_name
     item["binding_status"] = "BOUND" if strategy_name else "FREE"
     item["binding_label"] = strategy_name or "空闲"
@@ -445,8 +486,8 @@ def _serialize_fill_status(
         "allocation_role": allocation_role,
         "allocation_role_label": "子账户分配成交" if allocation_role == "CHILD" else "净额父单成交",
         "sub_account_id": row.sub_account_id,
-        "sub_account_name": sub_account.name if sub_account else "-",
-        "strategy_name": strategy_name if sub_account else "-",
+        "sub_account_name": sub_account.name if sub_account else "净额父单",
+        "strategy_name": strategy_name if sub_account else "券商原始成交",
         "order_id": row.order_id,
         "client_order_id": row.client_order_id,
         "broker_order_id": row.broker_order_id,
@@ -484,6 +525,7 @@ async def _build_netted_executor_plan(
         lot_size=lot_size,
         order_timeout_seconds=timeout_seconds,
         max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
+        clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
         price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
     )
     symbols = plan.get("symbols") or []
@@ -507,6 +549,7 @@ async def _build_netted_executor_plan(
             lot_size=lot_size,
             order_timeout_seconds=timeout_seconds,
             max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
+            clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
             price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
             reference_prices=reference_prices,
         )
@@ -520,7 +563,7 @@ async def _build_netted_executor_plan(
 
 @router.get("", response_model=List[ExternalTradingAccountResponse])
 async def list_external_trading_accounts(
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     accounts = (
@@ -535,7 +578,7 @@ async def list_external_trading_accounts(
 @router.post("", response_model=ExternalTradingAccountResponse)
 async def create_external_trading_account(
     payload: ExternalTradingAccountCreate,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     _ensure_unique(db, account_id, payload.name, payload.identifier)
@@ -549,6 +592,7 @@ async def create_external_trading_account(
         executor_lot_size=payload.executor_lot_size,
         executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
         executor_max_replace_count=payload.executor_max_replace_count,
+        executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
     )
     db.add(account)
@@ -561,7 +605,7 @@ async def create_external_trading_account(
 async def update_external_trading_account(
     external_account_id: int,
     payload: ExternalTradingAccountUpdate,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -592,12 +636,46 @@ async def update_external_trading_account(
 @router.delete("/{external_account_id}")
 async def delete_external_trading_account(
     external_account_id: int,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     account_pk = account.id
+    now = datetime.now()
+    for config in main_db.query(W20MomentumLiveConfig).filter(
+        W20MomentumLiveConfig.account_id == account_id,
+        W20MomentumLiveConfig.external_trading_account_id == account_pk,
+    ).all():
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        config.live_trade_enabled = False
+        config.updated_at = now
+    for config in main_db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.account_id == account_id,
+        SnowballCopyConfig.external_trading_account_id == account_pk,
+    ).all():
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        config.live_trade_enabled = False
+        config.updated_at = now
+    db.query(ExternalTradingOrderFill).filter(
+        ExternalTradingOrderFill.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
+    db.query(ExternalTradingOrder).filter(
+        ExternalTradingOrder.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
+    db.query(ExternalTradingTargetPosition).filter(
+        ExternalTradingTargetPosition.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
+    db.query(ExternalTradingLedgerPosition).filter(
+        ExternalTradingLedgerPosition.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
+    db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
     db.delete(account)
+    main_db.commit()
     db.commit()
     await external_trading_hub.disconnect_account(account_pk, reason="account deleted")
     return {"message": "Deleted successfully"}
@@ -606,7 +684,8 @@ async def delete_external_trading_account(
 @router.get("/{external_account_id}/sub-accounts")
 async def list_external_trading_sub_accounts(
     external_account_id: int,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     _get_account_or_404(db, account_id, external_account_id)
@@ -627,7 +706,7 @@ async def list_external_trading_sub_accounts(
             .order_by(ExternalTradingLedgerPosition.symbol.asc())
             .all()
         )
-        result.append(_serialize_sub_account_with_binding(db, sub_account, positions))
+        result.append(_serialize_sub_account_with_binding(db, sub_account, positions, main_db=main_db))
     return result
 
 
@@ -635,7 +714,8 @@ async def list_external_trading_sub_accounts(
 async def create_external_trading_sub_account(
     external_account_id: int,
     payload: ExternalTradingSubAccountPayload,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     _get_account_or_404(db, account_id, external_account_id)
@@ -652,6 +732,7 @@ async def create_external_trading_sub_account(
         executor_lot_size=payload.executor_lot_size,
         executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
         executor_max_replace_count=payload.executor_max_replace_count,
+        executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
         created_at=now,
         updated_at=now,
@@ -659,7 +740,7 @@ async def create_external_trading_sub_account(
     db.add(sub_account)
     db.commit()
     db.refresh(sub_account)
-    return _serialize_sub_account_with_binding(db, sub_account)
+    return _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
 
 
 @router.put("/{external_account_id}/sub-accounts/{sub_account_id}")
@@ -667,7 +748,8 @@ async def update_external_trading_sub_account(
     external_account_id: int,
     sub_account_id: int,
     payload: ExternalTradingSubAccountPayload,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     _get_account_or_404(db, account_id, external_account_id)
@@ -686,18 +768,20 @@ async def update_external_trading_sub_account(
     sub_account.executor_lot_size = payload.executor_lot_size
     sub_account.executor_order_timeout_seconds = payload.executor_order_timeout_seconds
     sub_account.executor_max_replace_count = payload.executor_max_replace_count
+    sub_account.executor_clip_sell_to_available = payload.executor_clip_sell_to_available
     sub_account.executor_price_level_sequence = payload.executor_price_level_sequence
     sub_account.updated_at = datetime.now()
     db.commit()
     db.refresh(sub_account)
-    return _serialize_sub_account_with_binding(db, sub_account)
+    return _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
 
 
 @router.delete("/{external_account_id}/sub-accounts/{sub_account_id}")
 async def delete_external_trading_sub_account(
     external_account_id: int,
     sub_account_id: int,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     _get_account_or_404(db, account_id, external_account_id)
@@ -717,11 +801,19 @@ async def delete_external_trading_sub_account(
         raise HTTPException(status_code=400, detail="该虚拟子账户有未完成订单，不能删除")
 
     now = datetime.now()
-    bound_configs = db.query(W20MomentumLiveConfig).filter(
+    bound_configs = main_db.query(W20MomentumLiveConfig).filter(
         W20MomentumLiveConfig.account_id == account_id,
         W20MomentumLiveConfig.live_sub_account_id == sub_account.id,
     ).all()
     for config in bound_configs:
+        config.live_sub_account_id = None
+        config.updated_at = now
+
+    bound_snowball_configs = main_db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.account_id == account_id,
+        SnowballCopyConfig.live_sub_account_id == sub_account.id,
+    ).all()
+    for config in bound_snowball_configs:
         config.live_sub_account_id = None
         config.updated_at = now
 
@@ -730,6 +822,7 @@ async def delete_external_trading_sub_account(
     db.query(ExternalTradingTargetPosition).filter(ExternalTradingTargetPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingLedgerPosition).filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.delete(sub_account)
+    main_db.commit()
     db.commit()
     return {"message": "Deleted successfully"}
 
@@ -738,7 +831,7 @@ async def delete_external_trading_sub_account(
 async def preview_external_trading_netted_executor(
     external_account_id: int,
     payload: NettedExecutorRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -761,7 +854,7 @@ async def preview_external_trading_netted_executor(
 async def execute_external_trading_netted_executor(
     external_account_id: int,
     payload: NettedExecutorRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -795,10 +888,12 @@ async def execute_external_trading_netted_executor(
 @router.get("/{external_account_id}/executor/status")
 async def get_external_trading_executor_status(
     external_account_id: int,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
+    expire_insufficient_sellable_blocks(db, external_trading_account_id=account.id)
 
     sub_accounts = (
         db.query(ExternalTradingSubAccount)
@@ -811,7 +906,7 @@ async def get_external_trading_executor_status(
     )
     sub_account_by_id = {row.id: row for row in sub_accounts}
     strategy_name_by_sub_account_id = {
-        row.id: _strategy_binding_name(db, row)
+        row.id: _strategy_binding_name(main_db, row)
         for row in sub_accounts
     }
     ledger_by_sub_account = {
@@ -927,6 +1022,7 @@ async def get_external_trading_executor_status(
             lot_size=normalize_lot_size(account.executor_lot_size),
             order_timeout_seconds=normalize_timeout_seconds(account.executor_order_timeout_seconds),
             max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
+            clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
             price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
         )
         plan["connected"] = external_trading_hub.get_status(account.id).get("connected")
@@ -941,7 +1037,7 @@ async def get_external_trading_executor_status(
     return {
         "account": _serialize_account(account),
         "sub_accounts": [
-            _serialize_sub_account_with_binding(db, row)
+            _serialize_sub_account_with_binding(db, row, main_db=main_db)
             for row in sub_accounts
         ],
         "target_positions": target_positions,
@@ -971,7 +1067,7 @@ async def get_external_trading_executor_status(
 @router.get("/{external_account_id}/status")
 async def get_external_trading_account_status(
     external_account_id: int,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -982,7 +1078,7 @@ async def get_external_trading_account_status(
 async def get_external_quotes(
     external_account_id: int,
     payload: QuoteRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1002,7 +1098,7 @@ async def get_external_quotes(
 async def get_external_snapshots(
     external_account_id: int,
     payload: QuoteRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1022,7 +1118,7 @@ async def get_external_snapshots(
 async def place_external_orders(
     external_account_id: int,
     payload: OrderBatchRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1042,7 +1138,7 @@ async def place_external_orders(
 async def cancel_external_orders(
     external_account_id: int,
     payload: OrderCancelBatchRequest,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1062,7 +1158,7 @@ async def cancel_external_orders(
 async def get_external_account_snapshot(
     external_account_id: int,
     timeout_seconds: float = 10.0,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1078,7 +1174,7 @@ async def get_external_account_snapshot(
 async def get_external_positions(
     external_account_id: int,
     timeout_seconds: float = 10.0,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1094,7 +1190,7 @@ async def get_external_positions(
 async def get_external_assets(
     external_account_id: int,
     timeout_seconds: float = 10.0,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1110,7 +1206,7 @@ async def get_external_assets(
 async def get_external_today_orders(
     external_account_id: int,
     timeout_seconds: float = 10.0,
-    db: OrmSession = Depends(get_db),
+    db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
@@ -1154,7 +1250,7 @@ async def external_trading_websocket(websocket: WebSocket):
         await websocket.close(code=1008, reason=str(exc))
         return
 
-    db = DBSession()
+    db = ExternalTradingDBSession()
     try:
         account = db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.account_id == account_id,

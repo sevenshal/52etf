@@ -680,6 +680,122 @@ def validate_market_order_type(client_symbol, market_type):
     return market_type
 
 
+def bool_value(value, default=False):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def get_position_candidates(client_symbol, api_symbol):
+    candidates = [
+        client_symbol,
+        api_symbol,
+        convert_to_api_code(client_symbol),
+        convert_to_client_code(api_symbol),
+    ]
+    normalized = []
+    for item in candidates:
+        if not item:
+            continue
+        text = str(item).upper()
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def get_position_quantities(client_symbol, api_symbol):
+    positions = get_positions() or {}
+    position_items = positions.items() if isinstance(positions, dict) else [(None, pos) for pos in positions]
+    candidates = get_position_candidates(client_symbol, api_symbol)
+    for key, pos in position_items:
+        symbol = value_of(pos, "sid", value_of(pos, "symbol", key))
+        pos_candidates = get_position_candidates(symbol, convert_to_api_code(symbol))
+        if not set(candidates).intersection(set(pos_candidates)):
+            continue
+        sellable_quantity = value_of(
+            pos,
+            "enable_amount",
+            value_of(pos, "available_quantity", value_of(pos, "sellable_quantity", value_of(pos, "amount", 0))),
+        )
+        position_quantity = value_of(pos, "amount", value_of(pos, "quantity", 0))
+        try:
+            sellable_quantity = max(int(float(sellable_quantity or 0)), 0)
+        except Exception:
+            sellable_quantity = 0
+        try:
+            position_quantity = max(int(float(position_quantity or 0)), 0)
+        except Exception:
+            position_quantity = 0
+        return {
+            "sellable_quantity": sellable_quantity,
+            "position_quantity": position_quantity,
+        }
+    return {
+        "sellable_quantity": 0,
+        "position_quantity": 0,
+    }
+
+
+def apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, quantity):
+    clip_enabled = bool_value(
+        order_request.get(
+            "clip_sell_to_available",
+            order_request.get("clip_sell_quantity_to_available", False),
+        ),
+        False,
+    )
+    meta = {
+        "requested_quantity": quantity,
+        "submitted_quantity": quantity,
+        "quantity_clipped": False,
+        "clip_sell_to_available": clip_enabled,
+        "sellable_quantity": None,
+        "position_quantity": None,
+    }
+    if side != "SELL" or not clip_enabled:
+        return quantity, meta
+
+    quantities = get_position_quantities(client_symbol, api_symbol)
+    sellable_quantity = quantities.get("sellable_quantity") or 0
+    position_quantity = quantities.get("position_quantity") or 0
+    clipped_quantity = min(quantity, sellable_quantity)
+    meta.update({
+        "submitted_quantity": clipped_quantity,
+        "quantity_clipped": clipped_quantity != quantity,
+        "sellable_quantity": sellable_quantity,
+        "position_quantity": position_quantity,
+    })
+    if clipped_quantity != quantity:
+        log_warn(
+            "SELL %s 数量按可卖数量裁剪: 请求=%d, 持仓=%d, 可卖=%d, 提交=%d"
+            % (client_symbol, quantity, position_quantity, sellable_quantity, clipped_quantity)
+        )
+    return clipped_quantity, meta
+
+
+def order_clip_fields(order_request, quantity):
+    requested_quantity = int(order_request.get("_requested_quantity") or quantity)
+    submitted_quantity = int(order_request.get("_submitted_quantity") or quantity)
+    quantity_clipped = bool_value(order_request.get("_quantity_clipped"), False)
+    return {
+        "requested_quantity": requested_quantity,
+        "submitted_quantity": submitted_quantity,
+        "quantity_clipped": quantity_clipped,
+        "clip_sell_to_available": bool_value(order_request.get("clip_sell_to_available"), False),
+        "sellable_quantity": order_request.get("_sellable_quantity"),
+        "position_quantity": order_request.get("_position_quantity"),
+    }
+
+
 def get_market_protection_price(order_request, client_symbol, side, quantity):
     price = (
         order_request.get("protection_limit_price")
@@ -738,6 +854,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
                 "client_symbol": client_symbol,
                 "side": side,
                 "quantity": quantity,
+                **order_clip_fields(order_request, quantity),
                 "order_type": "MARKET",
                 "market_type": market_type,
                 "protection_limit_price": protection_price,
@@ -759,6 +876,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
         "client_symbol": client_symbol,
         "side": side,
         "quantity": quantity,
+        **order_clip_fields(order_request, quantity),
         "order_type": "MARKET",
         "market_type": market_type,
         "protection_limit_price": protection_price,
@@ -824,6 +942,7 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
         "client_symbol": client_symbol,
         "side": side,
         "quantity": quantity,
+        **order_clip_fields(order_request, quantity),
         "order_type": "LIMIT",
         "calculated_price": limit_price,
         "price_source": calculated.get("price_source"),
@@ -837,16 +956,53 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
 
 
 def place_single_order(order_request, index):
+    order_request = dict(order_request or {})
     symbol = order_request.get("symbol")
     client_symbol = convert_to_client_code(symbol)
     api_symbol = convert_to_api_code(client_symbol)
     side = str(order_request.get("side") or "").upper()
     quantity = int(order_request.get("quantity") or 0)
+    requested_quantity = quantity
 
     if side not in ("BUY", "SELL"):
         raise Exception("orders[%d].side must be BUY or SELL" % index)
     if quantity <= 0:
         raise Exception("orders[%d].quantity must be greater than 0" % index)
+
+    quantity, clip_meta = apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, quantity)
+    order_request["_requested_quantity"] = requested_quantity
+    order_request["_submitted_quantity"] = quantity
+    order_request["_quantity_clipped"] = clip_meta.get("quantity_clipped")
+    order_request["_sellable_quantity"] = clip_meta.get("sellable_quantity")
+    order_request["_position_quantity"] = clip_meta.get("position_quantity")
+    order_request["clip_sell_to_available"] = clip_meta.get("clip_sell_to_available")
+    if quantity <= 0:
+        message = "SELL %s 可卖数量不足，请求%d，持仓%d，可卖%d，未提交订单" % (
+            client_symbol,
+            requested_quantity,
+            int(clip_meta.get("position_quantity") or 0),
+            int(clip_meta.get("sellable_quantity") or 0),
+        )
+        log.error("交易失败: %s" % message)
+        return {
+            "ok": False,
+            "client_order_id": order_request.get("client_order_id"),
+            "status": "FAILED",
+            "symbol": api_symbol,
+            "client_symbol": client_symbol,
+            "side": side,
+            "quantity": 0,
+            **order_clip_fields(order_request, 0),
+            "order_type": normalize_order_type(order_request),
+            "calculated_price": None,
+            "price_source": None,
+            "price_level": order_request.get("price_level"),
+            "snapshot_time": None,
+            "submitted_price": None,
+            "order_id": None,
+            "raw_status": None,
+            "message": message,
+        }
 
     if normalize_order_type(order_request) == "MARKET":
         return place_market_order(order_request, client_symbol, api_symbol, side, quantity)
