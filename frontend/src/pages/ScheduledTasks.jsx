@@ -4,15 +4,16 @@ import {
   Alert,
   Button,
   DatePicker,
+  Input,
   Modal,
   Space,
   Switch,
   Table,
-  TimePicker,
   Tooltip,
   Typography,
   message,
   Tag,
+  Select,
 } from 'antd';
 import {
   ClockCircleOutlined,
@@ -25,6 +26,11 @@ import request from '../utils/request';
 
 const { Title, Text } = Typography;
 const RESULT_PREVIEW_LENGTH = 96;
+const timezoneOptions = [
+  { value: 'Asia/Shanghai', label: '上海时间' },
+  { value: 'America/New_York', label: '美东时间' },
+];
+const timezoneSortValue = value => (value === 'America/New_York' ? 1 : 0);
 
 const getRunStartDateHint = (taskKey) => {
   if (taskKey === 'etf_historical_holdings_backfill') {
@@ -39,14 +45,6 @@ const getRunStartDateHint = (taskKey) => {
   };
 };
 
-const parseTimeValue = (time) => {
-  if (!time) {
-    return null;
-  }
-  const [hour, minute] = time.split(':').map(Number);
-  return dayjs().hour(hour || 0).minute(minute || 0).second(0);
-};
-
 const formatDateTime = (value) => {
   if (!value) {
     return '暂无';
@@ -54,15 +52,60 @@ const formatDateTime = (value) => {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss');
 };
 
-const getScheduleSortValue = (time) => {
-  if (!time || typeof time !== 'string') {
-    return Number.POSITIVE_INFINITY;
+const splitCronRules = value => String(value || '')
+  .split(/[;\n]+/)
+  .map(item => item.trim())
+  .filter(Boolean);
+
+const expandCronNumberField = (field, min, max) => {
+  const values = new Set();
+  const parts = String(field || '').split(',');
+  for (const rawPart of parts) {
+    let part = rawPart.trim();
+    if (!part) continue;
+    let step = 1;
+    if (part.includes('/')) {
+      const pieces = part.split('/');
+      part = pieces[0];
+      step = Math.max(Number(pieces[1]) || 1, 1);
+    }
+    let start;
+    let end;
+    if (part === '*') {
+      start = min;
+      end = max;
+    } else if (part.includes('-')) {
+      const pieces = part.split('-').map(Number);
+      [start, end] = pieces;
+    } else {
+      start = Number(part);
+      end = start;
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+    start = Math.max(start, min);
+    end = Math.min(end, max);
+    for (let value = start; value <= end; value += step) {
+      values.add(value);
+    }
   }
-  const [hour, minute] = time.split(':').map(Number);
-  if (Number.isNaN(hour) || Number.isNaN(minute)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return hour * 60 + minute;
+  return Array.from(values).sort((a, b) => a - b);
+};
+
+const getCronSortValue = task => {
+  const backendValue = Number(task.first_daily_trigger_minutes);
+  if (Number.isFinite(backendValue)) return backendValue;
+  let best = Number.POSITIVE_INFINITY;
+  splitCronRules(task.cron_rule || task.schedule_time).forEach(rule => {
+    const fields = rule.split(/\s+/);
+    if (fields.length !== 5) return;
+    const minutes = expandCronNumberField(fields[0], 0, 59);
+    const hours = expandCronNumberField(fields[1], 0, 23);
+    if (minutes.length && hours.length) {
+      best = Math.min(best, hours[0] * 60 + minutes[0]);
+    }
+  });
+  if (Number.isFinite(best)) return best;
+  return best;
 };
 
 const buildStatusTag = (task) => {
@@ -199,7 +242,9 @@ const ScheduledTasks = () => {
     try {
       const { data } = await request.put(`/api/scheduled-tasks/${task.task_key}`, {
         enabled: task.enabled,
-        schedule_time: task.schedule_time,
+        cron_rule: task.cron_rule,
+        timezone: task.timezone,
+        allow_queue: task.allow_queue,
       });
       updateTaskField(task.task_key, data);
       message.success('任务配置已保存');
@@ -250,8 +295,13 @@ const ScheduledTasks = () => {
 
   const sortedTasks = useMemo(() => {
     return [...tasks].sort((left, right) => {
-      const leftTime = getScheduleSortValue(left.schedule_time);
-      const rightTime = getScheduleSortValue(right.schedule_time);
+      const leftTime = getCronSortValue(left);
+      const rightTime = getCronSortValue(right);
+      const leftTimezone = timezoneSortValue(left.timezone);
+      const rightTimezone = timezoneSortValue(right.timezone);
+      if (leftTimezone !== rightTimezone) {
+        return leftTimezone - rightTimezone;
+      }
       if (leftTime !== rightTime) {
         return leftTime - rightTime;
       }
@@ -294,26 +344,56 @@ const ScheduledTasks = () => {
       ),
     },
     {
-      title: '执行时间',
-      dataIndex: 'schedule_time',
-      width: 132,
+      title: '触发 Cron',
+      dataIndex: 'cron_rule',
+      width: 280,
       render: (_, task) => (
-        <Space size={8} align="center">
-          <ClockCircleOutlined />
-          <TimePicker
-            value={parseTimeValue(task.schedule_time)}
-            format="HH:mm"
-            minuteStep={1}
-            allowClear={false}
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Space size={6}>
+            <ClockCircleOutlined />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              多条用分号或换行
+            </Text>
+          </Space>
+          <Input.TextArea
+            value={task.cron_rule || ''}
+            autoSize={{ minRows: 1, maxRows: 3 }}
             size="small"
-            style={{ width: 88 }}
-            onChange={(value) =>
+            onChange={(event) =>
               updateTaskField(task.task_key, {
-                schedule_time: value ? value.format('HH:mm') : task.schedule_time,
+                cron_rule: event.target.value,
               })
             }
           />
         </Space>
+      ),
+    },
+    {
+      title: '时区',
+      dataIndex: 'timezone',
+      width: 118,
+      render: (_, task) => (
+        <Select
+          size="small"
+          style={{ width: 104 }}
+          options={timezoneOptions}
+          value={task.timezone || 'Asia/Shanghai'}
+          onChange={(value) => updateTaskField(task.task_key, { timezone: value })}
+        />
+      ),
+    },
+    {
+      title: '排队',
+      dataIndex: 'allow_queue',
+      width: 86,
+      align: 'center',
+      render: (_, task) => (
+        <Switch
+          checked={task.allow_queue !== false}
+          checkedChildren="排队"
+          unCheckedChildren="直跑"
+          onChange={(checked) => updateTaskField(task.task_key, { allow_queue: checked })}
+        />
       ),
     },
     {
@@ -360,7 +440,7 @@ const ScheduledTasks = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 120,
+      width: 144,
       fixed: 'right',
       align: 'center',
       render: (_, task) => (
@@ -389,7 +469,7 @@ const ScheduledTasks = () => {
   ];
 
   return (
-    <div style={{ padding: '24px', maxWidth: 1440, margin: '0 auto' }}>
+    <div style={{ padding: '24px 12px', maxWidth: 'none', margin: '0 auto' }}>
       <Space
         align="start"
         style={{
@@ -401,7 +481,7 @@ const ScheduledTasks = () => {
       >
         <Space direction="vertical" size={2}>
           <Title level={4} style={{ margin: 0 }}>定时任务</Title>
-          <Text type="secondary">统一管理系统级定时任务，时间精确到时分。</Text>
+          <Text type="secondary">统一管理系统级定时任务，支持 Cron 和多次触发。</Text>
         </Space>
         <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()}>
           刷新
@@ -412,7 +492,7 @@ const ScheduledTasks = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="任务按服务器本地时间执行。修改保存后会立即重载调度；服务启动时只会补执行当天未执行且已错过计划时间的任务。"
+        message="Cron 格式为“分 时 日 月 周”，周几请用 mon-fri/sat/sun 这种英文写法。可选择上海时间或美东时间，美东时间会按夏令时自动换算；修改保存后立即重载调度；开启排队的任务进入统一队列顺序执行，关闭排队的任务触发后立即执行。"
       />
 
       <Table
@@ -423,7 +503,7 @@ const ScheduledTasks = () => {
         pagination={false}
         size="middle"
         tableLayout="fixed"
-        scroll={{ x: 1260 }}
+        scroll={{ x: 1520 }}
         locale={{ emptyText: '暂无定时任务' }}
       />
       <Modal
