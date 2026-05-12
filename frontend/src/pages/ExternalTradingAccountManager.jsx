@@ -23,6 +23,7 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  DollarOutlined,
   EditOutlined,
   PlusOutlined,
   SyncOutlined
@@ -96,6 +97,7 @@ const ExternalTradingAccountManager = () => {
   const [executorStatus, setExecutorStatus] = useState(null);
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
+  const [feeReconcilingAccountId, setFeeReconcilingAccountId] = useState(null);
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
 
@@ -134,7 +136,10 @@ const ExternalTradingAccountManager = () => {
       executor_order_timeout_seconds: 120,
       executor_max_replace_count: 3,
       executor_clip_sell_to_available: true,
-      executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE)
+      executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
+      commission_rate_pct: 0.025,
+      min_commission: 5,
+      stamp_tax_rate_pct: 0.05
     });
     setModalVisible(true);
   };
@@ -151,7 +156,10 @@ const ExternalTradingAccountManager = () => {
       executor_order_timeout_seconds: record.executor_order_timeout_seconds ?? 120,
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
       executor_clip_sell_to_available: record.executor_clip_sell_to_available !== false,
-      executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence)
+      executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
+      commission_rate_pct: record.commission_rate_pct ?? 0.025,
+      min_commission: record.min_commission ?? 5,
+      stamp_tax_rate_pct: record.stamp_tax_rate_pct ?? 0.05
     });
     setModalVisible(true);
   };
@@ -307,6 +315,29 @@ const ExternalTradingAccountManager = () => {
     }
   };
 
+  const reconcileFees = async account => {
+    if (!account?.id) return;
+    const tradeDate = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+    setFeeReconcilingAccountId(account.id);
+    try {
+      const { data } = await request.post(`/api/external-trading-accounts/${account.id}/fees/reconcile`, {
+        start_date: tradeDate,
+        end_date: tradeDate,
+        timeout_seconds: 30
+      });
+      const result = data?.result || {};
+      message.success(`费用对账完成：匹配${result.matched || 0}条，未匹配${result.unmatched || 0}条`);
+      fetchSubAccounts(account.id);
+      if (executorStatusAccount?.id === account.id) {
+        fetchExecutorStatus(account);
+      }
+    } catch (error) {
+      message.error(error.response?.data?.detail || '费用对账失败');
+    } finally {
+      setFeeReconcilingAccountId(null);
+    }
+  };
+
   const fetchExecutorStatus = async account => {
     if (!account?.id) return;
     setExecutorStatusLoading(true);
@@ -425,6 +456,9 @@ const ExternalTradingAccountManager = () => {
     { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatNumber(value) },
     { title: '未成', dataIndex: 'remaining_quantity', key: 'remaining_quantity', width: 100, render: value => formatNumber(value) },
     { title: '均价', dataIndex: 'avg_fill_price', key: 'avg_fill_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
+    { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
+    { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
+    { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
     { title: '状态', dataIndex: 'status', key: 'status', width: 130, render: value => <Tag color={orderStatusColor(value)}>{value || '-'}</Tag> },
     { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100, render: value => value || '-' },
     { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
@@ -445,6 +479,9 @@ const ExternalTradingAccountManager = () => {
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatNumber(value, 4) },
     { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatNumber(value, 2) },
+    { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
+    { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
+    { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
     { title: '订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
     { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
   ];
@@ -493,6 +530,16 @@ const ExternalTradingAccountManager = () => {
           <Button size="small" onClick={() => openExecutorStatus(account)}>
             执行器状态
           </Button>
+          <Popconfirm
+            title="拉取昨日交割单并对账费用？"
+            onConfirm={() => reconcileFees(account)}
+            okText="对账"
+            cancelText="取消"
+          >
+            <Button size="small" icon={<DollarOutlined />} loading={feeReconcilingAccountId === account.id}>
+              费用对账
+            </Button>
+          </Popconfirm>
         </Space>
         <Table rowKey="id" columns={subColumns} dataSource={rows} pagination={false} size="small" scroll={{ x: 1280 }} />
       </Space>
@@ -563,6 +610,17 @@ const ExternalTradingAccountManager = () => {
       )
     },
     {
+      title: '费用估算',
+      key: 'fees',
+      width: 220,
+      render: (_, record) => (
+        <Space direction="vertical" size={0}>
+          <Text>佣金 {formatNumber(record.commission_rate_pct, 4)}%</Text>
+          <Text type="secondary">最低 {formatNumber(record.min_commission, 2)} / 印花税 {formatNumber(record.stamp_tax_rate_pct, 4)}%</Text>
+        </Space>
+      )
+    },
+    {
       title: '操作',
       key: 'action',
       width: 150,
@@ -603,7 +661,7 @@ const ExternalTradingAccountManager = () => {
           dataSource={accounts}
           loading={loading}
           pagination={false}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1400 }}
           expandable={{
             expandedRowRender,
             onExpand: (expanded, record) => {
@@ -657,6 +715,16 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Form.Item name="executor_clip_sell_to_available" label="卖出按真实可卖数量裁剪" valuePropName="checked">
             <Switch checkedChildren="裁剪" unCheckedChildren="不裁剪" />
+          </Form.Item>
+          <Divider orientation="left">交易费用估算</Divider>
+          <Form.Item name="commission_rate_pct" label="佣金费率 (%)" rules={[{ required: true, message: '请输入佣金费率' }]}>
+            <InputNumber min={0} step={0.001} precision={4} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="min_commission" label="每笔最低佣金" rules={[{ required: true, message: '请输入每笔最低佣金' }]}>
+            <InputNumber min={0} step={0.01} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="stamp_tax_rate_pct" label="印花税费率 (%)" rules={[{ required: true, message: '请输入印花税费率' }]}>
+            <InputNumber min={0} step={0.001} precision={4} style={{ width: '100%' }} />
           </Form.Item>
         </Form>
       </Modal>
@@ -823,7 +891,7 @@ const ExternalTradingAccountManager = () => {
                     loading={executorStatusLoading}
                     pagination={{ pageSize: 10 }}
                     size="small"
-                    scroll={{ x: 2200 }}
+                    scroll={{ x: 2500 }}
                   />
                 )
               },
@@ -838,7 +906,7 @@ const ExternalTradingAccountManager = () => {
                     loading={executorStatusLoading}
                     pagination={{ pageSize: 10 }}
                     size="small"
-                    scroll={{ x: 1180 }}
+                    scroll={{ x: 1500 }}
                   />
                 )
               },

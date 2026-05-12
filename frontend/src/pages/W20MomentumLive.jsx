@@ -1326,7 +1326,7 @@ const W20MomentumLive = () => {
           <Descriptions.Item label="计划账户">{liveTradePlan.plan.external_account?.name || '-'}</Descriptions.Item>
           <Descriptions.Item label="虚拟子账户">{liveTradePlan.plan.sub_account?.name || '-'}</Descriptions.Item>
           <Descriptions.Item label="可用现金">{formatMoney(liveTradePlan.plan.available_cash, 2)}</Descriptions.Item>
-          <Descriptions.Item label="分配资金">{formatMoney(liveTradePlan.plan.trade_base_value, 2)}</Descriptions.Item>
+          <Descriptions.Item label="目标净资产">{formatMoney(liveTradePlan.plan.trade_base_value, 2)}</Descriptions.Item>
           <Descriptions.Item label="预计剩余现金">{formatMoney(liveTradePlan.plan.projected_cash, 2)}</Descriptions.Item>
           <Descriptions.Item label="执行策略">{formatExecutorPolicy(liveTradePlan.plan.sub_account?.effective_executor_policy)}</Descriptions.Item>
           <Descriptions.Item label="计划时间">{formatDateTime(liveTradePlan.timestamp)}</Descriptions.Item>
