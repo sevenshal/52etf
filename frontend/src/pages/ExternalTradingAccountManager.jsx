@@ -72,6 +72,22 @@ const textColumnFilter = (rows, getter) => ({
   filterSearch: true,
   onFilter: (value, record) => normalizeFilterText(getter(record)) === String(value)
 });
+const symbolText = record => {
+  const symbol = normalizeFilterText(record?.symbol);
+  const name = record?.symbol_name ? String(record.symbol_name) : '';
+  return name ? `${name} ${symbol}` : symbol;
+};
+const renderSymbol = (_, record) => {
+  const symbol = normalizeFilterText(record?.symbol);
+  const name = record?.symbol_name;
+  if (!name) return symbol;
+  return (
+    <Space direction="vertical" size={0}>
+      <Text strong>{name}</Text>
+      <Text type="secondary">{symbol}</Text>
+    </Space>
+  );
+};
 const formatPolicy = policy => {
   if (!policy) return '-';
   const level = policy.price_level ?? policy.executor_price_level;
@@ -377,7 +393,7 @@ const ExternalTradingAccountManager = () => {
   const demandColumns = [
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, ...textColumnFilter(demandRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_type', key: 'strategy_type', width: 150, render: value => value || '-', ...textColumnFilter(demandRows, strategyText) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(demandRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(demandRows, symbolText) },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     {
@@ -394,7 +410,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const internalCrossColumns = [
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(internalCrossRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(internalCrossRows, symbolText) },
     { title: '撮合数量', dataIndex: 'quantity', key: 'quantity', width: 110, render: value => formatNumber(value) },
     { title: '参考价', dataIndex: 'price', key: 'price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
     { title: '买方分配', dataIndex: 'buy_allocations', key: 'buy_allocations', render: value => (value || []).map(item => `${item.sub_account_name}:${formatNumber(item.quantity)}`).join(' / ') || '-' },
@@ -403,7 +419,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const externalOrderColumns = [
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(externalOrderRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(externalOrderRows, symbolText) },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '类型', dataIndex: 'order_type', key: 'order_type', width: 90 },
@@ -415,7 +431,7 @@ const ExternalTradingAccountManager = () => {
   const targetPositionColumns = [
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-', ...textColumnFilter(targetRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(targetRows, strategyText) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(targetRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(targetRows, symbolText) },
     { title: '目标', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatNumber(value) },
     { title: '账本', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatNumber(value) },
     { title: '未成买', dataIndex: 'pending_buy_quantity', key: 'pending_buy_quantity', width: 90, render: value => formatNumber(value) },
@@ -437,7 +453,7 @@ const ExternalTradingAccountManager = () => {
   const ledgerPositionColumns = [
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-', ...textColumnFilter(ledgerRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(ledgerRows, strategyText) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(ledgerRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(ledgerRows, symbolText) },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '可用', dataIndex: 'available_quantity', key: 'available_quantity', width: 100, render: value => formatNumber(value) },
     { title: '成本价', dataIndex: 'avg_cost', key: 'avg_cost', width: 100, render: value => formatNumber(value, 4) },
@@ -450,7 +466,7 @@ const ExternalTradingAccountManager = () => {
     { title: '角色', dataIndex: 'allocation_role', key: 'allocation_role', width: 90, render: value => value === 'PARENT' ? <Tag color="purple">父单</Tag> : value === 'CHILD' ? <Tag color="blue">子单</Tag> : value === 'BLOCK' ? <Tag color="orange">阻断</Tag> : <Tag>{value || '-'}</Tag> },
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: (_, record) => record.sub_account_name || '-', ...textColumnFilter(lifecycleRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(lifecycleRows, strategyText) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(lifecycleRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(lifecycleRows, symbolText) },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatNumber(value) },
@@ -474,7 +490,7 @@ const ExternalTradingAccountManager = () => {
     { title: '角色', dataIndex: 'allocation_role_label', key: 'allocation_role_label', width: 130, render: (_, record) => <Tag color={record.allocation_role === 'PARENT' ? 'purple' : 'blue'}>{record.allocation_role_label || '-'}</Tag> },
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-', ...textColumnFilter(fillRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: value => value || '-', ...textColumnFilter(fillRows, strategyText) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120, ...textColumnFilter(fillRows, record => record.symbol) },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(fillRows, symbolText) },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatNumber(value, 4) },
@@ -499,8 +515,9 @@ const ExternalTradingAccountManager = () => {
           : <Tag>空闲</Tag>
       },
       { title: '分配资金', dataIndex: 'cash_allocated', key: 'cash_allocated', render: value => Number(value || 0).toLocaleString() },
-      { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', render: value => Number(value || 0).toLocaleString() },
       { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', render: value => Number(value || 0).toLocaleString() },
+      { title: '持仓市值', dataIndex: 'position_market_value', key: 'position_market_value', render: value => Number(value || 0).toLocaleString() },
+      { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', render: value => Number(value || 0).toLocaleString() },
       { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
       { title: '持仓数', dataIndex: 'positions', key: 'positions', render: value => (value || []).length },
       { title: '启用', dataIndex: 'enabled', key: 'enabled', render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
