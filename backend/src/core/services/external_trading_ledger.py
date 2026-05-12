@@ -2079,6 +2079,8 @@ def build_netted_target_execution_plan(
             "message": demand.get("blocked_message") or "A股 T+1 可卖数量不足，下一交易日再重试",
         })
 
+    external_orders.sort(key=lambda row: (0 if str(row.get("side") or "").upper() == "SELL" else 1, str(row.get("symbol") or "")))
+
     return {
         "external_trading_account_id": external_trading_account_id,
         "price_level": price_level,

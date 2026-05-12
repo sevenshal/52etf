@@ -4,8 +4,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, validator
+from sqlalchemy import or_
 from sqlalchemy.orm import Session as OrmSession
 
+from ...core.analytics_database import AStockBasic, get_analytics_db_ctx
 from ...core.database import (
     SnowballCopyConfig,
     W20MomentumLiveConfig,
@@ -416,6 +418,107 @@ def _iso(value: Any) -> Optional[str]:
     if not value:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _stock_symbol_candidates(symbol: Any) -> List[str]:
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    parts = normalized.split(".")
+    if len(parts) == 2:
+        code, market = parts
+        candidates.append(code)
+        candidates.append(f"{market}.{code}")
+        if market == "SH":
+            candidates.extend([f"{code}.SS", f"SS.{code}"])
+    result = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate).strip().upper()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
+
+
+def _collect_symbol_fields(value: Any, symbols: set) -> None:
+    if isinstance(value, dict):
+        for key in ("symbol", "client_symbol"):
+            symbol = normalize_symbol(value.get(key))
+            if symbol:
+                symbols.add(symbol)
+        for item in value.values():
+            if isinstance(item, (dict, list, tuple)):
+                _collect_symbol_fields(item, symbols)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_symbol_fields(item, symbols)
+
+
+def _load_a_stock_name_map(symbols: set) -> Dict[str, str]:
+    normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols if normalize_symbol(symbol)})
+    if not normalized_symbols:
+        return {}
+
+    candidates = set()
+    codes = set()
+    for symbol in normalized_symbols:
+        symbol_candidates = _stock_symbol_candidates(symbol)
+        candidates.update(symbol_candidates)
+        parts = symbol.split(".")
+        if parts:
+            codes.add(parts[0])
+
+    try:
+        with get_analytics_db_ctx() as analytics_db:
+            rows = (
+                analytics_db.query(AStockBasic.ts_code, AStockBasic.symbol, AStockBasic.name)
+                .filter(
+                    or_(
+                        AStockBasic.ts_code.in_(sorted(candidates)),
+                        AStockBasic.symbol.in_(sorted(codes)),
+                    )
+                )
+                .all()
+            )
+    except Exception:
+        logger.exception("Failed to load A stock names from a_stock_basic")
+        return {}
+
+    name_by_key: Dict[str, str] = {}
+    for ts_code, raw_code, name in rows:
+        if not name:
+            continue
+        for key in _stock_symbol_candidates(ts_code):
+            name_by_key[key] = name
+        if raw_code:
+            name_by_key[str(raw_code).strip().upper()] = name
+
+    result = {}
+    for symbol in normalized_symbols:
+        for key in _stock_symbol_candidates(symbol):
+            name = name_by_key.get(key)
+            if name:
+                result[symbol] = name
+                break
+    return result
+
+
+def _attach_symbol_names(value: Any, stock_name_by_symbol: Dict[str, str]) -> None:
+    if isinstance(value, dict):
+        symbol = normalize_symbol(value.get("symbol") or value.get("client_symbol"))
+        if symbol:
+            value["symbol_name"] = stock_name_by_symbol.get(symbol)
+        for item in list(value.values()):
+            if isinstance(item, (dict, list, tuple)):
+                _attach_symbol_names(item, stock_name_by_symbol)
+    elif isinstance(value, list):
+        for item in value:
+            _attach_symbol_names(item, stock_name_by_symbol)
+    elif isinstance(value, tuple):
+        for item in value:
+            _attach_symbol_names(item, stock_name_by_symbol)
 
 
 def _serialize_target_position_status(
@@ -1079,6 +1182,13 @@ async def get_external_trading_executor_status(
         await _serialize_sub_account_with_binding(db, row, main_db=main_db)
         for row in sub_accounts
     ]
+
+    symbols = set()
+    for payload in (target_positions, ledger_positions, orders, fills, plan):
+        _collect_symbol_fields(payload, symbols)
+    stock_name_by_symbol = _load_a_stock_name_map(symbols)
+    for payload in (target_positions, ledger_positions, orders, fills, plan):
+        _attach_symbol_names(payload, stock_name_by_symbol)
 
     return {
         "account": _serialize_account(account),
