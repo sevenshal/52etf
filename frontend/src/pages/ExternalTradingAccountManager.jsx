@@ -371,7 +371,7 @@ const ExternalTradingAccountManager = () => {
 
   const orderLifecycleColumns = [
     { title: '角色', dataIndex: 'allocation_role', key: 'allocation_role', width: 90, render: value => value === 'PARENT' ? <Tag color="purple">父单</Tag> : value === 'CHILD' ? <Tag color="blue">子单</Tag> : <Tag>{value || '-'}</Tag> },
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: (_, record) => record.sub_account_name || (record.allocation_role === 'PARENT' ? '净额父单' : '-') },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: (_, record) => record.sub_account_name || '-' },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-' },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120 },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
@@ -391,6 +391,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const fillColumns = [
+    { title: '角色', dataIndex: 'allocation_role_label', key: 'allocation_role_label', width: 130, render: (_, record) => <Tag color={record.allocation_role === 'PARENT' ? 'purple' : 'blue'}>{record.allocation_role_label || '-'}</Tag> },
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-' },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: value => value || '-' },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 120 },
