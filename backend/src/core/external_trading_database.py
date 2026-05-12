@@ -5,6 +5,7 @@ import os
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Integer,
@@ -67,6 +68,9 @@ class ExternalTradingAccount(ExternalTradingBase):
     executor_max_replace_count = Column(Integer, default=3, nullable=False)
     executor_clip_sell_to_available = Column(Boolean, default=True, nullable=False)
     executor_price_level_sequence = Column(JSON)
+    commission_rate_pct = Column(Float, default=0.025, nullable=False)
+    min_commission = Column(Float, default=5.0, nullable=False)
+    stamp_tax_rate_pct = Column(Float, default=0.05, nullable=False)
     last_connected_at = Column(DateTime)
     last_disconnected_at = Column(DateTime)
     last_seen_at = Column(DateTime)
@@ -194,6 +198,14 @@ class ExternalTradingOrder(ExternalTradingBase):
     raw_request = Column(JSON)
     raw_submit_result = Column(JSON)
     raw_order_event = Column(JSON)
+    estimated_commission = Column(Float, default=0.0, nullable=False)
+    estimated_stamp_tax = Column(Float, default=0.0, nullable=False)
+    estimated_fee_total = Column(Float, default=0.0, nullable=False)
+    actual_commission = Column(Float)
+    actual_stamp_tax = Column(Float)
+    actual_fee_total = Column(Float)
+    fee_reconciled_at = Column(DateTime)
+    fee_source = Column(String(32))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -218,8 +230,53 @@ class ExternalTradingOrderFill(ExternalTradingBase):
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
     amount = Column(Float, nullable=False)
+    estimated_commission = Column(Float, default=0.0, nullable=False)
+    estimated_stamp_tax = Column(Float, default=0.0, nullable=False)
+    estimated_fee_total = Column(Float, default=0.0, nullable=False)
+    actual_commission = Column(Float)
+    actual_stamp_tax = Column(Float)
+    actual_fee_total = Column(Float)
+    fee_reconciled_at = Column(DateTime)
+    fee_source = Column(String(32))
     traded_at = Column(DateTime)
     raw_event = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class ExternalTradingDeliverRecord(ExternalTradingBase):
+    """PTrade 交割单原始记录与本地订单费用对账结果。"""
+    __tablename__ = "external_trading_deliver_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_trading_account_id",
+            "trade_date",
+            "deliver_key",
+            name="uq_external_deliver_record_key",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    trade_date = Column(Date, index=True, nullable=False)
+    deliver_key = Column(String(256), nullable=False)
+    matched_order_id = Column(Integer, index=True)
+    broker_order_id = Column(String(128), index=True)
+    entrust_no = Column(String(128), index=True)
+    symbol = Column(String(32), index=True)
+    side = Column(String(8))
+    quantity = Column(Integer, default=0, nullable=False)
+    price = Column(Float, default=0.0, nullable=False)
+    amount = Column(Float, default=0.0, nullable=False)
+    commission = Column(Float, default=0.0, nullable=False)
+    stamp_tax = Column(Float, default=0.0, nullable=False)
+    transfer_fee = Column(Float, default=0.0, nullable=False)
+    other_fee = Column(Float, default=0.0, nullable=False)
+    total_fee = Column(Float, default=0.0, nullable=False)
+    status = Column(String(32), default="UNMATCHED", index=True, nullable=False)
+    message = Column(String(1000))
+    raw_record = Column(JSON)
+    reconciled_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
 
 
@@ -260,11 +317,53 @@ def ensure_external_trading_indexes():
         "CREATE INDEX IF NOT EXISTS idx_external_orders_deadline ON external_trading_orders(external_trading_account_id, deadline_at, status)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_signal ON external_trading_orders(sub_account_id, symbol, signal_version)",
         "CREATE INDEX IF NOT EXISTS idx_external_target_source_execution ON external_trading_target_positions(source_execution_id)",
+        "CREATE INDEX IF NOT EXISTS idx_external_deliver_records_match ON external_trading_deliver_records(external_trading_account_id, trade_date, status)",
+        "CREATE INDEX IF NOT EXISTS idx_external_deliver_records_order ON external_trading_deliver_records(matched_order_id)",
     ]
     with external_trading_engine.begin() as conn:
         for sql in index_sqls:
             conn.execute(text(sql))
 
 
+def ensure_external_trading_columns():
+    table_columns = {
+        "external_trading_accounts": {
+            "commission_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN commission_rate_pct FLOAT NOT NULL DEFAULT 0.025",
+            "min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN min_commission FLOAT NOT NULL DEFAULT 5.0",
+            "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",
+        },
+        "external_trading_orders": {
+            "estimated_commission": "ALTER TABLE external_trading_orders ADD COLUMN estimated_commission FLOAT NOT NULL DEFAULT 0.0",
+            "estimated_stamp_tax": "ALTER TABLE external_trading_orders ADD COLUMN estimated_stamp_tax FLOAT NOT NULL DEFAULT 0.0",
+            "estimated_fee_total": "ALTER TABLE external_trading_orders ADD COLUMN estimated_fee_total FLOAT NOT NULL DEFAULT 0.0",
+            "actual_commission": "ALTER TABLE external_trading_orders ADD COLUMN actual_commission FLOAT",
+            "actual_stamp_tax": "ALTER TABLE external_trading_orders ADD COLUMN actual_stamp_tax FLOAT",
+            "actual_fee_total": "ALTER TABLE external_trading_orders ADD COLUMN actual_fee_total FLOAT",
+            "fee_reconciled_at": "ALTER TABLE external_trading_orders ADD COLUMN fee_reconciled_at DATETIME",
+            "fee_source": "ALTER TABLE external_trading_orders ADD COLUMN fee_source VARCHAR(32)",
+        },
+        "external_trading_order_fills": {
+            "estimated_commission": "ALTER TABLE external_trading_order_fills ADD COLUMN estimated_commission FLOAT NOT NULL DEFAULT 0.0",
+            "estimated_stamp_tax": "ALTER TABLE external_trading_order_fills ADD COLUMN estimated_stamp_tax FLOAT NOT NULL DEFAULT 0.0",
+            "estimated_fee_total": "ALTER TABLE external_trading_order_fills ADD COLUMN estimated_fee_total FLOAT NOT NULL DEFAULT 0.0",
+            "actual_commission": "ALTER TABLE external_trading_order_fills ADD COLUMN actual_commission FLOAT",
+            "actual_stamp_tax": "ALTER TABLE external_trading_order_fills ADD COLUMN actual_stamp_tax FLOAT",
+            "actual_fee_total": "ALTER TABLE external_trading_order_fills ADD COLUMN actual_fee_total FLOAT",
+            "fee_reconciled_at": "ALTER TABLE external_trading_order_fills ADD COLUMN fee_reconciled_at DATETIME",
+            "fee_source": "ALTER TABLE external_trading_order_fills ADD COLUMN fee_source VARCHAR(32)",
+        },
+    }
+    with external_trading_engine.begin() as conn:
+        for table_name, columns in table_columns.items():
+            existing = {
+                row[1]
+                for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            }
+            for column_name, ddl in columns.items():
+                if column_name not in existing:
+                    conn.exec_driver_sql(ddl)
+
+
 ExternalTradingBase.metadata.create_all(external_trading_engine)
+ensure_external_trading_columns()
 ensure_external_trading_indexes()

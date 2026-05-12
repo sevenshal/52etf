@@ -2,13 +2,14 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from ..external_trading_database import (
     ExternalTradingAccount,
+    ExternalTradingDeliverRecord,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
@@ -96,6 +97,97 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def round_money(value: Any) -> float:
+    return round(safe_float(value), 2)
+
+
+def _estimate_fee_totals(account: Optional[ExternalTradingAccount], side: str, cumulative_amount: float) -> Dict[str, float]:
+    amount = max(safe_float(cumulative_amount), 0.0)
+    if amount <= 0:
+        return {"commission": 0.0, "stamp_tax": 0.0, "fee_total": 0.0}
+
+    commission_rate_pct = safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025)
+    min_commission = safe_float(getattr(account, "min_commission", 5.0), 5.0)
+    stamp_tax_rate_pct = safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05)
+
+    commission = amount * commission_rate_pct / 100.0 if commission_rate_pct > 0 else 0.0
+    if min_commission > 0 and (commission > 0 or commission_rate_pct > 0):
+        commission = max(commission, min_commission)
+    stamp_tax = amount * stamp_tax_rate_pct / 100.0 if str(side or "").upper() == "SELL" and stamp_tax_rate_pct > 0 else 0.0
+    commission = round_money(commission)
+    stamp_tax = round_money(stamp_tax)
+    return {
+        "commission": commission,
+        "stamp_tax": stamp_tax,
+        "fee_total": round_money(commission + stamp_tax),
+    }
+
+
+def _estimated_fee_increment_for_order(db: Session, order: ExternalTradingOrder, fill_amount: float) -> Dict[str, float]:
+    account = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.id == order.external_trading_account_id).first()
+    previous_amount, previous_commission, previous_stamp_tax, previous_fee_total = _order_fill_money_totals(db, order.id)
+    target_totals = _estimate_fee_totals(account, order.side, previous_amount + safe_float(fill_amount))
+    commission = max(target_totals["commission"] - previous_commission, 0.0)
+    stamp_tax = max(target_totals["stamp_tax"] - previous_stamp_tax, 0.0)
+    fee_total = max(target_totals["fee_total"] - previous_fee_total, 0.0)
+    return {
+        "commission": round_money(commission),
+        "stamp_tax": round_money(stamp_tax),
+        "fee_total": round_money(fee_total),
+    }
+
+
+def _allocate_money(total: float, weights: List[float]) -> List[float]:
+    total = round_money(total)
+    if not weights:
+        return []
+    positive_total = sum(max(safe_float(weight), 0.0) for weight in weights)
+    if positive_total <= 0:
+        return [0.0 for _ in weights]
+    allocations = []
+    allocated = 0.0
+    for index, weight in enumerate(weights):
+        if index == len(weights) - 1:
+            value = round_money(total - allocated)
+        else:
+            value = round_money(total * max(safe_float(weight), 0.0) / positive_total)
+            allocated = round_money(allocated + value)
+        allocations.append(value)
+    return allocations
+
+
+def _parse_date(value: Any) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text_value = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
+        try:
+            if fmt == "%Y-%m-%d":
+                candidate = text_value[:10]
+            elif fmt == "%Y%m%d":
+                candidate = text_value[:8]
+            else:
+                candidate = text_value[:10]
+            return datetime.strptime(candidate, fmt).date()
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(text_value).date()
+    except Exception:
+        return None
+
+
+def _first_present_value(obj: Dict[str, Any], keys: Tuple[str, ...], default: Any = None) -> Any:
+    for key in keys:
+        if key in obj and obj.get(key) not in (None, ""):
+            return obj.get(key)
+    return default
 
 
 def parse_dt(value: Any) -> Optional[datetime]:
@@ -906,39 +998,57 @@ def _get_or_create_ledger_position(db: Session, order: ExternalTradingOrder) -> 
     return row
 
 
-def _apply_fill_to_ledger(db: Session, order: ExternalTradingOrder, fill_quantity: int, fill_price: float) -> None:
+def _apply_fill_to_ledger(
+    db: Session,
+    order: ExternalTradingOrder,
+    fill_quantity: int,
+    fill_price: float,
+    fee_total: float = 0.0,
+) -> None:
     if not order.sub_account_id or fill_quantity <= 0:
         return
     pos = _get_or_create_ledger_position(db, order)
     sub_account = db.query(ExternalTradingSubAccount).filter(ExternalTradingSubAccount.id == order.sub_account_id).first()
     amount = round(fill_quantity * fill_price, 2)
+    fee_total = round_money(fee_total)
     now = datetime.now()
 
     if order.side == "BUY":
         old_qty = max(pos.quantity or 0, 0)
         new_qty = old_qty + fill_quantity
         old_cost_value = old_qty * safe_float(pos.avg_cost)
-        pos.avg_cost = round((old_cost_value + amount) / new_qty, 6) if new_qty else 0.0
+        pos.avg_cost = round((old_cost_value + amount + fee_total) / new_qty, 6) if new_qty else 0.0
         pos.quantity = new_qty
         pos.available_quantity = max(pos.available_quantity or 0, 0) + fill_quantity
         if sub_account:
-            sub_account.cash_available = round(safe_float(sub_account.cash_available) - amount, 2)
+            sub_account.cash_available = round_money(safe_float(sub_account.cash_available) - amount - fee_total)
     else:
         old_qty = max(pos.quantity or 0, 0)
         sell_qty = min(fill_quantity, old_qty)
         pos.quantity = max(old_qty - fill_quantity, 0)
         pos.available_quantity = max(safe_int(pos.available_quantity) - fill_quantity, 0)
-        pos.realized_pnl = round(safe_float(pos.realized_pnl) + (fill_price - safe_float(pos.avg_cost)) * sell_qty, 2)
+        pos.realized_pnl = round_money(safe_float(pos.realized_pnl) + (fill_price - safe_float(pos.avg_cost)) * sell_qty - fee_total)
         if pos.quantity <= 0:
             pos.avg_cost = 0.0
         if sub_account:
-            sub_account.cash_available = round(safe_float(sub_account.cash_available) + amount, 2)
+            sub_account.cash_available = round_money(safe_float(sub_account.cash_available) + amount - fee_total)
 
     pos.market_price = fill_price
     pos.market_value = round(pos.quantity * fill_price, 2)
     pos.updated_at = now
     if sub_account:
         sub_account.updated_at = now
+
+
+def _order_fill_money_totals(db: Session, order_id: Optional[int]) -> Tuple[float, float, float, float]:
+    if not order_id:
+        return 0.0, 0.0, 0.0, 0.0
+    rows = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.order_id == order_id).all()
+    amount = sum(safe_float(row.amount) for row in rows)
+    commission = sum(safe_float(row.estimated_commission) for row in rows)
+    stamp_tax = sum(safe_float(row.estimated_stamp_tax) for row in rows)
+    fee_total = sum(safe_float(row.estimated_fee_total) for row in rows)
+    return round_money(amount), round_money(commission), round_money(stamp_tax), round_money(fee_total)
 
 
 def _order_fill_totals(db: Session, order_id: Optional[int]) -> Tuple[int, float]:
@@ -952,10 +1062,16 @@ def _order_fill_totals(db: Session, order_id: Optional[int]) -> Tuple[int, float
 
 def _refresh_order_from_fill_totals(db: Session, order: ExternalTradingOrder) -> None:
     filled_quantity, filled_amount = _order_fill_totals(db, order.id)
+    _, estimated_commission, estimated_stamp_tax, estimated_fee_total = _order_fill_money_totals(db, order.id)
     if filled_quantity > 0:
         order.avg_fill_price = round(filled_amount / filled_quantity, 6)
     order.filled_quantity = max(safe_int(order.filled_quantity), filled_quantity)
     order.remaining_quantity = max(safe_int(order.quantity) - safe_int(order.filled_quantity), 0)
+    order.estimated_commission = estimated_commission
+    order.estimated_stamp_tax = estimated_stamp_tax
+    order.estimated_fee_total = estimated_fee_total
+    if estimated_fee_total > 0 and not order.fee_source:
+        order.fee_source = "ESTIMATED"
     if order.remaining_quantity <= 0:
         order.status = "FILLED"
     elif safe_int(order.filled_quantity) > 0:
@@ -971,6 +1087,10 @@ def _insert_fill_row(
     price: float,
     traded_at: datetime,
     event: Dict[str, Any],
+    estimated_commission: float = 0.0,
+    estimated_stamp_tax: float = 0.0,
+    estimated_fee_total: float = 0.0,
+    fee_source: str = "ESTIMATED",
 ) -> ExternalTradingOrderFill:
     fill = ExternalTradingOrderFill(
         account_id=order.account_id,
@@ -985,6 +1105,10 @@ def _insert_fill_row(
         quantity=quantity,
         price=price,
         amount=round(quantity * price, 2),
+        estimated_commission=round_money(estimated_commission),
+        estimated_stamp_tax=round_money(estimated_stamp_tax),
+        estimated_fee_total=round_money(estimated_fee_total),
+        fee_source=fee_source,
         traded_at=traded_at,
         raw_event=event,
         created_at=datetime.now(),
@@ -1002,6 +1126,7 @@ def _allocate_quantity_to_child_orders(
     price: float,
     traded_at: datetime,
     event: Dict[str, Any],
+    estimated_fee_increment: Optional[Dict[str, float]] = None,
 ) -> List[ExternalTradingOrder]:
     children = [
         child
@@ -1037,6 +1162,25 @@ def _allocate_quantity_to_child_orders(
             item["quantity"] += 1
             leftover -= 1
 
+    payable_allocations = [
+        item
+        for item in raw_allocations
+        if safe_int(item.get("quantity")) > 0
+    ]
+    allocation_amounts = [round_money(safe_int(item.get("quantity")) * price) for item in payable_allocations]
+    fee_increment = estimated_fee_increment or {}
+    commission_allocations = _allocate_money(safe_float(fee_increment.get("commission")), allocation_amounts)
+    stamp_tax_allocations = _allocate_money(safe_float(fee_increment.get("stamp_tax")), allocation_amounts)
+    fee_total_allocations = _allocate_money(safe_float(fee_increment.get("fee_total")), allocation_amounts)
+    fee_by_child_id = {}
+    for index, item in enumerate(payable_allocations):
+        child = item["child"]
+        fee_by_child_id[child.id] = {
+            "commission": commission_allocations[index] if index < len(commission_allocations) else 0.0,
+            "stamp_tax": stamp_tax_allocations[index] if index < len(stamp_tax_allocations) else 0.0,
+            "fee_total": fee_total_allocations[index] if index < len(fee_total_allocations) else 0.0,
+        }
+
     updated_children: List[ExternalTradingOrder] = []
     now = datetime.now()
     for item in raw_allocations:
@@ -1047,6 +1191,7 @@ def _allocate_quantity_to_child_orders(
         child_fill_key = f"{fill_key}:child:{child.id}"
         if db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == child_fill_key).first():
             continue
+        child_fee = fee_by_child_id.get(child.id, {})
         _insert_fill_row(
             db,
             order=child,
@@ -1055,8 +1200,11 @@ def _allocate_quantity_to_child_orders(
             price=price,
             traded_at=traded_at,
             event={**event, "parent_fill_key": fill_key, "allocated_from_parent_order_id": parent.id},
+            estimated_commission=child_fee.get("commission", 0.0),
+            estimated_stamp_tax=child_fee.get("stamp_tax", 0.0),
+            estimated_fee_total=child_fee.get("fee_total", 0.0),
         )
-        _apply_fill_to_ledger(db, child, child_quantity, price)
+        _apply_fill_to_ledger(db, child, child_quantity, price, fee_total=child_fee.get("fee_total", 0.0))
         _refresh_order_from_fill_totals(db, child)
         child.last_event_at = traded_at
         child.updated_at = now
@@ -1084,6 +1232,7 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
             continue
 
         traded_at = parse_dt(event.get("traded_at") or event.get("trade_time") or event.get("business_time")) or now
+        estimated_fee_increment = _estimated_fee_increment_for_order(db, order, quantity * price)
         fill = _insert_fill_row(
             db,
             order=order,
@@ -1092,6 +1241,9 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
             price=price,
             traded_at=traded_at,
             event=event,
+            estimated_commission=estimated_fee_increment.get("commission", 0.0),
+            estimated_stamp_tax=estimated_fee_increment.get("stamp_tax", 0.0),
+            estimated_fee_total=estimated_fee_increment.get("fee_total", 0.0),
         )
         if _role(order) == "PARENT":
             updated_children = _allocate_quantity_to_child_orders(
@@ -1102,12 +1254,13 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
                 price,
                 traded_at,
                 event,
+                estimated_fee_increment=estimated_fee_increment,
             )
             for child in updated_children:
                 if child.execution_id:
                     execution_ids.add(child.execution_id)
         else:
-            _apply_fill_to_ledger(db, order, quantity, price)
+            _apply_fill_to_ledger(db, order, quantity, price, fee_total=estimated_fee_increment.get("fee_total", 0.0))
 
         _refresh_order_from_fill_totals(db, order)
         _propagate_parent_order_state(db, order)
@@ -1119,6 +1272,522 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
     for execution_id in execution_ids:
         refresh_execution_status(db, execution_id)
     return inserted
+
+
+def _deliver_value(record: Dict[str, Any], keys: Tuple[str, ...], default: Any = None) -> Any:
+    if not isinstance(record, dict):
+        return default
+    lowered = {str(key).lower(): value for key, value in record.items()}
+    for key in keys:
+        if key in record and record.get(key) not in (None, ""):
+            return record.get(key)
+        lower_key = str(key).lower()
+        if lower_key in lowered and lowered[lower_key] not in (None, ""):
+            return lowered[lower_key]
+    return default
+
+
+def _deliver_float(record: Dict[str, Any], keys: Tuple[str, ...], default: float = 0.0) -> float:
+    return round_money(safe_float(_deliver_value(record, keys), default))
+
+
+def _deliver_side(record: Dict[str, Any]) -> Optional[str]:
+    raw_side = _deliver_value(record, (
+        "side",
+        "entrust_bs",
+        "business_flag",
+        "bs_flag",
+        "buy_sell",
+        "买卖方向",
+        "买卖标志",
+        "业务名称",
+    ))
+    text = str(raw_side or "").strip().upper()
+    if text in {"1", "B", "BUY", "买", "买入"} or "买入" in text:
+        return "BUY"
+    if text in {"2", "S", "SELL", "卖", "卖出"} or "卖出" in text:
+        return "SELL"
+    return None
+
+
+def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Optional[date] = None) -> Dict[str, Any]:
+    record = raw_record if isinstance(raw_record, dict) else {"value": raw_record}
+    trade_date = (
+        _parse_date(_deliver_value(record, ("trade_date", "business_date", "init_date", "date", "成交日期", "交割日期")))
+        or default_trade_date
+        or datetime.now().date()
+    )
+    raw_symbol = _deliver_value(record, ("symbol", "stock_code", "security_code", "sid", "证券代码", "证券编号"))
+    symbol = normalize_symbol(raw_symbol) if raw_symbol else None
+    side = _deliver_side(record)
+    quantity = safe_int(_deliver_value(record, (
+        "quantity",
+        "business_amount",
+        "occur_amount",
+        "match_quantity",
+        "成交数量",
+        "发生数量",
+    )))
+    price = safe_float(_deliver_value(record, (
+        "price",
+        "business_price",
+        "match_price",
+        "成交价格",
+    )))
+    amount = _deliver_float(record, (
+        "amount",
+        "business_balance",
+        "occur_balance",
+        "match_amount",
+        "turnover",
+        "成交金额",
+        "发生金额",
+    ))
+    if amount <= 0 and quantity > 0 and price > 0:
+        amount = round_money(quantity * price)
+
+    commission = _deliver_float(record, (
+        "commission",
+        "brokerage",
+        "fare0",
+        "business_fare",
+        "brokerage_fee",
+        "佣金",
+    ))
+    stamp_tax = _deliver_float(record, (
+        "stamp_tax",
+        "stamp_duty",
+        "fare1",
+        "stamp_fee",
+        "印花税",
+    ))
+    transfer_fee = _deliver_float(record, (
+        "transfer_fee",
+        "transfer_fare",
+        "fare2",
+        "过户费",
+    ))
+    other_fee = _deliver_float(record, (
+        "other_fee",
+        "fare3",
+        "farex",
+        "exchange_fare",
+        "settlement_fee",
+        "经手费",
+        "证管费",
+        "其他费",
+    ))
+    total_fee = _deliver_float(record, (
+        "total_fee",
+        "fee_total",
+        "fare_total",
+        "total_fare",
+        "费用合计",
+    ))
+    if total_fee <= 0:
+        total_fee = round_money(commission + stamp_tax + transfer_fee + other_fee)
+
+    broker_order_id = _deliver_value(record, ("order_id", "broker_order_id", "entrust_no", "委托编号"))
+    entrust_no = _deliver_value(record, ("entrust_no", "order_id", "委托编号"))
+    business_no = _deliver_value(record, (
+        "business_no",
+        "deal_no",
+        "match_no",
+        "serial_no",
+        "business_id",
+        "成交编号",
+        "流水号",
+    ))
+    stable_key_parts = [
+        str(trade_date),
+        str(business_no or ""),
+        str(entrust_no or broker_order_id or ""),
+        str(symbol or raw_symbol or ""),
+        str(side or ""),
+        str(quantity or ""),
+        str(amount or ""),
+    ]
+    if not business_no and not entrust_no and not broker_order_id:
+        stable_key_parts.append(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str))
+    deliver_key = hashlib.sha256("|".join(stable_key_parts).encode("utf-8")).hexdigest()
+    return {
+        "trade_date": trade_date,
+        "deliver_key": deliver_key,
+        "broker_order_id": str(broker_order_id) if broker_order_id else None,
+        "entrust_no": str(entrust_no) if entrust_no else None,
+        "symbol": symbol,
+        "side": side,
+        "quantity": abs(quantity),
+        "price": price,
+        "amount": amount,
+        "commission": commission,
+        "stamp_tax": stamp_tax,
+        "transfer_fee": transfer_fee,
+        "other_fee": other_fee,
+        "total_fee": total_fee,
+        "raw_record": stringify_jsonable(record),
+    }
+
+
+def stringify_jsonable(obj: Any) -> Any:
+    try:
+        return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
+    except Exception:
+        if isinstance(obj, dict):
+            return {str(key): stringify_jsonable(value) for key, value in obj.items()}
+        if isinstance(obj, list):
+            return [stringify_jsonable(value) for value in obj]
+        return str(obj)
+
+
+def _find_order_for_deliver(
+    db: Session,
+    external_trading_account_id: int,
+    normalized: Dict[str, Any],
+) -> Optional[ExternalTradingOrder]:
+    candidates: List[ExternalTradingOrder] = []
+    broker_order_id = normalized.get("broker_order_id")
+    entrust_no = normalized.get("entrust_no")
+    for field_name, value in (("broker_order_id", broker_order_id), ("entrust_no", entrust_no)):
+        if not value:
+            continue
+        field = getattr(ExternalTradingOrder, field_name)
+        rows = (
+            db.query(ExternalTradingOrder)
+            .filter(
+                ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+                field == str(value),
+            )
+            .all()
+        )
+        candidates.extend(rows)
+    if candidates:
+        return _pick_event_order(candidates)
+
+    symbol = normalized.get("symbol")
+    side = normalized.get("side")
+    trade_date = normalized.get("trade_date")
+    if not symbol or not side or not trade_date:
+        return None
+    start_dt = datetime.combine(trade_date, datetime.min.time())
+    end_dt = datetime.combine(trade_date, datetime.max.time())
+    rows = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+            ExternalTradingOrder.symbol == symbol,
+            ExternalTradingOrder.side == side,
+            ExternalTradingOrder.submitted_at >= start_dt,
+            ExternalTradingOrder.submitted_at <= end_dt,
+        )
+        .all()
+    )
+    if not rows:
+        return None
+    quantity = safe_int(normalized.get("quantity"))
+    if quantity > 0:
+        exact_rows = [row for row in rows if safe_int(row.filled_quantity, row.quantity) == quantity or safe_int(row.quantity) == quantity]
+        if exact_rows:
+            return _pick_event_order(exact_rows)
+    return _pick_event_order(rows)
+
+
+def _upsert_deliver_record(
+    db: Session,
+    *,
+    account: ExternalTradingAccount,
+    normalized: Dict[str, Any],
+    matched_order: Optional[ExternalTradingOrder],
+    status: str,
+    message: Optional[str] = None,
+) -> ExternalTradingDeliverRecord:
+    row = (
+        db.query(ExternalTradingDeliverRecord)
+        .filter(
+            ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+            ExternalTradingDeliverRecord.trade_date == normalized["trade_date"],
+            ExternalTradingDeliverRecord.deliver_key == normalized["deliver_key"],
+        )
+        .first()
+    )
+    now = datetime.now()
+    if not row:
+        row = ExternalTradingDeliverRecord(
+            account_id=account.account_id,
+            external_trading_account_id=account.id,
+            trade_date=normalized["trade_date"],
+            deliver_key=normalized["deliver_key"],
+            created_at=now,
+        )
+        db.add(row)
+    row.matched_order_id = matched_order.id if matched_order else None
+    row.broker_order_id = normalized.get("broker_order_id")
+    row.entrust_no = normalized.get("entrust_no")
+    row.symbol = normalized.get("symbol")
+    row.side = normalized.get("side")
+    row.quantity = safe_int(normalized.get("quantity"))
+    row.price = safe_float(normalized.get("price"))
+    row.amount = round_money(normalized.get("amount"))
+    row.commission = round_money(normalized.get("commission"))
+    row.stamp_tax = round_money(normalized.get("stamp_tax"))
+    row.transfer_fee = round_money(normalized.get("transfer_fee"))
+    row.other_fee = round_money(normalized.get("other_fee"))
+    row.total_fee = round_money(normalized.get("total_fee"))
+    row.status = status
+    row.message = message
+    row.raw_record = normalized.get("raw_record")
+    row.reconciled_at = now if status == "MATCHED" else None
+    db.flush()
+    return row
+
+
+def _apply_fee_delta_to_ledger(db: Session, fill: ExternalTradingOrderFill, delta_fee: float) -> None:
+    delta_fee = round_money(delta_fee)
+    if not fill.sub_account_id or abs(delta_fee) < 0.005:
+        return
+    sub_account = db.query(ExternalTradingSubAccount).filter(ExternalTradingSubAccount.id == fill.sub_account_id).first()
+    position = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.sub_account_id == fill.sub_account_id,
+            ExternalTradingLedgerPosition.symbol == fill.symbol,
+        )
+        .first()
+    )
+    now = datetime.now()
+    if sub_account:
+        sub_account.cash_available = round_money(safe_float(sub_account.cash_available) - delta_fee)
+        sub_account.updated_at = now
+    if not position:
+        return
+    if fill.side == "BUY":
+        current_quantity = max(safe_int(position.quantity), 0)
+        if current_quantity > 0:
+            position.avg_cost = round(max((safe_float(position.avg_cost) * current_quantity + delta_fee) / current_quantity, 0.0), 6)
+            if position.market_price:
+                position.market_value = round_money(current_quantity * safe_float(position.market_price))
+    elif fill.side == "SELL":
+        position.realized_pnl = round_money(safe_float(position.realized_pnl) - delta_fee)
+    position.updated_at = now
+
+
+def _assign_actual_fees_to_fills(
+    db: Session,
+    fills: List[ExternalTradingOrderFill],
+    *,
+    actual_commission: float,
+    actual_stamp_tax: float,
+    actual_fee_total: float,
+    source: str,
+    adjust_ledger: bool,
+) -> None:
+    if not fills:
+        return
+    weights = [safe_float(fill.amount) for fill in fills]
+    commission_allocations = _allocate_money(actual_commission, weights)
+    stamp_tax_allocations = _allocate_money(actual_stamp_tax, weights)
+    fee_total_allocations = _allocate_money(actual_fee_total, weights)
+    now = datetime.now()
+    for index, fill in enumerate(fills):
+        new_commission = commission_allocations[index] if index < len(commission_allocations) else 0.0
+        new_stamp_tax = stamp_tax_allocations[index] if index < len(stamp_tax_allocations) else 0.0
+        new_fee_total = fee_total_allocations[index] if index < len(fee_total_allocations) else 0.0
+        previous_effective_fee = (
+            safe_float(fill.actual_fee_total)
+            if fill.actual_fee_total is not None
+            else safe_float(fill.estimated_fee_total)
+        )
+        if adjust_ledger:
+            _apply_fee_delta_to_ledger(db, fill, round_money(new_fee_total - previous_effective_fee))
+        fill.actual_commission = new_commission
+        fill.actual_stamp_tax = new_stamp_tax
+        fill.actual_fee_total = new_fee_total
+        fill.fee_reconciled_at = now
+        fill.fee_source = source
+
+
+def _refresh_actual_order_fees_from_fills(
+    db: Session,
+    order: ExternalTradingOrder,
+    *,
+    source: str,
+    fallback_commission: float = 0.0,
+    fallback_stamp_tax: float = 0.0,
+    fallback_fee_total: float = 0.0,
+) -> None:
+    fills = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.order_id == order.id).all()
+    if fills:
+        order.actual_commission = round_money(sum(safe_float(fill.actual_commission) for fill in fills))
+        order.actual_stamp_tax = round_money(sum(safe_float(fill.actual_stamp_tax) for fill in fills))
+        order.actual_fee_total = round_money(sum(safe_float(fill.actual_fee_total) for fill in fills))
+    else:
+        order.actual_commission = round_money(fallback_commission)
+        order.actual_stamp_tax = round_money(fallback_stamp_tax)
+        order.actual_fee_total = round_money(fallback_fee_total)
+    order.fee_reconciled_at = datetime.now()
+    order.fee_source = source
+    order.updated_at = datetime.now()
+
+
+def apply_fee_reconciliation(
+    db: Session,
+    order: ExternalTradingOrder,
+    *,
+    actual_commission: float,
+    actual_stamp_tax: float,
+    actual_fee_total: float,
+    source: str = "DELIVER",
+) -> Dict[str, Any]:
+    actual_commission = round_money(actual_commission)
+    actual_stamp_tax = round_money(actual_stamp_tax)
+    actual_fee_total = round_money(actual_fee_total)
+    role = _role(order)
+    updated_child_order_ids: List[int] = []
+
+    if role == "PARENT":
+        parent_fills = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.order_id == order.id).all()
+        _assign_actual_fees_to_fills(
+            db,
+            parent_fills,
+            actual_commission=actual_commission,
+            actual_stamp_tax=actual_stamp_tax,
+            actual_fee_total=actual_fee_total,
+            source=source,
+            adjust_ledger=False,
+        )
+        order.actual_commission = actual_commission
+        order.actual_stamp_tax = actual_stamp_tax
+        order.actual_fee_total = actual_fee_total
+        order.fee_reconciled_at = datetime.now()
+        order.fee_source = source
+        order.updated_at = datetime.now()
+
+        children = _child_orders(db, order.id)
+        child_order_ids = [child.id for child in children]
+        child_fills = (
+            db.query(ExternalTradingOrderFill)
+            .filter(ExternalTradingOrderFill.order_id.in_(child_order_ids))
+            .order_by(ExternalTradingOrderFill.id.asc())
+            .all()
+            if child_order_ids
+            else []
+        )
+        _assign_actual_fees_to_fills(
+            db,
+            child_fills,
+            actual_commission=actual_commission,
+            actual_stamp_tax=actual_stamp_tax,
+            actual_fee_total=actual_fee_total,
+            source=source,
+            adjust_ledger=True,
+        )
+        for child in children:
+            _refresh_actual_order_fees_from_fills(db, child, source=source)
+            updated_child_order_ids.append(child.id)
+    else:
+        fills = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.order_id == order.id).all()
+        _assign_actual_fees_to_fills(
+            db,
+            fills,
+            actual_commission=actual_commission,
+            actual_stamp_tax=actual_stamp_tax,
+            actual_fee_total=actual_fee_total,
+            source=source,
+            adjust_ledger=True,
+        )
+        _refresh_actual_order_fees_from_fills(
+            db,
+            order,
+            source=source,
+            fallback_commission=actual_commission,
+            fallback_stamp_tax=actual_stamp_tax,
+            fallback_fee_total=actual_fee_total,
+        )
+
+    return {
+        "order_id": order.id,
+        "role": role,
+        "actual_commission": actual_commission,
+        "actual_stamp_tax": actual_stamp_tax,
+        "actual_fee_total": actual_fee_total,
+        "updated_child_order_ids": updated_child_order_ids,
+    }
+
+
+def reconcile_deliver_records(
+    db: Session,
+    *,
+    account: ExternalTradingAccount,
+    records: List[Dict[str, Any]],
+    default_trade_date: Optional[date] = None,
+) -> Dict[str, Any]:
+    normalized_records = []
+    fee_groups: Dict[int, Dict[str, Any]] = {}
+    matched = 0
+    unmatched = 0
+    for raw_record in records or []:
+        normalized = normalize_deliver_record(raw_record, default_trade_date=default_trade_date)
+        order = _find_order_for_deliver(db, account.id, normalized)
+        if order:
+            matched += 1
+            group = fee_groups.setdefault(order.id, {
+                "order": order,
+                "commission": 0.0,
+                "stamp_tax": 0.0,
+                "total_fee": 0.0,
+                "deliver_record_ids": [],
+            })
+            group["commission"] = round_money(group["commission"] + safe_float(normalized.get("commission")))
+            group["stamp_tax"] = round_money(group["stamp_tax"] + safe_float(normalized.get("stamp_tax")))
+            group["total_fee"] = round_money(group["total_fee"] + safe_float(normalized.get("total_fee")))
+            deliver_row = _upsert_deliver_record(
+                db,
+                account=account,
+                normalized=normalized,
+                matched_order=order,
+                status="MATCHED",
+                message=None,
+            )
+            group["deliver_record_ids"].append(deliver_row.id)
+            normalized_records.append({"status": "MATCHED", "order_id": order.id, **normalized})
+        else:
+            unmatched += 1
+            _upsert_deliver_record(
+                db,
+                account=account,
+                normalized=normalized,
+                matched_order=None,
+                status="UNMATCHED",
+                message="未找到对应本地订单",
+            )
+            normalized_records.append({"status": "UNMATCHED", "order_id": None, **normalized})
+
+    applied = []
+    execution_ids = set()
+    for group in fee_groups.values():
+        order = group["order"]
+        applied_item = apply_fee_reconciliation(
+            db,
+            order,
+            actual_commission=group["commission"],
+            actual_stamp_tax=group["stamp_tax"],
+            actual_fee_total=group["total_fee"],
+            source="DELIVER",
+        )
+        applied_item["deliver_record_ids"] = group["deliver_record_ids"]
+        applied.append(applied_item)
+        execution_ids.update(_collect_related_execution_ids(db, order))
+    for execution_id in execution_ids:
+        refresh_execution_status(db, execution_id)
+
+    return {
+        "received": len(records or []),
+        "matched": matched,
+        "unmatched": unmatched,
+        "applied_order_count": len(applied),
+        "applied": applied,
+        "records": normalized_records,
+    }
 
 
 def _reference_price_for_symbol(reference_prices: Dict[str, float], symbol: str) -> float:
@@ -1628,6 +2297,14 @@ def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
         "status": row.status,
         "ptrade_status": row.ptrade_status,
         "message": row.message,
+        "estimated_commission": row.estimated_commission,
+        "estimated_stamp_tax": row.estimated_stamp_tax,
+        "estimated_fee_total": row.estimated_fee_total,
+        "actual_commission": row.actual_commission,
+        "actual_stamp_tax": row.actual_stamp_tax,
+        "actual_fee_total": row.actual_fee_total,
+        "fee_reconciled_at": row.fee_reconciled_at.isoformat() if row.fee_reconciled_at else None,
+        "fee_source": row.fee_source,
         "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
         "last_event_at": row.last_event_at.isoformat() if row.last_event_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,

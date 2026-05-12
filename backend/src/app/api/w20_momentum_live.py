@@ -44,6 +44,10 @@ from ...core.services.external_trading_ledger import (
     serialize_sub_account,
     sync_target_positions,
 )
+from ...core.services.external_trading_valuation import (
+    ExternalTradingValuationError,
+    calculate_sub_account_net_asset,
+)
 from ...core.utils import send_alert_email
 from .account import valid_account
 from .w20_momentum_backtest import (
@@ -1024,14 +1028,27 @@ async def _build_live_trade_plan(
         if symbol:
             quotes[symbol] = item
 
+    try:
+        valuation = await calculate_sub_account_net_asset(
+            db,
+            sub_account,
+            positions=list(ledger_positions.values()),
+            prefetched_quotes=quotes,
+            timeout=10.0,
+        )
+    except ExternalTradingValuationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    position_market_value = valuation["position_market_value"]
+    sub_account_net_asset = valuation["net_asset"]
+
     lot_size = max(int(config.lot_size or 100), 1)
     available_cash = min(
         sub_account_available_cash,
         account_available_cash,
     )
-    trade_base_value = sub_account_allocated_cash
+    trade_base_value = sub_account_net_asset
     if trade_base_value <= 0:
-        raise HTTPException(status_code=400, detail="虚拟子账户分配资金为空，无法生成实盘计划")
+        raise HTTPException(status_code=400, detail="虚拟子账户净资产为空，无法生成实盘计划")
 
     rows = []
     sell_orders = []
@@ -1193,6 +1210,10 @@ async def _build_live_trade_plan(
         "open_order_quantities": open_quantities,
         "target_positions": target_rows,
         "trade_base_value": trade_base_value,
+        "trade_base_source": "sub_account_net_asset",
+        "sub_account_position_market_value": round(position_market_value, 2),
+        "sub_account_net_asset": sub_account_net_asset,
+        "sub_account_valuation": valuation,
         "available_cash": available_cash,
         "projected_cash": projected_cash,
         "pricing_note": "W20 仅使用行情估算目标数量；真实下单价格由通用执行器策略决定",
@@ -1338,7 +1359,7 @@ def _build_live_trade_plan_email_body(
         f"信号日期: {latest_signal.get('date') or '-'}",
         f"目标持仓: {_format_live_trade_targets(latest_signal)}",
         f"外部交易账户: {external_account.name} ({external_account.identifier})",
-        f"分配资金: {_format_live_trade_money(plan.get('trade_base_value'))}",
+        f"目标净资产: {_format_live_trade_money(plan.get('trade_base_value'))}",
         f"可用现金: {_format_live_trade_money(plan.get('available_cash'))}",
         f"预计剩余现金: {_format_live_trade_money(plan.get('projected_cash'))}",
         "执行策略: 真实下单价格、超时和重定价由外部交易账号/虚拟子账户的通用执行器配置决定",

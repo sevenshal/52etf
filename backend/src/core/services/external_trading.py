@@ -255,6 +255,20 @@ class ExternalTradingHub:
     async def get_today_orders(self, account_pk: int, timeout: float = 10.0) -> Dict[str, Any]:
         return await self.send_command(account_pk, "get_today_orders", {}, timeout=timeout)
 
+    async def get_deliver(
+        self,
+        account_pk: int,
+        start_date: str,
+        end_date: str,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        return await self.send_command(
+            account_pk,
+            "get_deliver",
+            {"start_date": start_date, "end_date": end_date},
+            timeout=timeout,
+        )
+
     def get_status(self, account_pk: int) -> Dict[str, Any]:
         conn = self._connections.get(account_pk)
         if not conn:
@@ -424,3 +438,15 @@ async def get_external_today_orders(
 ) -> Dict[str, Any]:
     account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
     return await external_trading_hub.get_today_orders(account_pk, timeout=timeout)
+
+
+async def get_external_deliver(
+    account_id: str,
+    identifier: str,
+    start_date: str,
+    end_date: str,
+    name: Optional[str] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
+    return await external_trading_hub.get_deliver(account_pk, start_date, end_date, timeout=timeout)

@@ -637,6 +637,55 @@ class SimBroker:
     def get_all_orders(self):
         return list(self.orders)
 
+    def _order_fee(self, order_item):
+        quantity = int(order_item.get("business_amount") or order_item.get("quantity") or 0)
+        price = float(order_item.get("business_price") or order_item.get("price") or 0)
+        amount = round(quantity * price, 2)
+        commission = round(max(amount * 0.00025, 5.0), 2) if amount > 0 else 0.0
+        side = "BUY" if int(order_item.get("amount") or 0) > 0 else "SELL"
+        stamp_tax = round(amount * 0.0005, 2) if side == "SELL" and amount > 0 else 0.0
+        return amount, commission, stamp_tax, round(commission + stamp_tax, 2)
+
+    def get_deliver(self, start_date, end_date):
+        def normalize_date(value):
+            text = str(value or "").replace("-", "")[:8]
+            return text
+
+        start = normalize_date(start_date)
+        end = normalize_date(end_date or start_date)
+        records = []
+        for order_item in self.orders:
+            if str(order_item.get("status")) == "9":
+                continue
+            if int(order_item.get("business_amount") or 0) <= 0:
+                continue
+            entrust_time = str(order_item.get("entrust_time") or "")
+            trade_date = entrust_time[:10].replace("-", "") if entrust_time else datetime.now().strftime("%Y%m%d")
+            if start and trade_date < start:
+                continue
+            if end and trade_date > end:
+                continue
+            amount, commission, stamp_tax, total_fee = self._order_fee(order_item)
+            side = "BUY" if int(order_item.get("amount") or 0) > 0 else "SELL"
+            records.append({
+                "trade_date": trade_date,
+                "business_date": trade_date,
+                "order_id": order_item.get("order_id"),
+                "entrust_no": order_item.get("entrust_no") or order_item.get("order_id"),
+                "business_no": "%s-D" % order_item.get("order_id"),
+                "symbol": order_item.get("symbol"),
+                "side": side,
+                "entrust_bs": "1" if side == "BUY" else "2",
+                "business_amount": int(order_item.get("business_amount") or 0),
+                "business_price": float(order_item.get("business_price") or order_item.get("price") or 0),
+                "business_balance": amount,
+                "commission": commission,
+                "stamp_tax": stamp_tax,
+                "total_fee": total_fee,
+                "remark": "simulated deliver",
+            })
+        return records
+
     def get_positions(self):
         self._refresh_portfolio()
         return self.context.portfolio.positions
@@ -707,6 +756,7 @@ def configure_client(client, args):
     client.cancel_order = broker.cancel_order
     client.get_order = broker.get_order
     client.get_all_orders = broker.get_all_orders
+    client.get_deliver = broker.get_deliver
     client.get_positions = broker.get_positions
     client.emit_simulated_order_reports = broker.emit_order_reports
     client.API_HOST = args.host
@@ -752,6 +802,7 @@ def run_self_test(client):
         ("get_positions", {}),
         ("get_assets", {}),
         ("get_today_orders", {}),
+        ("get_deliver", {"start_date": datetime.now().strftime("%Y-%m-%d"), "end_date": datetime.now().strftime("%Y-%m-%d")}),
         ("get_account_snapshot", {}),
     ]
     for action, payload in commands:

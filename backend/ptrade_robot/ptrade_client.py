@@ -350,6 +350,8 @@ def execute_command(action, payload):
         return get_assets_payload()
     if action in ("get_today_orders", "today_orders", "orders.today"):
         return get_today_orders_payload()
+    if action in ("get_deliver", "deliver", "deliver.records"):
+        return get_deliver_payload(payload.get("start_date"), payload.get("end_date"))
     raise Exception("Unsupported command action: %s" % action)
 
 
@@ -1151,6 +1153,51 @@ def get_today_orders_payload():
     return {
         "current_time": current_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "orders": [normalize_order(item, current_dt) for item in today_orders],
+    }
+
+
+def normalize_deliver_date(value):
+    if value is None or value == "":
+        return get_current_dt().strftime("%Y%m%d")
+    text = str(value).strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10].replace("-", "")
+    return text
+
+
+def normalize_deliver_records(records):
+    if records is None:
+        return []
+    if hasattr(records, "to_dict"):
+        try:
+            records = records.to_dict("records")
+        except Exception:
+            records = records.to_dict()
+    if isinstance(records, dict):
+        if all(isinstance(value, dict) for value in records.values()):
+            records = records.values()
+        else:
+            records = [records]
+    result = []
+    for item in records or []:
+        if isinstance(item, dict):
+            result.append(stringify_unknown_fields(item))
+        else:
+            result.append({"value": str(item)})
+    return result
+
+
+def get_deliver_payload(start_date=None, end_date=None):
+    start = normalize_deliver_date(start_date)
+    end = normalize_deliver_date(end_date or start_date)
+    deliver_func = globals().get("get_deliver")
+    if not deliver_func:
+        raise Exception("PTrade get_deliver is unavailable in this runtime")
+    records = deliver_func(start, end) or []
+    return {
+        "start_date": start,
+        "end_date": end,
+        "records": normalize_deliver_records(records),
     }
 
 

@@ -42,6 +42,10 @@ from ...core.services.external_trading_ledger import (
     safe_int,
     sync_target_positions,
 )
+from ...core.services.external_trading_valuation import (
+    ExternalTradingValuationError,
+    calculate_sub_account_net_asset,
+)
 from .account import valid_account
 from .trade import TradeRequest
 
@@ -623,7 +627,6 @@ def _load_snowball_external_sync_items(
                 "blacklisted_symbols": config.blacklisted_symbols or [],
                 "external_trading_account_id": external_account.id,
                 "live_sub_account_id": sub_account.id,
-                "sub_account_cash_allocated": safe_float(sub_account.cash_allocated),
                 "current_targets": current_targets,
                 "cookie": acc_config.xueqiu_cookie if acc_config else None,
             })
@@ -683,13 +686,26 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
             continue
         target_weights[symbol] = safe_float(holding.get("weight"))
 
+    with get_external_trading_db_ctx() as trading_db:
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == item["live_sub_account_id"],
+            ExternalTradingSubAccount.account_id == item["account_id"],
+            ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
+            ExternalTradingSubAccount.strategy_config_id == item["id"],
+        ).first()
+        if not sub_account:
+            raise ValueError("雪球配置绑定的虚拟子账户不存在")
+        try:
+            valuation = await calculate_sub_account_net_asset(trading_db, sub_account)
+        except ExternalTradingValuationError as exc:
+            raise ValueError(str(exc)) from exc
+    all_symbols.update(_to_xueqiu_symbol(symbol) for symbol in (valuation.get("position_symbols") or []) if _to_xueqiu_symbol(symbol))
     quotes = await fetch_xueqiu_quotes(sorted(all_symbols), item.get("cookie"))
-    allocated_cash = safe_float(item.get("sub_account_cash_allocated"))
-    configured_amount = safe_float(item.get("total_amount"))
+    net_asset = safe_float(valuation.get("net_asset"))
     position_ratio = max(safe_float(item.get("total_position_ratio"), 100.0), 0.0) / 100.0
-    base_value = (allocated_cash if allocated_cash > 0 else configured_amount) * position_ratio
+    base_value = net_asset * position_ratio
     if base_value <= 0:
-        raise ValueError("雪球通用执行器目标资金为空，请设置配置总金额或虚拟子账户分配资金")
+        raise ValueError("雪球通用执行器目标净资产为空，请检查虚拟子账户现金和持仓市值")
 
     threshold_pct = max(safe_float(item.get("tracking_error_pct"), 1.0), 0.0)
     target_rows = []

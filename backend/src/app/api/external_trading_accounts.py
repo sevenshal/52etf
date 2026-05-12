@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +13,7 @@ from ...core.database import (
 )
 from ...core.external_trading_database import (
     ExternalTradingAccount,
+    ExternalTradingDeliverRecord,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
@@ -51,10 +52,15 @@ from ...core.services.external_trading_ledger import (
     get_ledger_positions,
     get_open_order_quantities,
     normalize_symbol,
+    reconcile_deliver_records,
     safe_int,
     serialize_ledger_position,
     serialize_order,
     serialize_sub_account,
+)
+from ...core.services.external_trading_valuation import (
+    ExternalTradingValuationError,
+    calculate_sub_account_net_asset,
 )
 from ...core.services.external_trading_crypto import (
     ExternalTradingCryptoError,
@@ -77,6 +83,9 @@ class ExternalTradingAccountBase(BaseModel):
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
     executor_clip_sell_to_available: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
+    commission_rate_pct: float = Field(default=0.025, ge=0)
+    min_commission: float = Field(default=5.0, ge=0)
+    stamp_tax_rate_pct: float = Field(default=0.05, ge=0)
 
     @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
@@ -113,6 +122,9 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
+    commission_rate_pct: Optional[float] = Field(default=None, ge=0)
+    min_commission: Optional[float] = Field(default=None, ge=0)
+    stamp_tax_rate_pct: Optional[float] = Field(default=None, ge=0)
 
     @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
@@ -246,6 +258,12 @@ class NettedExecutorRequest(BaseModel):
         return value
 
 
+class DeliverReconcileRequest(BaseModel):
+    start_date: date = Field(default_factory=lambda: datetime.now().date() - timedelta(days=1))
+    end_date: date = Field(default_factory=lambda: datetime.now().date() - timedelta(days=1))
+    timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+
+
 def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     runtime_status = external_trading_hub.get_status(account.id)
     executor_price_level = normalize_price_level(getattr(account, "executor_price_level", None))
@@ -271,6 +289,9 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_max_replace_count": executor_max_replace_count,
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
+        "commission_rate_pct": _safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025),
+        "min_commission": _safe_float(getattr(account, "min_commission", 5.0), 5.0),
+        "stamp_tax_rate_pct": _safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05),
         "connected": runtime_status.get("connected", False),
         "pending_count": runtime_status.get("pending_count", 0),
         "connected_at": runtime_status.get("connected_at"),
@@ -304,7 +325,7 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
     return sub_account.strategy_type
 
 
-def _serialize_sub_account_with_binding(
+async def _serialize_sub_account_with_binding(
     db: OrmSession,
     sub_account: ExternalTradingSubAccount,
     positions: Optional[List[ExternalTradingLedgerPosition]] = None,
@@ -318,15 +339,13 @@ def _serialize_sub_account_with_binding(
             .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
             .all()
         )
-    position_market_value = 0.0
-    for position in positions:
-        market_value = _safe_float(position.market_value)
-        if market_value <= 0 and _safe_float(position.quantity) > 0:
-            reference_price = _safe_float(position.market_price, _safe_float(position.avg_cost))
-            market_value = _safe_float(position.quantity) * reference_price
-        position_market_value += market_value
-    item["position_market_value"] = round(position_market_value, 2)
-    item["net_asset"] = round(_safe_float(sub_account.cash_available) + position_market_value, 2)
+    try:
+        valuation = await calculate_sub_account_net_asset(db, sub_account, positions=positions)
+    except ExternalTradingValuationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    item["position_market_value"] = valuation["position_market_value"]
+    item["net_asset"] = valuation["net_asset"]
+    item["valuation"] = valuation
     strategy_name = _strategy_binding_name(main_db, sub_account)
     item["strategy_name"] = strategy_name
     item["binding_status"] = "BOUND" if strategy_name else "FREE"
@@ -497,6 +516,14 @@ def _serialize_fill_status(
         "quantity": row.quantity,
         "price": row.price,
         "amount": row.amount,
+        "estimated_commission": row.estimated_commission,
+        "estimated_stamp_tax": row.estimated_stamp_tax,
+        "estimated_fee_total": row.estimated_fee_total,
+        "actual_commission": row.actual_commission,
+        "actual_stamp_tax": row.actual_stamp_tax,
+        "actual_fee_total": row.actual_fee_total,
+        "fee_reconciled_at": _iso(row.fee_reconciled_at),
+        "fee_source": row.fee_source,
         "traded_at": _iso(row.traded_at),
         "created_at": _iso(row.created_at),
     }
@@ -594,6 +621,9 @@ async def create_external_trading_account(
         executor_max_replace_count=payload.executor_max_replace_count,
         executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
+        commission_rate_pct=payload.commission_rate_pct,
+        min_commission=payload.min_commission,
+        stamp_tax_rate_pct=payload.stamp_tax_rate_pct,
     )
     db.add(account)
     db.commit()
@@ -662,6 +692,9 @@ async def delete_external_trading_account(
     db.query(ExternalTradingOrderFill).filter(
         ExternalTradingOrderFill.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
+    db.query(ExternalTradingDeliverRecord).filter(
+        ExternalTradingDeliverRecord.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
     db.query(ExternalTradingOrder).filter(
         ExternalTradingOrder.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
@@ -706,7 +739,7 @@ async def list_external_trading_sub_accounts(
             .order_by(ExternalTradingLedgerPosition.symbol.asc())
             .all()
         )
-        result.append(_serialize_sub_account_with_binding(db, sub_account, positions, main_db=main_db))
+        result.append(await _serialize_sub_account_with_binding(db, sub_account, positions, main_db=main_db))
     return result
 
 
@@ -740,7 +773,7 @@ async def create_external_trading_sub_account(
     db.add(sub_account)
     db.commit()
     db.refresh(sub_account)
-    return _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
+    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
 
 
 @router.put("/{external_account_id}/sub-accounts/{sub_account_id}")
@@ -760,8 +793,16 @@ async def update_external_trading_sub_account(
     ).first()
     if not sub_account:
         raise HTTPException(status_code=404, detail="External trading sub account not found")
+    previous_cash_allocated = _safe_float(sub_account.cash_allocated)
     sub_account.name = payload.name
     sub_account.cash_allocated = payload.cash_allocated
+    if abs(_safe_float(payload.cash_allocated) - previous_cash_allocated) >= 0.005:
+        try:
+            valuation = await calculate_sub_account_net_asset(db, sub_account)
+        except ExternalTradingValuationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        position_market_value = valuation["position_market_value"]
+        sub_account.cash_available = round(_safe_float(payload.cash_allocated) - position_market_value, 2)
     sub_account.remark = payload.remark
     sub_account.enabled = payload.enabled
     sub_account.executor_price_level = payload.executor_price_level
@@ -773,7 +814,7 @@ async def update_external_trading_sub_account(
     sub_account.updated_at = datetime.now()
     db.commit()
     db.refresh(sub_account)
-    return _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
+    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
 
 
 @router.delete("/{external_account_id}/sub-accounts/{sub_account_id}")
@@ -1034,12 +1075,14 @@ async def get_external_trading_executor_status(
         key = row.status or "UNKNOWN"
         order_status_counts[key] = order_status_counts.get(key, 0) + 1
 
+    serialized_sub_accounts = [
+        await _serialize_sub_account_with_binding(db, row, main_db=main_db)
+        for row in sub_accounts
+    ]
+
     return {
         "account": _serialize_account(account),
-        "sub_accounts": [
-            _serialize_sub_account_with_binding(db, row, main_db=main_db)
-            for row in sub_accounts
-        ],
+        "sub_accounts": serialized_sub_accounts,
         "target_positions": target_positions,
         "ledger_positions": ledger_positions,
         "orders": orders,
@@ -1216,6 +1259,57 @@ async def get_external_today_orders(
         return await external_trading_hub.get_today_orders(account.id, timeout=timeout_seconds)
     except ExternalTradingConnectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{external_account_id}/fees/reconcile")
+async def reconcile_external_trading_fees(
+    external_account_id: int,
+    payload: DeliverReconcileRequest,
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    if not account.enabled:
+        raise HTTPException(status_code=400, detail="External trading account is disabled")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be greater than or equal to start_date")
+    try:
+        deliver_response = await external_trading_hub.get_deliver(
+            account.id,
+            payload.start_date.isoformat(),
+            payload.end_date.isoformat(),
+            timeout=payload.timeout_seconds,
+        )
+    except ExternalTradingConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    records = (
+        deliver_response.get("records")
+        or deliver_response.get("deliver_records")
+        or deliver_response.get("delivers")
+        or deliver_response.get("deliveries")
+        or deliver_response.get("data")
+        or []
+    )
+    if isinstance(records, dict):
+        records = list(records.values())
+    if not isinstance(records, list):
+        raise HTTPException(status_code=500, detail="PTrade get_deliver returned invalid records")
+
+    default_trade_date = payload.start_date if payload.start_date == payload.end_date else None
+    result = reconcile_deliver_records(
+        db,
+        account=account,
+        records=records,
+        default_trade_date=default_trade_date,
+    )
+    db.commit()
+    return {
+        "start_date": payload.start_date.isoformat(),
+        "end_date": payload.end_date.isoformat(),
+        "deliver_response": deliver_response,
+        "result": result,
+    }
 
 
 @router.websocket("/ws")
