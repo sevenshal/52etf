@@ -51,7 +51,6 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_SNOWBALL,
     STRATEGY_W20,
     build_netted_target_execution_plan,
-    expire_insufficient_sellable_blocks,
     get_ledger_positions,
     get_open_order_quantities,
     normalize_symbol,
@@ -333,6 +332,8 @@ async def _serialize_sub_account_with_binding(
     positions: Optional[List[ExternalTradingLedgerPosition]] = None,
     *,
     main_db: OrmSession,
+    account: Optional[ExternalTradingAccount] = None,
+    update_position_valuation: bool = False,
 ) -> Dict[str, Any]:
     item = serialize_sub_account(sub_account)
     if positions is None:
@@ -342,7 +343,12 @@ async def _serialize_sub_account_with_binding(
             .all()
         )
     try:
-        valuation = await calculate_sub_account_net_asset(db, sub_account, positions=positions)
+        valuation = await calculate_sub_account_net_asset(
+            db,
+            sub_account,
+            positions=positions,
+            update_positions=update_position_valuation,
+        )
     except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     item["position_market_value"] = valuation["position_market_value"]
@@ -352,11 +358,14 @@ async def _serialize_sub_account_with_binding(
     item["strategy_name"] = strategy_name
     item["binding_status"] = "BOUND" if strategy_name else "FREE"
     item["binding_label"] = strategy_name or "空闲"
-    account = db.query(ExternalTradingAccount).filter(
-        ExternalTradingAccount.id == sub_account.external_trading_account_id,
-        ExternalTradingAccount.account_id == sub_account.account_id,
-    ).first()
-    item["effective_executor_policy"] = resolve_execution_policy(account, sub_account) if account else None
+    effective_account = account
+    if effective_account is None:
+        with db.no_autoflush:
+            effective_account = db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == sub_account.external_trading_account_id,
+                ExternalTradingAccount.account_id == sub_account.account_id,
+            ).first()
+    item["effective_executor_policy"] = resolve_execution_policy(effective_account, sub_account) if effective_account else None
     if positions is not None:
         item["positions"] = [serialize_ledger_position(pos) for pos in positions]
     return item
@@ -824,7 +833,7 @@ async def list_external_trading_sub_accounts(
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
-    _get_account_or_404(db, account_id, external_account_id)
+    account = _get_account_or_404(db, account_id, external_account_id)
     sub_accounts = (
         db.query(ExternalTradingSubAccount)
         .filter(
@@ -842,7 +851,13 @@ async def list_external_trading_sub_accounts(
             .order_by(ExternalTradingLedgerPosition.symbol.asc())
             .all()
         )
-        result.append(await _serialize_sub_account_with_binding(db, sub_account, positions, main_db=main_db))
+        result.append(await _serialize_sub_account_with_binding(
+            db,
+            sub_account,
+            positions,
+            main_db=main_db,
+            account=account,
+        ))
     return result
 
 
@@ -854,7 +869,7 @@ async def create_external_trading_sub_account(
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
-    _get_account_or_404(db, account_id, external_account_id)
+    account = _get_account_or_404(db, account_id, external_account_id)
     now = datetime.now()
     sub_account = ExternalTradingSubAccount(
         account_id=account_id,
@@ -876,7 +891,7 @@ async def create_external_trading_sub_account(
     db.add(sub_account)
     db.commit()
     db.refresh(sub_account)
-    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
+    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db, account=account)
 
 
 @router.put("/{external_account_id}/sub-accounts/{sub_account_id}")
@@ -888,7 +903,7 @@ async def update_external_trading_sub_account(
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
-    _get_account_or_404(db, account_id, external_account_id)
+    account = _get_account_or_404(db, account_id, external_account_id)
     sub_account = db.query(ExternalTradingSubAccount).filter(
         ExternalTradingSubAccount.id == sub_account_id,
         ExternalTradingSubAccount.account_id == account_id,
@@ -917,7 +932,7 @@ async def update_external_trading_sub_account(
     sub_account.updated_at = datetime.now()
     db.commit()
     db.refresh(sub_account)
-    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db)
+    return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db, account=account)
 
 
 @router.delete("/{external_account_id}/sub-accounts/{sub_account_id}")
@@ -1037,7 +1052,6 @@ async def get_external_trading_executor_status(
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
-    expire_insufficient_sellable_blocks(db, external_trading_account_id=account.id)
 
     sub_accounts = (
         db.query(ExternalTradingSubAccount)
@@ -1179,7 +1193,13 @@ async def get_external_trading_executor_status(
         order_status_counts[key] = order_status_counts.get(key, 0) + 1
 
     serialized_sub_accounts = [
-        await _serialize_sub_account_with_binding(db, row, main_db=main_db)
+        await _serialize_sub_account_with_binding(
+            db,
+            row,
+            list(ledger_by_sub_account.get(row.id, {}).values()),
+            main_db=main_db,
+            account=account,
+        )
         for row in sub_accounts
     ]
 

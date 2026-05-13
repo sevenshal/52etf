@@ -44,7 +44,7 @@ def _set_external_trading_sqlite_pragmas(dbapi_connection, _connection_record):
 
 
 ExternalTradingBase = declarative_base()
-ExternalTradingSessionLocal = sessionmaker(bind=external_trading_engine)
+ExternalTradingSessionLocal = sessionmaker(bind=external_trading_engine, autoflush=False)
 ExternalTradingSession = scoped_session(ExternalTradingSessionLocal)
 
 
