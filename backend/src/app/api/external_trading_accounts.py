@@ -20,6 +20,7 @@ from ...core.external_trading_database import (
     ExternalTradingOrder,
     ExternalTradingOrderFill,
     ExternalTradingSubAccount,
+    ExternalTradingSubAccountNetAssetHistory,
     ExternalTradingTargetPosition,
     ExternalTradingSessionLocal as ExternalTradingDBSession,
     get_external_trading_db,
@@ -417,6 +418,31 @@ def _iso(value: Any) -> Optional[str]:
     if not value:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _serialize_sub_account_net_asset_history(row: ExternalTradingSubAccountNetAssetHistory) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "account_id": row.account_id,
+        "external_trading_account_id": row.external_trading_account_id,
+        "sub_account_id": row.sub_account_id,
+        "strategy_type": row.strategy_type,
+        "strategy_config_id": row.strategy_config_id,
+        "trading_date": row.trading_date.isoformat() if row.trading_date else None,
+        "cash_allocated": row.cash_allocated,
+        "cash_available": row.cash_available,
+        "position_market_value": row.position_market_value,
+        "net_asset": row.net_asset,
+        "position_count": row.position_count,
+        "positions": row.positions or [],
+        "price_details": row.price_details or {},
+        "source": row.source,
+        "status": row.status,
+        "message": row.message,
+        "valued_at": _iso(row.valued_at),
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
 
 
 def _stock_symbol_candidates(symbol: Any) -> List[str]:
@@ -826,6 +852,9 @@ async def delete_external_trading_account(
     db.query(ExternalTradingLedgerPosition).filter(
         ExternalTradingLedgerPosition.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
+    db.query(ExternalTradingSubAccountNetAssetHistory).filter(
+        ExternalTradingSubAccountNetAssetHistory.external_trading_account_id == account_pk
+    ).delete(synchronize_session=False)
     db.query(ExternalTradingSubAccount).filter(
         ExternalTradingSubAccount.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
@@ -869,6 +898,62 @@ async def list_external_trading_sub_accounts(
             account=account,
         ))
     return result
+
+
+@router.get("/{external_account_id}/sub-accounts/{sub_account_id}/net-asset-history")
+async def get_external_trading_sub_account_net_asset_history(
+    external_account_id: int,
+    sub_account_id: int,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    sub_account = db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == sub_account_id,
+        ExternalTradingSubAccount.account_id == account_id,
+        ExternalTradingSubAccount.external_trading_account_id == external_account_id,
+    ).first()
+    if not sub_account:
+        raise HTTPException(status_code=404, detail="External trading sub account not found")
+
+    if end_date is None:
+        end_date = datetime.now().date()
+    if start_date is None:
+        start_date = end_date - timedelta(days=180)
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be later than end_date")
+
+    rows = (
+        db.query(ExternalTradingSubAccountNetAssetHistory)
+        .filter(
+            ExternalTradingSubAccountNetAssetHistory.account_id == account_id,
+            ExternalTradingSubAccountNetAssetHistory.external_trading_account_id == external_account_id,
+            ExternalTradingSubAccountNetAssetHistory.sub_account_id == sub_account_id,
+            ExternalTradingSubAccountNetAssetHistory.trading_date >= start_date,
+            ExternalTradingSubAccountNetAssetHistory.trading_date <= end_date,
+        )
+        .order_by(ExternalTradingSubAccountNetAssetHistory.trading_date.asc())
+        .all()
+    )
+    history = [_serialize_sub_account_net_asset_history(row) for row in rows]
+    return {
+        "account": _serialize_account(account),
+        "sub_account": {
+            **serialize_sub_account(sub_account),
+            "strategy_name": _strategy_binding_name(main_db, sub_account),
+        },
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "history": history,
+        "summary": {
+            "count": len(history),
+            "success_count": len([row for row in history if row.get("status") == "SUCCESS"]),
+            "failed_count": len([row for row in history if row.get("status") != "SUCCESS"]),
+        },
+    }
 
 
 @router.post("/{external_account_id}/sub-accounts")
@@ -990,6 +1075,9 @@ async def delete_external_trading_sub_account(
     db.query(ExternalTradingOrder).filter(ExternalTradingOrder.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingTargetPosition).filter(ExternalTradingTargetPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingLedgerPosition).filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
+    db.query(ExternalTradingSubAccountNetAssetHistory).filter(
+        ExternalTradingSubAccountNetAssetHistory.sub_account_id == sub_account.id
+    ).delete(synchronize_session=False)
     db.delete(sub_account)
     main_db.commit()
     db.commit()

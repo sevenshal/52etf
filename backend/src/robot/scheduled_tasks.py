@@ -523,6 +523,30 @@ def _is_china_trading_day(check_date: date) -> bool:
     return True
 
 
+def _run_external_trading_sub_account_net_asset_snapshot():
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过外部交易子账户净资产快照: {today_shanghai} 不是A股交易日"
+
+    from ..core.services.external_trading_net_asset_history import (
+        process_external_trading_sub_account_net_asset_snapshot_for_robot,
+    )
+
+    result = process_external_trading_sub_account_net_asset_snapshot_for_robot()
+    logging.getLogger("ScheduledTaskManager").info(
+        "External trading sub-account net asset snapshot result: %s",
+        result,
+    )
+    return (
+        "外部交易子账户净资产快照 "
+        f"status={result.get('status')} "
+        f"trading_date={result.get('trading_date')} "
+        f"checked={result.get('checked')} "
+        f"recorded={result.get('recorded')} "
+        f"failed={result.get('failed')}"
+    )
+
+
 def _run_snowball_ptrade_heartbeat_check():
     now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
     check_time = now_shanghai.time()
@@ -745,6 +769,16 @@ class ScheduledTaskManager:
                 sort_order=23,
                 runner=_run_external_trading_fee_reconcile,
                 default_cron_rule="50 8 * * mon-fri;15 9 * * mon-fri",
+            ),
+            "external_trading_sub_account_nav_snapshot": TaskDefinition(
+                task_key="external_trading_sub_account_nav_snapshot",
+                name="外部交易子账户净资产快照",
+                description="A股收盘后5分钟计算每个虚拟子账户的净资产、持仓市值和可用资金，并写入每日历史曲线。",
+                default_time="15:05",
+                default_enabled=True,
+                sort_order=24,
+                runner=_run_external_trading_sub_account_net_asset_snapshot,
+                default_cron_rule="5 15 * * mon-fri",
             ),
         }
 

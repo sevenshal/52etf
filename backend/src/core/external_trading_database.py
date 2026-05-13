@@ -133,6 +133,35 @@ class ExternalTradingLedgerPosition(ExternalTradingBase):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class ExternalTradingSubAccountNetAssetHistory(ExternalTradingBase):
+    """虚拟子账户每日净资产快照。"""
+    __tablename__ = "external_trading_sub_account_net_asset_history"
+    __table_args__ = (
+        UniqueConstraint("sub_account_id", "trading_date", name="uq_external_sub_account_nav_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    sub_account_id = Column(Integer, index=True, nullable=False)
+    strategy_type = Column(String(64), index=True)
+    strategy_config_id = Column(Integer, index=True)
+    trading_date = Column(Date, index=True, nullable=False)
+    cash_allocated = Column(Float, default=0.0, nullable=False)
+    cash_available = Column(Float, default=0.0, nullable=False)
+    position_market_value = Column(Float, default=0.0, nullable=False)
+    net_asset = Column(Float, default=0.0, nullable=False)
+    position_count = Column(Integer, default=0, nullable=False)
+    positions = Column(JSON)
+    price_details = Column(JSON)
+    source = Column(String(32), default="scheduled_close", nullable=False)
+    status = Column(String(32), default="SUCCESS", index=True, nullable=False)
+    message = Column(String(1000))
+    valued_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class ExternalTradingTargetPosition(ExternalTradingBase):
     """策略同步到执行器的目标仓位快照。"""
     __tablename__ = "external_trading_target_positions"
@@ -310,6 +339,8 @@ def ensure_external_trading_indexes():
         "CREATE INDEX IF NOT EXISTS idx_external_sub_accounts_strategy ON external_trading_sub_accounts(strategy_type, strategy_config_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_ledger_positions_sub_symbol ON external_trading_ledger_positions(sub_account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_external_target_positions_sub_symbol ON external_trading_target_positions(sub_account_id, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_account_date ON external_trading_sub_account_net_asset_history(account_id, external_trading_account_id, trading_date)",
+        "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_sub_date ON external_trading_sub_account_net_asset_history(sub_account_id, trading_date)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_lifecycle ON external_trading_orders(status, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_broker ON external_trading_orders(external_trading_account_id, broker_order_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_order_fills_order ON external_trading_order_fills(order_id, created_at)",
