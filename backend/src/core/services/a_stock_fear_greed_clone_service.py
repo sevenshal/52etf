@@ -43,6 +43,7 @@ A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL = {
     str(item["symbol"]).upper(): item
     for item in A_STOCK_FEAR_GREED_TARGETS
 }
+A_STOCK_MIN_COMPONENT_COUNT = 6
 
 
 A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
@@ -145,8 +146,13 @@ class AStockInnovation100FearGreedCloneCalculator:
         score_df = self._score_raw_signals(raw, score_window, min_periods)
 
         score_columns = [f"{key}_score" for key in A_STOCK_COMPONENTS]
-        score_df["fear_greed_clone"] = score_df[score_columns].mean(axis=1)
-        valid = score_df.dropna(subset=score_columns + ["fear_greed_clone"])
+        score_values = score_df[score_columns]
+        score_df["component_count"] = score_values.notna().sum(axis=1)
+        score_df["fear_greed_clone"] = score_values.mean(axis=1)
+        valid = score_df[
+            score_df["fear_greed_clone"].notna()
+            & (score_df["component_count"] >= A_STOCK_MIN_COMPONENT_COUNT)
+        ]
         if valid.empty:
             raise FearGreedCloneError(f"not enough data to calculate {self.label} Fear & Greed")
 
@@ -159,22 +165,31 @@ class AStockInnovation100FearGreedCloneCalculator:
             score = float(row["fear_greed_clone"])
             holdings = holdings_by_date.get(timestamp, [])
             holdings_as_of = holdings_as_of_by_date.get(timestamp)
+            components = self._component_payload(raw, score_df, timestamp)
+            components_used = [
+                key
+                for key, component in components.items()
+                if component.get("used_in_score")
+            ]
             records.append(
                 {
                     "symbol": self.target_symbol,
                     "date": day.isoformat(),
                     "score": round(score, 4),
                     "rating": FearGreedCloneCalculator.rating(score),
-                    "method": "equal-weighted rolling z-score normal CDF",
+                    "method": "available-component equal-weighted rolling z-score normal CDF",
                     "history_days": history_days,
                     "score_window": score_window,
                     "min_periods": min_periods,
+                    "min_component_count": A_STOCK_MIN_COMPONENT_COUNT,
+                    "component_count": int(row["component_count"]),
+                    "components_used": components_used,
                     "use_historical_holdings": True,
                     "etf_price": self._price_payload(raw.loc[timestamp]),
                     "holdings_as_of": holdings_as_of.isoformat() if holdings_as_of else None,
                     "holdings_count": len(holdings),
                     "holdings_weight_used": round(sum(item["weight"] for item in holdings), 6),
-                    "components": self._component_payload(raw, score_df, timestamp),
+                    "components": components,
                     "warnings": warnings,
                 }
             )
@@ -556,7 +571,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError(f"A股全市场日行情缓存中没有 {self.label} 成分股数据")
+            return {}
 
         frame = pd.DataFrame(
             [tuple(row) for row in rows],
@@ -574,7 +589,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             if symbol_frame["close"].notna().sum() >= 120:
                 frames[str(symbol)] = symbol_frame
         if not frames:
-            raise FearGreedCloneError(f"{self.label} 成分股可用行情不足")
+            return {}
         return frames
 
     def _load_index_close(self, ts_code: str, start_date: date, end_date: date) -> pd.Series:
@@ -600,7 +615,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError(f"{ts_code} 指数行情缺失，请先执行 A股基础数据同步")
+            return pd.Series(dtype=float)
         frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "close"])
         frame["date"] = pd.to_datetime(frame["date"])
         return pd.to_numeric(frame.set_index("date")["close"], errors="coerce").sort_index()
@@ -639,7 +654,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError(f"{self.label} A股期权行情缺失，请先执行 A股基础数据同步")
+            return pd.Series(dtype=float)
 
         frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "call_put", "volume"])
         frame["date"] = pd.to_datetime(frame["date"])
@@ -686,7 +701,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
-            raise FearGreedCloneError("中债信用收益率曲线缺失，请先执行 A股基础数据同步")
+            return pd.Series(dtype=float)
         frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "pair_key", "rating", "yield_rate"])
         frame["date"] = pd.to_datetime(frame["date"])
         frame["yield_rate"] = pd.to_numeric(frame["yield_rate"], errors="coerce")
@@ -697,10 +712,10 @@ class AStockInnovation100FearGreedCloneCalculator:
             aggfunc="last",
         )
         if "AA" not in pivot.columns or "AAA" not in pivot.columns:
-            raise FearGreedCloneError("中债信用曲线缺少 AA/AAA 配对数据")
+            return pd.Series(dtype=float)
         spread_by_pair = (pivot["AA"] - pivot["AAA"]).dropna()
         if spread_by_pair.empty:
-            raise FearGreedCloneError("中债 AA-AAA 信用利差为空")
+            return pd.Series(dtype=float)
         return spread_by_pair.groupby(level="date").mean().sort_index()
 
     def _weighted_range_position(
@@ -782,18 +797,30 @@ class AStockInnovation100FearGreedCloneCalculator:
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         for key, spec in A_STOCK_COMPONENTS.items():
-            component_score = float(scores.loc[latest_date, f"{key}_score"])
-            raw_value = float(raw.loc[latest_date, key])
+            component_score = self._finite_float_or_none(scores.loc[latest_date, f"{key}_score"])
+            raw_value = self._finite_float_or_none(raw.loc[latest_date, key])
+            used_in_score = component_score is not None
             payload[key] = {
                 "name": spec.name,
-                "score": round(component_score, 2),
-                "rating": FearGreedCloneCalculator.rating(component_score),
-                "raw_value": round(raw_value, 6),
+                "score": round(component_score, 2) if component_score is not None else None,
+                "rating": FearGreedCloneCalculator.rating(component_score) if component_score is not None else None,
+                "raw_value": round(raw_value, 6) if raw_value is not None else None,
+                "used_in_score": used_in_score,
                 "raw_label": spec.raw_label,
                 "source": spec.source,
                 "proxy_note": spec.proxy_note,
             }
         return payload
+
+    @staticmethod
+    def _finite_float_or_none(value) -> Optional[float]:
+        try:
+            if pd.isna(value):
+                return None
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
 
     @staticmethod
     def _price_payload(row: pd.Series) -> Dict[str, Optional[float]]:
@@ -813,7 +840,7 @@ class AStockInnovation100FearGreedCloneCalculator:
     def _warnings(self) -> List[str]:
         return [
             f"This is an independent {self.label}-specific clone, not CNN's undisclosed calculation.",
-            "Scores use rolling z-score/CDF and equal-weighted components.",
+            f"Scores use rolling z-score/CDF and equal-weighted available components; at least {A_STOCK_MIN_COMPONENT_COUNT} components are required.",
             f"The option component uses related A-share ETF option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}.",
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
