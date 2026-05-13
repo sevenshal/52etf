@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Divider,
+  Empty,
   Form,
   Input,
   InputNumber,
@@ -25,9 +26,11 @@ import {
   DeleteOutlined,
   DollarOutlined,
   EditOutlined,
+  LineChartOutlined,
   PlusOutlined,
   SyncOutlined
 } from '@ant-design/icons';
+import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 
 const { Text, Title } = Typography;
@@ -97,6 +100,67 @@ const formatPolicy = policy => {
   const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
   return `${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
+const getNetAssetHistoryOption = rows => {
+  const dates = (rows || []).map(item => item.trading_date);
+  return {
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })
+    },
+    legend: {
+      top: 0,
+      data: ['净资产', '持仓市值', '可用资金']
+    },
+    grid: {
+      left: 56,
+      right: 24,
+      top: 48,
+      bottom: 56
+    },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      boundaryGap: false
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: {
+        formatter: value => Number(value || 0).toLocaleString()
+      }
+    },
+    dataZoom: [
+      { type: 'inside' },
+      { type: 'slider', height: 22, bottom: 16 }
+    ],
+    series: [
+      {
+        name: '净资产',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        connectNulls: false,
+        data: (rows || []).map(item => item.status === 'SUCCESS' ? Number(item.net_asset || 0) : null)
+      },
+      {
+        name: '持仓市值',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        connectNulls: false,
+        data: (rows || []).map(item => item.status === 'SUCCESS' ? Number(item.position_market_value || 0) : null)
+      },
+      {
+        name: '可用资金',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        connectNulls: false,
+        data: (rows || []).map(item => item.status === 'SUCCESS' ? Number(item.cash_available || 0) : null)
+      }
+    ]
+  };
+};
 
 const ExternalTradingAccountManager = () => {
   const [accounts, setAccounts] = useState([]);
@@ -114,6 +178,11 @@ const ExternalTradingAccountManager = () => {
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
   const [feeReconcilingAccountId, setFeeReconcilingAccountId] = useState(null);
+  const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
+  const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
+  const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
+  const [netAssetHistorySubAccount, setNetAssetHistorySubAccount] = useState(null);
+  const [netAssetHistory, setNetAssetHistory] = useState(null);
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
 
@@ -223,6 +292,27 @@ const ExternalTradingAccountManager = () => {
     } catch (error) {
       message.error(error.response?.data?.detail || '获取虚拟子账户失败');
     }
+  };
+
+  const fetchNetAssetHistory = async (account, subAccount) => {
+    if (!account?.id || !subAccount?.id) return;
+    setNetAssetHistoryLoading(true);
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${account.id}/sub-accounts/${subAccount.id}/net-asset-history`);
+      setNetAssetHistory(data || null);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '获取净资产历史失败');
+      setNetAssetHistory(null);
+    } finally {
+      setNetAssetHistoryLoading(false);
+    }
+  };
+
+  const openNetAssetHistory = (account, subAccount) => {
+    setNetAssetHistoryAccount(account);
+    setNetAssetHistorySubAccount(subAccount);
+    setNetAssetHistoryVisible(true);
+    fetchNetAssetHistory(account, subAccount);
   };
 
   const openSubCreateModal = record => {
@@ -502,6 +592,19 @@ const ExternalTradingAccountManager = () => {
     { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
   ];
 
+  const netAssetHistoryRows = netAssetHistory?.history || [];
+  const netAssetHistoryColumns = [
+    { title: '日期', dataIndex: 'trading_date', key: 'trading_date', width: 120 },
+    { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', width: 130, render: value => formatNumber(value, 2) },
+    { title: '持仓市值', dataIndex: 'position_market_value', key: 'position_market_value', width: 130, render: value => formatNumber(value, 2) },
+    { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', width: 130, render: value => formatNumber(value, 2) },
+    { title: '分配资金', dataIndex: 'cash_allocated', key: 'cash_allocated', width: 130, render: value => formatNumber(value, 2) },
+    { title: '持仓数', dataIndex: 'position_count', key: 'position_count', width: 90, render: value => formatNumber(value) },
+    { title: '状态', dataIndex: 'status', key: 'status', width: 100, render: value => <Tag color={value === 'SUCCESS' ? 'green' : 'red'}>{value || '-'}</Tag> },
+    { title: '估值时间', dataIndex: 'valued_at', key: 'valued_at', width: 170, render: formatTime },
+    { title: '消息', dataIndex: 'message', key: 'message', render: value => value || '-' }
+  ];
+
   const expandedRowRender = account => {
     const rows = subAccounts[account.id] || [];
     const subColumns = [
@@ -526,6 +629,9 @@ const ExternalTradingAccountManager = () => {
         key: 'action',
         render: (_, subAccount) => (
           <Space>
+            <Button size="small" icon={<LineChartOutlined />} onClick={() => openNetAssetHistory(account, subAccount)}>
+              曲线
+            </Button>
             <Button size="small" icon={<EditOutlined />} onClick={() => openSubEditModal(account, subAccount)}>
               编辑
             </Button>
@@ -809,6 +915,49 @@ const ExternalTradingAccountManager = () => {
             <Switch checkedChildren="启用" unCheckedChildren="停用" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={`净资产曲线 - ${netAssetHistorySubAccount?.name || ''}`}
+        visible={netAssetHistoryVisible}
+        onCancel={() => setNetAssetHistoryVisible(false)}
+        width={1080}
+        footer={[
+          <Button
+            key="refresh"
+            icon={<SyncOutlined />}
+            loading={netAssetHistoryLoading}
+            onClick={() => fetchNetAssetHistory(netAssetHistoryAccount, netAssetHistorySubAccount)}
+          >
+            刷新
+          </Button>,
+          <Button key="close" onClick={() => setNetAssetHistoryVisible(false)}>
+            关闭
+          </Button>
+        ]}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={16}>
+          <Space wrap>
+            <Tag>{netAssetHistorySubAccount?.binding_label || '空闲'}</Tag>
+            <Text>记录 {netAssetHistory?.summary?.count || 0}</Text>
+            <Text>成功 {netAssetHistory?.summary?.success_count || 0}</Text>
+            <Text>失败 {netAssetHistory?.summary?.failed_count || 0}</Text>
+          </Space>
+          {netAssetHistoryRows.length ? (
+            <ReactECharts option={getNetAssetHistoryOption(netAssetHistoryRows)} style={{ height: 380 }} />
+          ) : (
+            <Empty description={netAssetHistoryLoading ? '加载中' : '暂无净资产历史'} />
+          )}
+          <Table
+            rowKey="id"
+            columns={netAssetHistoryColumns}
+            dataSource={netAssetHistoryRows}
+            loading={netAssetHistoryLoading}
+            pagination={{ pageSize: 8 }}
+            size="small"
+            scroll={{ x: 1200 }}
+          />
+        </Space>
       </Modal>
 
       <Modal
