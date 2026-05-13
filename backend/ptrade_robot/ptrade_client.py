@@ -3,7 +3,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import struct
 import threading
 import time
@@ -13,21 +12,19 @@ try:
 except ImportError:
     from urllib import quote
 
-# HTTP mode: set to False to use ws and avoid TLS certificate validation.
-USE_HTTPS = os.getenv("PTRADE_USE_HTTPS", "0").strip().lower() in ("1", "true", "yes", "wss")
-API_HOST = os.getenv("PTRADE_API_HOST", "api.52etf.vip").strip() or "api.52etf.vip"
+# PTrade sandbox forbids environment module access, so settings are constants.
+# Edit these values directly before uploading this file to the broker server.
+USE_HTTPS = False
+API_HOST = "api.52etf.vip"
 
 # The backend validates account_id + account name + unique identifier.
 # Create the same account in the web "外部交易账号" page before starting this script.
-DEFAULT_ACCOUNT_ID = (
-    os.getenv("PTRADE_ACCOUNT_ID", "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl").strip()
-    or "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
-)
-DEFAULT_IDENTIFIER = os.getenv("PTRADE_IDENTIFIER", "GS66301027527").strip() or "GS66301027527"
+DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl" #poiuytrewqLKJHGFDSAMNBVCXZasdfgh
+DEFAULT_IDENTIFIER = "GS66301027527" #GS66010000018
 
 HEARTBEAT_INTERVAL_SECONDS = 20
 RECONNECT_DELAY_SECONDS = 5
-DISABLE_AUTO_WEBSOCKET = os.getenv("PTRADE_DISABLE_AUTO_WS", "0").strip().lower() in ("1", "true", "yes")
+DISABLE_AUTO_WEBSOCKET = False
 RSA_N_HEX = (
     "d10e83e0f75ddef1fa41d524bbf4ff76dc9f28a1d1d376f09a9920b0e66362503b5fba39003215f68a911bb33d160745f9f452bfa775c73ca9a3741509b1e5f0e74f35fe2f7e09e4da3bd0eefdea5765322b62a90c080e0ab500853ce8147d7e837dd3cda9c089fe47934065a0da0f3e00cb9de406bd254e0e585d5c67f7af3e0d0729847ca04e69b9ce81e598cdde04e50305e7ecdd0fbeba18a30f307ac795f8145bb149e8a855eaff687077f95305b6419fbf3878dca91edef4666f51fdcdd1c70495fa94f74bdd2733261e04cffaa24a8b040d46897e940ad25756093538d85b321b115cd29970cd51fba8b18c48b2b6e406a71d72a9b58b402d0025854b"
 )
@@ -39,6 +36,7 @@ _SHA256_DIGESTINFO_PREFIX = bytes.fromhex("3031300d06096086480165030402010500042
 _SHARED_KEY = base64.b64decode(SHARED_KEY_B64)
 _ENC_KEY = hashlib.sha256(b"external-trading-enc:" + _SHARED_KEY).digest()
 _MAC_KEY = hashlib.sha256(b"external-trading-mac:" + _SHARED_KEY).digest()
+_NONCE_COUNTER = 0
 
 try:
     from tornado import gen, ioloop, websocket
@@ -96,6 +94,25 @@ def b64url_encode(data):
 def b64url_decode(data):
     padding = "=" * (-len(data) % 4)
     return base64.urlsafe_b64decode((data + padding).encode("ascii"))
+
+
+def pseudo_random_bytes(length):
+    """Return nonce bytes without blocked platform entropy APIs."""
+    global _NONCE_COUNTER
+    chunks = []
+    total = 0
+    while total < length:
+        _NONCE_COUNTER += 1
+        seed = "%s|%s|%s|%s" % (
+            time.time(),
+            datetime.now().isoformat(),
+            _NONCE_COUNTER,
+            id(chunks),
+        )
+        chunk = hashlib.sha256(_SHARED_KEY + seed.encode("utf-8")).digest()
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)[:length]
 
 
 def canonical_handshake_payload(account_id, identifier, ts, nonce):
@@ -177,7 +194,7 @@ def chacha20_xor(data, nonce):
 
 
 def encrypt_message(message):
-    nonce = os.urandom(12)
+    nonce = pseudo_random_bytes(12)
     plaintext = json.dumps(message, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     ciphertext = chacha20_xor(plaintext, nonce)
     mac = hmac.new(_MAC_KEY, nonce + ciphertext, hashlib.sha256).digest()
@@ -208,7 +225,7 @@ def decrypt_message(raw_message):
 def build_ws_url():
     ws_scheme = "wss" if USE_HTTPS else "ws"
     ts = str(int(time.time()))
-    nonce = b64url_encode(os.urandom(16))
+    nonce = b64url_encode(pseudo_random_bytes(16))
     signature = sign_handshake(g.account_id, g.external_account_identifier, ts, nonce)
     query = "account_id=%s&identifier=%s&ts=%s&nonce=%s&signature=%s" % (
         quote(str(g.account_id), safe=""),
