@@ -24,6 +24,7 @@ class KLineData(BaseModel):
     close: float
     volume: float
     turnover: float
+    turnover_rate: Optional[float] = None
 
 class FavoriteResponse(BaseModel):
     """收藏响应"""
@@ -73,6 +74,21 @@ async def get_stock_klines(
         end_date=parsed_end_date,
         period=period
     )
+
+    static_info = get_static_info_snapshot_map(db, [symbol]).get(symbol.upper(), {})
+    circulating_shares = static_info.get("circulating_shares") if static_info else None
+    total_shares = static_info.get("total_shares") if static_info else None
+    turnover_base_shares = circulating_shares or total_shares
+
+    def calculate_turnover_rate(volume):
+        try:
+            volume_value = float(volume)
+            shares_value = float(turnover_base_shares)
+        except (TypeError, ValueError):
+            return None
+        if volume_value < 0 or shares_value <= 0:
+            return None
+        return volume_value / shares_value
     
     # 转换为响应格式
     klines = []
@@ -84,7 +100,8 @@ async def get_stock_klines(
             low=k['low'],
             close=k['close'],
             volume=k['volume'],
-            turnover=k['turnover']
+            turnover=k['turnover'],
+            turnover_rate=calculate_turnover_rate(k.get('volume')),
         ))
     
     return klines
