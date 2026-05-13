@@ -16,6 +16,12 @@ const log10Volume = (volume) => {
   return numericVolume !== null && numericVolume > 0 ? Math.log10(numericVolume) : null;
 };
 
+const normalizeTurnoverRate = (value) => {
+  const numericRate = toNumber(value);
+  if (numericRate === null || numericRate <= 0) return 0;
+  return Math.min(numericRate, 1);
+};
+
 const isValidProfileKline = (kline) => {
   const high = toNumber(kline?.high);
   const low = toNumber(kline?.low);
@@ -41,6 +47,8 @@ const calculatePocWindow = (
     binCount = 48,
     maxLevelsPerSide = 2,
     volumeStdDevMultiplier = 1,
+    enableTurnoverDecay = false,
+    closePriceWeightMultiplier = 10,
   } = {}
 ) => {
   const validKlines = windowKlines.filter(isValidProfileKline);
@@ -55,6 +63,7 @@ const calculatePocWindow = (
   const bins = Math.max(12, Math.min(120, Number(binCount) || 48));
   const levelsPerSide = Math.max(1, Math.min(2, Number(maxLevelsPerSide) || 2));
   const binSize = priceRange / bins;
+  const closeWeightMultiplier = Math.max(1, Number(closePriceWeightMultiplier) || 1);
 
   const profile = Array.from({ length: bins }, (_, index) => ({
     price: minPrice + (index + 0.5) * binSize,
@@ -64,29 +73,94 @@ const calculatePocWindow = (
   }));
 
   const clampIndex = (index) => Math.max(0, Math.min(profile.length - 1, index));
+  const getBinStart = (index) => minPrice + index * binSize;
+  const getBinEnd = (index) => (index === profile.length - 1 ? maxPrice : minPrice + (index + 1) * binSize);
 
-  validKlines.forEach((kline) => {
+  const getPriceIndex = (price) => clampIndex(Math.floor((price - minPrice) / binSize));
+
+  const buildVolumeAllocations = (kline) => {
     const high = Number(kline.high);
     const low = Number(kline.low);
     const close = Number(kline.close);
-    const volume = Number(kline.volume);
+    const closeIndex = getPriceIndex(close || low);
 
     if (high <= low) {
-      const index = clampIndex(Math.floor(((close || low) - minPrice) / binSize));
-      profile[index].volume += volume;
-      profile[index].touch_count += 1;
-      profile[index].max_daily_volume = Math.max(profile[index].max_daily_volume, volume);
-      return;
+      return [{ index: closeIndex, share: 1 }];
     }
 
-    const startIndex = clampIndex(Math.floor((low - minPrice) / binSize));
-    const endIndex = clampIndex(Math.floor((high - minPrice) / binSize));
+    const startIndex = getPriceIndex(low);
+    const endIndex = getPriceIndex(high);
+    const overlaps = [];
 
     for (let index = startIndex; index <= endIndex; index += 1) {
-      profile[index].volume += volume;
-      profile[index].touch_count += 1;
-      profile[index].max_daily_volume = Math.max(profile[index].max_daily_volume, volume);
+      const overlapStart = Math.max(low, getBinStart(index));
+      const overlapEnd = Math.min(high, getBinEnd(index));
+      const overlap = Math.max(0, overlapEnd - overlapStart);
+      if (overlap > 0) {
+        overlaps.push({ index, overlap });
+      }
     }
+
+    if (!overlaps.length) {
+      return [{ index: closeIndex, share: 1 }];
+    }
+
+    const totalOverlap = overlaps.reduce((sum, item) => sum + item.overlap, 0);
+    if (totalOverlap <= 0) {
+      return [{ index: closeIndex, share: 1 }];
+    }
+
+    let boostedIndex = closeIndex;
+    let closeAllocation = overlaps.find(item => item.index === closeIndex);
+    if (!closeAllocation) {
+      closeAllocation = overlaps.reduce((best, item) => {
+        if (!best) return item;
+        const itemDistance = Math.abs(profile[item.index].price - close);
+        const bestDistance = Math.abs(profile[best.index].price - close);
+        return itemDistance < bestDistance ? item : best;
+      }, null);
+      boostedIndex = closeAllocation?.index ?? closeIndex;
+    }
+
+    if (!closeAllocation || overlaps.length === 1 || closeWeightMultiplier <= 1) {
+      return overlaps.map(item => ({
+        index: item.index,
+        share: item.overlap / totalOverlap,
+      }));
+    }
+
+    const baseCloseShare = closeAllocation.overlap / totalOverlap;
+    const boostedCloseShare = (baseCloseShare * closeWeightMultiplier)
+      / ((baseCloseShare * closeWeightMultiplier) + (1 - baseCloseShare));
+    const otherShare = (1 - boostedCloseShare) / (overlaps.length - 1);
+
+    return overlaps.map(item => ({
+      index: item.index,
+      share: item.index === boostedIndex ? boostedCloseShare : otherShare,
+    }));
+  };
+
+  const applyTurnoverDecay = (kline) => {
+    if (!enableTurnoverDecay) return;
+    const decayRate = normalizeTurnoverRate(kline?.turnover_rate ?? kline?.turnoverRate);
+    if (decayRate <= 0) return;
+    const remainingRate = 1 - decayRate;
+    profile.forEach((item) => {
+      item.volume *= remainingRate;
+    });
+  };
+
+  validKlines.forEach((kline) => {
+    const volume = Number(kline.volume);
+    applyTurnoverDecay(kline);
+
+    buildVolumeAllocations(kline).forEach(({ index, share }) => {
+      const allocatedVolume = volume * share;
+      if (allocatedVolume <= 0) return;
+      profile[index].volume += allocatedVolume;
+      profile[index].touch_count += 1;
+      profile[index].max_daily_volume = Math.max(profile[index].max_daily_volume, allocatedVolume);
+    });
   });
 
   const profileVolumes = profile
@@ -214,6 +288,8 @@ export const appendRollingPocSupportResistance = (
     maxLevelsPerSide = 2,
     minPeriods,
     volumeStdDevMultiplier = 1,
+    enableTurnoverDecay = false,
+    closePriceWeightMultiplier = 10,
     outputStartIndex = 0,
   } = {}
 ) => {
@@ -240,6 +316,8 @@ export const appendRollingPocSupportResistance = (
           binCount,
           maxLevelsPerSide,
           volumeStdDevMultiplier,
+          enableTurnoverDecay,
+          closePriceWeightMultiplier,
         }
       );
 

@@ -121,6 +121,7 @@ const StockKlineChart = ({
   const [buyPoints, setBuyPoints] = useState([]);
   const [sellPoints, setSellPoints] = useState([]);
   const [showSupportResistance, setShowSupportResistance] = useState(true);
+  const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
   const [chartOption, setChartOption] = useState({});
 
   useEffect(() => {
@@ -139,10 +140,11 @@ const StockKlineChart = ({
       maxLevelsPerSide: 2,
       minPeriods: supportResistanceWindow,
       volumeStdDevMultiplier,
+      enableTurnoverDecay,
     });
     const processed = preprocessKlinesVolume(enriched, volumeStdDevMultiplier, VOLUME_LOOKBACK_DAYS);
     setProcessedKlines(processed);
-  }, [rawKlines, supportResistanceWindow, volumeStdDevMultiplier]);
+  }, [rawKlines, supportResistanceWindow, volumeStdDevMultiplier, enableTurnoverDecay]);
 
   useEffect(() => {
     if (typeof onKlinesChange === 'function') {
@@ -729,6 +731,9 @@ const StockKlineChart = ({
               <div style={{ marginTop: 6 }}>
                 筹码分布粒度固定为 48 个价格桶：<code>桶宽 = (窗口最高价 - 窗口最低价) / 48</code>。
               </div>
+              <div style={{ marginTop: 6 }}>
+                单根 K 线成交量先按价格桶重叠比例分配；收盘价所在桶使用 10 倍权重，剩余成交量均分到其他覆盖桶。
+              </div>
             </>
           )}
         >
@@ -786,12 +791,28 @@ const StockKlineChart = ({
             onChange={setShowSupportResistance}
           />
         </Form.Item>
+        <Form.Item
+          label={renderMetricTitle(
+            '换手衰减',
+            <>
+              <div>开启后，每根历史 K 线会先用当天换手率衰减已有筹码，再加入当天新成交量。</div>
+              <div style={{ marginTop: 6 }}>
+                换手率由后端按 <code>成交量 / 流通股本</code> 计算；没有流通股本数据时，该 K 线不会触发衰减。
+              </div>
+            </>
+          )}
+        >
+          <Switch
+            checked={enableTurnoverDecay}
+            onChange={setEnableTurnoverDecay}
+          />
+        </Form.Item>
       </Form>
       {loading ? (
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}`}
+          key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}`}
           option={chartOption}
           notMerge={true}
           style={{ height }}
