@@ -65,14 +65,14 @@ def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[s
     result: Dict[str, Dict[str, Any]] = {}
     if not quotes:
         return result
-    items = quotes.values() if isinstance(quotes, dict) else quotes
-    for item in items or []:
+    items = quotes.items() if isinstance(quotes, dict) else [(None, item) for item in quotes]
+    for key, item in items or []:
         item_source = source
         if isinstance(item, dict):
-            symbol = normalize_symbol(item.get("symbol") or item.get("client_symbol"))
+            symbol = normalize_symbol(item.get("symbol") or item.get("client_symbol") or key)
             item_source = item.get("source") or item.get("price_source") or source
         else:
-            symbol = normalize_symbol(getattr(item, "symbol", None))
+            symbol = normalize_symbol(getattr(item, "symbol", None) or key)
         if not symbol:
             continue
         price = _extract_quote_price(item)
@@ -149,17 +149,18 @@ async def get_realtime_price_details(
     symbols: Iterable[Any],
     *,
     timeout: float = 10.0,
-    prefetched_quotes: Optional[Any] = None,
+    prefetched_prices: Optional[Any] = None,
+    prefer_hub: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     normalized_symbols = _normalize_symbols(symbols)
     result: Dict[str, Dict[str, Any]] = {}
 
-    for symbol, item in _normalize_quote_map(prefetched_quotes, "prefetched_hub").items():
+    for symbol, item in _normalize_quote_map(prefetched_prices, "prefetched_prices").items():
         if symbol in normalized_symbols:
             result[symbol] = _store_quote(
                 symbol,
                 item["price"],
-                item.get("source") or "prefetched_hub",
+                item.get("source") or "prefetched_prices",
                 item.get("raw") or item,
             )
 
@@ -171,24 +172,40 @@ async def get_realtime_price_details(
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
 
     hub_error = None
-    if missing:
+    longport_error = None
+
+    async def fetch_hub_for_missing():
+        nonlocal hub_error
+        current_missing = [symbol for symbol in normalized_symbols if symbol not in result]
+        if not current_missing:
+            return
         try:
-            result.update(await _fetch_hub_quotes(external_trading_account_id, missing, timeout))
+            result.update(await _fetch_hub_quotes(external_trading_account_id, current_missing, timeout))
         except ExternalTradingConnectionError as exc:
             hub_error = exc
             logger.warning("External trading hub quote failed for valuation: %s", exc)
         except Exception as exc:
             hub_error = exc
             logger.warning("External trading hub quote failed for valuation: %s", exc)
-    missing = [symbol for symbol in normalized_symbols if symbol not in result]
 
-    longport_error = None
-    if missing:
+    async def fetch_longport_for_missing():
+        nonlocal longport_error
+        current_missing = [symbol for symbol in normalized_symbols if symbol not in result]
+        if not current_missing:
+            return
         try:
-            result.update(await _fetch_longport_quotes(missing))
+            result.update(await _fetch_longport_quotes(current_missing))
         except Exception as exc:
             longport_error = exc
             logger.warning("LongPort quote fallback failed for valuation: %s", exc)
+
+    if prefer_hub:
+        await fetch_hub_for_missing()
+        await fetch_longport_for_missing()
+    else:
+        await fetch_longport_for_missing()
+        await fetch_hub_for_missing()
+
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
     if missing:
         errors = []
@@ -231,13 +248,15 @@ async def get_realtime_quote_map(
     symbols: Iterable[Any],
     *,
     timeout: float = 10.0,
-    prefetched_quotes: Optional[Any] = None,
+    prefetched_prices: Optional[Any] = None,
+    prefer_hub: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     price_details = await get_realtime_price_details(
         external_trading_account_id,
         symbols,
         timeout=timeout,
-        prefetched_quotes=prefetched_quotes,
+        prefetched_prices=prefetched_prices,
+        prefer_hub=prefer_hub,
     )
     return price_details_to_quote_map(price_details)
 
@@ -247,13 +266,15 @@ async def get_realtime_reference_prices(
     symbols: Iterable[Any],
     *,
     timeout: float = 10.0,
-    prefetched_quotes: Optional[Any] = None,
+    prefetched_prices: Optional[Any] = None,
+    prefer_hub: bool = True,
 ) -> Dict[str, float]:
     price_details = await get_realtime_price_details(
         external_trading_account_id,
         symbols,
         timeout=timeout,
-        prefetched_quotes=prefetched_quotes,
+        prefetched_prices=prefetched_prices,
+        prefer_hub=prefer_hub,
     )
     return {
         normalize_symbol(symbol): safe_float(detail.get("price"))
@@ -268,7 +289,7 @@ async def calculate_sub_account_net_asset(
     *,
     positions: Optional[List[ExternalTradingLedgerPosition]] = None,
     timeout: float = 10.0,
-    prefetched_quotes: Optional[Any] = None,
+    prefetched_prices: Optional[Any] = None,
     update_positions: bool = True,
 ) -> Dict[str, Any]:
     if positions is None:
@@ -283,7 +304,7 @@ async def calculate_sub_account_net_asset(
         sub_account.external_trading_account_id,
         symbols,
         timeout=timeout,
-        prefetched_quotes=prefetched_quotes,
+        prefetched_prices=prefetched_prices,
     ) if symbols else {}
 
     now = datetime.now()

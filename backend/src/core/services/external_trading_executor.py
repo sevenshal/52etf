@@ -338,7 +338,7 @@ async def _reference_prices_for_plan(account_pk: int, symbols: List[str]) -> Dic
     if not symbols:
         return {}
     try:
-        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0)
+        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0, prefer_hub=False)
     except ExternalTradingValuationError as exc:
         logger.warning("External trading executor reference price lookup failed: %s", exc)
         return {}
@@ -508,7 +508,11 @@ async def _submit_current_targets(
             clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
         )
-        symbols = plan.get("symbols") or []
+        symbols = sorted({
+            normalize_symbol(cross.get("symbol"))
+            for cross in (plan.get("internal_crosses") or [])
+            if safe_int(cross.get("quantity")) > 0 and normalize_symbol(cross.get("symbol"))
+        })
 
     if symbols:
         reference_prices = await _reference_prices_for_plan(account_pk, symbols)

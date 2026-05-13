@@ -32,7 +32,6 @@ from ...core.external_trading_database import (
     get_external_trading_db,
     get_external_trading_db_ctx,
 )
-from ...core.services.external_trading import ExternalTradingConnectionError, external_trading_hub
 from ...core.services.external_trading_executor import trigger_external_trading_executor
 from ...core.services.external_trading_execution_policy import resolve_execution_policy
 from ...core.services.external_trading_ledger import (
@@ -47,7 +46,7 @@ from ...core.services.external_trading_ledger import (
 from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
-    get_realtime_quote_map,
+    get_realtime_reference_prices,
 )
 from ...core.utils import send_alert_email
 from .account import valid_account
@@ -800,32 +799,6 @@ def _get_level_price(levels, level: int) -> float:
     return 0.0
 
 
-def _get_quote_last_price(quote: Dict) -> float:
-    for key in ("price", "last_px", "last_price", "latest_price", "current_price"):
-        price = _safe_float(quote.get(key))
-        if price > 0:
-            return price
-    return 0.0
-
-
-def _get_plan_estimated_price(quote: Dict, side: str) -> Tuple[float, str]:
-    side = str(side or "").upper()
-    bid = _safe_float(quote.get("bid"))
-    ask = _safe_float(quote.get("ask"))
-    last_price = _get_quote_last_price(quote)
-    if side == "BUY":
-        if ask > 0:
-            return ask, "ask_estimate"
-        if last_price > 0:
-            return last_price, "last_price_estimate"
-        return bid, "bid_fallback_estimate"
-    if bid > 0:
-        return bid, "bid_estimate"
-    if last_price > 0:
-        return last_price, "last_price_estimate"
-    return ask, "ask_fallback_estimate"
-
-
 def _order_estimated_price(order: Dict) -> float:
     return _safe_float(
         order.get("limit_price"),
@@ -979,28 +952,6 @@ async def _build_live_trade_plan(
         if index < len(target_weights_pct)
     }
 
-    try:
-        assets_resp, positions_resp = await asyncio.gather(
-            external_trading_hub.get_assets(external_account.id, timeout=10.0),
-            external_trading_hub.get_positions(external_account.id, timeout=10.0),
-        )
-    except ExternalTradingConnectionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-
-    assets = assets_resp.get("assets") or {}
-    raw_positions = positions_resp.get("positions") or []
-    broker_positions = {}
-    for item in raw_positions:
-        symbol = _to_w20_symbol(item.get("symbol") or item.get("client_symbol"))
-        if not symbol:
-            continue
-        broker_positions[symbol] = {
-            "quantity": _safe_int(item.get("quantity")),
-            "available_quantity": _safe_int(item.get("available_quantity"), _safe_int(item.get("quantity"))),
-            "cost_price": _safe_float(item.get("cost_price")),
-        }
-
-    account_available_cash = _safe_float(assets.get("available_cash"), _safe_float(assets.get("total_cash")))
     sub_account = _get_w20_live_sub_account(db, config, external_account)
     sub_account_allocated_cash = _safe_float(sub_account.cash_allocated)
     sub_account_available_cash = _safe_float(sub_account.cash_available, sub_account_allocated_cash)
@@ -1016,20 +967,29 @@ async def _build_live_trade_plan(
     }
     open_quantities = get_open_order_quantities(db, sub_account.id)
 
-    managed_symbols = set(_to_w20_symbol(symbol) for symbol in (config.symbols or []))
-    quote_symbols = sorted(managed_symbols | set(selected_symbols) | set(current_positions.keys()) | set(broker_positions.keys()))
+    plan_symbols = set(selected_symbols) | set(current_positions.keys()) | set(open_quantities.keys())
+    quote_symbols = sorted(plan_symbols)
     try:
-        quotes = await get_realtime_quote_map(external_account.id, quote_symbols, timeout=10.0)
+        reference_prices = await get_realtime_reference_prices(
+            external_account.id,
+            quote_symbols,
+            timeout=10.0,
+            prefer_hub=False,
+        )
     except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    quotes = {_to_w20_symbol(symbol): item for symbol, item in quotes.items() if _to_w20_symbol(symbol)}
+    reference_prices = {
+        _to_w20_symbol(symbol): _safe_float(price)
+        for symbol, price in reference_prices.items()
+        if _to_w20_symbol(symbol) and _safe_float(price) > 0
+    }
 
     try:
         valuation = await calculate_sub_account_net_asset(
             db,
             sub_account,
             positions=list(ledger_positions.values()),
-            prefetched_quotes=quotes,
+            prefetched_prices=reference_prices,
             timeout=10.0,
         )
     except ExternalTradingValuationError as exc:
@@ -1038,10 +998,7 @@ async def _build_live_trade_plan(
     sub_account_net_asset = valuation["net_asset"]
 
     lot_size = max(int(config.lot_size or 100), 1)
-    available_cash = min(
-        sub_account_available_cash,
-        account_available_cash,
-    )
+    available_cash = sub_account_available_cash
     trade_base_value = sub_account_net_asset
     if trade_base_value <= 0:
         raise HTTPException(status_code=400, detail="虚拟子账户净资产为空，无法生成实盘计划")
@@ -1050,14 +1007,9 @@ async def _build_live_trade_plan(
     sell_orders = []
     buy_candidates = []
     target_rows = []
-    for symbol in sorted(managed_symbols | set(selected_symbols)):
-        quote = quotes.get(symbol) or {}
-        bid = _safe_float(quote.get("bid"))
-        ask = _safe_float(quote.get("ask"))
-        last_price = _get_quote_last_price(quote)
-        buy_price, buy_price_source = _get_plan_estimated_price(quote, "BUY")
-        sell_price, sell_price_source = _get_plan_estimated_price(quote, "SELL")
-        reference_price = buy_price or sell_price or ask or bid or last_price
+    for symbol in sorted(plan_symbols):
+        reference_price = _safe_float(reference_prices.get(symbol))
+        price_source = "realtime_reference_price"
         if reference_price <= 0:
             rows.append({
                 "symbol": symbol,
@@ -1066,7 +1018,7 @@ async def _build_live_trade_plan(
                 "target_quantity": 0,
                 "delta_quantity": 0,
                 "action": "SKIP",
-                "message": "无可用盘口价格",
+                "message": "无可用实时参考价",
             })
             continue
 
@@ -1075,14 +1027,10 @@ async def _build_live_trade_plan(
         pending_sell_quantity = (open_quantities.get(symbol) or {}).get("SELL", 0)
         effective_quantity = current_quantity + pending_buy_quantity - pending_sell_quantity
         ledger_available_quantity = current_positions.get(symbol, {}).get("available_quantity", current_quantity)
-        broker_available_quantity = broker_positions.get(symbol, {}).get("available_quantity", ledger_available_quantity)
-        available_quantity = max(
-            min(ledger_available_quantity, broker_available_quantity) - pending_sell_quantity,
-            0,
-        )
+        available_quantity = max(ledger_available_quantity - pending_sell_quantity, 0)
         target_weight = target_weight_by_symbol.get(symbol, 0.0)
         target_value = trade_base_value * target_weight
-        target_quantity = _round_to_lot(target_value / buy_price, lot_size) if target_weight > 0 and buy_price > 0 else 0
+        target_quantity = _round_to_lot(target_value / reference_price, lot_size) if target_weight > 0 else 0
         delta = target_quantity - effective_quantity
         target_rows.append({
             "symbol": symbol,
@@ -1098,37 +1046,28 @@ async def _build_live_trade_plan(
             "pending_buy_quantity": pending_buy_quantity,
             "pending_sell_quantity": pending_sell_quantity,
             "effective_quantity": effective_quantity,
-            "broker_quantity": broker_positions.get(symbol, {}).get("quantity", 0),
-            "broker_available_quantity": broker_available_quantity,
             "available_quantity": available_quantity,
             "target_quantity": target_quantity,
             "delta_quantity": delta,
-            "bid": bid or None,
-            "ask": ask or None,
-            "last_price": last_price or None,
-            "buy_price_source": buy_price_source,
-            "sell_price_source": sell_price_source,
-            "estimated_price": buy_price if delta > 0 else sell_price,
+            "reference_price": reference_price,
+            "last_price": reference_price,
+            "price_source": price_source,
+            "estimated_price": reference_price,
             "action": "HOLD",
             "message": "",
         }
         if delta < 0:
-            if sell_price <= 0:
-                row["action"] = "SKIP"
-                row["message"] = "无可用卖出价格"
-                rows.append(row)
-                continue
             sell_quantity = min(abs(delta), max(available_quantity, 0))
             if sell_quantity > 0:
                 row["action"] = "SELL"
                 row["order_quantity"] = sell_quantity
-                row["estimated_amount"] = round(sell_quantity * sell_price, 2)
+                row["estimated_amount"] = round(sell_quantity * reference_price, 2)
                 order = {
                     "symbol": symbol,
                     "side": "SELL",
                     "quantity": sell_quantity,
-                    "estimated_price": sell_price,
-                    "price_source": sell_price_source,
+                    "estimated_price": reference_price,
+                    "price_source": price_source,
                     "remark": f"W20 {config.id} rebalance",
                 }
                 sell_orders.append(order)
@@ -1136,22 +1075,17 @@ async def _build_live_trade_plan(
                 row["action"] = "SKIP"
                 row["message"] = "无可卖数量"
         elif delta > 0:
-            if buy_price <= 0:
-                row["action"] = "SKIP"
-                row["message"] = "无可用买入价格"
-                rows.append(row)
-                continue
             buy_quantity = _round_to_lot(delta, lot_size)
             if buy_quantity >= lot_size:
                 row["action"] = "BUY"
                 row["order_quantity"] = buy_quantity
-                row["estimated_amount"] = round(buy_quantity * buy_price, 2)
+                row["estimated_amount"] = round(buy_quantity * reference_price, 2)
                 order = {
                     "symbol": symbol,
                     "side": "BUY",
                     "quantity": buy_quantity,
-                    "estimated_price": buy_price,
-                    "price_source": buy_price_source,
+                    "estimated_price": reference_price,
+                    "price_source": price_source,
                     "remark": f"W20 {config.id} rebalance",
                 }
                 buy_candidates.append({
@@ -1161,7 +1095,17 @@ async def _build_live_trade_plan(
             else:
                 row["action"] = "SKIP"
                 row["message"] = "买入数量不足最小交易单位"
-        rows.append(row)
+        is_relevant_row = any([
+            row["action"] != "HOLD",
+            _safe_float(row.get("target_weight_pct")) > 0,
+            _safe_int(row.get("current_quantity")) != 0,
+            _safe_int(row.get("pending_buy_quantity")) != 0,
+            _safe_int(row.get("pending_sell_quantity")) != 0,
+            _safe_int(row.get("target_quantity")) != 0,
+            _safe_int(row.get("delta_quantity")) != 0,
+        ])
+        if is_relevant_row:
+            rows.append(row)
 
     projected_cash = available_cash + sum(_order_estimated_price(item) * _safe_int(item.get("quantity")) for item in sell_orders)
     buy_orders = []
@@ -1201,8 +1145,6 @@ async def _build_live_trade_plan(
         "strategy_config_id": config.id,
         "sub_account": sub_account_data,
         "latest_signal": latest_signal,
-        "assets": assets,
-        "broker_positions": broker_positions,
         "open_order_quantities": open_quantities,
         "target_positions": target_rows,
         "trade_base_value": trade_base_value,

@@ -657,7 +657,11 @@ async def _build_netted_executor_plan(
         clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
         price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
     )
-    symbols = plan.get("symbols") or []
+    symbols = sorted({
+        normalize_symbol(cross.get("symbol"))
+        for cross in (plan.get("internal_crosses") or [])
+        if safe_int(cross.get("quantity")) > 0 and normalize_symbol(cross.get("symbol"))
+    })
     connected = external_trading_hub.get_status(account.id).get("connected")
     if require_connection and not connected:
         raise ExternalTradingConnectionError("外部交易账号未连接")
@@ -669,6 +673,7 @@ async def _build_netted_executor_plan(
                 account.id,
                 symbols,
                 timeout=min(timeout_seconds, 15.0),
+                prefer_hub=False,
             )
         except ExternalTradingValuationError as exc:
             reference_price_error = str(exc)
