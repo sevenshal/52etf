@@ -974,7 +974,6 @@ async def _build_live_trade_plan(
             external_account.id,
             quote_symbols,
             timeout=10.0,
-            prefer_hub=False,
         )
     except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

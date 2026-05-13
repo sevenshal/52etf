@@ -338,7 +338,7 @@ async def _reference_prices_for_plan(account_pk: int, symbols: List[str]) -> Dic
     if not symbols:
         return {}
     try:
-        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0, prefer_hub=False)
+        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0)
     except ExternalTradingValuationError as exc:
         logger.warning("External trading executor reference price lookup failed: %s", exc)
         return {}

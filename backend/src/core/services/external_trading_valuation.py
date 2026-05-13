@@ -1,8 +1,6 @@
 import asyncio
 import logging
 import os
-import threading
-import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -18,19 +16,11 @@ from .longport import LongPortService
 
 logger = logging.getLogger(__name__)
 
-QUOTE_CACHE_TTL_SECONDS = 10.0
 LONGPORT_MARKET_DATA_ACCOUNT_ID = os.getenv("EXTERNAL_TRADING_VALUATION_LONGPORT_ACCOUNT_ID", "LBPT10001248")
-
-_quote_cache: Dict[str, Dict[str, Any]] = {}
-_quote_cache_lock = threading.Lock()
 
 
 class ExternalTradingValuationError(Exception):
     """Raised when a virtual sub-account cannot be valued with current prices."""
-
-
-def _now_ts() -> float:
-    return time.monotonic()
 
 
 def _normalize_symbols(symbols: Iterable[Any]) -> List[str]:
@@ -83,35 +73,8 @@ def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[s
             "price": price,
             "source": item_source,
             "raw": item,
-            "cached": False,
         }
     return result
-
-
-def _get_cached_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    now = _now_ts()
-    with _quote_cache_lock:
-        cached = _quote_cache.get(symbol)
-        if not cached:
-            return None
-        if now - safe_float(cached.get("cached_at_ts")) > QUOTE_CACHE_TTL_SECONDS:
-            return None
-        return {**cached, "cached": True}
-
-
-def _store_quote(symbol: str, price: float, source: str, raw: Optional[Any] = None) -> Dict[str, Any]:
-    item = {
-        "symbol": symbol,
-        "price": float(price),
-        "source": source,
-        "raw": raw,
-        "cached": False,
-        "cached_at": datetime.now().isoformat(),
-        "cached_at_ts": _now_ts(),
-    }
-    with _quote_cache_lock:
-        _quote_cache[symbol] = item
-    return item
 
 
 async def _fetch_hub_quotes(
@@ -122,10 +85,7 @@ async def _fetch_hub_quotes(
     if not symbols:
         return {}
     response = await external_trading_hub.get_quotes(external_trading_account_id, symbols, timeout=timeout)
-    result = {}
-    for symbol, item in _normalize_quote_map(response.get("quotes") or [], "hub").items():
-        result[symbol] = _store_quote(symbol, item["price"], "hub", item.get("raw") or item)
-    return result
+    return _normalize_quote_map(response.get("quotes") or [], "hub")
 
 
 async def _fetch_longport_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -138,10 +98,7 @@ async def _fetch_longport_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]
 
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None, _call_longport)
-    result = {}
-    for symbol, item in _normalize_quote_map(response or [], "longport").items():
-        result[symbol] = _store_quote(symbol, item["price"], "longport", item.get("raw") or item)
-    return result
+    return _normalize_quote_map(response or [], "longport")
 
 
 async def get_realtime_price_details(
@@ -150,25 +107,14 @@ async def get_realtime_price_details(
     *,
     timeout: float = 10.0,
     prefetched_prices: Optional[Any] = None,
-    prefer_hub: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     normalized_symbols = _normalize_symbols(symbols)
     result: Dict[str, Dict[str, Any]] = {}
 
     for symbol, item in _normalize_quote_map(prefetched_prices, "prefetched_prices").items():
         if symbol in normalized_symbols:
-            result[symbol] = _store_quote(
-                symbol,
-                item["price"],
-                item.get("source") or "prefetched_prices",
-                item.get("raw") or item,
-            )
+            result[symbol] = item
 
-    missing = [symbol for symbol in normalized_symbols if symbol not in result]
-    for symbol in list(missing):
-        cached = _get_cached_quote(symbol)
-        if cached:
-            result[symbol] = cached
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
 
     hub_error = None
@@ -199,66 +145,19 @@ async def get_realtime_price_details(
             longport_error = exc
             logger.warning("LongPort quote fallback failed for valuation: %s", exc)
 
-    if prefer_hub:
-        await fetch_hub_for_missing()
-        await fetch_longport_for_missing()
-    else:
-        await fetch_longport_for_missing()
-        await fetch_hub_for_missing()
+    await fetch_longport_for_missing()
+    await fetch_hub_for_missing()
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
     if missing:
         errors = []
-        if hub_error:
-            errors.append(f"hub: {hub_error}")
         if longport_error:
             errors.append(f"longport: {longport_error}")
+        if hub_error:
+            errors.append(f"hub: {hub_error}")
         suffix = f" ({'; '.join(errors)})" if errors else ""
         raise ExternalTradingValuationError(f"无法获取以下标的最新价: {', '.join(missing)}{suffix}")
     return result
-
-
-def price_details_to_quote_map(price_details: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Convert valuation price details into quote-like rows for callers needing bid/ask/last fields."""
-    result: Dict[str, Dict[str, Any]] = {}
-    for raw_symbol, detail in (price_details or {}).items():
-        symbol = normalize_symbol(detail.get("symbol") or raw_symbol)
-        if not symbol:
-            continue
-        raw = detail.get("raw")
-        quote = dict(raw) if isinstance(raw, dict) else {}
-        price = safe_float(detail.get("price")) or _extract_quote_price(quote)
-        if price <= 0:
-            continue
-        quote["symbol"] = symbol
-        quote.setdefault("client_symbol", symbol)
-        quote["price"] = price
-        quote.setdefault("last_price", price)
-        quote["source"] = detail.get("source")
-        quote["price_source"] = detail.get("source")
-        quote["cached"] = bool(detail.get("cached"))
-        if detail.get("cached_at"):
-            quote["cached_at"] = detail.get("cached_at")
-        result[symbol] = quote
-    return result
-
-
-async def get_realtime_quote_map(
-    external_trading_account_id: int,
-    symbols: Iterable[Any],
-    *,
-    timeout: float = 10.0,
-    prefetched_prices: Optional[Any] = None,
-    prefer_hub: bool = True,
-) -> Dict[str, Dict[str, Any]]:
-    price_details = await get_realtime_price_details(
-        external_trading_account_id,
-        symbols,
-        timeout=timeout,
-        prefetched_prices=prefetched_prices,
-        prefer_hub=prefer_hub,
-    )
-    return price_details_to_quote_map(price_details)
 
 
 async def get_realtime_reference_prices(
@@ -267,14 +166,12 @@ async def get_realtime_reference_prices(
     *,
     timeout: float = 10.0,
     prefetched_prices: Optional[Any] = None,
-    prefer_hub: bool = True,
 ) -> Dict[str, float]:
     price_details = await get_realtime_price_details(
         external_trading_account_id,
         symbols,
         timeout=timeout,
         prefetched_prices=prefetched_prices,
-        prefer_hub=prefer_hub,
     )
     return {
         normalize_symbol(symbol): safe_float(detail.get("price"))
@@ -329,7 +226,6 @@ async def calculate_sub_account_net_asset(
             "price": price,
             "market_value": market_value,
             "price_source": detail.get("source"),
-            "cached": bool(detail.get("cached")),
         })
 
     cash_available = round(safe_float(sub_account.cash_available), 2)

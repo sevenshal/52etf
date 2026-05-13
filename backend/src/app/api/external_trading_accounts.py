@@ -673,7 +673,6 @@ async def _build_netted_executor_plan(
                 account.id,
                 symbols,
                 timeout=min(timeout_seconds, 15.0),
-                prefer_hub=False,
             )
         except ExternalTradingValuationError as exc:
             reference_price_error = str(exc)
