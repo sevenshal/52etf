@@ -475,7 +475,7 @@ const USStockSignalLive = () => {
         <Space size={[4, 4]} wrap>
           {value?.is_holding && <Tag color="gold">持仓</Tag>}
           {value?.is_selected && <Tag color="green">TopN</Tag>}
-          {value?.in_sell_rank_threshold && <Tag color="blue">卖出线内</Tag>}
+          {value?.in_sell_rank_threshold && <Tag color="blue">线内持有</Tag>}
           {value?.is_holding && !value?.in_sell_rank_threshold && <Tag color="red">卖出</Tag>}
         </Space>
       ),
