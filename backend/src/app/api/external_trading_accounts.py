@@ -62,6 +62,7 @@ from ...core.services.external_trading_ledger import (
 from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
+    get_realtime_reference_prices,
 )
 from ...core.services.external_trading_crypto import (
     ExternalTradingCryptoError,
@@ -412,17 +413,6 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _quote_reference_price(quote: Dict[str, Any]) -> float:
-    price = _safe_float(quote.get("price") or quote.get("last_price"))
-    if price > 0:
-        return price
-    bid = _safe_float(quote.get("bid"))
-    ask = _safe_float(quote.get("ask"))
-    if bid > 0 and ask > 0:
-        return round((bid + ask) / 2, 6)
-    return bid or ask or 0.0
-
-
 def _iso(value: Any) -> Optional[str]:
     if not value:
         return None
@@ -671,14 +661,30 @@ async def _build_netted_executor_plan(
     connected = external_trading_hub.get_status(account.id).get("connected")
     if require_connection and not connected:
         raise ExternalTradingConnectionError("外部交易账号未连接")
-    if symbols and connected:
-        quotes_resp = await external_trading_hub.get_quotes(account.id, symbols, timeout=min(timeout_seconds, 15.0))
-        reference_prices = {}
-        for quote in quotes_resp.get("quotes") or []:
-            symbol = normalize_symbol(quote.get("symbol") or quote.get("client_symbol"))
-            if not symbol:
-                continue
-            reference_prices[symbol] = _quote_reference_price(quote)
+    reference_prices: Dict[str, float] = {}
+    reference_price_error = None
+    if symbols:
+        try:
+            reference_prices = await get_realtime_reference_prices(
+                account.id,
+                symbols,
+                timeout=min(timeout_seconds, 15.0),
+            )
+        except ExternalTradingValuationError as exc:
+            reference_price_error = str(exc)
+            logger.warning(
+                "External trading reference price lookup failed for account %s: %s",
+                account.id,
+                exc,
+            )
+        except Exception as exc:
+            reference_price_error = str(exc)
+            logger.warning(
+                "External trading reference price lookup failed for account %s: %s",
+                account.id,
+                exc,
+            )
+    if reference_prices:
         plan = build_netted_target_execution_plan(
             db,
             account_id=owner_account_id,
@@ -692,9 +698,9 @@ async def _build_netted_executor_plan(
             price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
             reference_prices=reference_prices,
         )
-        plan["reference_prices"] = reference_prices
-    else:
-        plan["reference_prices"] = {}
+    plan["reference_prices"] = reference_prices
+    if reference_price_error:
+        plan["reference_price_error"] = reference_price_error
     plan["connected"] = bool(connected)
     plan["account_executor_policy"] = resolve_execution_policy(account)
     return plan

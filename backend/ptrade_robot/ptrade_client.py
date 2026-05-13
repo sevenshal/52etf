@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 import base64
 import hashlib
 import hmac
@@ -22,7 +22,7 @@ API_HOST = "api.52etf.vip"
 DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl" #poiuytrewqLKJHGFDSAMNBVCXZasdfgh
 DEFAULT_IDENTIFIER = "GS66301027527" #GS66010000018
 
-HEARTBEAT_INTERVAL_SECONDS = 20
+HEARTBEAT_INTERVAL_SECONDS = 10
 RECONNECT_DELAY_SECONDS = 5
 DISABLE_AUTO_WEBSOCKET = False
 RSA_N_HEX = (
@@ -39,7 +39,7 @@ _MAC_KEY = hashlib.sha256(b"external-trading-mac:" + _SHARED_KEY).digest()
 _NONCE_COUNTER = 0
 
 try:
-    from tornado import gen, ioloop, websocket
+    from tornado import ioloop, websocket
     HAS_WEBSOCKET = True
 except ImportError:
     HAS_WEBSOCKET = False
@@ -244,6 +244,7 @@ def run_ws_client():
     while True:
         conn = None
         loop = None
+        heartbeat = None
         try:
             loop = ioloop.IOLoop()
             loop.make_current()
@@ -255,28 +256,39 @@ def run_ws_client():
             g.ws_conn = conn
             log.info("External trading WebSocket connected.")
 
-            while True:
+            def send_heartbeat():
                 try:
-                    msg = loop.run_sync(
-                        lambda: gen.with_timeout(
-                            timedelta(seconds=HEARTBEAT_INTERVAL_SECONDS),
-                            conn.read_message(),
-                        )
-                    )
-                except gen.TimeoutError:
-                    send_ws_json(loop, conn, {
+                    conn.write_message(encrypt_message({
                         "type": "heartbeat",
                         "ts": datetime.now().isoformat(),
-                    })
-                    continue
+                    }))
+                except Exception as heartbeat_error:
+                    log_warn(
+                        "Failed to send external trading heartbeat: %s: %s"
+                        % (heartbeat_error.__class__.__name__, str(heartbeat_error))
+                    )
+
+            heartbeat = ioloop.PeriodicCallback(
+                send_heartbeat,
+                HEARTBEAT_INTERVAL_SECONDS * 1000,
+            )
+            heartbeat.start()
+
+            while True:
+                msg = loop.run_sync(lambda: conn.read_message())
 
                 if msg is None:
                     log_warn("External trading WebSocket closed by server.")
                     break
                 handle_ws_message(loop, conn, msg)
         except Exception as e:
-            log.error("External trading WebSocket error: %s" % str(e))
+            log.error("External trading WebSocket error: %s: %s" % (e.__class__.__name__, str(e)))
         finally:
+            if heartbeat:
+                try:
+                    heartbeat.stop()
+                except Exception:
+                    pass
             if conn:
                 try:
                     conn.close()

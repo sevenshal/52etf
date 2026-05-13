@@ -38,10 +38,10 @@ from .external_trading_ledger import (
     record_cancel_result,
     record_submission_result,
     refresh_execution_status,
-    safe_float,
     safe_int,
     serialize_order,
 )
+from .external_trading_valuation import ExternalTradingValuationError, get_realtime_reference_prices
 
 logger = logging.getLogger(__name__)
 
@@ -129,17 +129,6 @@ def next_a_share_trading_day_open(now: Optional[datetime] = None) -> datetime:
     while not _is_china_trading_day(next_day):
         next_day += timedelta(days=1)
     return datetime.combine(next_day, A_SHARE_OPEN, tzinfo=CHINA_TZ)
-
-
-def _quote_reference_price(quote: Dict[str, Any]) -> float:
-    price = safe_float(quote.get("price") or quote.get("last_price"))
-    if price > 0:
-        return price
-    bid = safe_float(quote.get("bid"))
-    ask = safe_float(quote.get("ask"))
-    if bid > 0 and ask > 0:
-        return round((bid + ask) / 2, 6)
-    return bid or ask or 0.0
 
 
 def _try_mark_running(account_pk: int) -> bool:
@@ -348,14 +337,14 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
 async def _reference_prices_for_plan(account_pk: int, symbols: List[str]) -> Dict[str, float]:
     if not symbols:
         return {}
-    quotes_resp = await external_trading_hub.get_quotes(account_pk, symbols, timeout=10.0)
-    reference_prices = {}
-    for quote in quotes_resp.get("quotes") or []:
-        symbol = normalize_symbol(quote.get("symbol") or quote.get("client_symbol"))
-        if not symbol:
-            continue
-        reference_prices[symbol] = _quote_reference_price(quote)
-    return reference_prices
+    try:
+        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0)
+    except ExternalTradingValuationError as exc:
+        logger.warning("External trading executor reference price lookup failed: %s", exc)
+        return {}
+    except Exception as exc:
+        logger.warning("External trading executor reference price lookup failed: %s", exc)
+        return {}
 
 
 def _price_level_sequence(initial_price_level: int) -> List[int]:

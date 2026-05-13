@@ -47,6 +47,7 @@ from ...core.services.external_trading_ledger import (
 from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
+    get_realtime_quote_map,
 )
 from ...core.utils import send_alert_email
 from .account import valid_account
@@ -1018,15 +1019,10 @@ async def _build_live_trade_plan(
     managed_symbols = set(_to_w20_symbol(symbol) for symbol in (config.symbols or []))
     quote_symbols = sorted(managed_symbols | set(selected_symbols) | set(current_positions.keys()) | set(broker_positions.keys()))
     try:
-        quotes_resp = await external_trading_hub.get_quotes(external_account.id, quote_symbols, timeout=10.0)
-    except ExternalTradingConnectionError as exc:
+        quotes = await get_realtime_quote_map(external_account.id, quote_symbols, timeout=10.0)
+    except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-
-    quotes = {}
-    for item in quotes_resp.get("quotes") or []:
-        symbol = _to_w20_symbol(item.get("symbol") or item.get("client_symbol"))
-        if symbol:
-            quotes[symbol] = item
+    quotes = {_to_w20_symbol(symbol): item for symbol, item in quotes.items() if _to_w20_symbol(symbol)}
 
     try:
         valuation = await calculate_sub_account_net_asset(

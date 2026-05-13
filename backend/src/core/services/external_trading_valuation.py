@@ -67,8 +67,10 @@ def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[s
         return result
     items = quotes.values() if isinstance(quotes, dict) else quotes
     for item in items or []:
+        item_source = source
         if isinstance(item, dict):
             symbol = normalize_symbol(item.get("symbol") or item.get("client_symbol"))
+            item_source = item.get("source") or item.get("price_source") or source
         else:
             symbol = normalize_symbol(getattr(item, "symbol", None))
         if not symbol:
@@ -79,7 +81,7 @@ def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[s
         result[symbol] = {
             "symbol": symbol,
             "price": price,
-            "source": source,
+            "source": item_source,
             "raw": item,
             "cached": False,
         }
@@ -154,7 +156,12 @@ async def get_realtime_price_details(
 
     for symbol, item in _normalize_quote_map(prefetched_quotes, "prefetched_hub").items():
         if symbol in normalized_symbols:
-            result[symbol] = _store_quote(symbol, item["price"], "prefetched_hub", item.get("raw") or item)
+            result[symbol] = _store_quote(
+                symbol,
+                item["price"],
+                item.get("source") or "prefetched_hub",
+                item.get("raw") or item,
+            )
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
     for symbol in list(missing):
@@ -192,6 +199,67 @@ async def get_realtime_price_details(
         suffix = f" ({'; '.join(errors)})" if errors else ""
         raise ExternalTradingValuationError(f"无法获取以下标的最新价: {', '.join(missing)}{suffix}")
     return result
+
+
+def price_details_to_quote_map(price_details: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Convert valuation price details into quote-like rows for callers needing bid/ask/last fields."""
+    result: Dict[str, Dict[str, Any]] = {}
+    for raw_symbol, detail in (price_details or {}).items():
+        symbol = normalize_symbol(detail.get("symbol") or raw_symbol)
+        if not symbol:
+            continue
+        raw = detail.get("raw")
+        quote = dict(raw) if isinstance(raw, dict) else {}
+        price = safe_float(detail.get("price")) or _extract_quote_price(quote)
+        if price <= 0:
+            continue
+        quote["symbol"] = symbol
+        quote.setdefault("client_symbol", symbol)
+        quote["price"] = price
+        quote.setdefault("last_price", price)
+        quote["source"] = detail.get("source")
+        quote["price_source"] = detail.get("source")
+        quote["cached"] = bool(detail.get("cached"))
+        if detail.get("cached_at"):
+            quote["cached_at"] = detail.get("cached_at")
+        result[symbol] = quote
+    return result
+
+
+async def get_realtime_quote_map(
+    external_trading_account_id: int,
+    symbols: Iterable[Any],
+    *,
+    timeout: float = 10.0,
+    prefetched_quotes: Optional[Any] = None,
+) -> Dict[str, Dict[str, Any]]:
+    price_details = await get_realtime_price_details(
+        external_trading_account_id,
+        symbols,
+        timeout=timeout,
+        prefetched_quotes=prefetched_quotes,
+    )
+    return price_details_to_quote_map(price_details)
+
+
+async def get_realtime_reference_prices(
+    external_trading_account_id: int,
+    symbols: Iterable[Any],
+    *,
+    timeout: float = 10.0,
+    prefetched_quotes: Optional[Any] = None,
+) -> Dict[str, float]:
+    price_details = await get_realtime_price_details(
+        external_trading_account_id,
+        symbols,
+        timeout=timeout,
+        prefetched_quotes=prefetched_quotes,
+    )
+    return {
+        normalize_symbol(symbol): safe_float(detail.get("price"))
+        for symbol, detail in price_details.items()
+        if normalize_symbol(symbol) and safe_float(detail.get("price")) > 0
+    }
 
 
 async def calculate_sub_account_net_asset(
