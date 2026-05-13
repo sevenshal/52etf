@@ -1124,11 +1124,25 @@ async def update_log_status(
 
 class SnapshotHolding(BaseModel):
     symbol: str
-    name: str # Added name
-    quantity: float
-    price: float
-    market_value: float
-    ratio: float # Percentage 0-100
+    xueqiu_symbol: Optional[str] = None
+    name: str = ""
+    quantity: float = 0.0
+    price: float = 0.0
+    market_value: float = 0.0
+    ratio: float = 0.0
+    xueqiu_weight_pct: float = 0.0
+    target_weight_pct: float = 0.0
+    target_quantity: int = 0
+    target_value: float = 0.0
+    ledger_quantity: int = 0
+    ledger_available_quantity: int = 0
+    ledger_market_value: float = 0.0
+    ledger_weight_pct: float = 0.0
+    quantity_diff: int = 0
+    value_diff: float = 0.0
+    weight_diff_pct: float = 0.0
+    blacklisted: bool = False
+    diff_type: str = "MATCHED"
 
 class SnowballSnapshotResponse(BaseModel):
     config_id: int
@@ -1139,6 +1153,20 @@ class SnowballSnapshotResponse(BaseModel):
     last_synced_amount: float
     holdings: List[SnapshotHolding] = []
     updated_at: datetime
+    source: str = "xueqiu_live"
+    sub_account_id: Optional[int] = None
+    sub_account_name: Optional[str] = None
+    position_ratio: float = 100.0
+    target_market_value: float = 0.0
+    target_cash: float = 0.0
+    ledger_market_value: float = 0.0
+    ledger_cash: float = 0.0
+    ledger_net_asset: float = 0.0
+    ledger_stock_ratio: float = 0.0
+    ledger_cash_ratio: float = 0.0
+    cash_diff: float = 0.0
+    diff_count: int = 0
+    snapshot_updated_at: Optional[datetime] = None
     
     class Config:
         from_attributes = True
@@ -1147,81 +1175,217 @@ class SnowballSnapshotResponse(BaseModel):
 async def get_snapshot(
     config_id: int,
     account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trading_db: Session = Depends(get_external_trading_db)
 ):
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
     snapshot = db.query(SnowballPortfolioSnapshot).filter(
         SnowballPortfolioSnapshot.config_id == config_id,
-        SnowballPortfolioSnapshot.account_id == account_id
+        SnowballPortfolioSnapshot.account_id == account_id,
     ).first()
-    
-    if not snapshot:
-            return SnowballSnapshotResponse(
-                config_id=config_id,
-                market_value=0.0,
-                cash=0.0,
-                stock_ratio=0.0,
-                cash_ratio=0.0,
-                last_synced_amount=0.0,
-                holdings=[],
-                updated_at=datetime.now()
-            )
-    
-    # Calculate Real-time Values
-    holdings_dict = snapshot.holdings or {}
-    symbols = list(holdings_dict.keys())
-    
-    # 1. Fetch Real-time Prices
+
     acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
     cookie = acc_config.xueqiu_cookie if acc_config else None
-    quotes = await fetch_xueqiu_batch_quotes(symbols, cookie)
-    
-    # 2. Build Holding Details & Calc Total
-    detailed_holdings = []
-    total_stock_value = 0.0
-    
-    for sym, qty in holdings_dict.items():
-        info = quotes.get(sym, {})
-        price = info.get("price", 0.0)
-        name = info.get("name", "")
-        
-        mv = qty * price
-        total_stock_value += mv
-        
-        detailed_holdings.append(SnapshotHolding(
-            symbol=sym,
-            name=name,
-            quantity=qty,
-            price=price,
-            market_value=mv,
-            ratio=0.0 # Calc later
-        ))
-        
-    current_cash = snapshot.cash or 0.0
-    total_market_value = total_stock_value + current_cash
-    
-    # 3. Calculate Ratios
-    if total_market_value > 0:
-        for h in detailed_holdings:
-            h.ratio = (h.market_value / total_market_value) * 100
-        
-        stock_ratio = (total_stock_value / total_market_value) * 100
-        cash_ratio = (current_cash / total_market_value) * 100
-    else:
-        stock_ratio = 0.0
-        cash_ratio = 100.0 if current_cash > 0 else 0.0
 
-    # Sort by Market Value desc
-    detailed_holdings.sort(key=lambda x: x.market_value, reverse=True)
+    xueqiu_holdings = await fetch_xueqiu_holdings(config.combination_id, cookie)
+    blacklist = config.blacklisted_symbols or []
+    target_weights: Dict[str, Dict[str, Any]] = {}
+    all_xq_symbols = set()
+    for holding in xueqiu_holdings:
+        xq_symbol = _to_xueqiu_symbol(holding.get("symbol"))
+        trade_symbol = _to_trade_symbol(xq_symbol)
+        if not xq_symbol or not trade_symbol:
+            continue
+        all_xq_symbols.add(xq_symbol)
+        blacklisted = any(
+            fnmatch.fnmatch(xq_symbol, pattern) or fnmatch.fnmatch(trade_symbol, pattern)
+            for pattern in blacklist
+        )
+        raw_weight = safe_float(holding.get("weight"))
+        target_weights[trade_symbol] = {
+            "xueqiu_symbol": xq_symbol,
+            "name": (
+                holding.get("stockName")
+                or holding.get("stock_name")
+                or holding.get("name")
+                or holding.get("stockNameCN")
+                or ""
+            ),
+            "xueqiu_weight_pct": raw_weight,
+            "target_weight_pct": 0.0 if blacklisted else raw_weight,
+            "blacklisted": blacklisted,
+        }
+
+    sub_account = None
+    ledger_rows = []
+    if config.external_trading_account_id and config.live_sub_account_id:
+        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == config.live_sub_account_id,
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+        ).first()
+        if sub_account:
+            ledger_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
+                ExternalTradingLedgerPosition.sub_account_id == sub_account.id
+            ).all()
+
+    ledger_positions: Dict[str, ExternalTradingLedgerPosition] = {}
+    for row in ledger_rows:
+        trade_symbol = normalize_trading_symbol(row.symbol)
+        if not trade_symbol:
+            continue
+        if (
+            safe_int(row.quantity) <= 0
+            and safe_int(row.available_quantity) <= 0
+            and safe_float(row.market_value) <= 0
+        ):
+            continue
+        ledger_positions[trade_symbol] = row
+        xq_symbol = _to_xueqiu_symbol(trade_symbol)
+        if xq_symbol:
+            all_xq_symbols.add(xq_symbol)
+
+    quotes = await fetch_xueqiu_batch_quotes(sorted(all_xq_symbols), cookie)
+
+    def get_quote_info(trade_symbol: str) -> Dict[str, Any]:
+        xq_symbol = _to_xueqiu_symbol(trade_symbol)
+        info = quotes.get(xq_symbol or "", {}) if xq_symbol else {}
+        row = ledger_positions.get(trade_symbol)
+        price = safe_float(info.get("price"))
+        if price <= 0 and row:
+            price = safe_float(row.market_price, safe_float(row.avg_cost))
+        return {
+            "xueqiu_symbol": xq_symbol,
+            "name": info.get("name") or target_weights.get(trade_symbol, {}).get("name") or "",
+            "price": price,
+        }
+
+    ledger_market_value = 0.0
+    for trade_symbol, row in ledger_positions.items():
+        quote_info = get_quote_info(trade_symbol)
+        quantity = safe_int(row.quantity)
+        market_value = safe_float(row.market_value)
+        if quote_info["price"] > 0 and quantity > 0:
+            market_value = round(quantity * quote_info["price"], 2)
+        ledger_market_value += market_value
+
+    ledger_cash = safe_float(getattr(sub_account, "cash_available", 0.0)) if sub_account else 0.0
+    ledger_net_asset = round(ledger_cash + ledger_market_value, 2)
+    position_ratio = max(safe_float(config.total_position_ratio, 100.0), 0.0)
+    fallback_base_value = safe_float(
+        config.total_amount,
+        safe_float(getattr(snapshot, "market_value", 0.0), safe_float(getattr(snapshot, "last_synced_amount", 0.0))),
+    )
+    base_value = ledger_net_asset * position_ratio / 100.0 if ledger_net_asset > 0 else fallback_base_value
+
+    detailed_holdings = []
+    target_market_value = 0.0
+    all_trade_symbols = set(target_weights.keys()) | set(ledger_positions.keys())
+    for trade_symbol in sorted(all_trade_symbols):
+        quote_info = get_quote_info(trade_symbol)
+        price = quote_info["price"]
+        target = target_weights.get(trade_symbol) or {
+            "xueqiu_symbol": quote_info["xueqiu_symbol"],
+            "name": quote_info["name"],
+            "xueqiu_weight_pct": 0.0,
+            "target_weight_pct": 0.0,
+            "blacklisted": False,
+        }
+        target_weight_pct = safe_float(target.get("target_weight_pct"))
+        ideal_target_value = base_value * target_weight_pct / 100.0
+        target_quantity = 0
+        if price > 0 and ideal_target_value > 0:
+            target_quantity = int((ideal_target_value / price) / 100) * 100
+        target_value = round(target_quantity * price, 2) if price > 0 else round(ideal_target_value, 2)
+        target_market_value += target_value
+
+        ledger_row = ledger_positions.get(trade_symbol)
+        ledger_quantity = safe_int(getattr(ledger_row, "quantity", 0))
+        ledger_available_quantity = safe_int(getattr(ledger_row, "available_quantity", ledger_quantity))
+        ledger_value = safe_float(getattr(ledger_row, "market_value", 0.0))
+        if price > 0 and ledger_quantity > 0:
+            ledger_value = round(ledger_quantity * price, 2)
+
+        quantity_diff = target_quantity - ledger_quantity
+        value_diff = round(target_value - ledger_value, 2)
+        ledger_weight_pct = (ledger_value / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0
+        weight_diff_pct = target_weight_pct - ledger_weight_pct
+        if target_quantity > 0 and ledger_quantity <= 0:
+            diff_type = "TARGET_ONLY"
+        elif target_quantity <= 0 and ledger_quantity > 0:
+            diff_type = "LEDGER_ONLY"
+        elif quantity_diff > 0:
+            diff_type = "BUY"
+        elif quantity_diff < 0:
+            diff_type = "SELL"
+        else:
+            diff_type = "MATCHED"
+
+        detailed_holdings.append(SnapshotHolding(
+            symbol=trade_symbol,
+            xueqiu_symbol=target.get("xueqiu_symbol") or quote_info["xueqiu_symbol"],
+            name=quote_info["name"] or target.get("name") or "",
+            quantity=target_quantity,
+            price=price,
+            market_value=target_value,
+            ratio=target_weight_pct,
+            xueqiu_weight_pct=safe_float(target.get("xueqiu_weight_pct")),
+            target_weight_pct=target_weight_pct,
+            target_quantity=target_quantity,
+            target_value=target_value,
+            ledger_quantity=ledger_quantity,
+            ledger_available_quantity=ledger_available_quantity,
+            ledger_market_value=round(ledger_value, 2),
+            ledger_weight_pct=ledger_weight_pct,
+            quantity_diff=quantity_diff,
+            value_diff=value_diff,
+            weight_diff_pct=weight_diff_pct,
+            blacklisted=bool(target.get("blacklisted")),
+            diff_type=diff_type,
+        ))
+
+    target_cash = round(max(base_value - target_market_value, 0.0), 2)
+    stock_ratio = (target_market_value / base_value) * 100 if base_value > 0 else 0.0
+    cash_ratio = (target_cash / base_value) * 100 if base_value > 0 else 0.0
+    ledger_stock_ratio = (ledger_market_value / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0
+    ledger_cash_ratio = (ledger_cash / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0
+    cash_diff = round(target_cash - ledger_cash, 2)
+    diff_count = len([row for row in detailed_holdings if row.quantity_diff != 0])
+
+    detailed_holdings.sort(
+        key=lambda row: (abs(row.value_diff), row.target_value, row.ledger_market_value),
+        reverse=True,
+    )
 
     return SnowballSnapshotResponse(
         config_id=config_id,
-        market_value=total_market_value,
-        cash=current_cash,
+        market_value=round(base_value, 2),
+        cash=target_cash,
         stock_ratio=stock_ratio,
         cash_ratio=cash_ratio,
-        last_synced_amount=snapshot.last_synced_amount,
+        last_synced_amount=safe_float(getattr(snapshot, "last_synced_amount", 0.0)),
         holdings=detailed_holdings,
-        updated_at=snapshot.updated_at or datetime.now()
+        updated_at=datetime.now(),
+        source="xueqiu_live_with_ledger_diff",
+        sub_account_id=getattr(sub_account, "id", None),
+        sub_account_name=getattr(sub_account, "name", None),
+        position_ratio=position_ratio,
+        target_market_value=round(target_market_value, 2),
+        target_cash=target_cash,
+        ledger_market_value=round(ledger_market_value, 2),
+        ledger_cash=round(ledger_cash, 2),
+        ledger_net_asset=ledger_net_asset,
+        ledger_stock_ratio=ledger_stock_ratio,
+        ledger_cash_ratio=ledger_cash_ratio,
+        cash_diff=cash_diff,
+        diff_count=diff_count,
+        snapshot_updated_at=snapshot.updated_at if snapshot else None,
     )
 
 
