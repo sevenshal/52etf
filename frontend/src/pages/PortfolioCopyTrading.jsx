@@ -72,6 +72,32 @@ const PortfolioCopyTrading = () => {
     });
 
     const formatError = (error, fallback) => error.response?.data?.detail || error.message || fallback;
+    const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
+    const formatSignedPercent = (value, digits = 2) => {
+        const number = Number(value || 0);
+        return `${number > 0 ? '+' : ''}${number.toFixed(digits)}%`;
+    };
+    const formatQuantity = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const formatSignedQuantity = (value) => {
+        const number = Number(value || 0);
+        return `${number > 0 ? '+' : ''}${number.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    };
+    const formatSignedMoney = (value, digits = 2) => {
+        const number = Number(value || 0);
+        return `${number > 0 ? '+' : ''}${formatMoney(number, digits)}`;
+    };
+    const diffColor = (value) => {
+        const number = Number(value || 0);
+        if (number > 0) return '#fa8c16';
+        if (number < 0) return '#cf1322';
+        return '#389e0d';
+    };
+    const diffTagColor = (value) => {
+        const number = Number(value || 0);
+        if (number > 0) return 'orange';
+        if (number < 0) return 'red';
+        return 'green';
+    };
 
     const fetchExternalTradingAccounts = async () => {
         try {
@@ -1352,47 +1378,69 @@ const PortfolioCopyTrading = () => {
                 visible={snapshotModalVisible}
                 onCancel={() => setSnapshotModalVisible(false)}
                 footer={null}
-                width={700}
+                width={1120}
             >
                 {snapshotLoading ? (
                     <div style={{ textAlign: 'center', padding: '20px' }}><ReloadOutlined spin /> 加载中...</div>
                 ) : snapshotData ? (
                     <div>
                         <Row gutter={16} style={{ marginBottom: 20 }}>
-                            <Col span={10}>
+                            <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>总市值 (Market Value)</Text>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>目标基准</Text>
                                     <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#1890ff' }}>
-                                        {snapshotData.market_value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                        {formatMoney(snapshotData.market_value)}
                                     </div>
                                     <div style={{ marginTop: 4 }}>
-                                        <Text type="secondary">Stock: </Text>
-                                        <Text>{snapshotData.stock_ratio.toFixed(1)}%</Text>
-                                        <Text type="secondary" style={{ marginLeft: 8 }}>Cash: </Text>
-                                        <Text>{snapshotData.cash_ratio.toFixed(1)}%</Text>
+                                        <Text type="secondary">持仓比例: </Text>
+                                        <Text>{formatPercent(snapshotData.position_ratio, 1)}</Text>
                                     </div>
                                 </Card>
                             </Col>
-                            <Col span={7}>
+                            <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>可用现金 (Cash)</Text>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>账本净资产</Text>
                                     <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#52c41a' }}>
-                                        {snapshotData.cash.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                        {formatMoney(snapshotData.ledger_net_asset)}
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                        <Text type="secondary">{snapshotData.sub_account_name || '未绑定子账户'}</Text>
                                     </div>
                                 </Card>
                             </Col>
-                            <Col span={7}>
+                            <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>配置金额 (Synced)</Text>
-                                    <div style={{ fontSize: '18px', fontWeight: 'bold' }}>
-                                        {snapshotData.last_synced_amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>股票市值差额</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: diffColor((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0)) }}>
+                                        {formatSignedMoney((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0))}
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                        <Text type="secondary">差异: </Text>
+                                        <Tag color={snapshotData.diff_count ? 'orange' : 'green'}>{snapshotData.diff_count || 0}</Tag>
+                                    </div>
+                                </Card>
+                            </Col>
+                            <Col span={6}>
+                                <Card size="small" bodyStyle={{ padding: '12px' }}>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>现金差额</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: diffColor(snapshotData.cash_diff) }}>
+                                        {formatSignedMoney(snapshotData.cash_diff)}
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                        <Text type="secondary">目标现金: </Text>
+                                        <Text>{formatMoney(snapshotData.target_cash)}</Text>
                                     </div>
                                 </Card>
                             </Col>
                         </Row>
 
                         <div style={{ marginBottom: 16 }}>
-                            <Text type="secondary">更新时间: {new Date(snapshotData.updated_at).toLocaleString()}</Text>
+                            <Space wrap>
+                                <Text type="secondary">抓取时间: {new Date(snapshotData.updated_at).toLocaleString()}</Text>
+                                {snapshotData.snapshot_updated_at && (
+                                    <Text type="secondary">旧快照时间: {new Date(snapshotData.snapshot_updated_at).toLocaleString()}</Text>
+                                )}
+                            </Space>
                         </div>
 
                         <Table
@@ -1400,46 +1448,111 @@ const PortfolioCopyTrading = () => {
                             pagination={false}
                             size="small"
                             rowKey="symbol"
-                            scroll={{ y: 400 }}
+                            scroll={{ x: 1200, y: 400 }}
                             columns={[
                                 {
-                                    title: 'Symbol',
+                                    title: '标的',
                                     dataIndex: 'symbol',
                                     key: 'symbol',
+                                    width: 180,
+                                    fixed: 'left',
                                     render: (text, record) => (
                                         <Space direction="vertical" size={0}>
-                                            <Text strong>{text}</Text>
+                                            <Space size={4} wrap>
+                                                <Text strong>{text}</Text>
+                                                {record.blacklisted && <Tag color="default">黑名单</Tag>}
+                                            </Space>
                                             {record.name && <Text type="secondary" style={{ fontSize: '12px' }}>{record.name}</Text>}
                                         </Space>
                                     )
                                 },
                                 {
-                                    title: 'Quantity',
-                                    dataIndex: 'quantity',
-                                    key: 'quantity',
+                                    title: '雪球权重',
+                                    dataIndex: 'xueqiu_weight_pct',
+                                    key: 'xueqiu_weight_pct',
+                                    width: 100,
                                     align: 'right',
-                                    render: (val) => val.toLocaleString()
+                                    render: (val) => formatPercent(val)
                                 },
                                 {
-                                    title: 'Price',
+                                    title: '目标权重',
+                                    dataIndex: 'target_weight_pct',
+                                    key: 'target_weight_pct',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => <Tag color="blue">{formatPercent(val)}</Tag>
+                                },
+                                {
+                                    title: '账本权重',
+                                    dataIndex: 'ledger_weight_pct',
+                                    key: 'ledger_weight_pct',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => formatPercent(val)
+                                },
+                                {
+                                    title: '目标股数',
+                                    dataIndex: 'target_quantity',
+                                    key: 'target_quantity',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => formatQuantity(val)
+                                },
+                                {
+                                    title: '账本股数',
+                                    dataIndex: 'ledger_quantity',
+                                    key: 'ledger_quantity',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => formatQuantity(val)
+                                },
+                                {
+                                    title: '股数差额',
+                                    dataIndex: 'quantity_diff',
+                                    key: 'quantity_diff',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => <Tag color={diffTagColor(val)}>{formatSignedQuantity(val)}</Tag>
+                                },
+                                {
+                                    title: '最新价',
                                     dataIndex: 'price',
                                     key: 'price',
+                                    width: 90,
                                     align: 'right',
-                                    render: (val) => val.toFixed(3)
+                                    render: (val) => formatMoney(val, 3)
                                 },
                                 {
-                                    title: 'Value',
-                                    dataIndex: 'market_value',
-                                    key: 'market_value',
+                                    title: '目标市值',
+                                    dataIndex: 'target_value',
+                                    key: 'target_value',
+                                    width: 110,
                                     align: 'right',
-                                    render: (val) => val.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                    render: (val) => formatMoney(val)
                                 },
                                 {
-                                    title: 'Ratio',
-                                    dataIndex: 'ratio',
-                                    key: 'ratio',
+                                    title: '账本市值',
+                                    dataIndex: 'ledger_market_value',
+                                    key: 'ledger_market_value',
+                                    width: 110,
                                     align: 'right',
-                                    render: (val) => <Tag color="blue">{val.toFixed(2)}%</Tag>
+                                    render: (val) => formatMoney(val)
+                                },
+                                {
+                                    title: '市值差额',
+                                    dataIndex: 'value_diff',
+                                    key: 'value_diff',
+                                    width: 110,
+                                    align: 'right',
+                                    render: (val) => <Text style={{ color: diffColor(val) }}>{formatSignedMoney(val)}</Text>
+                                },
+                                {
+                                    title: '权重差额',
+                                    dataIndex: 'weight_diff_pct',
+                                    key: 'weight_diff_pct',
+                                    width: 100,
+                                    align: 'right',
+                                    render: (val) => <Text style={{ color: diffColor(val) }}>{formatSignedPercent(val)}</Text>
                                 },
                             ]}
                         />
