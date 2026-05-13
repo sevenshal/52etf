@@ -1184,9 +1184,8 @@ const W20MomentumLive = () => {
       width: 90,
       render: value => <Tag color={value === 'BUY' ? 'red' : value === 'SELL' ? 'green' : 'default'}>{value}</Tag>,
     },
-    { title: '买一', dataIndex: 'bid', key: 'bid', width: 90, render: value => formatNumber(value, 4) },
-    { title: '卖一', dataIndex: 'ask', key: 'ask', width: 90, render: value => formatNumber(value, 4) },
-    { title: '最新', dataIndex: 'last_price', key: 'last_price', width: 90, render: value => formatNumber(value, 4) },
+    { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: value => formatNumber(value, 4) },
+    { title: '价格来源', dataIndex: 'price_source', key: 'price_source', width: 150 },
     { title: '预估金额', dataIndex: 'estimated_amount', key: 'estimated_amount', width: 120, render: value => value ? formatMoney(value, 2) : '-' },
     { title: '消息', dataIndex: 'message', key: 'message' },
   ];
