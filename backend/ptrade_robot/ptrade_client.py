@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import hashlib
 import hmac
@@ -100,6 +100,17 @@ def initialize(context):
         thread.start()
     else:
         log_warn("Tornado library not found, external trading WebSocket disabled.")
+
+
+def before_trading_start(context, data):
+    update_current_context(context)
+    process_pending_commands()
+    push_deliver_records()
+
+
+def after_trading_end(context, data):
+    update_current_context(context)
+    process_pending_commands()
 
 
 def handle_data(context, data):
@@ -477,10 +488,7 @@ def execute_command(action, payload):
         return get_assets_payload()
     if action in ("get_today_orders", "today_orders", "orders.today"):
         return get_today_orders_payload()
-    if action in ("get_deliver", "deliver", "deliver.records"):
-        return get_deliver_payload(payload.get("start_date"), payload.get("end_date"))
     raise Exception("Unsupported command action: %s" % action)
-
 
 def convert_to_api_code(symbol):
     """Convert PTrade client code (600000.SS) to backend code (SH.600000)."""
@@ -1238,52 +1246,52 @@ def sync_tracked_order_statuses():
     tracked = getattr(g, "order_client_id_by_order_id", {})
     if not tracked:
         return
-    last_status = getattr(g, "order_last_known_status", {})
 
     try:
+        last_status = getattr(g, "order_last_known_status", {})
+
         all_orders = get_all_orders() or []
+
+        # Build lookup by order_id (order_sn)
+        order_map = {}
+        for item in all_orders:
+            oid = value_of(item, "order_id", value_of(item, "id"))
+            if oid is not None:
+                order_map[str(oid)] = item
+
+        current_dt = get_current_dt()
+        changed_orders = []
+        finished_keys = []
+
+        for order_sn in list(tracked.keys()):
+            item = order_map.get(str(order_sn))
+            if item is None:
+                continue
+            status = str(value_of(item, "status", ""))
+            prev = last_status.get(str(order_sn))
+            if status == prev:
+                continue
+            # Status changed
+            last_status[str(order_sn)] = status
+            changed_orders.append(normalize_order(item, current_dt))
+            if status in TERMINAL_ORDER_STATUSES:
+                finished_keys.append(order_sn)
+
+        if changed_orders:
+            log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))
+            send_ws_event({
+                "type": "order_event",
+                "source": "status_sync",
+                "orders": changed_orders,
+                "ts": datetime.now().isoformat(),
+            })
+
+        # Clean up terminal orders from tracking
+        for key in finished_keys:
+            tracked.pop(key, None)
+            last_status.pop(key, None)
     except Exception as exc:
-        log_warn("sync_tracked_order_statuses: get_all_orders failed: %s" % exc)
-        return
-
-    # Build lookup by order_id (order_sn)
-    order_map = {}
-    for item in all_orders:
-        oid = value_of(item, "order_id", value_of(item, "id"))
-        if oid is not None:
-            order_map[str(oid)] = item
-
-    current_dt = get_current_dt()
-    changed_orders = []
-    finished_keys = []
-
-    for order_sn in list(tracked.keys()):
-        item = order_map.get(str(order_sn))
-        if item is None:
-            continue
-        status = str(value_of(item, "status", ""))
-        prev = last_status.get(str(order_sn))
-        if status == prev:
-            continue
-        # Status changed
-        last_status[str(order_sn)] = status
-        changed_orders.append(normalize_order(item, current_dt))
-        if status in TERMINAL_ORDER_STATUSES:
-            finished_keys.append(order_sn)
-
-    if changed_orders:
-        log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))
-        send_ws_event({
-            "type": "order_event",
-            "source": "status_sync",
-            "orders": changed_orders,
-            "ts": datetime.now().isoformat(),
-        })
-
-    # Clean up terminal orders from tracking
-    for key in finished_keys:
-        tracked.pop(key, None)
-        last_status.pop(key, None)
+        log_warn("sync_tracked_order_statuses failed: %s" % exc)
 
 
 def emit_simulated_reports_if_available(order_sn):
@@ -1469,6 +1477,27 @@ def get_deliver_payload(start_date=None, end_date=None):
         "end_date": end,
         "records": normalize_deliver_records(records),
     }
+
+
+def push_deliver_records():
+    """在 before_trading_start 阶段主动推送近期交割单给后端。"""
+    try:
+        current_dt = get_current_dt()
+        # 官方文档：仅支持查询上一个交易日（包含）之前的交割单信息
+        yesterday = (current_dt - timedelta(days=1)).strftime("%Y%m%d")
+        # A股可能存在长达10天的不开盘假期（如春节连周末），所以往前倒推15天
+        start_dt = current_dt - timedelta(days=15)
+        start_date_str = start_dt.strftime("%Y%m%d")
+        payload = get_deliver_payload(start_date_str, yesterday)
+        records = payload.get("records") or []
+        send_ws_event({
+            "type": "deliver_event",
+            "data": payload,
+            "ts": datetime.now().isoformat(),
+        })
+        log.info("push_deliver_records: pushed %d records from %s to %s" % (len(records), start_date_str, yesterday))
+    except Exception as exc:
+        log_warn("push_deliver_records failed: %s" % exc)
 
 
 def normalize_position(pos):

@@ -163,6 +163,21 @@ class ExternalTradingHub:
             logger.info("Processed external trade events from %s: %s", conn.name, inserted)
             return
 
+        if message_type == "deliver_event":
+            try:
+                from .external_trading_fee_reconcile import process_deliver_event
+
+                with get_external_trading_db_ctx() as db:
+                    result = process_deliver_event(
+                        db,
+                        external_trading_account_id=conn.account_pk,
+                        deliver_data=message.get("data") or {},
+                    )
+                logger.info("Processed deliver event from %s: %s", conn.name, result)
+            except Exception as exc:
+                logger.exception("Failed to process deliver event from %s: %s", conn.name, exc)
+            return
+
         logger.debug("Ignored external trading message from %s: %s", conn.name, message)
 
     async def send_command(

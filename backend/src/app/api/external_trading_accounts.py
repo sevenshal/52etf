@@ -46,7 +46,7 @@ from ...core.services.external_trading_execution_policy import (
     normalize_timeout_seconds,
     resolve_execution_policy,
 )
-from ...core.services.external_trading_fee_reconcile import reconcile_external_trading_account_fees
+
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STRATEGY_SNOWBALL,
@@ -261,10 +261,7 @@ class NettedExecutorRequest(BaseModel):
         return value
 
 
-class DeliverReconcileRequest(BaseModel):
-    start_date: date = Field(default_factory=lambda: datetime.now().date() - timedelta(days=1))
-    end_date: date = Field(default_factory=lambda: datetime.now().date() - timedelta(days=1))
-    timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+
 
 
 def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
@@ -1487,34 +1484,6 @@ async def get_external_today_orders(
         return await external_trading_hub.get_today_orders(account.id, timeout=timeout_seconds)
     except ExternalTradingConnectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-
-
-@router.post("/{external_account_id}/fees/reconcile")
-async def reconcile_external_trading_fees(
-    external_account_id: int,
-    payload: DeliverReconcileRequest,
-    db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
-):
-    account = _get_account_or_404(db, account_id, external_account_id)
-    if not account.enabled:
-        raise HTTPException(status_code=400, detail="External trading account is disabled")
-    if payload.end_date < payload.start_date:
-        raise HTTPException(status_code=400, detail="end_date must be greater than or equal to start_date")
-    try:
-        reconciled = await reconcile_external_trading_account_fees(
-            db,
-            account=account,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            timeout_seconds=payload.timeout_seconds,
-        )
-    except ExternalTradingConnectionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    db.commit()
-    return reconciled
 
 
 @router.websocket("/ws")

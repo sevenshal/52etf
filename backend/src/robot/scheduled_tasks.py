@@ -461,33 +461,35 @@ def _run_a_stock_innovation_momentum_live_sync():
 def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
     if result.get("status") == "SKIPPED":
         return (
-            "外部交易费用对账跳过 "
+            "外部交易费用对账检查跳过 "
             f"reason={result.get('reason')} "
             f"today={result.get('today')}"
         )
     return (
-        "外部交易费用对账 "
+        "外部交易费用对账检查 "
         f"status={result.get('status')} "
         f"trade_date={result.get('trade_date')} "
         f"checked={result.get('checked')} "
-        f"processed={result.get('processed')} "
-        f"failed={result.get('failed')} "
-        f"matched={result.get('matched')} "
-        f"unmatched={result.get('unmatched')} "
-        f"applied_order_count={result.get('applied_order_count')}"
+        f"reconciled={result.get('reconciled')} "
+        f"missing={result.get('missing')}"
     )
 
 
 def _run_external_trading_fee_reconcile():
     if _external_trading_fee_reconcile_succeeded_today():
-        return "跳过费用对账: 今日早前对账已成功"
+        return "跳过费用对账检查: 今日早前检查已成功"
 
-    from ..core.services.external_trading_fee_reconcile import process_external_trading_fee_reconcile_for_robot
+    from ..core.services.external_trading_fee_reconcile import (
+        check_and_alert_missing_deliver_records,
+    )
 
+    logger = logging.getLogger("ScheduledTaskManager")
     now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
-    strict = now_shanghai.time() >= dtime(9, 15)
-    result = process_external_trading_fee_reconcile_for_robot(strict=strict)
-    logging.getLogger("ScheduledTaskManager").info("External trading fee reconcile result: %s", result)
+    today = now_shanghai.date()
+
+    result = check_and_alert_missing_deliver_records(today)
+
+    logger.info("External trading fee reconcile check result: %s", result)
     return _format_external_trading_fee_reconcile_result(result)
 
 
@@ -502,7 +504,7 @@ def _external_trading_fee_reconcile_succeeded_today() -> bool:
         if config.last_run_started_at.date() != today_shanghai:
             return False
         message = config.last_run_message or ""
-        return config.last_run_status == "SUCCESS" and "status=OK" in message and "failed=0" in message
+        return config.last_run_status == "SUCCESS" and "status=OK" in message
 
 
 def _is_china_trading_day(check_date: date) -> bool:
@@ -762,13 +764,13 @@ class ScheduledTaskManager:
             ),
             "external_trading_fee_reconcile": TaskDefinition(
                 task_key="external_trading_fee_reconcile",
-                name="外部交易费用对账",
-                description="每个A股交易日开盘前拉取上一A股交易日PTrade交割单，把真实佣金/印花税补回外部交易订单、成交和策略账本；09:15 会在早前未成功时严格重试并告警。",
-                default_time="08:50",
+                name="外部交易费用对账检查",
+                description="A股开盘后检查PTrade是否已通过before_trading_start推送了前一交易日交割单(deliver_event)并完成对账；如有缺失发送告警邮件。",
+                default_time="09:35",
                 default_enabled=True,
                 sort_order=23,
                 runner=_run_external_trading_fee_reconcile,
-                default_cron_rule="50 8 * * mon-fri;15 9 * * mon-fri",
+                default_cron_rule="35 9 * * mon-fri",
             ),
             "external_trading_sub_account_nav_snapshot": TaskDefinition(
                 task_key="external_trading_sub_account_nav_snapshot",
