@@ -177,7 +177,6 @@ const ExternalTradingAccountManager = () => {
   const [executorStatus, setExecutorStatus] = useState(null);
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
-  const [feeReconcilingAccountId, setFeeReconcilingAccountId] = useState(null);
   const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
   const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
@@ -421,28 +420,7 @@ const ExternalTradingAccountManager = () => {
     }
   };
 
-  const reconcileFees = async account => {
-    if (!account?.id) return;
-    const tradeDate = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
-    setFeeReconcilingAccountId(account.id);
-    try {
-      const { data } = await request.post(`/api/external-trading-accounts/${account.id}/fees/reconcile`, {
-        start_date: tradeDate,
-        end_date: tradeDate,
-        timeout_seconds: 30
-      });
-      const result = data?.result || {};
-      message.success(`费用对账完成：匹配${result.matched || 0}条，未匹配${result.unmatched || 0}条`);
-      fetchSubAccounts(account.id);
-      if (executorStatusAccount?.id === account.id) {
-        fetchExecutorStatus(account);
-      }
-    } catch (error) {
-      message.error(error.response?.data?.detail || '费用对账失败');
-    } finally {
-      setFeeReconcilingAccountId(null);
-    }
-  };
+
 
   const fetchExecutorStatus = async account => {
     if (!account?.id) return;
@@ -653,16 +631,6 @@ const ExternalTradingAccountManager = () => {
           <Button size="small" onClick={() => openExecutorStatus(account)}>
             执行器状态
           </Button>
-          <Popconfirm
-            title="拉取昨日交割单并对账费用？"
-            onConfirm={() => reconcileFees(account)}
-            okText="对账"
-            cancelText="取消"
-          >
-            <Button size="small" icon={<DollarOutlined />} loading={feeReconcilingAccountId === account.id}>
-              费用对账
-            </Button>
-          </Popconfirm>
         </Space>
         <Table rowKey="id" columns={subColumns} dataSource={rows} pagination={false} size="small" scroll={{ x: 1280 }} />
       </Space>
