@@ -559,6 +559,67 @@ class TushareService(QuoteProvider):
             )
         return bak_daily
 
+    def get_a_stock_adj_factor_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 6000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """分页获取A股股票复权因子。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        symbol = self.normalize_symbol(ts_code) if ts_code else None
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 6000))
+        first_error = None
+        fields = "ts_code,trade_date,adj_factor"
+        while True:
+            try:
+                kwargs = {
+                    "start_date": start_value.strftime("%Y%m%d"),
+                    "end_date": end_value.strftime("%Y%m%d"),
+                    "fields": fields,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                if symbol:
+                    kwargs["ts_code"] = symbol
+                frame = self.pro.adj_factor(**kwargs)
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare adj_factor fetch failed for %s %s~%s offset=%s: %s",
+                    symbol or "ALL",
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            if raise_on_error and first_error is not None:
+                raise first_error
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        if "adj_factor" in result.columns:
+            result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
+        return result.dropna(subset=["ts_code", "trade_date", "adj_factor"]).sort_values(["ts_code", "trade_date"])
+
     def get_index_daily_range_frame(self, ts_code: str, start_date: date, end_date: date, limit: int = 5000) -> pd.DataFrame:
         """分页获取A股指数日行情。"""
         index_code = self.normalize_symbol(ts_code)
@@ -594,6 +655,66 @@ class TushareService(QuoteProvider):
         result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
+
+    def get_a_stock_fund_adj_factor_range_frame(
+        self,
+        ts_code: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 5000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """分页获取A股ETF/场内基金复权因子。"""
+        fund_code = self.normalize_symbol(ts_code)
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not fund_code or not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 5000))
+        first_error = None
+        fields = "ts_code,trade_date,adj_factor"
+        while True:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = self.pro.fund_adj(
+                    ts_code=fund_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare fund_adj fetch failed for %s %s~%s offset=%s: %s",
+                    fund_code,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            if raise_on_error and first_error is not None:
+                raise first_error
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        if "adj_factor" in result.columns:
+            result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
+        return result.dropna(subset=["ts_code", "trade_date", "adj_factor"]).sort_values(["ts_code", "trade_date"])
 
     def get_a_stock_fund_daily_range_frame(
         self,

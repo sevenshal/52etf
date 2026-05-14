@@ -58,14 +58,14 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
         key="stock_price_strength",
         name="Constituent Price Strength",
         raw_label="Constituent-weighted 52-week range position",
-        source="index constituents/weights + a_stock_market_daily",
+        source="index constituents/weights + a_stock_market_daily_qfq",
         proxy_note="A-share constituent proxy for new-high/new-low strength.",
     ),
     "stock_price_breadth": ComponentSpec(
         key="stock_price_breadth",
         name="Constituent Price Breadth",
         raw_label="5-day average constituent-weighted advancing amount ratio",
-        source="index constituents/weights + a_stock_market_daily",
+        source="index constituents/weights + a_stock_market_daily_qfq",
         proxy_note="Advancing/declining turnover breadth across target index constituents.",
     ),
     "put_call_options": ComponentSpec(
@@ -558,7 +558,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         sql = text(
             f"""
             SELECT trade_date, ts_code, high, low, close, pct_chg, amount
-            FROM a_stock_market_daily
+            FROM a_stock_market_daily_qfq
             WHERE trade_date >= :start_date
               AND trade_date <= :end_date
               AND ts_code IN ({", ".join(placeholders)})

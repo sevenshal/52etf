@@ -16,11 +16,15 @@ if ANALYTICS_DB_DIR:
 ANALYTICS_TABLE_NAMES = frozenset(
     {
         "a_stock_basic",
+        "a_stock_adj_factor",
         "a_stock_income",
         "a_stock_fund_daily",
+        "a_stock_fund_adj_factor",
+        "a_stock_fund_daily_qfq",
         "a_stock_index_daily",
         "a_stock_index_weight",
         "a_stock_market_daily",
+        "a_stock_market_daily_qfq",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
         "a_stock_chinabond_yield_curve_defs",
@@ -105,6 +109,17 @@ class AStockMarketDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockAdjFactor(AnalyticsBase):
+    """Tushare A股股票复权因子，raw 行情保持不变，qfq view 使用该表换算前复权价格。"""
+    __tablename__ = "a_stock_adj_factor"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    adj_factor = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class AStockIndexDaily(AnalyticsBase):
     """A股指数日行情缓存，存放在 DuckDB 分析库。"""
     __tablename__ = "a_stock_index_daily"
@@ -139,6 +154,17 @@ class AStockFundDaily(AnalyticsBase):
     pct_chg = Column(Float)
     vol = Column(Float)
     amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFundAdjFactor(AnalyticsBase):
+    """Tushare A股ETF/场内基金复权因子，qfq view 使用该表换算前复权价格。"""
+    __tablename__ = "a_stock_fund_adj_factor"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    adj_factor = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -274,8 +300,12 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_symbol_date ON a_stock_adj_factor(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_date_symbol ON a_stock_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_symbol_date ON a_stock_fund_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_date_symbol ON a_stock_fund_daily(trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_adj_factor_symbol_date ON a_stock_fund_adj_factor(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_adj_factor_date_symbol ON a_stock_fund_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_index_date ON a_stock_index_weight(index_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_weight_constituent ON a_stock_index_weight(con_code, trade_date)",
@@ -289,9 +319,108 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_symbol_date ON us_stock_daily(symbol, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]
+    view_sqls = [
+        """
+        CREATE OR REPLACE VIEW a_stock_market_daily_qfq AS
+        WITH anchor_factors AS (
+            SELECT ts_code, adj_factor AS anchor_adj_factor
+            FROM (
+                SELECT
+                    ts_code,
+                    adj_factor,
+                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+                FROM a_stock_adj_factor
+                WHERE adj_factor IS NOT NULL AND adj_factor > 0
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            m.ts_code,
+            m.ts_code AS symbol,
+            m.trade_date,
+            CAST(m.open * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS open,
+            CAST(m.high * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS high,
+            CAST(m.low * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS low,
+            CAST(m.close * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS close,
+            CAST(m.pre_close * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS pre_close,
+            CAST(m.change * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS change,
+            m.pct_chg,
+            m.vol,
+            m.vol AS volume,
+            m.amount,
+            m.amount AS turnover,
+            m.total_mv,
+            m.circ_mv,
+            m.float_share,
+            m.total_share,
+            m.turnover_rate,
+            f.adj_factor,
+            a.anchor_adj_factor,
+            'qfq' AS adjust_type,
+            m.created_at,
+            GREATEST(m.updated_at, f.updated_at) AS updated_at
+        FROM a_stock_market_daily m
+        JOIN a_stock_adj_factor f
+          ON m.ts_code = f.ts_code
+         AND m.trade_date = f.trade_date
+        JOIN anchor_factors a
+          ON m.ts_code = a.ts_code
+        WHERE f.adj_factor IS NOT NULL
+          AND f.adj_factor > 0
+          AND a.anchor_adj_factor IS NOT NULL
+          AND a.anchor_adj_factor > 0
+        """,
+        """
+        CREATE OR REPLACE VIEW a_stock_fund_daily_qfq AS
+        WITH anchor_factors AS (
+            SELECT ts_code, adj_factor AS anchor_adj_factor
+            FROM (
+                SELECT
+                    ts_code,
+                    adj_factor,
+                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+                FROM a_stock_fund_adj_factor
+                WHERE adj_factor IS NOT NULL AND adj_factor > 0
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            d.ts_code,
+            d.ts_code AS symbol,
+            d.trade_date,
+            CAST(d.open * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS open,
+            CAST(d.high * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS high,
+            CAST(d.low * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS low,
+            CAST(d.close * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS close,
+            CAST(d.pre_close * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS pre_close,
+            CAST(d.change * f.adj_factor / a.anchor_adj_factor AS DOUBLE) AS change,
+            d.pct_chg,
+            d.vol,
+            d.vol AS volume,
+            d.amount,
+            d.amount AS turnover,
+            f.adj_factor,
+            a.anchor_adj_factor,
+            'qfq' AS adjust_type,
+            d.created_at,
+            GREATEST(d.updated_at, f.updated_at) AS updated_at
+        FROM a_stock_fund_daily d
+        JOIN a_stock_fund_adj_factor f
+          ON d.ts_code = f.ts_code
+         AND d.trade_date = f.trade_date
+        JOIN anchor_factors a
+          ON d.ts_code = a.ts_code
+        WHERE f.adj_factor IS NOT NULL
+          AND f.adj_factor > 0
+          AND a.anchor_adj_factor IS NOT NULL
+          AND a.anchor_adj_factor > 0
+        """,
+    ]
     with analytics_engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS us_stock_basic"))
         for sql in index_sqls:
+            conn.execute(text(sql))
+        for sql in view_sqls:
             conn.execute(text(sql))
 
 

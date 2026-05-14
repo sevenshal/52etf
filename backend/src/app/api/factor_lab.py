@@ -853,6 +853,41 @@ def _is_a_stock_pool(pool: Optional[str]) -> bool:
     return pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET
 
 
+def _price_adjustment_metadata(candidate_etfs: List[str], universe_symbols: List[str]) -> Dict[str, Any]:
+    symbols = [str(item or "").strip().upper() for item in universe_symbols if item]
+    candidates = [str(item or "").strip().upper() for item in candidate_etfs if item]
+    all_symbols = list(dict.fromkeys([*symbols, *candidates]))
+    has_us = any(symbol.endswith(".US") for symbol in all_symbols)
+    has_a_index = any(symbol in A_STOCK_INDEX_POOL_CODE_SET or symbol == A_STOCK_INNO100_SYMBOL for symbol in all_symbols)
+    has_a_fund = any(symbol in A_STOCK_ETF_DAILY_SYMBOL_SET for symbol in all_symbols)
+    has_a_stock = any(
+        _is_a_stock_symbol(symbol)
+        and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
+        and symbol not in A_STOCK_INDEX_POOL_CODE_SET
+        for symbol in all_symbols
+    )
+
+    sources: Dict[str, str] = {}
+    if has_us:
+        sources["us_stock"] = "duckdb.us_stock_daily"
+    if has_a_stock:
+        sources["a_stock"] = "duckdb.a_stock_market_daily_qfq"
+    if has_a_fund:
+        sources["a_stock_fund"] = "duckdb.a_stock_fund_daily_qfq"
+    if has_a_index:
+        sources["a_stock_index"] = "duckdb.a_stock_index_daily"
+
+    if has_a_stock or has_a_fund:
+        adjustment = "qfq"
+    elif has_a_index and not has_us:
+        adjustment = "raw_index"
+    elif has_us and not (has_a_stock or has_a_fund or has_a_index):
+        adjustment = "forward"
+    else:
+        adjustment = "mixed"
+    return {"price_adjustment": adjustment, "price_sources": sources}
+
+
 def _normalize_momentum_weights(raw_weights: Dict[str, float], active_windows: List[int]) -> Dict[int, float]:
     active = list(dict.fromkeys(int(item) for item in active_windows))
     weights: Dict[int, float] = {}
@@ -1057,7 +1092,10 @@ def _get_max_trade_date() -> date:
 def _get_max_a_stock_market_date() -> Optional[date]:
     connection = _connect_duckdb()
     try:
-        row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
+        try:
+            row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily_qfq").fetchone()
+        except Exception:
+            row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
     finally:
         connection.close()
     value = row[0] if row else None
@@ -1081,13 +1119,22 @@ def _get_max_a_stock_fund_date(symbols: Optional[List[str]] = None) -> Optional[
     symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in list(dict.fromkeys(safe_symbols)))
     connection = _connect_duckdb()
     try:
-        row = connection.execute(
-            f"""
-            SELECT MAX(trade_date)
-            FROM a_stock_fund_daily
-            WHERE ts_code IN ({symbol_sql})
-            """
-        ).fetchone()
+        try:
+            row = connection.execute(
+                f"""
+                SELECT MAX(trade_date)
+                FROM a_stock_fund_daily_qfq
+                WHERE ts_code IN ({symbol_sql})
+                """
+            ).fetchone()
+        except Exception:
+            row = connection.execute(
+                f"""
+                SELECT MAX(trade_date)
+                FROM a_stock_fund_daily
+                WHERE ts_code IN ({symbol_sql})
+                """
+            ).fetchone()
     finally:
         connection.close()
     value = row[0] if row else None
@@ -1218,7 +1265,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
-                FROM a_stock_fund_daily
+                FROM a_stock_fund_daily_qfq
                 WHERE ts_code IN ({symbol_sql})
                   AND trade_date BETWEEN ? AND ?
                   AND close IS NOT NULL
@@ -1243,7 +1290,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
-                FROM a_stock_market_daily
+                FROM a_stock_market_daily_qfq
                 WHERE ts_code IN ({symbol_sql})
                   AND trade_date BETWEEN ? AND ?
                   AND close IS NOT NULL
@@ -4120,6 +4167,7 @@ def _build_factor_backtest_metadata(
         "universe_symbols": len(universe_history.all_symbols),
         "holdings_date_count": universe_history.holdings_date_count,
         "price_rows": int(price_df.height),
+        **_price_adjustment_metadata(candidate_etfs, universe_history.all_symbols),
         "engine": "polars",
         "elapsed_ms": round(elapsed_ms, 1),
         "replicates_virtual_strategy": _is_virtual_replication_shape(resolved_legs),

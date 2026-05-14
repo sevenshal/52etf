@@ -394,7 +394,7 @@ def _load_price_rows(symbols: List[str], start_date: date, end_date: date) -> Di
             price_rows = conn.execute(
                 text(f"""
                     SELECT ts_code, trade_date, open, high, low, close, amount, circ_mv
-                    FROM a_stock_market_daily
+                    FROM a_stock_market_daily_qfq
                     WHERE trade_date >= :start_date
                       AND trade_date <= :end_date
                       AND ts_code IN ({placeholders})
@@ -982,5 +982,10 @@ class AStockInnovationMomentumVirtualEngine:
                 "signal_price_source": DAILY_PRICE_SOURCE,
                 "execution_price_source": NEXT_OPEN_PRICE_SOURCE,
                 "price_source": DAILY_PRICE_SOURCE,
+                "price_adjustment": "qfq",
+                "price_sources": {
+                    "a_stock": "duckdb.a_stock_market_daily_qfq",
+                    "benchmark": "sqlite.a_stock_innovation100_levels",
+                },
             },
         }

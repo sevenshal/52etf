@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from ..core.analytics_database import (
     ANALYTICS_DB_PATH,
+    AStockAdjFactor,
     AStockBasic,
     AStockChinaBondYieldCurveDaily,
     AStockChinaBondYieldCurveDef,
+    AStockFundAdjFactor,
     AStockFundDaily,
     AStockIncome,
     AStockIndexDaily,
@@ -670,6 +672,121 @@ class AStockBaseDataSyncService:
             replace_dates=replace_dates,
         )
 
+    def sync_market_adj_factor(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        default_start = _parse_date(start_date)
+        end_value = _parse_date(end_date)
+        if not default_start or not end_value or default_start > end_value:
+            return {"trading_days": 0, "chunks": 0, "saved_rows": 0, "errors": [], "start_date": None}
+
+        min_date, max_date, _row_count = _adj_factor_table_bounds(self.analytics_db, AStockAdjFactor.__tablename__)
+        if explicit_start:
+            factor_start = _warmup_start(explicit_start, max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS))
+        elif incremental:
+            if not min_date or min_date > default_start:
+                factor_start = default_start
+            else:
+                factor_start = _overlap_start(default_start, max_date)
+        else:
+            factor_start = default_start
+        if factor_start > end_value:
+            return {
+                "trading_days": 0,
+                "chunks": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": None,
+                "end_date": end_value.isoformat(),
+            }
+
+        calendar = self.tushare.get_trade_calendar_frame(factor_start, end_value)
+        trading_dates = [
+            item
+            for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
+            if item <= end_value
+        ] if not calendar.empty else []
+        chunks = _date_chunks_by_span(trading_dates, max_items=8, max_calendar_span_days=20)
+        if not chunks:
+            return {
+                "trading_days": 0,
+                "chunks": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": factor_start.isoformat(),
+                "end_date": end_value.isoformat(),
+            }
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        completed = 0
+        total_chunks = len(chunks)
+
+        def fetch_chunk(chunk: List[date]) -> Tuple[date, date, pd.DataFrame]:
+            chunk_start = min(chunk)
+            chunk_end = max(chunk)
+            frame = self.tushare.get_a_stock_adj_factor_range_frame(
+                chunk_start,
+                chunk_end,
+                raise_on_error=True,
+            )
+            return chunk_start, chunk_end, frame
+
+        def report_progress(chunk_start: date, chunk_end: date):
+            self._progress(
+                (
+                    f"批量同步A股股票复权因子 {completed}/{total_chunks}，"
+                    f"最近完成 {chunk_start.isoformat()} ~ {chunk_end.isoformat()}"
+                ),
+                54,
+                processed_chunks=completed,
+                total_chunks=total_chunks,
+                adj_factor_saved_rows=saved_rows,
+                adj_factor_errors=len(errors),
+            )
+
+        workers = min(SYNC_WORKERS, total_chunks)
+        if workers <= 1:
+            for chunk in chunks:
+                chunk_start, chunk_end = min(chunk), max(chunk)
+                try:
+                    chunk_start, chunk_end, frame = fetch_chunk(chunk)
+                    saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockAdjFactor.__tablename__, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock adj_factor sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                    errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                completed += 1
+                if completed == 1 or completed == total_chunks or completed % 10 == 0:
+                    report_progress(chunk_start, chunk_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    chunk_start, chunk_end = min(chunk), max(chunk)
+                    try:
+                        chunk_start, chunk_end, frame = future.result()
+                        saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockAdjFactor.__tablename__, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock adj_factor sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                        errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+                    completed += 1
+                    if completed == 1 or completed == total_chunks or completed % 10 == 0:
+                        report_progress(chunk_start, chunk_end)
+
+        return {
+            "trading_days": len(trading_dates),
+            "chunks": total_chunks,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "start_date": factor_start.isoformat(),
+            "end_date": end_value.isoformat(),
+        }
+
     def _index_daily_stats(self, index_codes: List[str]) -> Dict[str, Dict[str, Optional[date]]]:
         if not index_codes:
             return {}
@@ -909,6 +1026,109 @@ class AStockBaseDataSyncService:
                         saved_rows += _bulk_upsert_fund_daily_frame(self.analytics_db, frame)
                     except Exception as exc:
                         self.logger.warning("A stock ETF daily sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
+                        errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
+                    completed += 1
+                    report_progress(symbol, symbol_start, symbol_end)
+
+        return {
+            "symbol_count": len(symbols),
+            "jobs": total_jobs,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "start_date": min(job[1] for job in jobs).isoformat(),
+            "end_date": end_value.isoformat(),
+        }
+
+    def sync_fund_adj_factor(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        end_value = _parse_date(end_date)
+        default_start = _parse_date(start_date)
+        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
+        if not default_start or not end_value or default_start > end_value or not symbols:
+            return {"symbol_count": len(symbols), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
+
+        bounds_by_symbol = _adj_factor_bounds_by_symbol(self.analytics_db, AStockFundAdjFactor.__tablename__, symbols)
+        jobs: List[Tuple[str, date, date]] = []
+        for symbol in symbols:
+            min_date, max_date, _row_count = bounds_by_symbol.get(symbol, (None, None, 0))
+            if explicit_start:
+                symbol_start = _warmup_start(explicit_start, A_STOCK_FUND_DAILY_WARMUP_DAYS)
+            elif incremental:
+                if not min_date or min_date > default_start:
+                    symbol_start = default_start
+                else:
+                    symbol_start = _overlap_start(default_start, max_date)
+            else:
+                symbol_start = default_start
+            if symbol_start <= end_value:
+                jobs.append((symbol, symbol_start, end_value))
+
+        if not jobs:
+            return {
+                "symbol_count": len(symbols),
+                "jobs": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "start_date": None,
+                "end_date": end_value.isoformat(),
+            }
+
+        def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
+            frame = self.tushare.get_a_stock_fund_adj_factor_range_frame(
+                symbol,
+                symbol_start,
+                symbol_end,
+                raise_on_error=True,
+            )
+            return symbol, symbol_start, symbol_end, frame
+
+        saved_rows = 0
+        errors: List[Dict[str, str]] = []
+        completed = 0
+        total_jobs = len(jobs)
+        workers = min(SYNC_WORKERS, total_jobs)
+
+        def report_progress(symbol: str, symbol_start: date, symbol_end: date):
+            self._progress(
+                (
+                    f"批量同步A股ETF复权因子 {completed}/{total_jobs}，"
+                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                ),
+                65,
+                processed_jobs=completed,
+                total_jobs=total_jobs,
+                fund_adj_factor_saved_rows=saved_rows,
+                fund_adj_factor_errors=len(errors),
+            )
+
+        if workers <= 1:
+            for symbol, symbol_start, symbol_end in jobs:
+                try:
+                    _, _, _, frame = fetch_job(symbol, symbol_start, symbol_end)
+                    saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockFundAdjFactor.__tablename__, frame)
+                except Exception as exc:
+                    self.logger.warning("A stock ETF fund_adj sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
+                    errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
+                completed += 1
+                report_progress(symbol, symbol_start, symbol_end)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(fetch_job, symbol, symbol_start, symbol_end): (symbol, symbol_start, symbol_end)
+                    for symbol, symbol_start, symbol_end in jobs
+                }
+                for future in as_completed(futures):
+                    symbol, symbol_start, symbol_end = futures[future]
+                    try:
+                        _, _, _, frame = future.result()
+                        saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockFundAdjFactor.__tablename__, frame)
+                    except Exception as exc:
+                        self.logger.warning("A stock ETF fund_adj sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
                         errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
                     completed += 1
                     report_progress(symbol, symbol_start, symbol_end)
@@ -1552,6 +1772,14 @@ class AStockBaseDataSyncService:
         if trading_dates:
             self._ensure_market_days(trading_dates)
 
+        self._progress("同步A股股票复权因子", 54, start_date=market_start.isoformat(), end_date=end_value.isoformat())
+        market_adj_factor_result = self.sync_market_adj_factor(
+            market_default_start,
+            end_value,
+            incremental=incremental,
+            explicit_start=explicit_start,
+        )
+
         index_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
         index_display_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS) if explicit_start else index_default_start
         self._progress("同步A股指数日行情缓存", 62, start_date=index_display_start.isoformat(), end_date=end_value.isoformat())
@@ -1571,6 +1799,19 @@ class AStockBaseDataSyncService:
             end_date=end_value.isoformat(),
         )
         fund_daily_result = self.sync_fund_daily(
+            fund_default_start,
+            end_value,
+            incremental=incremental,
+            explicit_start=explicit_start,
+        )
+
+        self._progress(
+            "同步A股ETF复权因子",
+            65,
+            start_date=fund_display_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        fund_adj_factor_result = self.sync_fund_adj_factor(
             fund_default_start,
             end_value,
             incremental=incremental,
@@ -1676,7 +1917,9 @@ class AStockBaseDataSyncService:
         basic_rows = _count_analytics_table_rows(self.analytics_db, AStockBasic.__tablename__)
         name_change_rows = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
+        market_adj_factor_rows = _count_analytics_table_rows(self.analytics_db, AStockAdjFactor.__tablename__)
         fund_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockFundDaily.__tablename__)
+        fund_adj_factor_rows = _count_analytics_table_rows(self.analytics_db, AStockFundAdjFactor.__tablename__)
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
@@ -1685,6 +1928,23 @@ class AStockBaseDataSyncService:
         repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
         chinabond_curve_def_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDef.__tablename__)
         chinabond_curve_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDaily.__tablename__)
+        market_qfq_coverage = _adj_factor_coverage_stats(
+            self.analytics_db,
+            raw_table=AStockMarketDaily.__tablename__,
+            factor_table=AStockAdjFactor.__tablename__,
+            qfq_view="a_stock_market_daily_qfq",
+            start_date=market_start,
+            end_date=end_value,
+        )
+        fund_qfq_coverage = _adj_factor_coverage_stats(
+            self.analytics_db,
+            raw_table=AStockFundDaily.__tablename__,
+            factor_table=AStockFundAdjFactor.__tablename__,
+            qfq_view="a_stock_fund_daily_qfq",
+            start_date=_parse_date(fund_daily_result.get("start_date")) or fund_display_start,
+            end_date=end_value,
+            symbols=list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol)),
+        )
         self.analytics_db.commit()
 
         self._progress("A股基础数据同步完成", 100)
@@ -1695,8 +1955,10 @@ class AStockBaseDataSyncService:
             "end_date": end_value.isoformat(),
             "warmup_days": {
                 "market_daily": market_warmup_days,
+                "stock_adj_factor": market_warmup_days,
                 "index_daily": A_STOCK_INDEX_DAILY_WARMUP_DAYS,
                 "fund_daily": A_STOCK_FUND_DAILY_WARMUP_DAYS,
+                "fund_adj_factor": A_STOCK_FUND_DAILY_WARMUP_DAYS,
                 "index_weight": A_STOCK_INDEX_WEIGHT_WARMUP_DAYS,
                 "option_daily": A_STOCK_OPTION_DAILY_WARMUP_DAYS,
                 "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
@@ -1706,6 +1968,13 @@ class AStockBaseDataSyncService:
             "reference_full_refresh": reference_full_refresh,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
+            "market_adj_factor_start_date": market_adj_factor_result.get("start_date"),
+            "market_adj_factor_end_date": market_adj_factor_result.get("end_date"),
+            "market_adj_factor_trading_days": market_adj_factor_result.get("trading_days"),
+            "market_adj_factor_chunks": market_adj_factor_result.get("chunks"),
+            "market_adj_factor_saved_rows": market_adj_factor_result.get("saved_rows"),
+            "market_adj_factor_errors": len(market_adj_factor_result.get("errors") or []),
+            "market_qfq_coverage": market_qfq_coverage,
             "index_start_date": index_daily_result.get("start_date") or index_display_start.isoformat(),
             "index_end_date": index_daily_result.get("end_date"),
             "index_daily_index_count": index_daily_result.get("index_count"),
@@ -1718,6 +1987,13 @@ class AStockBaseDataSyncService:
             "fund_daily_jobs": fund_daily_result.get("jobs"),
             "fund_daily_saved_rows": fund_daily_result.get("saved_rows"),
             "fund_daily_errors": len(fund_daily_result.get("errors") or []),
+            "fund_adj_factor_start_date": fund_adj_factor_result.get("start_date"),
+            "fund_adj_factor_end_date": fund_adj_factor_result.get("end_date"),
+            "fund_adj_factor_symbol_count": fund_adj_factor_result.get("symbol_count"),
+            "fund_adj_factor_jobs": fund_adj_factor_result.get("jobs"),
+            "fund_adj_factor_saved_rows": fund_adj_factor_result.get("saved_rows"),
+            "fund_adj_factor_errors": len(fund_adj_factor_result.get("errors") or []),
+            "fund_qfq_coverage": fund_qfq_coverage,
             "index_weight_start_date": index_weight_result.get("start_date") or index_weight_start.isoformat(),
             "index_weight_end_date": index_weight_result.get("end_date"),
             "index_weight_index_count": index_weight_result.get("index_count"),
@@ -1770,8 +2046,10 @@ class AStockBaseDataSyncService:
             "income_insert_batches": income_result.get("insert_batches"),
             "tables": {
                 AStockBasic.__tablename__: basic_rows,
+                AStockAdjFactor.__tablename__: market_adj_factor_rows,
                 AStockIncome.__tablename__: income_rows,
                 AStockFundDaily.__tablename__: fund_daily_rows,
+                AStockFundAdjFactor.__tablename__: fund_adj_factor_rows,
                 AStockIndexDaily.__tablename__: index_rows,
                 AStockIndexWeight.__tablename__: index_weight_rows,
                 AStockMarketDaily.__tablename__: market_rows,
@@ -2647,6 +2925,164 @@ def _count_analytics_table_rows(analytics_db: Session, table_name: str) -> int:
         return int(row[0] or 0) if row else 0
 
 
+def _adj_factor_table_bounds(analytics_db: Session, table_name: str) -> Tuple[Optional[date], Optional[date], int]:
+    row = analytics_db.execute(
+        text(
+            f"""
+            SELECT MIN(trade_date), MAX(trade_date), COUNT(*)
+            FROM {_quote_duckdb_identifier(table_name)}
+            """
+        )
+    ).fetchone()
+    if not row:
+        return None, None, 0
+    return _parse_date(row[0]), _parse_date(row[1]), int(row[2] or 0)
+
+
+def _adj_factor_bounds_by_symbol(
+    analytics_db: Session,
+    table_name: str,
+    symbols: List[str],
+) -> Dict[str, Tuple[Optional[date], Optional[date], int]]:
+    normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if symbol]
+    result: Dict[str, Tuple[Optional[date], Optional[date], int]] = {
+        symbol: (None, None, 0)
+        for symbol in normalized_symbols
+    }
+    if not normalized_symbols:
+        return result
+    params = {f"symbol_{idx}": symbol for idx, symbol in enumerate(normalized_symbols)}
+    placeholders = ", ".join(f":{key}" for key in params)
+    rows = analytics_db.execute(
+        text(
+            f"""
+            SELECT ts_code, MIN(trade_date), MAX(trade_date), COUNT(*)
+            FROM {_quote_duckdb_identifier(table_name)}
+            WHERE ts_code IN ({placeholders})
+            GROUP BY ts_code
+            """
+        ),
+        params,
+    ).fetchall()
+    for row in rows:
+        symbol = str(row[0] or "").strip().upper()
+        if symbol:
+            result[symbol] = (_parse_date(row[1]), _parse_date(row[2]), int(row[3] or 0))
+    return result
+
+
+def _adj_factor_coverage_stats(
+    analytics_db: Session,
+    *,
+    raw_table: str,
+    factor_table: str,
+    qfq_view: str,
+    start_date: date,
+    end_date: date,
+    symbols: Optional[List[str]] = None,
+) -> Dict[str, object]:
+    start_value = _parse_date(start_date)
+    end_value = _parse_date(end_date)
+    if not start_value or not end_value or start_value > end_value:
+        return {
+            "start_date": start_value.isoformat() if start_value else None,
+            "end_date": end_value.isoformat() if end_value else None,
+            "raw_rows": 0,
+            "matched_rows": 0,
+            "missing_rows": 0,
+            "missing_symbols": 0,
+            "qfq_rows": 0,
+            "coverage_pct": None,
+            "missing_sample_symbols": [],
+        }
+
+    params: Dict[str, object] = {
+        "start_date": start_value.isoformat(),
+        "end_date": end_value.isoformat(),
+    }
+    symbol_filter = ""
+    if symbols:
+        normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if symbol]
+        if normalized_symbols:
+            params.update({f"symbol_{idx}": symbol for idx, symbol in enumerate(normalized_symbols)})
+            placeholders = ", ".join(f":symbol_{idx}" for idx in range(len(normalized_symbols)))
+            symbol_filter = f" AND r.ts_code IN ({placeholders})"
+
+    raw_name = _quote_duckdb_identifier(raw_table)
+    factor_name = _quote_duckdb_identifier(factor_table)
+    qfq_name = _quote_duckdb_identifier(qfq_view)
+    coverage_row = analytics_db.execute(
+        text(
+            f"""
+            SELECT
+                COUNT(*) AS raw_rows,
+                COUNT(f.adj_factor) AS matched_rows,
+                SUM(CASE WHEN f.adj_factor IS NULL THEN 1 ELSE 0 END) AS missing_rows,
+                COUNT(DISTINCT CASE WHEN f.adj_factor IS NULL THEN r.ts_code ELSE NULL END) AS missing_symbols,
+                COUNT(DISTINCT r.ts_code) AS raw_symbols
+            FROM {raw_name} r
+            LEFT JOIN {factor_name} f
+              ON r.ts_code = f.ts_code
+             AND r.trade_date = f.trade_date
+            WHERE r.trade_date >= :start_date
+              AND r.trade_date <= :end_date
+              {symbol_filter}
+            """
+        ),
+        params,
+    ).fetchone()
+    qfq_row = analytics_db.execute(
+        text(
+            f"""
+            SELECT COUNT(*)
+            FROM {qfq_name} r
+            WHERE r.trade_date >= :start_date
+              AND r.trade_date <= :end_date
+              {symbol_filter}
+            """
+        ),
+        params,
+    ).fetchone()
+    sample_rows = analytics_db.execute(
+        text(
+            f"""
+            SELECT DISTINCT r.ts_code
+            FROM {raw_name} r
+            LEFT JOIN {factor_name} f
+              ON r.ts_code = f.ts_code
+             AND r.trade_date = f.trade_date
+            WHERE r.trade_date >= :start_date
+              AND r.trade_date <= :end_date
+              AND f.adj_factor IS NULL
+              {symbol_filter}
+            ORDER BY r.ts_code
+            LIMIT 20
+            """
+        ),
+        params,
+    ).fetchall()
+
+    raw_rows = int(coverage_row[0] or 0) if coverage_row else 0
+    matched_rows = int(coverage_row[1] or 0) if coverage_row else 0
+    missing_rows = int(coverage_row[2] or 0) if coverage_row else 0
+    missing_symbols = int(coverage_row[3] or 0) if coverage_row else 0
+    raw_symbols = int(coverage_row[4] or 0) if coverage_row else 0
+    qfq_rows = int(qfq_row[0] or 0) if qfq_row else 0
+    coverage_pct = round(matched_rows / raw_rows * 100, 4) if raw_rows else None
+    return {
+        "start_date": start_value.isoformat(),
+        "end_date": end_value.isoformat(),
+        "raw_rows": raw_rows,
+        "raw_symbols": raw_symbols,
+        "matched_rows": matched_rows,
+        "missing_rows": missing_rows,
+        "missing_symbols": missing_symbols,
+        "qfq_rows": qfq_rows,
+        "coverage_pct": coverage_pct,
+        "missing_sample_symbols": [str(row[0]) for row in sample_rows],
+    }
+
+
 def _latest_analytics_date(analytics_db: Session, model, column_name: str) -> Optional[date]:
     column = getattr(model, column_name)
     row = (
@@ -2662,6 +3098,48 @@ def _overlap_start(default_start: date, latest_date: Optional[date]) -> date:
     if not latest_date:
         return default_start
     return max(default_start, latest_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+
+
+def _normalize_adj_factor_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ts_code",
+        "trade_date",
+        "adj_factor",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["adj_factor"] = _numeric_series(frame, "adj_factor", 10)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["ts_code", "trade_date", "adj_factor"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized[normalized["adj_factor"] > 0]
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = normalized.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_adj_factor_frame(analytics_db: Session, table_name: str, frame: pd.DataFrame) -> int:
+    normalized = _normalize_adj_factor_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        table_name,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
 
 
 def sync_a_stock_base_data(
