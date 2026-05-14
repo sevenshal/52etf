@@ -173,7 +173,6 @@ def process_external_trading_connection_monitor_for_robot() -> Dict:
                 "id": item.id,
                 "name": item.name,
                 "identifier": item.identifier,
-                "remark": item.remark,
                 "last_connected_at": item.last_connected_at,
                 "last_disconnected_at": item.last_disconnected_at,
                 "last_seen_at": item.last_seen_at,

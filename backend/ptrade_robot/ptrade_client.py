@@ -25,6 +25,7 @@ DEFAULT_IDENTIFIER = "GS66301027527" #GS66010000018
 HEARTBEAT_INTERVAL_SECONDS = 10
 RECONNECT_DELAY_SECONDS = 5
 DISABLE_AUTO_WEBSOCKET = False
+COMMAND_QUEUE_TIMEOUT_SECONDS = 120
 RSA_N_HEX = (
     "d10e83e0f75ddef1fa41d524bbf4ff76dc9f28a1d1d376f09a9920b0e66362503b5fba39003215f68a911bb33d160745f9f452bfa775c73ca9a3741509b1e5f0e74f35fe2f7e09e4da3bd0eefdea5765322b62a90c080e0ab500853ce8147d7e837dd3cda9c089fe47934065a0da0f3e00cb9de406bd254e0e585d5c67f7af3e0d0729847ca04e69b9ce81e598cdde04e50305e7ecdd0fbeba18a30f307ac795f8145bb149e8a855eaff687077f95305b6419fbf3878dca91edef4666f51fdcdd1c70495fa94f74bdd2733261e04cffaa24a8b040d46897e940ad25756093538d85b321b115cd29970cd51fba8b18c48b2b6e406a71d72a9b58b402d0025854b"
 )
@@ -37,6 +38,11 @@ _SHARED_KEY = base64.b64decode(SHARED_KEY_B64)
 _ENC_KEY = hashlib.sha256(b"external-trading-enc:" + _SHARED_KEY).digest()
 _MAC_KEY = hashlib.sha256(b"external-trading-mac:" + _SHARED_KEY).digest()
 _NONCE_COUNTER = 0
+_CURRENT_CONTEXT = None
+_WS_LOOP = None
+_WS_CONN = None
+_PENDING_COMMANDS = []
+_PENDING_COMMANDS_LOCK = threading.Lock()
 
 try:
     from tornado import ioloop, websocket
@@ -59,14 +65,31 @@ def is_backtest_mode():
         return False
 
 
+def clear_legacy_runtime_g_attrs():
+    for name in ("current_context", "ws_loop", "ws_conn"):
+        try:
+            if hasattr(g, name):
+                try:
+                    delattr(g, name)
+                except Exception:
+                    setattr(g, name, None)
+        except Exception:
+            pass
+
+
+def update_current_context(context):
+    global _CURRENT_CONTEXT
+    _CURRENT_CONTEXT = context
+    clear_legacy_runtime_g_attrs()
+
+
 def initialize(context):
     g.account_id = DEFAULT_ACCOUNT_ID
     backtest = is_backtest_mode()
     g.external_account_identifier = DEFAULT_IDENTIFIER + ("B" if backtest else "")
-    g.current_context = context
-    g.ws_loop = None
-    g.ws_conn = None
+    update_current_context(context)
     g.order_client_id_by_order_id = {}
+    g.order_last_known_status = {}
 
     if DISABLE_AUTO_WEBSOCKET:
         log.info("External trading WebSocket autostart disabled.")
@@ -80,11 +103,15 @@ def initialize(context):
 
 
 def handle_data(context, data):
-    g.current_context = context
+    update_current_context(context)
+    process_pending_commands()
+    sync_tracked_order_statuses()
 
 
 def tick_data(context, data):
-    g.current_context = context
+    update_current_context(context)
+    process_pending_commands()
+    sync_tracked_order_statuses()
 
 
 def b64url_encode(data):
@@ -238,6 +265,7 @@ def build_ws_url():
 
 
 def run_ws_client():
+    global _WS_LOOP, _WS_CONN
     if not HAS_WEBSOCKET:
         return
 
@@ -252,8 +280,8 @@ def run_ws_client():
             log.info("Connecting external trading WebSocket: %s" % ws_url)
             future = websocket.websocket_connect(ws_url, connect_timeout=10)
             conn = loop.run_sync(lambda: future)
-            g.ws_loop = loop
-            g.ws_conn = conn
+            _WS_LOOP = loop
+            _WS_CONN = conn
             log.info("External trading WebSocket connected.")
 
             def send_heartbeat():
@@ -294,9 +322,10 @@ def run_ws_client():
                     conn.close()
                 except Exception:
                     pass
-            if getattr(g, "ws_conn", None) is conn:
-                g.ws_conn = None
-                g.ws_loop = None
+            if _WS_CONN is conn:
+                _WS_CONN = None
+                _WS_LOOP = None
+            discard_pending_commands_for_conn(conn)
             if loop:
                 try:
                     loop.close()
@@ -308,12 +337,12 @@ def run_ws_client():
 
 def send_ws_json(loop, conn, payload):
     text = encrypt_message(payload)
-    loop.run_sync(lambda: conn.write_message(text))
+    loop.add_callback(conn.write_message, text)
 
 
 def send_ws_event(payload):
-    loop = getattr(g, "ws_loop", None)
-    conn = getattr(g, "ws_conn", None)
+    loop = _WS_LOOP
+    conn = _WS_CONN
     if not loop or not conn:
         log_warn("External trading WebSocket unavailable, dropped event: %s" % payload.get("type"))
         return
@@ -343,6 +372,61 @@ def handle_ws_message(loop, conn, raw_message):
     request_id = message.get("id")
     action = message.get("action")
     payload = message.get("payload") or {}
+    enqueue_external_command(loop, conn, request_id, action, payload)
+
+
+def enqueue_external_command(loop, conn, request_id, action, payload):
+    command = {
+        "loop": loop,
+        "conn": conn,
+        "id": request_id,
+        "action": action,
+        "payload": payload or {},
+        "received_at": time.time(),
+    }
+    with _PENDING_COMMANDS_LOCK:
+        _PENDING_COMMANDS.append(command)
+    log.info("Queued external command for PTrade callback: %s id=%s" % (action, request_id))
+
+
+def discard_pending_commands_for_conn(conn):
+    if conn is None:
+        return
+    with _PENDING_COMMANDS_LOCK:
+        keep = []
+        discarded = 0
+        for command in _PENDING_COMMANDS:
+            if command.get("conn") is conn:
+                discarded += 1
+            else:
+                keep.append(command)
+        if discarded:
+            _PENDING_COMMANDS[:] = keep
+    if discarded:
+        log_warn("Discarded %d pending external commands after WebSocket disconnect." % discarded)
+
+
+def pop_pending_commands():
+    with _PENDING_COMMANDS_LOCK:
+        commands = _PENDING_COMMANDS[:]
+        _PENDING_COMMANDS[:] = []
+    return commands
+
+
+def is_command_connection_active(command):
+    return command.get("loop") is _WS_LOOP and command.get("conn") is _WS_CONN
+
+
+def process_pending_commands():
+    commands = pop_pending_commands()
+    for command in commands:
+        process_pending_command(command)
+
+
+def process_pending_command(command):
+    request_id = command.get("id")
+    action = command.get("action")
+    payload = command.get("payload") or {}
     response = {
         "type": "result",
         "id": request_id,
@@ -351,15 +435,29 @@ def handle_ws_message(loop, conn, raw_message):
         "ts": datetime.now().isoformat(),
     }
 
+    if not is_command_connection_active(command):
+        log_warn("Dropped external command from inactive WebSocket: %s id=%s" % (action, request_id))
+        return
+
     try:
-        log.info("Executing external command: %s id=%s" % (action, request_id))
+        age = time.time() - float(command.get("received_at") or time.time())
+        if age > COMMAND_QUEUE_TIMEOUT_SECONDS:
+            raise Exception("External command expired before PTrade callback processed it")
+        log.info("Executing external command on PTrade callback: %s id=%s" % (action, request_id))
         response["data"] = execute_command(action, payload)
     except Exception as e:
         log.error("External command failed: %s id=%s error=%s" % (action, request_id, str(e)))
         response["ok"] = False
         response["error"] = str(e)
 
-    send_ws_json(loop, conn, response)
+    if not is_command_connection_active(command):
+        log_warn("Dropped external command response after WebSocket disconnect: %s id=%s" % (action, request_id))
+        return
+
+    try:
+        send_ws_json(command.get("loop"), command.get("conn"), response)
+    except Exception as e:
+        log_warn("Failed to enqueue external command response: %s id=%s error=%s" % (action, request_id, str(e)))
 
 
 def execute_command(action, payload):
@@ -428,7 +526,7 @@ def value_of(obj, key, default=None):
 
 
 def get_current_dt():
-    context = getattr(g, "current_context", None)
+    context = _CURRENT_CONTEXT
     if context is not None and hasattr(context, "current_dt"):
         return context.current_dt
     return datetime.now()
@@ -469,6 +567,46 @@ def first_numeric_value(obj, keys):
         except Exception:
             continue
     return None
+
+
+def get_gear_price_for_symbol(client_symbol):
+    """Use get_gear_price to fetch bid/ask depth for a single symbol.
+
+    Returns a dict with at least ``bid_grp`` and ``offer_grp`` keys,
+    or an empty dict when data is unavailable.
+    """
+    try:
+        data = get_gear_price(client_symbol)
+    except Exception as exc:
+        log_warn("get_gear_price(%s) failed: %s" % (client_symbol, exc))
+        return {}
+    if not data:
+        return {}
+    # get_gear_price returns {bid_grp: {1:[p,v,c],...}, offer_grp: {1:[p,v,c],...}}
+    if value_of(data, "bid_grp") is not None or value_of(data, "offer_grp") is not None:
+        return data
+    return value_of(data, client_symbol) or value_of(data, str(client_symbol).upper()) or {}
+
+
+def normalize_quote_from_gear_price(client_symbol, gear_data):
+    """Build a normalized quote dict from get_gear_price output."""
+    bid_levels = normalize_depth_group(value_of(gear_data, "bid_grp"))
+    ask_levels = normalize_depth_group(value_of(gear_data, "offer_grp"))
+    best_bid = bid_levels[0] if bid_levels else {}
+    best_ask = ask_levels[0] if ask_levels else {}
+    return {
+        "symbol": convert_to_api_code(client_symbol),
+        "client_symbol": client_symbol,
+        "ok": True,
+        "price": best_bid.get("price") or best_ask.get("price"),
+        "bid": best_bid.get("price"),
+        "bid_size": best_bid.get("volume"),
+        "ask": best_ask.get("price"),
+        "ask_size": best_ask.get("volume"),
+        "bid_levels": bid_levels,
+        "ask_levels": ask_levels,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 def get_snapshot_map(client_symbols):
@@ -569,12 +707,12 @@ def get_quotes(symbols):
     return {"quotes": results}
 
 
-def get_limit_price_from_snapshot(symbol, side, quantity, snapshot):
-    """Use the order book to pick a limit price that covers the requested quantity."""
-    if not snapshot or not value_of(snapshot, "bid_grp") or not value_of(snapshot, "offer_grp"):
+def get_limit_price_from_gear_data(symbol, side, quantity, gear_data):
+    """Use the order book from get_gear_price to pick a limit price that covers the requested quantity."""
+    if not gear_data or not value_of(gear_data, "bid_grp") or not value_of(gear_data, "offer_grp"):
         raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
 
-    group = value_of(snapshot, "offer_grp") if side == "BUY" else value_of(snapshot, "bid_grp")
+    group = value_of(gear_data, "offer_grp") if side == "BUY" else value_of(gear_data, "bid_grp")
     levels = normalize_depth_group(group)
     if not levels:
         raise Exception("获取 %s 档位价格失败: 档位数据为空" % symbol)
@@ -605,7 +743,7 @@ def get_limit_price_from_snapshot(symbol, side, quantity, snapshot):
 
 
 def get_limit_price(symbol, side, quantity):
-    return get_limit_price_from_snapshot(symbol, side, quantity, get_single_snapshot(symbol))
+    return get_limit_price_from_gear_data(symbol, side, quantity, get_gear_price_for_symbol(symbol))
 
 
 def get_int_or_none(value):
@@ -618,18 +756,22 @@ def get_int_or_none(value):
 
 
 def calculate_order_price(symbol, side, quantity, price_level):
-    snapshot = get_single_snapshot(symbol)
-    if not snapshot:
-        raise Exception("获取 %s 快照失败: 数据为空" % symbol)
+    gear_data = get_gear_price_for_symbol(symbol)
+    if not gear_data:
+        raise Exception("获取 %s 盘口数据失败: get_gear_price 返回空" % symbol)
 
-    quote = normalize_quote_from_snapshot(symbol, snapshot)
+    quote = normalize_quote_from_gear_price(symbol, gear_data)
     level = get_int_or_none(price_level)
     if level is None or level == -1:
-        price = get_limit_price_from_snapshot(symbol, side, quantity, snapshot)
+        price = get_limit_price_from_gear_data(symbol, side, quantity, gear_data)
         source = "ptrade_depth_fallback"
     elif level == 0:
-        price = first_numeric_value(snapshot, ("last_px",))
-        source = "last_px"
+        # level 0 = use best bid/ask mid or best opposite side price
+        if side == "BUY":
+            price = quote.get("ask") or quote.get("bid")
+        else:
+            price = quote.get("bid") or quote.get("ask")
+        source = "best_price"
     elif 1 <= level <= 5:
         levels = quote.get("ask_levels") if side == "BUY" else quote.get("bid_levels")
         price = None
@@ -644,8 +786,15 @@ def calculate_order_price(symbol, side, quantity, price_level):
     if price is None or float(price) <= 0:
         raise Exception("获取 %s 执行价格失败: %s 无可用价格" % (symbol, source))
 
+    price = float(price)
+
+    log.info(
+        "%s 定价结果: price=%.4f source=%s level=%s bid=%s ask=%s"
+        % (symbol, price, source, level, quote.get("bid"), quote.get("ask"))
+    )
+
     return {
-        "price": float(price),
+        "price": price,
         "price_source": source,
         "price_level": level,
         "snapshot_time": quote.get("timestamp"),
@@ -846,7 +995,11 @@ def get_market_protection_price(order_request, client_symbol, side, quantity):
         return None
 
     price_level = order_request.get("price_level", -1)
-    calculated = calculate_order_price(client_symbol, side, quantity, price_level)
+    try:
+        calculated = calculate_order_price(client_symbol, side, quantity, price_level)
+    except Exception as e:
+        log_warn("Market order protection price failed for %s: %s" % (client_symbol, e))
+        return None
     calculated["price_source"] = "protection_%s" % calculated["price_source"]
     return calculated
 
@@ -1040,14 +1193,25 @@ def place_single_order(order_request, index):
     return place_limit_order(order_request, client_symbol, api_symbol, side, quantity)
 
 
-def get_first_order(order_sn):
-    try:
-        orders = get_order(order_sn)
-        if isinstance(orders, list):
-            return orders[0] if orders else None
-        return orders
-    except Exception:
-        return None
+def get_first_order(order_sn, max_attempts=3, wait_seconds=0.5):
+    """Query order status, retrying up to max_attempts times until status is
+    no longer '0' (just submitted) or attempts are exhausted."""
+    order_info = None
+    for attempt in range(max_attempts):
+        try:
+            orders = get_order(order_sn)
+            if isinstance(orders, list):
+                order_info = orders[0] if orders else None
+            else:
+                order_info = orders
+        except Exception:
+            order_info = None
+        status = str(value_of(order_info, "status", ""))
+        if status != "0" and status != "":
+            return order_info
+        if attempt < max_attempts - 1:
+            time.sleep(wait_seconds)
+    return order_info
 
 
 def remember_client_order_id(order_sn, client_order_id):
@@ -1056,6 +1220,70 @@ def remember_client_order_id(order_sn, client_order_id):
     if not hasattr(g, "order_client_id_by_order_id"):
         g.order_client_id_by_order_id = {}
     g.order_client_id_by_order_id[str(order_sn)] = client_order_id
+    if not hasattr(g, "order_last_known_status"):
+        g.order_last_known_status = {}
+    g.order_last_known_status[str(order_sn)] = "0"
+
+
+TERMINAL_ORDER_STATUSES = {"5", "6", "8", "9"}
+
+
+def sync_tracked_order_statuses():
+    """Poll tracked orders and push order_event for any status changes.
+
+    PTrade does not fire on_order_response for orders rejected at the broker
+    level (status=9).  This function runs on each handle_data / tick_data
+    callback to compensate.
+    """
+    tracked = getattr(g, "order_client_id_by_order_id", {})
+    if not tracked:
+        return
+    last_status = getattr(g, "order_last_known_status", {})
+
+    try:
+        all_orders = get_all_orders() or []
+    except Exception as exc:
+        log_warn("sync_tracked_order_statuses: get_all_orders failed: %s" % exc)
+        return
+
+    # Build lookup by order_id (order_sn)
+    order_map = {}
+    for item in all_orders:
+        oid = value_of(item, "order_id", value_of(item, "id"))
+        if oid is not None:
+            order_map[str(oid)] = item
+
+    current_dt = get_current_dt()
+    changed_orders = []
+    finished_keys = []
+
+    for order_sn in list(tracked.keys()):
+        item = order_map.get(str(order_sn))
+        if item is None:
+            continue
+        status = str(value_of(item, "status", ""))
+        prev = last_status.get(str(order_sn))
+        if status == prev:
+            continue
+        # Status changed
+        last_status[str(order_sn)] = status
+        changed_orders.append(normalize_order(item, current_dt))
+        if status in TERMINAL_ORDER_STATUSES:
+            finished_keys.append(order_sn)
+
+    if changed_orders:
+        log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))
+        send_ws_event({
+            "type": "order_event",
+            "source": "status_sync",
+            "orders": changed_orders,
+            "ts": datetime.now().isoformat(),
+        })
+
+    # Clean up terminal orders from tracking
+    for key in finished_keys:
+        tracked.pop(key, None)
+        last_status.pop(key, None)
 
 
 def emit_simulated_reports_if_available(order_sn):
@@ -1155,7 +1383,7 @@ def normalize_trade(trade_item, current_dt):
 
 
 def on_order_response(context, order_list):
-    g.current_context = context
+    update_current_context(context)
     current_dt = get_current_dt()
     orders = [normalize_order(item, current_dt) for item in (order_list or [])]
     send_ws_event({
@@ -1163,10 +1391,22 @@ def on_order_response(context, order_list):
         "orders": orders,
         "ts": datetime.now().isoformat(),
     })
+    # Update tracking so sync_tracked_order_statuses won't re-push
+    tracked = getattr(g, "order_client_id_by_order_id", {})
+    last_status = getattr(g, "order_last_known_status", {})
+    for item in (order_list or []):
+        oid = str(value_of(item, "order_id", value_of(item, "id", "")))
+        status = str(value_of(item, "status", ""))
+        if oid in last_status:
+            last_status[oid] = status
+        if status in TERMINAL_ORDER_STATUSES:
+            tracked.pop(oid, None)
+            last_status.pop(oid, None)
+    process_pending_commands()
 
 
 def on_trade_response(context, trade_list):
-    g.current_context = context
+    update_current_context(context)
     current_dt = get_current_dt()
     trades = [normalize_trade(item, current_dt) for item in (trade_list or [])]
     send_ws_event({
@@ -1174,6 +1414,7 @@ def on_trade_response(context, trade_list):
         "trades": trades,
         "ts": datetime.now().isoformat(),
     })
+    process_pending_commands()
 
 
 def get_today_orders_payload():
@@ -1259,7 +1500,7 @@ def get_positions_payload():
 
 
 def get_assets_payload():
-    context = getattr(g, "current_context", None)
+    context = _CURRENT_CONTEXT
     portfolio = {}
     if context is not None and hasattr(context, "portfolio"):
         portfolio_value = value_of(context.portfolio, "portfolio_value", 0)
