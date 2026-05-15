@@ -52,8 +52,11 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_SNOWBALL,
     STRATEGY_W20,
     build_netted_target_execution_plan,
+    empty_sub_account_fee_summary,
+    get_external_account_fee_summary,
     get_ledger_positions,
     get_open_order_quantities,
+    get_sub_account_fee_summaries,
     normalize_symbol,
     safe_int,
     serialize_ledger_position,
@@ -333,6 +336,7 @@ async def _serialize_sub_account_with_binding(
     main_db: OrmSession,
     account: Optional[ExternalTradingAccount] = None,
     update_position_valuation: bool = False,
+    fee_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     item = serialize_sub_account(sub_account)
     if positions is None:
@@ -357,6 +361,8 @@ async def _serialize_sub_account_with_binding(
     item["strategy_name"] = strategy_name
     item["binding_status"] = "BOUND" if strategy_name else "FREE"
     item["binding_label"] = strategy_name or "空闲"
+    item["trade_fee_summary"] = fee_summary or empty_sub_account_fee_summary(sub_account.id)
+    item["cumulative_trade_fee_total"] = item["trade_fee_summary"]["effective_fee_total"]
     effective_account = account
     if effective_account is None:
         with db.no_autoflush:
@@ -880,6 +886,11 @@ async def list_external_trading_sub_accounts(
         .all()
     )
     result = []
+    fee_summaries = get_sub_account_fee_summaries(
+        db,
+        account_id=account_id,
+        external_trading_account_id=external_account_id,
+    )
     for sub_account in sub_accounts:
         positions = (
             db.query(ExternalTradingLedgerPosition)
@@ -893,6 +904,7 @@ async def list_external_trading_sub_accounts(
             positions,
             main_db=main_db,
             account=account,
+            fee_summary=fee_summaries.get(sub_account.id),
         ))
     return result
 
@@ -1162,6 +1174,16 @@ async def get_external_trading_executor_status(
         row.id: _strategy_binding_name(main_db, row)
         for row in sub_accounts
     }
+    sub_account_fee_summaries = get_sub_account_fee_summaries(
+        db,
+        account_id=account_id,
+        external_trading_account_id=account.id,
+    )
+    account_fee_summary = get_external_account_fee_summary(
+        db,
+        account_id=account_id,
+        external_trading_account_id=account.id,
+    )
     ledger_by_sub_account = {
         sub_account_id: get_ledger_positions(db, sub_account_id)
         for sub_account_id in sub_account_by_id.keys()
@@ -1294,6 +1316,7 @@ async def get_external_trading_executor_status(
             list(ledger_by_sub_account.get(row.id, {}).values()),
             main_db=main_db,
             account=account,
+            fee_summary=sub_account_fee_summaries.get(row.id),
         )
         for row in sub_accounts
     ]
@@ -1314,6 +1337,7 @@ async def get_external_trading_executor_status(
         "fills": fills,
         "plan": plan,
         "plan_error": plan_error,
+        "fee_summary": account_fee_summary,
         "summary": {
             "sub_account_count": len(sub_accounts),
             "active_sub_account_count": len([row for row in sub_accounts if row.enabled]),
@@ -1328,6 +1352,9 @@ async def get_external_trading_executor_status(
             "external_order_count": len(plan.get("external_orders") or []),
             "internal_cross_count": len(plan.get("internal_crosses") or []),
             "demand_count": len(plan.get("demands") or []),
+            "trade_fee_total": account_fee_summary["trade_fee_total"],
+            "non_trade_fee_total": account_fee_summary["non_trade_fee_total"],
+            "total_fee": account_fee_summary["total_fee"],
         },
     }
 

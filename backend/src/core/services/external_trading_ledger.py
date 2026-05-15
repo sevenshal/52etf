@@ -1405,6 +1405,17 @@ def _deliver_cash_fee_total(record: Dict[str, Any], amount: float) -> Optional[f
     return round_money(abs(abs(clear_balance) - gross_amount))
 
 
+def _deliver_non_trade_fee_total(record: Dict[str, Any], amount: float) -> float:
+    cash_delta = _deliver_optional_float(record, ("occur_balance", "clear_balance", "发生金额", "清算金额", "结算金额"))
+    if cash_delta is not None:
+        return round_money(abs(cash_delta)) if cash_delta < -0.004 else 0.0
+
+    business_text = _deliver_business_text(record)
+    if any(keyword in business_text for keyword in ("费用", "费收取", "税", "资金下账", "扣")):
+        return round_money(abs(amount))
+    return 0.0
+
+
 def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Optional[date] = None) -> Dict[str, Any]:
     record = raw_record if isinstance(raw_record, dict) else {"value": raw_record}
     trade_date = (
@@ -1481,11 +1492,6 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         "total_fare",
         "费用合计",
     ))
-    cash_total_fee = _deliver_cash_fee_total(record, amount)
-    if cash_total_fee is not None:
-        total_fee = cash_total_fee
-    elif total_fee <= 0:
-        total_fee = round_money(commission + stamp_tax + transfer_fee + other_fee)
 
     broker_order_id = _deliver_value(record, ("order_id", "broker_order_id", "entrust_no", "委托编号"))
     entrust_no = _deliver_value(record, ("entrust_no", "order_id", "委托编号"))
@@ -1518,6 +1524,13 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         price=price,
         amount=amount,
     )
+    cash_total_fee = _deliver_cash_fee_total(record, amount)
+    if cash_total_fee is not None:
+        total_fee = cash_total_fee
+    elif is_trade and total_fee <= 0:
+        total_fee = round_money(commission + stamp_tax + transfer_fee + other_fee)
+    elif not is_trade:
+        total_fee = _deliver_non_trade_fee_total(record, amount)
     return {
         "trade_date": trade_date,
         "deliver_key": deliver_key,
@@ -1548,6 +1561,99 @@ def stringify_jsonable(obj: Any) -> Any:
         if isinstance(obj, list):
             return [stringify_jsonable(value) for value in obj]
         return str(obj)
+
+
+def empty_sub_account_fee_summary(sub_account_id: Optional[int] = None) -> Dict[str, Any]:
+    return {
+        "sub_account_id": sub_account_id,
+        "estimated_fee_total": 0.0,
+        "actual_fee_total": 0.0,
+        "effective_fee_total": 0.0,
+        "fill_count": 0,
+        "reconciled_fill_count": 0,
+        "unreconciled_fill_count": 0,
+    }
+
+
+def get_sub_account_fee_summaries(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    account_id: Optional[str] = None,
+) -> Dict[int, Dict[str, Any]]:
+    query = db.query(
+        ExternalTradingOrderFill.sub_account_id,
+        ExternalTradingOrderFill.estimated_fee_total,
+        ExternalTradingOrderFill.actual_fee_total,
+    ).filter(
+        ExternalTradingOrderFill.external_trading_account_id == external_trading_account_id,
+        ExternalTradingOrderFill.sub_account_id != None,  # noqa: E711
+    )
+    if account_id:
+        query = query.filter(ExternalTradingOrderFill.account_id == account_id)
+
+    summaries: Dict[int, Dict[str, Any]] = {}
+    for sub_account_id, estimated_fee_total, actual_fee_total in query.all():
+        sub_id = safe_int(sub_account_id)
+        if not sub_id:
+            continue
+        item = summaries.setdefault(sub_id, empty_sub_account_fee_summary(sub_id))
+        estimated_fee = safe_float(estimated_fee_total)
+        has_actual_fee = actual_fee_total is not None
+        actual_fee = safe_float(actual_fee_total)
+        effective_fee = actual_fee if has_actual_fee else estimated_fee
+        item["estimated_fee_total"] = round_money(item["estimated_fee_total"] + estimated_fee)
+        item["actual_fee_total"] = round_money(item["actual_fee_total"] + actual_fee)
+        item["effective_fee_total"] = round_money(item["effective_fee_total"] + effective_fee)
+        item["fill_count"] += 1
+        if has_actual_fee:
+            item["reconciled_fill_count"] += 1
+        else:
+            item["unreconciled_fill_count"] += 1
+    return summaries
+
+
+def get_external_account_fee_summary(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    account_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    query = db.query(
+        ExternalTradingDeliverRecord.status,
+        ExternalTradingDeliverRecord.total_fee,
+        ExternalTradingDeliverRecord.raw_record,
+        ExternalTradingDeliverRecord.trade_date,
+    ).filter(
+        ExternalTradingDeliverRecord.external_trading_account_id == external_trading_account_id,
+    )
+    if account_id:
+        query = query.filter(ExternalTradingDeliverRecord.account_id == account_id)
+
+    trade_fee_total = 0.0
+    non_trade_fee_total = 0.0
+    trade_record_count = 0
+    non_trade_record_count = 0
+    for status, total_fee, raw_record, trade_date in query.all():
+        fee = safe_float(total_fee)
+        is_trade = str(status or "").upper() != "IGNORED"
+        if isinstance(raw_record, dict):
+            normalized = normalize_deliver_record(raw_record, default_trade_date=trade_date)
+            fee = safe_float(normalized.get("total_fee"))
+            is_trade = bool(normalized.get("is_trade", is_trade))
+        if not is_trade:
+            non_trade_fee_total = round_money(non_trade_fee_total + fee)
+            non_trade_record_count += 1
+        else:
+            trade_fee_total = round_money(trade_fee_total + fee)
+            trade_record_count += 1
+    return {
+        "trade_fee_total": round_money(trade_fee_total),
+        "non_trade_fee_total": round_money(non_trade_fee_total),
+        "total_fee": round_money(trade_fee_total + non_trade_fee_total),
+        "trade_record_count": trade_record_count,
+        "non_trade_record_count": non_trade_record_count,
+    }
 
 
 def _deliver_order_candidate_matches(
