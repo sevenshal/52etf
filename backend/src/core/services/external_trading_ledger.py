@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ..external_trading_database import (
@@ -70,9 +71,19 @@ PTRADE_STATUS_MAP = {
 def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
     if not symbol:
         return None
-    parts = str(symbol).strip().upper().split(".")
+    text = str(symbol).strip().upper()
+    if not text:
+        return None
+    if "." not in text and len(text) == 6 and text.isdigit():
+        if text.startswith(("60", "68", "51", "52", "56", "58", "50", "11")):
+            return f"{text}.SH"
+        if text.startswith(("00", "30", "20", "15", "12", "13")):
+            return f"{text}.SZ"
+        if text.startswith(("43", "83", "87", "88", "92")):
+            return f"{text}.BJ"
+    parts = text.split(".")
     if len(parts) != 2:
-        return str(symbol).strip().upper()
+        return text
     first, second = parts
     if first in {"SH", "SS", "SZ", "BJ"}:
         market = "SH" if first in {"SH", "SS"} else first
@@ -1274,21 +1285,62 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
     return inserted
 
 
+PTRADE_TRADE_BUSINESS_FLAGS = {"4001", "4002"}
+PTRADE_NON_TRADE_BUSINESS_FLAGS = {"2434", "4420"}
+NON_TRADE_DELIVER_KEYWORDS = (
+    "组合费",
+    "红利税",
+    "股息",
+    "利息",
+    "资金下账",
+    "资金上账",
+)
+
+
+def _is_blank_deliver_value(value: Any) -> bool:
+    return value is None or value == "" or (isinstance(value, str) and value.strip() == "")
+
+
 def _deliver_value(record: Dict[str, Any], keys: Tuple[str, ...], default: Any = None) -> Any:
     if not isinstance(record, dict):
         return default
     lowered = {str(key).lower(): value for key, value in record.items()}
     for key in keys:
-        if key in record and record.get(key) not in (None, ""):
+        if key in record and not _is_blank_deliver_value(record.get(key)):
             return record.get(key)
         lower_key = str(key).lower()
-        if lower_key in lowered and lowered[lower_key] not in (None, ""):
+        if lower_key in lowered and not _is_blank_deliver_value(lowered[lower_key]):
             return lowered[lower_key]
     return default
 
 
 def _deliver_float(record: Dict[str, Any], keys: Tuple[str, ...], default: float = 0.0) -> float:
     return round_money(safe_float(_deliver_value(record, keys), default))
+
+
+def _deliver_optional_float(record: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
+    value = _deliver_value(record, keys)
+    if value is None:
+        return None
+    return round_money(safe_float(value))
+
+
+def _deliver_business_flag(record: Dict[str, Any]) -> str:
+    value = _deliver_value(record, ("business_flag", "业务代码"))
+    if value is None:
+        return ""
+    try:
+        return str(int(float(value)))
+    except Exception:
+        return str(value).strip()
+
+
+def _deliver_business_text(record: Dict[str, Any]) -> str:
+    parts = (
+        _deliver_value(record, ("business_name", "业务名称")),
+        _deliver_value(record, ("remark", "备注")),
+    )
+    return " ".join(str(part).strip() for part in parts if not _is_blank_deliver_value(part))
 
 
 def _deliver_side(record: Dict[str, Any]) -> Optional[str]:
@@ -1303,11 +1355,54 @@ def _deliver_side(record: Dict[str, Any]) -> Optional[str]:
         "业务名称",
     ))
     text = str(raw_side or "").strip().upper()
-    if text in {"1", "B", "BUY", "买", "买入"} or "买入" in text:
+    if text in {"1", "B", "BUY", "买", "买入", "4002"} or "买入" in text:
         return "BUY"
-    if text in {"2", "S", "SELL", "卖", "卖出"} or "卖出" in text:
+    if text in {"2", "S", "SELL", "卖", "卖出", "4001"} or "卖出" in text:
         return "SELL"
     return None
+
+
+def _deliver_is_trade_record(
+    record: Dict[str, Any],
+    *,
+    symbol: Optional[str],
+    side: Optional[str],
+    quantity: int,
+    price: float,
+    amount: float,
+) -> Tuple[bool, Optional[str]]:
+    has_trade_shape = bool(symbol and side and abs(safe_int(quantity)) > 0 and price > 0 and amount > 0)
+    if not has_trade_shape:
+        return False, "非证券成交流水，跳过订单对账"
+
+    business_flag = _deliver_business_flag(record)
+    business_text = _deliver_business_text(record)
+    if business_flag in PTRADE_TRADE_BUSINESS_FLAGS:
+        return True, None
+    if business_flag in PTRADE_NON_TRADE_BUSINESS_FLAGS:
+        return False, f"非证券买卖业务({business_flag})，跳过订单对账"
+    if any(keyword in business_text for keyword in NON_TRADE_DELIVER_KEYWORDS):
+        return False, "非证券买卖资金流水，跳过订单对账"
+    if "证券买入" in business_text or "证券卖出" in business_text:
+        return True, None
+    if not business_flag:
+        return True, None
+    return False, f"非证券买卖业务({business_flag})，跳过订单对账"
+
+
+def _deliver_cash_fee_total(record: Dict[str, Any], amount: float) -> Optional[float]:
+    business_flag = _deliver_business_flag(record)
+    business_text = _deliver_business_text(record)
+    if business_flag not in PTRADE_TRADE_BUSINESS_FLAGS and "证券买入" not in business_text and "证券卖出" not in business_text:
+        return None
+    clear_balance = _deliver_optional_float(record, ("clear_balance", "清算金额", "结算金额"))
+    gross_amount = _deliver_optional_float(record, ("business_balance", "match_amount", "turnover", "成交金额"))
+    if clear_balance is None or gross_amount is None:
+        return None
+    gross_amount = abs(safe_float(gross_amount))
+    if gross_amount <= 0:
+        return None
+    return round_money(abs(abs(clear_balance) - gross_amount))
 
 
 def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Optional[date] = None) -> Dict[str, Any]:
@@ -1347,36 +1442,38 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         amount = round_money(quantity * price)
 
     commission = _deliver_float(record, (
-        "commission",
-        "brokerage",
         "fare0",
+        "commission",
         "business_fare",
         "brokerage_fee",
         "佣金",
+        "brokerage",
     ))
     stamp_tax = _deliver_float(record, (
+        "fare1",
         "stamp_tax",
         "stamp_duty",
-        "fare1",
         "stamp_fee",
         "印花税",
     ))
     transfer_fee = _deliver_float(record, (
+        "fare2",
         "transfer_fee",
         "transfer_fare",
-        "fare2",
         "过户费",
     ))
-    other_fee = _deliver_float(record, (
+    other_fee_keys = (
         "other_fee",
         "fare3",
         "farex",
-        "exchange_fare",
         "settlement_fee",
         "经手费",
         "证管费",
         "其他费",
-    ))
+    )
+    if _deliver_value(record, ("fare0",), None) is None:
+        other_fee_keys = (*other_fee_keys, "exchange_fare")
+    other_fee = _deliver_float(record, other_fee_keys)
     total_fee = _deliver_float(record, (
         "total_fee",
         "fee_total",
@@ -1384,7 +1481,10 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         "total_fare",
         "费用合计",
     ))
-    if total_fee <= 0:
+    cash_total_fee = _deliver_cash_fee_total(record, amount)
+    if cash_total_fee is not None:
+        total_fee = cash_total_fee
+    elif total_fee <= 0:
         total_fee = round_money(commission + stamp_tax + transfer_fee + other_fee)
 
     broker_order_id = _deliver_value(record, ("order_id", "broker_order_id", "entrust_no", "委托编号"))
@@ -1410,6 +1510,14 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
     if not business_no and not entrust_no and not broker_order_id:
         stable_key_parts.append(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str))
     deliver_key = hashlib.sha256("|".join(stable_key_parts).encode("utf-8")).hexdigest()
+    is_trade, ignore_reason = _deliver_is_trade_record(
+        record,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price,
+        amount=amount,
+    )
     return {
         "trade_date": trade_date,
         "deliver_key": deliver_key,
@@ -1425,6 +1533,8 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         "transfer_fee": transfer_fee,
         "other_fee": other_fee,
         "total_fee": total_fee,
+        "is_trade": is_trade,
+        "ignore_reason": ignore_reason,
         "raw_record": stringify_jsonable(record),
     }
 
@@ -1440,11 +1550,44 @@ def stringify_jsonable(obj: Any) -> Any:
         return str(obj)
 
 
+def _deliver_order_candidate_matches(
+    row: ExternalTradingOrder,
+    normalized: Dict[str, Any],
+    *,
+    strict_quantity: bool,
+) -> bool:
+    symbol = normalized.get("symbol")
+    side = normalized.get("side")
+    trade_date = normalized.get("trade_date")
+    if symbol and normalize_symbol(row.symbol) != symbol:
+        return False
+    if side and row.side != side:
+        return False
+    if trade_date:
+        order_dt = row.submitted_at or row.created_at
+        if not order_dt or order_dt.date() != trade_date:
+            return False
+    quantity = safe_int(normalized.get("quantity"))
+    if quantity > 0:
+        order_quantity = safe_int(row.quantity)
+        filled_quantity = safe_int(row.filled_quantity)
+        if strict_quantity:
+            if filled_quantity > 0:
+                return filled_quantity == quantity
+            return order_quantity == quantity
+        if order_quantity > 0 and quantity > order_quantity:
+            return False
+    return True
+
+
 def _find_order_for_deliver(
     db: Session,
     external_trading_account_id: int,
     normalized: Dict[str, Any],
 ) -> Optional[ExternalTradingOrder]:
+    if not normalized.get("is_trade", True):
+        return None
+
     candidates: List[ExternalTradingOrder] = []
     broker_order_id = normalized.get("broker_order_id")
     entrust_no = normalized.get("entrust_no")
@@ -1460,7 +1603,10 @@ def _find_order_for_deliver(
             )
             .all()
         )
-        candidates.extend(rows)
+        candidates.extend(
+            row for row in rows
+            if _deliver_order_candidate_matches(row, normalized, strict_quantity=False)
+        )
     if candidates:
         return _pick_event_order(candidates)
 
@@ -1477,8 +1623,14 @@ def _find_order_for_deliver(
             ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
             ExternalTradingOrder.symbol == symbol,
             ExternalTradingOrder.side == side,
-            ExternalTradingOrder.submitted_at >= start_dt,
-            ExternalTradingOrder.submitted_at <= end_dt,
+            or_(
+                and_(ExternalTradingOrder.submitted_at >= start_dt, ExternalTradingOrder.submitted_at <= end_dt),
+                and_(
+                    ExternalTradingOrder.submitted_at == None,  # noqa: E711
+                    ExternalTradingOrder.created_at >= start_dt,
+                    ExternalTradingOrder.created_at <= end_dt,
+                ),
+            ),
         )
         .all()
     )
@@ -1486,7 +1638,10 @@ def _find_order_for_deliver(
         return None
     quantity = safe_int(normalized.get("quantity"))
     if quantity > 0:
-        exact_rows = [row for row in rows if safe_int(row.filled_quantity, row.quantity) == quantity or safe_int(row.quantity) == quantity]
+        exact_rows = [
+            row for row in rows
+            if _deliver_order_candidate_matches(row, normalized, strict_quantity=True)
+        ]
         if exact_rows:
             return _pick_event_order(exact_rows)
     return _pick_event_order(rows)
@@ -1725,8 +1880,21 @@ def reconcile_deliver_records(
     fee_groups: Dict[int, Dict[str, Any]] = {}
     matched = 0
     unmatched = 0
+    ignored = 0
     for raw_record in records or []:
         normalized = normalize_deliver_record(raw_record, default_trade_date=default_trade_date)
+        if not normalized.get("is_trade", True):
+            ignored += 1
+            _upsert_deliver_record(
+                db,
+                account=account,
+                normalized=normalized,
+                matched_order=None,
+                status="IGNORED",
+                message=normalized.get("ignore_reason") or "非证券买卖流水，跳过订单对账",
+            )
+            normalized_records.append({"status": "IGNORED", "order_id": None, **normalized})
+            continue
         order = _find_order_for_deliver(db, account.id, normalized)
         if order:
             matched += 1
@@ -1784,6 +1952,7 @@ def reconcile_deliver_records(
         "received": len(records or []),
         "matched": matched,
         "unmatched": unmatched,
+        "ignored": ignored,
         "applied_order_count": len(applied),
         "applied": applied,
         "records": normalized_records,

@@ -89,11 +89,13 @@ def process_deliver_event(
     )
     db.commit()
     logger.info(
-        "process_deliver_event: account=%s trade_date=%s received=%s matched=%s",
+        "process_deliver_event: account=%s trade_date=%s received=%s matched=%s unmatched=%s ignored=%s",
         account.id,
         trade_date.isoformat(),
         result.get("received"),
         result.get("matched"),
+        result.get("unmatched"),
+        result.get("ignored"),
     )
     return {
         "account_id": account.id,
