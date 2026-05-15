@@ -100,6 +100,18 @@ const formatPolicy = policy => {
   const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
   return `${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
+const renderTradeFeeSummary = (_, record) => {
+  const summary = record?.trade_fee_summary || {};
+  const total = record?.cumulative_trade_fee_total ?? summary.effective_fee_total;
+  return (
+    <Space direction="vertical" size={0}>
+      <Text>{formatNumber(total, 2)}</Text>
+      <Text type="secondary">
+        真实 {formatNumber(summary.actual_fee_total, 2)} / 估算 {formatNumber(summary.estimated_fee_total, 2)}
+      </Text>
+    </Space>
+  );
+};
 const getNetAssetHistoryOption = rows => {
   const dates = (rows || []).map(item => item.trading_date);
   return {
@@ -457,6 +469,7 @@ const ExternalTradingAccountManager = () => {
   const ledgerRows = executorStatus?.ledger_positions || [];
   const lifecycleRows = executorStatus?.orders || [];
   const fillRows = executorStatus?.fills || [];
+  const executorSubAccountRows = executorStatus?.sub_accounts || [];
 
   const demandColumns = [
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, ...textColumnFilter(demandRows, record => record.sub_account_name) },
@@ -570,6 +583,19 @@ const ExternalTradingAccountManager = () => {
     { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
   ];
 
+  const executorSubAccountColumns = [
+    { title: '子账户', dataIndex: 'name', key: 'name', width: 180, render: value => value || '-', ...textColumnFilter(executorSubAccountRows, record => record.name) },
+    { title: '绑定策略', dataIndex: 'binding_label', key: 'binding_label', width: 220, render: (_, record) => record.binding_status === 'BOUND' ? <Tag color="blue">{record.strategy_name || record.binding_label}</Tag> : <Tag>空闲</Tag>, ...textColumnFilter(executorSubAccountRows, record => record.strategy_name || record.binding_label) },
+    { title: '分配资金', dataIndex: 'cash_allocated', key: 'cash_allocated', width: 120, render: value => formatNumber(value, 2) },
+    { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', width: 120, render: value => formatNumber(value, 2) },
+    { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', width: 120, render: value => formatNumber(value, 2) },
+    { title: '累计交易费', dataIndex: 'cumulative_trade_fee_total', key: 'cumulative_trade_fee_total', width: 170, render: renderTradeFeeSummary },
+    { title: '成交数', dataIndex: ['trade_fee_summary', 'fill_count'], key: 'fee_fill_count', width: 90, render: value => formatNumber(value) },
+    { title: '未对账成交', dataIndex: ['trade_fee_summary', 'unreconciled_fill_count'], key: 'unreconciled_fill_count', width: 110, render: value => formatNumber(value) },
+    { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
+    { title: '启用', dataIndex: 'enabled', key: 'enabled', width: 90, render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }
+  ];
+
   const netAssetHistoryRows = netAssetHistory?.history || [];
   const netAssetHistoryColumns = [
     { title: '日期', dataIndex: 'trading_date', key: 'trading_date', width: 120 },
@@ -599,6 +625,7 @@ const ExternalTradingAccountManager = () => {
       { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', render: value => Number(value || 0).toLocaleString() },
       { title: '持仓市值', dataIndex: 'position_market_value', key: 'position_market_value', render: value => Number(value || 0).toLocaleString() },
       { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', render: value => Number(value || 0).toLocaleString() },
+      { title: '累计交易费', dataIndex: 'cumulative_trade_fee_total', key: 'cumulative_trade_fee_total', width: 170, render: renderTradeFeeSummary },
       { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
       { title: '持仓数', dataIndex: 'positions', key: 'positions', render: value => (value || []).length },
       { title: '启用', dataIndex: 'enabled', key: 'enabled', render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
@@ -632,7 +659,7 @@ const ExternalTradingAccountManager = () => {
             执行器状态
           </Button>
         </Space>
-        <Table rowKey="id" columns={subColumns} dataSource={rows} pagination={false} size="small" scroll={{ x: 1280 }} />
+        <Table rowKey="id" columns={subColumns} dataSource={rows} pagination={false} size="small" scroll={{ x: 1480 }} />
       </Space>
     );
   };
@@ -981,9 +1008,27 @@ const ExternalTradingAccountManager = () => {
             <Text>待执行差额 {executorStatus?.summary?.pending_delta_count ?? 0}</Text>
             <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
             <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
+            <Text>交易费 {formatNumber(executorStatus?.summary?.trade_fee_total, 2)}</Text>
+            <Text>非交易费 {formatNumber(executorStatus?.summary?.non_trade_fee_total, 2)}</Text>
+            <Text>总费用 {formatNumber(executorStatus?.summary?.total_fee, 2)}</Text>
           </Space>
           <Tabs
             items={[
+              {
+                key: 'sub_accounts',
+                label: '子账户',
+                children: (
+                  <Table
+                    rowKey="id"
+                    columns={executorSubAccountColumns}
+                    dataSource={executorSubAccountRows}
+                    loading={executorStatusLoading}
+                    pagination={{ pageSize: 10 }}
+                    size="small"
+                    scroll={{ x: 1500 }}
+                  />
+                )
+              },
               {
                 key: 'targets',
                 label: '目标仓位',
