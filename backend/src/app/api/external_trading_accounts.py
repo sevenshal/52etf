@@ -11,7 +11,6 @@ from ...core.analytics_database import AStockBasic, get_analytics_db_ctx
 from ...core.database import (
     FactorLiveTradingConfig,
     SnowballCopyConfig,
-    W20MomentumLiveConfig,
     get_db,
 )
 from ...core.external_trading_database import (
@@ -314,11 +313,7 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
     if not sub_account.strategy_type or not sub_account.strategy_config_id:
         return None
     if sub_account.strategy_type == STRATEGY_W20:
-        config = main_db.query(W20MomentumLiveConfig).filter(
-            W20MomentumLiveConfig.id == sub_account.strategy_config_id,
-            W20MomentumLiveConfig.account_id == sub_account.account_id,
-        ).first()
-        return config.name if config else "W20 风险调整动量虚拟盘（配置已删除）"
+        return "历史 W20 虚拟盘（已下线）"
     if sub_account.strategy_type == STRATEGY_SNOWBALL:
         config = main_db.query(SnowballCopyConfig).filter(
             SnowballCopyConfig.id == sub_account.strategy_config_id,
@@ -832,14 +827,6 @@ async def delete_external_trading_account(
     account = _get_account_or_404(db, account_id, external_account_id)
     account_pk = account.id
     now = datetime.now()
-    for config in main_db.query(W20MomentumLiveConfig).filter(
-        W20MomentumLiveConfig.account_id == account_id,
-        W20MomentumLiveConfig.external_trading_account_id == account_pk,
-    ).all():
-        config.external_trading_account_id = None
-        config.live_sub_account_id = None
-        config.live_trade_enabled = False
-        config.updated_at = now
     for config in main_db.query(SnowballCopyConfig).filter(
         SnowballCopyConfig.account_id == account_id,
         SnowballCopyConfig.external_trading_account_id == account_pk,
@@ -1080,14 +1067,6 @@ async def delete_external_trading_sub_account(
         raise HTTPException(status_code=400, detail="该虚拟子账户有未完成订单，不能删除")
 
     now = datetime.now()
-    bound_configs = main_db.query(W20MomentumLiveConfig).filter(
-        W20MomentumLiveConfig.account_id == account_id,
-        W20MomentumLiveConfig.live_sub_account_id == sub_account.id,
-    ).all()
-    for config in bound_configs:
-        config.live_sub_account_id = None
-        config.updated_at = now
-
     bound_snowball_configs = main_db.query(SnowballCopyConfig).filter(
         SnowballCopyConfig.account_id == account_id,
         SnowballCopyConfig.live_sub_account_id == sub_account.id,

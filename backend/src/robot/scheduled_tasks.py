@@ -791,8 +791,6 @@ class ScheduledTaskManager:
                 ScheduledTaskConfig.task_key.in_([
                     "a_stock_income_sync",
                     "etf_nport_holdings_import",
-                    "w20_momentum_live_sync",
-                    "a_stock_innovation_momentum_live_sync",
                     "external_trading_fee_reconcile_retry",
                 ])
             ).delete(synchronize_session=False)

@@ -796,12 +796,12 @@ class FactorLiveTradingLog(Base):
     payload = Column(JSON)
 
 class W20MomentumLiveConfig(Base):
-    """W20 风险调整 ETF 动量虚拟盘配置"""
+    """历史 W20 风险调整 ETF 动量配置。"""
     __tablename__ = "w20_momentum_live_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="W20 风险调整 ETF 动量")
+    name = Column(String(100), nullable=False, default="历史 W20 风险调整 ETF 动量")
     enabled = Column(Boolean, default=True, nullable=False)
     symbols = Column(JSON, nullable=False)
     benchmark_symbols = Column(JSON)
@@ -831,7 +831,7 @@ class W20MomentumLiveConfig(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class W20MomentumLiveEquity(Base):
-    """W20 虚拟盘每日净值"""
+    """历史 W20 每日净值。"""
     __tablename__ = "w20_momentum_live_equity"
 
     config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
@@ -845,7 +845,7 @@ class W20MomentumLiveEquity(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class W20MomentumLiveTrade(Base):
-    """W20 虚拟盘模拟成交记录"""
+    """历史 W20 模拟成交记录。"""
     __tablename__ = "w20_momentum_live_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -873,7 +873,7 @@ class W20MomentumLiveTrade(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class W20MomentumLiveHolding(Base):
-    """W20 虚拟盘最新持仓快照"""
+    """历史 W20 最新持仓快照。"""
     __tablename__ = "w20_momentum_live_holdings"
 
     config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
@@ -887,7 +887,7 @@ class W20MomentumLiveHolding(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class W20MomentumLiveLog(Base):
-    """W20 虚拟盘运行/信号日志"""
+    """历史 W20 运行/信号日志。"""
     __tablename__ = "w20_momentum_live_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -901,12 +901,12 @@ class W20MomentumLiveLog(Base):
     payload = Column(JSON)
 
 class USStockSignalVirtualConfig(Base):
-    """美股多因子策略虚拟盘配置"""
+    """历史美股多因子策略配置。"""
     __tablename__ = "us_stock_signal_virtual_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="美股多因子策略虚拟盘")
+    name = Column(String(100), nullable=False, default="历史美股多因子策略")
     enabled = Column(Boolean, default=True, nullable=False)
     candidate_etfs = Column(JSON, nullable=False)
     initial_capital = Column(Float, nullable=False, default=100_000.0)
@@ -938,7 +938,7 @@ class USStockSignalVirtualConfig(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualEvent(Base):
-    """美股多因子策略虚拟盘排名事件"""
+    """历史美股多因子策略排名事件。"""
     __tablename__ = "us_stock_signal_virtual_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -959,7 +959,7 @@ class USStockSignalVirtualEvent(Base):
     )
 
 class USStockSignalVirtualEquity(Base):
-    """美股多因子策略虚拟盘每日净值"""
+    """历史美股多因子策略每日净值。"""
     __tablename__ = "us_stock_signal_virtual_equity"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -973,7 +973,7 @@ class USStockSignalVirtualEquity(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualTrade(Base):
-    """美股多因子策略虚拟盘模拟成交"""
+    """历史美股多因子策略模拟成交。"""
     __tablename__ = "us_stock_signal_virtual_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1001,7 +1001,7 @@ class USStockSignalVirtualTrade(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class USStockSignalVirtualHolding(Base):
-    """美股多因子策略虚拟盘最新持仓快照"""
+    """历史美股多因子策略最新持仓快照。"""
     __tablename__ = "us_stock_signal_virtual_holdings"
 
     config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
@@ -1016,7 +1016,7 @@ class USStockSignalVirtualHolding(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class USStockSignalVirtualLog(Base):
-    """美股多因子策略虚拟盘运行日志"""
+    """历史美股多因子策略运行日志。"""
     __tablename__ = "us_stock_signal_virtual_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1095,12 +1095,12 @@ class FactorBacktestSearchResult(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class AStockInnovationMomentumConfig(Base):
-    """A股创新100风险调整混合动量虚拟盘配置"""
+    """历史 A股创新100风险调整混合动量配置。"""
     __tablename__ = "a_stock_innovation_momentum_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="A股创新100风险调整混合动量虚拟盘")
+    name = Column(String(100), nullable=False, default="历史A股创新100风险调整混合动量")
     enabled = Column(Boolean, default=True, nullable=False)
     initial_capital = Column(Float, nullable=False, default=1_000_000.0)
     start_date = Column(Date, nullable=False)
@@ -1146,7 +1146,7 @@ class AStockInnovationMomentumEvent(Base):
     )
 
 class AStockInnovationMomentumEquity(Base):
-    """A股创新100风险调整混合动量虚拟盘每日净值"""
+    """历史 A股创新100风险调整混合动量每日净值。"""
     __tablename__ = "a_stock_innovation_momentum_equity"
 
     config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
@@ -1160,7 +1160,7 @@ class AStockInnovationMomentumEquity(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AStockInnovationMomentumTrade(Base):
-    """A股创新100风险调整混合动量虚拟盘模拟成交"""
+    """历史 A股创新100风险调整混合动量模拟成交。"""
     __tablename__ = "a_stock_innovation_momentum_trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1187,7 +1187,7 @@ class AStockInnovationMomentumTrade(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class AStockInnovationMomentumHolding(Base):
-    """A股创新100风险调整混合动量虚拟盘最新持仓快照"""
+    """历史 A股创新100风险调整混合动量最新持仓快照。"""
     __tablename__ = "a_stock_innovation_momentum_holdings"
 
     config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
@@ -1203,7 +1203,7 @@ class AStockInnovationMomentumHolding(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AStockInnovationMomentumLog(Base):
-    """A股创新100风险调整混合动量虚拟盘运行日志"""
+    """历史 A股创新100风险调整混合动量运行日志。"""
     __tablename__ = "a_stock_innovation_momentum_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

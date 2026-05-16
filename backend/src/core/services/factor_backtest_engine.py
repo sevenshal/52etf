@@ -3748,7 +3748,7 @@ def make_virtual_signal_backtest_config(config: Any) -> FactorBacktestConfig:
     ]
     return FactorBacktestConfig(
         pool="CUSTOM",
-        pool_label=_get_attr(config, "name", "美股多因子策略虚拟盘"),
+        pool_label=_get_attr(config, "name", "美股多因子策略"),
         candidate_etfs=candidate_etfs,
         start_date=_get_attr(config, "start_date"),
         end_date=None,
