@@ -1582,10 +1582,10 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         label="波动：年化波动率",
         group="波动",
         description="过去窗口日收益标准差年化。",
-        default_windows=[20],
+        default_windows=SUPPORTED_WINDOWS.copy(),
         supports_windows=True,
         supports_mixed_windows=False,
-        direction="exploratory",
+        direction="lower_is_better",
         compute=_compute_volatility,
     ),
     "valuation_gap": FactorDefinition(

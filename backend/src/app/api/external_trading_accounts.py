@@ -1320,6 +1320,13 @@ async def get_external_trading_executor_status(
         )
         for row in sub_accounts
     ]
+    attributed_trade_fee_total = round(
+        sum(
+            _safe_float((row.get("trade_fee_summary") or {}).get("effective_fee_total"))
+            for row in serialized_sub_accounts
+        ),
+        2,
+    )
 
     symbols = set()
     for payload in (target_positions, ledger_positions, orders, fills, plan):
@@ -1353,7 +1360,10 @@ async def get_external_trading_executor_status(
             "internal_cross_count": len(plan.get("internal_crosses") or []),
             "demand_count": len(plan.get("demands") or []),
             "trade_fee_total": account_fee_summary["trade_fee_total"],
+            "attributed_trade_fee_total": attributed_trade_fee_total,
             "non_trade_fee_total": account_fee_summary["non_trade_fee_total"],
+            "non_trade_income_total": account_fee_summary["non_trade_income_total"],
+            "non_trade_net_total": account_fee_summary["non_trade_net_total"],
             "total_fee": account_fee_summary["total_fee"],
         },
     }

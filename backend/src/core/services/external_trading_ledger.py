@@ -1286,7 +1286,7 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
 
 
 PTRADE_TRADE_BUSINESS_FLAGS = {"4001", "4002"}
-PTRADE_NON_TRADE_BUSINESS_FLAGS = {"2434", "4420"}
+PTRADE_NON_TRADE_BUSINESS_FLAGS = {"2434", "4018", "4081", "4082", "4420"}
 NON_TRADE_DELIVER_KEYWORDS = (
     "组合费",
     "红利税",
@@ -1335,12 +1335,45 @@ def _deliver_business_flag(record: Dict[str, Any]) -> str:
         return str(value).strip()
 
 
+def _deliver_exchange_type(record: Dict[str, Any]) -> str:
+    value = _deliver_value(record, ("exchange_type", "market", "交易市场"))
+    return str(value or "").strip().upper()
+
+
+def _deliver_business_type(record: Dict[str, Any]) -> str:
+    value = _deliver_value(record, ("business_type", "业务类型"))
+    return str(value or "").strip().lower()
+
+
 def _deliver_business_text(record: Dict[str, Any]) -> str:
     parts = (
         _deliver_value(record, ("business_name", "业务名称")),
         _deliver_value(record, ("remark", "备注")),
     )
     return " ".join(str(part).strip() for part in parts if not _is_blank_deliver_value(part))
+
+
+def _deliver_is_hk_connect_record(record: Dict[str, Any]) -> bool:
+    if _deliver_exchange_type(record) == "G":
+        return True
+    if _deliver_business_type(record) == "g":
+        return True
+    return "港股通" in _deliver_business_text(record)
+
+
+def _deliver_identifier(record: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[str]:
+    for key in keys:
+        value = _deliver_value(record, (key,), None)
+        if _is_blank_deliver_value(value):
+            continue
+        text = str(value).strip()
+        try:
+            if float(text) == 0:
+                continue
+        except Exception:
+            pass
+        return text
+    return None
 
 
 def _deliver_side(record: Dict[str, Any]) -> Optional[str]:
@@ -1371,18 +1404,21 @@ def _deliver_is_trade_record(
     price: float,
     amount: float,
 ) -> Tuple[bool, Optional[str]]:
-    has_trade_shape = bool(symbol and side and abs(safe_int(quantity)) > 0 and price > 0 and amount > 0)
-    if not has_trade_shape:
-        return False, "非证券成交流水，跳过订单对账"
-
     business_flag = _deliver_business_flag(record)
     business_text = _deliver_business_text(record)
-    if business_flag in PTRADE_TRADE_BUSINESS_FLAGS:
-        return True, None
+    if _deliver_is_hk_connect_record(record):
+        return False, "港股通流水，跳过订单对账和费用统计"
     if business_flag in PTRADE_NON_TRADE_BUSINESS_FLAGS:
         return False, f"非证券买卖业务({business_flag})，跳过订单对账"
     if any(keyword in business_text for keyword in NON_TRADE_DELIVER_KEYWORDS):
         return False, "非证券买卖资金流水，跳过订单对账"
+
+    has_trade_shape = bool(symbol and side and abs(safe_int(quantity)) > 0 and price > 0 and amount > 0)
+    if not has_trade_shape:
+        return False, "非证券成交流水，跳过订单对账"
+
+    if business_flag in PTRADE_TRADE_BUSINESS_FLAGS:
+        return True, None
     if "证券买入" in business_text or "证券卖出" in business_text:
         return True, None
     if not business_flag:
@@ -1406,6 +1442,9 @@ def _deliver_cash_fee_total(record: Dict[str, Any], amount: float) -> Optional[f
 
 
 def _deliver_non_trade_fee_total(record: Dict[str, Any], amount: float) -> float:
+    if _deliver_is_hk_connect_record(record):
+        return 0.0
+
     cash_delta = _deliver_optional_float(record, ("occur_balance", "clear_balance", "发生金额", "清算金额", "结算金额"))
     if cash_delta is not None:
         return round_money(abs(cash_delta)) if cash_delta < -0.004 else 0.0
@@ -1414,6 +1453,30 @@ def _deliver_non_trade_fee_total(record: Dict[str, Any], amount: float) -> float
     if any(keyword in business_text for keyword in ("费用", "费收取", "税", "资金下账", "扣")):
         return round_money(abs(amount))
     return 0.0
+
+
+def _deliver_non_trade_income_total(record: Dict[str, Any], amount: float) -> float:
+    if _deliver_is_hk_connect_record(record):
+        return 0.0
+
+    cash_delta = _deliver_optional_float(record, ("occur_balance", "clear_balance", "发生金额", "清算金额", "结算金额"))
+    if cash_delta is not None:
+        return round_money(cash_delta) if cash_delta > 0.004 else 0.0
+
+    business_text = _deliver_business_text(record)
+    if any(keyword in business_text for keyword in ("入账", "资金上账", "派息", "红利")):
+        return round_money(abs(amount))
+    return 0.0
+
+
+def _deliver_record_identity(normalized: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    raw_record = normalized.get("raw_record")
+    record = raw_record if isinstance(raw_record, dict) else {}
+    for key in ("position_str", "serial_no", "business_id", "business_no", "deal_no", "match_no"):
+        value = _deliver_identifier(record, (key,))
+        if value:
+            return key, value
+    return None
 
 
 def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Optional[date] = None) -> Dict[str, Any]:
@@ -1493,14 +1556,15 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         "费用合计",
     ))
 
-    broker_order_id = _deliver_value(record, ("order_id", "broker_order_id", "entrust_no", "委托编号"))
-    entrust_no = _deliver_value(record, ("entrust_no", "order_id", "委托编号"))
-    business_no = _deliver_value(record, (
+    broker_order_id = _deliver_identifier(record, ("order_id", "broker_order_id", "委托编号"))
+    entrust_no = _deliver_identifier(record, ("entrust_no", "order_id", "委托编号"))
+    business_no = _deliver_identifier(record, (
         "business_no",
         "deal_no",
         "match_no",
         "serial_no",
         "business_id",
+        "position_str",
         "成交编号",
         "流水号",
     ))
@@ -1524,13 +1588,18 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         price=price,
         amount=amount,
     )
-    cash_total_fee = _deliver_cash_fee_total(record, amount)
-    if cash_total_fee is not None:
+    is_hk_connect = _deliver_is_hk_connect_record(record)
+    cash_total_fee = None if is_hk_connect else _deliver_cash_fee_total(record, amount)
+    non_trade_income = 0.0
+    if is_hk_connect:
+        total_fee = 0.0
+    elif cash_total_fee is not None:
         total_fee = cash_total_fee
     elif is_trade and total_fee <= 0:
         total_fee = round_money(commission + stamp_tax + transfer_fee + other_fee)
     elif not is_trade:
         total_fee = _deliver_non_trade_fee_total(record, amount)
+        non_trade_income = _deliver_non_trade_income_total(record, amount)
     return {
         "trade_date": trade_date,
         "deliver_key": deliver_key,
@@ -1546,6 +1615,7 @@ def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Opt
         "transfer_fee": transfer_fee,
         "other_fee": other_fee,
         "total_fee": total_fee,
+        "non_trade_income": non_trade_income,
         "is_trade": is_trade,
         "ignore_reason": ignore_reason,
         "raw_record": stringify_jsonable(record),
@@ -1632,17 +1702,21 @@ def get_external_account_fee_summary(
 
     trade_fee_total = 0.0
     non_trade_fee_total = 0.0
+    non_trade_income_total = 0.0
     trade_record_count = 0
     non_trade_record_count = 0
     for status, total_fee, raw_record, trade_date in query.all():
         fee = safe_float(total_fee)
+        income = 0.0
         is_trade = str(status or "").upper() != "IGNORED"
         if isinstance(raw_record, dict):
             normalized = normalize_deliver_record(raw_record, default_trade_date=trade_date)
             fee = safe_float(normalized.get("total_fee"))
+            income = safe_float(normalized.get("non_trade_income"))
             is_trade = bool(normalized.get("is_trade", is_trade))
         if not is_trade:
             non_trade_fee_total = round_money(non_trade_fee_total + fee)
+            non_trade_income_total = round_money(non_trade_income_total + income)
             non_trade_record_count += 1
         else:
             trade_fee_total = round_money(trade_fee_total + fee)
@@ -1650,6 +1724,8 @@ def get_external_account_fee_summary(
     return {
         "trade_fee_total": round_money(trade_fee_total),
         "non_trade_fee_total": round_money(non_trade_fee_total),
+        "non_trade_income_total": round_money(non_trade_income_total),
+        "non_trade_net_total": round_money(non_trade_income_total - non_trade_fee_total),
         "total_fee": round_money(trade_fee_total + non_trade_fee_total),
         "trade_record_count": trade_record_count,
         "non_trade_record_count": non_trade_record_count,
@@ -1772,6 +1848,29 @@ def _upsert_deliver_record(
         .first()
     )
     now = datetime.now()
+    if not row:
+        normalized_identity = _deliver_record_identity(normalized)
+        if normalized_identity:
+            same_day_rows = (
+                db.query(ExternalTradingDeliverRecord)
+                .filter(
+                    ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+                    ExternalTradingDeliverRecord.trade_date == normalized["trade_date"],
+                )
+                .all()
+            )
+            for candidate in same_day_rows:
+                if not isinstance(candidate.raw_record, dict):
+                    continue
+                candidate_normalized = normalize_deliver_record(
+                    candidate.raw_record,
+                    default_trade_date=candidate.trade_date,
+                )
+                if _deliver_record_identity(candidate_normalized) == normalized_identity:
+                    row = candidate
+                    row.deliver_key = normalized["deliver_key"]
+                    break
+
     if not row:
         row = ExternalTradingDeliverRecord(
             account_id=account.account_id,
