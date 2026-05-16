@@ -27,10 +27,7 @@ import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import SoxlFearStrategy from './pages/SoxlFearStrategy';
 import W20MomentumBacktest from './pages/W20MomentumBacktest';
-import W20MomentumLive from './pages/W20MomentumLive';
-import USStockSignalLive from './pages/USStockSignalLive';
 import AStockInnovation100 from './pages/AStockInnovation100';
-import AStockInnovationMomentumLive from './pages/AStockInnovationMomentumLive';
 import FactorLab from './pages/FactorLab';
 
 function App() {
@@ -46,6 +43,7 @@ function App() {
           <Route path="/a-stock-innovation100" element={<AStockInnovation100 />} />
           <Route path="/db" element={<FactorLab initialTab="db" />} />
           <Route path="/factor-lab" element={<FactorLab />} />
+          <Route path="/factor-lab/live" element={<FactorLab initialTab="live" />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
@@ -67,9 +65,6 @@ function App() {
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
           <Route path="/soxl-fear-strategy" element={<SoxlFearStrategy />} />
           <Route path="/w20-momentum-backtest" element={<W20MomentumBacktest />} />
-          <Route path="/w20-momentum-live" element={<W20MomentumLive />} />
-          <Route path="/us-stock-signal-live" element={<USStockSignalLive />} />
-          <Route path="/a-stock-innovation-momentum-live" element={<AStockInnovationMomentumLive />} />
         </Route>
       </Routes>
     </AccountProvider>

@@ -73,24 +73,9 @@ const Profile = () => {
           onClick: () => navigate('/soxl-fear-strategy'),
           arrow: true
         },
-      ]
-    },
-    {
-      title: '模拟盘',
-      items: [
         {
-          title: 'A股ETF风险调整动量虚拟盘',
-          onClick: () => navigate('/w20-momentum-live'),
-          arrow: true
-        },
-        {
-          title: '美股多因子策略虚拟盘',
-          onClick: () => navigate('/us-stock-signal-live'),
-          arrow: true
-        },
-        {
-          title: 'A股创新100动量虚拟盘',
-          onClick: () => navigate('/a-stock-innovation-momentum-live'),
+          title: '因子线上交易',
+          onClick: () => navigate('/factor-lab/live'),
           arrow: true
         },
       ]

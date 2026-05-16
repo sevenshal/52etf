@@ -168,6 +168,21 @@ const ROTATION_MODE_LABELS = ROTATION_MODE_OPTIONS.reduce((acc, item) => {
   acc[item.value] = item.label;
   return acc;
 }, {});
+const TIMEZONE_OPTIONS = [
+  { label: 'Asia/Shanghai', value: 'Asia/Shanghai' },
+  { label: 'America/New_York', value: 'America/New_York' },
+  { label: 'America/Chicago', value: 'America/Chicago' },
+  { label: 'America/Los_Angeles', value: 'America/Los_Angeles' },
+  { label: 'UTC', value: 'UTC' },
+];
+const DEFAULT_LIVE_TRADING_VALUES = {
+  name: '因子线上交易',
+  enabled: false,
+  signal_time: '18:35',
+  signal_timezone: 'Asia/Shanghai',
+  execution_time: '09:31',
+  execution_timezone: 'Asia/Shanghai',
+};
 const DEFAULT_BACKTEST_SEARCH_OBJECTIVES = [
   { key: 'annualized_return', label: '全区间年化收益最大' },
   { key: 'total_return', label: '全区间总收益最大' },
@@ -346,6 +361,21 @@ const normalizeBacktestDefaultRequest = (payload = {}) => ({
   })),
 });
 
+const normalizeLiveConfigFormValues = (config = {}) => normalizeBacktestDefaultRequest({
+  ...DEFAULT_BACKTEST_VALUES,
+  ...(config.request || {}),
+  name: config.name || DEFAULT_LIVE_TRADING_VALUES.name,
+  enabled: Object.prototype.hasOwnProperty.call(config, 'enabled')
+    ? config.enabled
+    : DEFAULT_LIVE_TRADING_VALUES.enabled,
+  external_trading_account_id: config.external_trading_account_id ?? null,
+  live_sub_account_id: config.live_sub_account_id ?? null,
+  signal_time: config.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
+  signal_timezone: config.signal_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone,
+  execution_time: config.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
+  execution_timezone: config.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.execution_timezone,
+});
+
 const normalizeTimingDefaultRequest = (payload = {}) => ({
   ...DEFAULT_TIMING_VALUES,
   ...payload,
@@ -493,6 +523,15 @@ const sanitizeBacktestLegsForPool = (legs, pool, factors = []) => {
   return [buildDefaultBacktestLeg('risk_adjusted_momentum', getFactorByKey(factors, 'risk_adjusted_momentum'))];
 };
 
+const sanitizeCompositeLegsForPool = (legs, pool, factors = []) => {
+  const source = Array.isArray(legs) && legs.length ? legs : DEFAULT_COMPOSITE_VALUES.legs;
+  const filtered = source.filter(leg => {
+    const factor = getFactorByKey(factors, leg?.factor) || { key: leg?.factor };
+    return isBacktestFactorOptionAllowedForPool(factor, pool);
+  });
+  return filtered.length ? filtered : DEFAULT_COMPOSITE_VALUES.legs;
+};
+
 const validateBacktestLegsForPool = (legs, pool, factors = []) => {
   const unsupported = (legs || []).filter(leg => {
     const factor = getFactorByKey(factors, leg?.factor) || { key: leg?.factor };
@@ -589,6 +628,18 @@ const buildBacktestPayload = values => {
   validateBacktestLegsForPool(payload.legs, payload.pool);
   return payload;
 };
+
+const buildLiveConfigPayload = values => ({
+  name: String(values.name || DEFAULT_LIVE_TRADING_VALUES.name).trim() || DEFAULT_LIVE_TRADING_VALUES.name,
+  enabled: Boolean(values.enabled),
+  request: buildBacktestPayload(values),
+  external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
+  live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
+  signal_time: values.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
+  signal_timezone: values.signal_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone,
+  execution_time: values.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
+  execution_timezone: values.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.execution_timezone,
+});
 
 const buildTimingPayload = values => ({
   target_symbol: String(values.target_symbol || DEFAULT_TIMING_VALUES.target_symbol).trim().toUpperCase(),
@@ -1394,12 +1445,24 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const [compositeForm] = Form.useForm();
   const [backtestForm] = Form.useForm();
   const [timingForm] = Form.useForm();
+  const [liveForm] = Form.useForm();
   const [activeTab, setActiveTab] = useState(initialTab);
   const [options, setOptions] = useState(null);
   const [result, setResult] = useState(null);
   const [compositeResult, setCompositeResult] = useState(null);
   const [backtestResult, setBacktestResult] = useState(null);
   const [timingResult, setTimingResult] = useState(null);
+  const [liveConfigs, setLiveConfigs] = useState([]);
+  const [liveLogs, setLiveLogs] = useState([]);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveSaving, setLiveSaving] = useState(false);
+  const [liveActionLoading, setLiveActionLoading] = useState(false);
+  const [selectedLiveConfigId, setSelectedLiveConfigId] = useState(null);
+  const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
+  const [externalTradingSubAccounts, setExternalTradingSubAccounts] = useState([]);
+  const [externalTradingAccountsLoading, setExternalTradingAccountsLoading] = useState(false);
+  const [liveCustomSymbolOptions, setLiveCustomSymbolOptions] = useState([]);
+  const [liveCustomSymbolSearching, setLiveCustomSymbolSearching] = useState(false);
   const [backtestSearchJob, setBacktestSearchJob] = useState(null);
   const [backtestSearchObjective, setBacktestSearchObjective] = useState('annualized_return');
   const [backtestSearchWindowBucketCount, setBacktestSearchWindowBucketCount] = useState(20);
@@ -1422,6 +1485,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const backtestSearchTableStateRef = useRef(backtestSearchTableState);
   const customSymbolSearchTimerRef = useRef(null);
   const customSymbolSearchSeqRef = useRef(0);
+  const liveCustomSymbolSearchTimerRef = useRef(null);
+  const liveCustomSymbolSearchSeqRef = useRef(0);
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1438,14 +1503,27 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const selectedHeatmapMetric = Form.useWatch('heatmap_metric', form);
   const selectedTimingHeatmapMetric = Form.useWatch('heatmap_metric', timingForm);
   const selectedHeatmapWindows = Form.useWatch('heatmap_windows', form);
+  const selectedSinglePool = Form.useWatch('pool', form);
+  const selectedCompositePool = Form.useWatch('pool', compositeForm);
   const selectedBacktestPool = Form.useWatch('pool', backtestForm);
+  const selectedLivePool = Form.useWatch('pool', liveForm);
+  const selectedLiveExternalTradingAccountId = Form.useWatch('external_trading_account_id', liveForm);
+  const selectedLiveSubAccountId = Form.useWatch('live_sub_account_id', liveForm);
   const compositeLegs = Form.useWatch('legs', compositeForm);
   const backtestLegs = Form.useWatch('legs', backtestForm);
   const customBacktestMarket = getCustomBacktestMarket(selectedBacktestPool);
   const customBacktestSymbolsVisible = isCustomBacktestPool(selectedBacktestPool);
+  const customLiveMarket = getCustomBacktestMarket(selectedLivePool);
+  const customLiveSymbolsVisible = isCustomBacktestPool(selectedLivePool);
   const selectedFactor = useMemo(() => (
     (options?.factors || []).find(item => item.key === selectedFactorKey)
   ), [options, selectedFactorKey]);
+  const liveFactorSelectOptions = useMemo(() => (
+    buildFactorSelectOptions(
+      options?.factors,
+      factor => isBacktestFactorOptionAllowedForPool(factor, selectedLivePool),
+    )
+  ), [options, selectedLivePool]);
   const showMomentumWeights = Boolean(
     selectedFactor?.supports_mixed_windows
     && normalizeHeatmapWindows(selectedHeatmapWindows, []).some(isMixedWindow)
@@ -1464,12 +1542,113 @@ const FactorLab = ({ initialTab = 'single' }) => {
       compositeForm.setFieldsValue(normalizeCompositeDefaultRequest(data.default_composite_request));
       backtestForm.setFieldsValue(normalizeBacktestDefaultRequest(data.default_backtest_request));
       timingForm.setFieldsValue(normalizeTimingDefaultRequest(data.default_timing_request));
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues({
+        request: data.default_backtest_request,
+        ...DEFAULT_LIVE_TRADING_VALUES,
+      }));
     } catch (error) {
       message.error(getErrorMessage(error, '加载因子实验室配置失败'));
     } finally {
       setLoadingOptions(false);
     }
-  }, [form, compositeForm, backtestForm, timingForm]);
+  }, [form, compositeForm, backtestForm, timingForm, liveForm]);
+
+  const loadExternalTradingAccounts = useCallback(async () => {
+    setExternalTradingAccountsLoading(true);
+    try {
+      const { data } = await request.get('/api/external-trading-accounts');
+      setExternalTradingAccounts(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载外部交易账户失败'));
+    } finally {
+      setExternalTradingAccountsLoading(false);
+    }
+  }, []);
+
+  const loadExternalTradingSubAccounts = useCallback(async (accountId) => {
+    if (!accountId) {
+      setExternalTradingSubAccounts([]);
+      return;
+    }
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts`);
+      setExternalTradingSubAccounts(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载外部交易子账户失败'));
+      setExternalTradingSubAccounts([]);
+    }
+  }, []);
+
+  const loadLiveConfigs = useCallback(async () => {
+    setLiveLoading(true);
+    try {
+      const { data } = await request.get('/api/factor-lab/live-configs');
+      const rows = Array.isArray(data) ? data : [];
+      setLiveConfigs(rows);
+      const nextConfig = rows.find(item => item.id === selectedLiveConfigId) || rows[0] || null;
+      if (nextConfig) {
+        setSelectedLiveConfigId(nextConfig.id);
+        liveForm.setFieldsValue(normalizeLiveConfigFormValues(nextConfig));
+        setLiveLogs([]);
+      } else if (selectedLiveConfigId) {
+        setSelectedLiveConfigId(null);
+        liveForm.setFieldsValue(normalizeLiveConfigFormValues());
+        setLiveLogs([]);
+      }
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载线上交易配置失败'));
+    } finally {
+      setLiveLoading(false);
+    }
+  }, [liveForm, selectedLiveConfigId]);
+
+  const loadLiveConfigLogs = useCallback(async (configId) => {
+    if (!configId) {
+      setLiveLogs([]);
+      return;
+    }
+    try {
+      const { data } = await request.get(`/api/factor-lab/live-configs/${configId}/logs`, {
+        params: { limit: 100 },
+      });
+      setLiveLogs(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载线上交易日志失败'));
+      setLiveLogs([]);
+    }
+  }, []);
+
+  const loadLiveCustomSymbolOptions = useCallback((market, query = '') => {
+    if (!market) {
+      setLiveCustomSymbolOptions([]);
+      setLiveCustomSymbolSearching(false);
+      return;
+    }
+    if (liveCustomSymbolSearchTimerRef.current) {
+      window.clearTimeout(liveCustomSymbolSearchTimerRef.current);
+    }
+    const requestSeq = liveCustomSymbolSearchSeqRef.current + 1;
+    liveCustomSymbolSearchSeqRef.current = requestSeq;
+    liveCustomSymbolSearchTimerRef.current = window.setTimeout(async () => {
+      setLiveCustomSymbolSearching(true);
+      try {
+        const { data } = await request.get('/api/factor-lab/symbol-search', {
+          params: { market, q: query, limit: 30 },
+        });
+        if (requestSeq === liveCustomSymbolSearchSeqRef.current) {
+          setLiveCustomSymbolOptions(data.options || []);
+        }
+      } catch (error) {
+        if (requestSeq === liveCustomSymbolSearchSeqRef.current) {
+          message.error(getErrorMessage(error, '搜索股票代码失败'));
+        }
+      } finally {
+        if (requestSeq === liveCustomSymbolSearchSeqRef.current) {
+          setLiveCustomSymbolSearching(false);
+        }
+      }
+    }, 250);
+  }, []);
 
   const loadCustomSymbolOptions = useCallback((market, query = '') => {
     if (!market) {
@@ -1510,6 +1689,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
     customSymbolSearchSeqRef.current += 1;
   }, []);
 
+  useEffect(() => () => {
+    if (liveCustomSymbolSearchTimerRef.current) {
+      window.clearTimeout(liveCustomSymbolSearchTimerRef.current);
+    }
+    liveCustomSymbolSearchSeqRef.current += 1;
+  }, []);
+
   useEffect(() => {
     if (!customBacktestMarket) {
       setCustomSymbolOptions([]);
@@ -1529,6 +1715,95 @@ const FactorLab = ({ initialTab = 'single' }) => {
       backtestForm.setFieldsValue({ legs: nextLegs });
     }
   }, [selectedBacktestPool, options?.factors, backtestForm]);
+
+  useEffect(() => {
+    if (!selectedLiveExternalTradingAccountId) {
+      setExternalTradingSubAccounts([]);
+      liveForm.setFieldsValue({ live_sub_account_id: null });
+      return;
+    }
+    loadExternalTradingSubAccounts(selectedLiveExternalTradingAccountId);
+  }, [selectedLiveExternalTradingAccountId, loadExternalTradingSubAccounts, liveForm]);
+
+  useEffect(() => {
+    if (!customLiveMarket) {
+      setLiveCustomSymbolOptions([]);
+      setLiveCustomSymbolSearching(false);
+      return;
+    }
+    loadLiveCustomSymbolOptions(customLiveMarket, '');
+  }, [customLiveMarket, loadLiveCustomSymbolOptions]);
+
+  useEffect(() => {
+    if (!isCustomBacktestPool(selectedLivePool)) return;
+    const currentLegs = liveForm.getFieldValue('legs') || [];
+    const nextLegs = sanitizeBacktestLegsForPool(currentLegs, selectedLivePool, options?.factors);
+    const currentKeys = currentLegs.map(leg => leg?.factor).join('|');
+    const nextKeys = nextLegs.map(leg => leg?.factor).join('|');
+    if (currentLegs.length !== nextLegs.length || currentKeys !== nextKeys) {
+      liveForm.setFieldsValue({ legs: nextLegs });
+    }
+  }, [selectedLivePool, options?.factors, liveForm]);
+
+  const selectedLiveSubAccount = useMemo(() => (
+    externalTradingSubAccounts.find(item => Number(item.id) === Number(selectedLiveSubAccountId)) || null
+  ), [externalTradingSubAccounts, selectedLiveSubAccountId]);
+  const selectedLiveExternalTradingAccount = useMemo(() => (
+    externalTradingAccounts.find(item => Number(item.id) === Number(selectedLiveExternalTradingAccountId)) || null
+  ), [externalTradingAccounts, selectedLiveExternalTradingAccountId]);
+  const selectedLiveSubAccountLotSizeNumber = Number(
+    selectedLiveSubAccount?.effective_executor_policy?.lot_size
+      ?? selectedLiveSubAccount?.executor_lot_size
+      ?? selectedLiveExternalTradingAccount?.executor_lot_size,
+  );
+  const selectedLiveSubAccountLotSize = Number.isFinite(selectedLiveSubAccountLotSizeNumber)
+    && selectedLiveSubAccountLotSizeNumber > 0
+    ? selectedLiveSubAccountLotSizeNumber
+    : null;
+  const selectedLiveSubAccountNetAsset = Number(selectedLiveSubAccount?.net_asset);
+  const selectedLiveSubAccountNetAssetValue = Number.isFinite(selectedLiveSubAccountNetAsset)
+    ? selectedLiveSubAccountNetAsset
+    : null;
+
+  useEffect(() => {
+    liveForm.setFieldsValue({
+      initial_capital: selectedLiveSubAccountNetAssetValue && selectedLiveSubAccountNetAssetValue > 0
+        ? selectedLiveSubAccountNetAssetValue
+        : DEFAULT_BACKTEST_VALUES.initial_capital,
+      lot_size: selectedLiveSubAccountLotSize
+        ? selectedLiveSubAccountLotSize
+        : (isAStockPoolValue(selectedLivePool) ? 100 : 1),
+    });
+  }, [selectedLiveSubAccountLotSize, selectedLiveSubAccountNetAssetValue, selectedLivePool, liveForm]);
+
+  useEffect(() => {
+    if (!selectedSinglePool) return;
+    const currentFactorKey = form.getFieldValue('factor');
+    const currentFactor = getFactorByKey(options?.factors, currentFactorKey);
+    if (currentFactor && isBacktestFactorOptionAllowedForPool(currentFactor, selectedSinglePool)) {
+      return;
+    }
+    const nextFactor = (options?.factors || []).find(factor => (
+      isBacktestFactorOptionAllowedForPool(factor, selectedSinglePool)
+    ));
+    if (!nextFactor) return;
+    form.setFieldsValue({
+      factor: nextFactor.key,
+      heatmap_windows: nextFactor.supports_windows ? nextFactor.default_windows : DEFAULT_FORM_VALUES.heatmap_windows,
+      momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+    });
+  }, [selectedSinglePool, options?.factors, form]);
+
+  useEffect(() => {
+    if (!selectedCompositePool) return;
+    const currentLegs = compositeForm.getFieldValue('legs') || [];
+    const nextLegs = sanitizeCompositeLegsForPool(currentLegs, selectedCompositePool, options?.factors);
+    const currentKeys = currentLegs.map(leg => leg?.factor).join('|');
+    const nextKeys = nextLegs.map(leg => leg?.factor).join('|');
+    if (currentLegs.length !== nextLegs.length || currentKeys !== nextKeys) {
+      compositeForm.setFieldsValue({ legs: nextLegs });
+    }
+  }, [selectedCompositePool, options?.factors, compositeForm]);
 
   const loadBacktestSearchResults = useCallback(async (nextState = {}) => {
     const queryState = {
@@ -1594,7 +1869,17 @@ const FactorLab = ({ initialTab = 'single' }) => {
   useEffect(() => {
     loadOptions();
     loadBacktestSearchHistory({ silent: true });
-  }, [loadOptions, loadBacktestSearchHistory]);
+    loadExternalTradingAccounts();
+    loadLiveConfigs();
+  }, [loadOptions, loadBacktestSearchHistory, loadExternalTradingAccounts, loadLiveConfigs]);
+
+  useEffect(() => {
+    if (!selectedLiveConfigId) {
+      setLiveLogs([]);
+      return;
+    }
+    loadLiveConfigLogs(selectedLiveConfigId);
+  }, [selectedLiveConfigId, loadLiveConfigLogs]);
 
   useEffect(() => {
     const shouldPoll = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
@@ -1723,6 +2008,136 @@ const FactorLab = ({ initialTab = 'single' }) => {
       custom_symbols: [],
     });
     setCustomSymbolOptions([]);
+  };
+
+  const handleLiveConfigSelect = async configId => {
+    setSelectedLiveConfigId(configId || null);
+    const nextConfig = liveConfigs.find(item => item.id === configId) || null;
+    if (!nextConfig) {
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
+      setLiveLogs([]);
+      return;
+    }
+    liveForm.setFieldsValue(normalizeLiveConfigFormValues(nextConfig));
+    await loadLiveConfigLogs(nextConfig.id);
+  };
+
+  const handleLivePoolChange = value => {
+    liveForm.setFieldsValue({
+      lot_size: isAStockPoolValue(value) ? 100 : 1,
+      custom_symbols: [],
+    });
+    setLiveCustomSymbolOptions([]);
+  };
+
+  const handleLiveLegFactorChange = (index, value) => {
+    const factor = getFactorByKey(options?.factors, value);
+    const legs = [...(liveForm.getFieldValue('legs') || [])];
+    legs[index] = {
+      ...(legs[index] || {}),
+      factor: value,
+      window: getDefaultWindowForFactor(factor),
+      momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
+    };
+    liveForm.setFieldsValue({ legs });
+  };
+
+  const handleLiveBacktest = async () => {
+    const values = await liveForm.validateFields();
+    try {
+      const payload = buildBacktestPayload({
+        ...values,
+        initial_capital: selectedLiveSubAccountNetAssetValue && selectedLiveSubAccountNetAssetValue > 0
+          ? selectedLiveSubAccountNetAssetValue
+          : values.initial_capital,
+        lot_size: selectedLiveSubAccountLotSize || values.lot_size,
+      });
+      backtestForm.setFieldsValue(normalizeBacktestDefaultRequest(payload));
+      setActiveTab('backtest');
+      await executeBacktestPayload(payload);
+    } catch (error) {
+      message.warning(error.message || '线上交易参数无法回测');
+    }
+  };
+
+  const handleLiveSave = async () => {
+    const values = await liveForm.validateFields();
+    setLiveSaving(true);
+    try {
+      const payload = buildLiveConfigPayload(values);
+      const { data } = selectedLiveConfigId
+        ? await request.put(`/api/factor-lab/live-configs/${selectedLiveConfigId}`, payload, { timeout: 300000 })
+        : await request.post('/api/factor-lab/live-configs', payload, { timeout: 300000 });
+      message.success('线上交易配置已保存');
+      await loadLiveConfigs();
+      setSelectedLiveConfigId(data.id);
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data));
+      await loadLiveConfigLogs(data.id);
+    } catch (error) {
+      message.error(getErrorMessage(error, '保存线上交易配置失败'));
+    } finally {
+      setLiveSaving(false);
+    }
+  };
+
+  const handleLiveDelete = async (configId = selectedLiveConfigId) => {
+    if (!configId) return;
+    setLiveActionLoading(true);
+    try {
+      await request.delete(`/api/factor-lab/live-configs/${configId}`, { timeout: 300000 });
+      message.success('线上交易配置已删除');
+      setSelectedLiveConfigId(null);
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
+      setLiveLogs([]);
+      await loadLiveConfigs();
+    } catch (error) {
+      message.error(getErrorMessage(error, '删除线上交易配置失败'));
+    } finally {
+      setLiveActionLoading(false);
+    }
+  };
+
+  const handleLiveGenerateSignal = async (configId = selectedLiveConfigId) => {
+    if (!configId) return;
+    setLiveActionLoading(true);
+    try {
+      const { data } = await request.post(`/api/factor-lab/live-configs/${configId}/signal`, {}, { timeout: 300000 });
+      message.success('已生成信号');
+      setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
+      setSelectedLiveConfigId(data.config.id);
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
+      await loadLiveConfigLogs(configId);
+      await loadLiveConfigs();
+    } catch (error) {
+      message.error(getErrorMessage(error, '生成线上交易信号失败'));
+    } finally {
+      setLiveActionLoading(false);
+    }
+  };
+
+  const handleLiveExecute = async (configId = selectedLiveConfigId) => {
+    if (!configId) return;
+    setLiveActionLoading(true);
+    try {
+      const { data } = await request.post(`/api/factor-lab/live-configs/${configId}/execute`, {}, { timeout: 300000 });
+      message.success('已执行线上交易');
+      setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
+      setSelectedLiveConfigId(data.config.id);
+      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
+      await loadLiveConfigLogs(configId);
+      await loadLiveConfigs();
+    } catch (error) {
+      message.error(getErrorMessage(error, '执行线上交易失败'));
+    } finally {
+      setLiveActionLoading(false);
+    }
+  };
+
+  const handleLiveRefresh = async () => {
+    await loadLiveConfigs();
+    if (selectedLiveConfigId) {
+      await loadLiveConfigLogs(selectedLiveConfigId);
+    }
   };
 
   const handleTimingTargetChange = value => {
@@ -1967,7 +2382,18 @@ const FactorLab = ({ initialTab = 'single' }) => {
     }
   };
 
-  const factorSelectOptions = useMemo(() => buildFactorSelectOptions(options?.factors), [options]);
+  const singleFactorSelectOptions = useMemo(() => (
+    buildFactorSelectOptions(
+      options?.factors,
+      factor => isBacktestFactorOptionAllowedForPool(factor, selectedSinglePool),
+    )
+  ), [options, selectedSinglePool]);
+  const compositeFactorSelectOptions = useMemo(() => (
+    buildFactorSelectOptions(
+      options?.factors,
+      factor => isBacktestFactorOptionAllowedForPool(factor, selectedCompositePool),
+    )
+  ), [options, selectedCompositePool]);
   const backtestFactorSelectOptions = useMemo(() => (
     buildFactorSelectOptions(
       options?.factors,
@@ -2020,7 +2446,23 @@ const FactorLab = ({ initialTab = 'single' }) => {
       ...CUSTOM_BACKTEST_POOL_OPTIONS.filter(item => !existing.has(item.value)),
     ];
   }, [options]);
+  const livePoolOptions = backtestPoolOptions;
   const rebalanceFrequencyOptions = useMemo(() => REBALANCE_FREQUENCY_OPTIONS, []);
+  const selectedLiveConfig = useMemo(() => (
+    liveConfigs.find(item => item.id === selectedLiveConfigId) || null
+  ), [liveConfigs, selectedLiveConfigId]);
+  const externalTradingAccountOptions = useMemo(() => (
+    externalTradingAccounts.map(item => ({
+      label: `${item.name || item.identifier || item.id}${item.enabled === false ? '（停用）' : ''}`,
+      value: item.id,
+    }))
+  ), [externalTradingAccounts]);
+  const externalTradingSubAccountOptions = useMemo(() => (
+    externalTradingSubAccounts.map(item => ({
+      label: `${item.name || item.id}${item.enabled === false ? '（停用）' : ''}`,
+      value: item.id,
+    }))
+  ), [externalTradingSubAccounts]);
   const timingMaWindowOptions = useMemo(() => [1, 5, 20].map(item => ({
     label: item === 1 ? '原始值' : `${item}日均值`,
     value: item,
@@ -2042,6 +2484,54 @@ const FactorLab = ({ initialTab = 'single' }) => {
       { label: 'SPY', value: 'SPY.US' },
     ]
   ), [options]);
+  const liveConfigColumns = useMemo(() => ([
+    {
+      title: '名称',
+      dataIndex: 'name',
+      width: 180,
+      fixed: 'left',
+      render: (value, row) => (
+        <Space direction="vertical" size={0}>
+          <Text strong>{value}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.request_summary?.pool || '-'}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'enabled',
+      width: 96,
+      render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>,
+    },
+    { title: '外部账户', dataIndex: 'external_trading_account_id', width: 104, render: value => value || '-' },
+    { title: '子账户', dataIndex: 'live_sub_account_id', width: 104, render: value => value || '-' },
+    { title: '信号', dataIndex: 'last_signal_status', width: 104, render: value => value ? <Tag>{value}</Tag> : '-' },
+    { title: '信号日', dataIndex: 'last_signal_date', width: 112, render: value => value || '-' },
+    { title: '执行', dataIndex: 'last_execution_status', width: 104, render: value => value ? <Tag color={value === 'OK' ? 'green' : 'red'}>{value}</Tag> : '-' },
+    { title: '执行日', dataIndex: 'last_execution_signal_date', width: 112, render: value => value || '-' },
+    { title: '更新时间', dataIndex: 'updated_at', width: 180, render: value => value || '-' },
+    {
+      title: '操作',
+      key: 'action',
+      width: 300,
+      fixed: 'right',
+      render: (_, row) => (
+        <Space size={6} wrap>
+          <Button size="small" onClick={() => handleLiveConfigSelect(row.id)}>编辑</Button>
+          <Button size="small" onClick={() => handleLiveGenerateSignal(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>信号</Button>
+          <Button size="small" onClick={() => handleLiveExecute(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>执行</Button>
+          <Button size="small" danger onClick={() => handleLiveDelete(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>删除</Button>
+        </Space>
+      ),
+    },
+  ]), [handleLiveConfigSelect, handleLiveDelete, handleLiveExecute, handleLiveGenerateSignal, liveActionLoading, selectedLiveConfigId]);
+  const liveLogColumns = useMemo(() => ([
+    { title: '时间', dataIndex: 'timestamp', width: 180 },
+    { title: '动作', dataIndex: 'action', width: 96, render: value => <Tag>{value}</Tag> },
+    { title: '状态', dataIndex: 'status', width: 96, render: value => <Tag color={value === 'OK' ? 'green' : value === 'SKIPPED' ? 'gold' : 'red'}>{value}</Tag> },
+    { title: '信号日', dataIndex: 'signal_date', width: 110, render: value => value || '-' },
+    { title: '消息', dataIndex: 'message', render: value => value || '-' },
+  ]), []);
   const summary = result?.summary || {};
   const metadata = result?.metadata || {};
   const oosSummary = result?.oos_summary || {};
@@ -2148,6 +2638,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
       .map(item => ({ label: item.label, value: item.key }))
   ), [options]);
   const isDatabaseTab = activeTab === 'db';
+  const isLiveTab = activeTab === 'live';
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
     : (activeTab === 'backtest' ? runBacktest : (activeTab === 'timing' ? runTimingAnalysis : runAnalysis));
@@ -2158,29 +2649,393 @@ const FactorLab = ({ initialTab = 'single' }) => {
   return (
     <div className="factor-lab-page">
       <div className="factor-lab-header">
-        <Tabs
-          className="factor-lab-tabs"
-          activeKey={activeTab}
-          onChange={setActiveTab}
-          items={[
-            { key: 'single', label: '单因子' },
-            { key: 'composite', label: '组合因子' },
-            { key: 'timing', label: '择时因子' },
-            { key: 'backtest', label: '因子回测' },
-            { key: 'db', label: 'DB' },
-          ]}
-        />
-        {!isDatabaseTab && (
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
-            <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
-              运行
-            </Button>
-          </Space>
-        )}
-      </div>
+          <Tabs
+            className="factor-lab-tabs"
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            items={[
+              { key: 'single', label: '单因子' },
+              { key: 'composite', label: '组合因子' },
+              { key: 'timing', label: '择时因子' },
+              { key: 'backtest', label: '因子回测' },
+              { key: 'live', label: '线上交易' },
+              { key: 'db', label: 'DB' },
+            ]}
+          />
+          {!isDatabaseTab && !isLiveTab && (
+            <Space>
+              <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
+                运行
+              </Button>
+            </Space>
+          )}
+          {isLiveTab && (
+            <Space>
+              <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
+            </Space>
+          )}
+        </div>
 
       {activeTab === 'db' && <DatabaseManager />}
+
+      {activeTab === 'live' && (
+        <>
+          <Row gutter={[12, 12]}>
+            <Col xs={24}>
+              <Card
+                className="factor-lab-control-card"
+                title="线上交易配置"
+                bordered={false}
+                extra={(
+                  <Space>
+                    <Button onClick={() => {
+                      setSelectedLiveConfigId(null);
+                      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
+                      setLiveLogs([]);
+                    }}>
+                      新建
+                    </Button>
+                    <Button loading={liveSaving} type="primary" onClick={handleLiveSave}>
+                      保存
+                    </Button>
+                    <Button loading={backtestRunning} onClick={handleLiveBacktest}>
+                      回测
+                    </Button>
+                    <Button loading={liveActionLoading} onClick={handleLiveGenerateSignal} disabled={!selectedLiveConfigId}>
+                      生成信号
+                    </Button>
+                    <Button loading={liveActionLoading} onClick={handleLiveExecute} disabled={!selectedLiveConfigId}>
+                      执行
+                    </Button>
+                    <Button danger loading={liveActionLoading} onClick={handleLiveDelete} disabled={!selectedLiveConfigId}>
+                      删除
+                    </Button>
+                    <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
+                  </Space>
+                )}
+              >
+                <Spin spinning={loadingOptions || liveLoading}>
+                  <Form form={liveForm} layout="vertical" initialValues={normalizeLiveConfigFormValues()}>
+                    <Form.Item name="start_date" hidden>
+                      <DatePicker />
+                    </Form.Item>
+                    <Form.Item name="end_date" hidden>
+                      <DatePicker />
+                    </Form.Item>
+                    <Form.Item name="oos_start_date" hidden>
+                      <DatePicker />
+                    </Form.Item>
+                    <Form.Item name="initial_capital" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                    <Form.Item name="commission_pct" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                    <Form.Item name="slippage_pct" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                    <Form.Item name="lot_size" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                    <Row gutter={[12, 8]}>
+                      <Col xs={24} sm={12} md={8} lg={6}>
+                        <Form.Item label="配置选择">
+                          <Select
+                            value={selectedLiveConfigId}
+                            allowClear
+                            options={liveConfigs.map(item => ({ label: item.name, value: item.id }))}
+                            onChange={handleLiveConfigSelect}
+                            placeholder="新建或选择现有配置"
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={8} lg={6}>
+                        <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+                          <Input />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="enabled" label="启用" rules={[{ required: true }]}>
+                          <Select options={[{ label: '启用', value: true }, { label: '停用', value: false }]} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={8} lg={6}>
+                        <Form.Item name="external_trading_account_id" label="外部交易账户">
+                          <Select
+                            allowClear
+                            options={externalTradingAccountOptions}
+                            loading={externalTradingAccountsLoading}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={8} lg={6}>
+                        <Form.Item name="live_sub_account_id" label="外部交易子账户">
+                          <Select
+                            allowClear
+                            options={externalTradingSubAccountOptions}
+                            placeholder="请选择子账户"
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item label="交易单位">
+                          <Input
+                            disabled
+                            readOnly
+                            value={selectedLiveSubAccountLotSize ? numberFormatter(selectedLiveSubAccountLotSize) : '-'}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item label="子账户净资产">
+                          <Input
+                            disabled
+                            readOnly
+                            value={selectedLiveSubAccount ? numberFormatter(selectedLiveSubAccountNetAssetValue) : '-'}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="signal_time" label="信号时间" rules={[{ required: true }]}>
+                          <Input placeholder="18:35" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="signal_timezone" label="信号时区" rules={[{ required: true }]}>
+                          <Select options={TIMEZONE_OPTIONS} showSearch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="execution_time" label="执行时间" rules={[{ required: true }]}>
+                          <Input placeholder="09:31" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="execution_timezone" label="执行时区" rules={[{ required: true }]}>
+                          <Select options={TIMEZONE_OPTIONS} showSearch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={6} lg={4}>
+                        <Form.Item name="pool" label="股票池" rules={[{ required: true }]}>
+                          <Select options={livePoolOptions} onChange={handleLivePoolChange} />
+                        </Form.Item>
+                      </Col>
+                      {customLiveSymbolsVisible && (
+                        <Col xs={24} md={12} lg={8}>
+                          <Form.Item name="custom_symbols" label="自定义标的" rules={[{ required: true, message: '请至少选择一个标的' }]}>
+                            <Select
+                              mode="tags"
+                              showSearch
+                              allowClear
+                              maxTagCount="responsive"
+                              tokenSeparators={[',', '，', ' ']}
+                              filterOption={false}
+                              options={liveCustomSymbolOptions}
+                              loading={liveCustomSymbolSearching}
+                              optionLabelProp="label"
+                              notFoundContent={liveCustomSymbolSearching ? <Spin size="small" /> : null}
+                              placeholder={customLiveMarket === 'a_stock' ? '输入代码或名称搜索' : '输入美股代码'}
+                              onFocus={() => loadLiveCustomSymbolOptions(customLiveMarket, '')}
+                              onSearch={query => loadLiveCustomSymbolOptions(customLiveMarket, query)}
+                            />
+                          </Form.Item>
+                        </Col>
+                      )}
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="max_positions" label="持仓数" rules={[{ required: true }]}>
+                          <InputNumber min={1} max={100} controls className="factor-lab-full" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={6} lg={4}>
+                        <Form.Item name="position_weights_text" label="仓位权重">
+                          <Input placeholder="0.7:0.3,0.7:0.2:0.1" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="sell_rank_multiplier" label="卖出倍数" rules={[{ required: true }]}>
+                          <InputNumber min={1} max={10} step={0.25} precision={2} controls className="factor-lab-full" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="rebalance_frequency" label="调仓频率" rules={[{ required: true }]}>
+                          <Select options={rebalanceFrequencyOptions} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} sm={12} md={6} lg={4}>
+                        <Form.Item name="rotation_mode" label="调仓方式" rules={[{ required: true }]}>
+                          <Select options={ROTATION_MODE_OPTIONS} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={12} sm={6} md={4} lg={3}>
+                        <Form.Item name="min_listing_days" label="上市天数" rules={[{ required: true }]}>
+                          <InputNumber min={0} max={3650} controls className="factor-lab-full" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+
+                    <Form.List name="legs">
+                      {(fields, { add, remove }) => (
+                        <div className="factor-lab-leg-list">
+                          <div className="factor-lab-leg-list-header">
+                            <Text strong>组合因子</Text>
+                            <Button
+                              size="small"
+                              icon={<PlusOutlined />}
+                              onClick={() => add(buildDefaultBacktestLeg('raw_momentum', getFactorByKey(options?.factors, 'raw_momentum')))}
+                            >
+                              添加因子
+                            </Button>
+                          </div>
+                          {fields.map(field => {
+                            const leg = (liveForm.getFieldValue('legs') || [])[field.name] || {};
+                            const factor = getFactorByKey(options?.factors, leg.factor);
+                            return (
+                              <div key={field.key} className="factor-lab-leg-row">
+                                <Row gutter={[12, 8]} align="middle">
+                                  <Col xs={24} md={7}>
+                                    <Form.Item
+                                      {...field}
+                                      name={[field.name, 'factor']}
+                                      label="因子"
+                                      rules={[{ required: true, message: '请选择因子' }]}
+                                    >
+                                      <Select
+                                        options={liveFactorSelectOptions}
+                                        onChange={value => handleLiveLegFactorChange(field.name, value)}
+                                      />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={12} md={4}>
+                                    <Form.Item
+                                      {...field}
+                                      name={[field.name, 'window']}
+                                      label="窗口"
+                                      rules={[{ required: true, message: '请选择窗口' }]}
+                                    >
+                                      <Select
+                                        options={getWindowOptionsForFactor(factor, options?.windows)}
+                                        disabled={factor && !factor.supports_windows}
+                                      />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={12} md={3}>
+                                    <Form.Item
+                                      {...field}
+                                      name={[field.name, 'weight']}
+                                      label="权重"
+                                      rules={[{ required: true, message: '请输入权重' }]}
+                                    >
+                                      <InputNumber min={-100} max={100} step={0.1} precision={4} controls className="factor-lab-full" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} md={5}>
+                                    <Form.Item
+                                      {...field}
+                                      name={[field.name, 'neutralization']}
+                                      label="中性化"
+                                      rules={[{ required: true, message: '请选择中性化' }]}
+                                    >
+                                      <Select options={neutralizationOptions} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={20} md={4}>
+                                    <Form.Item
+                                      {...field}
+                                      name={[field.name, 'standardization']}
+                                      label="标准化"
+                                      rules={[{ required: true, message: '请选择标准化' }]}
+                                    >
+                                      <Select options={standardizationOptions} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={4} md={1}>
+                                    <Button
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      disabled={fields.length <= 1}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  </Col>
+                                </Row>
+                                {isMixedWindow(leg.window) && (
+                                  <Row gutter={[12, 8]} className="factor-lab-leg-subrow">
+                                    {MOMENTUM_WEIGHT_WINDOWS.map(window => (
+                                      <Col xs={8} sm={8} md={4} lg={3} key={window}>
+                                        <Form.Item name={[field.name, 'momentum_weights', String(window)]} label={`${window}日权重`}>
+                                          <InputNumber min={0} step={0.05} precision={4} controls className="factor-lab-full" />
+                                        </Form.Item>
+                                      </Col>
+                                    ))}
+                                  </Row>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </Form.List>
+                  </Form>
+                </Spin>
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24} xl={12}>
+              <Card title="配置列表" bordered={false}>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  loading={liveLoading}
+                  columns={liveConfigColumns}
+                  dataSource={liveConfigs}
+                  pagination={false}
+                  scroll={{ x: 1240 }}
+                  rowClassName={row => (row.id === selectedLiveConfigId ? 'factor-lab-table-row-selected' : '')}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} xl={12}>
+              <Card title="最近日志" bordered={false}>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  columns={liveLogColumns}
+                  dataSource={liveLogs}
+                  pagination={false}
+                  scroll={{ x: 640, y: 420 }}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title="最近信号" bordered={false}>
+                {selectedLiveConfig?.last_signal_payload ? (
+                  <Space direction="vertical" size={8} className="factor-lab-full">
+                    <Space size={8} wrap>
+                      <Tag color={selectedLiveConfig.last_signal_status === 'OK' ? 'green' : selectedLiveConfig.last_signal_status === 'SKIPPED' ? 'gold' : 'red'}>
+                        {selectedLiveConfig.last_signal_status || '-'}
+                      </Tag>
+                      <span>信号日 {selectedLiveConfig.last_signal_date || '-'}</span>
+                      <span>{selectedLiveConfig.last_signal_message || '-'}</span>
+                    </Space>
+                    <div className="factor-lab-compact-stats">
+                      <span>卖出 {(selectedLiveConfig.last_signal_payload.sell_symbols || []).join(', ') || '-'}</span>
+                      <span>补位 {(selectedLiveConfig.last_signal_payload.buy_symbols || []).join(', ') || '-'}</span>
+                      <span>目标 {(selectedLiveConfig.last_signal_payload.target_symbols || []).join(', ') || '-'}</span>
+                    </div>
+                  </Space>
+                ) : (
+                  <Empty />
+                )}
+              </Card>
+            </Col>
+          </Row>
+        </>
+      )}
 
       {activeTab === 'single' && (
       <>
@@ -2195,7 +3050,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
               </Col>
               <Col xs={24} sm={12} md={8} lg={6}>
                 <Form.Item name="factor" label="因子" rules={[{ required: true }]}>
-                  <Select options={factorSelectOptions} onChange={handleFactorChange} />
+                  <Select options={singleFactorSelectOptions} onChange={handleFactorChange} />
                 </Form.Item>
               </Col>
               <Col xs={12} sm={6} md={4} lg={3}>
@@ -2513,7 +3368,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                               rules={[{ required: true, message: '请选择因子' }]}
                             >
                               <Select
-                                options={factorSelectOptions}
+                                options={compositeFactorSelectOptions}
                                 onChange={value => handleCompositeLegFactorChange(field.name, value)}
                               />
                             </Form.Item>
