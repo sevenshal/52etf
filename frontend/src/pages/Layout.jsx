@@ -21,7 +21,6 @@ const PROFILE_ROUTES = [
   '/all-weather-backtest',
   '/fear/backtest',
   '/soxl-fear-backtest',
-  '/w20-momentum-backtest',
   '/monthly-analysis',
   '/scheduled-tasks',
   '/system-log',

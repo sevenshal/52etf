@@ -862,7 +862,7 @@ const ExternalTradingAccountManager = () => {
           initialValues={{ enabled: true, cash_allocated: 0 }}
         >
           <Form.Item name="name" label="子账户名" rules={[{ required: true, message: '请输入子账户名' }]}>
-            <Input placeholder="例如：W20 实盘账本" />
+            <Input placeholder="例如：因子线上交易账本" />
           </Form.Item>
           <Form.Item name="cash_allocated" label="分配资金">
             <InputNumber min={0} step={10000} style={{ width: '100%' }} />
@@ -878,7 +878,7 @@ const ExternalTradingAccountManager = () => {
             </Space>
           ) : null}
           <Divider orientation="left">执行策略覆盖</Divider>
-          <Text type="secondary">留空则继承外部交易账户默认策略；W20 绑定保存时会同步它的限价档位和最小交易单位。</Text>
+          <Text type="secondary">留空则继承外部交易账户默认策略；绑定策略保存时会同步它的限价档位和最小交易单位。</Text>
           <Form.Item name="executor_price_level" label="初始限价档位">
             <Select allowClear options={priceLevelOptions} placeholder="继承账户默认" />
           </Form.Item>

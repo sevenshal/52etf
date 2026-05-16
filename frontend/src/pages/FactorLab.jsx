@@ -2080,11 +2080,17 @@ const FactorLab = ({ initialTab = 'single' }) => {
     }
   };
 
+  const resolveLiveActionConfigId = configId => {
+    const numericId = Number(configId);
+    return Number.isFinite(numericId) && numericId > 0 ? numericId : selectedLiveConfigId;
+  };
+
   const handleLiveDelete = async (configId = selectedLiveConfigId) => {
-    if (!configId) return;
+    const targetConfigId = resolveLiveActionConfigId(configId);
+    if (!targetConfigId) return;
     setLiveActionLoading(true);
     try {
-      await request.delete(`/api/factor-lab/live-configs/${configId}`, { timeout: 300000 });
+      await request.delete(`/api/factor-lab/live-configs/${targetConfigId}`, { timeout: 300000 });
       message.success('线上交易配置已删除');
       setSelectedLiveConfigId(null);
       liveForm.setFieldsValue(normalizeLiveConfigFormValues());
@@ -2098,15 +2104,16 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   const handleLiveGenerateSignal = async (configId = selectedLiveConfigId) => {
-    if (!configId) return;
+    const targetConfigId = resolveLiveActionConfigId(configId);
+    if (!targetConfigId) return;
     setLiveActionLoading(true);
     try {
-      const { data } = await request.post(`/api/factor-lab/live-configs/${configId}/signal`, {}, { timeout: 300000 });
+      const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/signal`, {}, { timeout: 300000 });
       message.success('已生成信号');
       setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
       setSelectedLiveConfigId(data.config.id);
       liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
-      await loadLiveConfigLogs(configId);
+      await loadLiveConfigLogs(targetConfigId);
       await loadLiveConfigs();
     } catch (error) {
       message.error(getErrorMessage(error, '生成线上交易信号失败'));
@@ -2116,15 +2123,16 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   const handleLiveExecute = async (configId = selectedLiveConfigId) => {
-    if (!configId) return;
+    const targetConfigId = resolveLiveActionConfigId(configId);
+    if (!targetConfigId) return;
     setLiveActionLoading(true);
     try {
-      const { data } = await request.post(`/api/factor-lab/live-configs/${configId}/execute`, {}, { timeout: 300000 });
+      const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/execute`, {}, { timeout: 300000 });
       message.success('已执行线上交易');
       setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
       setSelectedLiveConfigId(data.config.id);
       liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
-      await loadLiveConfigLogs(configId);
+      await loadLiveConfigLogs(targetConfigId);
       await loadLiveConfigs();
     } catch (error) {
       message.error(getErrorMessage(error, '执行线上交易失败'));
@@ -2702,13 +2710,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
                     <Button loading={backtestRunning} onClick={handleLiveBacktest}>
                       回测
                     </Button>
-                    <Button loading={liveActionLoading} onClick={handleLiveGenerateSignal} disabled={!selectedLiveConfigId}>
+                    <Button loading={liveActionLoading} onClick={() => handleLiveGenerateSignal()} disabled={!selectedLiveConfigId}>
                       生成信号
                     </Button>
-                    <Button loading={liveActionLoading} onClick={handleLiveExecute} disabled={!selectedLiveConfigId}>
+                    <Button loading={liveActionLoading} onClick={() => handleLiveExecute()} disabled={!selectedLiveConfigId}>
                       执行
                     </Button>
-                    <Button danger loading={liveActionLoading} onClick={handleLiveDelete} disabled={!selectedLiveConfigId}>
+                    <Button danger loading={liveActionLoading} onClick={() => handleLiveDelete()} disabled={!selectedLiveConfigId}>
                       删除
                     </Button>
                     <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
@@ -4131,7 +4139,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
             </Row>
 
             <div className="factor-lab-factor-note">
-              <Text type="secondary">默认参数用于复现“美股多因子策略虚拟盘”：风险调整动量 60% + 指数成分权重 40%，默认标准化为截面排名分位，因子间按标准化结果加权。</Text>
+              <Text type="secondary">默认参数用于美股多因子组合：风险调整动量 60% + 指数成分权重 40%，默认标准化为截面排名分位，因子间按标准化结果加权。</Text>
             </div>
           </Form>
         </Spin>

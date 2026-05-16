@@ -133,11 +133,6 @@ const Profile = () => {
           onClick: () => navigate('/soxl-fear-backtest'),
           arrow: true
         },
-        {
-          title: 'W20风险调整动量回测',
-          onClick: () => navigate('/w20-momentum-backtest'),
-          arrow: true
-        }
       ]
     },
     {
