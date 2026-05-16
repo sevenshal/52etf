@@ -753,6 +753,48 @@ class ScheduledTaskConfig(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class FactorLiveTradingConfig(Base):
+    """因子线上交易配置：复用因子回测参数生成信号，并同步到外部交易执行器。"""
+    __tablename__ = "factor_live_trading_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    name = Column(String(100), nullable=False, default="因子线上交易")
+    enabled = Column(Boolean, default=False, nullable=False)
+    request_payload = Column(JSON, nullable=False)
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_sub_account_id = Column(Integer, nullable=True)
+    signal_time = Column(String(5), default="18:35", nullable=False)
+    signal_timezone = Column(String(64), default="Asia/Shanghai", nullable=False)
+    execution_time = Column(String(5), default="09:31", nullable=False)
+    execution_timezone = Column(String(64), default="Asia/Shanghai", nullable=False)
+    last_signal_date = Column(Date)
+    last_signal_at = Column(DateTime)
+    last_signal_status = Column(String(16))
+    last_signal_message = Column(String(1000))
+    last_signal_payload = Column(JSON)
+    last_execution_signal_date = Column(Date)
+    last_execution_at = Column(DateTime)
+    last_execution_status = Column(String(16))
+    last_execution_message = Column(String(1000))
+    last_execution_payload = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class FactorLiveTradingLog(Base):
+    """因子线上交易信号和执行日志。"""
+    __tablename__ = "factor_live_trading_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("factor_live_trading_configs.id"), index=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    action = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False)
+    signal_date = Column(Date)
+    message = Column(String(1000))
+    payload = Column(JSON)
+
 class W20MomentumLiveConfig(Base):
     """W20 风险调整 ETF 动量虚拟盘配置"""
     __tablename__ = "w20_momentum_live_configs"
@@ -1222,6 +1264,9 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_calmar ON factor_backtest_search_results(search_id, calmar)",
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_oos_return ON factor_backtest_search_results(search_id, oos_annualized_return)",
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_oos_sharpe ON factor_backtest_search_results(search_id, oos_sharpe)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_account ON factor_live_trading_configs(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_enabled ON factor_live_trading_configs(enabled)",
+        "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_logs_config_time ON factor_live_trading_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_configs_account ON a_stock_innovation_momentum_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_events_config_date ON a_stock_innovation_momentum_events(config_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_trades_config_date ON a_stock_innovation_momentum_trades(config_id, date)",

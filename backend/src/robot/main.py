@@ -5,45 +5,42 @@ from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
-from .us_stock_signal_live_sync import start_us_stock_signal_live_sync
 from .scheduled_tasks import scheduled_task_manager, run_startup_tasks
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
 
-_last_w20_strategy_automation_check = 0.0
+_last_factor_live_trading_automation_check = 0.0
 _last_external_trading_monitor_check = 0.0
 _last_external_trading_executor_check = 0.0
 _last_snowball_external_trading_sync_check = 0.0
 
 
-def _process_w20_strategy_automation():
-  global _last_w20_strategy_automation_check
+def _process_factor_live_trading_automation():
+  global _last_factor_live_trading_automation_check
   now = time.time()
-  if now - _last_w20_strategy_automation_check < 30:
+  if now - _last_factor_live_trading_automation_check < 30:
     return
-  _last_w20_strategy_automation_check = now
+  _last_factor_live_trading_automation_check = now
 
   try:
-    from ..app.api.w20_momentum_live import (
-      process_w20_momentum_live_strategy_automation_for_robot,
+    from ..app.api.factor_lab import (
+      process_factor_live_trading_automation_for_robot,
     )
 
-    automation_result = process_w20_momentum_live_strategy_automation_for_robot()
+    automation_result = process_factor_live_trading_automation_for_robot()
     if (
       automation_result.get("signals")
       or automation_result.get("signal_waiting")
-      or automation_result.get("virtual_trades")
-      or automation_result.get("virtual_trade_waiting")
-      or automation_result.get("plan_emails")
-      or automation_result.get("plan_skipped")
+      or automation_result.get("executions")
+      or automation_result.get("execution_waiting")
       or automation_result.get("errors")
     ):
-      logging.info("W20 strategy automation result: %s", automation_result)
+      logging.info("Factor live trading automation result: %s", automation_result)
 
   except Exception:
-    logging.exception("W20 strategy automation check failed")
+    logging.exception("Factor live trading automation check failed")
 
 
 def _process_external_trading_connection_monitor():
@@ -115,13 +112,11 @@ def robot():
   start_portfolio_copy_trader()
   # 启动 SOXL 情绪量能自动交易
   start_soxl_fear_strategy_trader()
-  # 启动美股多因子策略虚拟盘自动同步（美股收盘后轮询配置）
-  start_us_stock_signal_live_sync()
 
   while True:
     try:
       scheduled_task_manager.run_pending()
-      _process_w20_strategy_automation()
+      _process_factor_live_trading_automation()
       _process_snowball_external_trading_sync()
       _process_external_trading_executor()
       _process_external_trading_connection_monitor()

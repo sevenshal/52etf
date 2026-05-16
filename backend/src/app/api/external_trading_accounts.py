@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from ...core.analytics_database import AStockBasic, get_analytics_db_ctx
 from ...core.database import (
+    FactorLiveTradingConfig,
     SnowballCopyConfig,
     W20MomentumLiveConfig,
     get_db,
@@ -50,6 +51,7 @@ from ...core.services.external_trading_execution_policy import (
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STRATEGY_SNOWBALL,
+    STRATEGY_FACTOR_LIVE,
     STRATEGY_W20,
     build_netted_target_execution_plan,
     empty_sub_account_fee_summary,
@@ -325,6 +327,12 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
         if config:
             return config.combination_name or config.combination_id or "A股雪球跟单"
         return "A股雪球跟单（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_FACTOR_LIVE:
+        config = main_db.query(FactorLiveTradingConfig).filter(
+            FactorLiveTradingConfig.id == sub_account.strategy_config_id,
+            FactorLiveTradingConfig.account_id == sub_account.account_id,
+        ).first()
+        return config.name if config else "因子线上交易（配置已删除）"
     return sub_account.strategy_type
 
 
@@ -840,6 +848,14 @@ async def delete_external_trading_account(
         config.live_sub_account_id = None
         config.live_trade_enabled = False
         config.updated_at = now
+    for config in main_db.query(FactorLiveTradingConfig).filter(
+        FactorLiveTradingConfig.account_id == account_id,
+        FactorLiveTradingConfig.external_trading_account_id == account_pk,
+    ).all():
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        config.enabled = False
+        config.updated_at = now
     db.query(ExternalTradingOrderFill).filter(
         ExternalTradingOrderFill.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
@@ -1077,6 +1093,14 @@ async def delete_external_trading_sub_account(
         SnowballCopyConfig.live_sub_account_id == sub_account.id,
     ).all()
     for config in bound_snowball_configs:
+        config.live_sub_account_id = None
+        config.updated_at = now
+
+    bound_factor_live_configs = main_db.query(FactorLiveTradingConfig).filter(
+        FactorLiveTradingConfig.account_id == account_id,
+        FactorLiveTradingConfig.live_sub_account_id == sub_account.id,
+    ).all()
+    for config in bound_factor_live_configs:
         config.live_sub_account_id = None
         config.updated_at = now
 

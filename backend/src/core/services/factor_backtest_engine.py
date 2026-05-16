@@ -4,7 +4,7 @@ import math
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, Literal, Optional, Set, Union
@@ -46,6 +46,13 @@ DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 DEFAULT_REBALANCE_FREQUENCY = "weekly"
 SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "semiannual"]
+REBALANCE_FREQUENCY_LABELS = {
+    "daily": "每日",
+    "weekly": "每周",
+    "monthly": "每月",
+    "quarterly": "季度",
+    "semiannual": "半年",
+}
 ROTATION_MODE_RANK_EXIT_REBALANCE = "rank_exit_rebalance"
 ROTATION_MODE_SCHEDULED_REBALANCE = "scheduled_rebalance"
 ROTATION_MODE_CASH_FILL_REBALANCE = "cash_fill_rebalance"
@@ -2635,6 +2642,248 @@ def prepare_factor_backtest_base_data(
         "raw_factor_cache": {},
         "component_factor_cache": {},
         "factor_values_cache": {},
+    }
+
+
+def _factor_values_payload_for_backtest_request(
+    request: FactorBacktestConfig,
+    prepared_data: Dict[str, Any],
+    db: ORMSession,
+    resolved_legs: List[Dict[str, Any]],
+) -> Dict[str, Dict[date, Dict[str, Any]]]:
+    factor_values_cache = prepared_data.setdefault("factor_values_cache", {})
+    factor_values_key = _factor_values_cache_key(request, resolved_legs)
+    cached_factor_payload = factor_values_cache.get(factor_values_key)
+    if isinstance(cached_factor_payload, dict) and "values" in cached_factor_payload:
+        return cached_factor_payload
+
+    factor_df = _prepare_composite_factor_frame(
+        price_df=prepared_data["price_df"],
+        request=request,
+        db=db,
+        symbols=prepared_data["universe_history"].all_symbols,
+        start_date=request.start_date,
+        end_date=prepared_data["end_date"],
+        analysis_dates=prepared_data["dates"],
+        industry_df=prepared_data.get("industry_df"),
+        valuation_df=prepared_data.get("valuation_df"),
+        weight_history=prepared_data.get("weight_history"),
+        raw_factor_cache=prepared_data.setdefault("raw_factor_cache", {}),
+        component_factor_cache=prepared_data.setdefault("component_factor_cache", {}),
+        resolved_legs=resolved_legs,
+        candidate_etfs=prepared_data["candidate_etfs"],
+    )
+    factor_payload = _factor_values_and_details_by_date(factor_df, request, prepared_data["end_date"], resolved_legs)
+    _put_limited_cache(
+        factor_values_cache,
+        factor_values_key,
+        factor_payload,
+        BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT,
+    )
+    return factor_payload
+
+
+def build_factor_signal_plan(
+    request: FactorBacktestConfig,
+    db: ORMSession,
+    *,
+    holding_symbols: Optional[List[str]] = None,
+    signal_date: Optional[date] = None,
+    prepared_data: Optional[Dict[str, Any]] = None,
+    rank_limit: int = 100,
+) -> Dict[str, Any]:
+    """Build the close-signal / next-open execution plan without running portfolio history."""
+    resolved_legs = resolve_factor_legs(request.legs)
+    validate_factor_legs_for_pool(request.pool, resolved_legs)
+    if signal_date and (request.end_date is None or request.end_date > signal_date):
+        request = replace(request, end_date=signal_date)
+    if prepared_data is None:
+        prepared_data = prepare_factor_backtest_base_data(request, db, resolved_legs)
+
+    dates: List[date] = prepared_data["dates"]
+    if not dates:
+        raise ValueError("没有可用交易日行情")
+    target_date = signal_date or prepared_data["end_date"]
+    factor_payload = _factor_values_payload_for_backtest_request(request, prepared_data, db, resolved_legs)
+    factor_values = factor_payload.get("values") or {}
+    factor_details = factor_payload.get("details") or {}
+    candidate_dates = [item for item in dates if item <= target_date and factor_values.get(item)]
+    if not candidate_dates:
+        raise ValueError("没有可用因子信号，请调整日期、窗口或股票池")
+    actual_signal_date = candidate_dates[-1]
+    date_index = dates.index(actual_signal_date)
+
+    universe_history = prepared_data["universe_history"]
+    row_by_symbol_date = prepared_data["row_by_symbol_date"]
+    current_universe = set(universe_history.symbols_for_date(actual_signal_date))
+    price_map: Dict[str, float] = {}
+    turnover_map: Dict[str, float] = {}
+    for symbol, row_by_date in row_by_symbol_date.items():
+        row = row_by_date.get(actual_signal_date)
+        if not row:
+            continue
+        close_price = _safe_float(row.get("close"))
+        if close_price is not None and close_price > 0:
+            price_map[symbol] = close_price
+        turnover_map[symbol] = _safe_float(row.get("turnover")) or 0.0
+
+    score_map = factor_values.get(actual_signal_date, {})
+    ranked: List[Dict[str, Any]] = []
+    for symbol in sorted(current_universe):
+        if symbol not in price_map:
+            continue
+        factor_score = _safe_float(score_map.get(symbol))
+        if factor_score is None:
+            continue
+        detail = factor_details.get(actual_signal_date, {}).get(symbol, {})
+        ranked.append(
+            {
+                "symbol": symbol,
+                "price": _safe_float(price_map[symbol], 4),
+                "turnover": _safe_float(turnover_map.get(symbol, 0.0), 2),
+                "factor_score": _safe_float(factor_score, 6),
+                "factor_value_raw": detail.get("factor_value_raw"),
+                "component_scores": detail.get("component_scores"),
+                "component_score_by_factor": detail.get("component_score_by_factor"),
+            }
+        )
+    ranked.sort(key=lambda item: (float(item.get("factor_score") or -1e18), float(item.get("turnover") or 0), item["symbol"]), reverse=True)
+    denominator = max(1, len(ranked) - 1)
+    for rank_index, item in enumerate(ranked):
+        item["rank"] = rank_index + 1
+        item["factor_percentile"] = _safe_float(1 - rank_index / denominator, 6)
+        item["rank_score"] = item["factor_score"]
+
+    position_weights = normalize_position_weights(request.position_weights, request.max_positions)
+    max_positions = len(position_weights)
+    sell_rank_multiplier = float(request.sell_rank_multiplier)
+    sell_rank_threshold = max(max_positions, int(math.ceil(max_positions * sell_rank_multiplier)))
+    rebalance_frequency = normalize_rebalance_frequency(request.rebalance_frequency)
+    rotation_mode = normalize_rotation_mode(request.rotation_mode)
+    rotation_mode_label = ROTATION_MODE_LABELS.get(rotation_mode, rotation_mode)
+    held_symbols = list(dict.fromkeys(str(item or "").strip().upper() for item in (holding_symbols or []) if item))
+    selected = ranked[:max_positions]
+    selected_symbols = [item["symbol"] for item in selected]
+    sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
+    rank_by_symbol = {item["symbol"]: int(item["rank"]) for item in ranked}
+    is_signal_day = is_rebalance_day(dates, date_index, rebalance_frequency)
+
+    def _portfolio_target_weights(symbols: List[str]) -> Dict[str, float]:
+        if not symbols:
+            return {}
+        weights = list(position_weights[: len(symbols)])
+        if len(weights) < len(symbols):
+            weights.extend([weights[-1] if weights else 1.0 / len(symbols)] * (len(symbols) - len(weights)))
+        total = sum(weights)
+        if total <= 0:
+            return {symbol: 1.0 / len(symbols) for symbol in symbols}
+        if total > 1.000001:
+            weights = [weight / total for weight in weights]
+        return {symbol: weight for symbol, weight in zip(symbols, weights) if weight > 0}
+
+    def _cash_fill_buy_weights(symbols: List[str]) -> Dict[str, float]:
+        if not symbols:
+            return {}
+        weights = list(position_weights[: len(symbols)])
+        if len(weights) < len(symbols):
+            weights.extend([weights[-1] if weights else 1.0] * (len(symbols) - len(weights)))
+        total = sum(weights)
+        if total <= 0:
+            return {symbol: 1.0 / len(symbols) for symbol in symbols}
+        return {symbol: weight / total for symbol, weight in zip(symbols, weights) if weight > 0}
+
+    if not is_signal_day:
+        planned = {
+            "sell_symbols": [],
+            "target_symbols": held_symbols,
+            "target_weights": {},
+            "buy_symbols": [],
+            "buy_weights": {},
+            "should_rebalance": False,
+        }
+    elif rotation_mode == ROTATION_MODE_SCHEDULED_REBALANCE:
+        target_symbols = list(dict.fromkeys(selected_symbols))
+        planned = {
+            "sell_symbols": [symbol for symbol in held_symbols if symbol not in target_symbols],
+            "target_symbols": target_symbols,
+            "target_weights": _portfolio_target_weights(target_symbols),
+            "buy_symbols": [symbol for symbol in target_symbols if symbol not in held_symbols],
+            "buy_weights": {},
+            "should_rebalance": True,
+        }
+    else:
+        sell_symbols = [symbol for symbol in held_symbols if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold]
+        survivors = [symbol for symbol in held_symbols if symbol not in sell_symbols and rank_by_symbol.get(symbol) is not None]
+        target_symbols = list(dict.fromkeys(survivors))
+        buy_symbols = []
+        for item in ranked:
+            symbol = item["symbol"]
+            if symbol in target_symbols or symbol in sell_symbols:
+                continue
+            target_symbols.append(symbol)
+            if symbol not in held_symbols:
+                buy_symbols.append(symbol)
+            if len(target_symbols) >= max_positions:
+                break
+        target_symbols = [symbol for symbol in target_symbols[:max_positions] if symbol in rank_by_symbol]
+        target_symbols.sort(key=lambda symbol: rank_by_symbol.get(symbol, 10**9))
+        buy_symbols = [symbol for symbol in buy_symbols if symbol in target_symbols]
+        buy_symbols.sort(key=lambda symbol: rank_by_symbol.get(symbol, 10**9))
+        planned = {
+            "sell_symbols": sell_symbols,
+            "target_symbols": target_symbols,
+            "target_weights": _portfolio_target_weights(target_symbols),
+            "buy_symbols": buy_symbols,
+            "buy_weights": _cash_fill_buy_weights(buy_symbols),
+            "should_rebalance": bool(
+                sell_symbols
+                or len(held_symbols) < max_positions
+                or any(symbol not in held_symbols for symbol in target_symbols)
+            ),
+        }
+
+    if not is_signal_day:
+        action_status = "SKIPPED"
+        action_message = f"{actual_signal_date.isoformat()} 不是{REBALANCE_FREQUENCY_LABELS.get(rebalance_frequency, rebalance_frequency)}信号日"
+    elif planned["should_rebalance"]:
+        action_status = "READY"
+        action_message = "已生成下一交易日开盘执行计划"
+    else:
+        action_status = "NO_CHANGE"
+        action_message = "当前持仓未跌出排名阈值，无需调仓"
+
+    return {
+        "signal_date": actual_signal_date.isoformat(),
+        "requested_signal_date": target_date.isoformat() if target_date else None,
+        "is_signal_day": is_signal_day,
+        "status": action_status,
+        "message": action_message,
+        "pool": str(request.pool or "").strip().upper(),
+        "pool_label": request.pool_label,
+        "custom_symbols": list(request.custom_symbols or []),
+        "current_holdings": held_symbols,
+        "selected_symbols": selected_symbols,
+        "sell_rank_symbols": sell_rank_symbols,
+        "sell_symbols": planned["sell_symbols"],
+        "target_symbols": planned["target_symbols"],
+        "target_weights": planned["target_weights"],
+        "buy_symbols": planned["buy_symbols"],
+        "buy_weights": planned["buy_weights"],
+        "should_rebalance": planned["should_rebalance"],
+        "max_positions": max_positions,
+        "position_weights": position_weights,
+        "position_weights_label": format_position_weights(position_weights),
+        "sell_rank_multiplier": sell_rank_multiplier,
+        "sell_rank_threshold": sell_rank_threshold,
+        "rebalance_frequency": rebalance_frequency,
+        "rotation_mode": rotation_mode,
+        "rotation_mode_label": rotation_mode_label,
+        "execution_rule": "signal_close_next_open",
+        "ranked": ranked[: max(1, int(rank_limit or 100))],
+        "ranked_count": len(ranked),
+        "universe_size": len(current_universe),
+        "price_source": DAILY_PRICE_SOURCE,
+        "engine": "polars_duckdb_shared_factor_signal_plan",
     }
 
 

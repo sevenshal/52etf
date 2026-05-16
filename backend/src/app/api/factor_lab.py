@@ -1,16 +1,19 @@
 import logging
+import asyncio
 import json
 import math
 import os
 import re
 import threading
 import time
+from functools import lru_cache
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import combinations, product
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import polars as pl
@@ -26,9 +29,18 @@ from ...core.database import (
     ETFFearGreedCloneHistory,
     FactorBacktestSearchResult,
     FactorBacktestSearchState,
+    FactorLiveTradingConfig,
+    FactorLiveTradingLog,
     StockEVC,
     USStockIndustrySnapshot,
     get_db,
+    get_db_ctx,
+)
+from ...core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingSubAccount,
+    get_external_trading_db,
+    get_external_trading_db_ctx,
 )
 from ...core.services.factor_backtest_engine import (
     A_STOCK_INDEX_POOL_CODES,
@@ -54,11 +66,28 @@ from ...core.services.factor_backtest_engine import (
     format_position_weights,
     normalize_position_weights,
     normalize_rotation_mode,
+    build_factor_signal_plan as shared_build_factor_signal_plan,
     prepare_factor_backtest_base_data as shared_prepare_factor_backtest_base_data,
     run_factor_backtest as shared_run_factor_backtest,
     unsupported_factor_keys_for_pool,
     warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
 )
+from ...core.services.external_trading_executor import trigger_external_trading_executor
+from ...core.services.external_trading_ledger import (
+    STRATEGY_FACTOR_LIVE,
+    get_ledger_positions,
+    normalize_symbol as normalize_external_symbol,
+    safe_float as external_safe_float,
+    safe_int as external_safe_int,
+    sync_target_positions,
+)
+from ...core.services.external_trading_valuation import (
+    ExternalTradingValuationError,
+    calculate_sub_account_net_asset,
+    get_realtime_reference_prices,
+)
+from ...core.services.market import MarketService
+from ...core.services.tushare import TushareService
 from ...core.utils import normalize_us_equity_symbol
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
@@ -289,6 +318,14 @@ class FactorLabAnalyzeRequest(BaseModel):
     @validator("pool", pre=True)
     def validate_pool(cls, value):
         return _validate_pool_key(value)
+
+    @validator("factor")
+    def validate_factor(cls, value, values):
+        unsupported_keys = unsupported_factor_keys_for_pool(values.get("pool"))
+        if value in unsupported_keys:
+            label = FACTOR_REGISTRY.get(value).label if FACTOR_REGISTRY.get(value) else value
+            raise ValueError(f"自定义股票池不支持因子: {label}")
+        return value
 
     @validator("heatmap_windows", pre=True)
     def validate_windows(cls, value):
@@ -595,13 +632,25 @@ class CompositeFactorAnalyzeRequest(BaseModel):
         return value
 
     @validator("legs")
-    def validate_legs(cls, value):
+    def validate_legs(cls, value, values):
         if len(value) < 2:
             raise ValueError("组合因子至少需要2个子因子")
         if len(value) > 8:
             raise ValueError("组合因子最多支持8个子因子")
         if sum(abs(float(item.weight)) for item in value) <= 0:
             raise ValueError("至少设置一个非0因子权重")
+        unsupported_keys = unsupported_factor_keys_for_pool(values.get("pool"))
+        used_keys = []
+        for leg in value or []:
+            factor_key = getattr(leg, "factor", None)
+            if factor_key in unsupported_keys and factor_key not in used_keys:
+                used_keys.append(factor_key)
+        if used_keys:
+            labels = [
+                FACTOR_REGISTRY.get(key).label if FACTOR_REGISTRY.get(key) else key
+                for key in used_keys
+            ]
+            raise ValueError(f"自定义股票池不支持因子: {', '.join(labels)}")
         return value
 
 
@@ -892,6 +941,55 @@ class FactorBacktestSearchRequest(BaseModel):
         ):
             raise ValueError("选择样本内/样本外目标时，请先设置样本外起始日期")
         return value
+
+
+class FactorLiveTradingConfigPayload(BaseModel):
+    name: str = Field(default="因子线上交易", min_length=1, max_length=100)
+    enabled: bool = False
+    request: FactorBacktestRequest = Field(default_factory=FactorBacktestRequest)
+    external_trading_account_id: Optional[int] = None
+    live_sub_account_id: Optional[int] = None
+    signal_time: str = "18:35"
+    signal_timezone: str = "Asia/Shanghai"
+    execution_time: str = "09:31"
+    execution_timezone: str = "Asia/Shanghai"
+
+    @validator("name", "signal_timezone", "execution_timezone", pre=True)
+    def strip_live_config_text(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @validator("signal_time", "execution_time")
+    def validate_live_time(cls, value):
+        text = str(value or "").strip()
+        if not re.fullmatch(r"\d{2}:\d{2}", text):
+            raise ValueError("触发时间格式必须是 HH:MM")
+        hour, minute = [int(item) for item in text.split(":")]
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError("触发时间格式必须是 HH:MM")
+        return text
+
+    @validator("signal_timezone", "execution_timezone")
+    def validate_live_timezone(cls, value):
+        text = str(value or "Asia/Shanghai").strip()
+        try:
+            ZoneInfo(text)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"不支持的时区: {text}")
+        return text
+
+
+class FactorLiveSignalRequest(BaseModel):
+    signal_date: Optional[date] = None
+    rank_limit: int = Field(default=100, ge=1, le=500)
+
+
+class FactorLiveExecutionRequest(BaseModel):
+    signal_date: Optional[date] = None
+    trigger_executor: bool = True
+    force: bool = True
+    timeout_seconds: float = Field(default=120.0, ge=10.0, le=3600.0)
 
 
 class FactorLabOptionsResponse(BaseModel):
@@ -4721,6 +4819,624 @@ def _warm_backtest_search_factor_caches(
     prepared_data["price_df"] = price_df.select(factor_columns).rechunk()
 
 
+def _iso_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _floor_to_lot(quantity: float, lot_size: int) -> int:
+    lot = max(1, int(lot_size or 1))
+    number = int(max(0.0, float(quantity or 0)))
+    return (number // lot) * lot
+
+
+def _request_payload_from_live_config(config: FactorLiveTradingConfig) -> FactorBacktestRequest:
+    return FactorBacktestRequest(**(config.request_payload or {}))
+
+
+def _serialize_factor_live_config(config: FactorLiveTradingConfig) -> Dict[str, Any]:
+    request_payload = config.request_payload or {}
+    position_weights = normalize_position_weights(
+        request_payload.get("position_weights"),
+        request_payload.get("max_positions") or 1,
+    )
+    return {
+        "id": config.id,
+        "account_id": config.account_id,
+        "name": config.name,
+        "enabled": bool(config.enabled),
+        "request": request_payload,
+        "request_summary": {
+            "pool": request_payload.get("pool"),
+            "custom_symbol_count": len(request_payload.get("custom_symbols") or []),
+            "max_positions": len(position_weights),
+            "position_weights_label": format_position_weights(position_weights),
+            "rebalance_frequency": request_payload.get("rebalance_frequency"),
+            "rotation_mode": request_payload.get("rotation_mode"),
+            "rotation_mode_label": ROTATION_MODE_LABELS.get(request_payload.get("rotation_mode"), request_payload.get("rotation_mode")),
+            "lot_size": request_payload.get("lot_size"),
+        },
+        "external_trading_account_id": config.external_trading_account_id,
+        "live_sub_account_id": config.live_sub_account_id,
+        "signal_time": config.signal_time,
+        "signal_timezone": config.signal_timezone,
+        "execution_time": config.execution_time,
+        "execution_timezone": config.execution_timezone,
+        "last_signal_date": _iso_value(config.last_signal_date),
+        "last_signal_at": _iso_value(config.last_signal_at),
+        "last_signal_status": config.last_signal_status,
+        "last_signal_message": config.last_signal_message,
+        "last_signal_payload": config.last_signal_payload,
+        "last_execution_signal_date": _iso_value(config.last_execution_signal_date),
+        "last_execution_at": _iso_value(config.last_execution_at),
+        "last_execution_status": config.last_execution_status,
+        "last_execution_message": config.last_execution_message,
+        "last_execution_payload": config.last_execution_payload,
+        "created_at": _iso_value(config.created_at),
+        "updated_at": _iso_value(config.updated_at),
+    }
+
+
+def _serialize_factor_live_log(row: FactorLiveTradingLog) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "config_id": row.config_id,
+        "account_id": row.account_id,
+        "timestamp": _iso_value(row.timestamp),
+        "action": row.action,
+        "status": row.status,
+        "signal_date": _iso_value(row.signal_date),
+        "message": row.message,
+        "payload": row.payload,
+    }
+
+
+def _add_factor_live_log(
+    db: ORMSession,
+    config: FactorLiveTradingConfig,
+    *,
+    action: str,
+    status: str,
+    message: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    signal_date: Optional[date] = None,
+) -> None:
+    db.add(
+        FactorLiveTradingLog(
+            config_id=config.id,
+            account_id=config.account_id,
+            action=action,
+            status=status,
+            message=(message or "")[:1000],
+            payload=jsonable_encoder(payload or {}),
+            signal_date=signal_date,
+            timestamp=datetime.now(),
+        )
+    )
+
+
+def _get_factor_live_config_or_404(
+    db: ORMSession,
+    account_id: str,
+    config_id: int,
+) -> FactorLiveTradingConfig:
+    config = db.query(FactorLiveTradingConfig).filter(
+        FactorLiveTradingConfig.id == config_id,
+        FactorLiveTradingConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="未找到因子线上交易配置")
+    return config
+
+
+def _get_external_sub_account_for_live_config(
+    external_db: ORMSession,
+    config: FactorLiveTradingConfig,
+) -> ExternalTradingSubAccount:
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        raise HTTPException(status_code=400, detail="请先选择外部交易账户和子账户")
+    account = external_db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == config.external_trading_account_id,
+        ExternalTradingAccount.account_id == config.account_id,
+    ).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="外部交易账户不存在")
+    sub_account = external_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == config.account_id,
+        ExternalTradingSubAccount.external_trading_account_id == account.id,
+    ).first()
+    if not sub_account:
+        raise HTTPException(status_code=404, detail="外部交易子账户不存在")
+    if not account.enabled or not sub_account.enabled:
+        raise HTTPException(status_code=400, detail="外部交易账户或子账户未启用")
+    return sub_account
+
+
+def _bind_factor_live_sub_account(
+    external_db: ORMSession,
+    config: FactorLiveTradingConfig,
+    *,
+    previous_sub_account_id: Optional[int] = None,
+) -> None:
+    if previous_sub_account_id and previous_sub_account_id != config.live_sub_account_id:
+        previous = external_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == previous_sub_account_id,
+            ExternalTradingSubAccount.account_id == config.account_id,
+        ).first()
+        if (
+            previous
+            and previous.strategy_type == STRATEGY_FACTOR_LIVE
+            and previous.strategy_config_id == config.id
+        ):
+            previous.strategy_type = None
+            previous.strategy_config_id = None
+            previous.updated_at = datetime.now()
+
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        return
+    sub_account = external_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == config.account_id,
+        ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+    ).first()
+    if not sub_account:
+        raise HTTPException(status_code=404, detail="外部交易子账户不存在")
+    if (
+        sub_account.strategy_type
+        and not (
+            sub_account.strategy_type == STRATEGY_FACTOR_LIVE
+            and sub_account.strategy_config_id == config.id
+        )
+    ):
+        raise HTTPException(status_code=400, detail="该外部交易子账户已绑定其他策略")
+    sub_account.strategy_type = STRATEGY_FACTOR_LIVE
+    sub_account.strategy_config_id = config.id
+    sub_account.updated_at = datetime.now()
+
+
+def _current_holding_symbols(external_db: ORMSession, sub_account: ExternalTradingSubAccount) -> List[str]:
+    positions = get_ledger_positions(external_db, sub_account.id)
+    return [
+        symbol
+        for symbol, row in positions.items()
+        if external_safe_int(getattr(row, "quantity", 0)) > 0
+    ]
+
+
+def _update_factor_live_config_from_payload(
+    config: FactorLiveTradingConfig,
+    payload: FactorLiveTradingConfigPayload,
+) -> None:
+    config.name = payload.name
+    config.enabled = payload.enabled
+    config.request_payload = _backtest_request_payload(payload.request)
+    config.external_trading_account_id = payload.external_trading_account_id
+    config.live_sub_account_id = payload.live_sub_account_id
+    config.signal_time = payload.signal_time
+    config.signal_timezone = payload.signal_timezone
+    config.execution_time = payload.execution_time
+    config.execution_timezone = payload.execution_timezone
+    config.updated_at = datetime.now()
+
+
+def _build_factor_live_signal_plan(
+    db: ORMSession,
+    external_db: ORMSession,
+    config: FactorLiveTradingConfig,
+    *,
+    signal_date: Optional[date] = None,
+    rank_limit: int = 100,
+) -> Dict[str, Any]:
+    request = _request_payload_from_live_config(config)
+    sub_account = _get_external_sub_account_for_live_config(external_db, config)
+    holding_symbols = _current_holding_symbols(external_db, sub_account)
+    plan = shared_build_factor_signal_plan(
+        _to_shared_backtest_config(request),
+        db,
+        holding_symbols=holding_symbols,
+        signal_date=signal_date,
+        rank_limit=rank_limit,
+    )
+    plan["external_trading_account_id"] = config.external_trading_account_id
+    plan["live_sub_account_id"] = config.live_sub_account_id
+    plan["live_sub_account_name"] = sub_account.name
+    return plan
+
+
+def _normalize_signal_payload_date(payload: Dict[str, Any]) -> Optional[date]:
+    value = (payload or {}).get("signal_date")
+    if not value:
+        return None
+    return date.fromisoformat(str(value))
+
+
+def _cash_fill_weights_from_signal(signal_payload: Dict[str, Any], symbols: List[str]) -> Dict[str, float]:
+    configured = signal_payload.get("buy_weights") or {}
+    result = {}
+    for symbol in symbols:
+        value = _safe_float(configured.get(symbol))
+        if value is not None and value > 0:
+            result[symbol] = value
+    total = sum(result.values())
+    if total > 0:
+        return {symbol: weight / total for symbol, weight in result.items()}
+    if not symbols:
+        return {}
+    return {symbol: 1.0 / len(symbols) for symbol in symbols}
+
+
+async def _execute_factor_live_signal(
+    db: ORMSession,
+    external_db: ORMSession,
+    config: FactorLiveTradingConfig,
+    *,
+    signal_date: Optional[date] = None,
+    trigger_executor: bool = True,
+    force: bool = True,
+    timeout_seconds: float = 120.0,
+) -> Dict[str, Any]:
+    request = _request_payload_from_live_config(config)
+    signal_payload = config.last_signal_payload or {}
+    actual_signal_date = _normalize_signal_payload_date(signal_payload)
+    if signal_date and actual_signal_date and signal_date != actual_signal_date:
+        raise HTTPException(status_code=400, detail="指定信号日与最近信号不一致，请先重新生成信号")
+    if not actual_signal_date:
+        raise HTTPException(status_code=400, detail="没有可执行的信号，请先生成信号")
+    if not signal_payload.get("should_rebalance"):
+        return {
+            "status": "SKIPPED",
+            "message": signal_payload.get("message") or "最近信号无需调仓",
+            "signal": signal_payload,
+            "targets": [],
+            "executor_result": None,
+        }
+
+    account = external_db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == config.external_trading_account_id,
+        ExternalTradingAccount.account_id == config.account_id,
+    ).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="外部交易账户不存在")
+    sub_account = _get_external_sub_account_for_live_config(external_db, config)
+    positions = get_ledger_positions(external_db, sub_account.id)
+    current_quantities = {
+        normalize_external_symbol(symbol): external_safe_int(getattr(row, "quantity", 0))
+        for symbol, row in positions.items()
+        if external_safe_int(getattr(row, "quantity", 0)) > 0
+    }
+    sell_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("sell_symbols") or []) if symbol]
+    target_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("target_symbols") or []) if symbol]
+    buy_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("buy_symbols") or []) if symbol]
+    symbols = sorted({
+        *current_quantities.keys(),
+        *sell_symbols,
+        *target_symbols,
+        *buy_symbols,
+    })
+    if not symbols:
+        return {
+            "status": "SKIPPED",
+            "message": "没有需要同步的目标标的",
+            "signal": signal_payload,
+            "targets": [],
+            "executor_result": None,
+        }
+
+    try:
+        reference_prices = await get_realtime_reference_prices(
+            account.id,
+            symbols,
+            timeout=min(float(timeout_seconds or 120.0), 30.0),
+        )
+    except ExternalTradingValuationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    reference_prices = {
+        normalize_external_symbol(symbol): external_safe_float(price)
+        for symbol, price in (reference_prices or {}).items()
+        if external_safe_float(price) and external_safe_float(price) > 0
+    }
+    missing_prices = [symbol for symbol in symbols if not reference_prices.get(symbol)]
+    if missing_prices:
+        raise HTTPException(status_code=409, detail=f"无法获取以下标的执行参考价: {', '.join(missing_prices)}")
+
+    try:
+        valuation = await calculate_sub_account_net_asset(
+            external_db,
+            sub_account,
+            positions=list(positions.values()),
+            update_positions=True,
+        )
+        net_asset = external_safe_float(valuation.get("net_asset"))
+        cash_available = external_safe_float(valuation.get("cash_available"), external_safe_float(sub_account.cash_available))
+    except ExternalTradingValuationError:
+        cash_available = external_safe_float(sub_account.cash_available)
+        net_asset = cash_available + sum(
+            quantity * reference_prices.get(symbol, 0.0)
+            for symbol, quantity in current_quantities.items()
+        )
+
+    lot_size = max(1, int(request.lot_size or 1))
+    rotation_mode = normalize_rotation_mode(request.rotation_mode)
+    targets_by_symbol: Dict[str, Dict[str, Any]] = {}
+
+    def set_target(symbol: str, quantity: int, target_weight: Optional[float] = None, target_value: Optional[float] = None):
+        price = reference_prices.get(symbol) or 0.0
+        targets_by_symbol[symbol] = {
+            "symbol": symbol,
+            "target_quantity": max(0, int(quantity or 0)),
+            "target_weight_pct": _safe_float(target_weight * 100, 4) if target_weight is not None else None,
+            "target_value": _safe_float(target_value if target_value is not None else max(0, int(quantity or 0)) * price, 2),
+            "reference_price": _safe_float(price, 4),
+        }
+
+    if rotation_mode == "cash_fill_rebalance":
+        for symbol, quantity in current_quantities.items():
+            set_target(symbol, quantity)
+        estimated_sell_cash = 0.0
+        for symbol in sell_symbols:
+            quantity = current_quantities.get(symbol, 0)
+            if quantity <= 0:
+                continue
+            estimated_sell_cash += quantity * reference_prices[symbol]
+            set_target(symbol, 0, 0.0, 0.0)
+        buy_weights = _cash_fill_weights_from_signal(signal_payload, buy_symbols)
+        available_cash = max(0.0, cash_available + estimated_sell_cash)
+        for symbol in buy_symbols:
+            price = reference_prices.get(symbol) or 0.0
+            weight = float(buy_weights.get(symbol) or 0.0)
+            if price <= 0 or weight <= 0:
+                continue
+            add_quantity = _floor_to_lot(available_cash * weight / price, lot_size)
+            set_target(
+                symbol,
+                current_quantities.get(symbol, 0) + add_quantity,
+                None,
+                add_quantity * price,
+            )
+    else:
+        weights = signal_payload.get("target_weights") or {}
+        for symbol in target_symbols:
+            price = reference_prices.get(symbol) or 0.0
+            weight = _safe_float(weights.get(symbol))
+            if price <= 0 or weight is None or weight <= 0:
+                continue
+            target_value = max(0.0, net_asset * weight)
+            set_target(
+                symbol,
+                _floor_to_lot(target_value / price, lot_size),
+                weight,
+                target_value,
+            )
+        for symbol in current_quantities:
+            if symbol not in targets_by_symbol:
+                set_target(symbol, 0, 0.0, 0.0)
+
+    targets = list(targets_by_symbol.values())
+    targets.sort(key=lambda item: (0 if item["target_quantity"] == 0 else 1, item["symbol"]))
+    signal_id = f"factor_live:{config.id}:{actual_signal_date.isoformat()}"
+    signal_version = datetime.now().strftime("%Y%m%d%H%M%S")
+    sync_target_positions(
+        external_db,
+        sub_account=sub_account,
+        targets=targets,
+        signal_id=signal_id,
+        signal_version=signal_version,
+    )
+    external_db.commit()
+
+    executor_result = None
+    if trigger_executor:
+        executor_result = await trigger_external_trading_executor(
+            account_id=config.account_id,
+            external_account_id=account.id,
+            trigger_source=f"factor_live_trading:{config.id}",
+            force=force,
+            lot_size=lot_size,
+            order_timeout_seconds=int(timeout_seconds or 120),
+        )
+
+    return {
+        "status": "OK",
+        "message": "已按信号同步目标仓位" + ("并触发外部执行器" if trigger_executor else ""),
+        "signal": signal_payload,
+        "targets": targets,
+        "reference_prices": reference_prices,
+        "net_asset": _safe_float(net_asset, 2),
+        "cash_available": _safe_float(cash_available, 2),
+        "lot_size": lot_size,
+        "signal_id": signal_id,
+        "signal_version": signal_version,
+        "executor_result": executor_result,
+    }
+
+
+def _is_time_reached(now: datetime, time_text: str) -> bool:
+    try:
+        hour, minute = [int(item) for item in str(time_text or "00:00").split(":")]
+    except Exception:
+        return False
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+@lru_cache(maxsize=512)
+def _is_china_trading_day(check_date: date) -> bool:
+    if check_date.weekday() >= 5:
+        return False
+    try:
+        calendar = TushareService.get_instance().get_trade_calendar_frame(check_date, check_date)
+        if not calendar.empty:
+            row = calendar.iloc[0]
+            return int(row.get("is_open") or 0) == 1
+    except Exception as exc:
+        logger.warning("A-share trading calendar check failed for %s: %s", check_date, exc)
+    return True
+
+
+@lru_cache(maxsize=512)
+def _is_us_trading_day(check_date: date) -> bool:
+    return check_date.weekday() < 5 and not MarketService.is_us_market_holiday(check_date)
+
+
+def _factor_live_market_kind(config: FactorLiveTradingConfig) -> str:
+    request = _request_payload_from_live_config(config)
+    pool_key = str(request.pool or "").strip().upper()
+    if pool_key == "CUSTOM_US_STOCK":
+        return "us"
+    if pool_key == "CUSTOM_A_STOCK":
+        return "cn"
+    candidate_etfs = [str(item or "").strip().upper() for item in SHARED_POOL_ETFS.get(pool_key, []) if item]
+    if candidate_etfs and all(symbol.endswith(".US") for symbol in candidate_etfs):
+        return "us"
+    return "cn"
+
+
+def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
+    result = {
+        "checked": 0,
+        "signals": [],
+        "signal_waiting": 0,
+        "executions": [],
+        "execution_waiting": 0,
+        "errors": [],
+    }
+    with get_db_ctx() as db, get_external_trading_db_ctx() as external_db:
+        configs = (
+            db.query(FactorLiveTradingConfig)
+            .filter(FactorLiveTradingConfig.enabled == True)  # noqa: E712
+            .order_by(FactorLiveTradingConfig.id.asc())
+            .all()
+        )
+        result["checked"] = len(configs)
+        for config in configs:
+            market_kind = _factor_live_market_kind(config)
+            try:
+                signal_now = datetime.now(ZoneInfo(config.signal_timezone or "Asia/Shanghai"))
+            except ZoneInfoNotFoundError:
+                signal_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            signal_already_checked_today = (
+                config.last_signal_date
+                and config.last_signal_date == signal_now.date()
+            )
+            signal_trading_day = _is_us_trading_day(signal_now.date()) if market_kind == "us" else _is_china_trading_day(signal_now.date())
+            if (
+                signal_trading_day
+                and _is_time_reached(signal_now, config.signal_time)
+                and not signal_already_checked_today
+            ):
+                try:
+                    plan = _build_factor_live_signal_plan(
+                        db,
+                        external_db,
+                        config,
+                        signal_date=signal_now.date(),
+                        rank_limit=100,
+                    )
+                    signal_date_value = date.fromisoformat(plan["signal_date"])
+                    config.last_signal_date = signal_date_value
+                    config.last_signal_at = datetime.now()
+                    config.last_signal_status = plan.get("status")
+                    config.last_signal_message = plan.get("message")
+                    config.last_signal_payload = jsonable_encoder(plan)
+                    config.updated_at = datetime.now()
+                    _add_factor_live_log(
+                        db,
+                        config,
+                        action="SIGNAL",
+                        status=plan.get("status") or "OK",
+                        message=plan.get("message"),
+                        payload=plan,
+                        signal_date=signal_date_value,
+                    )
+                    db.commit()
+                    result["signals"].append({"config_id": config.id, "status": plan.get("status"), "signal_date": plan.get("signal_date")})
+                except Exception as exc:
+                    db.rollback()
+                    config.last_signal_at = datetime.now()
+                    config.last_signal_status = "FAILED"
+                    config.last_signal_message = str(exc)[:1000]
+                    config.updated_at = datetime.now()
+                    _add_factor_live_log(
+                        db,
+                        config,
+                        action="SIGNAL",
+                        status="FAILED",
+                        message=str(exc),
+                        payload={},
+                    )
+                    db.commit()
+                    result["errors"].append({"config_id": config.id, "action": "SIGNAL", "error": str(exc)})
+            else:
+                result["signal_waiting"] += 1
+
+            signal_payload = config.last_signal_payload or {}
+            signal_date_value = _normalize_signal_payload_date(signal_payload)
+            try:
+                execution_now = datetime.now(ZoneInfo(config.execution_timezone or "Asia/Shanghai"))
+            except ZoneInfoNotFoundError:
+                execution_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            execution_trading_day = _is_us_trading_day(execution_now.date()) if market_kind == "us" else _is_china_trading_day(execution_now.date())
+            should_execute = (
+                signal_date_value
+                and signal_payload.get("should_rebalance")
+                and config.last_execution_signal_date != signal_date_value
+                and execution_trading_day
+                and execution_now.date() > signal_date_value
+                and _is_time_reached(execution_now, config.execution_time)
+            )
+            if should_execute:
+                try:
+                    execution_result = asyncio.run(
+                        _execute_factor_live_signal(
+                            db,
+                            external_db,
+                            config,
+                            signal_date=signal_date_value,
+                            trigger_executor=True,
+                            force=True,
+                        )
+                    )
+                    config.last_execution_signal_date = signal_date_value
+                    config.last_execution_at = datetime.now()
+                    config.last_execution_status = execution_result.get("status")
+                    config.last_execution_message = execution_result.get("message")
+                    config.last_execution_payload = jsonable_encoder(execution_result)
+                    config.updated_at = datetime.now()
+                    _add_factor_live_log(
+                        db,
+                        config,
+                        action="EXECUTE",
+                        status=execution_result.get("status") or "OK",
+                        message=execution_result.get("message"),
+                        payload=execution_result,
+                        signal_date=signal_date_value,
+                    )
+                    db.commit()
+                    result["executions"].append({"config_id": config.id, "status": execution_result.get("status"), "signal_date": signal_date_value.isoformat()})
+                except Exception as exc:
+                    db.rollback()
+                    config.last_execution_at = datetime.now()
+                    config.last_execution_status = "FAILED"
+                    config.last_execution_message = str(exc)[:1000]
+                    config.updated_at = datetime.now()
+                    _add_factor_live_log(
+                        db,
+                        config,
+                        action="EXECUTE",
+                        status="FAILED",
+                        message=str(exc),
+                        payload={"signal_date": signal_date_value.isoformat() if signal_date_value else None},
+                        signal_date=signal_date_value,
+                    )
+                    db.commit()
+                    result["errors"].append({"config_id": config.id, "action": "EXECUTE", "error": str(exc)})
+            else:
+                result["execution_waiting"] += 1
+    return result
+
+
 def _run_factor_backtest(
     request: FactorBacktestRequest,
     db: ORMSession,
@@ -6647,6 +7363,193 @@ async def get_factor_lab_options(
             "include_heatmap": True,
         },
     )
+
+
+@router.get("/live-configs")
+async def list_factor_live_trading_configs(
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    rows = (
+        db.query(FactorLiveTradingConfig)
+        .filter(FactorLiveTradingConfig.account_id == account_id)
+        .order_by(FactorLiveTradingConfig.updated_at.desc(), FactorLiveTradingConfig.id.desc())
+        .all()
+    )
+    return [_serialize_factor_live_config(row) for row in rows]
+
+
+@router.post("/live-configs")
+async def create_factor_live_trading_config(
+    payload: FactorLiveTradingConfigPayload,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
+):
+    config = FactorLiveTradingConfig(account_id=account_id)
+    _update_factor_live_config_from_payload(config, payload)
+    db.add(config)
+    db.flush()
+    _bind_factor_live_sub_account(external_db, config)
+    external_db.commit()
+    db.commit()
+    db.refresh(config)
+    return _serialize_factor_live_config(config)
+
+
+@router.get("/live-configs/{config_id}")
+async def get_factor_live_trading_config(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    return _serialize_factor_live_config(_get_factor_live_config_or_404(db, account_id, config_id))
+
+
+@router.put("/live-configs/{config_id}")
+async def update_factor_live_trading_config(
+    config_id: int,
+    payload: FactorLiveTradingConfigPayload,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
+):
+    config = _get_factor_live_config_or_404(db, account_id, config_id)
+    previous_sub_account_id = config.live_sub_account_id
+    _update_factor_live_config_from_payload(config, payload)
+    _bind_factor_live_sub_account(external_db, config, previous_sub_account_id=previous_sub_account_id)
+    external_db.commit()
+    db.commit()
+    db.refresh(config)
+    return _serialize_factor_live_config(config)
+
+
+@router.delete("/live-configs/{config_id}")
+async def delete_factor_live_trading_config(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
+):
+    config = _get_factor_live_config_or_404(db, account_id, config_id)
+    if config.live_sub_account_id:
+        sub_account = external_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == config.live_sub_account_id,
+            ExternalTradingSubAccount.account_id == account_id,
+        ).first()
+        if sub_account:
+            sync_target_positions(external_db, sub_account=sub_account, targets=[], signal_id=f"factor_live:{config.id}:deleted")
+            if sub_account.strategy_type == STRATEGY_FACTOR_LIVE and sub_account.strategy_config_id == config.id:
+                sub_account.strategy_type = None
+                sub_account.strategy_config_id = None
+                sub_account.updated_at = datetime.now()
+    db.query(FactorLiveTradingLog).filter(FactorLiveTradingLog.config_id == config.id).delete(synchronize_session=False)
+    db.delete(config)
+    external_db.commit()
+    db.commit()
+    return {"message": "Deleted successfully"}
+
+
+@router.get("/live-configs/{config_id}/logs")
+async def list_factor_live_trading_logs(
+    config_id: int,
+    limit: int = Query(default=100, ge=1, le=500),
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+):
+    _get_factor_live_config_or_404(db, account_id, config_id)
+    rows = (
+        db.query(FactorLiveTradingLog)
+        .filter(
+            FactorLiveTradingLog.config_id == config_id,
+            FactorLiveTradingLog.account_id == account_id,
+        )
+        .order_by(FactorLiveTradingLog.timestamp.desc(), FactorLiveTradingLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_serialize_factor_live_log(row) for row in rows]
+
+
+@router.post("/live-configs/{config_id}/signal")
+async def generate_factor_live_trading_signal(
+    config_id: int,
+    payload: Optional[FactorLiveSignalRequest] = None,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
+):
+    config = _get_factor_live_config_or_404(db, account_id, config_id)
+    payload = payload or FactorLiveSignalRequest()
+    try:
+        plan = _build_factor_live_signal_plan(
+            db,
+            external_db,
+            config,
+            signal_date=payload.signal_date,
+            rank_limit=payload.rank_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    signal_date_value = date.fromisoformat(plan["signal_date"])
+    config.last_signal_date = signal_date_value
+    config.last_signal_at = datetime.now()
+    config.last_signal_status = plan.get("status")
+    config.last_signal_message = plan.get("message")
+    config.last_signal_payload = jsonable_encoder(plan)
+    config.updated_at = datetime.now()
+    _add_factor_live_log(
+        db,
+        config,
+        action="SIGNAL",
+        status=plan.get("status") or "OK",
+        message=plan.get("message"),
+        payload=plan,
+        signal_date=signal_date_value,
+    )
+    db.commit()
+    db.refresh(config)
+    return {"config": _serialize_factor_live_config(config), "signal": plan}
+
+
+@router.post("/live-configs/{config_id}/execute")
+async def execute_factor_live_trading_signal(
+    config_id: int,
+    payload: Optional[FactorLiveExecutionRequest] = None,
+    account_id: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
+):
+    config = _get_factor_live_config_or_404(db, account_id, config_id)
+    payload = payload or FactorLiveExecutionRequest()
+    result = await _execute_factor_live_signal(
+        db,
+        external_db,
+        config,
+        signal_date=payload.signal_date,
+        trigger_executor=payload.trigger_executor,
+        force=payload.force,
+        timeout_seconds=payload.timeout_seconds,
+    )
+    signal_date_value = _normalize_signal_payload_date(result.get("signal") or {})
+    config.last_execution_signal_date = signal_date_value
+    config.last_execution_at = datetime.now()
+    config.last_execution_status = result.get("status")
+    config.last_execution_message = result.get("message")
+    config.last_execution_payload = jsonable_encoder(result)
+    config.updated_at = datetime.now()
+    _add_factor_live_log(
+        db,
+        config,
+        action="EXECUTE",
+        status=result.get("status") or "OK",
+        message=result.get("message"),
+        payload=result,
+        signal_date=signal_date_value,
+    )
+    db.commit()
+    db.refresh(config)
+    return {"config": _serialize_factor_live_config(config), "execution": result}
 
 
 @router.post("/analyze")
