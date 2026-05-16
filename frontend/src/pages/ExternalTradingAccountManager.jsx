@@ -1009,7 +1009,9 @@ const ExternalTradingAccountManager = () => {
             <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
             <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
             <Text>交易费 {formatNumber(executorStatus?.summary?.trade_fee_total, 2)}</Text>
+            <Text>归因交易费 {formatNumber(executorStatus?.summary?.attributed_trade_fee_total, 2)}</Text>
             <Text>非交易费 {formatNumber(executorStatus?.summary?.non_trade_fee_total, 2)}</Text>
+            <Text>非交易收益 {formatNumber(executorStatus?.summary?.non_trade_income_total, 2)}</Text>
             <Text>总费用 {formatNumber(executorStatus?.summary?.total_fee, 2)}</Text>
           </Space>
           <Tabs
