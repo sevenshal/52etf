@@ -16,6 +16,7 @@ from ..core.analytics_database import (
     AStockChinaBondYieldCurveDaily,
     AStockChinaBondYieldCurveDef,
     AStockFundAdjFactor,
+    AStockFundBasic,
     AStockFundDaily,
     AStockIncome,
     AStockIndexDaily,
@@ -32,6 +33,7 @@ from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
     A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
     A_STOCK_FACTOR_INDEX_POOLS,
+    A_STOCK_ETF_DAILY_NAMES,
     A_STOCK_ETF_DAILY_SYMBOLS,
     A_STOCK_INDEX_FEAR_GREED_TARGETS,
     BENCHMARK_INDEXES,
@@ -312,6 +314,9 @@ class AStockBaseDataSyncService:
         if not basic_frame.empty:
             self._upsert_stock_basic(basic_frame)
 
+        self._progress("同步A股ETF基础信息", 3)
+        self.sync_fund_basic()
+
         self._progress("同步A股名称/ST变更记录", 4)
         name_frames = []
         name_start = max(date(1990, 1, 1), start_date - timedelta(days=3650))
@@ -328,6 +333,9 @@ class AStockBaseDataSyncService:
         basic_frame = self.tushare.get_a_stock_basic_frame(["L", "D"])
         if not basic_frame.empty:
             self._upsert_stock_basic(basic_frame)
+
+        self._progress("增量同步A股ETF基础信息", 6)
+        self.sync_fund_basic()
 
         self._progress("增量同步A股名称/ST变更记录", 8)
         name_frames = []
@@ -364,6 +372,42 @@ class AStockBaseDataSyncService:
                 }
             )
         self._replace_analytics_table(AStockBasic, mappings)
+
+    def sync_fund_basic(self) -> int:
+        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
+        frame = self.tushare.get_a_stock_fund_basic_frame(symbols)
+        return self._upsert_fund_basic(frame, symbols)
+
+    def _upsert_fund_basic(self, frame: pd.DataFrame, symbols: List[str]) -> int:
+        now = datetime.now()
+        mappings_by_symbol: Dict[str, Dict] = {}
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                ts_code = str(row.get("ts_code") or "").strip().upper()
+                if not ts_code or ts_code not in symbols:
+                    continue
+                mappings_by_symbol[ts_code] = {
+                    "ts_code": ts_code,
+                    "name": _clean_text(row.get("name")) or A_STOCK_ETF_DAILY_NAMES.get(ts_code),
+                    "market": _clean_text(row.get("market")),
+                    "list_date": _parse_date(row.get("list_date")),
+                    "updated_at": now,
+                }
+
+        for symbol in symbols:
+            if symbol in mappings_by_symbol:
+                continue
+            mappings_by_symbol[symbol] = {
+                "ts_code": symbol,
+                "name": A_STOCK_ETF_DAILY_NAMES.get(symbol),
+                "market": None,
+                "list_date": None,
+                "updated_at": now,
+            }
+
+        mappings = [item for item in mappings_by_symbol.values() if item.get("ts_code")]
+        self._replace_analytics_table(AStockFundBasic, mappings)
+        return len(mappings)
 
     def _replace_name_changes(self, frame: pd.DataFrame):
         self.analytics_db.query(AStockNameChange).delete(synchronize_session=False)
@@ -1915,6 +1959,7 @@ class AStockBaseDataSyncService:
         )
 
         basic_rows = _count_analytics_table_rows(self.analytics_db, AStockBasic.__tablename__)
+        fund_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockFundBasic.__tablename__)
         name_change_rows = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
         market_adj_factor_rows = _count_analytics_table_rows(self.analytics_db, AStockAdjFactor.__tablename__)
@@ -1966,6 +2011,7 @@ class AStockBaseDataSyncService:
                 "income": INCOME_HISTORY_LOOKBACK_DAYS,
             },
             "reference_full_refresh": reference_full_refresh,
+            "fund_basic_rows": fund_basic_rows,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
             "market_adj_factor_start_date": market_adj_factor_result.get("start_date"),
@@ -2046,6 +2092,7 @@ class AStockBaseDataSyncService:
             "income_insert_batches": income_result.get("insert_batches"),
             "tables": {
                 AStockBasic.__tablename__: basic_rows,
+                AStockFundBasic.__tablename__: fund_basic_rows,
                 AStockAdjFactor.__tablename__: market_adj_factor_rows,
                 AStockIncome.__tablename__: income_rows,
                 AStockFundDaily.__tablename__: fund_daily_rows,

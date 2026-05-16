@@ -46,6 +46,20 @@ DEFAULT_MOMENTUM_WEIGHTS = {"20": 0.05, "60": 0.20, "120": 0.75}
 DEFAULT_SELL_RANK_MULTIPLIER = 2.0
 DEFAULT_REBALANCE_FREQUENCY = "weekly"
 SUPPORTED_REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "semiannual"]
+ROTATION_MODE_RANK_EXIT_REBALANCE = "rank_exit_rebalance"
+ROTATION_MODE_SCHEDULED_REBALANCE = "scheduled_rebalance"
+ROTATION_MODE_CASH_FILL_REBALANCE = "cash_fill_rebalance"
+DEFAULT_ROTATION_MODE = ROTATION_MODE_RANK_EXIT_REBALANCE
+SUPPORTED_ROTATION_MODES = [
+    ROTATION_MODE_RANK_EXIT_REBALANCE,
+    ROTATION_MODE_CASH_FILL_REBALANCE,
+    ROTATION_MODE_SCHEDULED_REBALANCE,
+]
+ROTATION_MODE_LABELS = {
+    ROTATION_MODE_RANK_EXIT_REBALANCE: "跌出排名再补位",
+    ROTATION_MODE_CASH_FILL_REBALANCE: "现金补位不减仓",
+    ROTATION_MODE_SCHEDULED_REBALANCE: "定期调仓到目标仓位",
+}
 DEFAULT_MIN_LISTING_DAYS = 365
 DEFAULT_VIRTUAL_FACTOR_LEGS = [
     {
@@ -83,6 +97,14 @@ POOL_OPTIONS = [
     ],
 ]
 POOL_ETFS = {item["key"]: item["etfs"] for item in POOL_OPTIONS}
+CUSTOM_A_STOCK_POOL = "CUSTOM_A_STOCK"
+CUSTOM_US_STOCK_POOL = "CUSTOM_US_STOCK"
+CUSTOM_POOL_KEYS = {CUSTOM_A_STOCK_POOL, CUSTOM_US_STOCK_POOL}
+CUSTOM_POOL_LABELS = {
+    CUSTOM_A_STOCK_POOL: "自定义A股股票池",
+    CUSTOM_US_STOCK_POOL: "自定义美股股票池",
+}
+CUSTOM_POOL_UNSUPPORTED_FACTOR_KEYS = {"index_weight"}
 
 FACTOR_DIRECTION_OPTIONS = {
     "higher_is_better": {"sign": 1.0, "label": "高值更好"},
@@ -145,12 +167,15 @@ class FactorBacktestConfig:
     pool: str = "SPY_QQQ"
     pool_label: Optional[str] = None
     candidate_etfs: Optional[List[str]] = None
+    custom_symbols: List[str] = field(default_factory=list)
     start_date: date = date(2020, 1, 2)
     end_date: Optional[date] = None
     initial_capital: float = 100_000.0
     max_positions: int = 7
+    position_weights: List[float] = field(default_factory=list)
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
     rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY
+    rotation_mode: str = DEFAULT_ROTATION_MODE
     commission_pct: float = 0.03
     slippage_pct: float = 0.02
     lot_size: int = 1
@@ -190,6 +215,7 @@ class FactorDefinition:
     supports_mixed_windows: bool
     direction: str
     compute: Any
+    unsupported_pool_types: List[str] = field(default_factory=list)
 
     def to_option(self) -> Dict[str, Any]:
         direction = FACTOR_DIRECTION_OPTIONS.get(self.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
@@ -204,6 +230,7 @@ class FactorDefinition:
             "direction": self.direction,
             "direction_label": direction["label"],
             "direction_sign": direction["sign"],
+            "unsupported_pool_types": list(self.unsupported_pool_types),
         }
 
 
@@ -280,24 +307,117 @@ def _is_a_stock_index_pool_symbol(symbol: str) -> bool:
     return str(symbol or "").strip().upper() in A_STOCK_INDEX_POOL_CODE_SET
 
 
+def is_custom_pool(pool: Optional[str]) -> bool:
+    return str(pool or "").strip().upper() in CUSTOM_POOL_KEYS
+
+
+def is_custom_a_stock_pool(pool: Optional[str]) -> bool:
+    return str(pool or "").strip().upper() == CUSTOM_A_STOCK_POOL
+
+
+def is_custom_us_stock_pool(pool: Optional[str]) -> bool:
+    return str(pool or "").strip().upper() == CUSTOM_US_STOCK_POOL
+
+
+def normalize_a_stock_symbol(symbol: str) -> str:
+    text = str(symbol or "").strip().upper().replace(" ", "")
+    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", text):
+        return text
+    if not re.fullmatch(r"\d{6}", text):
+        return text
+    if text.startswith(("43", "83", "87", "88", "92")):
+        return f"{text}.BJ"
+    if text.startswith(("5", "6", "9")):
+        return f"{text}.SH"
+    return f"{text}.SZ"
+
+
+def normalize_custom_pool_symbols(pool: Optional[str], raw_symbols: Any) -> List[str]:
+    pool_key = str(pool or "").strip().upper()
+    if pool_key not in CUSTOM_POOL_KEYS:
+        return []
+    if isinstance(raw_symbols, (list, tuple, set)):
+        items = list(raw_symbols)
+    elif raw_symbols is None:
+        items = []
+    else:
+        items = [raw_symbols]
+
+    normalized: List[str] = []
+    for item in items:
+        text = str(item or "").strip().upper().replace(" ", "")
+        if not text:
+            continue
+        if pool_key == CUSTOM_US_STOCK_POOL:
+            if re.search(r"\.(SH|SZ|BJ)$", text):
+                raise ValueError("自定义美股股票池只能选择美股代码")
+            symbol = text if text.endswith(".US") else f"{text}.US"
+            if not SYMBOL_PATTERN.match(symbol):
+                raise ValueError(f"美股代码格式不正确: {item}")
+        else:
+            symbol = normalize_a_stock_symbol(text)
+            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+                raise ValueError(f"A股代码格式不正确: {item}")
+            if _is_a_stock_index_pool_symbol(symbol) or symbol == A_STOCK_INNO100_SYMBOL:
+                raise ValueError("自定义A股股票池仅支持个股和ETF，不支持指数代码")
+        if symbol not in normalized:
+            normalized.append(symbol)
+
+    if not normalized:
+        raise ValueError("自定义股票池至少选择一个标的")
+    return normalized
+
+
 def _is_a_stock_pool(pool: Optional[str], candidate_etfs: Optional[List[str]] = None) -> bool:
     pool_key = str(pool or "").strip().upper()
+    if pool_key == CUSTOM_A_STOCK_POOL:
+        return True
     if pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET:
         return True
     candidates = set(str(item).strip().upper() for item in (candidate_etfs or []))
     return bool(candidates.intersection({A_STOCK_INNO100_SYMBOL, *A_STOCK_INDEX_POOL_CODE_SET}))
 
 
+def _existing_a_stock_fund_symbols(symbols: List[str], connection: Any = None) -> Set[str]:
+    safe_symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in list(dict.fromkeys(symbols or []))
+        if symbol and SYMBOL_PATTERN.match(str(symbol).strip().upper()) and _is_a_stock_symbol(str(symbol).strip().upper())
+    ]
+    if not safe_symbols:
+        return set()
+    symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in safe_symbols)
+    close_connection = connection is None
+    conn = connection or _connect_duckdb()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT ts_code
+            FROM a_stock_fund_daily
+            WHERE ts_code IN ({symbol_sql})
+            """
+        ).fetchall()
+    finally:
+        if close_connection:
+            conn.close()
+    return {str(row[0] or "").strip().upper() for row in rows if row and row[0]}
+
+
 def _price_adjustment_metadata(candidate_etfs: List[str], universe_symbols: List[str]) -> Dict[str, Any]:
     symbols = [str(item or "").strip().upper() for item in universe_symbols if item]
     candidates = [str(item or "").strip().upper() for item in candidate_etfs if item]
     all_symbols = list(dict.fromkeys([*symbols, *candidates]))
+    a_fund_symbol_set = set(A_STOCK_ETF_DAILY_SYMBOL_SET)
+    try:
+        a_fund_symbol_set.update(_existing_a_stock_fund_symbols(all_symbols))
+    except Exception:
+        pass
     has_us = any(symbol.endswith(".US") for symbol in all_symbols)
     has_a_index = any(_is_a_stock_index_pool_symbol(symbol) or symbol == A_STOCK_INNO100_SYMBOL for symbol in all_symbols)
-    has_a_fund = any(symbol in A_STOCK_ETF_DAILY_SYMBOL_SET for symbol in all_symbols)
+    has_a_fund = any(symbol in a_fund_symbol_set for symbol in all_symbols)
     has_a_stock = any(
         _is_a_stock_symbol(symbol)
-        and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
+        and symbol not in a_fund_symbol_set
         and not _is_a_stock_index_pool_symbol(symbol)
         for symbol in all_symbols
     )
@@ -373,10 +493,19 @@ def _selected_inno100_rebalance_ids_by_date(
     return dict(sorted(id_by_date.items(), key=lambda item: item[0]))
 
 
-def get_max_trade_date() -> date:
+def get_max_trade_date(symbols: Optional[List[str]] = None) -> date:
+    safe_symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or [])
+        if symbol and SYMBOL_PATTERN.match(str(symbol).strip().upper())
+    ]
+    where_clause = ""
+    if safe_symbols:
+        symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in list(dict.fromkeys(safe_symbols)))
+        where_clause = f" WHERE symbol IN ({symbol_sql})"
     connection = _connect_duckdb()
     try:
-        row = connection.execute("SELECT MAX(trade_date) FROM us_stock_daily").fetchone()
+        row = connection.execute(f"SELECT MAX(trade_date) FROM us_stock_daily{where_clause}").fetchone()
     finally:
         connection.close()
     value = row[0] if row else None
@@ -389,13 +518,54 @@ def get_max_trade_date() -> date:
     return date.today()
 
 
-def _get_max_a_stock_market_date() -> Optional[date]:
+def _get_max_a_stock_market_date(symbols: Optional[List[str]] = None) -> Optional[date]:
+    safe_symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or [])
+        if symbol and SYMBOL_PATTERN.match(str(symbol).strip().upper())
+    ]
+    where_clause = ""
+    if safe_symbols:
+        symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in list(dict.fromkeys(safe_symbols)))
+        where_clause = f" WHERE ts_code IN ({symbol_sql})"
     connection = _connect_duckdb()
     try:
         try:
-            row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily_qfq").fetchone()
+            row = connection.execute(f"SELECT MAX(trade_date) FROM a_stock_market_daily_qfq{where_clause}").fetchone()
         except Exception:
-            row = connection.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
+            row = connection.execute(f"SELECT MAX(trade_date) FROM a_stock_market_daily{where_clause}").fetchone()
+    finally:
+        connection.close()
+    return _coerce_date(row[0] if row else None)
+
+
+def _get_max_a_stock_fund_date(symbols: Optional[List[str]] = None) -> Optional[date]:
+    safe_symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or list(A_STOCK_ETF_DAILY_SYMBOL_SET))
+        if symbol and SYMBOL_PATTERN.match(str(symbol).strip().upper())
+    ]
+    if not safe_symbols:
+        return None
+    symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in list(dict.fromkeys(safe_symbols)))
+    connection = _connect_duckdb()
+    try:
+        try:
+            row = connection.execute(
+                f"""
+                SELECT MAX(trade_date)
+                FROM a_stock_fund_daily_qfq
+                WHERE ts_code IN ({symbol_sql})
+                """
+            ).fetchone()
+        except Exception:
+            row = connection.execute(
+                f"""
+                SELECT MAX(trade_date)
+                FROM a_stock_fund_daily
+                WHERE ts_code IN ({symbol_sql})
+                """
+            ).fetchone()
     finally:
         connection.close()
     return _coerce_date(row[0] if row else None)
@@ -440,9 +610,26 @@ def _get_latest_inno100_level_date(db: ORMSession) -> Optional[date]:
 def _resolve_backtest_end_date(request: FactorBacktestConfig, db: ORMSession) -> date:
     if request.end_date:
         return request.end_date
+    pool_key = str(request.pool or "").strip().upper()
+    if is_custom_us_stock_pool(pool_key):
+        return get_max_trade_date(normalize_custom_pool_symbols(pool_key, request.custom_symbols))
+    if is_custom_a_stock_pool(pool_key):
+        symbols = normalize_custom_pool_symbols(pool_key, request.custom_symbols)
+        fund_symbols = _existing_a_stock_fund_symbols(symbols)
+        stock_symbols = [
+            symbol
+            for symbol in symbols
+            if _is_a_stock_symbol(symbol) and symbol not in fund_symbols
+        ]
+        candidates = []
+        if stock_symbols:
+            candidates.append(_get_max_a_stock_market_date(stock_symbols))
+        if fund_symbols:
+            candidates.append(_get_max_a_stock_fund_date(list(fund_symbols)))
+        candidates = [item for item in candidates if item is not None]
+        return min(candidates) if candidates else date.today()
     if not _is_a_stock_pool(request.pool, request.candidate_etfs):
         return get_max_trade_date()
-    pool_key = str(request.pool or "").strip().upper()
     candidate_etfs = list(
         dict.fromkeys(
             str(item or "").strip().upper()
@@ -523,7 +710,17 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                 pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
             )
 
-        a_fund_symbols = [symbol for symbol in safe_symbols if symbol in A_STOCK_ETF_DAILY_SYMBOL_SET]
+        a_price_symbols = [
+            symbol
+            for symbol in safe_symbols
+            if _is_a_stock_symbol(symbol) and not _is_a_stock_index_pool_symbol(symbol)
+        ]
+        a_fund_symbol_set = {symbol for symbol in a_price_symbols if symbol in A_STOCK_ETF_DAILY_SYMBOL_SET}
+        try:
+            a_fund_symbol_set.update(_existing_a_stock_fund_symbols(a_price_symbols, connection))
+        except Exception:
+            pass
+        a_fund_symbols = [symbol for symbol in a_price_symbols if symbol in a_fund_symbol_set]
         if a_fund_symbols:
             symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_fund_symbols)
             query = f"""
@@ -545,13 +742,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                 pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
             )
 
-        a_symbols = [
-            symbol
-            for symbol in safe_symbols
-            if _is_a_stock_symbol(symbol)
-            and not _is_a_stock_index_pool_symbol(symbol)
-            and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
-        ]
+        a_symbols = [symbol for symbol in a_price_symbols if symbol not in a_fund_symbol_set]
         if a_symbols:
             symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
             query = f"""
@@ -624,6 +815,52 @@ def normalize_momentum_weights_payload(raw_weights: Dict[str, float]) -> Dict[st
 def normalize_rebalance_frequency(value) -> str:
     text = str(value or DEFAULT_REBALANCE_FREQUENCY).strip().lower()
     return text if text in SUPPORTED_REBALANCE_FREQUENCIES else DEFAULT_REBALANCE_FREQUENCY
+
+
+def normalize_rotation_mode(value) -> str:
+    text = str(value or DEFAULT_ROTATION_MODE).strip().lower()
+    return text if text in SUPPORTED_ROTATION_MODES else DEFAULT_ROTATION_MODE
+
+
+def normalize_position_weights(raw_weights: Any, max_positions: Any = 1) -> List[float]:
+    if isinstance(raw_weights, str):
+        items = [item for item in re.split(r"[:：,，\s]+", raw_weights.strip()) if item]
+    elif isinstance(raw_weights, (list, tuple)):
+        items = list(raw_weights)
+    elif raw_weights is None:
+        items = []
+    else:
+        items = [raw_weights]
+
+    weights: List[float] = []
+    for item in items:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number > 0:
+            weights.append(number)
+
+    if not weights:
+        try:
+            position_count = int(max_positions or 1)
+        except (TypeError, ValueError):
+            position_count = 1
+        position_count = max(1, min(100, position_count))
+        return [round(1.0 / position_count, 10) for _ in range(position_count)]
+
+    total = sum(weights)
+    if total <= 0 or not math.isfinite(total):
+        raise ValueError("仓位权重之和必须大于0")
+    if total > 1.000001:
+        weights = [weight / total for weight in weights]
+    if len(weights) > 100:
+        raise ValueError("仓位权重最多支持100个标的")
+    return [round(float(weight), 10) for weight in weights]
+
+
+def format_position_weights(weights: List[float]) -> str:
+    return ":".join(f"{float(weight):.4f}".rstrip("0").rstrip(".") for weight in weights)
 
 
 def is_rebalance_day(dates: List[date], index: int, frequency: str = DEFAULT_REBALANCE_FREQUENCY) -> bool:
@@ -1102,6 +1339,24 @@ def load_universe_weight_history(
     return weight_history
 
 
+def build_static_universe_history(pool_key: str, symbols: List[str], start_date: date) -> UniverseHistory:
+    normalized_symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in symbols if symbol))
+    return UniverseHistory(
+        snapshot_dates_by_etf={pool_key: [start_date]},
+        symbols_by_etf_date={pool_key: {start_date: normalized_symbols}},
+        all_symbols=normalized_symbols,
+        holdings_date_count={pool_key: 1},
+    )
+
+
+def build_static_equal_weight_history(pool_key: str, symbols: List[str], start_date: date) -> Dict[str, Dict[date, Dict[str, float]]]:
+    normalized_symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in symbols if symbol))
+    if not normalized_symbols:
+        return {}
+    weight = 1.0 / len(normalized_symbols)
+    return {pool_key: {start_date: {symbol: weight for symbol in normalized_symbols}}}
+
+
 def _load_valuation_frame(
     db: ORMSession,
     symbols: List[str],
@@ -1460,7 +1715,13 @@ def _compute_valuation_gap(df: pl.DataFrame, context: FactorContext) -> pl.DataF
 
 
 def _compute_index_weight(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    candidate_etfs = list(dict.fromkeys(context.candidate_etfs or DEFAULT_CANDIDATE_ETFS))
+    candidate_etfs = list(
+        dict.fromkeys(
+            context.candidate_etfs
+            or list((context.weight_history or {}).keys())
+            or DEFAULT_CANDIDATE_ETFS
+        )
+    )
     analysis_dates = context.analysis_dates or (
         df.filter((pl.col("trade_date") >= context.start_date) & (pl.col("trade_date") <= context.end_date))
         .select("trade_date")
@@ -1609,6 +1870,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_index_weight,
+        unsupported_pool_types=["custom"],
     ),
     "custom_momentum_volume": FactorDefinition(
         key="custom_momentum_volume",
@@ -1637,6 +1899,39 @@ def _weights_for_leg(leg: Dict[str, Any]) -> Dict[int, float]:
     if leg["window"] == MIXED_WINDOW_KEY:
         return normalize_momentum_weights(leg["momentum_weights"], windows)
     return normalize_momentum_weights({str(windows[0]): 1.0}, windows)
+
+
+def unsupported_factor_keys_for_pool(pool: Optional[str]) -> Set[str]:
+    if not is_custom_pool(pool):
+        return set()
+    return {
+        key
+        for key, definition in FACTOR_REGISTRY.items()
+        if "custom" in (definition.unsupported_pool_types or []) or key in CUSTOM_POOL_UNSUPPORTED_FACTOR_KEYS
+    }
+
+
+def validate_factor_legs_for_pool(pool: Optional[str], legs: List[Any]) -> None:
+    unsupported_keys = unsupported_factor_keys_for_pool(pool)
+    if not unsupported_keys:
+        return
+    used_keys: List[str] = []
+    for leg in legs or []:
+        factor_key = _get_attr(leg, "factor")
+        if isinstance(factor_key, dict):
+            factor_key = factor_key.get("key")
+        elif factor_key is None and isinstance(leg, dict):
+            factor_payload = leg.get("factor")
+            factor_key = factor_payload.get("key") if isinstance(factor_payload, dict) else factor_payload
+        if factor_key in unsupported_keys and factor_key not in used_keys:
+            used_keys.append(factor_key)
+    if not used_keys:
+        return
+    labels = [
+        FACTOR_REGISTRY.get(key).label if FACTOR_REGISTRY.get(key) else key
+        for key in used_keys
+    ]
+    raise ValueError(f"自定义股票池不支持因子: {', '.join(labels)}")
 
 
 def resolve_factor_legs(legs: List[Any]) -> List[Dict[str, Any]]:
@@ -2266,11 +2561,16 @@ def prepare_factor_backtest_base_data(
     resolved_legs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     resolved_legs = resolved_legs or resolve_factor_legs(request.legs)
+    validate_factor_legs_for_pool(request.pool, resolved_legs)
     end_date = _resolve_backtest_end_date(request, db)
+    pool_key = str(request.pool or "").strip().upper()
+    factor_keys = {leg["factor"]["key"] for leg in resolved_legs}
+    is_custom = is_custom_pool(pool_key)
+    custom_symbols = normalize_custom_pool_symbols(pool_key, request.custom_symbols) if is_custom else []
     candidate_etfs = list(
         dict.fromkeys(
             str(item or "").strip().upper()
-            for item in (request.candidate_etfs or POOL_ETFS.get(request.pool, DEFAULT_CANDIDATE_ETFS))
+            for item in (request.candidate_etfs or POOL_ETFS.get(pool_key, DEFAULT_CANDIDATE_ETFS))
             if item
         )
     )
@@ -2279,7 +2579,11 @@ def prepare_factor_backtest_base_data(
     fetch_padding_days = max(370, int(request.min_listing_days) + 30, int(max_factor_window * 3))
     fetch_start = request.start_date - timedelta(days=fetch_padding_days)
 
-    universe_history = load_universe_history(db, candidate_etfs, request.start_date, end_date)
+    if is_custom:
+        universe_history = build_static_universe_history(pool_key, custom_symbols, request.start_date)
+        candidate_etfs = []
+    else:
+        universe_history = load_universe_history(db, candidate_etfs, request.start_date, end_date)
     if not universe_history.all_symbols:
         raise ValueError("股票池没有可用成分股数据")
 
@@ -2300,17 +2604,20 @@ def prepare_factor_backtest_base_data(
     if not dates:
         raise ValueError("回测区间内没有可交易日行情")
 
-    factor_keys = {leg["factor"]["key"] for leg in resolved_legs}
     needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
     industry_df = _load_industry_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=3650), end_date) if needs_industry else None
     valuation_df = _load_valuation_frame(db, universe_history.all_symbols, request.start_date - timedelta(days=540), end_date) if "valuation_gap" in factor_keys else None
-    weight_history = load_universe_weight_history(db, candidate_etfs, request.start_date, end_date) if "index_weight" in factor_keys else None
-    benchmark_rows = load_benchmark_rows_by_symbol(
-        db,
-        candidate_etfs,
-        request.start_date - timedelta(days=10),
-        end_date,
-    )
+    if is_custom:
+        weight_history = build_static_equal_weight_history(pool_key, universe_history.all_symbols, request.start_date) if "index_weight" in factor_keys else None
+        benchmark_rows = {}
+    else:
+        weight_history = load_universe_weight_history(db, candidate_etfs, request.start_date, end_date) if "index_weight" in factor_keys else None
+        benchmark_rows = load_benchmark_rows_by_symbol(
+            db,
+            candidate_etfs,
+            request.start_date - timedelta(days=10),
+            end_date,
+        )
 
     return {
         "end_date": end_date,
@@ -2342,6 +2649,7 @@ def warm_backtest_search_factor_caches(
     raw_factor_cache = prepared_data.setdefault("raw_factor_cache", {})
     component_factor_cache = prepared_data.setdefault("component_factor_cache", {})
     base_resolved_legs = resolve_factor_legs(request.legs)
+    validate_factor_legs_for_pool(request.pool, base_resolved_legs)
     for leg in base_resolved_legs:
         factor_definition = leg["factor_definition"]
         if factor_definition.key in MOMENTUM_FACTOR_SCORE_PREFIX:
@@ -2380,12 +2688,21 @@ def _build_factor_backtest_metadata(
     elapsed_ms: float,
 ) -> Dict[str, Any]:
     required_windows = required_windows_for_legs(resolved_legs)
-    pool_label = request.pool_label or next((item["label"] for item in POOL_OPTIONS if item["key"] == request.pool), request.pool)
+    pool_key = str(request.pool or "").strip().upper()
+    position_weights = normalize_position_weights(request.position_weights, request.max_positions)
+    rotation_mode = normalize_rotation_mode(request.rotation_mode)
+    pool_label = request.pool_label or CUSTOM_POOL_LABELS.get(
+        pool_key,
+        next((item["label"] for item in POOL_OPTIONS if item["key"] == pool_key), request.pool),
+    )
+    custom_symbols = list(dict.fromkeys(str(item or "").strip().upper() for item in request.custom_symbols if item))
     return {
         "mode": request.mode,
-        "pool": request.pool,
+        "pool": pool_key,
         "pool_label": pool_label,
         "candidate_etfs": candidate_etfs,
+        "custom_symbols": custom_symbols,
+        "custom_symbol_count": len(custom_symbols),
         "components": [
             {
                 "component_key": leg["key"],
@@ -2408,12 +2725,16 @@ def _build_factor_backtest_metadata(
         "start_date": request.start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "initial_capital": request.initial_capital,
-        "max_positions": request.max_positions,
+        "max_positions": len(position_weights),
+        "position_weights": position_weights,
+        "position_weights_label": format_position_weights(position_weights),
         "sell_rank_multiplier": request.sell_rank_multiplier,
-        "sell_rank_threshold": max(request.max_positions, int(math.ceil(request.max_positions * request.sell_rank_multiplier))),
+        "sell_rank_threshold": max(len(position_weights), int(math.ceil(len(position_weights) * request.sell_rank_multiplier))),
         "factor_combination_method": "weighted_standardized_factor_values",
         "factor_combination_method_label": "子因子标准化后加权",
         "rebalance_frequency": request.rebalance_frequency,
+        "rotation_mode": rotation_mode,
+        "rotation_mode_label": ROTATION_MODE_LABELS.get(rotation_mode, rotation_mode),
         "commission_pct": request.commission_pct,
         "slippage_pct": request.slippage_pct,
         "lot_size": request.lot_size,
@@ -2465,6 +2786,7 @@ def run_factor_backtest(
 ) -> Dict[str, Any]:
     started_at = time.perf_counter()
     resolved_legs = resolve_factor_legs(request.legs)
+    validate_factor_legs_for_pool(request.pool, resolved_legs)
     if prepared_data is None:
         prepared_data = prepare_factor_backtest_base_data(request, db, resolved_legs)
 
@@ -2510,10 +2832,13 @@ def run_factor_backtest(
 
     benchmark_curve = build_benchmark_curve(prepared_data["benchmark_rows"], dates, float(request.initial_capital), request.start_date)
 
-    max_positions = int(request.max_positions)
+    position_weights = normalize_position_weights(request.position_weights, request.max_positions)
+    max_positions = len(position_weights)
     sell_rank_multiplier = float(request.sell_rank_multiplier)
     sell_rank_threshold = max(max_positions, int(math.ceil(max_positions * sell_rank_multiplier)))
     rebalance_frequency = normalize_rebalance_frequency(request.rebalance_frequency)
+    rotation_mode = normalize_rotation_mode(request.rotation_mode)
+    rotation_mode_label = ROTATION_MODE_LABELS.get(rotation_mode, rotation_mode)
     lot_size = max(1, int(request.lot_size or 1))
     commission_rate = max(0.0, float(request.commission_pct or 0)) / 100
     slippage_rate = max(0.0, float(request.slippage_pct or 0)) / 100
@@ -2533,6 +2858,76 @@ def run_factor_backtest(
     universe_size_by_date: Dict[str, int] = {}
     rebalance_count = 0
     pending_rebalance: Optional[Dict[str, Any]] = None
+
+    def _current_portfolio_value_with_prices(price_overrides: Dict[str, float]) -> float:
+        merged_prices = dict(last_prices)
+        merged_prices.update(price_overrides)
+        return portfolio_value(cash, positions, merged_prices)
+
+    def _portfolio_target_weights(symbols: List[str]) -> Dict[str, float]:
+        if not symbols:
+            return {}
+        weights = list(position_weights[: len(symbols)])
+        if len(weights) < len(symbols):
+            if weights:
+                last_weight = weights[-1]
+            else:
+                last_weight = 1.0 / len(symbols)
+            weights.extend([last_weight] * (len(symbols) - len(weights)))
+        total = sum(weights)
+        if total <= 0:
+            return {symbol: 1.0 / len(symbols) for symbol in symbols}
+        if total > 1.000001:
+            weights = [weight / total for weight in weights]
+        return {symbol: weight for symbol, weight in zip(symbols, weights) if weight > 0}
+
+    def _cash_fill_buy_weights(symbols: List[str]) -> Dict[str, float]:
+        if not symbols:
+            return {}
+        weights = list(position_weights[: len(symbols)])
+        if len(weights) < len(symbols):
+            weights.extend([weights[-1] if weights else 1.0] * (len(symbols) - len(weights)))
+        total = sum(weights)
+        if total <= 0:
+            return {symbol: 1.0 / len(symbols) for symbol in symbols}
+        return {symbol: weight / total for symbol, weight in zip(symbols, weights) if weight > 0}
+
+    def _plan_target_symbols(ranked: List[Dict[str, Any]], selected_symbols: List[str], rank_by_symbol: Dict[str, int]) -> Dict[str, Any]:
+        held_symbols = list(positions.keys())
+        if rotation_mode == ROTATION_MODE_SCHEDULED_REBALANCE:
+            target_symbols = list(dict.fromkeys(selected_symbols))
+            sell_symbols = [symbol for symbol in held_symbols if symbol not in target_symbols]
+            should_rebalance = True
+            buy_symbols = [symbol for symbol in target_symbols if symbol not in positions]
+        else:
+            sell_symbols = [symbol for symbol in held_symbols if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold]
+            survivors = [symbol for symbol in held_symbols if symbol not in sell_symbols and rank_by_symbol.get(symbol) is not None]
+            target_symbols = list(dict.fromkeys(survivors))
+            buy_symbols = []
+            for item in ranked:
+                symbol = item["symbol"]
+                if symbol in target_symbols or symbol in sell_symbols:
+                    continue
+                target_symbols.append(symbol)
+                if symbol not in positions:
+                    buy_symbols.append(symbol)
+                if len(target_symbols) >= max_positions:
+                    break
+            target_symbols = target_symbols[:max_positions]
+            buy_symbols = [symbol for symbol in buy_symbols if symbol in target_symbols]
+            should_rebalance = bool(sell_symbols or len(positions) < max_positions or any(symbol not in positions for symbol in target_symbols))
+        target_symbols = [symbol for symbol in target_symbols if symbol in rank_by_symbol]
+        target_symbols.sort(key=lambda symbol: rank_by_symbol.get(symbol, 10**9))
+        buy_symbols = [symbol for symbol in buy_symbols if symbol in target_symbols]
+        buy_symbols.sort(key=lambda symbol: rank_by_symbol.get(symbol, 10**9))
+        return {
+            "sell_symbols": sell_symbols,
+            "target_symbols": target_symbols,
+            "target_weights": _portfolio_target_weights(target_symbols),
+            "buy_symbols": buy_symbols,
+            "buy_weights": _cash_fill_buy_weights(buy_symbols),
+            "should_rebalance": should_rebalance,
+        }
 
     def append_trade(
         trade_date: date,
@@ -2729,17 +3124,38 @@ def run_factor_backtest(
 
         if pending_rebalance:
             signal_date = pending_rebalance["signal_date"]
+            target_prices: Dict[str, float] = {}
+            target_price_sources: Dict[str, str] = {}
+            target_quote_timestamps: Dict[str, Optional[str]] = {}
+            for symbol in pending_rebalance["target_symbols"]:
+                price, price_source, quote_timestamp = get_execution_price(
+                    symbol,
+                    current_date,
+                    "BUY",
+                    open_map,
+                )
+                if price is None or price <= 0:
+                    continue
+                target_prices[symbol] = price
+                target_price_sources[symbol] = price_source or NEXT_OPEN_PRICE_SOURCE
+                target_quote_timestamps[symbol] = quote_timestamp
+
             for symbol in list(pending_rebalance["sell_symbols"]):
                 if symbol not in positions:
                     continue
                 shares = int(positions[symbol].get("shares") or 0)
-                price, price_source, quote_timestamp = get_execution_price(
-                    symbol,
-                    current_date,
-                    "SELL",
-                    open_map,
-                    quantity=shares,
-                )
+                price = target_prices.get(symbol)
+                if price is None or price <= 0:
+                    price, price_source, quote_timestamp = get_execution_price(
+                        symbol,
+                        current_date,
+                        "SELL",
+                        open_map,
+                        quantity=shares,
+                    )
+                else:
+                    price_source = target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE)
+                    quote_timestamp = target_quote_timestamps.get(symbol)
                 if price is None or price <= 0:
                     continue
                 sell_position(
@@ -2748,37 +3164,98 @@ def run_factor_backtest(
                     symbol,
                     shares,
                     price,
-                    f"下一交易日开盘执行: 跌出因子排名Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}",
+                    (
+                        f"下一交易日开盘执行: 不在目标Top{max_positions}持仓: {', '.join(pending_rebalance['sell_symbols'])}"
+                        if rotation_mode == ROTATION_MODE_SCHEDULED_REBALANCE
+                        else f"下一交易日开盘执行: 跌出因子排名Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_symbols'])}"
+                    ),
                     price_source,
                     quote_timestamp,
                 )
-            slots_to_fill = max(0, max_positions - len(positions))
-            buy_candidates = [item for item in pending_rebalance["selected"] if item["symbol"] not in positions][:slots_to_fill]
-            budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
-            for item in buy_candidates:
-                symbol = item["symbol"]
-                buy_budget = min(cash, budget_per_symbol)
-                if buy_budget <= 0:
-                    continue
-                price, price_source, quote_timestamp = get_execution_price(
-                    symbol,
-                    current_date,
-                    "BUY",
-                    open_map,
-                    budget=buy_budget,
-                )
-                if price is None or price <= 0:
-                    continue
-                buy_position(
-                    current_date,
-                    signal_date,
-                    symbol,
-                    buy_budget,
-                    price,
-                    f"下一交易日开盘补位买入因子Top{max_positions}",
-                    price_source,
-                    quote_timestamp,
-                )
+
+            if pending_rebalance["should_rebalance"] and pending_rebalance["target_symbols"]:
+                if pending_rebalance.get("rotation_mode") == ROTATION_MODE_CASH_FILL_REBALANCE:
+                    max_new_positions = max(0, max_positions - len(positions))
+                    buy_symbols = [
+                        symbol
+                        for symbol in pending_rebalance.get("buy_symbols") or []
+                        if symbol not in positions and (target_prices.get(symbol) or 0) > 0
+                    ][:max_new_positions]
+                    buy_weights = _cash_fill_buy_weights(buy_symbols)
+                    available_cash = cash
+                    for symbol in buy_symbols:
+                        buy_weight = float(buy_weights.get(symbol) or 0)
+                        if buy_weight <= 0:
+                            continue
+                        buy_budget = min(cash, max(0.0, available_cash * buy_weight))
+                        if buy_budget <= 0:
+                            continue
+                        buy_position(
+                            current_date,
+                            signal_date,
+                            symbol,
+                            buy_budget,
+                            target_prices[symbol],
+                            f"下一交易日开盘现金补位买入: 可用现金占比{format_position_weights([buy_weight])}",
+                            target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
+                            target_quote_timestamps.get(symbol),
+                        )
+                else:
+                    target_weights = pending_rebalance["target_weights"]
+                    portfolio_after_sells = _current_portfolio_value_with_prices(target_prices)
+                    for symbol in pending_rebalance["target_symbols"]:
+                        price = target_prices.get(symbol)
+                        if price is None or price <= 0:
+                            continue
+                        target_weight = float(target_weights.get(symbol) or 0)
+                        if target_weight <= 0:
+                            continue
+                        current_shares = int(positions.get(symbol, {}).get("shares") or 0)
+                        current_value = current_shares * price
+                        target_value = portfolio_after_sells * target_weight
+                        if current_value <= target_value + 1e-9:
+                            continue
+                        excess_budget = current_value - target_value
+                        sell_quantity = floor_lot(excess_budget / (price * (1 + slippage_rate)), lot_size)
+                        if sell_quantity <= 0:
+                            continue
+                        sell_position(
+                            current_date,
+                            signal_date,
+                            symbol,
+                            sell_quantity,
+                            price,
+                            f"下一交易日开盘按目标仓位调仓: 目标{format_position_weights([target_weight])}",
+                            target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
+                            target_quote_timestamps.get(symbol),
+                        )
+
+                    portfolio_after_sells = _current_portfolio_value_with_prices(target_prices)
+                    for symbol in pending_rebalance["target_symbols"]:
+                        price = target_prices.get(symbol)
+                        if price is None or price <= 0:
+                            continue
+                        target_weight = float(target_weights.get(symbol) or 0)
+                        if target_weight <= 0:
+                            continue
+                        current_shares = int(positions.get(symbol, {}).get("shares") or 0)
+                        current_value = current_shares * price
+                        target_value = portfolio_after_sells * target_weight
+                        if current_value >= target_value - 1e-9:
+                            continue
+                        buy_budget = min(cash, max(0.0, target_value - current_value))
+                        if buy_budget <= 0:
+                            continue
+                        buy_position(
+                            current_date,
+                            signal_date,
+                            symbol,
+                            buy_budget,
+                            price,
+                            f"下一交易日开盘按目标仓位调仓: 目标{format_position_weights([target_weight])}",
+                            target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
+                            target_quote_timestamps.get(symbol),
+                        )
             pending_rebalance = None
 
         for symbol, price in price_map.items():
@@ -2793,7 +3270,6 @@ def run_factor_backtest(
 
         score_map = factor_values.get(current_date, {})
         if score_map and is_rebalance_day(dates, date_index, rebalance_frequency):
-            rebalance_count += 1
             ranked: List[Dict[str, Any]] = []
             for symbol in sorted(current_universe):
                 if symbol not in price_map:
@@ -2819,6 +3295,9 @@ def run_factor_backtest(
             sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
             rank_by_symbol = {item["symbol"]: rank for rank, item in enumerate(ranked, start=1)}
             ranked_by_symbol = {item["symbol"]: item for item in ranked}
+            planned = _plan_target_symbols(ranked, selected_symbols, rank_by_symbol)
+            if planned["should_rebalance"]:
+                rebalance_count += 1
             event_symbols = list(dict.fromkeys([
                 *sell_rank_symbols,
                 *list(positions.keys()),
@@ -2885,26 +3364,38 @@ def run_factor_backtest(
                             "held_market_value": _safe_float(event_item["held_market_value"], 2),
                             "selected_symbols": selected_symbols,
                             "sell_rank_symbols": sell_rank_symbols,
+                            "target_symbols": planned["target_symbols"],
+                            "buy_symbols": planned["buy_symbols"],
+                            "buy_weights": planned["buy_weights"],
                             "event_symbols": event_symbols,
                             "max_positions": max_positions,
                             "sell_rank_threshold": sell_rank_threshold,
                             "sell_rank_multiplier": sell_rank_multiplier,
                             "min_listing_days": request.min_listing_days,
                             "rebalance_frequency": rebalance_frequency,
+                            "rotation_mode": rotation_mode,
+                            "rotation_mode_label": rotation_mode_label,
                             "execution_rule": "signal_close_next_open",
-                            "rotation_rule": "hold_until_out_of_sell_rank",
+                            "rotation_rule": rotation_mode,
                             "strategy": request.strategy,
                         },
                         "price_source": DAILY_PRICE_SOURCE,
                     }
                 )
-            sell_symbols = [symbol for symbol in list(positions.keys()) if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold]
+            sell_symbols = planned["sell_symbols"]
             pending_rebalance = {
                 "signal_date": current_date,
                 "selected": selected,
                 "selected_symbols": selected_symbols,
                 "sell_rank_symbols": sell_rank_symbols,
                 "sell_symbols": sell_symbols,
+                "target_symbols": planned["target_symbols"],
+                "target_weights": planned["target_weights"],
+                "buy_symbols": planned["buy_symbols"],
+                "buy_weights": planned["buy_weights"],
+                "rotation_mode": rotation_mode,
+                "rotation_mode_label": rotation_mode_label,
+                "should_rebalance": planned["should_rebalance"],
             }
 
         value = portfolio_value(cash, positions, last_prices)
@@ -2972,7 +3463,7 @@ def run_factor_backtest(
             "symbol_count": prepared_data.get("symbol_count"),
             "universe_size_latest": next(reversed(universe_size_by_date.values()), None) if universe_size_by_date else None,
             "execution_rule": "signal_close_next_open",
-            "rotation_rule": "hold_until_out_of_sell_rank",
+            "rotation_rule": rotation_mode,
             "strategy": request.strategy,
         }
     )

@@ -35,6 +35,9 @@ from ...core.services.factor_backtest_engine import (
     A_STOCK_INNO100_INDEX_CODE,
     A_STOCK_INNO100_POOL,
     A_STOCK_INNO100_SYMBOL,
+    DEFAULT_ROTATION_MODE,
+    CUSTOM_POOL_LABELS,
+    CUSTOM_POOL_KEYS,
     FactorBacktestConfig as SharedFactorBacktestConfig,
     FactorBacktestLeg as SharedFactorBacktestLeg,
     POOL_ETFS as SHARED_POOL_ETFS,
@@ -42,11 +45,22 @@ from ...core.services.factor_backtest_engine import (
     get_max_a_stock_index_daily_date,
     load_universe_history,
     load_universe_weight_history,
+    ROTATION_MODE_LABELS,
+    ROTATION_MODE_RANK_EXIT_REBALANCE,
+    ROTATION_MODE_SCHEDULED_REBALANCE,
+    SUPPORTED_ROTATION_MODES,
+    normalize_a_stock_symbol,
+    normalize_custom_pool_symbols,
+    format_position_weights,
+    normalize_position_weights,
+    normalize_rotation_mode,
     prepare_factor_backtest_base_data as shared_prepare_factor_backtest_base_data,
     run_factor_backtest as shared_run_factor_backtest,
+    unsupported_factor_keys_for_pool,
     warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
 )
-from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
+from ...core.utils import normalize_us_equity_symbol
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_CANDIDATE_ETFS,
     DEFAULT_MOMENTUM_WEIGHTS,
@@ -239,12 +253,20 @@ MOMENTUM_FACTOR_SCORE_PREFIX = {
 POOL_OPTIONS = SHARED_POOL_OPTIONS
 POOL_ETFS = SHARED_POOL_ETFS
 POOL_KEYS = set(POOL_ETFS)
+BACKTEST_POOL_KEYS = set(POOL_KEYS).union(CUSTOM_POOL_KEYS)
 
 
 def _validate_pool_key(value) -> str:
     pool = str(value or "SPY_QQQ").strip().upper()
     if pool not in POOL_KEYS:
         raise ValueError(f"股票池仅支持: {', '.join(sorted(POOL_KEYS))}")
+    return pool
+
+
+def _validate_backtest_pool_key(value) -> str:
+    pool = str(value or "SPY_QQQ").strip().upper()
+    if pool not in BACKTEST_POOL_KEYS:
+        raise ValueError(f"股票池仅支持: {', '.join(sorted(BACKTEST_POOL_KEYS))}")
     return pool
 
 
@@ -585,13 +607,16 @@ class CompositeFactorAnalyzeRequest(BaseModel):
 
 class FactorBacktestRequest(BaseModel):
     pool: str = "SPY_QQQ"
+    custom_symbols: List[str] = Field(default_factory=list)
     start_date: date = DEFAULT_START_DATE
     end_date: Optional[date] = None
     oos_start_date: Optional[date] = None
     initial_capital: float = 100_000.0
     max_positions: int = 7
+    position_weights: List[float] = Field(default_factory=list)
     sell_rank_multiplier: float = DEFAULT_SELL_RANK_MULTIPLIER
     rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY
+    rotation_mode: str = DEFAULT_ROTATION_MODE
     commission_pct: float = 0.03
     slippage_pct: float = 0.02
     lot_size: int = 1
@@ -619,7 +644,15 @@ class FactorBacktestRequest(BaseModel):
 
     @validator("pool", pre=True)
     def validate_pool(cls, value):
-        return _validate_pool_key(value)
+        return _validate_backtest_pool_key(value)
+
+    @validator("custom_symbols", pre=True, always=True)
+    def validate_custom_symbols(cls, value, values):
+        return normalize_custom_pool_symbols(values.get("pool"), value)
+
+    @validator("position_weights", pre=True, always=True)
+    def validate_position_weights(cls, value, values):
+        return normalize_position_weights(value, values.get("max_positions") or 1)
 
     @validator("initial_capital")
     def validate_initial_capital(cls, value):
@@ -647,6 +680,13 @@ class FactorBacktestRequest(BaseModel):
         normalized = _normalize_rebalance_frequency(value)
         if normalized not in SUPPORTED_REBALANCE_FREQUENCIES:
             raise ValueError(f"调仓频率仅支持: {', '.join(SUPPORTED_REBALANCE_FREQUENCIES)}")
+        return normalized
+
+    @validator("rotation_mode")
+    def validate_rotation_mode(cls, value):
+        normalized = normalize_rotation_mode(value)
+        if normalized not in SUPPORTED_ROTATION_MODES:
+            raise ValueError(f"调仓方式仅支持: {', '.join(SUPPORTED_ROTATION_MODES)}")
         return normalized
 
     @validator("commission_pct", "slippage_pct")
@@ -690,13 +730,25 @@ class FactorBacktestRequest(BaseModel):
         return value
 
     @validator("legs")
-    def validate_legs(cls, value):
+    def validate_legs(cls, value, values):
         if len(value) < 1:
             raise ValueError("因子回测至少需要1个因子")
         if len(value) > 8:
             raise ValueError("因子回测最多支持8个因子")
         if sum(abs(float(item.weight)) for item in value) <= 0:
             raise ValueError("至少设置一个非0因子权重")
+        unsupported_keys = unsupported_factor_keys_for_pool(values.get("pool"))
+        used_keys = []
+        for leg in value or []:
+            factor_key = getattr(leg, "factor", None)
+            if factor_key in unsupported_keys and factor_key not in used_keys:
+                used_keys.append(factor_key)
+        if used_keys:
+            labels = [
+                FACTOR_REGISTRY.get(key).label if FACTOR_REGISTRY.get(key) else key
+                for key in used_keys
+            ]
+            raise ValueError(f"自定义股票池不支持因子: {', '.join(labels)}")
         return value
 
 
@@ -719,7 +771,9 @@ class FactorBacktestSearchRequest(BaseModel):
     window_weight_bucket_count: int = 20
     factor_weight_bucket_count: int = 20
     max_positions_candidates: Optional[List[int]] = None
+    position_weight_candidates: Optional[List[List[float]]] = None
     sell_rank_multiplier_candidates: Optional[List[float]] = None
+    rotation_mode_candidates: Optional[List[str]] = None
 
     @validator("window_weight_bucket_count", "factor_weight_bucket_count")
     def validate_bucket_count(cls, value):
@@ -728,12 +782,9 @@ class FactorBacktestSearchRequest(BaseModel):
             raise ValueError("权重分桶数必须在0到100之间")
         return number
 
-    @validator("max_positions_candidates", pre=True, always=True)
+    @validator("max_positions_candidates", pre=True)
     def validate_max_positions_candidates(cls, value, values):
-        request = values.get("request")
         items = value if isinstance(value, list) else ([] if value is None else [value])
-        if not items and request is not None:
-            items = [request.max_positions]
         normalized: List[int] = []
         for item in items:
             raw_number = float(item)
@@ -746,6 +797,49 @@ class FactorBacktestSearchRequest(BaseModel):
                 normalized.append(number)
         if len(normalized) > 50:
             raise ValueError("持仓数候选项最多支持50个")
+        return normalized
+
+    @validator("position_weight_candidates", pre=True, always=True)
+    def validate_position_weight_candidates(cls, value, values):
+        request = values.get("request")
+        fallback_max_positions = getattr(request, "max_positions", 1) if request is not None else 1
+        raw_candidates: List[Any] = []
+        if isinstance(value, str):
+            raw_candidates = [item.strip() for item in re.split(r"[,，]", value) if item.strip()]
+        elif isinstance(value, list):
+            scalar_number_list = True
+            for item in value:
+                if isinstance(item, (list, tuple, dict)):
+                    scalar_number_list = False
+                    break
+                try:
+                    float(item)
+                except (TypeError, ValueError):
+                    scalar_number_list = False
+                    break
+            if value and scalar_number_list:
+                raw_candidates = [value]
+            else:
+                raw_candidates = value
+        elif value is not None:
+            raw_candidates = [value]
+
+        if not raw_candidates and values.get("max_positions_candidates"):
+            raw_candidates = [[1.0] * int(item) for item in values.get("max_positions_candidates") or []]
+        if not raw_candidates and request is not None:
+            raw_candidates = [request.position_weights or [1.0] * int(request.max_positions or 1)]
+
+        normalized: List[List[float]] = []
+        seen = set()
+        for item in raw_candidates:
+            weights = normalize_position_weights(item, fallback_max_positions)
+            key = tuple(round(float(weight), 10) for weight in weights)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(list(key))
+        if len(normalized) > 50:
+            raise ValueError("仓位候选项最多支持50个")
         return normalized
 
     @validator("sell_rank_multiplier_candidates", pre=True, always=True)
@@ -765,6 +859,28 @@ class FactorBacktestSearchRequest(BaseModel):
         if len(normalized) > 50:
             raise ValueError("卖出倍数候选项最多支持50个")
         return normalized
+
+    @validator("rotation_mode_candidates", pre=True, always=True)
+    def validate_rotation_mode_candidates(cls, value, values):
+        request = values.get("request")
+        if isinstance(value, str):
+            items = [item.strip() for item in re.split(r"[,，\s]+", value) if item.strip()]
+        elif isinstance(value, list):
+            items = value
+        elif value is None:
+            items = []
+        else:
+            items = [value]
+        if not items and request is not None:
+            items = [request.rotation_mode]
+        normalized: List[str] = []
+        for item in items:
+            mode = normalize_rotation_mode(item)
+            if mode not in SUPPORTED_ROTATION_MODES:
+                raise ValueError(f"调仓方式仅支持: {', '.join(SUPPORTED_ROTATION_MODES)}")
+            if mode not in normalized:
+                normalized.append(mode)
+        return normalized or [DEFAULT_ROTATION_MODE]
 
     @validator("objective")
     def validate_objective(cls, value, values):
@@ -822,6 +938,7 @@ class FactorDefinition:
     supports_mixed_windows: bool
     direction: str
     compute: Callable[[pl.DataFrame, FactorContext], pl.DataFrame]
+    unsupported_pool_types: List[str] = field(default_factory=list)
 
     def to_option(self) -> Dict[str, Any]:
         direction = FACTOR_DIRECTION_OPTIONS.get(self.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
@@ -836,6 +953,7 @@ class FactorDefinition:
             "direction": self.direction,
             "direction_label": direction["label"],
             "direction_sign": direction["sign"],
+            "unsupported_pool_types": list(self.unsupported_pool_types),
         }
 
 
@@ -1856,6 +1974,174 @@ def _get_timing_fear_sources(db: ORMSession) -> List[Dict[str, Any]]:
     return sources
 
 
+def _normalize_symbol_search_limit(value: Any, default: int = 20) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(1, min(50, number))
+
+
+def _search_a_stock_fund_pool_symbols(connection: Any, search_text: str, limit: int) -> List[Dict[str, Any]]:
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT
+                d.ts_code,
+                COALESCE(b.name, '') AS name
+            FROM a_stock_fund_daily d
+            LEFT JOIN a_stock_fund_basic b
+              ON d.ts_code = b.ts_code
+            """
+        ).fetchall()
+    except Exception:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT ts_code, '' AS name
+            FROM a_stock_fund_daily
+            """
+        ).fetchall()
+
+    options: List[Dict[str, Any]] = []
+    for ts_code, name in rows:
+        symbol = normalize_a_stock_symbol(ts_code)
+        fallback_name = A_STOCK_ETF_DAILY_NAMES.get(symbol)
+        display_name = str(name or fallback_name or "").strip()
+        searchable = f"{symbol} {display_name}".upper()
+        if search_text and search_text not in searchable:
+            continue
+        if display_name:
+            label = f"{display_name} {symbol}"
+        else:
+            label = f"ETF {symbol}"
+        if search_text and symbol.upper() == search_text:
+            score = 0
+        elif search_text and symbol.upper().startswith(search_text):
+            score = 1
+        elif search_text and display_name.upper().find(search_text) >= 0:
+            score = 2
+        else:
+            score = 3
+        options.append({"label": label, "value": symbol, "_score": score})
+
+    options.sort(key=lambda item: (item.get("_score", 99), item["value"]))
+    return [{key: value for key, value in item.items() if key != "_score"} for item in options[:limit]]
+
+
+def _search_a_stock_pool_symbols(query: str, limit: int) -> List[Dict[str, Any]]:
+    search_text = str(query or "").strip().upper()
+    like_pattern = f"%{search_text}%"
+    connection = _connect_duckdb()
+    try:
+        stock_rows = connection.execute(
+            f"""
+            SELECT DISTINCT
+                ts_code,
+                COALESCE(name, '') AS name
+            FROM a_stock_basic
+            WHERE list_status = 'L'
+              AND (
+                    UPPER(ts_code) LIKE ?
+                 OR UPPER(symbol) LIKE ?
+                 OR UPPER(COALESCE(name, '')) LIKE ?
+              )
+            ORDER BY
+                CASE
+                    WHEN UPPER(ts_code) = ? THEN 0
+                    WHEN UPPER(ts_code) LIKE ? THEN 1
+                    WHEN UPPER(COALESCE(name, '')) LIKE ? THEN 2
+                    ELSE 3
+                END,
+                ts_code
+            LIMIT {limit}
+            """,
+            [like_pattern, like_pattern, like_pattern, search_text, f"{search_text}%", like_pattern],
+        ).fetchall()
+        fund_options = _search_a_stock_fund_pool_symbols(connection, search_text, limit)
+    finally:
+        connection.close()
+
+    stock_options: List[Dict[str, Any]] = []
+    seen_symbols = set()
+    for ts_code, name in stock_rows:
+        symbol = normalize_a_stock_symbol(ts_code)
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        label = f"{name} {symbol}".strip() if name else symbol
+        stock_options.append({"label": label, "value": symbol})
+
+    deduped_fund_options: List[Dict[str, Any]] = []
+    for item in fund_options:
+        symbol = item.get("value")
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        deduped_fund_options.append(item)
+
+    groups: List[Dict[str, Any]] = []
+    if stock_options:
+        groups.append({"label": "A股个股", "options": stock_options})
+    if deduped_fund_options:
+        groups.append({"label": "A股ETF", "options": deduped_fund_options})
+    return groups
+
+
+def _search_us_stock_symbols(query: str, limit: int) -> List[Dict[str, Any]]:
+    search_text = str(query or "").strip().upper()
+    like_pattern = f"%{search_text}%"
+    connection = _connect_duckdb()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT DISTINCT symbol
+            FROM us_stock_daily
+            WHERE UPPER(symbol) LIKE ?
+            ORDER BY
+                CASE
+                    WHEN UPPER(symbol) = ? THEN 0
+                    WHEN UPPER(symbol) LIKE ? THEN 1
+                    ELSE 2
+                END,
+                symbol
+            LIMIT {limit}
+            """,
+            [like_pattern, search_text, f"{search_text}%"],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    options = []
+    for (symbol,) in rows:
+        normalized = normalize_us_equity_symbol(symbol)
+        if normalized:
+            options.append({"label": normalized, "value": normalized})
+    return [{"label": "美股", "options": options}] if options else []
+
+
+@router.get("/symbol-search")
+def search_factor_lab_symbols(
+    market: str = Query(..., description="a_stock 或 us_stock"),
+    q: str = Query("", description="搜索关键词"),
+    limit: int = Query(20, ge=1, le=50),
+    _: str = Depends(valid_account),
+):
+    market_key = str(market or "").strip().lower()
+    normalized_limit = _normalize_symbol_search_limit(limit, 20)
+    if market_key == "a_stock":
+        options = _search_a_stock_pool_symbols(q, normalized_limit)
+    elif market_key == "us_stock":
+        options = _search_us_stock_symbols(q, normalized_limit)
+    else:
+        raise HTTPException(status_code=400, detail="market 仅支持 a_stock 或 us_stock")
+    return {
+        "market": market_key,
+        "query": q,
+        "limit": normalized_limit,
+        "options": options,
+    }
+
+
 def _load_valuation_frame(
     db: ORMSession,
     symbols: List[str],
@@ -2530,6 +2816,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_index_weight,
+        unsupported_pool_types=["custom"],
     ),
     "custom_momentum_volume": FactorDefinition(
         key="custom_momentum_volume",
@@ -4226,16 +4513,23 @@ def _factor_values_cache_key(
 
 
 def _to_shared_backtest_config(request: FactorBacktestRequest) -> SharedFactorBacktestConfig:
+    pool_key = str(request.pool or "").strip().upper()
     return SharedFactorBacktestConfig(
-        pool=request.pool,
-        pool_label=next((item["label"] for item in POOL_OPTIONS if item["key"] == request.pool), request.pool),
-        candidate_etfs=POOL_ETFS[request.pool],
+        pool=pool_key,
+        pool_label=CUSTOM_POOL_LABELS.get(
+            pool_key,
+            next((item["label"] for item in POOL_OPTIONS if item["key"] == pool_key), pool_key),
+        ),
+        candidate_etfs=POOL_ETFS.get(pool_key, []),
+        custom_symbols=list(request.custom_symbols or []),
+        position_weights=list(request.position_weights or []),
         start_date=request.start_date,
         end_date=request.end_date,
         initial_capital=request.initial_capital,
         max_positions=request.max_positions,
         sell_rank_multiplier=request.sell_rank_multiplier,
         rebalance_frequency=request.rebalance_frequency,
+        rotation_mode=request.rotation_mode,
         commission_pct=request.commission_pct,
         slippage_pct=request.slippage_pct,
         lot_size=request.lot_size,
@@ -4953,8 +5247,9 @@ def _estimate_backtest_search_cases(request: FactorBacktestSearchRequest) -> int
                 total += factor_cases_for_subset * (window_case_count ** active_mixed_count)
     return int(
         total
-        * max(1, len(request.max_positions_candidates or []))
+        * max(1, len(request.position_weight_candidates or []))
         * max(1, len(request.sell_rank_multiplier_candidates or []))
+        * max(1, len(request.rotation_mode_candidates or []))
     )
 
 
@@ -4992,7 +5287,8 @@ def _format_backtest_search_params(
     return "；".join(
         item
         for item in [
-            f"持仓 {int(request.max_positions)}",
+            f"仓位 {format_position_weights(request.position_weights)}",
+            f"调仓 {ROTATION_MODE_LABELS.get(request.rotation_mode, request.rotation_mode)}",
             f"卖出倍数 {_format_weight(float(request.sell_rank_multiplier))}",
             "因子 " + " / ".join(factor_parts),
             "；".join(window_parts),
@@ -5014,8 +5310,9 @@ def _iter_backtest_search_requests(
         if leg_count > 1
         else [[1.0]]
     )
-    max_positions_grid = search_request.max_positions_candidates or [search_request.request.max_positions]
+    position_weight_grid = search_request.position_weight_candidates or [search_request.request.position_weights]
     sell_multiplier_grid = search_request.sell_rank_multiplier_candidates or [search_request.request.sell_rank_multiplier]
+    rotation_mode_grid = search_request.rotation_mode_candidates or [search_request.request.rotation_mode]
     for factor_weights in factor_weight_grid:
         window_grids = []
         for index, leg in enumerate(leg_payloads):
@@ -5039,10 +5336,12 @@ def _iter_backtest_search_requests(
                         for window_index, window in enumerate(SUPPORTED_MOMENTUM_WINDOWS)
                     }
                 next_legs.append(next_leg)
-            for max_positions, sell_rank_multiplier in product(max_positions_grid, sell_multiplier_grid):
+            for position_weights, sell_rank_multiplier, rotation_mode in product(position_weight_grid, sell_multiplier_grid, rotation_mode_grid):
                 next_payload = dict(base_payload)
-                next_payload["max_positions"] = int(max_positions)
+                next_payload["position_weights"] = list(position_weights)
+                next_payload["max_positions"] = len(position_weights)
                 next_payload["sell_rank_multiplier"] = float(sell_rank_multiplier)
+                next_payload["rotation_mode"] = rotation_mode
                 next_payload["legs"] = next_legs
                 yield FactorBacktestRequest(**next_payload), next_legs
 
@@ -5159,7 +5458,11 @@ def _search_row_from_backtest_result(
         "objective": objective,
         "params_label": _format_backtest_search_params(request, legs),
         "max_positions": request.max_positions,
+        "position_weights": request.position_weights,
+        "position_weights_label": format_position_weights(request.position_weights),
         "sell_rank_multiplier": request.sell_rank_multiplier,
+        "rotation_mode": request.rotation_mode,
+        "rotation_mode_label": ROTATION_MODE_LABELS.get(request.rotation_mode, request.rotation_mode),
         "total_return": metrics.get("total_return"),
         "annualized_return": metrics.get("annualized_return"),
         "sharpe": metrics.get("sharpe"),
@@ -5186,7 +5489,11 @@ def _backtest_search_row_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         "objective_value": row.get("objective_value"),
         "params_label": row.get("params_label"),
         "max_positions": row.get("max_positions"),
+        "position_weights": row.get("position_weights"),
+        "position_weights_label": row.get("position_weights_label"),
         "sell_rank_multiplier": row.get("sell_rank_multiplier"),
+        "rotation_mode": row.get("rotation_mode"),
+        "rotation_mode_label": row.get("rotation_mode_label"),
         "total_return": row.get("total_return"),
         "annualized_return": row.get("annualized_return"),
         "sharpe": row.get("sharpe"),
@@ -5215,6 +5522,9 @@ def _backtest_search_row_payload(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _db_search_row_to_dict(row: FactorBacktestSearchResult) -> Dict[str, Any]:
+    request_payload = row.request_payload or {}
+    position_weights = request_payload.get("position_weights") or normalize_position_weights(None, row.max_positions or 1)
+    rotation_mode = normalize_rotation_mode(request_payload.get("rotation_mode"))
     return {
         "id": row.id,
         "rank": row.rank,
@@ -5223,7 +5533,11 @@ def _db_search_row_to_dict(row: FactorBacktestSearchResult) -> Dict[str, Any]:
         "objective_value": row.objective_value,
         "params_label": row.params_label,
         "max_positions": row.max_positions,
+        "position_weights": position_weights,
+        "position_weights_label": format_position_weights(position_weights),
         "sell_rank_multiplier": row.sell_rank_multiplier,
+        "rotation_mode": rotation_mode,
+        "rotation_mode_label": ROTATION_MODE_LABELS.get(rotation_mode, rotation_mode),
         "total_return": row.total_return,
         "annualized_return": row.annualized_return,
         "sharpe": row.sharpe,
@@ -5247,7 +5561,7 @@ def _db_search_row_to_dict(row: FactorBacktestSearchResult) -> Dict[str, Any]:
         "win_rate": row.win_rate,
         "rebalance_count": row.rebalance_count,
         "holding_count": row.holding_count,
-        "request": row.request_payload,
+        "request": request_payload,
     }
 
 
@@ -5362,7 +5676,9 @@ def _serialize_backtest_search_status_from_record(state: Optional[FactorBacktest
         "window_weight_bucket_count": (state.search_params or {}).get("window_weight_bucket_count"),
         "factor_weight_bucket_count": (state.search_params or {}).get("factor_weight_bucket_count"),
         "max_positions_candidates": (state.search_params or {}).get("max_positions_candidates"),
+        "position_weight_candidates": (state.search_params or {}).get("position_weight_candidates"),
         "sell_rank_multiplier_candidates": (state.search_params or {}).get("sell_rank_multiplier_candidates"),
+        "rotation_mode_candidates": (state.search_params or {}).get("rotation_mode_candidates"),
         "worker_count": state.worker_count,
         "total_cases": state.total_cases,
         "submitted_cases": state.submitted_cases,
@@ -5418,7 +5734,9 @@ def _serialize_backtest_search_status_from_job(job: Optional[Dict[str, Any]]) ->
         "window_weight_bucket_count": (job.get("search_params") or {}).get("window_weight_bucket_count"),
         "factor_weight_bucket_count": (job.get("search_params") or {}).get("factor_weight_bucket_count"),
         "max_positions_candidates": (job.get("search_params") or {}).get("max_positions_candidates"),
+        "position_weight_candidates": (job.get("search_params") or {}).get("position_weight_candidates"),
         "sell_rank_multiplier_candidates": (job.get("search_params") or {}).get("sell_rank_multiplier_candidates"),
+        "rotation_mode_candidates": (job.get("search_params") or {}).get("rotation_mode_candidates"),
         "worker_count": int(job.get("worker_count") or 1),
         "total_cases": total_cases,
         "submitted_cases": int(job.get("submitted_cases") or 0),
@@ -5715,7 +6033,9 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
             "window_weight_bucket_count": search_request.window_weight_bucket_count,
             "factor_weight_bucket_count": search_request.factor_weight_bucket_count,
             "max_positions_candidates": search_request.max_positions_candidates,
+            "position_weight_candidates": search_request.position_weight_candidates,
             "sell_rank_multiplier_candidates": search_request.sell_rank_multiplier_candidates,
+            "rotation_mode_candidates": search_request.rotation_mode_candidates,
         },
         "total_cases": total_cases,
         "submitted_cases": 0,
@@ -6280,6 +6600,9 @@ async def get_factor_lab_options(
         },
         default_backtest_request={
             "pool": "QQQ",
+            "custom_symbols": [],
+            "position_weights": [],
+            "rotation_mode": DEFAULT_ROTATION_MODE,
             "start_date": DEFAULT_START_DATE.isoformat(),
             "end_date": None,
             "oos_start_date": DEFAULT_OOS_START_DATE.isoformat(),

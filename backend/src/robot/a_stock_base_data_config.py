@@ -66,6 +66,17 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "515220.SH",
     "510880.SH",
 )
+A_STOCK_ETF_DAILY_NAMES = {
+    "563360.SH": "A500ETF",
+    "510500.SH": "中证500ETF",
+    "588230.SH": "科创200ETF",
+    "159915.SZ": "创业板ETF",
+    "515220.SH": "煤炭ETF",
+    "510880.SH": "红利ETF",
+    "513100.SH": "纳指ETF",
+    "518880.SH": "黄金ETF",
+    "510300.SH": "沪深300ETF",
+}
 A_STOCK_ETF_DAILY_SYMBOLS = tuple(
     dict.fromkeys(
         [

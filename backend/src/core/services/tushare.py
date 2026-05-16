@@ -1003,6 +1003,43 @@ class TushareService(QuoteProvider):
                 self._fund_basic_frame = pd.DataFrame()
         return self._fund_basic_frame
 
+    def get_a_stock_fund_basic_frame(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+        """获取A股ETF/场内基金基础信息。"""
+        requested_symbols = list(
+            dict.fromkeys(
+                self.normalize_symbol(symbol)
+                for symbol in (symbols or [])
+                if symbol
+            )
+        )
+        base_frame = self._load_fund_basic_frame()
+        frames = [base_frame] if isinstance(base_frame, pd.DataFrame) and not base_frame.empty else []
+
+        if requested_symbols:
+            available_symbols = set()
+            if frames and "ts_code" in base_frame.columns:
+                available_symbols = {
+                    str(item or "").strip().upper()
+                    for item in base_frame["ts_code"].dropna().tolist()
+                }
+            missing_symbols = [symbol for symbol in requested_symbols if symbol not in available_symbols]
+            for symbol in missing_symbols:
+                try:
+                    frame = self.pro.fund_basic(ts_code=symbol, fields="ts_code,name,market,list_date")
+                except Exception as exc:
+                    self.logger.warning("Tushare fund_basic fetch failed for %s: %s", symbol, exc)
+                    continue
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frames.append(frame)
+
+        if not frames:
+            return pd.DataFrame(columns=["ts_code", "name", "market", "list_date"])
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"], keep="last")
+        if requested_symbols and "ts_code" in result.columns:
+            result = result[result["ts_code"].astype("string").str.upper().isin(requested_symbols)]
+        return result
+
     def _load_daily_basic_frame(self) -> pd.DataFrame:
         if self._daily_basic_frame is None:
             try:

@@ -18,6 +18,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_basic",
         "a_stock_adj_factor",
         "a_stock_income",
+        "a_stock_fund_basic",
         "a_stock_fund_daily",
         "a_stock_fund_adj_factor",
         "a_stock_fund_daily_qfq",
@@ -155,6 +156,17 @@ class AStockFundDaily(AnalyticsBase):
     vol = Column(Float)
     amount = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFundBasic(AnalyticsBase):
+    """Tushare A股ETF/场内基金基础信息缓存，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_fund_basic"
+
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(128))
+    market = Column(String(64))
+    list_date = Column(Date)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -302,6 +314,7 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_symbol_date ON a_stock_adj_factor(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_date_symbol ON a_stock_adj_factor(trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_basic_name ON a_stock_fund_basic(name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_symbol_date ON a_stock_fund_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_date_symbol ON a_stock_fund_daily(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_adj_factor_symbol_date ON a_stock_fund_adj_factor(ts_code, trade_date)",
