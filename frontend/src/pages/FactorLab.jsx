@@ -84,13 +84,17 @@ const DEFAULT_COMPOSITE_VALUES = {
 
 const DEFAULT_BACKTEST_VALUES = {
   pool: 'QQQ',
+  custom_symbols: [],
   start_date: dayjs('2020-01-02'),
   end_date: null,
   oos_start_date: getLastYearStartDate(),
   initial_capital: 100000,
   max_positions: 7,
+  position_weights: [],
+  position_weights_text: '',
   sell_rank_multiplier: 2,
   rebalance_frequency: 'weekly',
+  rotation_mode: 'rank_exit_rebalance',
   commission_pct: 0.03,
   slippage_pct: 0.02,
   lot_size: 1,
@@ -155,6 +159,15 @@ const REBALANCE_FREQUENCY_LABELS = REBALANCE_FREQUENCY_OPTIONS.reduce((acc, item
   acc[item.value] = item.label;
   return acc;
 }, {});
+const ROTATION_MODE_OPTIONS = [
+  { label: '跌出排名再补位', value: 'rank_exit_rebalance' },
+  { label: '现金补位不减仓', value: 'cash_fill_rebalance' },
+  { label: '定期调仓到目标仓位', value: 'scheduled_rebalance' },
+];
+const ROTATION_MODE_LABELS = ROTATION_MODE_OPTIONS.reduce((acc, item) => {
+  acc[item.value] = item.label;
+  return acc;
+}, {});
 const DEFAULT_BACKTEST_SEARCH_OBJECTIVES = [
   { key: 'annualized_return', label: '全区间年化收益最大' },
   { key: 'total_return', label: '全区间总收益最大' },
@@ -180,8 +193,29 @@ const BACKTEST_SEARCH_STATUS_META = {
 };
 const A_STOCK_INNO100_POOL = 'INNO100';
 const A_STOCK_INNO100_SYMBOL = 'INNO100.CN';
+const CUSTOM_A_STOCK_POOL = 'CUSTOM_A_STOCK';
+const CUSTOM_US_STOCK_POOL = 'CUSTOM_US_STOCK';
+const CUSTOM_POOL_UNSUPPORTED_FACTOR_KEYS = new Set(['index_weight']);
+const CUSTOM_BACKTEST_POOL_OPTIONS = [
+  { label: '自定义A股股票池', value: CUSTOM_A_STOCK_POOL },
+  { label: '自定义美股股票池', value: CUSTOM_US_STOCK_POOL },
+];
+const isCustomBacktestPool = value => (
+  String(value || '').toUpperCase() === CUSTOM_A_STOCK_POOL
+  || String(value || '').toUpperCase() === CUSTOM_US_STOCK_POOL
+);
+const getCustomBacktestMarket = value => {
+  const pool = String(value || '').toUpperCase();
+  if (pool === CUSTOM_A_STOCK_POOL) return 'a_stock';
+  if (pool === CUSTOM_US_STOCK_POOL) return 'us_stock';
+  return null;
+};
+const isBacktestFactorAllowedForPool = (factorKey, pool) => (
+  !isCustomBacktestPool(pool) || !CUSTOM_POOL_UNSUPPORTED_FACTOR_KEYS.has(String(factorKey || ''))
+);
 const isAStockPoolValue = value => (
   String(value || '').toUpperCase() === A_STOCK_INNO100_POOL
+  || String(value || '').toUpperCase() === CUSTOM_A_STOCK_POOL
   || /\.(SH|SZ|BJ)$/.test(String(value || '').toUpperCase())
 );
 
@@ -205,12 +239,56 @@ const factorValueFormatter = value => {
   return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
 };
 
+const formatErrorDetail = detail => {
+  if (!detail) return '';
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map(item => {
+        if (typeof item === 'string') return item;
+        if (!item || typeof item !== 'object') return String(item);
+        const location = Array.isArray(item.loc) ? item.loc.join('.') : item.loc;
+        return [location, item.msg].filter(Boolean).join(': ') || JSON.stringify(item);
+      })
+      .filter(Boolean)
+      .join('；');
+  }
+  if (typeof detail === 'object') {
+    return detail.msg || detail.message || JSON.stringify(detail);
+  }
+  return String(detail);
+};
+
 const getErrorMessage = (error, fallback) => (
-  error?.response?.data?.detail
-  || error?.response?.data?.message
-  || error?.message
+  formatErrorDetail(error?.response?.data?.detail)
+  || formatErrorDetail(error?.response?.data?.message)
+  || formatErrorDetail(error?.message)
   || fallback
 );
+
+const normalizeAStockSymbol = value => {
+  const text = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (/^\d{6}\.(SH|SZ|BJ)$/.test(text)) return text;
+  if (!/^\d{6}$/.test(text)) return text;
+  if (/^(43|83|87|88|92)/.test(text)) return `${text}.BJ`;
+  if (/^[569]/.test(text)) return `${text}.SH`;
+  return `${text}.SZ`;
+};
+
+const normalizeCustomStockSymbols = (symbols, pool) => {
+  const poolKey = String(pool || '').toUpperCase();
+  const items = Array.isArray(symbols) ? symbols : [];
+  const normalized = [];
+  items.forEach(item => {
+    const text = String(item || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (!text) return;
+    const symbol = poolKey === CUSTOM_US_STOCK_POOL
+      ? (text.endsWith('.US') ? text : `${text}.US`)
+      : normalizeAStockSymbol(text);
+    if (symbol && !normalized.includes(symbol)) normalized.push(symbol);
+  });
+  return isCustomBacktestPool(poolKey) ? normalized : [];
+};
 
 const normalizeDefaultRequest = (payload = {}) => ({
   ...DEFAULT_FORM_VALUES,
@@ -248,6 +326,13 @@ const normalizeCompositeDefaultRequest = (payload = {}) => ({
 const normalizeBacktestDefaultRequest = (payload = {}) => ({
   ...DEFAULT_BACKTEST_VALUES,
   ...payload,
+  pool: payload.pool || DEFAULT_BACKTEST_VALUES.pool,
+  custom_symbols: normalizeCustomStockSymbols(payload.custom_symbols, payload.pool),
+  position_weights: normalizePositionWeights(payload.position_weights, payload.max_positions || DEFAULT_BACKTEST_VALUES.max_positions),
+  position_weights_text: payload.position_weights?.length
+    ? formatPositionWeightsText(normalizePositionWeights(payload.position_weights, payload.max_positions || DEFAULT_BACKTEST_VALUES.max_positions))
+    : (payload.position_weights_text || ''),
+  rotation_mode: payload.rotation_mode || DEFAULT_BACKTEST_VALUES.rotation_mode,
   start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_BACKTEST_VALUES.start_date,
   end_date: payload.end_date ? dayjs(payload.end_date) : null,
   oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
@@ -276,9 +361,10 @@ const normalizeTimingDefaultRequest = (payload = {}) => ({
   heatmap_ma_windows: payload.heatmap_ma_windows || DEFAULT_TIMING_VALUES.heatmap_ma_windows,
 });
 
-const buildFactorSelectOptions = factors => {
+const buildFactorSelectOptions = (factors, filterFactor = () => true) => {
   const groups = {};
   (factors || []).forEach(factor => {
+    if (!filterFactor(factor)) return;
     const group = factor.group || '因子';
     if (!groups[group]) groups[group] = [];
     groups[group].push({
@@ -387,6 +473,38 @@ const buildDefaultBacktestLeg = (factorKey = 'risk_adjusted_momentum', factor = 
   momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
 });
 
+const isBacktestFactorOptionAllowedForPool = (factor, pool) => (
+  isBacktestFactorAllowedForPool(factor?.key, pool)
+  && !(isCustomBacktestPool(pool) && (factor?.unsupported_pool_types || []).includes('custom'))
+);
+
+const sanitizeBacktestLegsForPool = (legs, pool, factors = []) => {
+  const source = Array.isArray(legs) && legs.length ? legs : DEFAULT_BACKTEST_VALUES.legs;
+  const filtered = source.filter(leg => {
+    const factor = getFactorByKey(factors, leg?.factor) || { key: leg?.factor };
+    return isBacktestFactorOptionAllowedForPool(factor, pool);
+  });
+  if (filtered.length) {
+    if (filtered.length === 1 && filtered.length !== source.length) {
+      return [{ ...filtered[0], weight: 1 }];
+    }
+    return filtered;
+  }
+  return [buildDefaultBacktestLeg('risk_adjusted_momentum', getFactorByKey(factors, 'risk_adjusted_momentum'))];
+};
+
+const validateBacktestLegsForPool = (legs, pool, factors = []) => {
+  const unsupported = (legs || []).filter(leg => {
+    const factor = getFactorByKey(factors, leg?.factor) || { key: leg?.factor };
+    return !isBacktestFactorOptionAllowedForPool(factor, pool);
+  });
+  if (!unsupported.length) return;
+  const labels = unsupported
+    .map(leg => getFactorByKey(factors, leg?.factor)?.label || leg?.factor)
+    .filter(Boolean);
+  throw new Error(`自定义股票池不支持因子：${[...new Set(labels)].join('、')}`);
+};
+
 const buildAnalyzePayload = (values, overrides = {}) => {
   const heatmapWindows = normalizeHeatmapWindows(
     overrides.heatmap_windows || values.heatmap_windows,
@@ -438,30 +556,39 @@ const buildCompositePayload = values => {
   };
 };
 
-const buildBacktestPayload = values => ({
-  pool: values.pool,
-  start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
-  end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
-  oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
-  initial_capital: Number(values.initial_capital || DEFAULT_BACKTEST_VALUES.initial_capital),
-  max_positions: Number(values.max_positions || DEFAULT_BACKTEST_VALUES.max_positions),
-  sell_rank_multiplier: Number(values.sell_rank_multiplier || DEFAULT_BACKTEST_VALUES.sell_rank_multiplier),
-  rebalance_frequency: values.rebalance_frequency || DEFAULT_BACKTEST_VALUES.rebalance_frequency,
-  commission_pct: Number(values.commission_pct ?? DEFAULT_BACKTEST_VALUES.commission_pct),
-  slippage_pct: Number(values.slippage_pct ?? DEFAULT_BACKTEST_VALUES.slippage_pct),
-  lot_size: Number(values.lot_size || DEFAULT_BACKTEST_VALUES.lot_size),
-  min_listing_days: Number(values.min_listing_days ?? DEFAULT_BACKTEST_VALUES.min_listing_days),
-  legs: (values.legs || [])
-    .filter(leg => leg?.factor)
-    .map(leg => ({
-      factor: leg.factor,
-      window: isMixedWindow(leg.window) ? MIXED_WINDOW_KEY : Number(leg.window),
-      weight: Number(leg.weight || 0),
-      neutralization: leg.neutralization || 'none',
-      standardization: leg.standardization || 'rank_percentile',
-      momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
-    })),
-});
+const buildBacktestPayload = values => {
+  const fallbackMaxPositions = Number(values.max_positions || DEFAULT_BACKTEST_VALUES.max_positions);
+  const positionWeights = parsePositionWeightsText(values.position_weights_text, fallbackMaxPositions);
+  const payload = {
+    pool: values.pool,
+    custom_symbols: normalizeCustomStockSymbols(values.custom_symbols, values.pool),
+    position_weights: positionWeights,
+    start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
+    end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
+    oos_start_date: values.oos_start_date ? values.oos_start_date.format('YYYY-MM-DD') : null,
+    initial_capital: Number(values.initial_capital || DEFAULT_BACKTEST_VALUES.initial_capital),
+    max_positions: positionWeights.length || fallbackMaxPositions,
+    sell_rank_multiplier: Number(values.sell_rank_multiplier || DEFAULT_BACKTEST_VALUES.sell_rank_multiplier),
+    rebalance_frequency: values.rebalance_frequency || DEFAULT_BACKTEST_VALUES.rebalance_frequency,
+    rotation_mode: values.rotation_mode || DEFAULT_BACKTEST_VALUES.rotation_mode,
+    commission_pct: Number(values.commission_pct ?? DEFAULT_BACKTEST_VALUES.commission_pct),
+    slippage_pct: Number(values.slippage_pct ?? DEFAULT_BACKTEST_VALUES.slippage_pct),
+    lot_size: Number(values.lot_size || DEFAULT_BACKTEST_VALUES.lot_size),
+    min_listing_days: Number(values.min_listing_days ?? DEFAULT_BACKTEST_VALUES.min_listing_days),
+    legs: (values.legs || [])
+      .filter(leg => leg?.factor)
+      .map(leg => ({
+        factor: leg.factor,
+        window: isMixedWindow(leg.window) ? MIXED_WINDOW_KEY : Number(leg.window),
+        weight: Number(leg.weight || 0),
+        neutralization: leg.neutralization || 'none',
+        standardization: leg.standardization || 'rank_percentile',
+        momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
+      })),
+  };
+  validateBacktestLegsForPool(payload.legs, payload.pool);
+  return payload;
+};
 
 const buildTimingPayload = values => ({
   target_symbol: String(values.target_symbol || DEFAULT_TIMING_VALUES.target_symbol).trim().toUpperCase(),
@@ -1048,6 +1175,62 @@ const parseCandidateNumbers = (value, { integer = false, min = -Infinity, max = 
   return normalized;
 };
 
+const normalizePositionWeights = (weights, maxPositions = 1) => {
+  const items = Array.isArray(weights) ? weights : [];
+  const parsed = items
+    .map(item => Number(item))
+    .filter(item => Number.isFinite(item) && item > 0);
+  if (!parsed.length) {
+    const count = Math.max(1, Math.min(100, Number(maxPositions) || 1));
+    return Array.from({ length: count }, () => Number((1 / count).toFixed(10)));
+  }
+  const total = parsed.reduce((sum, item) => sum + item, 0);
+  if (!Number.isFinite(total) || total <= 0) return [];
+  return (total > 1.000001 ? parsed.map(item => item / total) : parsed)
+    .map(item => Number(item.toFixed(10)));
+};
+
+const parsePositionWeightsText = (value, maxPositions = 1, label = '仓位权重') => {
+  const text = String(value || '').trim();
+  if (!text) return normalizePositionWeights([], maxPositions);
+  const items = text
+    .split(/[:：/\s]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  if (!items.length) return normalizePositionWeights([], maxPositions);
+  const weights = items.map(item => {
+    const number = Number(item);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error(`${label}只能包含大于0的数字`);
+    }
+    return number;
+  });
+  if (weights.length > 100) {
+    throw new Error(`${label}最多支持100个标的`);
+  }
+  return normalizePositionWeights(weights, maxPositions);
+};
+
+const parsePositionWeightCandidates = (value, fallbackWeights, fallbackMaxPositions) => {
+  const parts = String(value || '')
+    .split(/[,\uff0c]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  const source = parts.length ? parts : [formatPositionWeightsText(fallbackWeights?.length ? fallbackWeights : normalizePositionWeights([], fallbackMaxPositions))];
+  const normalized = [];
+  source.forEach(item => {
+    const weights = parsePositionWeightsText(item, fallbackMaxPositions, '仓位候选项');
+    const key = weights.map(weight => weight.toFixed(10)).join(':');
+    if (!normalized.some(candidate => candidate.map(weight => weight.toFixed(10)).join(':') === key)) {
+      normalized.push(weights);
+    }
+  });
+  if (normalized.length > 50) {
+    throw new Error('仓位候选项最多支持50组');
+  }
+  return normalized;
+};
+
 const getNumericValue = (record, key) => {
   const value = Number(record?.[key]);
   return Number.isFinite(value) ? value : null;
@@ -1164,7 +1347,9 @@ const getBacktestSearchColumns = (objective, onApply, onAnalyze, applyingCaseInd
   numericColumn({ title: '样本外回撤', dataIndex: 'oos_max_drawdown', width: 116, render: percentFormatter }),
   numericColumn({ title: '年化波动', dataIndex: 'annualized_volatility', width: 112, render: percentFormatter }),
   numericColumn({ title: '持仓', dataIndex: 'max_positions', width: 76, render: numberFormatter }),
+  { title: '仓位', dataIndex: 'position_weights_label', width: 128 },
   numericColumn({ title: '卖出倍数', dataIndex: 'sell_rank_multiplier', width: 96, render: icFormatter }),
+  { title: '调仓方式', dataIndex: 'rotation_mode_label', width: 142 },
   numericColumn({ title: '胜率', dataIndex: 'win_rate', width: 90, render: percentFormatter }),
   numericColumn({ title: '交易', dataIndex: 'trade_count', width: 82, render: numberFormatter }),
   { title: '参数', dataIndex: 'params_label', width: 800 },
@@ -1190,12 +1375,19 @@ const formatMomentumWeightsText = weights => {
     .join(' / ');
 };
 
+const formatPositionWeightsText = weights => (
+  (weights || [])
+    .map(weight => Number(weight || 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') || '0')
+    .join(':')
+);
+
 const formatFactorWeight = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return Number(value).toFixed(4);
 };
 
 const getRebalanceFrequencyLabel = value => REBALANCE_FREQUENCY_LABELS[value] || value || '-';
+const getRotationModeLabel = value => ROTATION_MODE_LABELS[value] || value || '-';
 
 const FactorLab = ({ initialTab = 'single' }) => {
   const [form] = Form.useForm();
@@ -1212,10 +1404,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const [backtestSearchObjective, setBacktestSearchObjective] = useState('annualized_return');
   const [backtestSearchWindowBucketCount, setBacktestSearchWindowBucketCount] = useState(20);
   const [backtestSearchFactorBucketCount, setBacktestSearchFactorBucketCount] = useState(20);
-  const [backtestSearchMaxPositions, setBacktestSearchMaxPositions] = useState('7');
+  const [backtestSearchPositionWeights, setBacktestSearchPositionWeights] = useState('0.7:0.3,0.7:0.2:0.1');
   const [backtestSearchSellMultipliers, setBacktestSearchSellMultipliers] = useState('2');
+  const [backtestSearchRotationModes, setBacktestSearchRotationModes] = useState(['rank_exit_rebalance', 'cash_fill_rebalance', 'scheduled_rebalance']);
   const [backtestSearchRows, setBacktestSearchRows] = useState([]);
   const [backtestSearchResultsLoading, setBacktestSearchResultsLoading] = useState(false);
+  const [customSymbolOptions, setCustomSymbolOptions] = useState([]);
+  const [customSymbolSearching, setCustomSymbolSearching] = useState(false);
   const [backtestSearchTableState, setBacktestSearchTableState] = useState({
     current: 1,
     pageSize: 20,
@@ -1225,6 +1420,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
     total: 0,
   });
   const backtestSearchTableStateRef = useRef(backtestSearchTableState);
+  const customSymbolSearchTimerRef = useRef(null);
+  const customSymbolSearchSeqRef = useRef(0);
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1241,8 +1438,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const selectedHeatmapMetric = Form.useWatch('heatmap_metric', form);
   const selectedTimingHeatmapMetric = Form.useWatch('heatmap_metric', timingForm);
   const selectedHeatmapWindows = Form.useWatch('heatmap_windows', form);
+  const selectedBacktestPool = Form.useWatch('pool', backtestForm);
   const compositeLegs = Form.useWatch('legs', compositeForm);
   const backtestLegs = Form.useWatch('legs', backtestForm);
+  const customBacktestMarket = getCustomBacktestMarket(selectedBacktestPool);
+  const customBacktestSymbolsVisible = isCustomBacktestPool(selectedBacktestPool);
   const selectedFactor = useMemo(() => (
     (options?.factors || []).find(item => item.key === selectedFactorKey)
   ), [options, selectedFactorKey]);
@@ -1270,6 +1470,65 @@ const FactorLab = ({ initialTab = 'single' }) => {
       setLoadingOptions(false);
     }
   }, [form, compositeForm, backtestForm, timingForm]);
+
+  const loadCustomSymbolOptions = useCallback((market, query = '') => {
+    if (!market) {
+      setCustomSymbolOptions([]);
+      setCustomSymbolSearching(false);
+      return;
+    }
+    if (customSymbolSearchTimerRef.current) {
+      window.clearTimeout(customSymbolSearchTimerRef.current);
+    }
+    const requestSeq = customSymbolSearchSeqRef.current + 1;
+    customSymbolSearchSeqRef.current = requestSeq;
+    customSymbolSearchTimerRef.current = window.setTimeout(async () => {
+      setCustomSymbolSearching(true);
+      try {
+        const { data } = await request.get('/api/factor-lab/symbol-search', {
+          params: { market, q: query, limit: 30 },
+        });
+        if (requestSeq === customSymbolSearchSeqRef.current) {
+          setCustomSymbolOptions(data.options || []);
+        }
+      } catch (error) {
+        if (requestSeq === customSymbolSearchSeqRef.current) {
+          message.error(getErrorMessage(error, '搜索股票代码失败'));
+        }
+      } finally {
+        if (requestSeq === customSymbolSearchSeqRef.current) {
+          setCustomSymbolSearching(false);
+        }
+      }
+    }, 250);
+  }, []);
+
+  useEffect(() => () => {
+    if (customSymbolSearchTimerRef.current) {
+      window.clearTimeout(customSymbolSearchTimerRef.current);
+    }
+    customSymbolSearchSeqRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    if (!customBacktestMarket) {
+      setCustomSymbolOptions([]);
+      setCustomSymbolSearching(false);
+      return;
+    }
+    loadCustomSymbolOptions(customBacktestMarket, '');
+  }, [customBacktestMarket, loadCustomSymbolOptions]);
+
+  useEffect(() => {
+    if (!isCustomBacktestPool(selectedBacktestPool)) return;
+    const currentLegs = backtestForm.getFieldValue('legs') || [];
+    const nextLegs = sanitizeBacktestLegsForPool(currentLegs, selectedBacktestPool, options?.factors);
+    const currentKeys = currentLegs.map(leg => leg?.factor).join('|');
+    const nextKeys = nextLegs.map(leg => leg?.factor).join('|');
+    if (currentLegs.length !== nextLegs.length || currentKeys !== nextKeys) {
+      backtestForm.setFieldsValue({ legs: nextLegs });
+    }
+  }, [selectedBacktestPool, options?.factors, backtestForm]);
 
   const loadBacktestSearchResults = useCallback(async (nextState = {}) => {
     const queryState = {
@@ -1459,7 +1718,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   const handleBacktestPoolChange = value => {
-    backtestForm.setFieldsValue({ lot_size: isAStockPoolValue(value) ? 100 : 1 });
+    backtestForm.setFieldsValue({
+      lot_size: isAStockPoolValue(value) ? 100 : 1,
+      custom_symbols: [],
+    });
+    setCustomSymbolOptions([]);
   };
 
   const handleTimingTargetChange = value => {
@@ -1502,7 +1765,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
   const runBacktest = async () => {
     const values = await backtestForm.validateFields();
-    await executeBacktestPayload(buildBacktestPayload(values));
+    try {
+      await executeBacktestPayload(buildBacktestPayload(values));
+    } catch (error) {
+      message.warning(error.message || '仓位权重格式不正确');
+    }
   };
 
   const runTimingAnalysis = async () => {
@@ -1552,7 +1819,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
   const startBacktestSearch = async () => {
     const values = await backtestForm.validateFields();
-    const baseRequest = buildBacktestPayload(values);
+    let baseRequest;
+    try {
+      baseRequest = buildBacktestPayload(values);
+    } catch (error) {
+      message.warning(error.message || '仓位权重格式不正确');
+      return;
+    }
     if (
       (String(backtestSearchObjective).startsWith('in_sample_') || String(backtestSearchObjective).startsWith('oos_'))
       && !baseRequest.oos_start_date
@@ -1560,16 +1833,14 @@ const FactorLab = ({ initialTab = 'single' }) => {
       message.warning('选择样本内/样本外目标时，请先设置样本外起始日期');
       return;
     }
-    let maxPositionsCandidates;
+    let positionWeightCandidates;
     let sellMultiplierCandidates;
     try {
-      maxPositionsCandidates = parseCandidateNumbers(backtestSearchMaxPositions, {
-        integer: true,
-        min: 1,
-        max: 100,
-        fallback: [baseRequest.max_positions],
-        label: '持仓数候选项',
-      });
+      positionWeightCandidates = parsePositionWeightCandidates(
+        backtestSearchPositionWeights,
+        baseRequest.position_weights,
+        baseRequest.max_positions,
+      );
       sellMultiplierCandidates = parseCandidateNumbers(backtestSearchSellMultipliers, {
         min: 1,
         max: 10,
@@ -1598,8 +1869,9 @@ const FactorLab = ({ initialTab = 'single' }) => {
         objective: backtestSearchObjective,
         window_weight_bucket_count: Number(backtestSearchWindowBucketCount ?? 20),
         factor_weight_bucket_count: Number(backtestSearchFactorBucketCount ?? 20),
-        max_positions_candidates: maxPositionsCandidates,
+        position_weight_candidates: positionWeightCandidates,
         sell_rank_multiplier_candidates: sellMultiplierCandidates,
+        rotation_mode_candidates: backtestSearchRotationModes?.length ? backtestSearchRotationModes : [baseRequest.rotation_mode],
       };
       const { data } = await request.post('/api/factor-lab/backtest-search/start', payload, { timeout: 60000 });
       setBacktestSearchJob(data);
@@ -1696,6 +1968,12 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   const factorSelectOptions = useMemo(() => buildFactorSelectOptions(options?.factors), [options]);
+  const backtestFactorSelectOptions = useMemo(() => (
+    buildFactorSelectOptions(
+      options?.factors,
+      factor => isBacktestFactorOptionAllowedForPool(factor, selectedBacktestPool),
+    )
+  ), [options, selectedBacktestPool]);
   const windowOptions = useMemo(() => {
     const baseOptions = (options?.windows || [20, 60, 120]).map(item => ({
       label: `${item}日`,
@@ -1734,6 +2012,14 @@ const FactorLab = ({ initialTab = 'single' }) => {
       { key: 'rank_percentile', label: '截面排名分位' },
     ]).map(item => ({ label: item.label, value: item.key }))
   ), [options]);
+  const backtestPoolOptions = useMemo(() => {
+    const presetOptions = (options?.pools || []).map(item => ({ label: item.label, value: item.key }));
+    const existing = new Set(presetOptions.map(item => item.value));
+    return [
+      ...presetOptions,
+      ...CUSTOM_BACKTEST_POOL_OPTIONS.filter(item => !existing.has(item.value)),
+    ];
+  }, [options]);
   const rebalanceFrequencyOptions = useMemo(() => REBALANCE_FREQUENCY_OPTIONS, []);
   const timingMaWindowOptions = useMemo(() => [1, 5, 20].map(item => ({
     label: item === 1 ? '原始值' : `${item}日均值`,
@@ -2692,11 +2978,32 @@ const FactorLab = ({ initialTab = 'single' }) => {
               <Col xs={24} sm={12} md={6} lg={4}>
                 <Form.Item name="pool" label="股票池" rules={[{ required: true }]}>
                   <Select
-                    options={(options?.pools || []).map(item => ({ label: item.label, value: item.key }))}
+                    options={backtestPoolOptions}
                     onChange={handleBacktestPoolChange}
                   />
                 </Form.Item>
               </Col>
+              {customBacktestSymbolsVisible && (
+                <Col xs={24} md={12} lg={8}>
+                  <Form.Item name="custom_symbols" label="股票标的" rules={[{ required: true, message: '请至少选择一个标的' }]}>
+                    <Select
+                      mode="tags"
+                      showSearch
+                      allowClear
+                      maxTagCount="responsive"
+                      tokenSeparators={[',', '，', ' ']}
+                      filterOption={false}
+                      options={customSymbolOptions}
+                      loading={customSymbolSearching}
+                      optionLabelProp="label"
+                      notFoundContent={customSymbolSearching ? <Spin size="small" /> : null}
+                      placeholder={customBacktestMarket === 'a_stock' ? '输入代码或名称搜索' : '输入美股代码'}
+                      onFocus={() => loadCustomSymbolOptions(customBacktestMarket, '')}
+                      onSearch={query => loadCustomSymbolOptions(customBacktestMarket, query)}
+                    />
+                  </Form.Item>
+                </Col>
+              )}
               <Col xs={24} sm={12} md={6} lg={4}>
                 <Form.Item name="start_date" label="开始日期" rules={[{ required: true }]}>
                   <DatePicker className="factor-lab-full" />
@@ -2722,6 +3029,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
                   <InputNumber min={1} max={100} controls className="factor-lab-full" />
                 </Form.Item>
               </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="position_weights_text" label="仓位权重">
+                  <Input placeholder="0.7:0.3" />
+                </Form.Item>
+              </Col>
               <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item name="sell_rank_multiplier" label="卖出倍数" rules={[{ required: true }]}>
                   <InputNumber min={1} max={10} step={0.25} precision={2} controls className="factor-lab-full" />
@@ -2730,6 +3042,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
               <Col xs={12} sm={6} md={4} lg={3}>
                 <Form.Item name="rebalance_frequency" label="调仓频率" rules={[{ required: true }]}>
                   <Select options={rebalanceFrequencyOptions} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={6} lg={4}>
+                <Form.Item name="rotation_mode" label="调仓方式" rules={[{ required: true }]}>
+                  <Select options={ROTATION_MODE_OPTIONS} />
                 </Form.Item>
               </Col>
               <Col xs={12} sm={6} md={4} lg={3}>
@@ -2781,7 +3098,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                               rules={[{ required: true, message: '请选择因子' }]}
                             >
                               <Select
-                                options={factorSelectOptions}
+                                options={backtestFactorSelectOptions}
                                 onChange={value => handleBacktestLegFactorChange(field.name, value)}
                               />
                             </Form.Item>
@@ -2892,12 +3209,23 @@ const FactorLab = ({ initialTab = 'single' }) => {
                   />
                 </Form.Item>
               </Col>
-              <Col xs={24} sm={12} md={6} lg={4}>
-                <Form.Item label="持仓数候选">
+              <Col xs={24} sm={12} md={8} lg={5}>
+                <Form.Item label="仓位候选">
                   <Input
-                    value={backtestSearchMaxPositions}
-                    onChange={event => setBacktestSearchMaxPositions(event.target.value)}
-                    placeholder="7,10,15"
+                    value={backtestSearchPositionWeights}
+                    onChange={event => setBacktestSearchPositionWeights(event.target.value)}
+                    placeholder="0.7:0.3,0.7:0.2:0.1"
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={5}>
+                <Form.Item label="调仓方式候选">
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    value={backtestSearchRotationModes}
+                    options={ROTATION_MODE_OPTIONS}
+                    onChange={setBacktestSearchRotationModes}
                   />
                 </Form.Item>
               </Col>
@@ -3019,7 +3347,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
               setBacktestSearchTableState(previous => ({ ...previous, ...nextState }));
               loadBacktestSearchResults(nextState);
             }}
-            scroll={{ x: 2940 }}
+            scroll={{ x: 3210 }}
           />
         </Card>
       )}
@@ -3029,13 +3357,16 @@ const FactorLab = ({ initialTab = 'single' }) => {
           <Card className="factor-lab-backtest-params" title="回测参数" bordered={false}>
             <div className="factor-lab-param-grid">
               <span>股票池：{backtestMetadata.pool_label || backtestMetadata.pool}</span>
+              {backtestMetadata.custom_symbol_count > 0 && <span>自定义标的：{numberFormatter(backtestMetadata.custom_symbol_count)}</span>}
               <span>区间：{backtestMetadata.start_date} 至 {backtestMetadata.end_date}</span>
               {backtestMetadata.oos_start_date && <span>样本外：{backtestMetadata.oos_start_date} 起</span>}
               <span>初始资金：{numberFormatter(backtestMetadata.initial_capital)}</span>
               <span>持仓数：Top{backtestMetadata.max_positions}</span>
+              {backtestMetadata.position_weights_label && <span>仓位：{backtestMetadata.position_weights_label}</span>}
               <span>卖出阈值：Top{backtestMetadata.sell_rank_threshold}</span>
               <span>卖出倍数：{formatFactorWeight(backtestMetadata.sell_rank_multiplier)}</span>
               <span>调仓频率：{getRebalanceFrequencyLabel(backtestMetadata.rebalance_frequency)}</span>
+              <span>调仓方式：{backtestMetadata.rotation_mode_label || getRotationModeLabel(backtestMetadata.rotation_mode)}</span>
               <span>手续费：{percentFormatter(backtestMetadata.commission_pct)}</span>
               <span>滑点：{percentFormatter(backtestMetadata.slippage_pct)}</span>
               <span>交易单位：{numberFormatter(backtestMetadata.lot_size)}</span>
@@ -3079,10 +3410,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
               <Space size={12} wrap>
                 <span>{backtestMetadata.start_date} 至 {backtestMetadata.end_date}</span>
                 <span>{backtestMetadata.pool_label}</span>
+                {backtestMetadata.custom_symbol_count > 0 && <span>自定义标的 {numberFormatter(backtestMetadata.custom_symbol_count)}</span>}
                 <span>{backtestMetadata.universe_symbols} 只股票</span>
                 <span>Top{backtestMetadata.max_positions}</span>
+                {backtestMetadata.position_weights_label && <span>仓位 {backtestMetadata.position_weights_label}</span>}
                 <span>卖出阈值 Top{backtestMetadata.sell_rank_threshold}</span>
                 <span>{getRebalanceFrequencyLabel(backtestMetadata.rebalance_frequency)}</span>
+                <span>{backtestMetadata.rotation_mode_label || getRotationModeLabel(backtestMetadata.rotation_mode)}</span>
                 <span>{backtestMetadata.factor_combination_method_label || '子因子标准化后加权'}</span>
                 <span>上市满 {backtestMetadata.min_listing_days} 天</span>
                 <span>{numberFormatter(backtestMetadata.price_rows)} 行行情</span>
