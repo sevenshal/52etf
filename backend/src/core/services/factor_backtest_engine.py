@@ -22,6 +22,7 @@ from ..database import (
     StockEVC,
     USStockIndustrySnapshot,
 )
+from .symbol_names import attach_symbol_names, load_symbol_name_map, normalize_symbol_for_name
 from ..utils import normalize_us_equity_symbol
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_FACTOR_INDEX_POOLS
 
@@ -63,7 +64,7 @@ SUPPORTED_ROTATION_MODES = [
     ROTATION_MODE_SCHEDULED_REBALANCE,
 ]
 ROTATION_MODE_LABELS = {
-    ROTATION_MODE_RANK_EXIT_REBALANCE: "跌出排名再补位",
+    ROTATION_MODE_RANK_EXIT_REBALANCE: "跌出排名再补位调仓",
     ROTATION_MODE_CASH_FILL_REBALANCE: "现金补位不减仓",
     ROTATION_MODE_SCHEDULED_REBALANCE: "定期调仓到目标仓位",
 }
@@ -89,10 +90,10 @@ DEFAULT_VIRTUAL_FACTOR_LEGS = [
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 POOL_OPTIONS = [
-    {"key": "QQQ", "label": "QQQ", "description": "纳指100成分股", "etfs": ["QQQ.US"]},
-    {"key": "SPY", "label": "SPY", "description": "标普500成分股", "etfs": ["SPY.US"]},
-    {"key": "SPY_QQQ", "label": "SPY+QQQ", "description": "标普500与纳指100成分股并集", "etfs": ["SPY.US", "QQQ.US"]},
-    {"key": A_STOCK_INNO100_POOL, "label": "A创100", "description": "自编A股创新100历史成分股", "etfs": [A_STOCK_INNO100_SYMBOL]},
+    {"key": "QQQ", "label": "纳斯达克100ETF QQQ", "description": "纳指100成分股", "etfs": ["QQQ.US"]},
+    {"key": "SPY", "label": "标普500ETF SPY", "description": "标普500成分股", "etfs": ["SPY.US"]},
+    {"key": "SPY_QQQ", "label": "标普500ETF SPY + 纳斯达克100ETF QQQ", "description": "标普500与纳指100成分股并集", "etfs": ["SPY.US", "QQQ.US"]},
+    {"key": A_STOCK_INNO100_POOL, "label": "A股创新100 INNO100.CN", "description": "自编A股创新100历史成分股", "etfs": [A_STOCK_INNO100_SYMBOL]},
     *[
         {
             "key": item["index_code"],
@@ -2852,6 +2853,19 @@ def build_factor_signal_plan(
         action_status = "NO_CHANGE"
         action_message = "当前持仓未跌出排名阈值，无需调仓"
 
+    signal_symbols = {
+        *held_symbols,
+        *selected_symbols,
+        *sell_rank_symbols,
+        *planned["sell_symbols"],
+        *planned["target_symbols"],
+        *planned["buy_symbols"],
+        *(item.get("symbol") for item in ranked[: max(1, int(rank_limit or 100))]),
+    }
+    symbol_names = load_symbol_name_map(signal_symbols, db)
+    ranked_rows = ranked[: max(1, int(rank_limit or 100))]
+    attach_symbol_names(ranked_rows, symbol_names)
+
     return {
         "signal_date": actual_signal_date.isoformat(),
         "requested_signal_date": target_date.isoformat() if target_date else None,
@@ -2879,7 +2893,8 @@ def build_factor_signal_plan(
         "rotation_mode": rotation_mode,
         "rotation_mode_label": rotation_mode_label,
         "execution_rule": "signal_close_next_open",
-        "ranked": ranked[: max(1, int(rank_limit or 100))],
+        "symbol_names": symbol_names,
+        "ranked": ranked_rows,
         "ranked_count": len(ranked),
         "universe_size": len(current_universe),
         "price_source": DAILY_PRICE_SOURCE,
@@ -3193,6 +3208,9 @@ def run_factor_backtest(
         price_source: str = NEXT_OPEN_PRICE_SOURCE,
         quote_timestamp: Optional[str] = None,
         execution_price: Optional[float] = None,
+        decision_score: Optional[float] = None,
+        decision_rank: Optional[int] = None,
+        decision_percentile: Optional[float] = None,
     ):
         amount = price * quantity
         portfolio_after = portfolio_value(cash, positions, last_prices)
@@ -3214,6 +3232,9 @@ def run_factor_backtest(
                 "profit_pct": _safe_float(profit_pct, 2),
                 "reason": reason,
                 "reason_detail": reason_detail,
+                "decision_score": _safe_float(decision_score, 6),
+                "decision_rank": int(decision_rank) if decision_rank is not None else None,
+                "decision_percentile": _safe_float(decision_percentile, 6),
                 "cash_after": _safe_float(cash, 2),
                 "portfolio_value_after": _safe_float(portfolio_after, 2),
                 "symbol_market_value_after": _safe_float(symbol_market_value, 2),
@@ -3232,6 +3253,9 @@ def run_factor_backtest(
         reason_detail: str,
         price_source: str = NEXT_OPEN_PRICE_SOURCE,
         quote_timestamp: Optional[str] = None,
+        decision_score: Optional[float] = None,
+        decision_rank: Optional[int] = None,
+        decision_percentile: Optional[float] = None,
     ):
         nonlocal cash
         if symbol not in positions:
@@ -3274,6 +3298,9 @@ def run_factor_backtest(
             price_source,
             quote_timestamp,
             price,
+            decision_score,
+            decision_rank,
+            decision_percentile,
         )
 
     def buy_position(
@@ -3285,6 +3312,9 @@ def run_factor_backtest(
         reason_detail: str,
         price_source: str = NEXT_OPEN_PRICE_SOURCE,
         quote_timestamp: Optional[str] = None,
+        decision_score: Optional[float] = None,
+        decision_rank: Optional[int] = None,
+        decision_percentile: Optional[float] = None,
     ):
         nonlocal cash
         buy_price = price * (1 + slippage_rate)
@@ -3326,6 +3356,9 @@ def run_factor_backtest(
             price_source,
             quote_timestamp,
             price,
+            decision_score,
+            decision_rank,
+            decision_percentile,
         )
 
     def get_execution_price(
@@ -3376,6 +3409,17 @@ def run_factor_backtest(
             target_prices: Dict[str, float] = {}
             target_price_sources: Dict[str, str] = {}
             target_quote_timestamps: Dict[str, Optional[str]] = {}
+
+            def _decision_score(symbol: str) -> Optional[float]:
+                return _safe_float((pending_rebalance.get("score_by_symbol") or {}).get(symbol))
+
+            def _decision_rank(symbol: str) -> Optional[int]:
+                value = (pending_rebalance.get("rank_by_symbol") or {}).get(symbol)
+                return int(value) if value is not None else None
+
+            def _decision_percentile(symbol: str) -> Optional[float]:
+                return _safe_float((pending_rebalance.get("percentile_by_symbol") or {}).get(symbol))
+
             for symbol in pending_rebalance["target_symbols"]:
                 price, price_source, quote_timestamp = get_execution_price(
                     symbol,
@@ -3420,6 +3464,9 @@ def run_factor_backtest(
                     ),
                     price_source,
                     quote_timestamp,
+                    _decision_score(symbol),
+                    _decision_rank(symbol),
+                    _decision_percentile(symbol),
                 )
 
             if pending_rebalance["should_rebalance"] and pending_rebalance["target_symbols"]:
@@ -3448,6 +3495,9 @@ def run_factor_backtest(
                             f"下一交易日开盘现金补位买入: 可用现金占比{format_position_weights([buy_weight])}",
                             target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
                             target_quote_timestamps.get(symbol),
+                            _decision_score(symbol),
+                            _decision_rank(symbol),
+                            _decision_percentile(symbol),
                         )
                 else:
                     target_weights = pending_rebalance["target_weights"]
@@ -3477,6 +3527,9 @@ def run_factor_backtest(
                             f"下一交易日开盘按目标仓位调仓: 目标{format_position_weights([target_weight])}",
                             target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
                             target_quote_timestamps.get(symbol),
+                            _decision_score(symbol),
+                            _decision_rank(symbol),
+                            _decision_percentile(symbol),
                         )
 
                     portfolio_after_sells = _current_portfolio_value_with_prices(target_prices)
@@ -3504,6 +3557,9 @@ def run_factor_backtest(
                             f"下一交易日开盘按目标仓位调仓: 目标{format_position_weights([target_weight])}",
                             target_price_sources.get(symbol, NEXT_OPEN_PRICE_SOURCE),
                             target_quote_timestamps.get(symbol),
+                            _decision_score(symbol),
+                            _decision_rank(symbol),
+                            _decision_percentile(symbol),
                         )
             pending_rebalance = None
 
@@ -3642,6 +3698,9 @@ def run_factor_backtest(
                 "target_weights": planned["target_weights"],
                 "buy_symbols": planned["buy_symbols"],
                 "buy_weights": planned["buy_weights"],
+                "score_by_symbol": {item["symbol"]: item.get("factor_score") for item in ranked},
+                "rank_by_symbol": rank_by_symbol,
+                "percentile_by_symbol": {item["symbol"]: item.get("factor_percentile") for item in ranked},
                 "rotation_mode": rotation_mode,
                 "rotation_mode_label": rotation_mode_label,
                 "should_rebalance": planned["should_rebalance"],
@@ -3716,6 +3775,19 @@ def run_factor_backtest(
             "strategy": request.strategy,
         }
     )
+    symbols_for_names = set(candidate_etfs or [])
+    symbols_for_names.update(request.custom_symbols or [])
+    symbols_for_names.update(row.get("symbol") for row in trades)
+    symbols_for_names.update(row.get("symbol") for row in holdings)
+    symbols_for_names.update(row.get("primary_benchmark_symbol") for row in yearly_stats)
+    symbol_names = load_symbol_name_map(symbols_for_names, db)
+    attach_symbol_names(trades, symbol_names)
+    attach_symbol_names(holdings, symbol_names)
+    for row in yearly_stats:
+        benchmark_symbol = normalize_symbol_for_name(row.get("primary_benchmark_symbol"))
+        row["primary_benchmark_symbol_name"] = symbol_names.get(benchmark_symbol)
+    metadata["symbol_names"] = symbol_names
+
     return {
         "metadata": metadata,
         "meta": metadata,

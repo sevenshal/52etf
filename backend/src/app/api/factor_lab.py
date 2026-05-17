@@ -87,6 +87,7 @@ from ...core.services.external_trading_valuation import (
     get_realtime_reference_prices,
 )
 from ...core.services.market import MarketService
+from ...core.services.symbol_names import format_symbol_label, load_symbol_name_map, normalize_symbol_for_name
 from ...core.services.tushare import TushareService
 from ...core.utils import normalize_us_equity_symbol
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
@@ -2120,7 +2121,7 @@ def _search_a_stock_fund_pool_symbols(connection: Any, search_text: str, limit: 
             score = 2
         else:
             score = 3
-        options.append({"label": label, "value": symbol, "_score": score})
+        options.append({"label": label, "value": symbol, "name": display_name or None, "_score": score})
 
     options.sort(key=lambda item: (item.get("_score", 99), item["value"]))
     return [{key: value for key, value in item.items() if key != "_score"} for item in options[:limit]]
@@ -2166,8 +2167,9 @@ def _search_a_stock_pool_symbols(query: str, limit: int) -> List[Dict[str, Any]]
         if symbol in seen_symbols:
             continue
         seen_symbols.add(symbol)
-        label = f"{name} {symbol}".strip() if name else symbol
-        stock_options.append({"label": label, "value": symbol})
+        display_name = str(name or "").strip()
+        label = f"{display_name} {symbol}".strip() if display_name else symbol
+        stock_options.append({"label": label, "value": symbol, "name": display_name or None})
 
     deduped_fund_options: List[Dict[str, Any]] = []
     for item in fund_options:
@@ -2185,7 +2187,7 @@ def _search_a_stock_pool_symbols(query: str, limit: int) -> List[Dict[str, Any]]
     return groups
 
 
-def _search_us_stock_symbols(query: str, limit: int) -> List[Dict[str, Any]]:
+def _search_us_stock_symbols(query: str, limit: int, db: ORMSession) -> List[Dict[str, Any]]:
     search_text = str(query or "").strip().upper()
     like_pattern = f"%{search_text}%"
     connection = _connect_duckdb()
@@ -2209,11 +2211,20 @@ def _search_us_stock_symbols(query: str, limit: int) -> List[Dict[str, Any]]:
     finally:
         connection.close()
 
-    options = []
+    normalized_symbols = []
     for (symbol,) in rows:
         normalized = normalize_us_equity_symbol(symbol)
         if normalized:
-            options.append({"label": normalized, "value": normalized})
+            normalized_symbols.append(normalized)
+    name_map = load_symbol_name_map(normalized_symbols, db)
+    options = []
+    for normalized in normalized_symbols:
+        name = name_map.get(normalized)
+        options.append({
+            "label": f"{name} {normalized}" if name else normalized,
+            "value": normalized,
+            "name": name,
+        })
     return [{"label": "美股", "options": options}] if options else []
 
 
@@ -2223,13 +2234,14 @@ def search_factor_lab_symbols(
     q: str = Query("", description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
     _: str = Depends(valid_account),
+    db: ORMSession = Depends(get_db),
 ):
     market_key = str(market or "").strip().lower()
     normalized_limit = _normalize_symbol_search_limit(limit, 20)
     if market_key == "a_stock":
         options = _search_a_stock_pool_symbols(q, normalized_limit)
     elif market_key == "us_stock":
-        options = _search_us_stock_symbols(q, normalized_limit)
+        options = _search_us_stock_symbols(q, normalized_limit, db)
     else:
         raise HTTPException(status_code=400, detail="market 仅支持 a_stock 或 us_stock")
     return {
@@ -4835,12 +4847,79 @@ def _request_payload_from_live_config(config: FactorLiveTradingConfig) -> Factor
     return FactorBacktestRequest(**(config.request_payload or {}))
 
 
-def _serialize_factor_live_config(config: FactorLiveTradingConfig) -> Dict[str, Any]:
+def _factor_pool_label(pool: Any) -> str:
+    pool_key = str(pool or "").strip().upper()
+    return CUSTOM_POOL_LABELS.get(
+        pool_key,
+        next((item["label"] for item in POOL_OPTIONS if item["key"] == pool_key), pool_key),
+    )
+
+
+def _signal_payload_with_symbol_names(payload: Optional[Dict[str, Any]], db: Optional[ORMSession]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return payload
+    if db is None and payload.get("symbol_names"):
+        return payload
+    symbols = set()
+    for key in ("current_holdings", "selected_symbols", "sell_rank_symbols", "sell_symbols", "target_symbols", "buy_symbols"):
+        symbols.update(str(item or "").strip().upper() for item in (payload.get(key) or []) if item)
+    for item in payload.get("ranked") or []:
+        if isinstance(item, dict) and item.get("symbol"):
+            symbols.add(str(item.get("symbol")).strip().upper())
+    if not symbols:
+        return payload
+    symbol_names = {
+        **load_symbol_name_map(symbols, db),
+        **(payload.get("symbol_names") or {}),
+    }
+    next_payload = dict(payload)
+    next_payload["symbol_names"] = symbol_names
+    ranked = []
+    for item in payload.get("ranked") or []:
+        if not isinstance(item, dict):
+            ranked.append(item)
+            continue
+        row = dict(item)
+        symbol = normalize_symbol_for_name(row.get("symbol"))
+        row["symbol_name"] = symbol_names.get(symbol)
+        ranked.append(row)
+    if ranked:
+        next_payload["ranked"] = ranked
+    return next_payload
+
+
+def _serialize_factor_live_config(
+    config: FactorLiveTradingConfig,
+    db: Optional[ORMSession] = None,
+    external_db: Optional[ORMSession] = None,
+) -> Dict[str, Any]:
     request_payload = config.request_payload or {}
     position_weights = normalize_position_weights(
         request_payload.get("position_weights"),
         request_payload.get("max_positions") or 1,
     )
+    custom_symbols = [str(item or "").strip().upper() for item in (request_payload.get("custom_symbols") or []) if item]
+    custom_symbol_names = load_symbol_name_map(custom_symbols, db) if custom_symbols else {}
+    last_signal_payload = _signal_payload_with_symbol_names(config.last_signal_payload, db)
+    external_account_name = None
+    external_account_identifier = None
+    live_sub_account_name = None
+    if external_db is not None:
+        if config.external_trading_account_id:
+            external_account = external_db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == config.external_trading_account_id,
+                ExternalTradingAccount.account_id == config.account_id,
+            ).first()
+            if external_account:
+                external_account_name = external_account.name
+                external_account_identifier = external_account.identifier
+        if config.live_sub_account_id:
+            live_sub_account = external_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+            ).first()
+            if live_sub_account:
+                live_sub_account_name = live_sub_account.name
     return {
         "id": config.id,
         "account_id": config.account_id,
@@ -4849,6 +4928,9 @@ def _serialize_factor_live_config(config: FactorLiveTradingConfig) -> Dict[str, 
         "request": request_payload,
         "request_summary": {
             "pool": request_payload.get("pool"),
+            "pool_label": _factor_pool_label(request_payload.get("pool")),
+            "custom_symbols": custom_symbols,
+            "custom_symbol_names": custom_symbol_names,
             "custom_symbol_count": len(request_payload.get("custom_symbols") or []),
             "max_positions": len(position_weights),
             "position_weights_label": format_position_weights(position_weights),
@@ -4858,7 +4940,15 @@ def _serialize_factor_live_config(config: FactorLiveTradingConfig) -> Dict[str, 
             "lot_size": request_payload.get("lot_size"),
         },
         "external_trading_account_id": config.external_trading_account_id,
+        "external_trading_account_name": external_account_name,
+        "external_trading_account_identifier": external_account_identifier,
+        "external_trading_account_label": (
+            f"{external_account_name}（{external_account_identifier}）"
+            if external_account_name and external_account_identifier
+            else external_account_name
+        ),
         "live_sub_account_id": config.live_sub_account_id,
+        "live_sub_account_name": live_sub_account_name,
         "signal_time": config.signal_time,
         "signal_timezone": config.signal_timezone,
         "execution_time": config.execution_time,
@@ -4867,7 +4957,7 @@ def _serialize_factor_live_config(config: FactorLiveTradingConfig) -> Dict[str, 
         "last_signal_at": _iso_value(config.last_signal_at),
         "last_signal_status": config.last_signal_status,
         "last_signal_message": config.last_signal_message,
-        "last_signal_payload": config.last_signal_payload,
+        "last_signal_payload": last_signal_payload,
         "last_execution_signal_date": _iso_value(config.last_execution_signal_date),
         "last_execution_at": _iso_value(config.last_execution_at),
         "last_execution_status": config.last_execution_status,
@@ -4983,6 +5073,8 @@ def _bind_factor_live_sub_account(
     ).first()
     if not sub_account:
         raise HTTPException(status_code=404, detail="外部交易子账户不存在")
+    if not sub_account.enabled:
+        raise HTTPException(status_code=400, detail="该外部交易子账户未启用")
     if (
         sub_account.strategy_type
         and not (
@@ -6864,9 +6956,14 @@ def _run_timing_factor_analysis(
 
     fear_dates = fear_df.filter((pl.col("trade_date") >= request.start_date) & (pl.col("trade_date") <= end_date))
     heatmap_metric_meta = TIMING_HEATMAP_METRIC_OPTIONS.get(request.heatmap_metric, {})
+    symbol_names = load_symbol_name_map([request.target_symbol], db)
+    normalized_target_symbol = normalize_symbol_for_name(request.target_symbol) or request.target_symbol
     metadata = {
         "mode": "timing",
         "target_symbol": request.target_symbol,
+        "target_symbol_name": symbol_names.get(normalized_target_symbol),
+        "target_symbol_label": format_symbol_label(request.target_symbol, symbol_names),
+        "symbol_names": symbol_names,
         "fear_symbol": request.fear_symbol,
         "fear_label": _fear_source_label(request.fear_symbol),
         "ma_window": selected_ma_window,
@@ -7028,11 +7125,13 @@ def _run_composite_factor_analysis(
         }
         for leg in resolved_legs
     ]
+    symbol_names = load_symbol_name_map(candidate_etfs, db)
     metadata = {
         "mode": "composite",
         "pool": request.pool,
         "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
         "candidate_etfs": candidate_etfs,
+        "symbol_names": symbol_names,
         "factor": {
             "key": "composite",
             "label": "组合因子",
@@ -7183,10 +7282,12 @@ def _run_factor_analysis(
         else None
     )
 
+    symbol_names = load_symbol_name_map(candidate_etfs, db)
     metadata = {
         "pool": request.pool,
         "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
         "candidate_etfs": candidate_etfs,
+        "symbol_names": symbol_names,
         "factor": factor_definition.to_option(),
         "factor_direction": factor_definition.direction,
         "factor_direction_label": FACTOR_DIRECTION_OPTIONS.get(
@@ -7246,6 +7347,18 @@ async def get_factor_lab_options(
     _: str = Depends(valid_account),
     db: ORMSession = Depends(get_db),
 ):
+    timing_target_names = load_symbol_name_map(
+        [item.get("value") for item in DEFAULT_TIMING_TARGET_OPTIONS],
+        db,
+    )
+    timing_target_options = [
+        {
+            **item,
+            "label": format_symbol_label(item.get("value"), timing_target_names) or item.get("label"),
+            "name": timing_target_names.get(normalize_symbol_for_name(item.get("value")) or ""),
+        }
+        for item in DEFAULT_TIMING_TARGET_OPTIONS
+    ]
     return FactorLabOptionsResponse(
         pools=POOL_OPTIONS,
         factors=[definition.to_option() for definition in FACTOR_REGISTRY.values()],
@@ -7260,7 +7373,7 @@ async def get_factor_lab_options(
             for key, value in TIMING_HEATMAP_METRIC_OPTIONS.items()
         ],
         timing_fear_sources=_get_timing_fear_sources(db),
-        timing_target_options=DEFAULT_TIMING_TARGET_OPTIONS,
+        timing_target_options=timing_target_options,
         backtest_search_objectives=[
             {"key": key, **value}
             for key, value in BACKTEST_SEARCH_OBJECTIVE_OPTIONS.items()
@@ -7369,6 +7482,7 @@ async def get_factor_lab_options(
 async def list_factor_live_trading_configs(
     account_id: str = Depends(valid_account),
     db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
 ):
     rows = (
         db.query(FactorLiveTradingConfig)
@@ -7376,7 +7490,7 @@ async def list_factor_live_trading_configs(
         .order_by(FactorLiveTradingConfig.updated_at.desc(), FactorLiveTradingConfig.id.desc())
         .all()
     )
-    return [_serialize_factor_live_config(row) for row in rows]
+    return [_serialize_factor_live_config(row, db, external_db) for row in rows]
 
 
 @router.post("/live-configs")
@@ -7394,7 +7508,7 @@ async def create_factor_live_trading_config(
     external_db.commit()
     db.commit()
     db.refresh(config)
-    return _serialize_factor_live_config(config)
+    return _serialize_factor_live_config(config, db, external_db)
 
 
 @router.get("/live-configs/{config_id}")
@@ -7402,8 +7516,9 @@ async def get_factor_live_trading_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: ORMSession = Depends(get_db),
+    external_db: ORMSession = Depends(get_external_trading_db),
 ):
-    return _serialize_factor_live_config(_get_factor_live_config_or_404(db, account_id, config_id))
+    return _serialize_factor_live_config(_get_factor_live_config_or_404(db, account_id, config_id), db, external_db)
 
 
 @router.put("/live-configs/{config_id}")
@@ -7421,7 +7536,7 @@ async def update_factor_live_trading_config(
     external_db.commit()
     db.commit()
     db.refresh(config)
-    return _serialize_factor_live_config(config)
+    return _serialize_factor_live_config(config, db, external_db)
 
 
 @router.delete("/live-configs/{config_id}")
@@ -7509,7 +7624,7 @@ async def generate_factor_live_trading_signal(
     )
     db.commit()
     db.refresh(config)
-    return {"config": _serialize_factor_live_config(config), "signal": plan}
+    return {"config": _serialize_factor_live_config(config, db, external_db), "signal": plan}
 
 
 @router.post("/live-configs/{config_id}/execute")
@@ -7549,7 +7664,7 @@ async def execute_factor_live_trading_signal(
     )
     db.commit()
     db.refresh(config)
-    return {"config": _serialize_factor_live_config(config), "execution": result}
+    return {"config": _serialize_factor_live_config(config, db, external_db), "execution": result}
 
 
 @router.post("/analyze")
