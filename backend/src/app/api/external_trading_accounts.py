@@ -1359,10 +1359,10 @@ async def get_external_trading_executor_status(
     )
 
     symbols = set()
-    for payload in (target_positions, ledger_positions, orders, fills, plan):
+    for payload in (serialized_sub_accounts, target_positions, ledger_positions, orders, fills, plan):
         _collect_symbol_fields(payload, symbols)
     stock_name_by_symbol = _load_a_stock_name_map(symbols)
-    for payload in (target_positions, ledger_positions, orders, fills, plan):
+    for payload in (serialized_sub_accounts, target_positions, ledger_positions, orders, fills, plan):
         _attach_symbol_names(payload, stock_name_by_symbol)
 
     return {
