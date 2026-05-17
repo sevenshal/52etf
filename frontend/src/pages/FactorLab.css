@@ -210,6 +210,14 @@
   margin-top: 12px;
 }
 
+.factor-lab-table-row-selected > td {
+  background: #eef6ff !important;
+}
+
+.factor-lab-live-config-table .ant-table-row {
+  cursor: pointer;
+}
+
 @media (max-width: 1200px) {
   .factor-lab-metrics {
     grid-template-columns: repeat(3, minmax(120px, 1fr));

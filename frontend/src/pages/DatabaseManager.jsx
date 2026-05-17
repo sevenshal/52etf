@@ -65,13 +65,47 @@ const isNumeric = (value) => {
   return Number.isFinite(Number(value));
 };
 
-const formatCellValue = (value) => {
+const symbolColumnNames = new Set([
+  'symbol',
+  'stock_symbol',
+  'target_symbol',
+  'primary_benchmark_symbol',
+  'benchmark_symbol',
+  'fear_symbol',
+  'ts_code',
+  'ticker',
+  'stock_code',
+  'security_code',
+  'sec_code',
+  'etf_code',
+  'index_code',
+]);
+
+const normalizeDisplaySymbol = value => String(value || '').trim().toUpperCase();
+
+const isSymbolColumn = column => {
+  const normalized = String(column || '').trim().toLowerCase();
+  return symbolColumnNames.has(normalized) || normalized.endsWith('_symbol') || normalized.endsWith('_ts_code');
+};
+
+const getSymbolNameFromMap = (symbol, symbolNames = {}) => {
+  const normalized = normalizeDisplaySymbol(symbol);
+  if (!normalized || !symbolNames) return '';
+  const base = normalized.endsWith('.US') ? normalized.slice(0, -3) : normalized.split('.')[0];
+  const usSymbol = normalized.includes('.') ? '' : `${normalized}.US`;
+  return symbolNames[normalized] || symbolNames[base] || (usSymbol ? symbolNames[usSymbol] : '') || '';
+};
+
+const formatCellValue = (value, { column, symbolNames } = {}) => {
   if (value === null || value === undefined) return '-';
   if (typeof value === 'object') {
     if (value.type === 'binary') return `<binary ${value.size} bytes>`;
     return JSON.stringify(value);
   }
-  return String(value);
+  const text = String(value);
+  if (!isSymbolColumn(column)) return text;
+  const name = getSymbolNameFromMap(text, symbolNames);
+  return name ? `${name} ${normalizeDisplaySymbol(text)}` : text;
 };
 
 const formatTiming = (value) => {
@@ -403,6 +437,7 @@ const DatabaseManager = () => {
 
   const resultColumns = useMemo(() => result?.columns || [], [result]);
   const resultRows = useMemo(() => result?.rows || [], [result]);
+  const resultSymbolNames = useMemo(() => result?.symbol_names || {}, [result]);
 
   const numericColumns = useMemo(() => (
     resultColumns.filter(column => resultRows.some(row => isNumeric(row[column])))
@@ -416,12 +451,12 @@ const DatabaseManager = () => {
       width: 168,
       ellipsis: true,
       render: value => (
-        <Tooltip title={formatCellValue(value)}>
-          <span>{formatCellValue(value)}</span>
+        <Tooltip title={formatCellValue(value, { column, symbolNames: resultSymbolNames })}>
+          <span>{formatCellValue(value, { column, symbolNames: resultSymbolNames })}</span>
         </Tooltip>
       ),
     }))
-  ), [resultColumns]);
+  ), [resultColumns, resultSymbolNames]);
 
   const tableDataSource = useMemo(() => (
     resultRows.map((row, index) => ({ ...row, __rowIndex: index }))
@@ -453,8 +488,8 @@ const DatabaseManager = () => {
       const yLabelSet = new Set();
       const heatmapRows = resultRows
         .map(row => {
-          const xLabel = formatCellValue(row[dimensionColumn]);
-          const yLabel = formatCellValue(row[heatmapYColumn]);
+          const xLabel = formatCellValue(row[dimensionColumn], { column: dimensionColumn, symbolNames: resultSymbolNames });
+          const yLabel = formatCellValue(row[heatmapYColumn], { column: heatmapYColumn, symbolNames: resultSymbolNames });
           const value = Number(row[valueColumn]);
           if (!Number.isFinite(value)) return null;
 
@@ -566,7 +601,7 @@ const DatabaseManager = () => {
 
     const rows = resultRows
       .map(row => ({
-        name: formatCellValue(row[dimensionColumn]),
+        name: formatCellValue(row[dimensionColumn], { column: dimensionColumn, symbolNames: resultSymbolNames }),
         value: Number(row[valueColumn]),
       }))
       .filter(item => Number.isFinite(item.value));
@@ -618,7 +653,7 @@ const DatabaseManager = () => {
         },
       ],
     };
-  }, [chartType, dimensionColumn, heatmapYColumn, resultRows, valueColumn]);
+  }, [chartType, dimensionColumn, heatmapYColumn, resultRows, resultSymbolNames, valueColumn]);
 
   const fetchTables = async () => {
     setSchemaLoading(true);

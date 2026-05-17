@@ -9,6 +9,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Modal,
   Progress,
   Row,
   Select,
@@ -160,7 +161,7 @@ const REBALANCE_FREQUENCY_LABELS = REBALANCE_FREQUENCY_OPTIONS.reduce((acc, item
   return acc;
 }, {});
 const ROTATION_MODE_OPTIONS = [
-  { label: '跌出排名再补位', value: 'rank_exit_rebalance' },
+  { label: '跌出排名再补位调仓', value: 'rank_exit_rebalance' },
   { label: '现金补位不减仓', value: 'cash_fill_rebalance' },
   { label: '定期调仓到目标仓位', value: 'scheduled_rebalance' },
 ];
@@ -169,11 +170,8 @@ const ROTATION_MODE_LABELS = ROTATION_MODE_OPTIONS.reduce((acc, item) => {
   return acc;
 }, {});
 const TIMEZONE_OPTIONS = [
-  { label: 'Asia/Shanghai', value: 'Asia/Shanghai' },
-  { label: 'America/New_York', value: 'America/New_York' },
-  { label: 'America/Chicago', value: 'America/Chicago' },
-  { label: 'America/Los_Angeles', value: 'America/Los_Angeles' },
-  { label: 'UTC', value: 'UTC' },
+  { label: '上海时区', value: 'Asia/Shanghai' },
+  { label: '美东时区', value: 'America/New_York' },
 ];
 const DEFAULT_LIVE_TRADING_VALUES = {
   name: '因子线上交易',
@@ -252,6 +250,64 @@ const icFormatter = value => {
 const factorValueFormatter = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+};
+
+const normalizeDisplaySymbol = value => String(value || '').trim().toUpperCase();
+
+const getSymbolNameFromMap = (symbol, symbolNames = {}) => {
+  const normalized = normalizeDisplaySymbol(symbol);
+  if (!normalized || !symbolNames) return '';
+  const base = normalized.endsWith('.US') ? normalized.slice(0, -3) : normalized.split('.')[0];
+  const usSymbol = normalized.includes('.') ? '' : `${normalized}.US`;
+  return symbolNames[normalized] || symbolNames[base] || (usSymbol ? symbolNames[usSymbol] : '') || '';
+};
+
+const formatSymbolDisplay = (symbol, symbolNames = {}, fallbackName = '') => {
+  const normalized = normalizeDisplaySymbol(symbol);
+  if (!normalized) return '-';
+  const name = String(fallbackName || getSymbolNameFromMap(normalized, symbolNames) || '').trim();
+  return name ? `${name} ${normalized}` : normalized;
+};
+
+const renderSymbolCell = (value, record = {}, { nameKey = 'symbol_name', symbolNames = {} } = {}) => {
+  const normalized = normalizeDisplaySymbol(value);
+  if (!normalized) return '-';
+  const name = String(record?.[nameKey] || getSymbolNameFromMap(normalized, symbolNames) || '').trim();
+  if (!name) return normalized;
+  return (
+    <Space direction="vertical" size={0}>
+      <Text strong>{name}</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>{normalized}</Text>
+    </Space>
+  );
+};
+
+const formatSymbolList = (symbols, symbolNames = {}) => {
+  const items = (Array.isArray(symbols) ? symbols : [])
+    .map(symbol => formatSymbolDisplay(symbol, symbolNames))
+    .filter(Boolean);
+  return items.length ? items.join(', ') : '-';
+};
+
+const flattenSymbolOptions = options => (
+  (options || []).flatMap(item => (Array.isArray(item?.options) ? item.options : [item])).filter(Boolean)
+);
+
+const mergeSymbolOptions = (options, selectedSymbols, symbolNames = {}) => {
+  const merged = [...(options || [])];
+  const seen = new Set(flattenSymbolOptions(merged).map(item => normalizeDisplaySymbol(item.value)));
+  (Array.isArray(selectedSymbols) ? selectedSymbols : []).forEach(symbol => {
+    const normalized = normalizeDisplaySymbol(symbol);
+    if (!normalized || seen.has(normalized)) return;
+    const name = getSymbolNameFromMap(normalized, symbolNames);
+    merged.push({
+      label: formatSymbolDisplay(normalized, symbolNames, name),
+      value: normalized,
+      name: name || undefined,
+    });
+    seen.add(normalized);
+  });
+  return merged;
 };
 
 const formatErrorDetail = detail => {
@@ -361,20 +417,23 @@ const normalizeBacktestDefaultRequest = (payload = {}) => ({
   })),
 });
 
-const normalizeLiveConfigFormValues = (config = {}) => normalizeBacktestDefaultRequest({
-  ...DEFAULT_BACKTEST_VALUES,
-  ...(config.request || {}),
-  name: config.name || DEFAULT_LIVE_TRADING_VALUES.name,
-  enabled: Object.prototype.hasOwnProperty.call(config, 'enabled')
-    ? config.enabled
-    : DEFAULT_LIVE_TRADING_VALUES.enabled,
-  external_trading_account_id: config.external_trading_account_id ?? null,
-  live_sub_account_id: config.live_sub_account_id ?? null,
-  signal_time: config.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
-  signal_timezone: config.signal_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone,
-  execution_time: config.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
-  execution_timezone: config.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.execution_timezone,
-});
+const normalizeLiveConfigFormValues = (config = {}) => {
+  const timezone = config.signal_timezone || config.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone;
+  return normalizeBacktestDefaultRequest({
+    ...DEFAULT_BACKTEST_VALUES,
+    ...(config.request || {}),
+    name: config.name || DEFAULT_LIVE_TRADING_VALUES.name,
+    enabled: Object.prototype.hasOwnProperty.call(config, 'enabled')
+      ? config.enabled
+      : DEFAULT_LIVE_TRADING_VALUES.enabled,
+    external_trading_account_id: config.external_trading_account_id ?? null,
+    live_sub_account_id: config.live_sub_account_id ?? null,
+    signal_time: config.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
+    signal_timezone: timezone,
+    execution_time: config.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
+    execution_timezone: timezone,
+  });
+};
 
 const normalizeTimingDefaultRequest = (payload = {}) => ({
   ...DEFAULT_TIMING_VALUES,
@@ -629,16 +688,45 @@ const buildBacktestPayload = values => {
   return payload;
 };
 
-const buildLiveConfigPayload = values => ({
-  name: String(values.name || DEFAULT_LIVE_TRADING_VALUES.name).trim() || DEFAULT_LIVE_TRADING_VALUES.name,
-  enabled: Boolean(values.enabled),
-  request: buildBacktestPayload(values),
-  external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
-  live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
-  signal_time: values.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
-  signal_timezone: values.signal_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone,
-  execution_time: values.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
-  execution_timezone: values.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.execution_timezone,
+const buildLiveConfigPayload = values => {
+  const timezone = values.signal_timezone || values.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone;
+  return {
+    name: String(values.name || DEFAULT_LIVE_TRADING_VALUES.name).trim() || DEFAULT_LIVE_TRADING_VALUES.name,
+    enabled: Boolean(values.enabled),
+    request: buildBacktestPayload(values),
+    external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
+    live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
+    signal_time: values.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
+    signal_timezone: timezone,
+    execution_time: values.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
+    execution_timezone: timezone,
+  };
+};
+
+const buildBacktestRequestFromMetadata = (metadata = {}) => ({
+  pool: metadata.pool || DEFAULT_BACKTEST_VALUES.pool,
+  custom_symbols: metadata.custom_symbols || [],
+  position_weights: metadata.position_weights || [],
+  start_date: metadata.start_date || DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
+  end_date: metadata.end_date || null,
+  oos_start_date: metadata.oos_start_date || null,
+  initial_capital: Number(metadata.initial_capital || DEFAULT_BACKTEST_VALUES.initial_capital),
+  max_positions: Number(metadata.max_positions || DEFAULT_BACKTEST_VALUES.max_positions),
+  sell_rank_multiplier: Number(metadata.sell_rank_multiplier || DEFAULT_BACKTEST_VALUES.sell_rank_multiplier),
+  rebalance_frequency: metadata.rebalance_frequency || DEFAULT_BACKTEST_VALUES.rebalance_frequency,
+  rotation_mode: metadata.rotation_mode || DEFAULT_BACKTEST_VALUES.rotation_mode,
+  commission_pct: Number(metadata.commission_pct ?? DEFAULT_BACKTEST_VALUES.commission_pct),
+  slippage_pct: Number(metadata.slippage_pct ?? DEFAULT_BACKTEST_VALUES.slippage_pct),
+  lot_size: Number(metadata.lot_size || DEFAULT_BACKTEST_VALUES.lot_size),
+  min_listing_days: Number(metadata.min_listing_days ?? DEFAULT_BACKTEST_VALUES.min_listing_days),
+  legs: (metadata.components || []).map(component => ({
+    factor: component.factor_key || component.factor,
+    window: component.window,
+    weight: Number(component.raw_weight ?? component.weight ?? 0),
+    neutralization: component.neutralization || 'none',
+    standardization: component.standardization || 'rank_percentile',
+    momentum_weights: normalizeMomentumWeights(component.momentum_weights),
+  })).filter(leg => leg.factor),
 });
 
 const buildTimingPayload = values => ({
@@ -1039,7 +1127,7 @@ const getTimingHeatmapOption = (
   };
 };
 
-const getBacktestEquityOption = (equityRows = [], benchmarkRows = [], candidateEtfs = []) => {
+const getBacktestEquityOption = (equityRows = [], benchmarkRows = [], candidateEtfs = [], symbolNames = {}) => {
   const dates = equityRows.map(item => item.date);
   const benchmarkByDate = new Map((benchmarkRows || []).map(item => [item.date, item.values || {}]));
   const drawdownValues = equityRows
@@ -1084,7 +1172,7 @@ const getBacktestEquityOption = (equityRows = [], benchmarkRows = [], candidateE
         lineStyle: { width: 2.5, color: '#2477b3' },
       },
       ...(candidateEtfs || []).map((symbol, index) => ({
-        name: symbol,
+        name: formatSymbolDisplay(symbol, symbolNames),
         type: 'line',
         showSymbol: false,
         data: dates.map(item => benchmarkByDate.get(item)?.[symbol] ?? null),
@@ -1163,13 +1251,18 @@ const backtestYearlyColumns = [
   { title: '开始', dataIndex: 'start_date', width: 112 },
   { title: '结束', dataIndex: 'end_date', width: 112 },
   { title: '策略收益', dataIndex: 'strategy_return_pct', align: 'right', render: percentFormatter },
-  { title: '主基准', dataIndex: 'primary_benchmark_symbol', width: 110 },
+  {
+    title: '主基准',
+    dataIndex: 'primary_benchmark_symbol',
+    width: 160,
+    render: (value, row) => renderSymbolCell(value, { symbol_name: row.primary_benchmark_symbol_name }),
+  },
   { title: '基准收益', dataIndex: 'primary_benchmark_return_pct', align: 'right', render: percentFormatter },
   { title: '超额收益', dataIndex: 'primary_excess_return_pct', align: 'right', render: percentFormatter },
 ];
 
 const backtestHoldingColumns = [
-  { title: '代码', dataIndex: 'symbol', width: 110, fixed: 'left' },
+  { title: '标的', dataIndex: 'symbol', width: 160, fixed: 'left', render: renderSymbolCell },
   { title: '股数', dataIndex: 'shares', align: 'right', render: numberFormatter },
   { title: '价格', dataIndex: 'price', align: 'right', render: numberFormatter },
   { title: '成本', dataIndex: 'avg_cost', align: 'right', render: numberFormatter },
@@ -1182,7 +1275,8 @@ const backtestTradeColumns = [
   { title: '日期', dataIndex: 'date', width: 112, fixed: 'left' },
   { title: '信号日', dataIndex: 'signal_date', width: 112 },
   { title: '方向', dataIndex: 'action', width: 80, render: value => <Tag color={value === 'BUY' ? 'green' : 'orange'}>{value}</Tag> },
-  { title: '代码', dataIndex: 'symbol', width: 110 },
+  { title: '标的', dataIndex: 'symbol', width: 160, render: renderSymbolCell },
+  { title: '分数', dataIndex: 'decision_score', align: 'right', render: factorValueFormatter },
   { title: '价格', dataIndex: 'price', align: 'right', render: numberFormatter },
   { title: '数量', dataIndex: 'quantity', align: 'right', render: numberFormatter },
   { title: '金额', dataIndex: 'amount', align: 'right', render: numberFormatter },
@@ -1439,6 +1533,34 @@ const formatFactorWeight = value => {
 
 const getRebalanceFrequencyLabel = value => REBALANCE_FREQUENCY_LABELS[value] || value || '-';
 const getRotationModeLabel = value => ROTATION_MODE_LABELS[value] || value || '-';
+const FACTOR_LIVE_STRATEGY_TYPE = 'factor_live_trading';
+
+const isCurrentFactorLiveSubAccount = (subAccount, configId) => (
+  Boolean(
+    configId
+    && subAccount?.strategy_type === FACTOR_LIVE_STRATEGY_TYPE
+    && Number(subAccount?.strategy_config_id) === Number(configId),
+  )
+);
+
+const isAvailableLiveSubAccount = (subAccount, configId = null) => (
+  Boolean(
+    subAccount?.enabled
+    && (
+      subAccount?.binding_status === 'FREE'
+      || (!subAccount?.strategy_type && !subAccount?.strategy_config_id)
+      || isCurrentFactorLiveSubAccount(subAccount, configId)
+    ),
+  )
+);
+
+const formatLiveSubAccountOptionLabel = (subAccount, configId = null) => {
+  const name = subAccount?.name || subAccount?.id || '-';
+  if (!subAccount?.enabled) return `${name}（停用）`;
+  if (isCurrentFactorLiveSubAccount(subAccount, configId)) return `${name}（当前配置）`;
+  if (isAvailableLiveSubAccount(subAccount, configId)) return name;
+  return `${name}（已占用：${subAccount?.binding_label || subAccount?.strategy_name || subAccount?.strategy_type || '其他策略'}）`;
+};
 
 const FactorLab = ({ initialTab = 'single' }) => {
   const [form] = Form.useForm();
@@ -1458,6 +1580,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const [liveSaving, setLiveSaving] = useState(false);
   const [liveActionLoading, setLiveActionLoading] = useState(false);
   const [selectedLiveConfigId, setSelectedLiveConfigId] = useState(null);
+  const [liveConfigModalOpen, setLiveConfigModalOpen] = useState(false);
+  const [editingLiveConfigId, setEditingLiveConfigId] = useState(null);
   const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
   const [externalTradingSubAccounts, setExternalTradingSubAccounts] = useState([]);
   const [externalTradingAccountsLoading, setExternalTradingAccountsLoading] = useState(false);
@@ -1487,6 +1611,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const customSymbolSearchSeqRef = useRef(0);
   const liveCustomSymbolSearchTimerRef = useRef(null);
   const liveCustomSymbolSearchSeqRef = useRef(0);
+  const selectedLiveConfigIdRef = useRef(null);
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1507,6 +1632,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const selectedCompositePool = Form.useWatch('pool', compositeForm);
   const selectedBacktestPool = Form.useWatch('pool', backtestForm);
   const selectedLivePool = Form.useWatch('pool', liveForm);
+  const selectedBacktestCustomSymbols = Form.useWatch('custom_symbols', backtestForm);
+  const selectedLiveCustomSymbols = Form.useWatch('custom_symbols', liveForm);
   const selectedLiveExternalTradingAccountId = Form.useWatch('external_trading_account_id', liveForm);
   const selectedLiveSubAccountId = Form.useWatch('live_sub_account_id', liveForm);
   const compositeLegs = Form.useWatch('legs', compositeForm);
@@ -1532,6 +1659,10 @@ const FactorLab = ({ initialTab = 'single' }) => {
   useEffect(() => {
     backtestSearchTableStateRef.current = backtestSearchTableState;
   }, [backtestSearchTableState]);
+
+  useEffect(() => {
+    selectedLiveConfigIdRef.current = selectedLiveConfigId;
+  }, [selectedLiveConfigId]);
 
   const loadOptions = useCallback(async () => {
     setLoadingOptions(true);
@@ -1579,20 +1710,18 @@ const FactorLab = ({ initialTab = 'single' }) => {
     }
   }, []);
 
-  const loadLiveConfigs = useCallback(async () => {
+  const loadLiveConfigs = useCallback(async (preferredConfigId = undefined) => {
     setLiveLoading(true);
     try {
       const { data } = await request.get('/api/factor-lab/live-configs');
       const rows = Array.isArray(data) ? data : [];
       setLiveConfigs(rows);
-      const nextConfig = rows.find(item => item.id === selectedLiveConfigId) || rows[0] || null;
+      const targetConfigId = preferredConfigId === undefined ? selectedLiveConfigIdRef.current : preferredConfigId;
+      const nextConfig = rows.find(item => item.id === targetConfigId) || rows[0] || null;
       if (nextConfig) {
         setSelectedLiveConfigId(nextConfig.id);
-        liveForm.setFieldsValue(normalizeLiveConfigFormValues(nextConfig));
-        setLiveLogs([]);
-      } else if (selectedLiveConfigId) {
+      } else {
         setSelectedLiveConfigId(null);
-        liveForm.setFieldsValue(normalizeLiveConfigFormValues());
         setLiveLogs([]);
       }
     } catch (error) {
@@ -1600,7 +1729,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
     } finally {
       setLiveLoading(false);
     }
-  }, [liveForm, selectedLiveConfigId]);
+  }, []);
 
   const loadLiveConfigLogs = useCallback(async (configId) => {
     if (!configId) {
@@ -2012,14 +2141,40 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
   const handleLiveConfigSelect = async configId => {
     setSelectedLiveConfigId(configId || null);
+  };
+
+  const openLiveConfigModal = (config = null) => {
+    const formValues = normalizeLiveConfigFormValues(config || {
+      request: options?.default_backtest_request,
+      ...DEFAULT_LIVE_TRADING_VALUES,
+    });
+    setEditingLiveConfigId(config?.id || null);
+    liveForm.setFieldsValue(formValues);
+    setLiveCustomSymbolOptions(mergeSymbolOptions(
+      [],
+      formValues.custom_symbols,
+      {
+        ...(config?.request_summary?.custom_symbol_names || {}),
+        ...(config?.last_signal_payload?.symbol_names || {}),
+      },
+    ));
+    setLiveConfigModalOpen(true);
+  };
+
+  const handleLiveCreate = () => {
+    openLiveConfigModal();
+  };
+
+  const handleLiveEdit = configId => {
     const nextConfig = liveConfigs.find(item => item.id === configId) || null;
-    if (!nextConfig) {
-      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
-      setLiveLogs([]);
-      return;
-    }
-    liveForm.setFieldsValue(normalizeLiveConfigFormValues(nextConfig));
-    await loadLiveConfigLogs(nextConfig.id);
+    if (!nextConfig) return;
+    setSelectedLiveConfigId(nextConfig.id);
+    openLiveConfigModal(nextConfig);
+  };
+
+  const handleLiveConfigModalCancel = () => {
+    setLiveConfigModalOpen(false);
+    setEditingLiveConfigId(null);
   };
 
   const handleLivePoolChange = value => {
@@ -2053,6 +2208,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
         lot_size: selectedLiveSubAccountLotSize || values.lot_size,
       });
       backtestForm.setFieldsValue(normalizeBacktestDefaultRequest(payload));
+      setLiveConfigModalOpen(false);
       setActiveTab('backtest');
       await executeBacktestPayload(payload);
     } catch (error) {
@@ -2060,18 +2216,34 @@ const FactorLab = ({ initialTab = 'single' }) => {
     }
   };
 
+  const handleAddBacktestToLive = () => {
+    if (!backtestResult) return;
+    const payload = buildBacktestRequestFromMetadata(backtestMetadata);
+    const formValues = normalizeLiveConfigFormValues({
+      name: `${backtestMetadata.pool_label || '因子回测'}线上交易`,
+      enabled: false,
+      request: payload,
+    });
+    setEditingLiveConfigId(null);
+    liveForm.setFieldsValue(formValues);
+    setLiveCustomSymbolOptions(mergeSymbolOptions([], payload.custom_symbols, backtestMetadata.symbol_names));
+    setLiveConfigModalOpen(true);
+    setActiveTab('live');
+  };
+
   const handleLiveSave = async () => {
     const values = await liveForm.validateFields();
     setLiveSaving(true);
     try {
       const payload = buildLiveConfigPayload(values);
-      const { data } = selectedLiveConfigId
-        ? await request.put(`/api/factor-lab/live-configs/${selectedLiveConfigId}`, payload, { timeout: 300000 })
+      const { data } = editingLiveConfigId
+        ? await request.put(`/api/factor-lab/live-configs/${editingLiveConfigId}`, payload, { timeout: 300000 })
         : await request.post('/api/factor-lab/live-configs', payload, { timeout: 300000 });
       message.success('线上交易配置已保存');
-      await loadLiveConfigs();
+      setLiveConfigModalOpen(false);
+      setEditingLiveConfigId(null);
       setSelectedLiveConfigId(data.id);
-      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data));
+      await loadLiveConfigs(data.id);
       await loadLiveConfigLogs(data.id);
     } catch (error) {
       message.error(getErrorMessage(error, '保存线上交易配置失败'));
@@ -2088,14 +2260,16 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const handleLiveDelete = async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
+    setSelectedLiveConfigId(targetConfigId);
     setLiveActionLoading(true);
     try {
       await request.delete(`/api/factor-lab/live-configs/${targetConfigId}`, { timeout: 300000 });
       message.success('线上交易配置已删除');
-      setSelectedLiveConfigId(null);
-      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
-      setLiveLogs([]);
-      await loadLiveConfigs();
+      if (editingLiveConfigId === targetConfigId) {
+        setLiveConfigModalOpen(false);
+        setEditingLiveConfigId(null);
+      }
+      await loadLiveConfigs(null);
     } catch (error) {
       message.error(getErrorMessage(error, '删除线上交易配置失败'));
     } finally {
@@ -2106,15 +2280,15 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const handleLiveGenerateSignal = async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
+    setSelectedLiveConfigId(targetConfigId);
     setLiveActionLoading(true);
     try {
       const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/signal`, {}, { timeout: 300000 });
       message.success('已生成信号');
       setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
       setSelectedLiveConfigId(data.config.id);
-      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
       await loadLiveConfigLogs(targetConfigId);
-      await loadLiveConfigs();
+      await loadLiveConfigs(data.config.id);
     } catch (error) {
       message.error(getErrorMessage(error, '生成线上交易信号失败'));
     } finally {
@@ -2125,15 +2299,15 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const handleLiveExecute = async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
+    setSelectedLiveConfigId(targetConfigId);
     setLiveActionLoading(true);
     try {
       const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/execute`, {}, { timeout: 300000 });
       message.success('已执行线上交易');
       setLiveConfigs(previous => previous.map(item => (item.id === data.config.id ? data.config : item)));
       setSelectedLiveConfigId(data.config.id);
-      liveForm.setFieldsValue(normalizeLiveConfigFormValues(data.config));
       await loadLiveConfigLogs(targetConfigId);
-      await loadLiveConfigs();
+      await loadLiveConfigs(data.config.id);
     } catch (error) {
       message.error(getErrorMessage(error, '执行线上交易失败'));
     } finally {
@@ -2142,7 +2316,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   const handleLiveRefresh = async () => {
-    await loadLiveConfigs();
+    await loadLiveConfigs(selectedLiveConfigId);
     if (selectedLiveConfigId) {
       await loadLiveConfigLogs(selectedLiveConfigId);
     }
@@ -2459,6 +2633,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const selectedLiveConfig = useMemo(() => (
     liveConfigs.find(item => item.id === selectedLiveConfigId) || null
   ), [liveConfigs, selectedLiveConfigId]);
+  const selectedLiveConfigTitle = selectedLiveConfig?.name || '未选择配置';
   const externalTradingAccountOptions = useMemo(() => (
     externalTradingAccounts.map(item => ({
       label: `${item.name || item.identifier || item.id}${item.enabled === false ? '（停用）' : ''}`,
@@ -2467,10 +2642,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
   ), [externalTradingAccounts]);
   const externalTradingSubAccountOptions = useMemo(() => (
     externalTradingSubAccounts.map(item => ({
-      label: `${item.name || item.id}${item.enabled === false ? '（停用）' : ''}`,
+      label: formatLiveSubAccountOptionLabel(item, editingLiveConfigId),
       value: item.id,
+      disabled: !isAvailableLiveSubAccount(item, editingLiveConfigId),
     }))
-  ), [externalTradingSubAccounts]);
+  ), [externalTradingSubAccounts, editingLiveConfigId]);
   const timingMaWindowOptions = useMemo(() => [1, 5, 20].map(item => ({
     label: item === 1 ? '原始值' : `${item}日均值`,
     value: item,
@@ -2486,10 +2662,10 @@ const FactorLab = ({ initialTab = 'single' }) => {
   ), [options]);
   const timingTargetOptions = useMemo(() => (
     options?.timing_target_options || [
-      { label: 'SOXL', value: 'SOXL.US' },
-      { label: 'TQQQ', value: 'TQQQ.US' },
-      { label: 'QQQ', value: 'QQQ.US' },
-      { label: 'SPY', value: 'SPY.US' },
+      { label: '三倍做多半导体ETF SOXL.US', value: 'SOXL.US' },
+      { label: '三倍做多纳指100ETF TQQQ.US', value: 'TQQQ.US' },
+      { label: '纳斯达克100ETF QQQ.US', value: 'QQQ.US' },
+      { label: '标普500ETF SPY.US', value: 'SPY.US' },
     ]
   ), [options]);
   const liveConfigColumns = useMemo(() => ([
@@ -2498,12 +2674,19 @@ const FactorLab = ({ initialTab = 'single' }) => {
       dataIndex: 'name',
       width: 180,
       fixed: 'left',
-      render: (value, row) => (
-        <Space direction="vertical" size={0}>
-          <Text strong>{value}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.request_summary?.pool || '-'}</Text>
-        </Space>
-      ),
+      render: value => <Text strong>{value}</Text>,
+    },
+    {
+      title: '股票池',
+      key: 'pool',
+      width: 180,
+      render: (_, row) => row.request_summary?.pool_label || row.request_summary?.pool || '-',
+    },
+    {
+      title: '调仓频率',
+      key: 'rebalance_frequency',
+      width: 104,
+      render: (_, row) => getRebalanceFrequencyLabel(row.request_summary?.rebalance_frequency),
     },
     {
       title: '状态',
@@ -2511,8 +2694,18 @@ const FactorLab = ({ initialTab = 'single' }) => {
       width: 96,
       render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>,
     },
-    { title: '外部账户', dataIndex: 'external_trading_account_id', width: 104, render: value => value || '-' },
-    { title: '子账户', dataIndex: 'live_sub_account_id', width: 104, render: value => value || '-' },
+    {
+      title: '外部账户',
+      dataIndex: 'external_trading_account_id',
+      width: 180,
+      render: (value, row) => row.external_trading_account_name || value || '-',
+    },
+    {
+      title: '子账户',
+      dataIndex: 'live_sub_account_id',
+      width: 150,
+      render: (value, row) => row.live_sub_account_name || value || '-',
+    },
     { title: '信号', dataIndex: 'last_signal_status', width: 104, render: value => value ? <Tag>{value}</Tag> : '-' },
     { title: '信号日', dataIndex: 'last_signal_date', width: 112, render: value => value || '-' },
     { title: '执行', dataIndex: 'last_execution_status', width: 104, render: value => value ? <Tag color={value === 'OK' ? 'green' : 'red'}>{value}</Tag> : '-' },
@@ -2525,14 +2718,14 @@ const FactorLab = ({ initialTab = 'single' }) => {
       fixed: 'right',
       render: (_, row) => (
         <Space size={6} wrap>
-          <Button size="small" onClick={() => handleLiveConfigSelect(row.id)}>编辑</Button>
-          <Button size="small" onClick={() => handleLiveGenerateSignal(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>信号</Button>
-          <Button size="small" onClick={() => handleLiveExecute(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>执行</Button>
-          <Button size="small" danger onClick={() => handleLiveDelete(row.id)} loading={liveActionLoading && selectedLiveConfigId === row.id}>删除</Button>
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveEdit(row.id); }}>编辑</Button>
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>信号</Button>
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveExecute(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>执行</Button>
+          <Button size="small" danger onClick={event => { event.stopPropagation(); handleLiveDelete(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>删除</Button>
         </Space>
       ),
     },
-  ]), [handleLiveConfigSelect, handleLiveDelete, handleLiveExecute, handleLiveGenerateSignal, liveActionLoading, selectedLiveConfigId]);
+  ]), [handleLiveDelete, handleLiveEdit, handleLiveExecute, handleLiveGenerateSignal, liveActionLoading, selectedLiveConfigId]);
   const liveLogColumns = useMemo(() => ([
     { title: '时间', dataIndex: 'timestamp', width: 180 },
     { title: '动作', dataIndex: 'action', width: 96, render: value => <Tag>{value}</Tag> },
@@ -2593,6 +2786,23 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const backtestHoldingRows = backtestResult?.current_holdings || [];
   const backtestTradeRows = backtestResult?.trades || [];
   const backtestComponents = backtestMetadata.components || [];
+  const backtestCustomSymbolSelectOptions = useMemo(() => (
+    mergeSymbolOptions(
+      customSymbolOptions,
+      selectedBacktestCustomSymbols,
+      backtestMetadata.symbol_names,
+    )
+  ), [customSymbolOptions, selectedBacktestCustomSymbols, backtestMetadata.symbol_names]);
+  const liveCustomSymbolSelectOptions = useMemo(() => (
+    mergeSymbolOptions(
+      liveCustomSymbolOptions,
+      selectedLiveCustomSymbols,
+      {
+        ...(selectedLiveConfig?.request_summary?.custom_symbol_names || {}),
+        ...(selectedLiveConfig?.last_signal_payload?.symbol_names || {}),
+      },
+    )
+  ), [liveCustomSymbolOptions, selectedLiveCustomSymbols, selectedLiveConfig]);
   const timingSummary = timingResult?.summary || {};
   const timingMetadata = timingResult?.metadata || {};
   const timingBucketRows = timingResult?.bucket_returns || [];
@@ -2678,51 +2888,32 @@ const FactorLab = ({ initialTab = 'single' }) => {
               </Button>
             </Space>
           )}
-          {isLiveTab && (
-            <Space>
-              <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
-            </Space>
-          )}
         </div>
 
       {activeTab === 'db' && <DatabaseManager />}
 
       {activeTab === 'live' && (
         <>
-          <Row gutter={[12, 12]}>
-            <Col xs={24}>
-              <Card
-                className="factor-lab-control-card"
-                title="线上交易配置"
-                bordered={false}
-                extra={(
-                  <Space>
-                    <Button onClick={() => {
-                      setSelectedLiveConfigId(null);
-                      liveForm.setFieldsValue(normalizeLiveConfigFormValues());
-                      setLiveLogs([]);
-                    }}>
-                      新建
-                    </Button>
-                    <Button loading={liveSaving} type="primary" onClick={handleLiveSave}>
-                      保存
-                    </Button>
-                    <Button loading={backtestRunning} onClick={handleLiveBacktest}>
-                      回测
-                    </Button>
-                    <Button loading={liveActionLoading} onClick={() => handleLiveGenerateSignal()} disabled={!selectedLiveConfigId}>
-                      生成信号
-                    </Button>
-                    <Button loading={liveActionLoading} onClick={() => handleLiveExecute()} disabled={!selectedLiveConfigId}>
-                      执行
-                    </Button>
-                    <Button danger loading={liveActionLoading} onClick={() => handleLiveDelete()} disabled={!selectedLiveConfigId}>
-                      删除
-                    </Button>
-                    <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
-                  </Space>
-                )}
-              >
+          <Modal
+            title={editingLiveConfigId ? '编辑线上交易配置' : '添加线上交易配置'}
+            open={liveConfigModalOpen}
+            onCancel={handleLiveConfigModalCancel}
+            width={1120}
+            maskClosable={false}
+            destroyOnClose={false}
+            styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
+            footer={(
+              <Space>
+                <Button onClick={handleLiveConfigModalCancel}>取消</Button>
+                <Button loading={backtestRunning} onClick={handleLiveBacktest}>
+                  回测
+                </Button>
+                <Button loading={liveSaving} type="primary" onClick={handleLiveSave}>
+                  保存
+                </Button>
+              </Space>
+            )}
+          >
                 <Spin spinning={loadingOptions || liveLoading}>
                   <Form form={liveForm} layout="vertical" initialValues={normalizeLiveConfigFormValues()}>
                     <Form.Item name="start_date" hidden>
@@ -2747,17 +2938,6 @@ const FactorLab = ({ initialTab = 'single' }) => {
                       <InputNumber />
                     </Form.Item>
                     <Row gutter={[12, 8]}>
-                      <Col xs={24} sm={12} md={8} lg={6}>
-                        <Form.Item label="配置选择">
-                          <Select
-                            value={selectedLiveConfigId}
-                            allowClear
-                            options={liveConfigs.map(item => ({ label: item.name, value: item.id }))}
-                            onChange={handleLiveConfigSelect}
-                            placeholder="新建或选择现有配置"
-                          />
-                        </Form.Item>
-                      </Col>
                       <Col xs={24} sm={12} md={8} lg={6}>
                         <Form.Item name="name" label="名称" rules={[{ required: true }]}>
                           <Input />
@@ -2810,17 +2990,12 @@ const FactorLab = ({ initialTab = 'single' }) => {
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6} md={4} lg={3}>
-                        <Form.Item name="signal_timezone" label="信号时区" rules={[{ required: true }]}>
-                          <Select options={TIMEZONE_OPTIONS} showSearch />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={12} sm={6} md={4} lg={3}>
                         <Form.Item name="execution_time" label="执行时间" rules={[{ required: true }]}>
                           <Input placeholder="09:31" />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6} md={4} lg={3}>
-                        <Form.Item name="execution_timezone" label="执行时区" rules={[{ required: true }]}>
+                        <Form.Item name="signal_timezone" label="时区" rules={[{ required: true }]}>
                           <Select options={TIMEZONE_OPTIONS} showSearch />
                         </Form.Item>
                       </Col>
@@ -2839,7 +3014,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                               maxTagCount="responsive"
                               tokenSeparators={[',', '，', ' ']}
                               filterOption={false}
-                              options={liveCustomSymbolOptions}
+                              options={liveCustomSymbolSelectOptions}
                               loading={liveCustomSymbolSearching}
                               optionLabelProp="label"
                               notFoundContent={liveCustomSymbolSearching ? <Spin size="small" /> : null}
@@ -2985,27 +3160,43 @@ const FactorLab = ({ initialTab = 'single' }) => {
                     </Form.List>
                   </Form>
                 </Spin>
-              </Card>
-            </Col>
-          </Row>
+          </Modal>
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
-            <Col xs={24} xl={12}>
-              <Card title="配置列表" bordered={false}>
+            <Col xs={24}>
+              <Card
+                title="配置列表"
+                bordered={false}
+                extra={(
+                  <Space>
+                    <Button type="primary" icon={<PlusOutlined />} onClick={handleLiveCreate}>
+                      添加配置
+                    </Button>
+                    <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
+                  </Space>
+                )}
+              >
                 <Table
+                  className="factor-lab-live-config-table"
                   rowKey="id"
                   size="small"
                   loading={liveLoading}
                   columns={liveConfigColumns}
                   dataSource={liveConfigs}
                   pagination={false}
-                  scroll={{ x: 1240 }}
+                  scroll={{ x: 1800 }}
                   rowClassName={row => (row.id === selectedLiveConfigId ? 'factor-lab-table-row-selected' : '')}
+                  onRow={row => ({
+                    onClick: () => handleLiveConfigSelect(row.id),
+                  })}
                 />
               </Card>
             </Col>
-            <Col xs={24} xl={12}>
-              <Card title="最近日志" bordered={false}>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title={`最近日志：${selectedLiveConfigTitle}`} bordered={false}>
                 <Table
                   rowKey="id"
                   size="small"
@@ -3020,7 +3211,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
             <Col xs={24}>
-              <Card title="最近信号" bordered={false}>
+              <Card title={`最近信号：${selectedLiveConfigTitle}`} bordered={false}>
                 {selectedLiveConfig?.last_signal_payload ? (
                   <Space direction="vertical" size={8} className="factor-lab-full">
                     <Space size={8} wrap>
@@ -3031,9 +3222,9 @@ const FactorLab = ({ initialTab = 'single' }) => {
                       <span>{selectedLiveConfig.last_signal_message || '-'}</span>
                     </Space>
                     <div className="factor-lab-compact-stats">
-                      <span>卖出 {(selectedLiveConfig.last_signal_payload.sell_symbols || []).join(', ') || '-'}</span>
-                      <span>补位 {(selectedLiveConfig.last_signal_payload.buy_symbols || []).join(', ') || '-'}</span>
-                      <span>目标 {(selectedLiveConfig.last_signal_payload.target_symbols || []).join(', ') || '-'}</span>
+                      <span>卖出 {formatSymbolList(selectedLiveConfig.last_signal_payload.sell_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
+                      <span>补位 {formatSymbolList(selectedLiveConfig.last_signal_payload.buy_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
+                      <span>目标 {formatSymbolList(selectedLiveConfig.last_signal_payload.target_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
                     </div>
                   </Space>
                 ) : (
@@ -3740,7 +3931,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
             message={(
               <Space size={12} wrap>
                 <span>{timingMetadata.effective_start_date || timingMetadata.start_date} 至 {timingMetadata.effective_end_date || timingMetadata.end_date}</span>
-                <span>目标 {timingMetadata.target_symbol}</span>
+                <span>目标 {formatSymbolDisplay(timingMetadata.target_symbol, timingMetadata.symbol_names, timingMetadata.target_symbol_name)}</span>
                 <span>{timingMetadata.fear_label}</span>
                 <span>{timingMetadata.ma_window_label}</span>
                 <span>T+{timingMetadata.forward_window}</span>
@@ -3856,7 +4047,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                       maxTagCount="responsive"
                       tokenSeparators={[',', '，', ' ']}
                       filterOption={false}
-                      options={customSymbolOptions}
+                      options={backtestCustomSymbolSelectOptions}
                       loading={customSymbolSearching}
                       optionLabelProp="label"
                       notFoundContent={customSymbolSearching ? <Spin size="small" /> : null}
@@ -4217,7 +4408,12 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
       {backtestResult && (
         <Spin spinning={backtestRunning}>
-          <Card className="factor-lab-backtest-params" title="回测参数" bordered={false}>
+          <Card
+            className="factor-lab-backtest-params"
+            title="回测参数"
+            bordered={false}
+            extra={<Button onClick={handleAddBacktestToLive}>加入线上交易</Button>}
+          >
             <div className="factor-lab-param-grid">
               <span>股票池：{backtestMetadata.pool_label || backtestMetadata.pool}</span>
               {backtestMetadata.custom_symbol_count > 0 && <span>自定义标的：{numberFormatter(backtestMetadata.custom_symbol_count)}</span>}
@@ -4294,7 +4490,12 @@ const FactorLab = ({ initialTab = 'single' }) => {
               <Card title="净值曲线" bordered={false}>
                 {backtestEquityRows.length ? (
                   <ReactECharts
-                    option={getBacktestEquityOption(backtestEquityRows, backtestBenchmarkRows, backtestMetadata.candidate_etfs)}
+                    option={getBacktestEquityOption(
+                      backtestEquityRows,
+                      backtestBenchmarkRows,
+                      backtestMetadata.candidate_etfs,
+                      backtestMetadata.symbol_names,
+                    )}
                     style={{ height: 380 }}
                   />
                 ) : <Empty />}
@@ -4338,7 +4539,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                   columns={backtestTradeColumns}
                   dataSource={backtestTradeRows}
                   pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100] }}
-                  scroll={{ x: 1120 }}
+                  scroll={{ x: 1200 }}
                 />
               </Card>
             </Col>
