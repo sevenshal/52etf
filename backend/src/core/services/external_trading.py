@@ -381,17 +381,6 @@ def resolve_external_trading_account_pk(
         return account.id
 
 
-async def get_external_quotes(
-    account_id: str,
-    identifier: str,
-    symbols: List[str],
-    name: Optional[str] = None,
-    timeout: float = 10.0,
-) -> Dict[str, Any]:
-    account_pk = resolve_external_trading_account_pk(account_id, identifier=identifier, name=name)
-    return await external_trading_hub.get_quotes(account_pk, symbols, timeout=timeout)
-
-
 async def get_external_snapshots(
     account_id: str,
     identifier: str,

@@ -1409,26 +1409,6 @@ async def get_external_trading_account_status(
     return _serialize_account(account)
 
 
-@router.post("/{external_account_id}/quotes")
-async def get_external_quotes(
-    external_account_id: int,
-    payload: QuoteRequest,
-    db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
-):
-    account = _get_account_or_404(db, account_id, external_account_id)
-    if not account.enabled:
-        raise HTTPException(status_code=400, detail="External trading account is disabled")
-    try:
-        return await external_trading_hub.get_quotes(
-            account.id,
-            payload.symbols,
-            timeout=payload.timeout_seconds,
-        )
-    except ExternalTradingConnectionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-
-
 @router.post("/{external_account_id}/snapshots")
 async def get_external_snapshots(
     external_account_id: int,
