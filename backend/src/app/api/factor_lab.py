@@ -270,6 +270,7 @@ DEFAULT_TIMING_TARGET_OPTIONS = [
 ]
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
+BACKTEST_SEARCH_MIN_CPU_CORES = 4
 BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
 BACKTEST_SEARCH_STATE_ID = 1
 BACKTEST_SEARCH_ACTIVE_JOB: Optional[Dict[str, Any]] = None
@@ -283,6 +284,31 @@ MOMENTUM_FACTOR_SCORE_PREFIX = {
 POOL_OPTIONS = SHARED_POOL_OPTIONS
 POOL_ETFS = SHARED_POOL_ETFS
 POOL_KEYS = set(POOL_ETFS)
+
+
+def _effective_cpu_count() -> int:
+    try:
+        affinity = os.sched_getaffinity(0)
+        if affinity:
+            return len(affinity)
+    except (AttributeError, OSError):
+        pass
+    return int(os.cpu_count() or 1)
+
+
+def _ensure_backtest_search_cpu_capacity() -> int:
+    cpu_count = _effective_cpu_count()
+    if cpu_count < BACKTEST_SEARCH_MIN_CPU_CORES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"当前机器可用 CPU 核心数为 {cpu_count}，少于批量搜参要求的 "
+                f"{BACKTEST_SEARCH_MIN_CPU_CORES} 核，已拒绝执行"
+            ),
+        )
+    return cpu_count
+
+
 BACKTEST_POOL_KEYS = set(POOL_KEYS).union(CUSTOM_POOL_KEYS)
 
 
@@ -6816,6 +6842,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
 def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, account_id: str) -> Dict[str, Any]:
     global BACKTEST_SEARCH_ACTIVE_JOB, BACKTEST_SEARCH_ACTIVE_THREAD
 
+    available_cpu_cores = _ensure_backtest_search_cpu_capacity()
     with BACKTEST_SEARCH_JOBS_LOCK:
         active_job = BACKTEST_SEARCH_ACTIVE_JOB
         active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
@@ -6854,6 +6881,7 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         "current_case": None,
         "error": None,
         "cancel_requested": False,
+        "available_cpu_cores": available_cpu_cores,
     }
     db = DBSession()
     try:
