@@ -257,7 +257,7 @@ def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quanti
     return "ACKNOWLEDGED"
 
 
-def order_event_filled_quantity(payload: Dict[str, Any], raw_status: Any, current: int = 0, quantity: int = 0) -> int:
+def order_event_filled_quantity(payload: Dict[str, Any], raw_status: Any, current: int = 0) -> int:
     raw = "" if raw_status is None else str(raw_status)
     current_quantity = safe_int(current)
     reported_value = payload.get("filled", None)
@@ -271,8 +271,6 @@ def order_event_filled_quantity(payload: Dict[str, Any], raw_status: Any, curren
         payload.get("business_amount", payload.get("filled_amount")),
     )
     reported = abs(safe_int(reported_value, current_quantity))
-    if raw == "8" and reported <= 0 and safe_int(quantity) > 0:
-        reported = safe_int(quantity)
     return max(current_quantity, reported)
 
 
@@ -861,7 +859,6 @@ def record_submission_result(
             item,
             raw_status,
             current=row.filled_quantity,
-            quantity=row.quantity,
         )
         response_status = str(item.get("status") or "").upper()
         if item.get("ok") is False and retryable is False:
@@ -986,7 +983,6 @@ def process_order_events(db: Session, *, external_trading_account_id: int, order
             event,
             raw_status,
             current=row.filled_quantity,
-            quantity=row.quantity,
         )
         row.ptrade_status = None if raw_status is None else str(raw_status)
         row.status = merge_lifecycle_status(
@@ -2743,4 +2739,3 @@ def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
         "last_event_at": row.last_event_at.isoformat() if row.last_event_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
-
