@@ -2255,38 +2255,6 @@ def _build_demand_rows(
         sub_account_id: get_open_order_quantities(db, sub_account_id)
         for sub_account_id in sub_accounts.keys()
     }
-    ledger_by_account_scope_sub_account = {
-        sub_account_id: (
-            ledger_by_sub_account[sub_account_id]
-            if sub_account_id in ledger_by_sub_account
-            else get_ledger_positions(db, sub_account_id)
-        )
-        for sub_account_id in account_scope_sub_accounts.keys()
-    }
-    open_by_account_scope_sub_account = {
-        sub_account_id: (
-            open_by_sub_account[sub_account_id]
-            if sub_account_id in open_by_sub_account
-            else get_open_order_quantities(db, sub_account_id)
-        )
-        for sub_account_id in account_scope_sub_accounts.keys()
-    }
-    account_available_by_symbol: Dict[str, int] = {}
-    for sub_account_id, ledger_positions in ledger_by_account_scope_sub_account.items():
-        open_quantities_by_symbol = open_by_account_scope_sub_account.get(sub_account_id, {})
-        for raw_symbol, position in (ledger_positions or {}).items():
-            normalized_symbol = normalize_symbol(raw_symbol)
-            if not normalized_symbol:
-                continue
-            current_quantity = safe_int(getattr(position, "quantity", 0))
-            pending_sell = safe_int(open_quantities_by_symbol.get(normalized_symbol, {}).get("SELL"))
-            available_quantity = max(
-                safe_int(getattr(position, "available_quantity", current_quantity), current_quantity) - pending_sell,
-                0,
-            )
-            account_available_by_symbol[normalized_symbol] = (
-                account_available_by_symbol.get(normalized_symbol, 0) + available_quantity
-            )
     now = datetime.now()
     active_sell_blocks = (
         db.query(ExternalTradingOrder)
@@ -2350,7 +2318,6 @@ def _build_demand_rows(
             "remaining_quantity": quantity,
             "current_quantity": current_quantity,
             "available_quantity": available_quantity if side == "SELL" else 0,
-            "account_available_quantity": account_available_by_symbol.get(symbol, 0),
             "target_quantity": target_quantity,
             "effective_quantity": effective_quantity,
             "pending_buy_quantity": pending_buy,
