@@ -94,6 +94,14 @@ def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
     return f"{parts[0]}.{market}"
 
 
+def is_star_market_symbol(symbol: Optional[str]) -> bool:
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return False
+    parts = normalized.split(".")
+    return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
+
+
 def safe_int(value: Any, default: int = 0) -> int:
     try:
         if value is None or value == "":
@@ -736,6 +744,15 @@ def _create_quantity_clip_block_orders(
 
 
 def _block_type_for_quantity_clip(item: Dict[str, Any], requested_quantity: int) -> Tuple[str, str, str]:
+    explicit_reason = str(item.get("block_reason") or "").strip()
+    explicit_message = str(item.get("block_message") or item.get("message") or "").strip()
+    if explicit_reason == "invalid_star_market_min_sell_quantity":
+        return (
+            STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
+            explicit_reason,
+            explicit_message or "科创板最低卖出申报数量限制，阻断到下一交易日开盘后重试",
+        )
+
     position_quantity = safe_int(item.get("position_quantity"), -1)
     if position_quantity < 0:
         position_quantity = safe_int(item.get("sellable_quantity"), 0)
@@ -796,6 +813,8 @@ def _apply_submission_quantity_clip(
         "sellable_quantity": item.get("sellable_quantity"),
         "position_quantity": item.get("position_quantity"),
         "clip_sell_to_available": item.get("clip_sell_to_available"),
+        "block_reason": item.get("block_reason"),
+        "block_message": item.get("block_message"),
     }
     residual_allocations = []
     if _role(row) == "PARENT":
@@ -2438,12 +2457,23 @@ def build_netted_target_execution_plan(
             order_lot_size = max(safe_int(order_policy.get("lot_size"), lot_size), 1)
             quantity = sum(safe_int(item.get("quantity")) for item in allocations)
             if side == "BUY":
+                raw_buy_quantity = quantity
+                if is_star_market_symbol(symbol) and 0 < quantity < 200:
+                    skipped.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": quantity,
+                        "reason": "SKIPPED_INVALID_LOT",
+                        "message": "科创板最低买入申报200股，计划买入%d股，已跳过" % quantity,
+                    })
+                    continue
                 quantity = (quantity // order_lot_size) * order_lot_size
                 if quantity <= 0 and allocations:
                     skipped.append({
                         "symbol": symbol,
                         "side": side,
-                        "quantity": sum(safe_int(item.get("quantity")) for item in allocations),
+                        "quantity": raw_buy_quantity,
+                        "reason": "SKIPPED_INVALID_LOT",
                         "message": "净买入数量不足最小交易单位",
                     })
                     continue

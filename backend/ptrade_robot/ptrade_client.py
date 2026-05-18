@@ -927,6 +927,14 @@ def is_sh_market_symbol(client_symbol):
     return str(client_symbol or "").upper().endswith((".XSHG", ".SS", ".SH"))
 
 
+def is_star_market_symbol(symbol):
+    api_symbol = convert_to_api_code(symbol)
+    if not api_symbol:
+        return False
+    parts = str(api_symbol).upper().split(".")
+    return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
+
+
 def validate_market_order_type(client_symbol, market_type):
     market_type = int(market_type)
     allowed = (0, 1, 2, 4) if is_sh_market_symbol(client_symbol) else (0, 2, 3, 4, 5)
@@ -1019,14 +1027,17 @@ def apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, qua
         "clip_sell_to_available": clip_enabled,
         "sellable_quantity": None,
         "position_quantity": None,
+        "block_reason": None,
+        "block_message": None,
     }
-    if side != "SELL" or not clip_enabled:
+    star_market = is_star_market_symbol(api_symbol or client_symbol)
+    if side != "SELL" or (not clip_enabled and not star_market):
         return quantity, meta
 
     quantities = get_position_quantities(client_symbol, api_symbol)
     sellable_quantity = quantities.get("sellable_quantity") or 0
     position_quantity = quantities.get("position_quantity") or 0
-    clipped_quantity = min(quantity, sellable_quantity)
+    clipped_quantity = min(quantity, sellable_quantity) if clip_enabled else quantity
     meta.update({
         "submitted_quantity": clipped_quantity,
         "quantity_clipped": clipped_quantity != quantity,
@@ -1038,6 +1049,19 @@ def apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, qua
             "SELL %s 数量按可卖数量裁剪: 请求=%d, 持仓=%d, 可卖=%d, 提交=%d"
             % (client_symbol, quantity, position_quantity, sellable_quantity, clipped_quantity)
         )
+    if star_market and 0 < clipped_quantity < 200 and clipped_quantity != sellable_quantity:
+        message = (
+            "科创板最低卖出申报200股，当前持仓%d股，可卖%d股，计划卖出%d股，已跳过"
+            % (position_quantity, sellable_quantity, clipped_quantity)
+        )
+        meta.update({
+            "submitted_quantity": 0,
+            "quantity_clipped": True,
+            "block_reason": "invalid_star_market_min_sell_quantity",
+            "block_message": message,
+        })
+        log_warn("SELL %s 数量不满足科创板最低申报规则: %s" % (client_symbol, message))
+        return 0, meta
     return clipped_quantity, meta
 
 
@@ -1052,6 +1076,8 @@ def order_clip_fields(order_request, quantity):
         "clip_sell_to_available": bool_value(order_request.get("clip_sell_to_available"), False),
         "sellable_quantity": order_request.get("_sellable_quantity"),
         "position_quantity": order_request.get("_position_quantity"),
+        "block_reason": order_request.get("_block_reason"),
+        "block_message": order_request.get("_block_message"),
     }
 
 
@@ -1238,13 +1264,17 @@ def place_single_order(order_request, index):
     order_request["_quantity_clipped"] = clip_meta.get("quantity_clipped")
     order_request["_sellable_quantity"] = clip_meta.get("sellable_quantity")
     order_request["_position_quantity"] = clip_meta.get("position_quantity")
+    order_request["_block_reason"] = clip_meta.get("block_reason")
+    order_request["_block_message"] = clip_meta.get("block_message")
     order_request["clip_sell_to_available"] = clip_meta.get("clip_sell_to_available")
     if quantity <= 0:
-        message = "SELL %s 可卖数量不足，请求%d，持仓%d，可卖%d，未提交订单" % (
-            client_symbol,
-            requested_quantity,
-            int(clip_meta.get("position_quantity") or 0),
-            int(clip_meta.get("sellable_quantity") or 0),
+        message = clip_meta.get("block_message") or (
+            "SELL %s 可卖数量不足，请求%d，持仓%d，可卖%d，未提交订单" % (
+                client_symbol,
+                requested_quantity,
+                int(clip_meta.get("position_quantity") or 0),
+                int(clip_meta.get("sellable_quantity") or 0),
+            )
         )
         log.error("交易失败: %s" % message)
         return {
