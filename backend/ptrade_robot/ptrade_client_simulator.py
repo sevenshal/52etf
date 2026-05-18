@@ -588,7 +588,9 @@ class SimBroker:
 
     def order(self, symbol, amount, limit_price=None):
         price = float(limit_price if limit_price is not None else self._best_fill_price(symbol, amount))
-        return self._submit_order(symbol, amount, price, "LIMIT", submitted_price=price)
+        order_id = self._submit_order(symbol, amount, price, "LIMIT", submitted_price=price)
+        self.emit_order_reports(order_id)
+        return order_id
 
     def order_market(self, symbol, amount, market_type, limit_price=None):
         client_symbol = self._client_symbol(symbol)
@@ -597,7 +599,7 @@ class SimBroker:
             protection_price = float(limit_price)
             rejected = (amount > 0 and fill_price > protection_price) or (amount < 0 and fill_price < protection_price)
             if rejected:
-                return self._record_order(
+                order_id = self._record_order(
                     client_symbol,
                     amount,
                     fill_price,
@@ -607,10 +609,12 @@ class SimBroker:
                     status="9",
                     message="protection price rejected",
                 )
+                self.emit_order_reports(order_id)
+                return order_id
             submitted_price = protection_price
         else:
             submitted_price = None
-        return self._submit_order(
+        order_id = self._submit_order(
             client_symbol,
             amount,
             fill_price,
@@ -618,6 +622,8 @@ class SimBroker:
             market_type=market_type,
             submitted_price=submitted_price,
         )
+        self.emit_order_reports(order_id)
+        return order_id
 
     def cancel_order(self, order_id):
         matches = self.get_order(order_id)
@@ -758,7 +764,6 @@ def configure_client(client, args):
     client.get_all_orders = broker.get_all_orders
     client.get_deliver = broker.get_deliver
     client.get_positions = broker.get_positions
-    client.emit_simulated_order_reports = broker.emit_order_reports
     client.API_HOST = args.host
     client.USE_HTTPS = bool(args.https)
     client.DEFAULT_ACCOUNT_ID = args.account_id

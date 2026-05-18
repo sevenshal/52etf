@@ -67,6 +67,7 @@ PTRADE_STATUS_MAP = {
     "-": "FAILED",
     "V": "ACKNOWLEDGED",
 }
+PTRADE_ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
 
 
 def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
@@ -86,10 +87,10 @@ def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
     if len(parts) != 2:
         return text
     first, second = parts
-    if first in {"SH", "SS", "SZ", "BJ"}:
-        market = "SH" if first in {"SH", "SS"} else first
+    if first in {"SH", "SS", "XSHG", "SZ", "XSHE", "BJ", "XBSE"}:
+        market = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}.get(first, first)
         return f"{parts[1]}.{market}"
-    market = "SH" if second in {"SH", "SS"} else second
+    market = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}.get(second, second)
     return f"{parts[0]}.{market}"
 
 
@@ -226,6 +227,12 @@ def parse_dt(value: Any) -> Optional[datetime]:
 def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quantity: int = 0) -> str:
     raw = "" if raw_status is None else str(raw_status)
     mapped = PTRADE_STATUS_MAP.get(raw)
+    if mapped in {"SUBMITTED", "ACKNOWLEDGED"}:
+        if quantity > 0 and filled_quantity >= quantity:
+            return "FILLED"
+        if filled_quantity > 0:
+            return "PARTIALLY_FILLED"
+        return mapped
     if mapped:
         return mapped
     if quantity > 0 and filled_quantity >= quantity:
@@ -233,6 +240,25 @@ def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quanti
     if filled_quantity > 0:
         return "PARTIALLY_FILLED"
     return "ACKNOWLEDGED"
+
+
+def order_event_filled_quantity(payload: Dict[str, Any], raw_status: Any, current: int = 0, quantity: int = 0) -> int:
+    raw = "" if raw_status is None else str(raw_status)
+    current_quantity = safe_int(current)
+    reported_value = payload.get("filled", None)
+    if reported_value is not None:
+        reported = abs(safe_int(reported_value, current_quantity))
+        return max(current_quantity, reported)
+    if raw not in PTRADE_ORDER_FILL_STATUSES:
+        return current_quantity
+    reported_value = payload.get(
+        "filled_quantity",
+        payload.get("business_amount", payload.get("filled_amount")),
+    )
+    reported = abs(safe_int(reported_value, current_quantity))
+    if raw == "8" and reported <= 0 and safe_int(quantity) > 0:
+        reported = safe_int(quantity)
+    return max(current_quantity, reported)
 
 
 def merge_lifecycle_status(current_status: Optional[str], incoming_status: str) -> str:
@@ -825,7 +851,12 @@ def record_submission_result(
             insufficient_sellable_block_until=insufficient_sellable_block_until,
         )
         raw_status = item.get("raw_status")
-        filled_quantity = safe_int(item.get("filled_quantity"), row.filled_quantity)
+        filled_quantity = order_event_filled_quantity(
+            item,
+            raw_status,
+            current=row.filled_quantity,
+            quantity=row.quantity,
+        )
         lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
         if item.get("ok") is False and lifecycle not in TERMINAL_ORDER_STATUSES:
             lifecycle = "FAILED"
@@ -950,9 +981,11 @@ def process_order_events(db: Session, *, external_trading_account_id: int, order
             logger.warning("Unmatched external order event: %s", event)
             continue
         raw_status = event.get("status")
-        filled_quantity = safe_int(
-            event.get("filled_quantity", event.get("business_amount", event.get("filled_amount"))),
-            row.filled_quantity,
+        filled_quantity = order_event_filled_quantity(
+            event,
+            raw_status,
+            current=row.filled_quantity,
+            quantity=row.quantity,
         )
         row.ptrade_status = None if raw_status is None else str(raw_status)
         row.status = merge_lifecycle_status(
@@ -976,7 +1009,7 @@ def process_order_events(db: Session, *, external_trading_account_id: int, order
 
 
 def _trade_fill_key(event: Dict[str, Any]) -> str:
-    for key in ("fill_key", "business_no", "deal_no", "match_no", "serial_no"):
+    for key in ("fill_key", "business_id", "business_no", "deal_no", "match_no", "serial_no"):
         if event.get(key):
             return str(event.get(key))
     stable = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)

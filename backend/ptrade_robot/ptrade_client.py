@@ -89,6 +89,7 @@ def initialize(context):
     g.external_account_identifier = DEFAULT_IDENTIFIER + ("B" if backtest else "")
     update_current_context(context)
     g.order_client_id_by_order_id = {}
+    g.order_side_by_order_id = {}
     g.order_last_known_status = {}
 
     if DISABLE_AUTO_WEBSOCKET:
@@ -491,38 +492,61 @@ def execute_command(action, payload):
     raise Exception("Unsupported command action: %s" % action)
 
 def convert_to_api_code(symbol):
-    """Convert PTrade client code (600000.SS) to backend code (SH.600000)."""
+    """Convert PTrade client code to backend code, e.g. 600000.XSHG -> 600000.SH."""
     if not symbol:
         return None
-    parts = str(symbol).split(".")
+    parts = str(symbol).strip().upper().split(".")
     if len(parts) != 2:
-        return symbol
+        return str(symbol).strip().upper()
 
-    first = parts[0].upper()
-    second = parts[1].upper()
-    if first in ("SH", "SS", "SZ", "BJ"):
-        market = "SH" if first == "SS" else first
-        return "%s.%s" % (market, parts[1])
+    first = parts[0]
+    second = parts[1]
+    market_aliases = {
+        "XSHG": "SH",
+        "SH": "SH",
+        "SS": "SH",
+        "XSHE": "SZ",
+        "SZ": "SZ",
+        "XBSE": "BJ",
+        "BJ": "BJ",
+    }
+    if first in market_aliases:
+        return "%s.%s" % (second, market_aliases[first])
 
-    market = "SH" if second == "SS" else second
-    return "%s.%s" % (market, parts[0])
+    return "%s.%s" % (first, market_aliases.get(second, second))
 
 
 def convert_to_client_code(symbol):
-    """Convert backend code (SH.600000) to PTrade client code (600000.SS)."""
+    """Convert backend code to official PTrade code, e.g. 600000.SH -> 600000.XSHG."""
     if not symbol:
         return None
-    parts = str(symbol).split(".")
+    text = str(symbol).strip().upper()
+    parts = text.split(".")
+    if len(parts) == 1 and len(text) == 6 and text.isdigit():
+        if text.startswith(("60", "68", "51", "52", "56", "58", "50", "11")):
+            return "%s.XSHG" % text
+        if text.startswith(("00", "30", "20", "15", "12", "13")):
+            return "%s.XSHE" % text
+        if text.startswith(("43", "83", "87", "88", "92")):
+            return "%s.XBSE" % text
     if len(parts) != 2:
-        return symbol
+        return text
 
-    first = parts[0].upper()
-    second = parts[1].upper()
-    if first not in ("SH", "SS", "SZ", "BJ"):
-        return "%s.%s" % (parts[0], "SS" if second == "SH" else second)
+    first = parts[0]
+    second = parts[1]
+    market_aliases = {
+        "XSHG": "XSHG",
+        "SH": "XSHG",
+        "SS": "XSHG",
+        "XSHE": "XSHE",
+        "SZ": "XSHE",
+        "XBSE": "XBSE",
+        "BJ": "XBSE",
+    }
+    if first in market_aliases:
+        return "%s.%s" % (second, market_aliases[first])
 
-    market = "SS" if first in ("SH", "SS") else first
-    return "%s.%s" % (parts[1], market)
+    return "%s.%s" % (first, market_aliases.get(second, second))
 
 
 def value_of(obj, key, default=None):
@@ -531,6 +555,46 @@ def value_of(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def first_value(obj, keys, default=None):
+    for key in keys:
+        value = value_of(obj, key, None)
+        if value is not None:
+            return value
+    return default
+
+
+def symbol_lookup_candidates(symbol):
+    candidates = []
+
+    def add(value):
+        if value is None:
+            return
+        text = str(value).strip().upper()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    add(symbol)
+    api_symbol = convert_to_api_code(symbol)
+    add(api_symbol)
+    add(convert_to_client_code(api_symbol))
+    parts = str(api_symbol or "").split(".")
+    if len(parts) == 2:
+        code, market = parts
+        add("%s.%s" % (market, code))
+        if market == "SH":
+            add("%s.SS" % code)
+            add("SS.%s" % code)
+            add("%s.XSHG" % code)
+            add("XSHG.%s" % code)
+        elif market == "SZ":
+            add("%s.XSHE" % code)
+            add("XSHE.%s" % code)
+        elif market == "BJ":
+            add("%s.XBSE" % code)
+            add("XBSE.%s" % code)
+    return candidates
 
 
 def get_current_dt():
@@ -593,7 +657,11 @@ def get_gear_price_for_symbol(client_symbol):
     # get_gear_price returns {bid_grp: {1:[p,v,c],...}, offer_grp: {1:[p,v,c],...}}
     if value_of(data, "bid_grp") is not None or value_of(data, "offer_grp") is not None:
         return data
-    return value_of(data, client_symbol) or value_of(data, str(client_symbol).upper()) or {}
+    for key in symbol_lookup_candidates(client_symbol):
+        item = value_of(data, key)
+        if item:
+            return item
+    return {}
 
 
 def normalize_quote_from_gear_price(client_symbol, gear_data):
@@ -634,12 +702,11 @@ def get_snapshot_map(client_symbols):
 
 def get_single_snapshot(client_symbol):
     snapshots = get_snapshot_map([client_symbol])
-    return (
-        snapshots.get(client_symbol)
-        or snapshots.get(convert_to_api_code(client_symbol))
-        or snapshots.get(str(client_symbol).upper())
-        or {}
-    )
+    for key in symbol_lookup_candidates(client_symbol):
+        item = snapshots.get(key)
+        if item:
+            return item
+    return {}
 
 
 def normalize_quote_from_snapshot(client_symbol, snapshot):
@@ -669,11 +736,11 @@ def get_snapshots_payload(symbols):
     results = []
     for client_symbol in client_symbols:
         api_symbol = convert_to_api_code(client_symbol)
-        snapshot = (
-            snapshots.get(client_symbol)
-            or snapshots.get(api_symbol)
-            or snapshots.get(str(client_symbol).upper())
-        )
+        snapshot = None
+        for key in symbol_lookup_candidates(client_symbol):
+            snapshot = snapshots.get(key)
+            if snapshot:
+                break
         if not snapshot:
             results.append({
                 "symbol": api_symbol,
@@ -700,11 +767,11 @@ def get_quotes(symbols):
             "ok": True,
         }
         try:
-            snapshot = (
-                snapshots.get(client_symbol)
-                or snapshots.get(api_symbol)
-                or snapshots.get(str(client_symbol).upper())
-            )
+            snapshot = None
+            for key in symbol_lookup_candidates(client_symbol):
+                snapshot = snapshots.get(key)
+                if snapshot:
+                    break
             if not snapshot:
                 raise Exception("snapshot not found")
             item.update(normalize_quote_from_snapshot(client_symbol, snapshot))
@@ -857,7 +924,7 @@ def normalize_order_type(order_request):
 
 
 def is_sh_market_symbol(client_symbol):
-    return str(client_symbol or "").upper().endswith((".SS", ".SH"))
+    return str(client_symbol or "").upper().endswith((".XSHG", ".SS", ".SH"))
 
 
 def validate_market_order_type(client_symbol, market_type):
@@ -905,16 +972,20 @@ def get_position_quantities(client_symbol, api_symbol):
     position_items = positions.items() if isinstance(positions, dict) else [(None, pos) for pos in positions]
     candidates = get_position_candidates(client_symbol, api_symbol)
     for key, pos in position_items:
-        symbol = value_of(pos, "sid", value_of(pos, "symbol", key))
+        symbol = first_value(pos, ("sid", "symbol", "stock_code"), key)
         pos_candidates = get_position_candidates(symbol, convert_to_api_code(symbol))
         if not set(candidates).intersection(set(pos_candidates)):
             continue
         sellable_quantity = value_of(
             pos,
             "enable_amount",
-            value_of(pos, "available_quantity", value_of(pos, "sellable_quantity", value_of(pos, "amount", 0))),
+            value_of(
+                pos,
+                "available_quantity",
+                value_of(pos, "sellable_quantity", first_value(pos, ("amount", "current_amount"), 0)),
+            ),
         )
-        position_quantity = value_of(pos, "amount", value_of(pos, "quantity", 0))
+        position_quantity = first_value(pos, ("amount", "current_amount", "quantity"), 0)
         try:
             sellable_quantity = max(int(float(sellable_quantity or 0)), 0)
         except Exception:
@@ -1024,8 +1095,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
         order_sn = order_market(client_symbol, signed_quantity, market_type)
     else:
         order_sn = order_market(client_symbol, signed_quantity, market_type, protection_price)
-    remember_client_order_id(order_sn, client_order_id)
-    emit_simulated_reports_if_available(order_sn)
+    remember_client_order_id(order_sn, client_order_id, side=side)
 
     message = "%s %s 市价单, 数量: %d, 市价类型: %s" % (side, client_symbol, quantity, market_type)
     if protection_price is not None:
@@ -1035,6 +1105,7 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
     raw_status = None
     if order_sn:
         order_info = get_first_order(order_sn)
+        remember_client_order_aliases(order_info, client_order_id, side=side)
         raw_status = str(value_of(order_info, "status", ""))
         if raw_status == "9":
             log.error("交易失败: %s失败(被拒绝)" % message)
@@ -1104,14 +1175,14 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
 
     signed_quantity = quantity if side == "BUY" else -quantity
     order_sn = order(client_symbol, signed_quantity, limit_price=limit_price)
-    remember_client_order_id(order_sn, client_order_id)
-    emit_simulated_reports_if_available(order_sn)
+    remember_client_order_id(order_sn, client_order_id, side=side)
 
     status = "FAILED"
     message = ""
     raw_status = None
     if order_sn:
         order_info = get_first_order(order_sn)
+        remember_client_order_aliases(order_info, client_order_id, side=side)
         raw_status = str(value_of(order_info, "status", ""))
         if raw_status == "9":
             message = "%s %s失败(被拒绝)" % (side, client_symbol)
@@ -1122,7 +1193,7 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
         message = "%s %s失败(无订单号)" % (side, client_symbol)
 
     if status == "SUCCESS":
-        log.info("交易成功: %s" % message)
+        log.info("交易指令已提交: %s" % message)
     else:
         log.error("交易失败: %s" % message)
 
@@ -1222,18 +1293,44 @@ def get_first_order(order_sn, max_attempts=3, wait_seconds=0.5):
     return order_info
 
 
-def remember_client_order_id(order_sn, client_order_id):
+def remember_client_order_id(order_sn, client_order_id, side=None):
     if not order_sn or not client_order_id:
         return
     if not hasattr(g, "order_client_id_by_order_id"):
         g.order_client_id_by_order_id = {}
     g.order_client_id_by_order_id[str(order_sn)] = client_order_id
+    if side:
+        if not hasattr(g, "order_side_by_order_id"):
+            g.order_side_by_order_id = {}
+        g.order_side_by_order_id[str(order_sn)] = str(side).upper()
     if not hasattr(g, "order_last_known_status"):
         g.order_last_known_status = {}
     g.order_last_known_status[str(order_sn)] = "0"
 
 
+def remember_client_order_aliases(order_item, client_order_id, side=None):
+    if not order_item or not client_order_id:
+        return
+    for key in ("order_id", "id", "entrust_no"):
+        value = value_of(order_item, key)
+        if value:
+            remember_client_order_id(value, client_order_id, side=side)
+
+
+def order_aliases(order_item):
+    aliases = []
+    for key in ("order_id", "id", "entrust_no"):
+        value = value_of(order_item, key)
+        if value is None:
+            continue
+        text = str(value)
+        if text not in aliases:
+            aliases.append(text)
+    return aliases
+
+
 TERMINAL_ORDER_STATUSES = {"5", "6", "8", "9"}
+ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
 
 
 def sync_tracked_order_statuses():
@@ -1250,14 +1347,17 @@ def sync_tracked_order_statuses():
     try:
         last_status = getattr(g, "order_last_known_status", {})
 
-        all_orders = get_all_orders() or []
+        try:
+            all_orders = get_orders() or []
+        except Exception as exc:
+            log_warn("get_orders failed, fallback to get_all_orders: %s" % exc)
+            all_orders = get_all_orders() or []
 
         # Build lookup by order_id (order_sn)
         order_map = {}
         for item in all_orders:
-            oid = value_of(item, "order_id", value_of(item, "id"))
-            if oid is not None:
-                order_map[str(oid)] = item
+            for oid in order_aliases(item):
+                order_map[oid] = item
 
         current_dt = get_current_dt()
         changed_orders = []
@@ -1275,7 +1375,7 @@ def sync_tracked_order_statuses():
             last_status[str(order_sn)] = status
             changed_orders.append(normalize_order(item, current_dt))
             if status in TERMINAL_ORDER_STATUSES:
-                finished_keys.append(order_sn)
+                finished_keys.extend(order_aliases(item) or [order_sn])
 
         if changed_orders:
             log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))
@@ -1288,26 +1388,30 @@ def sync_tracked_order_statuses():
 
         # Clean up terminal orders from tracking
         for key in finished_keys:
-            tracked.pop(key, None)
-            last_status.pop(key, None)
+            tracked.pop(str(key), None)
+            last_status.pop(str(key), None)
     except Exception as exc:
         log_warn("sync_tracked_order_statuses failed: %s" % exc)
-
-
-def emit_simulated_reports_if_available(order_sn):
-    simulator_hook = globals().get("emit_simulated_order_reports")
-    if not simulator_hook or not order_sn:
-        return
-    try:
-        simulator_hook(order_sn)
-    except Exception as e:
-        log_warn("Simulated order report hook failed: %s" % str(e))
 
 
 def lookup_client_order_id(order_id):
     if not order_id:
         return None
-    return getattr(g, "order_client_id_by_order_id", {}).get(str(order_id))
+    try:
+        mapping = getattr(g, "order_client_id_by_order_id", {})
+    except NameError:
+        return None
+    return mapping.get(str(order_id))
+
+
+def lookup_order_side(order_id):
+    if not order_id:
+        return None
+    try:
+        mapping = getattr(g, "order_side_by_order_id", {})
+    except NameError:
+        return None
+    return mapping.get(str(order_id))
 
 
 def stringify_unknown_fields(obj):
@@ -1325,49 +1429,80 @@ def stringify_unknown_fields(obj):
 
 def get_order_side(order_item):
     entrust_bs = value_of(order_item, "entrust_bs")
-    if str(entrust_bs) == "1":
+    if str(entrust_bs).upper() in ("1", "BUY", "B"):
         return "BUY"
-    if str(entrust_bs) == "2":
+    if str(entrust_bs).upper() in ("2", "SELL", "S"):
         return "SELL"
 
-    quantity = value_of(order_item, "amount", value_of(order_item, "quantity", 0))
+    order_id = first_value(order_item, ("order_id", "id", "entrust_no"))
+    side = lookup_order_side(order_id) or lookup_order_side(value_of(order_item, "entrust_no"))
+    if side:
+        return side
+
+    quantity = first_value(order_item, ("amount", "quantity", "entrust_amount"), 0)
     try:
         return "BUY" if float(quantity) >= 0 else "SELL"
     except Exception:
         return None
 
 
-def normalize_order(order_item, current_dt):
-    quantity = value_of(order_item, "amount", value_of(order_item, "quantity", 0)) or 0
+def get_order_filled_quantity(order_item):
+    filled_value = value_of(order_item, "filled", None)
+    if filled_value is not None:
+        quantity = filled_value
+    else:
+        status = str(value_of(order_item, "status", ""))
+        if status not in ORDER_FILL_STATUSES:
+            return 0
+        quantity = first_value(order_item, ("filled_quantity", "business_amount", "filled_amount"), 0)
     try:
-        quantity = abs(quantity)
+        quantity = abs(int(quantity or 0))
+    except Exception:
+        quantity = 0
+    status = str(value_of(order_item, "status", ""))
+    if status == "8" and quantity <= 0:
+        total_quantity = first_value(order_item, ("amount", "quantity", "entrust_amount"), 0) or 0
+        try:
+            quantity = abs(int(total_quantity or 0))
+        except Exception:
+            quantity = 0
+    return quantity
+
+
+def normalize_order(order_item, current_dt):
+    raw_symbol = first_value(order_item, ("symbol", "stock_code", "security", "sid"))
+    quantity = first_value(order_item, ("amount", "quantity", "entrust_amount"), 0) or 0
+    try:
+        quantity = abs(int(float(quantity)))
     except Exception:
         pass
 
-    order_id = value_of(order_item, "order_id", value_of(order_item, "id"))
+    order_id = first_value(order_item, ("order_id", "id", "entrust_no"))
     entrust_no = value_of(order_item, "entrust_no")
     return {
         "client_order_id": value_of(order_item, "client_order_id", lookup_client_order_id(order_id) or lookup_client_order_id(entrust_no)),
-        "symbol": convert_to_api_code(value_of(order_item, "symbol")),
-        "client_symbol": value_of(order_item, "symbol"),
+        "symbol": convert_to_api_code(raw_symbol),
+        "client_symbol": raw_symbol,
         "side": get_order_side(order_item),
         "quantity": quantity,
-        "price": value_of(order_item, "price", value_of(order_item, "business_price")),
+        "price": first_value(order_item, ("price", "limit", "entrust_price", "business_price")),
         "status": value_of(order_item, "status"),
         "order_id": order_id,
         "entrust_no": value_of(order_item, "entrust_no", order_id),
         "entrust_bs": value_of(order_item, "entrust_bs"),
-        "filled_quantity": value_of(order_item, "business_amount", value_of(order_item, "filled_amount", value_of(order_item, "filled_quantity"))),
-        "avg_fill_price": value_of(order_item, "business_price", value_of(order_item, "avg_fill_price")),
-        "submitted_at": value_of(order_item, "entrust_time", current_dt.isoformat()),
+        "entrust_type": value_of(order_item, "entrust_type"),
+        "filled_quantity": get_order_filled_quantity(order_item),
+        "avg_fill_price": first_value(order_item, ("business_price", "avg_fill_price", "filled_price")),
+        "submitted_at": first_value(order_item, ("entrust_time", "order_time", "dt", "created"), current_dt.isoformat()),
         "event_time": current_dt.isoformat(),
         "raw": stringify_unknown_fields(order_item),
     }
 
 
 def normalize_trade(trade_item, current_dt):
+    raw_symbol = first_value(trade_item, ("symbol", "stock_code", "security", "sid"))
     order_id = value_of(trade_item, "order_id", value_of(trade_item, "entrust_no"))
-    quantity = value_of(trade_item, "business_amount", value_of(trade_item, "filled_amount", value_of(trade_item, "quantity", 0))) or 0
+    quantity = first_value(trade_item, ("business_amount", "quantity", "filled_amount", "filled"), 0) or 0
     try:
         quantity = abs(int(quantity))
     except Exception:
@@ -1375,15 +1510,15 @@ def normalize_trade(trade_item, current_dt):
 
     return {
         "client_order_id": value_of(trade_item, "client_order_id", lookup_client_order_id(order_id)),
-        "symbol": convert_to_api_code(value_of(trade_item, "symbol")),
-        "client_symbol": value_of(trade_item, "symbol"),
+        "symbol": convert_to_api_code(raw_symbol),
+        "client_symbol": raw_symbol,
         "side": get_order_side(trade_item),
         "quantity": quantity,
         "price": value_of(trade_item, "business_price", value_of(trade_item, "price")),
         "amount": value_of(trade_item, "business_balance", value_of(trade_item, "amount")),
         "order_id": order_id,
         "entrust_no": value_of(trade_item, "entrust_no", order_id),
-        "business_no": value_of(trade_item, "business_no", value_of(trade_item, "deal_no", value_of(trade_item, "match_no"))),
+        "business_no": first_value(trade_item, ("business_id", "business_no", "deal_no", "match_no")),
         "business_time": value_of(trade_item, "business_time", value_of(trade_item, "trade_time", current_dt.isoformat())),
         "traded_at": value_of(trade_item, "business_time", value_of(trade_item, "trade_time", current_dt.isoformat())),
         "raw": stringify_unknown_fields(trade_item),
@@ -1403,13 +1538,19 @@ def on_order_response(context, order_list):
     tracked = getattr(g, "order_client_id_by_order_id", {})
     last_status = getattr(g, "order_last_known_status", {})
     for item in (order_list or []):
-        oid = str(value_of(item, "order_id", value_of(item, "id", "")))
+        oid = str(first_value(item, ("order_id", "id", "entrust_no"), ""))
         status = str(value_of(item, "status", ""))
+        client_order_id = lookup_client_order_id(oid) or lookup_client_order_id(value_of(item, "entrust_no"))
+        remember_client_order_aliases(item, client_order_id, side=lookup_order_side(oid))
+        aliases = order_aliases(item) or [oid]
+        for alias in aliases:
+            last_status[str(alias)] = status
         if oid in last_status:
             last_status[oid] = status
         if status in TERMINAL_ORDER_STATUSES:
-            tracked.pop(oid, None)
-            last_status.pop(oid, None)
+            for alias in aliases:
+                tracked.pop(str(alias), None)
+                last_status.pop(str(alias), None)
     process_pending_commands()
 
 
@@ -1468,8 +1609,9 @@ def normalize_deliver_records(records):
 def get_deliver_payload(start_date=None, end_date=None):
     start = normalize_deliver_date(start_date)
     end = normalize_deliver_date(end_date or start_date)
-    deliver_func = globals().get("get_deliver")
-    if not deliver_func:
+    try:
+        deliver_func = get_deliver
+    except NameError:
         raise Exception("PTrade get_deliver is unavailable in this runtime")
     records = deliver_func(start, end) or []
     return {
@@ -1501,12 +1643,12 @@ def push_deliver_records():
 
 
 def normalize_position(pos):
-    symbol = value_of(pos, "sid", value_of(pos, "symbol"))
+    symbol = first_value(pos, ("sid", "symbol", "stock_code"))
     return {
         "symbol": convert_to_api_code(symbol),
         "client_symbol": symbol,
-        "quantity": value_of(pos, "amount", value_of(pos, "quantity", 0)),
-        "available_quantity": value_of(pos, "enable_amount", value_of(pos, "available_quantity")),
+        "quantity": first_value(pos, ("amount", "current_amount", "quantity"), 0),
+        "available_quantity": first_value(pos, ("enable_amount", "available_quantity", "sellable_quantity"), 0),
         "cost_price": value_of(pos, "cost_basis", value_of(pos, "cost_price", 0)),
         "last_price": value_of(pos, "last_sale_price", value_of(pos, "price")),
         "market_value": value_of(pos, "market_value"),
@@ -1523,7 +1665,7 @@ def get_positions_payload():
         "positions": [
             normalize_position(pos)
             for pos in position_values
-            if value_of(pos, "amount", value_of(pos, "quantity", 0)) != 0
+            if first_value(pos, ("amount", "current_amount", "quantity"), 0) != 0
         ],
     }
 

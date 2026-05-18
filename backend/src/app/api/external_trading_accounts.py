@@ -463,7 +463,11 @@ def _stock_symbol_candidates(symbol: Any) -> List[str]:
         candidates.append(code)
         candidates.append(f"{market}.{code}")
         if market == "SH":
-            candidates.extend([f"{code}.SS", f"SS.{code}"])
+            candidates.extend([f"{code}.SS", f"SS.{code}", f"{code}.XSHG", f"XSHG.{code}"])
+        elif market == "SZ":
+            candidates.extend([f"{code}.XSHE", f"XSHE.{code}"])
+        elif market == "BJ":
+            candidates.extend([f"{code}.XBSE", f"XBSE.{code}"])
     result = []
     seen = set()
     for candidate in candidates:
