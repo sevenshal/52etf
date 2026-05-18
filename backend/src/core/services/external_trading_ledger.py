@@ -52,7 +52,6 @@ TERMINAL_ORDER_STATUSES = {
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
 }
 PASSIVE_CHILD_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
-NON_RETRYABLE_SUBMISSION_STATUSES = {"REJECTED", "NOT_SUPPORTED"}
 
 PTRADE_STATUS_MAP = {
     "0": "SUBMITTED",
@@ -94,23 +93,6 @@ def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
         return f"{parts[1]}.{market}"
     market = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}.get(second, second)
     return f"{parts[0]}.{market}"
-
-
-def is_star_market_symbol(symbol: Optional[str]) -> bool:
-    normalized = normalize_symbol(symbol)
-    if not normalized:
-        return False
-    parts = normalized.split(".")
-    return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
-
-
-def is_bj_market_symbol(symbol: Optional[str]) -> bool:
-    normalized = normalize_symbol(symbol)
-    if not normalized:
-        return False
-    parts = normalized.split(".")
-    return len(parts) == 2 and parts[1] == "BJ"
-
 
 def safe_int(value: Any, default: int = 0) -> int:
     try:
@@ -240,6 +222,21 @@ def parse_dt(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(text_value)
     except Exception:
         return None
+
+
+def submission_result_retryable(value: Any) -> Optional[bool]:
+    if not isinstance(value, dict) or "retryable" not in value:
+        return None
+    retryable = value.get("retryable")
+    if retryable is None:
+        return None
+    if isinstance(retryable, str):
+        lowered = retryable.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    return bool(retryable)
 
 
 def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quantity: int = 0) -> str:
@@ -579,19 +576,6 @@ def _propagate_parent_order_state(db: Session, parent: ExternalTradingOrder) -> 
         child.updated_at = now
 
 
-def _collect_related_execution_ids(db: Session, row: Optional[ExternalTradingOrder]) -> set:
-    execution_ids = set()
-    if not row:
-        return execution_ids
-    if row.execution_id:
-        execution_ids.add(row.execution_id)
-    if _role(row) == "PARENT":
-        for child in _child_orders(db, row.id):
-            if child.execution_id:
-                execution_ids.add(child.execution_id)
-    return execution_ids
-
-
 def _resize_child_orders_for_parent_clip(
     db: Session,
     parent: ExternalTradingOrder,
@@ -844,7 +828,6 @@ def record_submission_result(
     insufficient_sellable_block_until: Optional[datetime] = None,
 ) -> None:
     now = datetime.now()
-    execution_ids = set()
     for item in response_orders or []:
         client_order_id = item.get("client_order_id")
         row = None
@@ -873,6 +856,7 @@ def record_submission_result(
             insufficient_sellable_block_until=insufficient_sellable_block_until,
         )
         raw_status = item.get("raw_status")
+        retryable = submission_result_retryable(item)
         filled_quantity = order_event_filled_quantity(
             item,
             raw_status,
@@ -880,8 +864,8 @@ def record_submission_result(
             quantity=row.quantity,
         )
         response_status = str(item.get("status") or "").upper()
-        if item.get("ok") is False and response_status in NON_RETRYABLE_SUBMISSION_STATUSES:
-            lifecycle = response_status
+        if item.get("ok") is False and retryable is False:
+            lifecycle = response_status or ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
         else:
             lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
         if item.get("ok") is False and lifecycle not in TERMINAL_ORDER_STATUSES:
@@ -899,9 +883,6 @@ def record_submission_result(
         row.raw_submit_result = item
         row.updated_at = now
         _propagate_parent_order_state(db, row)
-        execution_ids.update(_collect_related_execution_ids(db, row))
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
 
 
 def record_cancel_result(
@@ -911,7 +892,6 @@ def record_cancel_result(
     response_orders: List[Dict[str, Any]],
 ) -> None:
     now = datetime.now()
-    execution_ids = set()
     for item in response_orders or []:
         client_order_id = item.get("client_order_id")
         row = None
@@ -956,10 +936,6 @@ def record_cancel_result(
         row.raw_order_event = item
         row.updated_at = now
         _propagate_parent_order_state(db, row)
-        execution_ids.update(_collect_related_execution_ids(db, row))
-
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
 
 
 def _find_order_for_event(db: Session, external_trading_account_id: int, event: Dict[str, Any]) -> Optional[ExternalTradingOrder]:
@@ -1000,7 +976,6 @@ def _find_order_for_event(db: Session, external_trading_account_id: int, event: 
 def process_order_events(db: Session, *, external_trading_account_id: int, orders: List[Dict[str, Any]]) -> int:
     updated = 0
     now = datetime.now()
-    execution_ids = set()
     for event in orders or []:
         row = _find_order_for_event(db, external_trading_account_id, event)
         if not row:
@@ -1027,10 +1002,7 @@ def process_order_events(db: Session, *, external_trading_account_id: int, order
         row.raw_order_event = event
         row.updated_at = now
         _propagate_parent_order_state(db, row)
-        execution_ids.update(_collect_related_execution_ids(db, row))
         updated += 1
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
     return updated
 
 
@@ -1286,7 +1258,6 @@ def _allocate_quantity_to_child_orders(
 def process_trade_events(db: Session, *, external_trading_account_id: int, trades: List[Dict[str, Any]]) -> int:
     inserted = 0
     now = datetime.now()
-    execution_ids = set()
     for event in trades or []:
         order = _find_order_for_event(db, external_trading_account_id, event)
         if not order:
@@ -1327,9 +1298,6 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
                 event,
                 estimated_fee_increment=estimated_fee_increment,
             )
-            for child in updated_children:
-                if child.execution_id:
-                    execution_ids.add(child.execution_id)
         else:
             _apply_fill_to_ledger(db, order, quantity, price, fee_total=estimated_fee_increment.get("fee_total", 0.0))
 
@@ -1337,11 +1305,7 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
         _propagate_parent_order_state(db, order)
         order.last_event_at = fill.traded_at
         order.updated_at = now
-        if order.execution_id:
-            execution_ids.add(order.execution_id)
         inserted += 1
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
     return inserted
 
 
@@ -2196,7 +2160,6 @@ def reconcile_deliver_records(
             normalized_records.append({"status": "UNMATCHED", "order_id": None, **normalized})
 
     applied = []
-    execution_ids = set()
     for group in fee_groups.values():
         order = group["order"]
         applied_item = apply_fee_reconciliation(
@@ -2209,9 +2172,6 @@ def reconcile_deliver_records(
         )
         applied_item["deliver_record_ids"] = group["deliver_record_ids"]
         applied.append(applied_item)
-        execution_ids.update(_collect_related_execution_ids(db, order))
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
 
     return {
         "received": len(records or []),
@@ -2504,26 +2464,8 @@ def build_netted_target_execution_plan(
             quantity = sum(safe_int(item.get("quantity")) for item in allocations)
             if quantity <= 0:
                 continue
-            if is_bj_market_symbol(symbol):
-                skipped.append({
-                    "symbol": symbol,
-                    "side": side,
-                    "quantity": quantity,
-                    "reason": "NOT_SUPPORTED",
-                    "message": "PTrade执行器暂不支持北交所标的 %s，已跳过" % symbol,
-                })
-                continue
             if side == "BUY":
                 raw_buy_quantity = quantity
-                if is_star_market_symbol(symbol) and 0 < quantity < 200:
-                    skipped.append({
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                        "reason": "SKIPPED_INVALID_LOT",
-                        "message": "科创板最低买入申报200股，计划买入%d股，已跳过" % quantity,
-                    })
-                    continue
                 quantity = (quantity // order_lot_size) * order_lot_size
                 if quantity <= 0 and allocations:
                     skipped.append({
@@ -2546,30 +2488,6 @@ def build_netted_target_execution_plan(
                         trimmed_allocations.append(trimmed)
                         remaining_to_keep -= kept
                 allocations = trimmed_allocations
-            if side == "SELL" and is_star_market_symbol(symbol) and 0 < quantity < 200:
-                account_available_candidates = [
-                    safe_int(item.get("account_available_quantity"), -1)
-                    for item in allocations
-                    if safe_int(item.get("account_available_quantity"), -1) >= 0
-                ]
-                account_available_quantity = (
-                    max(account_available_candidates)
-                    if account_available_candidates
-                    else sum(safe_int(item.get("available_quantity")) for item in allocations)
-                )
-                if quantity != account_available_quantity:
-                    skipped.append({
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                        "account_available_quantity": account_available_quantity,
-                        "reason": "SKIPPED_INVALID_LOT",
-                        "message": (
-                            "科创板最低卖出申报200股，后端账本可卖%d股，计划卖出%d股，已跳过"
-                            % (account_available_quantity, quantity)
-                        ),
-                    })
-                    continue
             if quantity <= 0:
                 continue
             external_orders.append({
@@ -2618,7 +2536,6 @@ def build_netted_target_execution_plan(
 
 def apply_internal_crosses(db: Session, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     applied = []
-    execution_ids = set()
     now = datetime.now()
     for cross in plan.get("internal_crosses") or []:
         price = safe_float(cross.get("price"))
@@ -2676,11 +2593,7 @@ def apply_internal_crosses(db: Session, plan: Dict[str, Any]) -> List[Dict[str, 
                 )
                 _apply_fill_to_ledger(db, order, quantity, price)
                 _refresh_order_from_fill_totals(db, order)
-                if order.execution_id:
-                    execution_ids.add(order.execution_id)
                 applied.append(serialize_order(order))
-    for execution_id in execution_ids:
-        refresh_execution_status(db, execution_id)
     return applied
 
 
@@ -2831,34 +2744,3 @@ def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
-
-def summarize_execution_orders(db: Session, execution_id: Optional[int]) -> Tuple[str, List[Dict[str, Any]]]:
-    if not execution_id:
-        return "SUBMITTED", []
-    orders = (
-        db.query(ExternalTradingOrder)
-        .filter(ExternalTradingOrder.execution_id == execution_id)
-        .order_by(ExternalTradingOrder.id.asc())
-        .all()
-    )
-    if not orders:
-        return "SUBMITTED", []
-    statuses = {order.status for order in orders}
-    has_filled_quantity = any(safe_int(order.filled_quantity) > 0 for order in orders)
-    if statuses <= {"FILLED"}:
-        status = "FILLED"
-    elif statuses.intersection({"PARTIALLY_FILLED"}) or has_filled_quantity:
-        status = "PARTIALLY_FILLED"
-    elif statuses.intersection(BLOCKED_ORDER_STATUSES):
-        status = "BLOCKED"
-    elif statuses <= {"REJECTED", "NOT_SUPPORTED", "FAILED", "CANCELED"}:
-        status = "FAILED"
-    elif statuses.intersection({"REJECTED", "NOT_SUPPORTED", "FAILED", "CANCELED", "PARTIALLY_CANCELED"}):
-        status = "PARTIALLY_FAILED"
-    else:
-        status = "SUBMITTED"
-    return status, [serialize_order(order) for order in orders]
-
-
-def refresh_execution_status(db: Session, execution_id: Optional[int]) -> Optional[str]:
-    return None

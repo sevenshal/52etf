@@ -37,7 +37,6 @@ from .external_trading_ledger import (
     normalize_symbol,
     record_cancel_result,
     record_submission_result,
-    refresh_execution_status,
     safe_int,
     serialize_order,
 )
@@ -231,8 +230,7 @@ def _parent_order_obsolete(
     return False
 
 
-def _propagate_parent_status_for_executor(db, parent: ExternalTradingOrder) -> Set[int]:
-    execution_ids = set()
+def _propagate_parent_status_for_executor(db, parent: ExternalTradingOrder) -> None:
     for child in _children_for_parent(db, parent.id):
         child.broker_order_id = parent.broker_order_id or child.broker_order_id
         child.entrust_no = parent.entrust_no or child.entrust_no
@@ -241,19 +239,16 @@ def _propagate_parent_status_for_executor(db, parent: ExternalTradingOrder) -> S
         child.status = parent.status
         child.last_event_at = parent.last_event_at
         child.updated_at = datetime.now()
-        if child.execution_id:
-            execution_ids.add(child.execution_id)
-    return execution_ids
 
 
-def _mark_parent_failed_without_broker_id(db, parent: ExternalTradingOrder, reason: str) -> Set[int]:
+def _mark_parent_failed_without_broker_id(db, parent: ExternalTradingOrder, reason: str) -> None:
     now = datetime.now()
     parent.status = "FAILED"
     parent.cancel_reason = reason
     parent.message = "订单没有券商订单号，无法撤单，已标记失败"
     parent.last_event_at = now
     parent.updated_at = now
-    return _propagate_parent_status_for_executor(db, parent)
+    _propagate_parent_status_for_executor(db, parent)
 
 
 async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str, Any]:
@@ -262,7 +257,6 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
     cancel_items = []
     cancel_reason_by_client_id: Dict[str, str] = {}
     failed_without_broker = 0
-    refreshed_execution_ids: Set[int] = set()
 
     with get_external_trading_db_ctx() as db:
         target_versions = _current_target_versions(db, account_pk)
@@ -288,8 +282,8 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
             reason = "signal_changed" if stale_signal else "timeout_reprice"
             order_id = parent.broker_order_id or parent.entrust_no
             if not order_id:
-                refreshed_execution_ids.update(_mark_parent_failed_without_broker_id(db, parent, reason))
                 failed_without_broker += 1
+                _mark_parent_failed_without_broker_id(db, parent, reason)
                 continue
 
             parent.cancel_reason = reason
@@ -300,9 +294,6 @@ async def _cancel_stale_or_timed_out_orders(account: Dict[str, Any]) -> Dict[str
                 "client_order_id": parent.client_order_id,
             })
             cancel_reason_by_client_id[parent.client_order_id] = reason
-
-        for execution_id in refreshed_execution_ids:
-            refresh_execution_status(db, execution_id)
 
     if not cancel_items:
         return {
@@ -464,7 +455,6 @@ def _mark_submission_error(parent_client_order_ids: List[str], message: str) -> 
             .filter(ExternalTradingOrder.client_order_id.in_(parent_client_order_ids))
             .all()
         )
-        execution_ids = set()
         now = datetime.now()
         uncertain = "响应超时" in message or "timeout" in message.lower()
         for row in rows:
@@ -472,9 +462,7 @@ def _mark_submission_error(parent_client_order_ids: List[str], message: str) -> 
             row.message = message[:1000]
             row.last_event_at = now
             row.updated_at = now
-            execution_ids.update(_propagate_parent_status_for_executor(db, row))
-        for execution_id in execution_ids:
-            refresh_execution_status(db, execution_id)
+            _propagate_parent_status_for_executor(db, row)
 
 
 async def _submit_current_targets(
