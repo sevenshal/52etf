@@ -289,6 +289,30 @@ const formatSymbolList = (symbols, symbolNames = {}) => {
   return items.length ? items.join(', ') : '-';
 };
 
+const getSymbolWeightValue = (weights, symbol) => {
+  if (!weights || typeof weights !== 'object') return undefined;
+  const normalized = normalizeDisplaySymbol(symbol);
+  if (!normalized) return undefined;
+  const base = normalized.endsWith('.US') ? normalized.slice(0, -3) : normalized.split('.')[0];
+  return weights[normalized] ?? weights[symbol] ?? weights[base];
+};
+
+const formatTargetWeightPercent = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '';
+  return `${(Number(value) * 100).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}%`;
+};
+
+const formatTargetSymbolList = (symbols, symbolNames = {}, targetWeights = {}) => {
+  const items = (Array.isArray(symbols) ? symbols : [])
+    .map(symbol => {
+      const display = formatSymbolDisplay(symbol, symbolNames);
+      const weightText = formatTargetWeightPercent(getSymbolWeightValue(targetWeights, symbol));
+      return weightText ? `${display} ${weightText}` : display;
+    })
+    .filter(Boolean);
+  return items.length ? items.join(', ') : '-';
+};
+
 const flattenSymbolOptions = options => (
   (options || []).flatMap(item => (Array.isArray(item?.options) ? item.options : [item])).filter(Boolean)
 );
@@ -3224,7 +3248,13 @@ const FactorLab = ({ initialTab = 'single' }) => {
                     <div className="factor-lab-compact-stats">
                       <span>卖出 {formatSymbolList(selectedLiveConfig.last_signal_payload.sell_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
                       <span>补位 {formatSymbolList(selectedLiveConfig.last_signal_payload.buy_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
-                      <span>目标 {formatSymbolList(selectedLiveConfig.last_signal_payload.target_symbols, selectedLiveConfig.last_signal_payload.symbol_names)}</span>
+                      <span>
+                        目标 {formatTargetSymbolList(
+                          selectedLiveConfig.last_signal_payload.target_symbols,
+                          selectedLiveConfig.last_signal_payload.symbol_names,
+                          selectedLiveConfig.last_signal_payload.target_weights,
+                        )}
+                      </span>
                     </div>
                   </Space>
                 ) : (
