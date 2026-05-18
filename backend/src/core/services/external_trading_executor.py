@@ -32,6 +32,7 @@ from .external_trading_ledger import (
     STRATEGY_NETTED_EXECUTOR,
     apply_internal_crosses,
     build_netted_target_execution_plan,
+    collect_internal_cross_reference_symbols,
     create_netted_execution_orders,
     expire_insufficient_sellable_blocks,
     normalize_symbol,
@@ -496,11 +497,7 @@ async def _submit_current_targets(
             clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
         )
-        symbols = sorted({
-            normalize_symbol(cross.get("symbol"))
-            for cross in (plan.get("internal_crosses") or [])
-            if safe_int(cross.get("quantity")) > 0 and normalize_symbol(cross.get("symbol"))
-        })
+        symbols = collect_internal_cross_reference_symbols(plan)
 
     if symbols:
         reference_prices = await _reference_prices_for_plan(account_pk, symbols)

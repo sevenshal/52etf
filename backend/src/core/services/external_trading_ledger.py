@@ -2188,6 +2188,19 @@ def _reference_price_for_symbol(reference_prices: Dict[str, float], symbol: str)
     )
 
 
+def collect_internal_cross_reference_symbols(plan: Optional[Dict[str, Any]]) -> List[str]:
+    symbols: List[str] = []
+    for cross in (plan or {}).get("internal_crosses") or []:
+        symbol = normalize_symbol(cross.get("symbol"))
+        if not symbol or safe_int(cross.get("quantity")) <= 0:
+            continue
+        if safe_float(cross.get("price")) > 0 and str(cross.get("status") or "").upper() == "READY":
+            continue
+        if symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
 def _subtract_from_demands(demands: List[Dict[str, Any]], quantity: int) -> List[Dict[str, Any]]:
     allocations = []
     remaining = max(quantity, 0)

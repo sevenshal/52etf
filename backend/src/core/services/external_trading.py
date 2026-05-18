@@ -4,8 +4,9 @@ import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import WebSocket
 
@@ -19,9 +20,76 @@ from .external_trading_crypto import decrypt_message, encrypt_message
 
 logger = logging.getLogger(__name__)
 
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+A_SHARE_OPEN = dtime(9, 30)
+A_SHARE_MORNING_CLOSE = dtime(11, 30)
+A_SHARE_AFTERNOON_OPEN = dtime(13, 0)
+A_SHARE_CLOSE = dtime(15, 0)
+PTRADE_MARKET_HOURS_ENFORCED_ACTIONS = {
+    "get_quotes",
+    "get_snapshots",
+    "place_orders",
+    "cancel_orders",
+    "get_account_snapshot",
+    "get_positions",
+    "get_assets",
+    "get_today_orders",
+    "get_deliver",
+}
+_trading_day_cache: Dict[date, bool] = {}
+
 
 class ExternalTradingConnectionError(Exception):
     """Raised when an external trading account is unavailable or rejects a command."""
+
+
+def _china_now() -> datetime:
+    return datetime.now(CHINA_TZ)
+
+
+def _is_china_trading_day(check_date: date) -> bool:
+    if check_date in _trading_day_cache:
+        return _trading_day_cache[check_date]
+    if check_date.weekday() >= 5:
+        _trading_day_cache[check_date] = False
+        return False
+    try:
+        from .tushare import TushareService
+
+        calendar = TushareService.get_instance().get_trade_calendar_frame(check_date, check_date)
+        if not calendar.empty:
+            row = calendar.iloc[0]
+            is_open = int(row.get("is_open") or 0) == 1
+            _trading_day_cache[check_date] = is_open
+            return is_open
+    except Exception as exc:
+        logger.warning("A-share trading calendar check failed for %s: %s", check_date, exc)
+    _trading_day_cache[check_date] = True
+    return True
+
+
+def _is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
+    current = now or _china_now()
+    if current.tzinfo:
+        current = current.astimezone(CHINA_TZ)
+    if not _is_china_trading_day(current.date()):
+        return False
+    current_time = current.time()
+    return (
+        A_SHARE_OPEN <= current_time <= A_SHARE_MORNING_CLOSE
+        or A_SHARE_AFTERNOON_OPEN <= current_time <= A_SHARE_CLOSE
+    )
+
+
+def _ensure_ptrade_command_window(action: str) -> None:
+    if action not in PTRADE_MARKET_HOURS_ENFORCED_ACTIONS:
+        return
+    if _is_a_share_trading_window():
+        return
+    now_text = _china_now().strftime("%Y-%m-%d %H:%M:%S")
+    raise ExternalTradingConnectionError(
+        f"当前非A股开盘时段（Asia/Shanghai {now_text}），拒绝发送 {action} 指令到 PTrade"
+    )
 
 
 @dataclass
@@ -192,6 +260,7 @@ class ExternalTradingHub:
             conn = self._connections.get(account_pk)
             if not conn:
                 raise ExternalTradingConnectionError("外部交易账号未连接")
+            _ensure_ptrade_command_window(action)
 
             request_id = uuid.uuid4().hex
             loop = asyncio.get_running_loop()

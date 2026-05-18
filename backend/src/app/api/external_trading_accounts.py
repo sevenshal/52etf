@@ -53,6 +53,7 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_FACTOR_LIVE,
     STRATEGY_W20,
     build_netted_target_execution_plan,
+    collect_internal_cross_reference_symbols,
     empty_sub_account_fee_summary,
     get_external_account_fee_summary,
     get_ledger_positions,
@@ -720,11 +721,7 @@ async def _build_netted_executor_plan(
         clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
         price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
     )
-    symbols = sorted({
-        normalize_symbol(cross.get("symbol"))
-        for cross in (plan.get("internal_crosses") or [])
-        if safe_int(cross.get("quantity")) > 0 and normalize_symbol(cross.get("symbol"))
-    })
+    symbols = collect_internal_cross_reference_symbols(plan)
     connected = external_trading_hub.get_status(account.id).get("connected")
     if require_connection and not connected:
         raise ExternalTradingConnectionError("外部交易账号未连接")
