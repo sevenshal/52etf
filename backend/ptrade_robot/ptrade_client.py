@@ -935,6 +935,14 @@ def is_star_market_symbol(symbol):
     return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
 
 
+def is_bj_market_symbol(symbol):
+    api_symbol = convert_to_api_code(symbol)
+    if not api_symbol:
+        return False
+    parts = str(api_symbol).upper().split(".")
+    return len(parts) == 2 and parts[1] == "BJ"
+
+
 def validate_market_order_type(client_symbol, market_type):
     market_type = int(market_type)
     allowed = (0, 1, 2, 4) if is_sh_market_symbol(client_symbol) else (0, 2, 3, 4, 5)
@@ -1049,19 +1057,6 @@ def apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, qua
             "SELL %s 数量按可卖数量裁剪: 请求=%d, 持仓=%d, 可卖=%d, 提交=%d"
             % (client_symbol, quantity, position_quantity, sellable_quantity, clipped_quantity)
         )
-    if star_market and 0 < clipped_quantity < 200 and clipped_quantity != sellable_quantity:
-        message = (
-            "科创板最低卖出申报200股，当前持仓%d股，可卖%d股，计划卖出%d股，已跳过"
-            % (position_quantity, sellable_quantity, clipped_quantity)
-        )
-        meta.update({
-            "submitted_quantity": 0,
-            "quantity_clipped": True,
-            "block_reason": "invalid_star_market_min_sell_quantity",
-            "block_message": message,
-        })
-        log_warn("SELL %s 数量不满足科创板最低申报规则: %s" % (client_symbol, message))
-        return 0, meta
     return clipped_quantity, meta
 
 
@@ -1079,6 +1074,103 @@ def order_clip_fields(order_request, quantity):
         "block_reason": order_request.get("_block_reason"),
         "block_message": order_request.get("_block_message"),
     }
+
+
+def make_preflight_rejection(
+    order_request,
+    client_symbol,
+    api_symbol,
+    side,
+    requested_quantity,
+    status,
+    error_code,
+    message,
+):
+    order_request["_requested_quantity"] = requested_quantity
+    order_request["_submitted_quantity"] = 0
+    order_request["_quantity_clipped"] = False
+    order_request.setdefault("_sellable_quantity", None)
+    order_request.setdefault("_position_quantity", None)
+    order_request.setdefault("_block_reason", None)
+    order_request.setdefault("_block_message", None)
+    log.error("交易规则校验失败: %s" % message)
+    return {
+        "ok": False,
+        "client_order_id": order_request.get("client_order_id"),
+        "status": status,
+        "error_code": error_code,
+        "retryable": False,
+        "symbol": api_symbol,
+        "client_symbol": client_symbol,
+        "side": side,
+        "quantity": 0,
+        **order_clip_fields(order_request, 0),
+        "order_type": normalize_order_type(order_request),
+        "calculated_price": None,
+        "price_source": None,
+        "price_level": order_request.get("price_level"),
+        "snapshot_time": None,
+        "submitted_price": None,
+        "order_id": None,
+        "raw_status": None,
+        "message": message,
+    }
+
+
+def validate_order_rules(order_request, client_symbol, api_symbol, side, quantity, requested_quantity):
+    if is_bj_market_symbol(api_symbol or client_symbol):
+        return make_preflight_rejection(
+            order_request,
+            client_symbol,
+            api_symbol,
+            side,
+            requested_quantity,
+            "NOT_SUPPORTED",
+            "UNSUPPORTED_MARKET",
+            "PTrade执行器暂不支持北交所标的 %s，未提交订单" % api_symbol,
+        )
+
+    if not is_star_market_symbol(api_symbol or client_symbol):
+        return None
+
+    if side == "BUY" and 0 < quantity < 200:
+        return make_preflight_rejection(
+            order_request,
+            client_symbol,
+            api_symbol,
+            side,
+            requested_quantity,
+            "REJECTED",
+            "INVALID_LOT_SIZE",
+            "科创板最低买入申报200股，计划买入%d股，未提交订单" % quantity,
+        )
+
+    if side == "SELL" and 0 < quantity < 200:
+        sellable_quantity = order_request.get("_sellable_quantity")
+        position_quantity = order_request.get("_position_quantity")
+        if sellable_quantity is None or position_quantity is None:
+            quantities = get_position_quantities(client_symbol, api_symbol)
+            sellable_quantity = quantities.get("sellable_quantity") or 0
+            position_quantity = quantities.get("position_quantity") or 0
+            order_request["_sellable_quantity"] = sellable_quantity
+            order_request["_position_quantity"] = position_quantity
+        sellable_quantity = int(sellable_quantity or 0)
+        position_quantity = int(position_quantity or 0)
+        if quantity != sellable_quantity:
+            return make_preflight_rejection(
+                order_request,
+                client_symbol,
+                api_symbol,
+                side,
+                requested_quantity,
+                "REJECTED",
+                "INVALID_LOT_SIZE",
+                (
+                    "科创板最低卖出申报200股，当前持仓%d股，可卖%d股，计划卖出%d股，未提交订单"
+                    % (position_quantity, sellable_quantity, quantity)
+                ),
+            )
+    return None
 
 
 def get_market_protection_price(order_request, client_symbol, side, quantity):
@@ -1139,6 +1231,8 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
                 "ok": False,
                 "client_order_id": client_order_id,
                 "status": "FAILED",
+                "error_code": "BROKER_REJECTED",
+                "retryable": True,
                 "symbol": api_symbol,
                 "client_symbol": client_symbol,
                 "side": side,
@@ -1227,6 +1321,8 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
         "ok": status == "SUCCESS",
         "client_order_id": client_order_id,
         "status": status,
+        "error_code": "BROKER_REJECTED" if raw_status == "9" else None,
+        "retryable": True if raw_status == "9" else None,
         "symbol": api_symbol,
         "client_symbol": client_symbol,
         "side": side,
@@ -1258,8 +1354,10 @@ def place_single_order(order_request, index):
     if quantity <= 0:
         raise Exception("orders[%d].quantity must be greater than 0" % index)
 
-    quantity, clip_meta = apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, quantity)
     order_request["_requested_quantity"] = requested_quantity
+    order_request["_submitted_quantity"] = quantity
+    order_request["_quantity_clipped"] = False
+    quantity, clip_meta = apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, quantity)
     order_request["_submitted_quantity"] = quantity
     order_request["_quantity_clipped"] = clip_meta.get("quantity_clipped")
     order_request["_sellable_quantity"] = clip_meta.get("sellable_quantity")
@@ -1267,6 +1365,9 @@ def place_single_order(order_request, index):
     order_request["_block_reason"] = clip_meta.get("block_reason")
     order_request["_block_message"] = clip_meta.get("block_message")
     order_request["clip_sell_to_available"] = clip_meta.get("clip_sell_to_available")
+    rule_result = validate_order_rules(order_request, client_symbol, api_symbol, side, quantity, requested_quantity)
+    if rule_result:
+        return rule_result
     if quantity <= 0:
         message = clip_meta.get("block_message") or (
             "SELL %s 可卖数量不足，请求%d，持仓%d，可卖%d，未提交订单" % (

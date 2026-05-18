@@ -45,12 +45,14 @@ TERMINAL_ORDER_STATUSES = {
     "CANCELED",
     "PARTIALLY_CANCELED",
     "REJECTED",
+    "NOT_SUPPORTED",
     "FAILED",
     "EXPIRED",
     STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
 }
 PASSIVE_CHILD_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
+NON_RETRYABLE_SUBMISSION_STATUSES = {"REJECTED", "NOT_SUPPORTED"}
 
 PTRADE_STATUS_MAP = {
     "0": "SUBMITTED",
@@ -62,7 +64,7 @@ PTRADE_STATUS_MAP = {
     "6": "CANCELED",
     "7": "PARTIALLY_FILLED",
     "8": "FILLED",
-    "9": "REJECTED",
+    "9": "FAILED",
     "+": "ACKNOWLEDGED",
     "-": "FAILED",
     "V": "ACKNOWLEDGED",
@@ -100,6 +102,14 @@ def is_star_market_symbol(symbol: Optional[str]) -> bool:
         return False
     parts = normalized.split(".")
     return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
+
+
+def is_bj_market_symbol(symbol: Optional[str]) -> bool:
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return False
+    parts = normalized.split(".")
+    return len(parts) == 2 and parts[1] == "BJ"
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -746,13 +756,6 @@ def _create_quantity_clip_block_orders(
 def _block_type_for_quantity_clip(item: Dict[str, Any], requested_quantity: int) -> Tuple[str, str, str]:
     explicit_reason = str(item.get("block_reason") or "").strip()
     explicit_message = str(item.get("block_message") or item.get("message") or "").strip()
-    if explicit_reason == "invalid_star_market_min_sell_quantity":
-        return (
-            STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
-            explicit_reason,
-            explicit_message or "科创板最低卖出申报数量限制，阻断到下一交易日开盘后重试",
-        )
-
     position_quantity = safe_int(item.get("position_quantity"), -1)
     if position_quantity < 0:
         position_quantity = safe_int(item.get("sellable_quantity"), 0)
@@ -876,7 +879,11 @@ def record_submission_result(
             current=row.filled_quantity,
             quantity=row.quantity,
         )
-        lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
+        response_status = str(item.get("status") or "").upper()
+        if item.get("ok") is False and response_status in NON_RETRYABLE_SUBMISSION_STATUSES:
+            lifecycle = response_status
+        else:
+            lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
         if item.get("ok") is False and lifecycle not in TERMINAL_ORDER_STATUSES:
             lifecycle = "FAILED"
         lifecycle = merge_lifecycle_status(row.status, lifecycle)
@@ -887,7 +894,7 @@ def record_submission_result(
         row.entrust_no = str(item.get("entrust_no")) if item.get("entrust_no") else row.entrust_no
         row.submitted_price = safe_float(item.get("submitted_price"), row.submitted_price)
         row.message = item.get("message")
-        row.submitted_at = now if row.status not in {"FAILED", "REJECTED"} else row.submitted_at
+        row.submitted_at = now if row.status not in {"FAILED", "REJECTED", "NOT_SUPPORTED"} else row.submitted_at
         row.last_event_at = now
         row.raw_submit_result = item
         row.updated_at = now
@@ -2495,6 +2502,17 @@ def build_netted_target_execution_plan(
             )
             order_lot_size = max(safe_int(order_policy.get("lot_size"), lot_size), 1)
             quantity = sum(safe_int(item.get("quantity")) for item in allocations)
+            if quantity <= 0:
+                continue
+            if is_bj_market_symbol(symbol):
+                skipped.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "reason": "NOT_SUPPORTED",
+                    "message": "PTrade执行器暂不支持北交所标的 %s，已跳过" % symbol,
+                })
+                continue
             if side == "BUY":
                 raw_buy_quantity = quantity
                 if is_star_market_symbol(symbol) and 0 < quantity < 200:
@@ -2833,9 +2851,9 @@ def summarize_execution_orders(db: Session, execution_id: Optional[int]) -> Tupl
         status = "PARTIALLY_FILLED"
     elif statuses.intersection(BLOCKED_ORDER_STATUSES):
         status = "BLOCKED"
-    elif statuses <= {"REJECTED", "FAILED", "CANCELED"}:
+    elif statuses <= {"REJECTED", "NOT_SUPPORTED", "FAILED", "CANCELED"}:
         status = "FAILED"
-    elif statuses.intersection({"REJECTED", "FAILED", "CANCELED", "PARTIALLY_CANCELED"}):
+    elif statuses.intersection({"REJECTED", "NOT_SUPPORTED", "FAILED", "CANCELED", "PARTIALLY_CANCELED"}):
         status = "PARTIALLY_FAILED"
     else:
         status = "SUBMITTED"
