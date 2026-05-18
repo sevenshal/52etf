@@ -1560,21 +1560,16 @@ def stringify_unknown_fields(obj):
 
 def get_order_side(order_item):
     entrust_bs = value_of(order_item, "entrust_bs")
-    if str(entrust_bs).upper() in ("1", "BUY", "B"):
+    if str(entrust_bs) == "1":
         return "BUY"
-    if str(entrust_bs).upper() in ("2", "SELL", "S"):
+    if str(entrust_bs) == "2":
         return "SELL"
 
     order_id = first_value(order_item, ("order_id", "id", "entrust_no"))
     side = lookup_order_side(order_id) or lookup_order_side(value_of(order_item, "entrust_no"))
     if side:
         return side
-
-    quantity = first_value(order_item, ("amount", "quantity", "entrust_amount"), 0)
-    try:
-        return "BUY" if float(quantity) >= 0 else "SELL"
-    except Exception:
-        return None
+    return None
 
 
 def get_order_filled_quantity(order_item):
@@ -1590,13 +1585,6 @@ def get_order_filled_quantity(order_item):
         quantity = abs(int(quantity or 0))
     except Exception:
         quantity = 0
-    status = str(value_of(order_item, "status", ""))
-    if status == "8" and quantity <= 0:
-        total_quantity = first_value(order_item, ("amount", "quantity", "entrust_amount"), 0) or 0
-        try:
-            quantity = abs(int(total_quantity or 0))
-        except Exception:
-            quantity = 0
     return quantity
 
 
