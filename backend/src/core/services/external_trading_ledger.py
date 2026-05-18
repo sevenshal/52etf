@@ -2257,15 +2257,20 @@ def _build_demand_rows(
         .filter(ExternalTradingAccount.id == external_trading_account_id)
         .first()
     )
-    sub_query = db.query(ExternalTradingSubAccount).filter(
+    account_scope_query = db.query(ExternalTradingSubAccount).filter(
         ExternalTradingSubAccount.external_trading_account_id == external_trading_account_id,
-        ExternalTradingSubAccount.enabled == True,  # noqa: E712
     )
     if account_id:
-        sub_query = sub_query.filter(ExternalTradingSubAccount.account_id == account_id)
+        account_scope_query = account_scope_query.filter(ExternalTradingSubAccount.account_id == account_id)
+    account_scope_sub_accounts = {row.id: row for row in account_scope_query.all()}
+    sub_accounts = {
+        row_id: row
+        for row_id, row in account_scope_sub_accounts.items()
+        if row.enabled
+    }
     if sub_account_ids:
-        sub_query = sub_query.filter(ExternalTradingSubAccount.id.in_(sub_account_ids))
-    sub_accounts = {row.id: row for row in sub_query.all()}
+        requested_ids = {safe_int(item) for item in sub_account_ids}
+        sub_accounts = {row_id: row for row_id, row in sub_accounts.items() if row_id in requested_ids}
     if not sub_accounts:
         return []
 
@@ -2287,6 +2292,38 @@ def _build_demand_rows(
         sub_account_id: get_open_order_quantities(db, sub_account_id)
         for sub_account_id in sub_accounts.keys()
     }
+    ledger_by_account_scope_sub_account = {
+        sub_account_id: (
+            ledger_by_sub_account[sub_account_id]
+            if sub_account_id in ledger_by_sub_account
+            else get_ledger_positions(db, sub_account_id)
+        )
+        for sub_account_id in account_scope_sub_accounts.keys()
+    }
+    open_by_account_scope_sub_account = {
+        sub_account_id: (
+            open_by_sub_account[sub_account_id]
+            if sub_account_id in open_by_sub_account
+            else get_open_order_quantities(db, sub_account_id)
+        )
+        for sub_account_id in account_scope_sub_accounts.keys()
+    }
+    account_available_by_symbol: Dict[str, int] = {}
+    for sub_account_id, ledger_positions in ledger_by_account_scope_sub_account.items():
+        open_quantities_by_symbol = open_by_account_scope_sub_account.get(sub_account_id, {})
+        for raw_symbol, position in (ledger_positions or {}).items():
+            normalized_symbol = normalize_symbol(raw_symbol)
+            if not normalized_symbol:
+                continue
+            current_quantity = safe_int(getattr(position, "quantity", 0))
+            pending_sell = safe_int(open_quantities_by_symbol.get(normalized_symbol, {}).get("SELL"))
+            available_quantity = max(
+                safe_int(getattr(position, "available_quantity", current_quantity), current_quantity) - pending_sell,
+                0,
+            )
+            account_available_by_symbol[normalized_symbol] = (
+                account_available_by_symbol.get(normalized_symbol, 0) + available_quantity
+            )
     now = datetime.now()
     active_sell_blocks = (
         db.query(ExternalTradingOrder)
@@ -2349,6 +2386,8 @@ def _build_demand_rows(
             "quantity": quantity,
             "remaining_quantity": quantity,
             "current_quantity": current_quantity,
+            "available_quantity": available_quantity if side == "SELL" else 0,
+            "account_available_quantity": account_available_by_symbol.get(symbol, 0),
             "target_quantity": target_quantity,
             "effective_quantity": effective_quantity,
             "pending_buy_quantity": pending_buy,
@@ -2489,6 +2528,30 @@ def build_netted_target_execution_plan(
                         trimmed_allocations.append(trimmed)
                         remaining_to_keep -= kept
                 allocations = trimmed_allocations
+            if side == "SELL" and is_star_market_symbol(symbol) and 0 < quantity < 200:
+                account_available_candidates = [
+                    safe_int(item.get("account_available_quantity"), -1)
+                    for item in allocations
+                    if safe_int(item.get("account_available_quantity"), -1) >= 0
+                ]
+                account_available_quantity = (
+                    max(account_available_candidates)
+                    if account_available_candidates
+                    else sum(safe_int(item.get("available_quantity")) for item in allocations)
+                )
+                if quantity != account_available_quantity:
+                    skipped.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": quantity,
+                        "account_available_quantity": account_available_quantity,
+                        "reason": "SKIPPED_INVALID_LOT",
+                        "message": (
+                            "科创板最低卖出申报200股，后端账本可卖%d股，计划卖出%d股，已跳过"
+                            % (account_available_quantity, quantity)
+                        ),
+                    })
+                    continue
             if quantity <= 0:
                 continue
             external_orders.append({
