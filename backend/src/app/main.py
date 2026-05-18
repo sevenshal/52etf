@@ -50,7 +50,7 @@ if ENV == "prod":
     # 生产环境只允许特定域名
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["https://quant.framework.cn"],
+        allow_origins=["https://quant.framework.cn", "https://52etf.vip"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
