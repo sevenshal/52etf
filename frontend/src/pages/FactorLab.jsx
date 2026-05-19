@@ -1947,7 +1947,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
     if (!nextFactor) return;
     form.setFieldsValue({
       factor: nextFactor.key,
-      heatmap_windows: nextFactor.supports_windows ? nextFactor.default_windows : DEFAULT_FORM_VALUES.heatmap_windows,
+      heatmap_windows: nextFactor.default_windows || DEFAULT_FORM_VALUES.heatmap_windows,
       momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
     });
   }, [selectedSinglePool, options?.factors, form]);
@@ -2071,9 +2071,9 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const handleFactorChange = value => {
     const factor = (options?.factors || []).find(item => item.key === value);
     if (!factor) return;
-    const nextWindows = factor.supports_windows ? factor.default_windows : DEFAULT_FORM_VALUES.heatmap_windows;
+    const nextWindows = factor.default_windows || DEFAULT_FORM_VALUES.heatmap_windows;
     form.setFieldsValue({
-      heatmap_windows: factor.supports_windows ? nextWindows : DEFAULT_FORM_VALUES.heatmap_windows,
+      heatmap_windows: nextWindows,
       momentum_weights: DEFAULT_MOMENTUM_WEIGHTS,
     });
   };
@@ -2612,7 +2612,11 @@ const FactorLab = ({ initialTab = 'single' }) => {
     )
   ), [options, selectedBacktestPool]);
   const windowOptions = useMemo(() => {
-    const baseOptions = (options?.windows || [20, 60, 120]).map(item => ({
+    const windowValues = [
+      ...(options?.windows || [20, 60, 120]),
+      ...(selectedFactor?.default_windows || []),
+    ];
+    const baseOptions = [...new Set(windowValues)].sort((a, b) => Number(a) - Number(b)).map(item => ({
       label: `${item}日`,
       value: item,
     }));
