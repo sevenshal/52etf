@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Union
 
 import numpy as np
 import polars as pl
@@ -2692,6 +2692,7 @@ def build_factor_signal_plan(
     signal_date: Optional[date] = None,
     prepared_data: Optional[Dict[str, Any]] = None,
     rank_limit: int = 100,
+    next_trading_day_resolver: Optional[Callable[[date], Optional[date]]] = None,
 ) -> Dict[str, Any]:
     """Build the close-signal / next-open execution plan without running portfolio history."""
     resolved_legs = resolve_factor_legs(request.legs)
@@ -2767,7 +2768,15 @@ def build_factor_signal_plan(
     selected_symbols = [item["symbol"] for item in selected]
     sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
     rank_by_symbol = {item["symbol"]: int(item["rank"]) for item in ranked}
-    is_signal_day = is_rebalance_day(dates, date_index, rebalance_frequency)
+    if date_index < len(dates) - 1:
+        is_signal_day = is_rebalance_day(dates, date_index, rebalance_frequency)
+        next_trading_day = dates[date_index + 1]
+    else:
+        next_trading_day = next_trading_day_resolver(actual_signal_date) if next_trading_day_resolver else None
+        if next_trading_day and next_trading_day > actual_signal_date:
+            is_signal_day = is_rebalance_day([actual_signal_date, next_trading_day], 0, rebalance_frequency)
+        else:
+            is_signal_day = is_rebalance_day(dates, date_index, rebalance_frequency)
 
     def _portfolio_target_weights(symbols: List[str]) -> Dict[str, float]:
         if not symbols:
@@ -2893,6 +2902,7 @@ def build_factor_signal_plan(
         "rotation_mode": rotation_mode,
         "rotation_mode_label": rotation_mode_label,
         "execution_rule": "signal_close_next_open",
+        "next_trading_date": next_trading_day.isoformat() if next_trading_day else None,
         "symbol_names": symbol_names,
         "ranked": ranked_rows,
         "ranked_count": len(ranked),

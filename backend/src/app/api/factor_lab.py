@@ -5150,12 +5150,14 @@ def _build_factor_live_signal_plan(
     request = _request_payload_from_live_config(config)
     sub_account = _get_external_sub_account_for_live_config(external_db, config)
     holding_symbols = _current_holding_symbols(external_db, sub_account)
+    next_trading_day_resolver = _factor_live_next_trading_day_resolver(config)
     plan = shared_build_factor_signal_plan(
         _to_shared_backtest_config(request),
         db,
         holding_symbols=holding_symbols,
         signal_date=signal_date,
         rank_limit=rank_limit,
+        next_trading_day_resolver=next_trading_day_resolver,
     )
     plan["external_trading_account_id"] = config.external_trading_account_id
     plan["live_sub_account_id"] = config.live_sub_account_id
@@ -5396,6 +5398,21 @@ def _is_china_trading_day(check_date: date) -> bool:
 @lru_cache(maxsize=512)
 def _is_us_trading_day(check_date: date) -> bool:
     return check_date.weekday() < 5 and not MarketService.is_us_market_holiday(check_date)
+
+
+def _next_trading_day_after(check_date: date, is_trading_day: Callable[[date], bool]) -> Optional[date]:
+    next_day = check_date + timedelta(days=1)
+    for _ in range(370):
+        if is_trading_day(next_day):
+            return next_day
+        next_day += timedelta(days=1)
+    return None
+
+
+def _factor_live_next_trading_day_resolver(config: FactorLiveTradingConfig) -> Callable[[date], Optional[date]]:
+    market_kind = _factor_live_market_kind(config)
+    is_trading_day = _is_us_trading_day if market_kind == "us" else _is_china_trading_day
+    return lambda check_date: _next_trading_day_after(check_date, is_trading_day)
 
 
 def _factor_live_market_kind(config: FactorLiveTradingConfig) -> str:
