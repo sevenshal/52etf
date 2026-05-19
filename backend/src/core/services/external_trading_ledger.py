@@ -880,25 +880,38 @@ def _block_is_active_for_plan(row: ExternalTradingOrder, now: datetime) -> bool:
     return status in BLOCKED_ORDER_STATUSES
 
 
-def _non_retryable_block_matches_demand(
+def _non_retryable_block_rule(row: ExternalTradingOrder) -> Tuple[str, str]:
+    raw = row.raw_request if isinstance(row.raw_request, dict) else {}
+    submit_result = raw.get("submit_result") if isinstance(raw.get("submit_result"), dict) else {}
+    error_code = str(raw.get("error_code") or submit_result.get("error_code") or "").upper()
+    response_status = str(raw.get("response_status") or submit_result.get("status") or "").upper()
+    return response_status, error_code
+
+
+def _non_retryable_block_prevents_demand(row: ExternalTradingOrder) -> bool:
+    # 这类规则跟单个子账户无关，必须等净额父单成型后再判断，否则会误杀可合并成合法手数的订单。
+    response_status, error_code = _non_retryable_block_rule(row)
+    if response_status == "NOT_SUPPORTED" or error_code == "UNSUPPORTED_MARKET":
+        return True
+    return False
+
+
+def _non_retryable_block_matches_parent_order(
     row: ExternalTradingOrder,
     *,
     symbol: str,
     side: str,
     quantity: int,
-    available_quantity: int,
+    account_sellable_quantity: int,
 ) -> bool:
-    raw = row.raw_request if isinstance(row.raw_request, dict) else {}
-    submit_result = raw.get("submit_result") if isinstance(raw.get("submit_result"), dict) else {}
-    error_code = str(raw.get("error_code") or submit_result.get("error_code") or "").upper()
-    response_status = str(raw.get("response_status") or submit_result.get("status") or "").upper()
+    response_status, error_code = _non_retryable_block_rule(row)
     if response_status == "NOT_SUPPORTED" or error_code == "UNSUPPORTED_MARKET":
         return True
     if error_code == "INVALID_LOT_SIZE" and is_star_market_symbol(symbol):
         if side == "BUY":
             return 0 < quantity < 200
         if side == "SELL":
-            return 0 < quantity < 200 and quantity != available_quantity
+            return 0 < quantity < 200 and quantity != account_sellable_quantity
     return True
 
 
@@ -915,13 +928,7 @@ def _block_matches_demand(
     if not _block_is_active_for_plan(row, now):
         return False
     if status == STATUS_BLOCKED_NON_RETRYABLE_REJECTION:
-        return _non_retryable_block_matches_demand(
-            row,
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            available_quantity=available_quantity,
-        )
+        return _non_retryable_block_prevents_demand(row)
     return True
 
 
@@ -934,6 +941,144 @@ def _block_priority(row: ExternalTradingOrder) -> int:
     if status == STATUS_BLOCKED_INSUFFICIENT_SELLABLE:
         return 2
     return 3
+
+
+def _get_account_level_sellable_quantities(
+    db: Session,
+    *,
+    account_id: Optional[str],
+    external_trading_account_id: int,
+) -> Dict[str, int]:
+    sub_accounts_query = db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.external_trading_account_id == external_trading_account_id,
+    )
+    if account_id:
+        sub_accounts_query = sub_accounts_query.filter(ExternalTradingSubAccount.account_id == account_id)
+    sub_accounts = sub_accounts_query.all()
+    sub_account_ids = [safe_int(row.id) for row in sub_accounts if safe_int(row.id) > 0]
+    if not sub_account_ids:
+        return {}
+
+    positions = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(ExternalTradingLedgerPosition.sub_account_id.in_(sub_account_ids))
+        .all()
+    )
+    pending_sells = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.sub_account_id.in_(sub_account_ids),
+            ExternalTradingOrder.side == "SELL",
+            ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
+        )
+        .all()
+    )
+    pending_sell_by_key: Dict[Tuple[int, str], int] = {}
+    for row in pending_sells:
+        symbol = normalize_symbol(row.symbol)
+        if not symbol or not row.sub_account_id:
+            continue
+        key = (safe_int(row.sub_account_id), symbol)
+        remaining = max(safe_int(row.remaining_quantity, row.quantity - row.filled_quantity), 0)
+        pending_sell_by_key[key] = pending_sell_by_key.get(key, 0) + remaining
+
+    sellable_by_symbol: Dict[str, int] = {}
+    for row in positions:
+        symbol = normalize_symbol(row.symbol)
+        if not symbol:
+            continue
+        available_quantity = safe_int(getattr(row, "available_quantity", row.quantity), safe_int(row.quantity))
+        pending_sell = pending_sell_by_key.get((safe_int(row.sub_account_id), symbol), 0)
+        remaining_sellable = max(available_quantity - pending_sell, 0)
+        if remaining_sellable <= 0:
+            continue
+        sellable_by_symbol[symbol] = sellable_by_symbol.get(symbol, 0) + remaining_sellable
+    return sellable_by_symbol
+
+
+def _get_active_non_retryable_blocks(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    now: datetime,
+) -> Dict[Tuple[str, str], List[ExternalTradingOrder]]:
+    rows = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
+            ExternalTradingOrder.status == STATUS_BLOCKED_NON_RETRYABLE_REJECTION,
+        )
+        .all()
+    )
+    block_by_key: Dict[Tuple[str, str], List[ExternalTradingOrder]] = {}
+    for row in rows:
+        symbol = normalize_symbol(row.symbol)
+        side = str(row.side or "").upper()
+        if not symbol or side not in {"BUY", "SELL"} or not _block_is_active_for_plan(row, now):
+            continue
+        block_by_key.setdefault((symbol, side), []).append(row)
+    for same_key_rows in block_by_key.values():
+        same_key_rows.sort(key=_block_priority)
+    return block_by_key
+
+
+def _filter_parent_orders_by_non_retryable_blocks(
+    db: Session,
+    *,
+    account_id: Optional[str],
+    external_trading_account_id: int,
+    now: datetime,
+    external_orders: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not external_orders:
+        return external_orders
+    active_blocks = _get_active_non_retryable_blocks(
+        db,
+        external_trading_account_id=external_trading_account_id,
+        now=now,
+    )
+    if not active_blocks:
+        return external_orders
+    account_sellable_quantities = _get_account_level_sellable_quantities(
+        db,
+        account_id=account_id,
+        external_trading_account_id=external_trading_account_id,
+    )
+
+    filtered_orders: List[Dict[str, Any]] = []
+    for order in external_orders:
+        symbol = normalize_symbol(order.get("symbol"))
+        side = str(order.get("side") or "").upper()
+        quantity = safe_int(order.get("quantity"))
+        if not symbol or side not in {"BUY", "SELL"} or quantity <= 0:
+            filtered_orders.append(order)
+            continue
+        account_sellable_quantity = safe_int(account_sellable_quantities.get(symbol))
+        blocked_order = None
+        for candidate in active_blocks.get((symbol, side), []):
+            if _non_retryable_block_matches_parent_order(
+                candidate,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                account_sellable_quantity=account_sellable_quantity,
+            ):
+                blocked_order = candidate
+                break
+        if not blocked_order:
+            filtered_orders.append(order)
+            continue
+        skipped.append({
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "reason": blocked_order.cancel_reason,
+            "blocked_status": blocked_order.status,
+            "blocked_order_id": blocked_order.id,
+            "message": blocked_order.message or "订单被明确规则永久阻断，执行器不再重复提交",
+        })
+    return filtered_orders
 
 
 def resolve_manual_block_fill_price(
@@ -2797,6 +2942,14 @@ def build_netted_target_execution_plan(
                 "execution_policy": order_policy,
                 "allocations": allocations,
             })
+    external_orders = _filter_parent_orders_by_non_retryable_blocks(
+        db,
+        account_id=account_id,
+        external_trading_account_id=external_trading_account_id,
+        now=datetime.now(),
+        external_orders=external_orders,
+        skipped=skipped,
+    )
     for demand in blocked_demands:
         skipped.append({
             "symbol": demand.get("symbol"),
