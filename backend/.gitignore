@@ -40,3 +40,4 @@ myenv/
 
 build_dist
 *.pyz
+output
