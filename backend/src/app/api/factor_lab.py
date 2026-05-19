@@ -8,8 +8,7 @@ import threading
 import time
 import traceback
 from functools import lru_cache
-from bisect import bisect_left, bisect_right
-from dataclasses import dataclass, field
+from bisect import bisect_left
 from datetime import date, datetime, timedelta
 from itertools import combinations, product
 from types import SimpleNamespace
@@ -32,7 +31,6 @@ from ...core.database import (
     FactorBacktestSearchState,
     FactorLiveTradingConfig,
     FactorLiveTradingLog,
-    StockEVC,
     USStockIndustrySnapshot,
     get_db,
     get_db_ctx,
@@ -73,6 +71,26 @@ from ...core.services.factor_backtest_engine import (
     unsupported_factor_keys_for_pool,
     warm_backtest_search_factor_caches as shared_warm_backtest_search_factor_caches,
 )
+from ...core.services.factor_engine import (
+    DEFAULT_MOMENTUM_WEIGHTS,
+    FACTOR_DIRECTION_OPTIONS,
+    FACTOR_REGISTRY,
+    MIXED_WINDOW_KEY,
+    MOMENTUM_FACTOR_SCORE_PREFIX,
+    NEUTRALIZATION_OPTIONS,
+    STANDARDIZATION_OPTIONS,
+    SUPPORTED_MOMENTUM_WINDOWS,
+    SUPPORTED_WINDOWS,
+    TRADING_DAYS_PER_YEAR,
+    FactorContext,
+    FactorDefinition,
+    _momentum_score_source_frame,
+    _normalize_momentum_weights,
+    _normalize_momentum_weights_payload,
+    _prepare_factor_frame,
+    _prepare_momentum_factor_frame_from_source,
+    register_factor,
+)
 from ...core.services.external_trading_executor import trigger_external_trading_executor
 from ...core.services.external_trading_ledger import (
     STRATEGY_FACTOR_LIVE,
@@ -93,18 +111,11 @@ from ...core.services.tushare import TushareService
 from ...core.utils import normalize_us_equity_symbol, send_alert_email
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
-    DEFAULT_CANDIDATE_ETFS,
-    DEFAULT_MOMENTUM_WEIGHTS,
     DEFAULT_REBALANCE_FREQUENCY,
     DEFAULT_SELL_RANK_MULTIPLIER,
     SUPPORTED_REBALANCE_FREQUENCIES,
-    SUPPORTED_MOMENTUM_WINDOWS,
-    _build_benchmark_curve,
-    _build_yearly_stats,
-    _floor_lot,
     _is_rebalance_day,
     _normalize_rebalance_frequency,
-    _portfolio_value,
 )
 from .account import valid_account
 
@@ -112,7 +123,6 @@ from .account import valid_account
 router = APIRouter(prefix="/api/factor-lab", tags=["Factor Lab"])
 logger = logging.getLogger(__name__)
 
-TRADING_DAYS_PER_YEAR = 252
 ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
 try:
     FACTOR_LIVE_ALERT_COOLDOWN_SECONDS = int(os.getenv("FACTOR_LIVE_ALERT_COOLDOWN_SECONDS", "1800"))
@@ -127,8 +137,6 @@ FACTOR_LIVE_REBALANCE_FREQUENCY_LABELS = {
     "quarterly": "季度",
     "semiannual": "半年",
 }
-SUPPORTED_WINDOWS = [20, 60, 120]
-MIXED_WINDOW_KEY = "mixed"
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
 DEFAULT_START_DATE = date(2020, 1, 2)
 DEFAULT_OOS_START_DATE = date(date.today().year - 1, 1, 1)
@@ -138,7 +146,6 @@ DEFAULT_NEUTRALIZATION = "none"
 DEFAULT_STANDARDIZATION = "zscore"
 DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
 DEFAULT_TIMING_HEATMAP_METRIC = "annualized_low_minus_high_avg_return_pct"
-MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE = 10
 MAX_HEATMAP_CELLS = 20
 FACTOR_DISTRIBUTION_BIN_COUNT = 40
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -163,26 +170,9 @@ A_STOCK_FEAR_SOURCE_ORDER = {
         ]
     )
 }
-FACTOR_DIRECTION_OPTIONS = {
-    "higher_is_better": {"sign": 1.0, "label": "高值更好"},
-    "lower_is_better": {"sign": -1.0, "label": "低值更好"},
-    "exploratory": {"sign": 1.0, "label": "探索方向"},
-}
-NEUTRALIZATION_OPTIONS = {
-    "none": {"label": "不做中性化"},
-    "sector": {"label": "行业大类中性化（Sector）"},
-    "sector_market_cap": {"label": "行业大类+市值中性化"},
-    "fine_industry": {"label": "细行业中性化（Industry，小样本回退Sector）"},
-    "fine_industry_market_cap": {"label": "细行业+市值中性化（小样本回退Sector）"},
-}
 NEUTRALIZATION_ALIASES = {
     "industry": "sector",
     "industry_market_cap": "sector_market_cap",
-}
-STANDARDIZATION_OPTIONS = {
-    "none": {"label": "不标准化"},
-    "zscore": {"label": "截面 Z-Score"},
-    "rank_percentile": {"label": "截面排名分位"},
 }
 HEATMAP_METRIC_OPTIONS = {
     "non_overlap_annualized_median_pct": {
@@ -289,10 +279,6 @@ BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
 BACKTEST_SEARCH_STATE_ID = 1
 BACKTEST_SEARCH_ACTIVE_JOB: Optional[Dict[str, Any]] = None
 BACKTEST_SEARCH_ACTIVE_THREAD: Optional[threading.Thread] = None
-MOMENTUM_FACTOR_SCORE_PREFIX = {
-    "risk_adjusted_momentum": "_ram",
-    "raw_momentum": "_raw_mom",
-}
 
 
 POOL_OPTIONS = SHARED_POOL_OPTIONS
@@ -340,6 +326,18 @@ def _validate_backtest_pool_key(value) -> str:
     return pool
 
 
+def _allowed_windows_for_factor(factor_key: Any = None) -> List[int]:
+    allowed = list(SUPPORTED_WINDOWS)
+    factor_definition = FACTOR_REGISTRY.get(str(factor_key or ""))
+    if factor_definition:
+        allowed.extend(
+            int(window)
+            for window in (factor_definition.default_windows or [])
+            if not (isinstance(window, str) and window == MIXED_WINDOW_KEY)
+        )
+    return list(dict.fromkeys(allowed))
+
+
 class FactorLabAnalyzeRequest(BaseModel):
     pool: str = "SPY_QQQ"
     factor: str = "risk_adjusted_momentum"
@@ -369,9 +367,11 @@ class FactorLabAnalyzeRequest(BaseModel):
         return value
 
     @validator("heatmap_windows", pre=True)
-    def validate_windows(cls, value):
+    def validate_windows(cls, value, values):
         items = value if isinstance(value, list) else [value]
         normalized: List[Union[int, str]] = []
+        factor_definition = FACTOR_REGISTRY.get(str(values.get("factor") or ""))
+        allowed_windows = _allowed_windows_for_factor(values.get("factor"))
         for item in items:
             if isinstance(item, str) and item.strip().lower() == MIXED_WINDOW_KEY:
                 if MIXED_WINDOW_KEY not in normalized:
@@ -381,12 +381,14 @@ class FactorLabAnalyzeRequest(BaseModel):
                 window = int(item)
             except (TypeError, ValueError):
                 raise ValueError("窗口必须是数字或 mixed")
-            if window not in SUPPORTED_WINDOWS:
-                raise ValueError(f"窗口只支持: {', '.join(str(item) for item in SUPPORTED_WINDOWS)}")
+            if window not in allowed_windows:
+                raise ValueError(f"窗口只支持: {', '.join(str(item) for item in allowed_windows)}")
             if window not in normalized:
                 normalized.append(window)
         if not normalized:
             raise ValueError("至少选择一个窗口")
+        if factor_definition and not factor_definition.supports_windows:
+            return factor_definition.default_windows
         return normalized
 
     @validator("heatmap_forward_windows", pre=True)
@@ -570,15 +572,16 @@ class CompositeFactorLeg(BaseModel):
     momentum_weights: Dict[str, float] = Field(default_factory=lambda: DEFAULT_MOMENTUM_WEIGHTS.copy())
 
     @validator("window", pre=True)
-    def validate_window(cls, value):
+    def validate_window(cls, value, values):
         if isinstance(value, str) and value.strip().lower() == MIXED_WINDOW_KEY:
             return MIXED_WINDOW_KEY
         try:
             window = int(value)
         except (TypeError, ValueError):
             raise ValueError("窗口必须是数字或 mixed")
-        if window not in SUPPORTED_WINDOWS:
-            raise ValueError(f"窗口只支持: {', '.join(str(item) for item in SUPPORTED_WINDOWS)}")
+        allowed_windows = _allowed_windows_for_factor(values.get("factor"))
+        if window not in allowed_windows:
+            raise ValueError(f"窗口只支持: {', '.join(str(item) for item in allowed_windows)}")
         return window
 
     @validator("weight")
@@ -1051,51 +1054,6 @@ class FactorLabOptionsResponse(BaseModel):
     default_timing_request: Dict[str, Any]
 
 
-@dataclass(frozen=True)
-class FactorContext:
-    windows: List[int]
-    momentum_weights: Dict[int, float]
-    db: ORMSession
-    symbols: List[str]
-    start_date: date
-    end_date: date
-    analysis_dates: List[date] = field(default_factory=list)
-    industry_df: Optional[pl.DataFrame] = None
-    candidate_etfs: List[str] = field(default_factory=list)
-    valuation_df: Optional[pl.DataFrame] = None
-    weight_history: Optional[Dict[str, Dict[date, Dict[str, float]]]] = None
-
-
-@dataclass(frozen=True)
-class FactorDefinition:
-    key: str
-    label: str
-    group: str
-    description: str
-    default_windows: List[int]
-    supports_windows: bool
-    supports_mixed_windows: bool
-    direction: str
-    compute: Callable[[pl.DataFrame, FactorContext], pl.DataFrame]
-    unsupported_pool_types: List[str] = field(default_factory=list)
-
-    def to_option(self) -> Dict[str, Any]:
-        direction = FACTOR_DIRECTION_OPTIONS.get(self.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
-        return {
-            "key": self.key,
-            "label": self.label,
-            "group": self.group,
-            "description": self.description,
-            "default_windows": self.default_windows,
-            "supports_windows": self.supports_windows,
-            "supports_mixed_windows": self.supports_mixed_windows,
-            "direction": self.direction,
-            "direction_label": direction["label"],
-            "direction_sign": direction["sign"],
-            "unsupported_pool_types": list(self.unsupported_pool_types),
-        }
-
-
 def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
@@ -1108,72 +1066,6 @@ def _is_a_stock_symbol(symbol: str) -> bool:
 def _is_a_stock_pool(pool: Optional[str]) -> bool:
     pool_key = str(pool or "").strip().upper()
     return pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET
-
-
-def _price_adjustment_metadata(candidate_etfs: List[str], universe_symbols: List[str]) -> Dict[str, Any]:
-    symbols = [str(item or "").strip().upper() for item in universe_symbols if item]
-    candidates = [str(item or "").strip().upper() for item in candidate_etfs if item]
-    all_symbols = list(dict.fromkeys([*symbols, *candidates]))
-    has_us = any(symbol.endswith(".US") for symbol in all_symbols)
-    has_a_index = any(symbol in A_STOCK_INDEX_POOL_CODE_SET or symbol == A_STOCK_INNO100_SYMBOL for symbol in all_symbols)
-    has_a_fund = any(symbol in A_STOCK_ETF_DAILY_SYMBOL_SET for symbol in all_symbols)
-    has_a_stock = any(
-        _is_a_stock_symbol(symbol)
-        and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
-        and symbol not in A_STOCK_INDEX_POOL_CODE_SET
-        for symbol in all_symbols
-    )
-
-    sources: Dict[str, str] = {}
-    if has_us:
-        sources["us_stock"] = "duckdb.us_stock_daily"
-    if has_a_stock:
-        sources["a_stock"] = "duckdb.a_stock_market_daily_qfq"
-    if has_a_fund:
-        sources["a_stock_fund"] = "duckdb.a_stock_fund_daily_qfq"
-    if has_a_index:
-        sources["a_stock_index"] = "duckdb.a_stock_index_daily"
-
-    if has_a_stock or has_a_fund:
-        adjustment = "qfq"
-    elif has_a_index and not has_us:
-        adjustment = "raw_index"
-    elif has_us and not (has_a_stock or has_a_fund or has_a_index):
-        adjustment = "forward"
-    else:
-        adjustment = "mixed"
-    return {"price_adjustment": adjustment, "price_sources": sources}
-
-
-def _normalize_momentum_weights(raw_weights: Dict[str, float], active_windows: List[int]) -> Dict[int, float]:
-    active = list(dict.fromkeys(int(item) for item in active_windows))
-    weights: Dict[int, float] = {}
-    for window in active:
-        raw_value = raw_weights.get(str(window), raw_weights.get(window, 0.0))
-        try:
-            weights[window] = max(0.0, float(raw_value or 0))
-        except (TypeError, ValueError):
-            weights[window] = 0.0
-    total = sum(weights.values())
-    if total <= 0:
-        return {window: 1.0 / len(active) for window in active}
-    return {window: weight / total for window, weight in weights.items() if weight > 0}
-
-
-def _normalize_momentum_weights_payload(raw_weights: Dict[str, float]) -> Dict[str, float]:
-    raw = raw_weights if isinstance(raw_weights, dict) else DEFAULT_MOMENTUM_WEIGHTS
-    normalized: Dict[str, float] = {}
-    for window in SUPPORTED_MOMENTUM_WINDOWS:
-        try:
-            weight = float(raw.get(str(window), raw.get(window, 0)) or 0)
-        except (TypeError, ValueError):
-            raise ValueError(f"{window}日动量权重必须是数字")
-        if weight < 0:
-            raise ValueError(f"{window}日动量权重不能为负数")
-        normalized[str(window)] = weight
-    if sum(normalized.values()) <= 0:
-        raise ValueError("至少设置一个大于0的动量权重")
-    return normalized
 
 
 def _numeric_heatmap_windows(windows: List[Union[int, str]]) -> List[int]:
@@ -1457,6 +1349,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
         "symbol": pl.Utf8,
         "trade_date": pl.Date,
         "open": pl.Float64,
+        "high": pl.Float64,
         "close": pl.Float64,
         "volume": pl.Float64,
         "turnover": pl.Float64,
@@ -1475,6 +1368,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     symbol,
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
+                    CAST(high AS DOUBLE) AS high,
                     CAST(close AS DOUBLE) AS close,
                     CAST(volume AS DOUBLE) AS volume,
                     CAST(turnover AS DOUBLE) AS turnover
@@ -1495,6 +1389,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     ts_code AS symbol,
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
+                    CAST(high AS DOUBLE) AS high,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -1519,6 +1414,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     ts_code AS symbol,
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
+                    CAST(high AS DOUBLE) AS high,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -1544,6 +1440,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
                     ts_code AS symbol,
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
+                    CAST(high AS DOUBLE) AS high,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -1567,6 +1464,7 @@ def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> p
     return df.with_columns(
         pl.col("trade_date").cast(pl.Date),
         pl.col("open").cast(pl.Float64),
+        pl.col("high").cast(pl.Float64),
         pl.col("close").cast(pl.Float64),
         pl.col("volume").cast(pl.Float64),
         pl.col("turnover").cast(pl.Float64),
@@ -2292,66 +2190,6 @@ def search_factor_lab_symbols(
     }
 
 
-def _load_valuation_frame(
-    db: ORMSession,
-    symbols: List[str],
-    start_date: date,
-    end_date: date,
-) -> pl.DataFrame:
-    if not symbols:
-        return pl.DataFrame()
-
-    rows = (
-        db.query(
-            StockEVC.symbol,
-            StockEVC.date,
-            StockEVC.fair_value_lo,
-            StockEVC.fair_value_hi,
-            StockEVC.forward_pe_ratio,
-            StockEVC.pe_ratio,
-        )
-        .filter(
-            StockEVC.symbol.in_(symbols),
-            StockEVC.date >= start_date,
-            StockEVC.date <= end_date,
-        )
-        .all()
-    )
-    if not rows:
-        return pl.DataFrame()
-
-    return (
-        pl.DataFrame(
-            {
-                "symbol": [row.symbol for row in rows],
-                "valuation_date": [row.date for row in rows],
-                "fair_value_lo": [row.fair_value_lo for row in rows],
-                "fair_value_hi": [row.fair_value_hi for row in rows],
-                "forward_pe_ratio": [row.forward_pe_ratio for row in rows],
-                "pe_ratio": [row.pe_ratio for row in rows],
-            }
-        )
-        .with_columns(
-            pl.col("valuation_date").cast(pl.Date),
-            pl.col("fair_value_lo").cast(pl.Float64),
-            pl.col("fair_value_hi").cast(pl.Float64),
-            pl.col("forward_pe_ratio").cast(pl.Float64),
-            pl.col("pe_ratio").cast(pl.Float64),
-        )
-        .with_columns(
-            pl.coalesce(
-                [
-                    (pl.col("fair_value_lo") + pl.col("fair_value_hi")) / 2,
-                    pl.col("fair_value_hi"),
-                    pl.col("fair_value_lo"),
-                ]
-            ).alias("_fair_value_mid")
-        )
-        .filter(pl.col("_fair_value_mid").is_not_null() & (pl.col("_fair_value_mid") > 0))
-        .sort(["symbol", "valuation_date"])
-    )
-
-
 def _load_industry_frame(
     db: ORMSession,
     symbols: List[str],
@@ -2436,789 +2274,6 @@ def _load_industry_frame(
         pl.concat(non_empty_frames, how="vertical_relaxed")
         .select(["symbol", "industry_date", "sector", "industry_group", "industry", "sub_industry", "market_cap"])
         .sort("symbol")
-    )
-
-
-def _ensure_base_columns(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.sort(["symbol", "trade_date"])
-        .with_columns(
-            pl.int_range(0, pl.len()).over("symbol").cast(pl.Float64).alias("_row_nr"),
-            pl.col("close").log().alias("_log_close"),
-            (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("_daily_return"),
-            pl.when(pl.col("volume").is_not_null() & (pl.col("volume") > 0))
-            .then(pl.col("volume").log10())
-            .otherwise(None)
-            .alias("_log_volume"),
-        )
-    )
-
-
-def _add_momentum_window_features(df: pl.DataFrame, window: int, prefix: str) -> pl.DataFrame:
-    w = int(window)
-    sum_x = w * (w - 1) / 2
-    sum_x2 = w * (w - 1) * (2 * w - 1) / 6
-    denominator = w * sum_x2 - sum_x * sum_x
-
-    df = df.with_columns(
-        pl.col("_log_close").rolling_sum(w, min_samples=w).over("symbol").alias(f"{prefix}_sum_y"),
-        (pl.col("_log_close") ** 2).rolling_sum(w, min_samples=w).over("symbol").alias(f"{prefix}_sum_y2"),
-        (pl.col("_row_nr") * pl.col("_log_close")).rolling_sum(w, min_samples=w).over("symbol").alias(f"{prefix}_sum_iy"),
-        pl.col("_daily_return").rolling_std(w - 1, min_samples=w - 1).over("symbol").alias(f"{prefix}_daily_vol"),
-        (pl.col("close") / pl.col("close").shift(w - 1).over("symbol") - 1).alias(f"{prefix}_window_return"),
-    )
-    df = df.with_columns(
-        (
-            pl.col(f"{prefix}_sum_iy")
-            - (pl.col("_row_nr") - (w - 1)) * pl.col(f"{prefix}_sum_y")
-        ).alias(f"{prefix}_sum_xy")
-    )
-    df = df.with_columns(
-        (
-            (w * pl.col(f"{prefix}_sum_xy") - sum_x * pl.col(f"{prefix}_sum_y"))
-            / denominator
-        ).alias(f"{prefix}_slope")
-    )
-    df = df.with_columns(
-        ((pl.col(f"{prefix}_sum_y") - pl.col(f"{prefix}_slope") * sum_x) / w).alias(f"{prefix}_intercept"),
-        (
-            pl.col(f"{prefix}_sum_y2")
-            - (pl.col(f"{prefix}_sum_y") ** 2 / w)
-        ).alias(f"{prefix}_ss_tot"),
-    )
-    df = df.with_columns(
-        (
-            pl.col(f"{prefix}_sum_y2")
-            - 2 * pl.col(f"{prefix}_intercept") * pl.col(f"{prefix}_sum_y")
-            - 2 * pl.col(f"{prefix}_slope") * pl.col(f"{prefix}_sum_xy")
-            + (pl.col(f"{prefix}_intercept") ** 2) * w
-            + 2 * pl.col(f"{prefix}_intercept") * pl.col(f"{prefix}_slope") * sum_x
-            + (pl.col(f"{prefix}_slope") ** 2) * sum_x2
-        ).alias(f"{prefix}_ss_res")
-    )
-    return df.with_columns(
-        pl.when(pl.col(f"{prefix}_ss_tot") > 0)
-        .then((1 - pl.col(f"{prefix}_ss_res") / pl.col(f"{prefix}_ss_tot")).clip(0.0, 1.0))
-        .otherwise(None)
-        .alias(f"{prefix}_r_squared"),
-        (pl.col(f"{prefix}_daily_vol") * math.sqrt(TRADING_DAYS_PER_YEAR) * 100).alias(f"{prefix}_annualized_vol_pct"),
-        (pl.col(f"{prefix}_slope") * TRADING_DAYS_PER_YEAR * 100).alias(f"{prefix}_annualized_slope_pct"),
-    )
-
-
-def _add_risk_adjusted_momentum_score(df: pl.DataFrame, window: int) -> pl.DataFrame:
-    w = int(window)
-    prefix = f"_ram_{w}"
-    df = _add_momentum_window_features(df, w, prefix)
-    return df.with_columns(
-        pl.when(pl.col(f"{prefix}_annualized_vol_pct") > 0)
-        .then(
-            pl.col(f"{prefix}_annualized_slope_pct")
-            * pl.col(f"{prefix}_r_squared")
-            / pl.col(f"{prefix}_annualized_vol_pct")
-            * 100
-        )
-        .otherwise(None)
-        .alias(f"{prefix}_score")
-    )
-
-
-def _add_raw_momentum_score(df: pl.DataFrame, window: int) -> pl.DataFrame:
-    w = int(window)
-    prefix = f"_raw_mom_{w}"
-    df = _add_momentum_window_features(df, w, prefix)
-    return df.with_columns(
-        pl.when(pl.col(f"{prefix}_r_squared").is_not_null())
-        .then(
-            pl.col(f"{prefix}_annualized_slope_pct")
-            * pl.col(f"{prefix}_r_squared")
-        )
-        .otherwise(None)
-        .alias(f"{prefix}_score")
-    )
-
-
-def _compute_risk_adjusted_momentum(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    result = _ensure_base_columns(df)
-    for window in context.momentum_weights:
-        result = _add_risk_adjusted_momentum_score(result, window)
-
-    factor_expr = None
-    for window, weight in context.momentum_weights.items():
-        expr = pl.col(f"_ram_{window}_score") * float(weight)
-        factor_expr = expr if factor_expr is None else factor_expr + expr
-    return result.with_columns(factor_expr.alias("factor_value"))
-
-
-def _compute_raw_momentum(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    result = _ensure_base_columns(df)
-    for window in context.momentum_weights:
-        result = _add_raw_momentum_score(result, window)
-
-    factor_expr = None
-    for window, weight in context.momentum_weights.items():
-        expr = pl.col(f"_raw_mom_{window}_score") * float(weight)
-        factor_expr = expr if factor_expr is None else factor_expr + expr
-    return result.with_columns(factor_expr.alias("factor_value"))
-
-
-def _build_momentum_score_source_frame(
-    price_df: pl.DataFrame,
-    factor_key: str,
-    windows: List[int],
-) -> pl.DataFrame:
-    if price_df.is_empty():
-        return price_df
-
-    result = _ensure_base_columns(price_df)
-    score_columns: List[str] = []
-    for window in list(dict.fromkeys(int(item) for item in windows)):
-        if factor_key == "risk_adjusted_momentum":
-            result = _add_risk_adjusted_momentum_score(result, window)
-            score_columns.append(f"_ram_{window}_score")
-        elif factor_key == "raw_momentum":
-            result = _add_raw_momentum_score(result, window)
-            score_columns.append(f"_raw_mom_{window}_score")
-
-    base_columns = [
-        column
-        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
-        if column in result.columns
-    ]
-    return result.select([*base_columns, *score_columns])
-
-
-def _momentum_score_source_frame(
-    price_df: pl.DataFrame,
-    factor_key: str,
-    windows: List[int],
-    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]],
-) -> pl.DataFrame:
-    cache_key = (
-        factor_key,
-        tuple(sorted(list(dict.fromkeys(int(item) for item in windows)))),
-    )
-    if raw_factor_cache is not None and cache_key in raw_factor_cache:
-        return raw_factor_cache[cache_key]
-
-    source = _build_momentum_score_source_frame(price_df, factor_key, list(cache_key[1]))
-    if raw_factor_cache is not None:
-        raw_factor_cache[cache_key] = source
-    return source
-
-
-def _prepare_momentum_factor_frame_from_source(
-    source_df: pl.DataFrame,
-    factor_definition: FactorDefinition,
-    context: FactorContext,
-    request: FactorLabAnalyzeRequest,
-) -> pl.DataFrame:
-    prefix = MOMENTUM_FACTOR_SCORE_PREFIX.get(factor_definition.key)
-    if source_df.is_empty() or not prefix:
-        return source_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    base_columns = [
-        column
-        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
-        if column in source_df.columns
-    ]
-    result = source_df.select(base_columns).unique(subset=["symbol", "trade_date"])
-    factor_expr = None
-    raw_factor_expr = None
-    for window, weight in context.momentum_weights.items():
-        column = f"{prefix}_{int(window)}_score"
-        if column not in source_df.columns:
-            continue
-        window_factor_column = f"_window_factor_{int(window)}"
-        window_raw_factor_column = f"_window_factor_raw_{int(window)}"
-        window_df = (
-            source_df.select([*base_columns, column])
-            .with_columns(pl.col(column).alias("factor_value"))
-        )
-        window_df = _apply_factor_transformations(
-            _apply_factor_direction(window_df, factor_definition),
-            request,
-            context,
-        ).select(
-            "symbol",
-            "trade_date",
-            pl.col("factor_value").alias(window_factor_column),
-            pl.col("factor_value_raw").alias(window_raw_factor_column),
-        )
-        result = result.join(window_df, on=["symbol", "trade_date"], how="left")
-        expr = pl.col(window_factor_column) * float(weight)
-        factor_expr = expr if factor_expr is None else factor_expr + expr
-        raw_expr = pl.col(window_raw_factor_column) * float(weight)
-        raw_factor_expr = raw_expr if raw_factor_expr is None else raw_factor_expr + raw_expr
-
-    result = result.with_columns(
-        (factor_expr if factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value"),
-        (raw_factor_expr if raw_factor_expr is not None else pl.lit(None, dtype=pl.Float64)).alias("factor_value_raw"),
-    )
-    return result.select([*base_columns, "factor_value", "factor_value_raw"])
-
-
-def _compute_volume_z(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    window = int(context.windows[0])
-    short_window = max(int(window / 20), 1)
-    result = _ensure_base_columns(df)
-    return (
-        result.with_columns(
-            pl.col("_log_volume")
-            .rolling_mean(short_window, min_samples=short_window)
-            .over("symbol")
-            .alias("_volume_short_avg"),
-            pl.col("_log_volume")
-            .shift(short_window)
-            .rolling_mean(window, min_samples=window)
-            .over("symbol")
-            .alias("_volume_long_avg"),
-            pl.col("_log_volume")
-            .shift(short_window)
-            .rolling_std(window, min_samples=window)
-            .over("symbol")
-            .alias("_volume_long_std"),
-        )
-        .with_columns(
-            pl.when(pl.col("_volume_long_std") > 0)
-            .then((pl.col("_volume_short_avg") - pl.col("_volume_long_avg")) / pl.col("_volume_long_std"))
-            .otherwise(None)
-            .alias("factor_value")
-        )
-    )
-
-
-def _compute_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    window = int(context.windows[0])
-    short_window = max(int(window / 20), 1)
-    result = _ensure_base_columns(df)
-    return (
-        result.with_columns(
-            pl.when(pl.col("volume").is_not_null() & (pl.col("volume") > 0))
-            .then(pl.col("volume").cast(pl.Float64))
-            .otherwise(None)
-            .alias("_volume_for_ratio")
-        )
-        .with_columns(
-            pl.col("_volume_for_ratio")
-            .rolling_mean(short_window, min_samples=short_window)
-            .over("symbol")
-            .alias("_volume_short_avg"),
-            pl.col("_volume_for_ratio")
-            .shift(short_window)
-            .rolling_mean(window, min_samples=window)
-            .over("symbol")
-            .alias("_volume_long_avg"),
-        )
-        .with_columns(
-            pl.when(pl.col("_volume_long_avg") > 0)
-            .then(pl.col("_volume_short_avg") / pl.col("_volume_long_avg"))
-            .otherwise(None)
-            .alias("factor_value")
-        )
-    )
-
-
-def _compute_log_volume_ratio(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    ratio_df = _compute_volume_ratio(df, context)
-    if ratio_df.is_empty() or "factor_value" not in ratio_df.columns:
-        return ratio_df
-    return ratio_df.with_columns(
-        pl.when(pl.col("factor_value") > 0)
-        .then(pl.col("factor_value").log10())
-        .otherwise(None)
-        .alias("factor_value")
-    )
-
-
-def _compute_volatility(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    window = int(context.windows[0])
-    result = _ensure_base_columns(df)
-    return result.with_columns(
-        (
-            pl.col("_daily_return").rolling_std(window, min_samples=window).over("symbol")
-            * math.sqrt(TRADING_DAYS_PER_YEAR)
-            * 100
-        ).alias("factor_value")
-    )
-
-
-def _compute_valuation_gap(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    valuation_df = context.valuation_df
-    if valuation_df is None:
-        valuation_df = _load_valuation_frame(
-            context.db,
-            context.symbols,
-            context.start_date - timedelta(days=540),
-            context.end_date,
-        )
-    if valuation_df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    result = (
-        df.sort(["symbol", "trade_date"])
-        .join_asof(
-            valuation_df,
-            left_on="trade_date",
-            right_on="valuation_date",
-            by="symbol",
-            strategy="backward",
-        )
-        .with_columns(((pl.col("_fair_value_mid") / pl.col("close")) - 1).alias("factor_value"))
-    )
-    return result
-
-
-def _compute_index_weight(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty():
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    candidate_etfs = list(dict.fromkeys(context.candidate_etfs or DEFAULT_CANDIDATE_ETFS))
-    if not candidate_etfs:
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    analysis_dates = context.analysis_dates or (
-        df.filter((pl.col("trade_date") >= context.start_date) & (pl.col("trade_date") <= context.end_date))
-        .select("trade_date")
-        .unique()
-        .sort("trade_date")
-        .to_series()
-        .to_list()
-    )
-    if not analysis_dates:
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    weight_history = context.weight_history
-    if weight_history is None:
-        weight_history = load_universe_weight_history(
-            context.db,
-            candidate_etfs,
-            context.start_date,
-            context.end_date,
-        )
-    if not weight_history:
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    etf_weight = 1.0 / len(candidate_etfs)
-    sorted_weight_dates = {
-        etf_symbol: sorted(history.keys())
-        for etf_symbol, history in weight_history.items()
-    }
-    records: List[Dict[str, Any]] = []
-    for current_date in analysis_dates:
-        combined_weights: Dict[str, float] = {}
-        for etf_symbol in candidate_etfs:
-            snapshot_dates = sorted_weight_dates.get(etf_symbol) or []
-            date_index = bisect_right(snapshot_dates, current_date) - 1
-            if date_index < 0:
-                continue
-            snapshot_date = snapshot_dates[date_index]
-            for symbol, weight in weight_history.get(etf_symbol, {}).get(snapshot_date, {}).items():
-                combined_weights[symbol] = combined_weights.get(symbol, 0.0) + float(weight or 0.0) * etf_weight
-        for symbol, weight in combined_weights.items():
-            records.append(
-                {
-                    "trade_date": current_date,
-                    "symbol": symbol,
-                    "factor_value": weight,
-                }
-            )
-
-    if not records:
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
-
-    weight_df = pl.DataFrame(records).with_columns(
-        pl.col("trade_date").cast(pl.Date),
-        pl.col("factor_value").cast(pl.Float64),
-    )
-    return df.join(weight_df, on=["symbol", "trade_date"], how="left")
-
-
-def _compute_custom_momentum_volume(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    momentum = _compute_risk_adjusted_momentum(df, context).select(["symbol", "trade_date", "factor_value"])
-    volume_context = FactorContext(
-        windows=[20],
-        momentum_weights=context.momentum_weights,
-        db=context.db,
-        symbols=context.symbols,
-        start_date=context.start_date,
-        end_date=context.end_date,
-        candidate_etfs=context.candidate_etfs,
-    )
-    volume = _compute_volume_z(df, volume_context).select(
-        ["symbol", "trade_date", pl.col("factor_value").alias("_volume_z")]
-    )
-    return (
-        df.join(momentum.rename({"factor_value": "_momentum_score"}), on=["symbol", "trade_date"], how="left")
-        .join(volume, on=["symbol", "trade_date"], how="left")
-        .with_columns(
-            (
-                pl.col("_momentum_score").rank("average").over("trade_date")
-                + pl.col("_volume_z").rank("average").over("trade_date") * 0.25
-            ).alias("factor_value")
-        )
-    )
-
-
-FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
-    "raw_momentum": FactorDefinition(
-        key="raw_momentum",
-        label="动量：原始动量",
-        group="动量",
-        description="与风险调整动量同源：ln(close) 回归斜率 * R2，不除以波动率，用来和风险调整版直接对照。",
-        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=True,
-        direction="higher_is_better",
-        compute=_compute_raw_momentum,
-    ),
-    "risk_adjusted_momentum": FactorDefinition(
-        key="risk_adjusted_momentum",
-        label="动量：风险调整动量",
-        group="动量",
-        description="与多因子动量腿同源：ln(close) 回归斜率 * R2 / 年化波动；热力图按每个滑动窗口单独测试。",
-        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=True,
-        direction="higher_is_better",
-        compute=_compute_risk_adjusted_momentum,
-    ),
-    "volume_z": FactorDefinition(
-        key="volume_z",
-        label="成交量：对数成交量Z分数",
-        group="成交量",
-        description="短窗口均值相对长窗口均值的 log10(volume) Z 分数；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
-        default_windows=SUPPORTED_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=False,
-        direction="exploratory",
-        compute=_compute_volume_z,
-    ),
-    "volume_ratio": FactorDefinition(
-        key="volume_ratio",
-        label="成交量：均量比",
-        group="成交量",
-        description="短窗口平均成交量 / 长窗口平均成交量；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
-        default_windows=SUPPORTED_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=False,
-        direction="exploratory",
-        compute=_compute_volume_ratio,
-    ),
-    "log_volume_ratio": FactorDefinition(
-        key="log_volume_ratio",
-        label="成交量：log均量比",
-        group="成交量",
-        description="log10(短窗口平均成交量 / 长窗口平均成交量)；短窗口 M=max(N/20,1)，长窗口为更早的 N 天，与短窗口不重叠。",
-        default_windows=SUPPORTED_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=False,
-        direction="exploratory",
-        compute=_compute_log_volume_ratio,
-    ),
-    "volatility": FactorDefinition(
-        key="volatility",
-        label="波动：年化波动率",
-        group="波动",
-        description="过去窗口日收益标准差年化；按低波更好进行方向调整。",
-        default_windows=SUPPORTED_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=False,
-        direction="lower_is_better",
-        compute=_compute_volatility,
-    ),
-    "valuation_gap": FactorDefinition(
-        key="valuation_gap",
-        label="估值：安全边际",
-        group="估值",
-        description="使用最近一次EVC估值中值 / 当日收盘价 - 1，越高代表相对低估。",
-        default_windows=[20],
-        supports_windows=False,
-        supports_mixed_windows=False,
-        direction="higher_is_better",
-        compute=_compute_valuation_gap,
-    ),
-    "index_weight": FactorDefinition(
-        key="index_weight",
-        label="指数：成分权重",
-        group="指数",
-        description="股票在所选股票池ETF中的成分权重；SPY+QQQ按两个ETF等权合成后再做截面排名。",
-        default_windows=[20],
-        supports_windows=False,
-        supports_mixed_windows=False,
-        direction="higher_is_better",
-        compute=_compute_index_weight,
-        unsupported_pool_types=["custom"],
-    ),
-    "custom_momentum_volume": FactorDefinition(
-        key="custom_momentum_volume",
-        label="自定义：动量+成交量示例",
-        group="自定义",
-        description="示例注册因子：风险调整混合动量截面排名 + 0.25 * 成交量Z分数截面排名。",
-        default_windows=SUPPORTED_MOMENTUM_WINDOWS.copy(),
-        supports_windows=True,
-        supports_mixed_windows=True,
-        direction="higher_is_better",
-        compute=_compute_custom_momentum_volume,
-    ),
-}
-
-
-def register_factor(definition: FactorDefinition):
-    """Register a Python factor function for Factor Lab.
-
-    Add local custom factors by creating a FactorDefinition and calling this
-    function during app startup/import.
-    """
-    FACTOR_REGISTRY[definition.key] = definition
-
-
-def _apply_factor_direction(df: pl.DataFrame, factor_definition: FactorDefinition) -> pl.DataFrame:
-    if df.is_empty() or "factor_value" not in df.columns:
-        return df
-
-    direction = FACTOR_DIRECTION_OPTIONS.get(factor_definition.direction, FACTOR_DIRECTION_OPTIONS["exploratory"])
-    sign = float(direction["sign"])
-    return df.with_columns(
-        pl.col("factor_value").alias("factor_value_raw"),
-        (pl.col("factor_value") * sign).alias("factor_value_directional"),
-        (pl.col("factor_value") * sign).alias("factor_value"),
-    )
-
-
-def _with_neutralization_columns(
-    df: pl.DataFrame,
-    industry_df: Optional[pl.DataFrame],
-    neutralization: str,
-) -> pl.DataFrame:
-    source = df
-    if industry_df is not None and not industry_df.is_empty():
-        source = (
-            source.sort(["symbol", "trade_date"])
-            .join(industry_df, on="symbol", how="left")
-        )
-
-    for column in ["industry_group", "industry", "sector", "sub_industry", "market_cap"]:
-        if column not in source.columns:
-            source = source.with_columns(pl.lit(None).alias(column))
-
-    source = source.with_columns(
-        pl.coalesce([pl.col("sector"), pl.lit("Unknown")]).alias("_neutralization_sector"),
-        pl.coalesce(
-            [
-                pl.col("industry"),
-                pl.col("sector"),
-                pl.lit("Unknown"),
-            ]
-        ).alias("_neutralization_fine_industry"),
-        pl.when(pl.col("market_cap").is_not_null() & (pl.col("market_cap") > 0))
-        .then(pl.col("market_cap").cast(pl.Float64))
-        .otherwise(None)
-        .alias("_neutralization_market_cap"),
-    )
-    if neutralization.startswith("fine_industry"):
-        source = source.with_columns(
-            pl.when(pl.col("factor_value").is_not_null() & pl.col("factor_value").is_finite())
-            .then(1)
-            .otherwise(0)
-            .sum()
-            .over(["trade_date", "_neutralization_fine_industry"])
-            .alias("_fine_industry_sample_count")
-        )
-        return source.with_columns(
-            pl.when(
-                pl.col("industry").is_not_null()
-                & (pl.col("_fine_industry_sample_count") >= MIN_FINE_INDUSTRY_NEUTRALIZATION_SIZE)
-            )
-            .then(pl.col("_neutralization_fine_industry"))
-            .otherwise(pl.col("_neutralization_sector"))
-            .alias("_neutralization_industry")
-        )
-
-    return source.with_columns(pl.col("_neutralization_sector").alias("_neutralization_industry"))
-
-
-def _neutralize_group(group: pl.DataFrame, mode: str) -> pl.DataFrame:
-    if group.is_empty() or "factor_value" not in group.columns:
-        return group
-
-    y = group.get_column("factor_value").cast(pl.Float64).to_numpy()
-    finite_y = np.isfinite(y)
-    if finite_y.sum() < 2:
-        return group.with_columns(pl.Series("factor_value_neutralized", y))
-
-    labels = group.get_column("_neutralization_industry").fill_null("Unknown").cast(pl.Utf8).to_list()
-    _, label_inverse = np.unique(np.asarray(labels, dtype=str), return_inverse=True)
-
-    x_parts = [np.ones((group.height, 1), dtype=float)]
-    category_count = int(label_inverse.max()) + 1 if label_inverse.size else 0
-    if category_count > 1:
-        x_parts.append(np.eye(category_count, dtype=float)[label_inverse][:, 1:])
-
-    if mode.endswith("_market_cap") and "_neutralization_market_cap" in group.columns:
-        market_cap = group.get_column("_neutralization_market_cap").cast(pl.Float64).to_numpy()
-        finite_market_cap = np.isfinite(market_cap) & (market_cap > 0)
-        if finite_market_cap.any():
-            median_market_cap = float(np.nanmedian(market_cap[finite_market_cap]))
-            filled_market_cap = np.where(finite_market_cap, market_cap, median_market_cap)
-            log_market_cap = np.log(np.clip(filled_market_cap, 1.0, None))
-            log_market_cap = log_market_cap - float(np.nanmean(log_market_cap))
-            if np.nanstd(log_market_cap) > 1e-12:
-                x_parts.append(log_market_cap.reshape(-1, 1))
-
-    x = np.hstack(x_parts)
-    fit_mask = finite_y & np.all(np.isfinite(x), axis=1)
-    if fit_mask.sum() < max(3, x.shape[1] + 1):
-        residual = y - float(np.nanmean(y[finite_y]))
-    else:
-        try:
-            beta, *_ = np.linalg.lstsq(x[fit_mask], y[fit_mask], rcond=None)
-            residual = y - x @ beta
-        except np.linalg.LinAlgError:
-            residual = y - float(np.nanmean(y[finite_y]))
-
-    residual = np.where(np.isfinite(residual), residual, y)
-    return group.with_columns(pl.Series("factor_value_neutralized", residual))
-
-
-def _apply_factor_neutralization(
-    df: pl.DataFrame,
-    neutralization: str,
-    industry_df: Optional[pl.DataFrame],
-) -> pl.DataFrame:
-    if df.is_empty() or neutralization == "none":
-        return df
-
-    if industry_df is None or industry_df.is_empty():
-        logger.warning("Factor neutralization requested but industry snapshot data is empty")
-        return df.with_columns(pl.col("factor_value").alias("factor_value_neutralized"))
-
-    return (
-        _with_neutralization_columns(df, industry_df, neutralization)
-        .group_by("trade_date", maintain_order=True)
-        .map_groups(lambda group: _neutralize_group(group, neutralization))
-        .with_columns(pl.col("factor_value_neutralized").alias("factor_value"))
-    )
-
-
-def _apply_factor_standardization(df: pl.DataFrame) -> pl.DataFrame:
-    if df.is_empty() or "factor_value" not in df.columns:
-        return df
-
-    return (
-        df.with_columns(
-            pl.when(pl.col("factor_value").is_finite())
-            .then(pl.col("factor_value"))
-            .otherwise(None)
-            .alias("_factor_for_standardization")
-        )
-        .with_columns(
-            pl.mean("_factor_for_standardization").over("trade_date").alias("_factor_mean"),
-            pl.std("_factor_for_standardization").over("trade_date").alias("_factor_std"),
-        )
-        .with_columns(
-            pl.when((pl.col("_factor_std") > 0) & pl.col("factor_value").is_finite())
-            .then((pl.col("factor_value") - pl.col("_factor_mean")) / pl.col("_factor_std"))
-            .otherwise(pl.col("factor_value"))
-            .alias("factor_value_standardized")
-        )
-        .with_columns(pl.col("factor_value_standardized").alias("factor_value"))
-        .drop(["_factor_for_standardization", "_factor_mean", "_factor_std"])
-    )
-
-
-def _with_cross_section_rank_percentile(
-    df: pl.DataFrame,
-    source_column: str,
-    output_column: str,
-) -> pl.DataFrame:
-    if df.is_empty() or source_column not in df.columns:
-        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias(output_column))
-
-    valid_column = f"_{output_column}_valid"
-    rank_column = f"_{output_column}_rank"
-    count_column = f"_{output_column}_count"
-    return (
-        df.with_columns(
-            pl.when(pl.col(source_column).is_not_null() & pl.col(source_column).is_finite())
-            .then(pl.col(source_column).cast(pl.Float64))
-            .otherwise(None)
-            .alias(valid_column)
-        )
-        .with_columns(
-            pl.col(valid_column).rank("average").over("trade_date").alias(rank_column),
-            pl.col(valid_column).count().over("trade_date").alias(count_column),
-        )
-        .with_columns(
-            pl.when(pl.col(valid_column).is_null())
-            .then(None)
-            .when(pl.col(count_column) <= 1)
-            .then(1.0)
-            .otherwise((pl.col(rank_column) - 1) / (pl.col(count_column) - 1))
-            .alias(output_column)
-        )
-        .drop([valid_column, rank_column, count_column])
-    )
-
-
-def _apply_factor_rank_percentile(df: pl.DataFrame) -> pl.DataFrame:
-    if df.is_empty() or "factor_value" not in df.columns:
-        return df
-    return _with_cross_section_rank_percentile(
-        df,
-        "factor_value",
-        "factor_value_rank_percentile",
-    ).with_columns(
-        pl.col("factor_value_rank_percentile").alias("factor_value")
-    )
-
-
-def _apply_factor_transformations(
-    df: pl.DataFrame,
-    request: FactorLabAnalyzeRequest,
-    context: FactorContext,
-) -> pl.DataFrame:
-    result = df
-    if request.neutralization != "none":
-        result = _apply_factor_neutralization(result, request.neutralization, context.industry_df)
-    if request.standardization == "zscore":
-        result = _apply_factor_standardization(result)
-    elif request.standardization == "rank_percentile":
-        result = _apply_factor_rank_percentile(result)
-    return result
-
-
-def _prepare_factor_frame(
-    price_df: pl.DataFrame,
-    factor_definition: FactorDefinition,
-    context: FactorContext,
-    request: FactorLabAnalyzeRequest,
-) -> pl.DataFrame:
-    return _apply_factor_transformations(
-        _apply_factor_direction(
-            factor_definition.compute(price_df, context),
-            factor_definition,
-        ),
-        request,
-        context,
     )
 
 
@@ -3973,6 +3028,7 @@ def _compute_parameter_heatmap(
             analysis_dates=context_base.analysis_dates,
             industry_df=context_base.industry_df,
             candidate_etfs=context_base.candidate_etfs,
+            weight_history_loader=load_universe_weight_history,
         )
         factor_df = _prepare_cached_leg_factor_frame(
             price_df,
@@ -4104,6 +3160,7 @@ def _compute_factor_analysis_for_combo(
         analysis_dates=analysis_dates,
         industry_df=industry_df,
         candidate_etfs=candidate_etfs,
+        weight_history_loader=load_universe_weight_history,
     )
     factor_df = _prepare_cached_leg_factor_frame(
         price_df,
@@ -4276,7 +3333,7 @@ def _prepare_composite_factor_frame(
     ]
     base_columns = [
         column
-        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
+        for column in ["symbol", "trade_date", "high", "close", "volume", "turnover", "_first_trade_date"]
         if column in price_df.columns
     ]
     composite_df = price_df.select(base_columns).unique(subset=["symbol", "trade_date"])
@@ -4296,6 +3353,7 @@ def _prepare_composite_factor_frame(
             candidate_etfs=candidate_etfs,
             valuation_df=valuation_df,
             weight_history=weight_history,
+            weight_history_loader=load_universe_weight_history,
         )
         leg_request_payload = _request_to_dict(request)
         leg_request_payload.update(
@@ -4430,238 +3488,6 @@ def _compute_component_correlation(
     return rows
 
 
-def _price_frame_to_rows_by_symbol(price_df: pl.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
-    if price_df.is_empty():
-        return {}
-
-    rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
-    columns = [
-        column
-        for column in ["symbol", "trade_date", "open", "close", "volume", "turnover"]
-        if column in price_df.columns
-    ]
-    for row in price_df.select(columns).sort(["symbol", "trade_date"]).to_dicts():
-        symbol = row.get("symbol")
-        row_date = row.get("trade_date")
-        open_price = _safe_float(row.get("open"))
-        close_price = _safe_float(row.get("close"))
-        if not symbol or not row_date or open_price is None or close_price is None or open_price <= 0 or close_price <= 0:
-            continue
-        rows_by_symbol.setdefault(symbol, []).append(
-            {
-                "date": row_date,
-                "open": open_price,
-                "close": close_price,
-                "volume": _safe_float(row.get("volume")) or 0.0,
-                "turnover": _safe_float(row.get("turnover")) or 0.0,
-            }
-        )
-    return rows_by_symbol
-
-
-def _build_backtest_factor_frame(
-    request: FactorBacktestRequest,
-    db: ORMSession,
-    universe_symbols: List[str],
-    price_df: pl.DataFrame,
-    analysis_dates: List[date],
-    required_windows: List[int],
-    end_date: date,
-    resolved_legs: List[Dict[str, Any]],
-    candidate_etfs: List[str],
-    industry_df: Optional[pl.DataFrame] = None,
-    valuation_df: Optional[pl.DataFrame] = None,
-    weight_history: Optional[Dict[str, Dict[date, Dict[str, float]]]] = None,
-    raw_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
-    component_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
-) -> pl.DataFrame:
-    needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
-    if needs_industry and industry_df is None:
-        industry_df = _load_industry_frame(
-            db,
-            universe_symbols,
-            request.start_date - timedelta(days=3650),
-            end_date,
-        )
-    factor_request = SimpleNamespace(
-        pool=request.pool,
-        bucket_count=max(2, min(20, request.max_positions)),
-        start_date=request.start_date,
-        end_date=end_date,
-        oos_start_date=None,
-        forward_window=1,
-        min_listing_days=request.min_listing_days,
-        legs=request.legs,
-    )
-    return _prepare_composite_factor_frame(
-        price_df=price_df,
-        request=factor_request,
-        db=db,
-        symbols=universe_symbols,
-        start_date=request.start_date,
-        end_date=end_date,
-        analysis_dates=analysis_dates,
-        industry_df=industry_df,
-        valuation_df=valuation_df,
-        weight_history=weight_history,
-        raw_factor_cache=raw_factor_cache,
-        component_factor_cache=component_factor_cache,
-        resolved_legs=resolved_legs,
-        candidate_etfs=candidate_etfs,
-    )
-
-
-def _factor_values_by_date(factor_df: pl.DataFrame, request: FactorBacktestRequest, end_date: date) -> Dict[date, Dict[str, float]]:
-    if factor_df.is_empty():
-        return {}
-
-    source = (
-        _filter_min_listing_days(factor_df, request.min_listing_days)
-        .filter(
-            (pl.col("trade_date") >= request.start_date)
-            & (pl.col("trade_date") <= end_date)
-            & pl.col("factor_value").is_not_null()
-            & pl.col("factor_value").is_finite()
-        )
-        .select("trade_date", "symbol", "factor_value")
-    )
-    values_by_date: Dict[date, Dict[str, float]] = {}
-    for row in source.to_dicts():
-        score = _safe_float(row.get("factor_value"))
-        if score is None:
-            continue
-        values_by_date.setdefault(row["trade_date"], {})[row["symbol"]] = score
-    return values_by_date
-
-
-def _is_virtual_replication_shape(resolved_legs: List[Dict[str, Any]]) -> bool:
-    if len(resolved_legs) != 2:
-        return False
-    by_key = {leg["factor"]["key"]: leg for leg in resolved_legs}
-    momentum_leg = by_key.get("risk_adjusted_momentum")
-    index_leg = by_key.get("index_weight")
-    if not momentum_leg or not index_leg:
-        return False
-    return (
-        momentum_leg["window"] == MIXED_WINDOW_KEY
-        and momentum_leg["neutralization"] == "none"
-        and momentum_leg["standardization"] == "rank_percentile"
-        and index_leg["neutralization"] == "none"
-        and index_leg["standardization"] == "rank_percentile"
-        and abs(float(momentum_leg.get("weight") or 0) - 0.6) < 1e-6
-        and abs(float(index_leg.get("weight") or 0) - 0.4) < 1e-6
-    )
-
-
-def _build_factor_backtest_metadata(
-    request: FactorBacktestRequest,
-    candidate_etfs: List[str],
-    universe_history,
-    price_df: pl.DataFrame,
-    resolved_legs: List[Dict[str, Any]],
-    end_date: date,
-    elapsed_ms: float,
-) -> Dict[str, Any]:
-    required_windows = _required_windows_for_composite_legs(resolved_legs)
-    return {
-        "mode": "factor_backtest",
-        "pool": request.pool,
-        "pool_label": next(item["label"] for item in POOL_OPTIONS if item["key"] == request.pool),
-        "candidate_etfs": candidate_etfs,
-        "components": [
-            {
-                "component_key": leg["key"],
-                "factor": leg["factor"],
-                "factor_key": leg["factor"]["key"],
-                "factor_label": leg["factor"]["label"],
-                "window": leg["window"],
-                "window_label": leg["window_label"],
-                "windows": leg["windows"],
-                "raw_weight": _safe_float(leg["raw_weight"], 4),
-                "weight": _safe_float(leg["weight"], 4),
-                "neutralization": leg["neutralization"],
-                "neutralization_label": leg["neutralization_label"],
-                "standardization": leg["standardization"],
-                "standardization_label": leg["standardization_label"],
-                "momentum_weights": leg["momentum_weights"],
-            }
-            for leg in resolved_legs
-        ],
-        "start_date": request.start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "initial_capital": request.initial_capital,
-        "max_positions": request.max_positions,
-        "sell_rank_multiplier": request.sell_rank_multiplier,
-        "sell_rank_threshold": max(request.max_positions, int(round(request.max_positions * request.sell_rank_multiplier))),
-        "factor_combination_method": "weighted_standardized_factor_values",
-        "factor_combination_method_label": "子因子标准化后加权",
-        "rebalance_frequency": request.rebalance_frequency,
-        "commission_pct": request.commission_pct,
-        "slippage_pct": request.slippage_pct,
-        "lot_size": request.lot_size,
-        "min_listing_days": request.min_listing_days,
-        "windows": required_windows,
-        "universe_symbols": len(universe_history.all_symbols),
-        "holdings_date_count": universe_history.holdings_date_count,
-        "price_rows": int(price_df.height),
-        **_price_adjustment_metadata(candidate_etfs, universe_history.all_symbols),
-        "engine": "polars",
-        "elapsed_ms": round(elapsed_ms, 1),
-        "replicates_virtual_strategy": _is_virtual_replication_shape(resolved_legs),
-    }
-
-
-def _compute_equity_risk_metrics(
-    equity_curve: List[Dict[str, Any]],
-    annualized_return_pct: float,
-) -> Dict[str, Optional[float]]:
-    values = [
-        float(item.get("value"))
-        for item in equity_curve or []
-        if item.get("value") is not None and math.isfinite(float(item.get("value")))
-    ]
-    if len(values) < 2:
-        return {"annualized_volatility": None, "sharpe": None, "calmar": None}
-
-    returns = []
-    for index in range(1, len(values)):
-        previous = values[index - 1]
-        current = values[index]
-        if previous > 0:
-            returns.append(current / previous - 1)
-    if not returns:
-        return {"annualized_volatility": None, "sharpe": None, "calmar": None}
-
-    mean_return = sum(returns) / len(returns)
-    std_return = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.0
-    annualized_volatility = std_return * math.sqrt(TRADING_DAYS_PER_YEAR) * 100 if std_return > 0 else None
-    sharpe = mean_return / std_return * math.sqrt(TRADING_DAYS_PER_YEAR) if std_return > 0 else None
-    max_drawdown = min([float(item.get("drawdown") or 0) for item in equity_curve] or [0])
-    calmar = annualized_return_pct / abs(max_drawdown) if max_drawdown < 0 else None
-    return {
-        "annualized_volatility": _safe_float(annualized_volatility, 2),
-        "sharpe": _safe_float(sharpe, 4),
-        "calmar": _safe_float(calmar, 4),
-    }
-
-
-def _factor_values_cache_key(
-    request: FactorBacktestRequest,
-    resolved_legs: List[Dict[str, Any]],
-) -> Any:
-    return (
-        int(request.min_listing_days),
-        tuple(
-            (
-                _backtest_leg_factor_cache_key(leg),
-                round(float(leg.get("weight") or 0), 10),
-            )
-            for leg in resolved_legs
-            if abs(float(leg.get("weight") or 0)) > 1e-12
-        ),
-    )
-
-
 def _to_shared_backtest_config(request: FactorBacktestRequest) -> SharedFactorBacktestConfig:
     pool_key = str(request.pool or "").strip().upper()
     return SharedFactorBacktestConfig(
@@ -4710,89 +3536,6 @@ def _prepare_factor_backtest_base_data(
         db,
     )
 
-    end_date = _resolve_analysis_end_date(request.pool, request.end_date, db)
-    candidate_etfs = POOL_ETFS[request.pool]
-    required_windows = _required_windows_for_composite_legs(resolved_legs)
-    max_factor_window = max(required_windows)
-    fetch_padding_days = max(370, request.min_listing_days + 30, int(max_factor_window * 3))
-    fetch_start = request.start_date - timedelta(days=fetch_padding_days)
-
-    universe_history = load_universe_history(db, candidate_etfs, request.start_date, end_date)
-    if not universe_history.all_symbols:
-        raise HTTPException(status_code=400, detail="股票池没有可用成分股数据")
-
-    price_df = _load_price_frame(universe_history.all_symbols, fetch_start, end_date)
-    if price_df.is_empty():
-        raise HTTPException(status_code=400, detail="股票池没有可用日行情数据")
-
-    rows_by_symbol = _price_frame_to_rows_by_symbol(price_df)
-    row_by_symbol_date = {
-        symbol: {row["date"]: row for row in rows}
-        for symbol, rows in rows_by_symbol.items()
-    }
-    dates = sorted({
-        row["date"]
-        for rows in rows_by_symbol.values()
-        for row in rows
-        if request.start_date <= row["date"] <= end_date
-    })
-    if not dates:
-        raise HTTPException(status_code=400, detail="回测区间内没有可交易日行情")
-
-    factor_keys = {leg["factor"]["key"] for leg in resolved_legs}
-    needs_industry = any(leg["neutralization"] != "none" for leg in resolved_legs)
-    industry_df = (
-        _load_industry_frame(
-            db,
-            universe_history.all_symbols,
-            request.start_date - timedelta(days=3650),
-            end_date,
-        )
-        if needs_industry
-        else None
-    )
-    valuation_df = (
-        _load_valuation_frame(
-            db,
-            universe_history.all_symbols,
-            request.start_date - timedelta(days=540),
-            end_date,
-        )
-        if "valuation_gap" in factor_keys
-        else None
-    )
-    weight_history = (
-        load_universe_weight_history(
-            db,
-            candidate_etfs,
-            request.start_date,
-            end_date,
-        )
-        if "index_weight" in factor_keys
-        else None
-    )
-    benchmark_rows = _price_frame_to_rows_by_symbol(
-        _load_price_frame(candidate_etfs, request.start_date - timedelta(days=10), end_date)
-    )
-
-    return {
-        "end_date": end_date,
-        "candidate_etfs": candidate_etfs,
-        "required_windows": required_windows,
-        "universe_history": universe_history,
-        "price_df": price_df,
-        "symbol_count": len(rows_by_symbol),
-        "row_by_symbol_date": row_by_symbol_date,
-        "dates": dates,
-        "industry_df": industry_df,
-        "valuation_df": valuation_df,
-        "weight_history": weight_history,
-        "benchmark_rows": benchmark_rows,
-        "raw_factor_cache": {},
-        "component_factor_cache": {},
-        "factor_values_cache": {},
-    }
-
 
 def _warm_backtest_search_factor_caches(
     search_request: FactorBacktestSearchRequest,
@@ -4804,71 +3547,6 @@ def _warm_backtest_search_factor_caches(
         prepared_data,
         db,
     )
-
-    price_df = prepared_data.get("price_df")
-    if price_df is None or price_df.is_empty():
-        return
-
-    raw_factor_cache = prepared_data.setdefault("raw_factor_cache", {})
-    component_factor_cache = prepared_data.setdefault("component_factor_cache", {})
-    base_request = search_request.request
-    base_resolved_legs = _resolve_factor_legs(base_request.legs)
-
-    for leg in base_resolved_legs:
-        factor_definition = leg["factor_definition"]
-        if factor_definition.key in MOMENTUM_FACTOR_SCORE_PREFIX:
-            _momentum_score_source_frame(
-                price_df,
-                factor_definition.key,
-                leg["windows"],
-                raw_factor_cache,
-            )
-
-        if leg["window"] == MIXED_WINDOW_KEY:
-            continue
-
-        momentum_weights = _leg_momentum_weights(leg)
-        leg_context = FactorContext(
-            windows=leg["windows"],
-            momentum_weights=momentum_weights,
-            db=db,
-            symbols=prepared_data["universe_history"].all_symbols,
-            start_date=base_request.start_date,
-            end_date=prepared_data["end_date"],
-            analysis_dates=prepared_data["dates"],
-            industry_df=prepared_data.get("industry_df"),
-            candidate_etfs=prepared_data["candidate_etfs"],
-            valuation_df=prepared_data.get("valuation_df"),
-            weight_history=prepared_data.get("weight_history"),
-        )
-        leg_request_payload = _request_to_dict(base_request)
-        leg_request_payload.update(
-            {
-                "neutralization": leg["neutralization"],
-                "standardization": leg["standardization"],
-            }
-        )
-        leg_request = SimpleNamespace(**leg_request_payload)
-        factor_df = _prepare_cached_leg_factor_frame(
-            price_df,
-            factor_definition,
-            leg_context,
-            leg_request,
-            raw_factor_cache,
-        ).select("symbol", "trade_date", "factor_value")
-        _put_limited_cache(
-            component_factor_cache,
-            _backtest_leg_factor_cache_key(leg),
-            factor_df,
-            BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT,
-        )
-
-    factor_columns = [
-        column
-        for column in ["symbol", "trade_date", "close", "volume", "_first_trade_date"]
-        if column in price_df.columns
-    ]
-    prepared_data["price_df"] = price_df.select(factor_columns).rechunk()
 
 
 def _iso_value(value: Any) -> Optional[str]:
@@ -5774,447 +4452,6 @@ def _run_factor_backtest(
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    started_at = time.perf_counter()
-    resolved_legs = _resolve_factor_legs(request.legs)
-    if prepared_data is None:
-        prepared_data = _prepare_factor_backtest_base_data(request, db, resolved_legs)
-
-    end_date = prepared_data["end_date"]
-    candidate_etfs = prepared_data["candidate_etfs"]
-    required_windows = prepared_data["required_windows"]
-    universe_history = prepared_data["universe_history"]
-    price_df = prepared_data["price_df"]
-    row_by_symbol_date = prepared_data["row_by_symbol_date"]
-    dates = prepared_data["dates"]
-
-    factor_values_cache = prepared_data.setdefault("factor_values_cache", {})
-    factor_values_key = _factor_values_cache_key(request, resolved_legs)
-    factor_values = factor_values_cache.get(factor_values_key)
-    if factor_values is None:
-        factor_df = _build_backtest_factor_frame(
-            request=request,
-            db=db,
-            universe_symbols=universe_history.all_symbols,
-            price_df=price_df,
-            analysis_dates=dates,
-            required_windows=required_windows,
-            end_date=end_date,
-            resolved_legs=resolved_legs,
-            candidate_etfs=candidate_etfs,
-            industry_df=prepared_data.get("industry_df"),
-            valuation_df=prepared_data.get("valuation_df"),
-            weight_history=prepared_data.get("weight_history"),
-            raw_factor_cache=prepared_data.setdefault("raw_factor_cache", {}),
-            component_factor_cache=prepared_data.setdefault("component_factor_cache", {}),
-        )
-        factor_values = _factor_values_by_date(factor_df, request, end_date)
-        _put_limited_cache(
-            factor_values_cache,
-            factor_values_key,
-            factor_values,
-            BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT,
-        )
-    if not factor_values:
-        raise HTTPException(status_code=400, detail="没有可用因子信号，请调整日期、窗口或股票池")
-
-    benchmark_curve = _build_benchmark_curve(
-        prepared_data["benchmark_rows"],
-        dates,
-        float(request.initial_capital),
-        request.start_date,
-    )
-
-    max_positions = int(request.max_positions)
-    sell_rank_multiplier = float(request.sell_rank_multiplier)
-    sell_rank_threshold = max(max_positions, int(round(max_positions * sell_rank_multiplier)))
-    rebalance_frequency = _normalize_rebalance_frequency(request.rebalance_frequency)
-    lot_size = max(1, int(request.lot_size or 1))
-    commission_rate = max(0.0, float(request.commission_pct or 0)) / 100
-    slippage_rate = max(0.0, float(request.slippage_pct or 0)) / 100
-
-    cash = float(request.initial_capital)
-    positions: Dict[str, Dict[str, Any]] = {}
-    last_prices: Dict[str, float] = {}
-    equity_curve: List[Dict[str, Any]] = []
-    events: List[Dict[str, Any]] = []
-    trades: List[Dict[str, Any]] = []
-    closed_profits: List[float] = []
-    peak_value = cash
-    universe_size_by_date: Dict[str, int] = {}
-    rebalance_count = 0
-    pending_rebalance: Optional[Dict[str, Any]] = None
-
-    def append_trade(
-        trade_date: date,
-        signal_date: date,
-        action: str,
-        symbol: str,
-        price: float,
-        quantity: int,
-        commission: float,
-        reason: str,
-        reason_detail: str,
-        profit: Optional[float] = None,
-        profit_pct: Optional[float] = None,
-    ):
-        amount = price * quantity
-        portfolio_after = _portfolio_value(cash, positions, last_prices)
-        symbol_market_value = 0.0
-        if symbol in positions:
-            symbol_market_value = int(positions[symbol].get("shares") or 0) * float(last_prices.get(symbol) or price)
-        trades.append(
-            {
-                "date": trade_date.isoformat(),
-                "signal_date": signal_date.isoformat(),
-                "action": action,
-                "symbol": symbol,
-                "price": _safe_float(price, 4),
-                "quantity": int(quantity),
-                "amount": _safe_float(amount, 2),
-                "commission": _safe_float(commission, 2),
-                "profit": _safe_float(profit, 2),
-                "profit_pct": _safe_float(profit_pct, 2),
-                "reason": reason,
-                "reason_detail": reason_detail,
-                "cash_after": _safe_float(cash, 2),
-                "portfolio_value_after": _safe_float(portfolio_after, 2),
-                "symbol_market_value_after": _safe_float(symbol_market_value, 2),
-                "symbol_weight_pct_after": _safe_float(symbol_market_value / portfolio_after * 100 if portfolio_after > 0 else 0, 2),
-                "price_source": "next_open",
-            }
-        )
-
-    def sell_position(trade_date: date, signal_date: date, symbol: str, quantity: int, price: float, reason_detail: str):
-        nonlocal cash
-        if symbol not in positions:
-            return
-        position = positions[symbol]
-        old_shares = int(position.get("shares") or 0)
-        quantity = min(old_shares, int(quantity or 0))
-        if quantity <= 0:
-            return
-
-        sell_price = price * (1 - slippage_rate)
-        amount = sell_price * quantity
-        commission = amount * commission_rate
-        old_cost_basis = float(position.get("cost_basis") or 0)
-        cost_basis_sold = old_cost_basis * quantity / old_shares if old_shares > 0 else 0.0
-        cash += amount - commission
-        profit = amount - commission - cost_basis_sold
-        profit_pct = profit / cost_basis_sold * 100 if cost_basis_sold > 0 else None
-        closed_profits.append(profit)
-
-        remaining_shares = old_shares - quantity
-        if remaining_shares <= 0:
-            del positions[symbol]
-        else:
-            position["shares"] = remaining_shares
-            position["cost_basis"] = max(0.0, old_cost_basis - cost_basis_sold)
-            position["avg_cost"] = position["cost_basis"] / remaining_shares if remaining_shares > 0 else 0.0
-            position["last_price"] = price
-        last_prices[symbol] = price
-
-        append_trade(
-            trade_date,
-            signal_date,
-            "SELL",
-            symbol,
-            sell_price,
-            quantity,
-            commission,
-            f"{rebalance_frequency}_rebalance",
-            reason_detail,
-            profit=profit,
-            profit_pct=profit_pct,
-        )
-
-    def buy_position(trade_date: date, signal_date: date, symbol: str, budget: float, price: float, reason_detail: str):
-        nonlocal cash
-        buy_price = price * (1 + slippage_rate)
-        quantity = _floor_lot(budget / (buy_price * (1 + commission_rate)), lot_size)
-        if quantity <= 0:
-            return
-        amount = buy_price * quantity
-        commission = amount * commission_rate
-        if amount + commission > cash + 1e-9:
-            return
-
-        cash -= amount + commission
-        if symbol not in positions:
-            positions[symbol] = {
-                "shares": quantity,
-                "avg_cost": (amount + commission) / quantity,
-                "cost_basis": amount + commission,
-                "entry_date": trade_date,
-                "last_price": price,
-            }
-        else:
-            position = positions[symbol]
-            position["shares"] = int(position.get("shares") or 0) + quantity
-            position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
-            position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
-            position["last_price"] = price
-        last_prices[symbol] = price
-
-        append_trade(
-            trade_date,
-            signal_date,
-            "BUY",
-            symbol,
-            buy_price,
-            quantity,
-            commission,
-            f"{rebalance_frequency}_rebalance",
-            reason_detail,
-        )
-
-    for date_index, current_date in enumerate(dates):
-        open_map: Dict[str, float] = {}
-        price_map: Dict[str, float] = {}
-        turnover_map: Dict[str, float] = {}
-        for symbol, row_by_date in row_by_symbol_date.items():
-            row = row_by_date.get(current_date)
-            if not row:
-                continue
-            open_price = _safe_float(row.get("open"))
-            close_price = _safe_float(row.get("close"))
-            if open_price is not None and open_price > 0:
-                open_map[symbol] = open_price
-            if close_price is not None and close_price > 0:
-                price_map[symbol] = close_price
-            turnover_map[symbol] = _safe_float(row.get("turnover")) or 0.0
-
-        if pending_rebalance:
-            signal_date = pending_rebalance["signal_date"]
-            for symbol in list(pending_rebalance["sell_symbols"]):
-                if symbol not in positions:
-                    continue
-                price = open_map.get(symbol)
-                if price is None or price <= 0:
-                    continue
-                shares = int(positions[symbol].get("shares") or 0)
-                sell_position(
-                    current_date,
-                    signal_date,
-                    symbol,
-                    shares,
-                    price,
-                    f"下一交易日开盘执行: 跌出因子排名Top{sell_rank_threshold}: {', '.join(pending_rebalance['sell_rank_symbols'])}",
-                )
-
-            slots_to_fill = max(0, max_positions - len(positions))
-            buy_candidates = [
-                item
-                for item in pending_rebalance["selected"]
-                if item["symbol"] not in positions
-            ][:slots_to_fill]
-            budget_per_symbol = cash / len(buy_candidates) if buy_candidates else 0.0
-            for item in buy_candidates:
-                symbol = item["symbol"]
-                price = open_map.get(symbol)
-                if price is None or price <= 0:
-                    continue
-                buy_budget = min(cash, budget_per_symbol)
-                if buy_budget <= 0:
-                    continue
-                buy_position(
-                    current_date,
-                    signal_date,
-                    symbol,
-                    buy_budget,
-                    price,
-                    f"下一交易日开盘补位买入因子Top{max_positions}",
-                )
-            pending_rebalance = None
-
-        for symbol, price in price_map.items():
-            last_prices[symbol] = price
-            if symbol in positions:
-                positions[symbol]["last_price"] = price
-
-        if not price_map:
-            continue
-
-        current_universe = set(universe_history.symbols_for_date(current_date))
-        universe_size_by_date[current_date.isoformat()] = len(current_universe)
-
-        if _is_rebalance_day(dates, date_index, rebalance_frequency):
-            rebalance_count += 1
-            score_map = factor_values.get(current_date, {})
-            ranked: List[Dict[str, Any]] = []
-            for symbol in sorted(current_universe):
-                if symbol not in price_map:
-                    continue
-                raw_score = score_map.get(symbol)
-                factor_score = _safe_float(raw_score)
-                if factor_score is None:
-                    continue
-                ranked.append(
-                    {
-                        "symbol": symbol,
-                        "price": price_map[symbol],
-                        "turnover": turnover_map.get(symbol, 0.0),
-                        "factor_score": factor_score,
-                    }
-                )
-
-            ranked.sort(
-                key=lambda item: (
-                    float(item.get("factor_score") or -1e18),
-                    float(item.get("turnover") or 0),
-                    item["symbol"],
-                ),
-                reverse=True,
-            )
-            denominator = max(1, len(ranked) - 1)
-            for rank_index, item in enumerate(ranked):
-                item["factor_percentile"] = 1 - rank_index / denominator
-                item["rank_score"] = item["factor_score"]
-            selected = ranked[:max_positions]
-            selected_symbols = [item["symbol"] for item in selected]
-            sell_rank_symbols = [item["symbol"] for item in ranked[:sell_rank_threshold]]
-            rank_by_symbol = {item["symbol"]: rank for rank, item in enumerate(ranked, start=1)}
-
-            for rank, item in enumerate(selected, start=1):
-                events.append(
-                    {
-                        "symbol": item["symbol"],
-                        "date": current_date.isoformat(),
-                        "direction": "RANK",
-                        "signal_price": _safe_float(item["price"], 4),
-                        "turnover": _safe_float(item.get("turnover"), 2),
-                        "threshold_pct": _safe_float(item.get("factor_score"), 4),
-                        "payload": {
-                            "rank": rank,
-                            "rank_score": _safe_float(item.get("rank_score"), 6),
-                            "factor_score": _safe_float(item.get("factor_score"), 6),
-                            "factor_percentile": _safe_float(item.get("factor_percentile"), 6),
-                            "selected_symbols": selected_symbols,
-                            "sell_rank_symbols": sell_rank_symbols,
-                            "max_positions": max_positions,
-                            "sell_rank_threshold": sell_rank_threshold,
-                            "sell_rank_multiplier": sell_rank_multiplier,
-                            "min_listing_days": request.min_listing_days,
-                            "rebalance_frequency": rebalance_frequency,
-                            "execution_rule": "signal_close_next_open",
-                            "rotation_rule": "hold_until_out_of_sell_rank",
-                            "strategy": "factor_lab_top_n_rotation",
-                        },
-                        "price_source": "daily_close",
-                    }
-                )
-
-            sell_symbols = [
-                symbol
-                for symbol in list(positions.keys())
-                if rank_by_symbol.get(symbol, 10**9) > sell_rank_threshold
-            ]
-            pending_rebalance = {
-                "signal_date": current_date,
-                "selected": selected,
-                "selected_symbols": selected_symbols,
-                "sell_rank_symbols": sell_rank_symbols,
-                "sell_symbols": sell_symbols,
-            }
-
-        value = _portfolio_value(cash, positions, last_prices)
-        peak_value = max(peak_value, value)
-        drawdown = (value / peak_value - 1) * 100 if peak_value > 0 else 0.0
-        equity_curve.append(
-            {
-                "date": current_date.isoformat(),
-                "value": _safe_float(value, 2),
-                "cash": _safe_float(cash, 2),
-                "position_value": _safe_float(value - cash, 2),
-                "drawdown": _safe_float(drawdown, 2),
-            }
-        )
-
-    current_value = equity_curve[-1]["value"] if equity_curve else float(request.initial_capital)
-    initial_value = float(request.initial_capital)
-    total_return = (current_value / initial_value - 1) * 100 if initial_value > 0 else 0.0
-    yearly_stats = _build_yearly_stats(equity_curve, benchmark_curve, candidate_etfs)
-    elapsed_days = (
-        (date.fromisoformat(equity_curve[-1]["date"]) - date.fromisoformat(equity_curve[0]["date"])).days
-        if len(equity_curve) > 1
-        else 0
-    )
-    annualized_return = (
-        ((1 + total_return / 100) ** (365 / elapsed_days) - 1) * 100
-        if elapsed_days > 0 and total_return > -100
-        else 0.0
-    )
-    win_count = sum(1 for item in closed_profits if item > 0)
-    risk_metrics = _compute_equity_risk_metrics(equity_curve, annualized_return)
-
-    holdings: List[Dict[str, Any]] = []
-    for symbol, position in positions.items():
-        price = float(last_prices.get(symbol) or position.get("last_price") or position.get("avg_cost") or 0)
-        market_value = int(position["shares"]) * price
-        holdings.append(
-            {
-                "symbol": symbol,
-                "shares": int(position["shares"]),
-                "price": _safe_float(price, 4),
-                "avg_cost": _safe_float(position.get("avg_cost"), 4),
-                "entry_date": position["entry_date"].isoformat() if position.get("entry_date") else None,
-                "market_value": _safe_float(market_value, 2),
-                "actual_weight_pct": _safe_float(market_value / current_value * 100 if current_value > 0 else 0, 2),
-            }
-        )
-    holdings.sort(key=lambda item: item.get("market_value") or 0, reverse=True)
-
-    metrics = {
-        "total_return": _safe_float(total_return, 2),
-        "annualized_return": _safe_float(annualized_return, 2),
-        "max_drawdown": _safe_float(min([item["drawdown"] for item in equity_curve] or [0]), 2),
-        "signal_count": len(events),
-        "rank_signal_count": len(events),
-        "rebalance_count": rebalance_count,
-        "buy_signal_count": sum(1 for item in trades if item["action"] == "BUY"),
-        "sell_signal_count": sum(1 for item in trades if item["action"] == "SELL"),
-        "trade_count": len(trades),
-        "closed_trade_count": len(closed_profits),
-        "win_count": win_count,
-        "win_rate": _safe_float(win_count / len(closed_profits) * 100 if closed_profits else 0.0, 2),
-        "ending_value": _safe_float(current_value, 2),
-        "cash": equity_curve[-1]["cash"] if equity_curve else _safe_float(cash, 2),
-        "holding_count": len(holdings),
-        "pending_signal_date": pending_rebalance["signal_date"].isoformat() if pending_rebalance else None,
-        **risk_metrics,
-    }
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-    metadata = _build_factor_backtest_metadata(
-        request,
-        candidate_etfs,
-        universe_history,
-        price_df,
-        resolved_legs,
-        end_date,
-        elapsed_ms,
-    )
-    metadata.update(
-        {
-            "symbol_count": prepared_data.get("symbol_count"),
-            "universe_size_latest": next(reversed(universe_size_by_date.values()), None) if universe_size_by_date else None,
-            "execution_rule": "signal_close_next_open",
-            "rotation_rule": "hold_until_out_of_sell_rank",
-            "strategy": "factor_lab_top_n_rotation",
-        }
-    )
-
-    return {
-        "metadata": metadata,
-        "metrics": metrics,
-        "equity_curve": equity_curve,
-        "benchmark_curve": benchmark_curve,
-        "yearly_stats": yearly_stats,
-        "events": events,
-        "trades": trades,
-        "current_holdings": holdings,
-        "component_correlation": [],
-    }
 
 
 def _composition_count(total: int, parts: int) -> int:
@@ -7484,6 +5721,7 @@ def _run_factor_analysis(
         analysis_dates=analysis_dates,
         industry_df=industry_df,
         candidate_etfs=candidate_etfs,
+        weight_history_loader=load_universe_weight_history,
     )
     heatmap_records = _compute_parameter_heatmap(price_df, universe_df, factor_definition, request, heatmap_context)
     selected_combo = _select_best_combo(request, factor_definition, heatmap_records)
