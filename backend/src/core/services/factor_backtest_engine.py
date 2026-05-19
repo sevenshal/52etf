@@ -612,6 +612,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
         "trade_date": pl.Date,
         "open": pl.Float64,
         "high": pl.Float64,
+        "low": pl.Float64,
         "close": pl.Float64,
         "volume": pl.Float64,
         "turnover": pl.Float64,
@@ -631,6 +632,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
                     CAST(high AS DOUBLE) AS high,
+                    CAST(low AS DOUBLE) AS low,
                     CAST(close AS DOUBLE) AS close,
                     CAST(volume AS DOUBLE) AS volume,
                     CAST(turnover AS DOUBLE) AS turnover
@@ -654,6 +656,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
                     CAST(high AS DOUBLE) AS high,
+                    CAST(low AS DOUBLE) AS low,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -687,6 +690,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
                     CAST(high AS DOUBLE) AS high,
+                    CAST(low AS DOUBLE) AS low,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -710,6 +714,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
                     CAST(trade_date AS DATE) AS trade_date,
                     CAST(open AS DOUBLE) AS open,
                     CAST(high AS DOUBLE) AS high,
+                    CAST(low AS DOUBLE) AS low,
                     CAST(close AS DOUBLE) AS close,
                     CAST(vol AS DOUBLE) AS volume,
                     CAST(amount AS DOUBLE) AS turnover
@@ -736,6 +741,7 @@ def load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl
         pl.col("trade_date").cast(pl.Date),
         pl.col("open").cast(pl.Float64),
         pl.col("high").cast(pl.Float64),
+        pl.col("low").cast(pl.Float64),
         pl.col("close").cast(pl.Float64),
         pl.col("volume").cast(pl.Float64),
         pl.col("turnover").cast(pl.Float64),
@@ -1521,7 +1527,7 @@ def _prepare_composite_factor_frame(
     component_factor_cache: Optional[Dict[Any, pl.DataFrame]] = None,
 ) -> pl.DataFrame:
     active_legs = [leg for leg in resolved_legs if abs(float(leg.get("weight") or 0)) > 1e-12]
-    base_columns = [column for column in ["symbol", "trade_date", "high", "close", "volume", "turnover", "_first_trade_date"] if column in price_df.columns]
+    base_columns = [column for column in ["symbol", "trade_date", "open", "high", "low", "close", "volume", "turnover", "_first_trade_date"] if column in price_df.columns]
     composite_df = price_df.select(base_columns).unique(subset=["symbol", "trade_date"])
     for leg in active_legs:
         factor_definition = leg["factor_definition"]
@@ -2228,7 +2234,7 @@ def warm_backtest_search_factor_caches(
             "symbol", "trade_date", "factor_value"
         )
         _put_limited_cache(component_factor_cache, _backtest_leg_factor_cache_key(leg), factor_df, BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT)
-    factor_columns = [column for column in ["symbol", "trade_date", "high", "close", "volume", "turnover", "_first_trade_date"] if column in price_df.columns]
+    factor_columns = [column for column in ["symbol", "trade_date", "open", "high", "low", "close", "volume", "turnover", "_first_trade_date"] if column in price_df.columns]
     prepared_data["price_df"] = price_df.select(factor_columns).rechunk()
 
 
