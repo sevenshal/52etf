@@ -35,9 +35,11 @@ STRATEGY_FACTOR_LIVE = "factor_live_trading"
 STRATEGY_NETTED_EXECUTOR = "netted_executor"
 STATUS_BLOCKED_INSUFFICIENT_SELLABLE = "BLOCKED_INSUFFICIENT_SELLABLE"
 STATUS_BLOCKED_INSUFFICIENT_POSITION = "BLOCKED_INSUFFICIENT_POSITION"
+STATUS_BLOCKED_NON_RETRYABLE_REJECTION = "BLOCKED_NON_RETRYABLE_REJECTION"
 BLOCKED_ORDER_STATUSES = {
     STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
+    STATUS_BLOCKED_NON_RETRYABLE_REJECTION,
 }
 ACTIVE_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
 TERMINAL_ORDER_STATUSES = {
@@ -50,6 +52,7 @@ TERMINAL_ORDER_STATUSES = {
     "EXPIRED",
     STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
+    STATUS_BLOCKED_NON_RETRYABLE_REJECTION,
 }
 PASSIVE_CHILD_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
 
@@ -93,6 +96,14 @@ def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
         return f"{parts[1]}.{market}"
     market = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}.get(second, second)
     return f"{parts[0]}.{market}"
+
+
+def is_star_market_symbol(symbol: Optional[str]) -> bool:
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return False
+    parts = normalized.split(".")
+    return len(parts) == 2 and parts[1] == "SH" and parts[0].startswith(("688", "689"))
 
 def safe_int(value: Any, default: int = 0) -> int:
     try:
@@ -642,6 +653,81 @@ def _resize_child_orders_for_parent_clip(
     return residual_allocations
 
 
+def _upsert_block_order(
+    db: Session,
+    *,
+    parent: ExternalTradingOrder,
+    child: ExternalTradingOrder,
+    side: str,
+    quantity: int,
+    blocked_until: Optional[datetime],
+    block_status: str,
+    block_reason: str,
+    block_message: str,
+    raw_block: Dict[str, Any],
+) -> bool:
+    if quantity <= 0 or not child.sub_account_id or block_status not in BLOCKED_ORDER_STATUSES:
+        return False
+    now = datetime.now()
+    query = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.external_trading_account_id == parent.external_trading_account_id,
+            ExternalTradingOrder.sub_account_id == child.sub_account_id,
+            ExternalTradingOrder.symbol == parent.symbol,
+            ExternalTradingOrder.side == side,
+            ExternalTradingOrder.status == block_status,
+        )
+    )
+    if block_status == STATUS_BLOCKED_INSUFFICIENT_SELLABLE:
+        query = query.filter(ExternalTradingOrder.deadline_at > now)
+    existing = query.first()
+    if existing:
+        existing.quantity = max(safe_int(existing.quantity), quantity)
+        existing.remaining_quantity = existing.quantity
+        existing.signal_version = child.signal_version or parent.signal_version
+        existing.cancel_reason = block_reason
+        if blocked_until:
+            existing.deadline_at = max(existing.deadline_at or blocked_until, blocked_until)
+        existing.message = block_message
+        existing.raw_request = {
+            **(existing.raw_request or {}),
+            **raw_block,
+            "latest_block": raw_block,
+        }
+        existing.updated_at = now
+        return False
+
+    block_order = ExternalTradingOrder(
+        account_id=child.account_id or parent.account_id,
+        external_trading_account_id=parent.external_trading_account_id,
+        sub_account_id=child.sub_account_id,
+        strategy_type=child.strategy_type,
+        strategy_config_id=child.strategy_config_id,
+        execution_id=child.execution_id,
+        allocation_role="BLOCK",
+        client_order_id=uuid.uuid4().hex,
+        symbol=parent.symbol,
+        side=side,
+        order_type="BLOCK",
+        price_level=parent.price_level,
+        signal_version=child.signal_version or parent.signal_version,
+        replace_count=parent.replace_count,
+        deadline_at=blocked_until,
+        cancel_reason=block_reason,
+        quantity=quantity,
+        filled_quantity=0,
+        remaining_quantity=quantity,
+        status=block_status,
+        message=block_message,
+        raw_request=raw_block,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(block_order)
+    return True
+
+
 def _create_quantity_clip_block_orders(
     db: Session,
     *,
@@ -655,7 +741,6 @@ def _create_quantity_clip_block_orders(
 ) -> int:
     if parent.side != "SELL" or block_status not in BLOCKED_ORDER_STATUSES:
         return 0
-    now = datetime.now()
     created = 0
     for allocation in residual_allocations:
         child = allocation.get("child")
@@ -665,19 +750,6 @@ def _create_quantity_clip_block_orders(
         if quantity <= 0 or not child.sub_account_id:
             continue
 
-        query = (
-            db.query(ExternalTradingOrder)
-            .filter(
-                ExternalTradingOrder.external_trading_account_id == parent.external_trading_account_id,
-                ExternalTradingOrder.sub_account_id == child.sub_account_id,
-                ExternalTradingOrder.symbol == parent.symbol,
-                ExternalTradingOrder.side == "SELL",
-                ExternalTradingOrder.status == block_status,
-            )
-        )
-        if block_status == STATUS_BLOCKED_INSUFFICIENT_SELLABLE:
-            query = query.filter(ExternalTradingOrder.deadline_at > now)
-        existing = query.first()
         raw_block = {
             "reason": block_reason,
             "source_parent_order_id": parent.id,
@@ -691,47 +763,73 @@ def _create_quantity_clip_block_orders(
             "blocked_until": blocked_until.isoformat() if blocked_until else None,
             "submit_result": submit_result,
         }
-        if existing:
-            existing.quantity = max(safe_int(existing.quantity), quantity)
-            existing.remaining_quantity = existing.quantity
-            if blocked_until:
-                existing.deadline_at = max(existing.deadline_at or blocked_until, blocked_until)
-            existing.message = block_message
-            existing.raw_request = {
-                **(existing.raw_request or {}),
-                "latest_block": raw_block,
-            }
-            existing.updated_at = now
-            continue
-
-        block_order = ExternalTradingOrder(
-            account_id=child.account_id or parent.account_id,
-            external_trading_account_id=parent.external_trading_account_id,
-            sub_account_id=child.sub_account_id,
-            strategy_type=child.strategy_type,
-            strategy_config_id=child.strategy_config_id,
-            execution_id=child.execution_id,
-            allocation_role="BLOCK",
-            client_order_id=uuid.uuid4().hex,
-            symbol=parent.symbol,
+        created += int(_upsert_block_order(
+            db,
+            parent=parent,
+            child=child,
             side="SELL",
-            order_type="BLOCK",
-            price_level=parent.price_level,
-            signal_version=child.signal_version or parent.signal_version,
-            replace_count=parent.replace_count,
-            deadline_at=blocked_until,
-            cancel_reason=block_reason,
             quantity=quantity,
-            filled_quantity=0,
-            remaining_quantity=quantity,
-            status=block_status,
-            message=block_message,
-            raw_request=raw_block,
-            created_at=now,
-            updated_at=now,
+            blocked_until=blocked_until,
+            block_status=block_status,
+            block_reason=block_reason,
+            block_message=block_message,
+            raw_block=raw_block,
+        ))
+    return created
+
+
+def _create_non_retryable_rejection_blocks(
+    db: Session,
+    *,
+    parent: ExternalTradingOrder,
+    submit_result: Dict[str, Any],
+) -> int:
+    if _role(parent) != "PARENT" or parent.strategy_type != STRATEGY_NETTED_EXECUTOR:
+        return 0
+    children = _child_orders(db, parent.id)
+    if not children:
+        return 0
+
+    block_status = STATUS_BLOCKED_NON_RETRYABLE_REJECTION
+    block_reason = str(submit_result.get("error_code") or "non_retryable_rejection").strip() or "non_retryable_rejection"
+    block_message = (
+        submit_result.get("message")
+        or submit_result.get("error")
+        or "订单被拒且不可重试，执行器已阻断重复报单"
+    )
+    created = 0
+    for child in children:
+        quantity = max(
+            safe_int(child.remaining_quantity),
+            safe_int(child.quantity) - safe_int(child.filled_quantity),
+            0,
         )
-        db.add(block_order)
-        created += 1
+        raw_block = {
+            "reason": block_reason,
+            "source_parent_order_id": parent.id,
+            "source_parent_client_order_id": parent.client_order_id,
+            "source_child_order_id": child.id,
+            "requested_quantity": safe_int(child.quantity),
+            "submitted_quantity": safe_int(submit_result.get("submitted_quantity")),
+            "blocked_quantity": quantity,
+            "response_status": submit_result.get("status"),
+            "error_code": submit_result.get("error_code"),
+            "retryable": False,
+            "message": block_message,
+            "submit_result": submit_result,
+        }
+        created += int(_upsert_block_order(
+            db,
+            parent=parent,
+            child=child,
+            side=str(child.side or parent.side or "").upper(),
+            quantity=quantity,
+            blocked_until=None,
+            block_status=block_status,
+            block_reason=block_reason,
+            block_message=block_message,
+            raw_block=raw_block,
+        ))
     return created
 
 
@@ -773,6 +871,209 @@ def expire_insufficient_sellable_blocks(
         row.message = "A股 T+1 可卖数量阻断已到期，允许执行器重新尝试"
         row.updated_at = current
     return len(rows)
+
+
+def _block_is_active_for_plan(row: ExternalTradingOrder, now: datetime) -> bool:
+    status = str(getattr(row, "status", "") or "").upper()
+    if status == STATUS_BLOCKED_INSUFFICIENT_SELLABLE:
+        return bool(row.deadline_at and row.deadline_at > now)
+    return status in BLOCKED_ORDER_STATUSES
+
+
+def _non_retryable_block_matches_demand(
+    row: ExternalTradingOrder,
+    *,
+    symbol: str,
+    side: str,
+    quantity: int,
+    available_quantity: int,
+) -> bool:
+    raw = row.raw_request if isinstance(row.raw_request, dict) else {}
+    submit_result = raw.get("submit_result") if isinstance(raw.get("submit_result"), dict) else {}
+    error_code = str(raw.get("error_code") or submit_result.get("error_code") or "").upper()
+    response_status = str(raw.get("response_status") or submit_result.get("status") or "").upper()
+    if response_status == "NOT_SUPPORTED" or error_code == "UNSUPPORTED_MARKET":
+        return True
+    if error_code == "INVALID_LOT_SIZE" and is_star_market_symbol(symbol):
+        if side == "BUY":
+            return 0 < quantity < 200
+        if side == "SELL":
+            return 0 < quantity < 200 and quantity != available_quantity
+    return True
+
+
+def _block_matches_demand(
+    row: ExternalTradingOrder,
+    *,
+    now: datetime,
+    symbol: str,
+    side: str,
+    quantity: int,
+    available_quantity: int,
+) -> bool:
+    status = str(getattr(row, "status", "") or "").upper()
+    if not _block_is_active_for_plan(row, now):
+        return False
+    if status == STATUS_BLOCKED_NON_RETRYABLE_REJECTION:
+        return _non_retryable_block_matches_demand(
+            row,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            available_quantity=available_quantity,
+        )
+    return True
+
+
+def _block_priority(row: ExternalTradingOrder) -> int:
+    status = str(getattr(row, "status", "") or "").upper()
+    if status == STATUS_BLOCKED_INSUFFICIENT_POSITION:
+        return 0
+    if status == STATUS_BLOCKED_NON_RETRYABLE_REJECTION:
+        return 1
+    if status == STATUS_BLOCKED_INSUFFICIENT_SELLABLE:
+        return 2
+    return 3
+
+
+def resolve_manual_block_fill_price(
+    db: Session,
+    order: ExternalTradingOrder,
+    explicit_price: Optional[float] = None,
+) -> Tuple[float, str]:
+    price = round_money(safe_float(explicit_price))
+    if price > 0:
+        return price, "manual_input"
+
+    raw_request = order.raw_request if isinstance(order.raw_request, dict) else {}
+    submit_result = raw_request.get("submit_result") if isinstance(raw_request.get("submit_result"), dict) else {}
+    price = round_money(safe_float(order.submitted_price))
+    if price > 0:
+        return price, "block_submitted_price"
+
+    price = round_money(safe_float(raw_request.get("submitted_price")))
+    if price > 0:
+        return price, "block_raw_submitted_price"
+
+    price = round_money(safe_float(submit_result.get("submitted_price")))
+    if price > 0:
+        return price, "source_submit_result_price"
+
+    source_parent_order_id = safe_int(raw_request.get("source_parent_order_id"), 0)
+    if source_parent_order_id > 0:
+        parent = db.query(ExternalTradingOrder).filter(ExternalTradingOrder.id == source_parent_order_id).first()
+        if parent:
+            price = round_money(safe_float(parent.submitted_price))
+            if price > 0:
+                return price, "source_parent_submitted_price"
+            parent_submit_result = parent.raw_submit_result if isinstance(parent.raw_submit_result, dict) else {}
+            price = round_money(safe_float(parent_submit_result.get("submitted_price")))
+            if price > 0:
+                return price, "source_parent_submit_result_price"
+
+    if order.sub_account_id and order.symbol:
+        position = (
+            db.query(ExternalTradingLedgerPosition)
+            .filter(
+                ExternalTradingLedgerPosition.sub_account_id == order.sub_account_id,
+                ExternalTradingLedgerPosition.symbol == order.symbol,
+            )
+            .first()
+        )
+        if position:
+            price = round_money(safe_float(position.market_price))
+            if price > 0:
+                return price, "ledger_market_price"
+            price = round_money(safe_float(position.avg_cost))
+            if price > 0:
+                return price, "ledger_avg_cost"
+
+    raise ValueError("无法自动确定成交价，请后续补一个手动输入成交价的能力")
+
+
+def mark_block_order_manual_success(
+    db: Session,
+    *,
+    order: ExternalTradingOrder,
+    fill_price: float,
+    price_source: str,
+    traded_at: Optional[datetime] = None,
+    note: Optional[str] = None,
+) -> ExternalTradingOrderFill:
+    if _role(order) != "BLOCK":
+        raise ValueError("只有阻断单支持手工标记成功")
+    if str(order.status or "").upper() != STATUS_BLOCKED_INSUFFICIENT_POSITION:
+        raise ValueError("当前仅支持“持仓不足”阻断单手工标记成功")
+    if str(order.side or "").upper() != "SELL":
+        raise ValueError("当前仅支持卖出阻断单手工标记成功")
+
+    quantity = max(
+        safe_int(order.remaining_quantity),
+        safe_int(order.quantity) - safe_int(order.filled_quantity),
+        0,
+    )
+    if quantity <= 0:
+        raise ValueError("阻断单没有可处理的剩余数量")
+
+    fill_price = round_money(safe_float(fill_price))
+    if fill_price <= 0:
+        raise ValueError("成交价必须大于 0")
+
+    fill_key = f"manual:block-success:{order.id}"
+    existing_fill = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == fill_key).first()
+    if existing_fill:
+        raise ValueError("这条阻断单已经标记成功过了")
+
+    position = None
+    if order.sub_account_id and order.symbol:
+        position = (
+            db.query(ExternalTradingLedgerPosition)
+            .filter(
+                ExternalTradingLedgerPosition.sub_account_id == order.sub_account_id,
+                ExternalTradingLedgerPosition.symbol == order.symbol,
+            )
+            .first()
+        )
+    if not position or safe_int(position.quantity) < quantity:
+        raise ValueError("账本持仓数量不足，无法按成功成交回写")
+
+    traded_time = traded_at or datetime.now()
+    estimated_fee_increment = _estimated_fee_increment_for_order(db, order, quantity * fill_price)
+    event = {
+        "type": "manual_block_success",
+        "price_source": price_source,
+        "note": note,
+        "quantity": quantity,
+        "price": fill_price,
+        "traded_at": traded_time.isoformat(),
+        "source_status": order.status,
+        "source_message": order.message,
+    }
+    fill = _insert_fill_row(
+        db,
+        order=order,
+        fill_key=fill_key,
+        quantity=quantity,
+        price=fill_price,
+        traded_at=traded_time,
+        event=event,
+        estimated_commission=estimated_fee_increment.get("commission", 0.0),
+        estimated_stamp_tax=estimated_fee_increment.get("stamp_tax", 0.0),
+        estimated_fee_total=estimated_fee_increment.get("fee_total", 0.0),
+    )
+    _apply_fill_to_ledger(db, order, quantity, fill_price, fee_total=estimated_fee_increment.get("fee_total", 0.0))
+    _refresh_order_from_fill_totals(db, order)
+    order.submitted_price = safe_float(order.submitted_price, fill_price) or fill_price
+    order.avg_fill_price = fill_price
+    order.submitted_at = order.submitted_at or traded_time
+    order.last_event_at = traded_time
+    order.raw_order_event = event
+    order.message = (
+        f"人工标记成功，按 {fill_price:.2f} 元回写账本"
+        + (f"（{note}）" if note else "")
+    )[:1000]
+    order.updated_at = datetime.now()
+    return fill
 
 
 def _apply_submission_quantity_clip(
@@ -880,6 +1181,12 @@ def record_submission_result(
         row.raw_submit_result = item
         row.updated_at = now
         _propagate_parent_order_state(db, row)
+        if item.get("ok") is False and retryable is False:
+            _create_non_retryable_rejection_blocks(
+                db,
+                parent=row,
+                submit_result=item,
+            )
 
 
 def record_cancel_result(
@@ -2269,26 +2576,26 @@ def _build_demand_rows(
         for sub_account_id in sub_accounts.keys()
     }
     now = datetime.now()
-    active_sell_blocks = (
+    active_blocks = (
         db.query(ExternalTradingOrder)
         .filter(
             ExternalTradingOrder.external_trading_account_id == external_trading_account_id,
             ExternalTradingOrder.sub_account_id.in_(list(sub_accounts.keys())),
-            ExternalTradingOrder.side == "SELL",
             ExternalTradingOrder.status.in_(list(BLOCKED_ORDER_STATUSES)),
         )
         .all()
     )
-    sell_block_by_key = {
-        (safe_int(row.sub_account_id), normalize_symbol(row.symbol)): row
-        for row in active_sell_blocks
-        if row.sub_account_id
-        and row.symbol
-        and (
-            row.status == STATUS_BLOCKED_INSUFFICIENT_POSITION
-            or (row.deadline_at and row.deadline_at > now)
-        )
-    }
+    block_by_key: Dict[Tuple[int, Optional[str], str], List[ExternalTradingOrder]] = {}
+    for row in active_blocks:
+        if not row.sub_account_id or not row.symbol:
+            continue
+        side = str(row.side or "").upper()
+        if side not in {"BUY", "SELL"} or not _block_is_active_for_plan(row, now):
+            continue
+        key = (safe_int(row.sub_account_id), normalize_symbol(row.symbol), side)
+        block_by_key.setdefault(key, []).append(row)
+    for rows in block_by_key.values():
+        rows.sort(key=_block_priority)
     demands: List[Dict[str, Any]] = []
     for target in target_rows:
         sub_account = sub_accounts.get(target.sub_account_id)
@@ -2307,6 +2614,7 @@ def _build_demand_rows(
             continue
         side = "BUY" if delta > 0 else "SELL"
         quantity = abs(delta)
+        available_quantity = 0
         if side == "SELL":
             available_quantity = max(safe_int(getattr(ledger_position, "available_quantity", current_quantity)) - pending_sell, 0)
             quantity = min(quantity, available_quantity)
@@ -2317,7 +2625,18 @@ def _build_demand_rows(
             sub_account,
             fallback=execution_policy_fallback,
         )
-        blocked_order = sell_block_by_key.get((sub_account.id, symbol)) if side == "SELL" else None
+        blocked_order = None
+        for candidate in block_by_key.get((sub_account.id, symbol, side), []):
+            if _block_matches_demand(
+                candidate,
+                now=now,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                available_quantity=available_quantity,
+            ):
+                blocked_order = candidate
+                break
         demands.append({
             "account_id": sub_account.account_id,
             "external_trading_account_id": external_trading_account_id,

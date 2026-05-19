@@ -49,6 +49,7 @@ from ...core.services.external_trading_execution_policy import (
 
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
+    STATUS_BLOCKED_INSUFFICIENT_POSITION,
     STRATEGY_SNOWBALL,
     STRATEGY_FACTOR_LIVE,
     STRATEGY_W20,
@@ -59,7 +60,9 @@ from ...core.services.external_trading_ledger import (
     get_ledger_positions,
     get_open_order_quantities,
     get_sub_account_fee_summaries,
+    mark_block_order_manual_success,
     normalize_symbol,
+    resolve_manual_block_fill_price,
     safe_int,
     serialize_ledger_position,
     serialize_order,
@@ -220,6 +223,18 @@ class OrderCancelInstruction(BaseModel):
 class OrderCancelBatchRequest(BaseModel):
     orders: List[OrderCancelInstruction] = Field(..., min_items=1)
     timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
+
+
+class ManualBlockSuccessRequest(BaseModel):
+    price: Optional[float] = Field(default=None, gt=0)
+    traded_at: Optional[datetime] = None
+    note: Optional[str] = Field(default=None, max_length=500)
+
+    @validator("note", pre=True)
+    def strip_note(cls, value):
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 class ExternalTradingSubAccountPayload(BaseModel):
@@ -1468,6 +1483,68 @@ async def cancel_external_orders(
         )
     except ExternalTradingConnectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{external_account_id}/orders/{order_id}/mark-success")
+async def mark_external_block_order_success(
+    external_account_id: int,
+    order_id: int,
+    payload: ManualBlockSuccessRequest = ManualBlockSuccessRequest(),
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    order = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.id == order_id,
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+        )
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="External trading order not found")
+    if (order.allocation_role or "").upper() != "BLOCK":
+        raise HTTPException(status_code=400, detail="只有阻断单支持手工标记成功")
+    if (order.status or "").upper() != STATUS_BLOCKED_INSUFFICIENT_POSITION:
+        raise HTTPException(status_code=400, detail="当前仅支持“持仓不足”阻断单手工标记成功")
+
+    try:
+        fill_price, price_source = resolve_manual_block_fill_price(
+            db,
+            order,
+            explicit_price=payload.price,
+        )
+        fill = mark_block_order_manual_success(
+            db,
+            order=order,
+            fill_price=fill_price,
+            price_source=price_source,
+            traded_at=payload.traded_at,
+            note=payload.note,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "message": f"已按 {fill_price:.2f} 元将阻断单标记成功并回写账本",
+        "order": serialize_order(order),
+        "fill": {
+            "id": fill.id,
+            "fill_key": fill.fill_key,
+            "quantity": fill.quantity,
+            "price": fill.price,
+            "amount": fill.amount,
+            "traded_at": fill.traded_at.isoformat() if fill.traded_at else None,
+        },
+        "price_source": price_source,
+    }
 
 
 @router.get("/{external_account_id}/snapshot")
