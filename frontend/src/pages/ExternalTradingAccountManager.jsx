@@ -24,7 +24,6 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
-  DollarOutlined,
   EditOutlined,
   LineChartOutlined,
   PlusOutlined,
@@ -589,9 +588,21 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const orderLifecycleColumns = [
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
     { title: '角色', dataIndex: 'allocation_role', key: 'allocation_role', width: 90, render: value => value === 'PARENT' ? <Tag color="purple">父单</Tag> : value === 'CHILD' ? <Tag color="blue">子单</Tag> : value === 'BLOCK' ? <Tag color="orange">阻断</Tag> : <Tag>{value || '-'}</Tag> },
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: (_, record) => record.sub_account_name || '-', ...textColumnFilter(lifecycleRows, record => record.sub_account_name) },
-    { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(lifecycleRows, strategyText) },
+    {
+      title: '子账户',
+      dataIndex: 'sub_account_name',
+      key: 'sub_account_name',
+      width: 240,
+      render: (_, record) => (
+        <Space direction="vertical" size={0}>
+          <Text>{record.sub_account_name || '-'}</Text>
+          <Text type="secondary">策略: {record.strategy_name || record.strategy_type || '-'}</Text>
+        </Space>
+      ),
+      ...textColumnFilter(lifecycleRows, record => record.sub_account_name)
+    },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(lifecycleRows, symbolText) },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
