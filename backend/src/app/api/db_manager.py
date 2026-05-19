@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session as OrmSession
 
 from ...core.database import DB_PATH, DbSqlFavorite, engine, get_db
 from ...core.analytics_database import ANALYTICS_DB_PATH, ANALYTICS_TABLE_NAMES
-from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
 from .account import valid_account
 
 
@@ -109,7 +108,6 @@ class DbQueryResponse(BaseModel):
     executed_sql: str
     engine: str
     timings: Dict[str, float] = Field(default_factory=dict)
-    symbol_names: Dict[str, str] = Field(default_factory=dict)
 
 
 class DbSqlFavoriteRequest(BaseModel):
@@ -129,47 +127,6 @@ class DbSqlFavoriteResponse(BaseModel):
 
 class DbSqlFavoriteDeleteResponse(BaseModel):
     success: bool
-
-
-SYMBOL_COLUMN_NAMES = {
-    "symbol",
-    "stock_symbol",
-    "target_symbol",
-    "primary_benchmark_symbol",
-    "benchmark_symbol",
-    "fear_symbol",
-    "ts_code",
-    "ticker",
-    "stock_code",
-    "security_code",
-    "sec_code",
-    "etf_code",
-    "index_code",
-}
-
-
-def _is_symbol_column(column: str) -> bool:
-    normalized = str(column or "").strip().lower()
-    return normalized in SYMBOL_COLUMN_NAMES or normalized.endswith("_symbol") or normalized.endswith("_ts_code")
-
-
-def _load_query_symbol_names(columns: List[str], rows: List[Dict[str, Any]], db: OrmSession) -> Dict[str, str]:
-    symbol_columns = [column for column in columns if _is_symbol_column(column)]
-    if not symbol_columns:
-        return {}
-
-    symbols = []
-    seen = set()
-    for row in rows:
-        for column in symbol_columns:
-            value = row.get(column)
-            normalized = normalize_symbol_for_name(value)
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                symbols.append(normalized)
-    if not symbols:
-        return {}
-    return load_symbol_name_map(symbols, db)
 
 
 def _serialize_favorite(favorite: DbSqlFavorite) -> DbSqlFavoriteResponse:
@@ -792,7 +749,6 @@ def delete_sql_favorite(
 def execute_query(
     payload: DbQueryRequest,
     _account_id: str = Depends(valid_account),
-    db: OrmSession = Depends(get_db),
 ):
     total_started_at = time.perf_counter()
     statement = _normalize_single_statement(payload.sql)
@@ -820,7 +776,6 @@ def execute_query(
         columns, rows, timings = _execute_sqlite_query(query, allowed_table_names)
 
     timings["schema_ms"] = schema_ms
-    symbol_names = _load_query_symbol_names(columns, rows, db)
     timings["request_total_ms"] = round((time.perf_counter() - total_started_at) * 1000, 2)
 
     return DbQueryResponse(
@@ -831,5 +786,4 @@ def execute_query(
         executed_sql=query,
         engine=payload.engine,
         timings=timings,
-        symbol_names=symbol_names,
     )
