@@ -500,21 +500,47 @@ def _compute_alpha005(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
-def _compute_alpha006(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
-    if df.is_empty() or not {"open", "volume"}.issubset(df.columns):
+def _compute_alpha052(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"high", "low", "close"}.issubset(df.columns):
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
     return (
         df.sort(["symbol", "trade_date"])
+        .with_columns(((pl.col("high") + pl.col("low") + pl.col("close")) / 3).alias("_alpha052_typical_price"))
+        .with_columns(pl.col("_alpha052_typical_price").shift(1).over("symbol").alias("_alpha052_typical_price_lag_1"))
         .with_columns(
-            (
-                -pl.rolling_corr(
-                    pl.col("open").cast(pl.Float64),
-                    pl.col("volume").cast(pl.Float64),
-                    window_size=10,
-                    min_samples=10,
-                ).over("symbol")
-            ).alias("factor_value")
+            pl.max_horizontal(pl.col("high") - pl.col("_alpha052_typical_price_lag_1"), pl.lit(0.0)).alias("_alpha052_up_force"),
+            pl.max_horizontal(pl.col("_alpha052_typical_price_lag_1") - pl.col("low"), pl.lit(0.0)).alias("_alpha052_down_force"),
         )
+        .with_columns(
+            pl.col("_alpha052_up_force").rolling_sum(26, min_samples=26).over("symbol").alias("_alpha052_up_sum_26"),
+            pl.col("_alpha052_down_force").rolling_sum(26, min_samples=26).over("symbol").alias("_alpha052_down_sum_26"),
+        )
+        .with_columns(
+            pl.when(pl.col("_alpha052_down_sum_26") != 0)
+            .then(pl.col("_alpha052_up_sum_26") / pl.col("_alpha052_down_sum_26") * 100)
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_alpha059(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"low", "close"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha059_close_lag_1"))
+        .with_columns(
+            pl.when(pl.col("close") == pl.col("_alpha059_close_lag_1"))
+            .then(0.0)
+            .when(pl.col("close") > pl.col("_alpha059_close_lag_1"))
+            .then(pl.col("close") - pl.min_horizontal(pl.col("low"), pl.col("_alpha059_close_lag_1")))
+            .when(pl.col("close") < pl.col("_alpha059_close_lag_1"))
+            .then(pl.col("close") - pl.max_horizontal(pl.col("low"), pl.col("_alpha059_close_lag_1")))
+            .otherwise(None)
+            .alias("_alpha059_price_flow")
+        )
+        .with_columns(pl.col("_alpha059_price_flow").rolling_sum(20, min_samples=20).over("symbol").alias("factor_value"))
     )
 
 
@@ -574,6 +600,24 @@ def _compute_alpha088(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
+def _compute_alpha093(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"open", "low"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("open").shift(1).over("symbol").alias("_alpha093_open_lag_1"))
+        .with_columns(
+            pl.when(pl.col("_alpha093_open_lag_1").is_null())
+            .then(None)
+            .when(pl.col("open") >= pl.col("_alpha093_open_lag_1"))
+            .then(0.0)
+            .otherwise(pl.max_horizontal(pl.col("open") - pl.col("low"), pl.col("open") - pl.col("_alpha093_open_lag_1")))
+            .alias("_alpha093_open_down_probe")
+        )
+        .with_columns(pl.col("_alpha093_open_down_probe").rolling_sum(20, min_samples=20).over("symbol").alias("factor_value"))
+    )
+
+
 def _compute_alpha106(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty() or "close" not in df.columns:
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -597,6 +641,63 @@ def _compute_alpha118(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
             .otherwise(None)
             .alias("factor_value")
         )
+    )
+
+
+def _compute_alpha122(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            pl.when(pl.col("close") > 0)
+            .then(pl.col("close").log())
+            .otherwise(None)
+            .alias("_alpha122_log_close")
+        )
+        .with_columns(_sma_cn_expr("_alpha122_log_close", 13, 2).alias("_alpha122_sma_1"))
+        .with_columns(_sma_cn_expr("_alpha122_sma_1", 13, 2).alias("_alpha122_sma_2"))
+        .with_columns(_sma_cn_expr("_alpha122_sma_2", 13, 2).alias("_alpha122_sma_3"))
+        .with_columns(pl.col("_alpha122_sma_3").shift(1).over("symbol").alias("_alpha122_sma_3_lag_1"))
+        .with_columns(
+            pl.when(pl.col("_alpha122_sma_3_lag_1") != 0)
+            .then((pl.col("_alpha122_sma_3") - pl.col("_alpha122_sma_3_lag_1")) / pl.col("_alpha122_sma_3_lag_1"))
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_alpha129(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha129_close_lag_1"))
+        .with_columns(
+            pl.when(pl.col("_alpha129_close_lag_1").is_null())
+            .then(None)
+            .when(pl.col("close") < pl.col("_alpha129_close_lag_1"))
+            .then((pl.col("close") - pl.col("_alpha129_close_lag_1")).abs())
+            .otherwise(0.0)
+            .alias("_alpha129_down_delta")
+        )
+        .with_columns(pl.col("_alpha129_down_delta").rolling_sum(12, min_samples=12).over("symbol").alias("factor_value"))
+    )
+
+
+def _compute_alpha132(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "turnover" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            pl.when(pl.col("turnover").is_not_null() & (pl.col("turnover") > 0))
+            .then(pl.col("turnover").cast(pl.Float64))
+            .otherwise(None)
+            .alias("_alpha132_amount")
+        )
+        .with_columns(pl.col("_alpha132_amount").rolling_mean(20, min_samples=20).over("symbol").alias("factor_value"))
     )
 
 
@@ -627,6 +728,24 @@ def _compute_alpha135(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
+def _compute_alpha139(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"open", "volume"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            (
+                -pl.rolling_corr(
+                    pl.col("open").cast(pl.Float64),
+                    pl.col("volume").cast(pl.Float64),
+                    window_size=10,
+                    min_samples=10,
+                ).over("symbol")
+            ).alias("factor_value")
+        )
+    )
+
+
 def _compute_alpha145(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty() or "volume" not in df.columns:
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -646,11 +765,88 @@ def _compute_alpha145(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
+def _compute_alpha147(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    window = 12
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            pl.int_range(0, pl.len()).over("symbol").cast(pl.Float64).alias("_alpha147_row_nr"),
+            pl.col("close").rolling_mean(window, min_samples=window).over("symbol").alias("_alpha147_ma12"),
+        )
+        .with_columns(
+            pl.col("_alpha147_row_nr").rolling_sum(window, min_samples=window).over("symbol").alias("_alpha147_sum_x"),
+            (pl.col("_alpha147_row_nr") ** 2).rolling_sum(window, min_samples=window).over("symbol").alias("_alpha147_sum_x2"),
+            pl.col("_alpha147_ma12").rolling_sum(window, min_samples=window).over("symbol").alias("_alpha147_sum_y"),
+            (pl.col("_alpha147_row_nr") * pl.col("_alpha147_ma12")).rolling_sum(window, min_samples=window).over("symbol").alias("_alpha147_sum_xy"),
+        )
+        .with_columns((window * pl.col("_alpha147_sum_x2") - pl.col("_alpha147_sum_x") ** 2).alias("_alpha147_denominator"))
+        .with_columns(
+            pl.when(pl.col("_alpha147_denominator") != 0)
+            .then(
+                (window * pl.col("_alpha147_sum_xy") - pl.col("_alpha147_sum_x") * pl.col("_alpha147_sum_y"))
+                / pl.col("_alpha147_denominator")
+            )
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_alpha151(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns((pl.col("close") - pl.col("close").shift(20).over("symbol")).alias("_alpha151_delta_20"))
+        .with_columns(_sma_cn_expr("_alpha151_delta_20", 20, 1).alias("factor_value"))
+    )
+
+
 def _compute_alpha158(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty() or not {"high", "low", "close"}.issubset(df.columns):
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
     return df.sort(["symbol", "trade_date"]).with_columns(
         ((pl.col("high") - pl.col("low")) / pl.col("close")).alias("factor_value")
+    )
+
+
+def _compute_alpha160(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            pl.col("close").shift(1).over("symbol").alias("_alpha160_close_lag_1"),
+            pl.col("close").rolling_std(20, min_samples=20).over("symbol").alias("_alpha160_close_std_20"),
+        )
+        .with_columns(
+            pl.when(pl.col("close") <= pl.col("_alpha160_close_lag_1"))
+            .then(pl.col("_alpha160_close_std_20"))
+            .otherwise(0.0)
+            .alias("_alpha160_down_std")
+        )
+        .with_columns(_sma_cn_expr("_alpha160_down_std", 20, 1).alias("factor_value"))
+    )
+
+
+def _true_range_expr(prefix: str) -> pl.Expr:
+    return pl.max_horizontal(
+        pl.col("high") - pl.col("low"),
+        (pl.col(f"_{prefix}_close_lag_1") - pl.col("high")).abs(),
+        (pl.col(f"_{prefix}_close_lag_1") - pl.col("low")).abs(),
+    )
+
+
+def _compute_alpha161(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"high", "low", "close"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha161_close_lag_1"))
+        .with_columns(_true_range_expr("alpha161").alias("_alpha161_true_range"))
+        .with_columns(pl.col("_alpha161_true_range").rolling_mean(12, min_samples=12).over("symbol").alias("factor_value"))
     )
 
 
@@ -670,6 +866,54 @@ def _compute_alpha169(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
+def _compute_alpha167(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha167_close_lag_1"))
+        .with_columns(
+            pl.when(pl.col("_alpha167_close_lag_1").is_null())
+            .then(None)
+            .when(pl.col("close") > pl.col("_alpha167_close_lag_1"))
+            .then(pl.col("close") - pl.col("_alpha167_close_lag_1"))
+            .otherwise(0.0)
+            .alias("_alpha167_up_delta")
+        )
+        .with_columns(pl.col("_alpha167_up_delta").rolling_sum(12, min_samples=12).over("symbol").alias("factor_value"))
+    )
+
+
+def _compute_alpha174(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(
+            pl.col("close").shift(1).over("symbol").alias("_alpha174_close_lag_1"),
+            pl.col("close").rolling_std(20, min_samples=20).over("symbol").alias("_alpha174_close_std_20"),
+        )
+        .with_columns(
+            pl.when(pl.col("close") > pl.col("_alpha174_close_lag_1"))
+            .then(pl.col("_alpha174_close_std_20"))
+            .otherwise(0.0)
+            .alias("_alpha174_up_std")
+        )
+        .with_columns(_sma_cn_expr("_alpha174_up_std", 20, 1).alias("factor_value"))
+    )
+
+
+def _compute_alpha175(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"high", "low", "close"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha175_close_lag_1"))
+        .with_columns(_true_range_expr("alpha175").alias("_alpha175_true_range"))
+        .with_columns(pl.col("_alpha175_true_range").rolling_mean(6, min_samples=6).over("symbol").alias("factor_value"))
+    )
+
+
 def _compute_alpha187(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty() or not {"open", "high"}.issubset(df.columns):
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -683,6 +927,17 @@ def _compute_alpha187(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
             .alias("_alpha187_up_break")
         )
         .with_columns(pl.col("_alpha187_up_break").rolling_sum(20, min_samples=20).over("symbol").alias("factor_value"))
+    )
+
+
+def _compute_alpha189(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or "close" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").rolling_mean(6, min_samples=6).over("symbol").alias("_alpha189_close_ma6"))
+        .with_columns((pl.col("close") - pl.col("_alpha189_close_ma6")).abs().alias("_alpha189_abs_ma6_gap"))
+        .with_columns(pl.col("_alpha189_abs_ma6_gap").rolling_mean(6, min_samples=6).over("symbol").alias("factor_value"))
     )
 
 
@@ -925,29 +1180,18 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha005",
         label="Alpha005：高点量能共振背离",
         group="国君191",
-        description="原 Alpha005：-TSMAX(CORR(TSRANK(VOLUME,5),TSRANK(HIGH,5),5),3)，刻画高点与量能短期同步性，2024后中证500样本高值更优。",
+        description="原 Alpha005：-TSMAX(CORR(TSRANK(VOLUME,5),TSRANK(HIGH,5),5),3)，刻画高点与量能短期同步性；筛选样本高值更优。",
         default_windows=[5],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_alpha005,
     ),
-    "alpha006": FactorDefinition(
-        key="alpha006",
-        label="Alpha006：开盘量价背离",
-        group="国君191",
-        description="原 Alpha006：-CORR(OPEN,VOLUME,10)，刻画开盘价与成交量的短期相关性背离，2024后中证500样本高值更优。",
-        default_windows=[10],
-        supports_windows=False,
-        supports_mixed_windows=False,
-        direction="higher_is_better",
-        compute=_compute_alpha006,
-    ),
     "alpha021": FactorDefinition(
         key="alpha021",
         label="Alpha021：6日均价趋势斜率",
         group="国君191",
-        description="原 Alpha021：REGBETA(MEAN(CLOSE,6),SEQUENCE(6))，刻画6日均价的短期趋势斜率；2024后中证500样本低值更优。",
+        description="原 Alpha021：REGBETA(MEAN(CLOSE,6),SEQUENCE(6))，刻画6日均价的短期趋势斜率；筛选样本低值更优。",
         default_windows=[6],
         supports_windows=False,
         supports_mixed_windows=False,
@@ -958,7 +1202,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha024",
         label="Alpha024：5日平滑反转动量",
         group="国君191",
-        description="原 Alpha024：SMA(CLOSE-DELAY(CLOSE,5),5,1)，刻画5日价格变化的平滑值；2024后中证500样本低值更优。",
+        description="原 Alpha024：SMA(CLOSE-DELAY(CLOSE,5),5,1)，刻画5日价格变化的平滑值；筛选样本低值更优。",
         default_windows=[5],
         supports_windows=False,
         supports_mixed_windows=False,
@@ -969,7 +1213,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha027",
         label="Alpha027：短周期动量摆动",
         group="国君191",
-        description="原 Alpha027：WMA(3日与6日收益率之和,12)，刻画短周期动量摆动；2024后中证500样本低值更优。",
+        description="原 Alpha027：WMA(3日与6日收益率之和,12)，刻画短周期动量摆动；筛选样本低值更优。",
         default_windows=[12],
         supports_windows=False,
         supports_mixed_windows=False,
@@ -991,23 +1235,56 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha046",
         label="Alpha046：多均线乖离反转",
         group="国君191",
-        description="原 Alpha046：(MA3+MA6+MA12+MA24)/(4*CLOSE)，价格低于多条均线时取值更高，2024后中证500样本高值更优。",
+        description="原 Alpha046：(MA3+MA6+MA12+MA24)/(4*CLOSE)，价格低于多条均线时取值更高；筛选样本高值更优。",
         default_windows=[24],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_alpha046,
     ),
+    "alpha052": FactorDefinition(
+        key="alpha052",
+        label="Alpha052：上下推动强弱比",
+        group="国君191",
+        description="原 Alpha052：SUM(MAX(0,HIGH-DELAY(TP,1)),26)/SUM(MAX(0,DELAY(TP,1)-LOW),26)*100，TP=(HIGH+LOW+CLOSE)/3；A创100样本低值更优。",
+        default_windows=[26],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha052,
+    ),
+    "alpha059": FactorDefinition(
+        key="alpha059",
+        label="Alpha059：价格摆动累积",
+        group="国君191",
+        description="原 Alpha059：按收盘涨跌选择 CLOSE-MIN(LOW,DELAY(CLOSE,1)) 或 CLOSE-MAX(LOW,DELAY(CLOSE,1)) 后求20日和；A创100样本低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha059,
+    ),
     "alpha088": FactorDefinition(
         key="alpha088",
         label="Alpha088：20日涨幅反转",
         group="国君191",
-        description="原 Alpha088：(CLOSE-DELAY(CLOSE,20))/DELAY(CLOSE,20)*100，刻画20日涨幅；2024后中证500样本低值更优。",
+        description="原 Alpha088：(CLOSE-DELAY(CLOSE,20))/DELAY(CLOSE,20)*100，刻画20日涨幅；筛选样本低值更优。",
         default_windows=[20],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha088,
+    ),
+    "alpha093": FactorDefinition(
+        key="alpha093",
+        label="Alpha093：开盘下探强度",
+        group="国君191",
+        description="原 Alpha093：SUM(IF(OPEN>=DELAY(OPEN,1),0,MAX(OPEN-LOW,OPEN-DELAY(OPEN,1))),20)，刻画开盘低于前开后的下探幅度累计；A创100长样本低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha093,
     ),
     "alpha095": FactorDefinition(
         key="alpha095",
@@ -1024,7 +1301,7 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha106",
         label="Alpha106：20日价差反转",
         group="国君191",
-        description="原 Alpha106：CLOSE-DELAY(CLOSE,20)，刻画20日绝对价差；2024后中证500样本低值更优。",
+        description="原 Alpha106：CLOSE-DELAY(CLOSE,20)，刻画20日绝对价差；筛选样本低值更优。",
         default_windows=[20],
         supports_windows=False,
         supports_mixed_windows=False,
@@ -1035,18 +1312,51 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha118",
         label="Alpha118：上影下影强弱比",
         group="国君191",
-        description="原 Alpha118：SUM(HIGH-OPEN,20)/SUM(OPEN-LOW,20)*100，刻画20日上行影线相对下行影线强弱；2024后中证500样本低值更优。",
+        description="原 Alpha118：SUM(HIGH-OPEN,20)/SUM(OPEN-LOW,20)*100，刻画20日上行影线相对下行影线强弱；筛选样本低值更优。",
         default_windows=[20],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha118,
     ),
+    "alpha122": FactorDefinition(
+        key="alpha122",
+        label="Alpha122：三重平滑对数趋势",
+        group="国君191",
+        description="原 Alpha122：三重SMA(LOG(CLOSE),13,2)的一阶变化率，刻画平滑后的价格趋势变化；A创100样本低值更优。",
+        default_windows=[13],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha122,
+    ),
+    "alpha129": FactorDefinition(
+        key="alpha129",
+        label="Alpha129：12日下跌幅累积",
+        group="国君191",
+        description="原 Alpha129：SUM(IF(CLOSE-DELAY(CLOSE,1)<0,ABS(CLOSE-DELAY(CLOSE,1)),0),12)，刻画近12日下跌价差累计；A创100长样本低值更优。",
+        default_windows=[12],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha129,
+    ),
+    "alpha132": FactorDefinition(
+        key="alpha132",
+        label="Alpha132：20日成交额均值",
+        group="国君191",
+        description="原 Alpha132：MEAN(AMOUNT,20)，刻画20日平均成交额；2021后A创100与中证500样本均偏低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha132,
+    ),
     "alpha134": FactorDefinition(
         key="alpha134",
         label="Alpha134：12日价量反转",
         group="国君191",
-        description="原 Alpha134：(CLOSE-DELAY(CLOSE,12))/DELAY(CLOSE,12)*VOLUME，刻画12日涨跌幅与成交量的复合强度；2024后中证500样本低值更优。",
+        description="原 Alpha134：(CLOSE-DELAY(CLOSE,12))/DELAY(CLOSE,12)*VOLUME，刻画12日涨跌幅与成交量的复合强度；筛选样本低值更优。",
         default_windows=[12],
         supports_windows=False,
         supports_mixed_windows=False,
@@ -1057,56 +1367,155 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         key="alpha135",
         label="Alpha135：平滑20日动量",
         group="国君191",
-        description="原 Alpha135：SMA(DELAY(CLOSE/DELAY(CLOSE,20),1),20,1)，刻画平滑后的20日动量比值；2024后中证500样本低值更优。",
+        description="原 Alpha135：SMA(DELAY(CLOSE/DELAY(CLOSE,20),1),20,1)，刻画平滑后的20日动量比值；筛选样本低值更优。",
         default_windows=[20],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha135,
     ),
+    "alpha139": FactorDefinition(
+        key="alpha139",
+        label="Alpha139：开盘量价背离",
+        group="国君191",
+        description="原 Alpha139：-CORR(OPEN,VOLUME,10)，刻画开盘价与成交量的短期相关性背离；A创100与中证500样本均为高值更优。",
+        default_windows=[10],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="higher_is_better",
+        compute=_compute_alpha139,
+    ),
     "alpha145": FactorDefinition(
         key="alpha145",
         label="Alpha145：成交量均线背离",
         group="国君191",
-        description="原 Alpha145：(MA(VOLUME,9)-MA(VOLUME,26))/MA(VOLUME,12)*100，刻画成交量短长均线背离；2024后中证500样本低值更优。",
+        description="原 Alpha145：(MA(VOLUME,9)-MA(VOLUME,26))/MA(VOLUME,12)*100，刻画成交量短长均线背离；筛选样本低值更优。",
         default_windows=[26],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha145,
     ),
+    "alpha147": FactorDefinition(
+        key="alpha147",
+        label="Alpha147：12日均价趋势斜率",
+        group="国君191",
+        description="原 Alpha147：REGBETA(MEAN(CLOSE,12),SEQUENCE(12))，刻画12日均价趋势斜率；A创100长样本低值更优。",
+        default_windows=[12],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha147,
+    ),
+    "alpha151": FactorDefinition(
+        key="alpha151",
+        label="Alpha151：平滑20日价差反转",
+        group="国君191",
+        description="原 Alpha151：SMA(CLOSE-DELAY(CLOSE,20),20,1)，刻画20日绝对价差的平滑动量；A创100样本低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha151,
+    ),
     "alpha158": FactorDefinition(
         key="alpha158",
         label="Alpha158：日内振幅率",
         group="国君191",
-        description="原 Alpha158：((HIGH-SMA(CLOSE,15,2))-(LOW-SMA(CLOSE,15,2)))/CLOSE，等价于日内振幅/收盘价；2024后中证500样本低值更优。",
+        description="原 Alpha158：((HIGH-SMA(CLOSE,15,2))-(LOW-SMA(CLOSE,15,2)))/CLOSE，等价于日内振幅/收盘价；筛选样本低值更优。",
         default_windows=[15],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha158,
     ),
+    "alpha160": FactorDefinition(
+        key="alpha160",
+        label="Alpha160：下跌波动平滑",
+        group="国君191",
+        description="原 Alpha160：SMA(IF(CLOSE<=DELAY(CLOSE,1),STD(CLOSE,20),0),20,1)，刻画下跌日价格波动的平滑强度；A创100长样本低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha160,
+    ),
+    "alpha161": FactorDefinition(
+        key="alpha161",
+        label="Alpha161：12日真实波幅",
+        group="国君191",
+        description="原 Alpha161：MEAN(MAX(MAX(HIGH-LOW,ABS(DELAY(CLOSE,1)-HIGH)),ABS(DELAY(CLOSE,1)-LOW)),12)，刻画12日平均真实波幅；A创100与中证500长样本低值更优。",
+        default_windows=[12],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha161,
+    ),
+    "alpha167": FactorDefinition(
+        key="alpha167",
+        label="Alpha167：12日上涨幅累积",
+        group="国君191",
+        description="原 Alpha167：SUM(IF(CLOSE>DELAY(CLOSE,1),CLOSE-DELAY(CLOSE,1),0),12)，刻画近12日上涨价差累计；A创100长样本低值更优。",
+        default_windows=[12],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha167,
+    ),
     "alpha169": FactorDefinition(
         key="alpha169",
         label="Alpha169：平滑差分动量",
         group="国君191",
-        description="原 Alpha169：SMA(MA(DELAY(SMA(CLOSE-DELAY(CLOSE,1),9,1),1),12)-MA(...,26),10,1)，刻画平滑价差动量；2024后中证500样本低值更优。",
+        description="原 Alpha169：SMA(MA(DELAY(SMA(CLOSE-DELAY(CLOSE,1),9,1),1),12)-MA(...,26),10,1)，刻画平滑价差动量；筛选样本低值更优。",
         default_windows=[26],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha169,
     ),
+    "alpha174": FactorDefinition(
+        key="alpha174",
+        label="Alpha174：上涨波动平滑",
+        group="国君191",
+        description="原 Alpha174：SMA(IF(CLOSE>DELAY(CLOSE,1),STD(CLOSE,20),0),20,1)，刻画上涨日价格波动的平滑强度；A创100长样本低值更优。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha174,
+    ),
+    "alpha175": FactorDefinition(
+        key="alpha175",
+        label="Alpha175：6日真实波幅",
+        group="国君191",
+        description="原 Alpha175：MEAN(MAX(MAX(HIGH-LOW,ABS(DELAY(CLOSE,1)-HIGH)),ABS(DELAY(CLOSE,1)-LOW)),6)，刻画6日平均真实波幅；A创100长样本低值更优。",
+        default_windows=[6],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha175,
+    ),
     "alpha187": FactorDefinition(
         key="alpha187",
         label="Alpha187：开盘向上突破强度",
         group="国君191",
-        description="原 Alpha187：SUM(IF(OPEN<=DELAY(OPEN,1),0,MAX(HIGH-OPEN,OPEN-DELAY(OPEN,1))),20)，刻画20日开盘向上突破强度；2024后中证500样本低值更优。",
+        description="原 Alpha187：SUM(IF(OPEN<=DELAY(OPEN,1),0,MAX(HIGH-OPEN,OPEN-DELAY(OPEN,1))),20)，刻画20日开盘向上突破强度；筛选样本低值更优。",
         default_windows=[20],
         supports_windows=False,
         supports_mixed_windows=False,
         direction="lower_is_better",
         compute=_compute_alpha187,
+    ),
+    "alpha189": FactorDefinition(
+        key="alpha189",
+        label="Alpha189：6日均价偏离度",
+        group="国君191",
+        description="原 Alpha189：MEAN(ABS(CLOSE-MEAN(CLOSE,6)),6)，刻画收盘价相对6日均价的平均偏离；A创100与中证500长样本低值更优。",
+        default_windows=[6],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_alpha189,
     ),
     "valuation_gap": FactorDefinition(
         key="valuation_gap",
