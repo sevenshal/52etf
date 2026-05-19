@@ -4883,8 +4883,19 @@ def _floor_to_lot(quantity: float, lot_size: int) -> int:
     return (number // lot) * lot
 
 
+def _sanitize_live_backtest_request_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    request_payload = dict(payload or {})
+    request_payload["end_date"] = None
+    request_payload["oos_start_date"] = None
+    return request_payload
+
+
+def _live_backtest_request_payload(request: FactorBacktestRequest) -> Dict[str, Any]:
+    return _sanitize_live_backtest_request_payload(_backtest_request_payload(request))
+
+
 def _request_payload_from_live_config(config: FactorLiveTradingConfig) -> FactorBacktestRequest:
-    return FactorBacktestRequest(**(config.request_payload or {}))
+    return FactorBacktestRequest(**_sanitize_live_backtest_request_payload(config.request_payload))
 
 
 def _factor_pool_label(pool: Any) -> str:
@@ -4933,7 +4944,7 @@ def _serialize_factor_live_config(
     db: Optional[ORMSession] = None,
     external_db: Optional[ORMSession] = None,
 ) -> Dict[str, Any]:
-    request_payload = config.request_payload or {}
+    request_payload = _sanitize_live_backtest_request_payload(config.request_payload)
     position_weights = normalize_position_weights(
         request_payload.get("position_weights"),
         request_payload.get("max_positions") or 1,
@@ -5212,7 +5223,7 @@ def _update_factor_live_config_from_payload(
 ) -> None:
     config.name = payload.name
     config.enabled = payload.enabled
-    config.request_payload = _backtest_request_payload(payload.request)
+    config.request_payload = _live_backtest_request_payload(payload.request)
     config.external_trading_account_id = payload.external_trading_account_id
     config.live_sub_account_id = payload.live_sub_account_id
     config.signal_time = payload.signal_time

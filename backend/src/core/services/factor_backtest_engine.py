@@ -2697,7 +2697,7 @@ def build_factor_signal_plan(
     """Build the close-signal / next-open execution plan without running portfolio history."""
     resolved_legs = resolve_factor_legs(request.legs)
     validate_factor_legs_for_pool(request.pool, resolved_legs)
-    if signal_date and (request.end_date is None or request.end_date > signal_date):
+    if signal_date:
         request = replace(request, end_date=signal_date)
     if prepared_data is None:
         prepared_data = prepare_factor_backtest_base_data(request, db, resolved_legs)
@@ -2713,6 +2713,11 @@ def build_factor_signal_plan(
     if not candidate_dates:
         raise ValueError("没有可用因子信号，请调整日期、窗口或股票池")
     actual_signal_date = candidate_dates[-1]
+    if signal_date and actual_signal_date != signal_date:
+        raise ValueError(
+            f"{signal_date.isoformat()} 没有可用因子信号，"
+            f"最新可用信号日为 {actual_signal_date.isoformat()}，请确认行情和复权数据已同步"
+        )
     date_index = dates.index(actual_signal_date)
 
     universe_history = prepared_data["universe_history"]
