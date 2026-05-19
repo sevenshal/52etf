@@ -120,6 +120,13 @@ except ValueError:
     FACTOR_LIVE_ALERT_COOLDOWN_SECONDS = 1800
 _factor_live_alert_lock = threading.Lock()
 _factor_live_alert_last_sent: Dict[str, float] = {}
+FACTOR_LIVE_REBALANCE_FREQUENCY_LABELS = {
+    "daily": "每日",
+    "weekly": "每周",
+    "monthly": "每月",
+    "quarterly": "季度",
+    "semiannual": "半年",
+}
 SUPPORTED_WINDOWS = [20, 60, 120]
 MIXED_WINDOW_KEY = "mixed"
 DEFAULT_FORWARD_WINDOWS = [5, 20, 60]
@@ -5507,6 +5514,26 @@ def _factor_live_next_execution_date(
     return _factor_live_next_trading_day_resolver(config)(signal_date)
 
 
+def _factor_live_is_calendar_signal_day(config: FactorLiveTradingConfig, check_date: date) -> bool:
+    market_kind = _factor_live_market_kind(config)
+    is_trading_day = _is_us_trading_day if market_kind == "us" else _is_china_trading_day
+    if not is_trading_day(check_date):
+        return False
+    request = _request_payload_from_live_config(config)
+    rebalance_frequency = _normalize_rebalance_frequency(request.rebalance_frequency)
+    next_trading_day = _factor_live_next_trading_day_resolver(config)(check_date)
+    if not next_trading_day:
+        return False
+    return _is_rebalance_day([check_date, next_trading_day], 0, rebalance_frequency)
+
+
+def _factor_live_not_signal_day_message(config: FactorLiveTradingConfig, check_date: date) -> str:
+    request = _request_payload_from_live_config(config)
+    rebalance_frequency = _normalize_rebalance_frequency(request.rebalance_frequency)
+    label = FACTOR_LIVE_REBALANCE_FREQUENCY_LABELS.get(rebalance_frequency, rebalance_frequency)
+    return f"{check_date.isoformat()} 不是{label}信号日"
+
+
 def _factor_live_market_kind(config: FactorLiveTradingConfig) -> str:
     request = _request_payload_from_live_config(config)
     pool_key = str(request.pool or "").strip().upper()
@@ -5548,9 +5575,15 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
                 and config.last_signal_date == signal_now.date()
             )
             signal_trading_day = _is_us_trading_day(signal_now.date()) if market_kind == "us" else _is_china_trading_day(signal_now.date())
+            calendar_signal_day = (
+                signal_trading_day
+                and _is_time_reached(signal_now, config.signal_time)
+                and _factor_live_is_calendar_signal_day(config, signal_now.date())
+            )
             if (
                 signal_trading_day
                 and _is_time_reached(signal_now, config.signal_time)
+                and calendar_signal_day
                 and not signal_already_checked_today
             ):
                 try:
@@ -5562,6 +5595,8 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
                         rank_limit=100,
                     )
                     signal_date_value = date.fromisoformat(plan["signal_date"])
+                    if not plan.get("is_signal_day"):
+                        continue
                     config.last_signal_date = signal_date_value
                     config.last_signal_at = datetime.now()
                     config.last_signal_status = plan.get("status")
@@ -5604,7 +5639,8 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
                     )
                     result["errors"].append({"config_id": config.id, "action": "SIGNAL", "error": error_message})
             else:
-                result["signal_waiting"] += 1
+                if not (signal_trading_day and _is_time_reached(signal_now, config.signal_time) and not calendar_signal_day):
+                    result["signal_waiting"] += 1
 
             signal_payload = config.last_signal_payload or {}
             signal_date_value = _normalize_signal_payload_date(signal_payload)
@@ -7779,17 +7815,28 @@ async def generate_factor_live_trading_signal(
 ):
     config = _get_factor_live_config_or_404(db, account_id, config_id)
     payload = payload or FactorLiveSignalRequest()
+    if payload.signal_date:
+        requested_signal_date = payload.signal_date
+    else:
+        try:
+            requested_signal_date = datetime.now(ZoneInfo(config.signal_timezone or "Asia/Shanghai")).date()
+        except ZoneInfoNotFoundError:
+            requested_signal_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _factor_live_is_calendar_signal_day(config, requested_signal_date):
+        raise HTTPException(status_code=400, detail=_factor_live_not_signal_day_message(config, requested_signal_date))
     try:
         plan = _build_factor_live_signal_plan(
             db,
             external_db,
             config,
-            signal_date=payload.signal_date,
+            signal_date=requested_signal_date,
             rank_limit=payload.rank_limit,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     signal_date_value = date.fromisoformat(plan["signal_date"])
+    if not plan.get("is_signal_day"):
+        raise HTTPException(status_code=400, detail=plan.get("message") or "当前不是信号日")
     config.last_signal_date = signal_date_value
     config.last_signal_at = datetime.now()
     config.last_signal_status = plan.get("status")
