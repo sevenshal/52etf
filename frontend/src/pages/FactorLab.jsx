@@ -714,10 +714,15 @@ const buildBacktestPayload = values => {
 
 const buildLiveConfigPayload = values => {
   const timezone = values.signal_timezone || values.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone;
+  const liveRequest = {
+    ...buildBacktestPayload(values),
+    end_date: null,
+    oos_start_date: null,
+  };
   return {
     name: String(values.name || DEFAULT_LIVE_TRADING_VALUES.name).trim() || DEFAULT_LIVE_TRADING_VALUES.name,
     enabled: Boolean(values.enabled),
-    request: buildBacktestPayload(values),
+    request: liveRequest,
     external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
     live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
     signal_time: values.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
