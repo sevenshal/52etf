@@ -192,6 +192,8 @@ const ExternalTradingAccountManager = () => {
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
   const [markBlockSuccessOrderId, setMarkBlockSuccessOrderId] = useState(null);
+  const [markBlockSuccessModalVisible, setMarkBlockSuccessModalVisible] = useState(false);
+  const [markBlockSuccessRecord, setMarkBlockSuccessRecord] = useState(null);
   const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
   const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
@@ -199,6 +201,7 @@ const ExternalTradingAccountManager = () => {
   const [netAssetHistory, setNetAssetHistory] = useState(null);
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
+  const [markBlockSuccessForm] = Form.useForm();
 
   const fetchAccounts = async (silent = false) => {
     if (!silent) {
@@ -455,17 +458,39 @@ const ExternalTradingAccountManager = () => {
     if (!executorStatusAccount?.id || !record?.id) return;
     setMarkBlockSuccessOrderId(record.id);
     try {
+      const values = await markBlockSuccessForm.validateFields();
       const { data } = await request.post(
         `/api/external-trading-accounts/${executorStatusAccount.id}/orders/${record.id}/mark-success`,
-        {}
+        { price: values.price }
       );
       message.success(data?.message || '阻断单已标记成功');
+      setMarkBlockSuccessModalVisible(false);
+      setMarkBlockSuccessRecord(null);
+      markBlockSuccessForm.resetFields();
       await fetchExecutorStatus(executorStatusAccount);
     } catch (error) {
-      message.error(error.response?.data?.detail || '阻断单标记成功失败');
+      if (!error?.errorFields) {
+        message.error(error.response?.data?.detail || '阻断单标记成功失败');
+      }
     } finally {
       setMarkBlockSuccessOrderId(null);
     }
+  };
+
+  const openMarkBlockSuccessModal = record => {
+    const defaultPrice = Number(record?.submitted_price || record?.avg_fill_price || 0);
+    setMarkBlockSuccessRecord(record);
+    setMarkBlockSuccessModalVisible(true);
+    markBlockSuccessForm.setFieldsValue({
+      price: Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice : undefined
+    });
+  };
+
+  const closeMarkBlockSuccessModal = () => {
+    if (markBlockSuccessOrderId) return;
+    setMarkBlockSuccessModalVisible(false);
+    setMarkBlockSuccessRecord(null);
+    markBlockSuccessForm.resetFields();
   };
 
   const openExecutorStatus = account => {
@@ -592,21 +617,14 @@ const ExternalTradingAccountManager = () => {
       fixed: 'right',
       render: (_, record) => (
         record?.allocation_role === 'BLOCK' && record?.status === 'BLOCKED_INSUFFICIENT_POSITION' ? (
-          <Popconfirm
-            title="确定将这条阻断单标记成功吗？"
-            description="系统会写入一笔人工成交并按成功成交回写账本，此操作当前不支持自动撤销。"
-            okText="标记成功"
-            cancelText="取消"
-            onConfirm={() => handleMarkBlockSuccess(record)}
+          <Button
+            size="small"
+            type="link"
+            loading={markBlockSuccessOrderId === record.id}
+            onClick={() => openMarkBlockSuccessModal(record)}
           >
-            <Button
-              size="small"
-              type="link"
-              loading={markBlockSuccessOrderId === record.id}
-            >
-              标记成功
-            </Button>
-          </Popconfirm>
+            标记成功
+          </Button>
         ) : '-'
       )
     }
@@ -997,6 +1015,49 @@ const ExternalTradingAccountManager = () => {
             size="small"
             scroll={{ x: 1200 }}
           />
+        </Space>
+      </Modal>
+
+      <Modal
+        title="标记阻断单成功"
+        visible={markBlockSuccessModalVisible}
+        onCancel={closeMarkBlockSuccessModal}
+        onOk={() => handleMarkBlockSuccess(markBlockSuccessRecord)}
+        confirmLoading={markBlockSuccessOrderId === markBlockSuccessRecord?.id}
+        okText="标记成功"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Text>
+            系统会按你输入的成交价写入一笔人工成交，并按成功成交回写账本；此操作当前不支持自动撤销。
+          </Text>
+          <Space wrap>
+            <Tag>{markBlockSuccessRecord?.sub_account_name || '-'}</Tag>
+            <Tag>{markBlockSuccessRecord?.symbol_name || markBlockSuccessRecord?.symbol || '-'}</Tag>
+            <Tag color={markBlockSuccessRecord?.side === 'SELL' ? 'green' : 'red'}>
+              {markBlockSuccessRecord?.side || '-'}
+            </Tag>
+            <Tag>数量 {formatNumber(markBlockSuccessRecord?.remaining_quantity || markBlockSuccessRecord?.quantity)}</Tag>
+          </Space>
+          <Form form={markBlockSuccessForm} layout="vertical">
+            <Form.Item
+              name="price"
+              label="成交价"
+              rules={[
+                { required: true, message: '请输入成交价' },
+                { type: 'number', min: 0.0001, message: '成交价必须大于 0' }
+              ]}
+            >
+              <InputNumber
+                min={0.0001}
+                precision={4}
+                step={0.01}
+                style={{ width: '100%' }}
+                placeholder="请输入人工成交价"
+              />
+            </Form.Item>
+          </Form>
         </Space>
       </Modal>
 
