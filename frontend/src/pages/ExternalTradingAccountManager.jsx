@@ -57,6 +57,8 @@ const parseSequence = (value, fallback = DEFAULT_EXECUTOR_SEQUENCE) => {
   return parsed.length ? Array.from(new Set(parsed)) : fallback;
 };
 const getBlockLabel = record => {
+  if (record?.blocked_status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
+  if (record?.status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
   if (record?.blocked_status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
   if (record?.status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
   return 'T+1阻断';
@@ -189,6 +191,7 @@ const ExternalTradingAccountManager = () => {
   const [executorStatus, setExecutorStatus] = useState(null);
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
+  const [markBlockSuccessOrderId, setMarkBlockSuccessOrderId] = useState(null);
   const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
   const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
@@ -448,6 +451,23 @@ const ExternalTradingAccountManager = () => {
     }
   };
 
+  const handleMarkBlockSuccess = async record => {
+    if (!executorStatusAccount?.id || !record?.id) return;
+    setMarkBlockSuccessOrderId(record.id);
+    try {
+      const { data } = await request.post(
+        `/api/external-trading-accounts/${executorStatusAccount.id}/orders/${record.id}/mark-success`,
+        {}
+      );
+      message.success(data?.message || '阻断单已标记成功');
+      await fetchExecutorStatus(executorStatusAccount);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '阻断单标记成功失败');
+    } finally {
+      setMarkBlockSuccessOrderId(null);
+    }
+  };
+
   const openExecutorStatus = account => {
     setExecutorStatusAccount(account);
     setExecutorStatusVisible(true);
@@ -458,7 +478,7 @@ const ExternalTradingAccountManager = () => {
     if (status === 'FILLED') return 'success';
     if (['REJECTED', 'FAILED', 'EXPIRED'].includes(status)) return 'error';
     if (['CANCELED', 'PARTIALLY_CANCELED'].includes(status)) return 'default';
-    if (['PARTIALLY_FILLED', 'CANCEL_PENDING', 'BLOCKED_INSUFFICIENT_SELLABLE', 'BLOCKED_INSUFFICIENT_POSITION'].includes(status)) return 'warning';
+    if (['PARTIALLY_FILLED', 'CANCEL_PENDING', 'BLOCKED_INSUFFICIENT_SELLABLE', 'BLOCKED_INSUFFICIENT_POSITION', 'BLOCKED_NON_RETRYABLE_REJECTION'].includes(status)) return 'warning';
     return 'processing';
   };
 
@@ -564,7 +584,32 @@ const ExternalTradingAccountManager = () => {
     { title: '重定价', dataIndex: 'replace_count', key: 'replace_count', width: 90, render: value => formatNumber(value) },
     { title: '超时点', dataIndex: 'deadline_at', key: 'deadline_at', width: 170, render: formatTime },
     { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime },
-    { title: '消息', dataIndex: 'message', key: 'message', width: 220, render: value => value || '-' }
+    { title: '消息', dataIndex: 'message', key: 'message', width: 220, render: value => value || '-' },
+    {
+      title: '操作',
+      key: 'action',
+      width: 120,
+      fixed: 'right',
+      render: (_, record) => (
+        record?.allocation_role === 'BLOCK' && record?.status === 'BLOCKED_INSUFFICIENT_POSITION' ? (
+          <Popconfirm
+            title="确定将这条阻断单标记成功吗？"
+            description="系统会写入一笔人工成交并按成功成交回写账本，此操作当前不支持自动撤销。"
+            okText="标记成功"
+            cancelText="取消"
+            onConfirm={() => handleMarkBlockSuccess(record)}
+          >
+            <Button
+              size="small"
+              type="link"
+              loading={markBlockSuccessOrderId === record.id}
+            >
+              标记成功
+            </Button>
+          </Popconfirm>
+        ) : '-'
+      )
+    }
   ];
 
   const fillColumns = [
