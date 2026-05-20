@@ -596,6 +596,15 @@ def build_broker_position_diff(
         ledger_quantity = safe_int(ledger_row.get("quantity"))
         broker_available_quantity = safe_int(broker_row.get("available_quantity"))
         ledger_available_quantity = safe_int(ledger_row.get("available_quantity"))
+        if (
+            broker_quantity == 0
+            and ledger_quantity == 0
+            and broker_available_quantity == 0
+            and ledger_available_quantity == 0
+            and round_money(broker_row.get("market_value")) == 0
+            and round_money(ledger_row.get("market_value")) == 0
+        ):
+            continue
         quantity_diff = broker_quantity - ledger_quantity
         available_quantity_diff = broker_available_quantity - ledger_available_quantity
         broker_market_value = round_money(broker_row.get("market_value"))
