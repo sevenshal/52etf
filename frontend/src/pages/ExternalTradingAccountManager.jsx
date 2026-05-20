@@ -113,6 +113,16 @@ const renderTradeFeeSummary = (_, record) => {
     </Space>
   );
 };
+const diffTextColor = value => {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num) || num === 0) return undefined;
+  return num > 0 ? '#cf1322' : '#389e0d';
+};
+const renderDiffValue = value => (
+  <Text style={{ color: diffTextColor(value) }}>
+    {formatNumber(value)}
+  </Text>
+);
 const getNetAssetHistoryOption = rows => {
   const dates = (rows || []).map(item => item.trading_date);
   return {
@@ -190,6 +200,10 @@ const ExternalTradingAccountManager = () => {
   const [executorStatus, setExecutorStatus] = useState(null);
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
+  const [brokerPositionsVisible, setBrokerPositionsVisible] = useState(false);
+  const [brokerPositionsAccount, setBrokerPositionsAccount] = useState(null);
+  const [brokerPositions, setBrokerPositions] = useState(null);
+  const [brokerPositionsLoading, setBrokerPositionsLoading] = useState(false);
   const [markBlockSuccessOrderId, setMarkBlockSuccessOrderId] = useState(null);
   const [markBlockSuccessModalVisible, setMarkBlockSuccessModalVisible] = useState(false);
   const [markBlockSuccessRecord, setMarkBlockSuccessRecord] = useState(null);
@@ -453,6 +467,20 @@ const ExternalTradingAccountManager = () => {
     }
   };
 
+  const fetchBrokerPositions = async account => {
+    if (!account?.id) return;
+    setBrokerPositionsLoading(true);
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${account.id}/broker-positions`);
+      setBrokerPositions(data || null);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '获取券商持仓失败');
+      setBrokerPositions(null);
+    } finally {
+      setBrokerPositionsLoading(false);
+    }
+  };
+
   const handleMarkBlockSuccess = async record => {
     if (!executorStatusAccount?.id || !record?.id) return;
     setMarkBlockSuccessOrderId(record.id);
@@ -498,6 +526,12 @@ const ExternalTradingAccountManager = () => {
     fetchExecutorStatus(account);
   };
 
+  const openBrokerPositions = account => {
+    setBrokerPositionsAccount(account);
+    setBrokerPositionsVisible(true);
+    fetchBrokerPositions(account);
+  };
+
   const orderStatusColor = status => {
     if (status === 'FILLED') return 'success';
     if (['REJECTED', 'FAILED', 'EXPIRED'].includes(status)) return 'error';
@@ -514,6 +548,9 @@ const ExternalTradingAccountManager = () => {
   const lifecycleRows = executorStatus?.orders || [];
   const fillRows = executorStatus?.fills || [];
   const executorSubAccountRows = executorStatus?.sub_accounts || [];
+  const brokerPositionRows = brokerPositions?.positions || [];
+  const brokerPositionSummary = brokerPositions?.summary || {};
+  const brokerSnapshot = brokerPositions?.snapshot || null;
 
   const demandColumns = [
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, ...textColumnFilter(demandRows, record => record.sub_account_name) },
@@ -585,6 +622,31 @@ const ExternalTradingAccountManager = () => {
     { title: '市值', dataIndex: 'market_value', key: 'market_value', width: 120, render: value => formatNumber(value, 2) },
     { title: '已实现盈亏', dataIndex: 'realized_pnl', key: 'realized_pnl', width: 120, render: value => formatNumber(value, 2) },
     { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime }
+  ];
+
+  const brokerPositionColumns = [
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(brokerPositionRows, symbolText) },
+    { title: '券商数量', dataIndex: 'broker_quantity', key: 'broker_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '账本数量', dataIndex: 'ledger_quantity', key: 'ledger_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '数量差额', dataIndex: 'quantity_diff', key: 'quantity_diff', width: 110, render: renderDiffValue },
+    { title: '券商可用', dataIndex: 'broker_available_quantity', key: 'broker_available_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '账本可用', dataIndex: 'ledger_available_quantity', key: 'ledger_available_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '可用差额', dataIndex: 'available_quantity_diff', key: 'available_quantity_diff', width: 110, render: renderDiffValue },
+    { title: '券商市值', dataIndex: 'broker_market_value', key: 'broker_market_value', width: 130, render: value => formatNumber(value, 2) },
+    { title: '账本市值', dataIndex: 'ledger_market_value', key: 'ledger_market_value', width: 130, render: value => formatNumber(value, 2) },
+    { title: '市值差额', dataIndex: 'market_value_diff', key: 'market_value_diff', width: 130, render: renderDiffValue },
+    {
+      title: '差异状态',
+      dataIndex: 'diff_status',
+      key: 'diff_status',
+      width: 130,
+      render: value => {
+        if (value === 'MATCH') return <Tag color="green">一致</Tag>;
+        if (value === 'BROKER_ONLY') return <Tag color="orange">券商独有</Tag>;
+        if (value === 'LEDGER_ONLY') return <Tag color="blue">账本独有</Tag>;
+        return <Tag color="red">不一致</Tag>;
+      }
+    }
   ];
 
   const orderLifecycleColumns = [
@@ -728,6 +790,9 @@ const ExternalTradingAccountManager = () => {
         <Space wrap>
           <Button size="small" icon={<PlusOutlined />} onClick={() => openSubCreateModal(account)}>
             添加虚拟子账户
+          </Button>
+          <Button size="small" onClick={() => openBrokerPositions(account)}>
+            券商持仓
           </Button>
           <Button size="small" onClick={() => openExecutorStatus(account)}>
             执行器状态
@@ -1025,6 +1090,68 @@ const ExternalTradingAccountManager = () => {
             pagination={{ pageSize: 8 }}
             size="small"
             scroll={{ x: 1200 }}
+          />
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`券商持仓 - ${brokerPositionsAccount?.name || ''}`}
+        visible={brokerPositionsVisible}
+        onCancel={() => setBrokerPositionsVisible(false)}
+        width={1440}
+        footer={[
+          <Button
+            key="refresh"
+            icon={<SyncOutlined />}
+            loading={brokerPositionsLoading}
+            onClick={() => fetchBrokerPositions(brokerPositionsAccount)}
+          >
+            刷新
+          </Button>,
+          <Button key="close" onClick={() => setBrokerPositionsVisible(false)}>
+            关闭
+          </Button>
+        ]}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={16}>
+          {brokerPositions?.refresh?.error ? (
+            <Alert type="warning" showIcon message="快照刷新失败" description={brokerPositions.refresh.error} />
+          ) : null}
+          <Space wrap>
+            <Tag color={brokerPositions?.refresh?.refreshed ? 'green' : 'default'}>
+              {brokerPositions?.refresh?.refreshed ? '已刷新快照' : '仅快照'}
+            </Tag>
+            <Tag color={brokerPositions?.refresh?.market_window_open ? 'blue' : 'default'}>
+              {brokerPositions?.refresh?.market_window_open ? '开盘刷新' : '非开盘读快照'}
+            </Tag>
+            <Text>快照 {brokerSnapshot?.snapshot_at ? formatTime(brokerSnapshot.snapshot_at) : '-'}</Text>
+            <Text>来源 {brokerSnapshot?.snapshot_source || '-'}</Text>
+            <Text>类型 {brokerSnapshot?.snapshot_kind || '-'}</Text>
+            <Text>标的 {brokerPositionSummary?.symbol_count ?? 0}</Text>
+            <Text>一致 {brokerPositionSummary?.matched_count ?? 0}</Text>
+            <Text type="danger">不一致 {brokerPositionSummary?.mismatch_count ?? 0}</Text>
+          </Space>
+          <Space wrap>
+            <Text>券商市值 {formatNumber(brokerPositionSummary?.broker_market_value_total, 2)}</Text>
+            <Text>账本市值 {formatNumber(brokerPositionSummary?.ledger_market_value_total, 2)}</Text>
+            <Text style={{ color: diffTextColor(brokerPositionSummary?.market_value_diff_total) }}>
+              差额 {formatNumber(brokerPositionSummary?.market_value_diff_total, 2)}
+            </Text>
+            <Text style={{ color: diffTextColor(brokerPositionSummary?.quantity_diff_total) }}>
+              数量差额 {formatNumber(brokerPositionSummary?.quantity_diff_total)}
+            </Text>
+          </Space>
+          <Table
+            rowKey={record => record.symbol}
+            columns={brokerPositionColumns}
+            dataSource={brokerPositionRows}
+            loading={brokerPositionsLoading}
+            pagination={{ pageSize: 10 }}
+            size="small"
+            scroll={{ x: 1680 }}
+            onRow={record => ({
+              style: record.diff_status === 'MATCH' ? undefined : { background: '#fffbe6' }
+            })}
           />
         </Space>
       </Modal>
