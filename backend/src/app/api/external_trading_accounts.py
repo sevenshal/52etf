@@ -15,6 +15,7 @@ from ...core.database import (
 )
 from ...core.external_trading_database import (
     ExternalTradingAccount,
+    ExternalTradingBrokerPositionSnapshot,
     ExternalTradingDeliverRecord,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
@@ -24,9 +25,11 @@ from ...core.external_trading_database import (
     ExternalTradingTargetPosition,
     ExternalTradingSessionLocal as ExternalTradingDBSession,
     get_external_trading_db,
+    get_external_trading_db_ctx,
 )
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
+    is_a_share_trading_window,
     external_trading_hub,
 )
 from ...core.services.external_trading_executor import trigger_external_trading_executor
@@ -54,16 +57,21 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_FACTOR_LIVE,
     STRATEGY_W20,
     build_netted_target_execution_plan,
+    build_broker_position_diff,
     collect_internal_cross_reference_symbols,
     empty_sub_account_fee_summary,
+    get_account_ledger_positions,
     get_external_account_fee_summary,
+    get_latest_broker_position_snapshot,
     get_ledger_positions,
     get_open_order_quantities,
     get_sub_account_fee_summaries,
+    persist_broker_position_snapshot,
     mark_block_order_manual_success,
     normalize_symbol,
     resolve_manual_block_fill_price,
     safe_int,
+    serialize_broker_position_snapshot,
     serialize_ledger_position,
     serialize_order,
     serialize_sub_account,
@@ -465,6 +473,19 @@ def _serialize_sub_account_net_asset_history(row: ExternalTradingSubAccountNetAs
         "valued_at": _iso(row.valued_at),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
+    }
+
+
+def _serialize_broker_position_view(
+    snapshot: Optional[ExternalTradingBrokerPositionSnapshot],
+    ledger_positions: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    diff = build_broker_position_diff(snapshot, ledger_positions)
+    snapshot_item = serialize_broker_position_snapshot(snapshot) if snapshot else None
+    return {
+        "snapshot": snapshot_item,
+        "positions": diff["rows"],
+        "summary": diff["summary"],
     }
 
 
@@ -1577,6 +1598,83 @@ async def get_external_positions(
         return await external_trading_hub.get_positions(account.id, timeout=timeout_seconds)
     except ExternalTradingConnectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/{external_account_id}/broker-positions")
+async def get_external_broker_positions(
+    external_account_id: int,
+    refresh_if_open: bool = True,
+    timeout_seconds: float = 10.0,
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    if not account.enabled:
+        raise HTTPException(status_code=400, detail="External trading account is disabled")
+
+    runtime_status = external_trading_hub.get_status(account.id)
+    market_window_open = bool(is_a_share_trading_window())
+    refresh_attempted = bool(refresh_if_open and market_window_open)
+    refresh_error = None
+    refreshed = False
+    snapshot = None
+
+    if refresh_if_open and market_window_open:
+        if runtime_status.get("connected"):
+            try:
+                payload = await external_trading_hub.get_positions(account.id, timeout=timeout_seconds)
+                with get_external_trading_db_ctx() as external_db:
+                    snapshot = persist_broker_position_snapshot(
+                        external_db,
+                        account=account,
+                        payload=payload,
+                        snapshot_source="refresh",
+                        snapshot_kind="intraday",
+                        market_window_open=True,
+                    )
+                refreshed = True
+            except ExternalTradingConnectionError as exc:
+                refresh_error = str(exc)
+            except Exception as exc:
+                refresh_error = str(exc)
+        else:
+            refresh_error = "外部交易账号未连接，已回退到快照"
+
+    if snapshot is None:
+        snapshot = get_latest_broker_position_snapshot(
+            db,
+            external_trading_account_id=account.id,
+            account_id=account_id,
+        )
+
+    ledger_positions = get_account_ledger_positions(db, account.id, account_id)
+    response = _serialize_broker_position_view(snapshot, ledger_positions)
+    response["account"] = {
+        "id": account.id,
+        "account_id": account.account_id,
+        "name": account.name,
+        "identifier": account.identifier,
+        "connected": bool(runtime_status.get("connected")),
+        "pending_count": runtime_status.get("pending_count", 0),
+        "connected_at": runtime_status.get("connected_at"),
+        "last_seen_at": runtime_status.get("last_seen_at"),
+    }
+    response["refresh"] = {
+        "attempted": refresh_attempted,
+        "refreshed": refreshed,
+        "market_window_open": market_window_open,
+        "connected": bool(runtime_status.get("connected")),
+        "refresh_if_open": refresh_if_open,
+        "error": refresh_error,
+        "timeout_seconds": timeout_seconds,
+    }
+    response["snapshot_exists"] = snapshot is not None
+
+    symbols = set()
+    _collect_symbol_fields(response, symbols)
+    stock_name_by_symbol = _load_a_stock_name_map(symbols)
+    _attach_symbol_names(response, stock_name_by_symbol)
+    return response
 
 
 @router.get("/{external_account_id}/assets")

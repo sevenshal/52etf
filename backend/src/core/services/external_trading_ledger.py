@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..external_trading_database import (
     ExternalTradingAccount,
+    ExternalTradingBrokerPositionSnapshot,
     ExternalTradingDeliverRecord,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
@@ -380,6 +381,56 @@ def get_ledger_positions(db: Session, sub_account_id: Optional[int]) -> Dict[str
     return {normalize_symbol(row.symbol): row for row in rows if row.symbol}
 
 
+def get_account_ledger_positions(db: Session, external_trading_account_id: int, account_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    query = db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.external_trading_account_id == external_trading_account_id,
+    )
+    if account_id:
+        query = query.filter(ExternalTradingSubAccount.account_id == account_id)
+    sub_account_ids = [safe_int(row.id) for row in query.all() if safe_int(row.id) > 0]
+    if not sub_account_ids:
+        return {}
+
+    rows = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(ExternalTradingLedgerPosition.sub_account_id.in_(sub_account_ids))
+        .all()
+    )
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        symbol = normalize_symbol(row.symbol)
+        if not symbol:
+            continue
+        bucket = aggregated.setdefault(symbol, {
+            "symbol": symbol,
+            "quantity": 0,
+            "available_quantity": 0,
+            "_avg_cost_notional": 0.0,
+            "_market_price_notional": 0.0,
+            "_market_price_weight": 0,
+            "market_value": 0.0,
+            "realized_pnl": 0.0,
+        })
+        quantity = safe_int(row.quantity)
+        available_quantity = safe_int(getattr(row, "available_quantity", row.quantity), quantity)
+        bucket["quantity"] += quantity
+        bucket["available_quantity"] += available_quantity
+        bucket["realized_pnl"] = round_money(bucket["realized_pnl"] + safe_float(row.realized_pnl))
+        bucket["market_value"] = round_money(bucket["market_value"] + safe_float(row.market_value))
+        bucket["_avg_cost_notional"] += safe_float(row.avg_cost) * quantity
+        market_price = safe_float(row.market_price)
+        if market_price > 0 and quantity > 0:
+            bucket["_market_price_notional"] += market_price * quantity
+            bucket["_market_price_weight"] += quantity
+
+    for bucket in aggregated.values():
+        quantity = safe_int(bucket.get("quantity"))
+        bucket["avg_cost"] = round_money(bucket.pop("_avg_cost_notional", 0.0) / quantity) if quantity > 0 else 0.0
+        price_weight = safe_int(bucket.pop("_market_price_weight", 0))
+        bucket["market_price"] = round_money(bucket.pop("_market_price_notional", 0.0) / price_weight) if price_weight > 0 else None
+    return aggregated
+
+
 def serialize_ledger_position(row: ExternalTradingLedgerPosition) -> Dict[str, Any]:
     return {
         "id": row.id,
@@ -392,6 +443,211 @@ def serialize_ledger_position(row: ExternalTradingLedgerPosition) -> Dict[str, A
         "market_value": row.market_value,
         "realized_pnl": row.realized_pnl,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _normalize_broker_position(position: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = normalize_symbol(position.get("symbol") or position.get("client_symbol"))
+    quantity = safe_int(position.get("quantity", position.get("amount")))
+    available_quantity = safe_int(position.get("available_quantity", position.get("enable_amount", quantity)), quantity)
+    cost_price = safe_float(position.get("cost_price", position.get("cost_basis")))
+    last_price = safe_float(position.get("last_price"))
+    market_value = safe_float(position.get("market_value"))
+    if market_value <= 0 and quantity > 0 and last_price > 0:
+        market_value = round_money(quantity * last_price)
+    if market_value <= 0 and quantity > 0 and cost_price > 0:
+        market_value = round_money(quantity * cost_price)
+    return {
+        "symbol": symbol,
+        "client_symbol": position.get("client_symbol"),
+        "quantity": quantity,
+        "available_quantity": available_quantity,
+        "cost_price": cost_price,
+        "last_price": last_price if last_price > 0 else None,
+        "market_value": round_money(market_value),
+        "profit": round_money(position.get("profit")),
+        "profit_ratio": safe_float(position.get("profit_ratio")),
+    }
+
+
+def persist_broker_position_snapshot(
+    db: Session,
+    *,
+    account: ExternalTradingAccount,
+    payload: Dict[str, Any],
+    snapshot_source: str,
+    snapshot_kind: Optional[str] = None,
+    market_window_open: bool = False,
+    snapshot_at: Optional[datetime] = None,
+    status: str = "SUCCESS",
+    message: Optional[str] = None,
+) -> ExternalTradingBrokerPositionSnapshot:
+    raw_positions = payload.get("positions") if isinstance(payload, dict) else []
+    if isinstance(raw_positions, dict):
+        raw_positions = list(raw_positions.values())
+    normalized_positions = [
+        _normalize_broker_position(position)
+        for position in (raw_positions or [])
+        if normalize_symbol((position or {}).get("symbol") or (position or {}).get("client_symbol"))
+    ]
+    if snapshot_at is None:
+        candidate = payload.get("current_time") if isinstance(payload, dict) else None
+        snapshot_at = parse_dt(candidate) or datetime.now()
+    snapshot_at = snapshot_at.replace(microsecond=0)
+    snapshot_date = snapshot_at.date()
+    position_count = len(normalized_positions)
+    total_market_value = round_money(sum(safe_float(row.get("market_value")) for row in normalized_positions))
+    total_available_market_value = round_money(
+        sum(safe_float(row.get("market_value")) * safe_int(row.get("available_quantity")) / safe_int(row.get("quantity"))
+            if safe_int(row.get("quantity")) > 0 else 0.0
+            for row in normalized_positions)
+    )
+    row = ExternalTradingBrokerPositionSnapshot(
+        account_id=account.account_id,
+        external_trading_account_id=account.id,
+        snapshot_date=snapshot_date,
+        snapshot_at=snapshot_at,
+        snapshot_source=snapshot_source,
+        snapshot_kind=snapshot_kind,
+        market_window_open=bool(market_window_open),
+        position_count=position_count,
+        total_market_value=total_market_value,
+        total_available_market_value=total_available_market_value,
+        positions=normalized_positions,
+        raw_payload=payload,
+        status=status,
+        message=message,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def get_latest_broker_position_snapshot(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    account_id: Optional[str] = None,
+) -> Optional[ExternalTradingBrokerPositionSnapshot]:
+    query = db.query(ExternalTradingBrokerPositionSnapshot).filter(
+        ExternalTradingBrokerPositionSnapshot.external_trading_account_id == external_trading_account_id,
+    )
+    if account_id:
+        query = query.filter(ExternalTradingBrokerPositionSnapshot.account_id == account_id)
+    return query.order_by(ExternalTradingBrokerPositionSnapshot.snapshot_at.desc(), ExternalTradingBrokerPositionSnapshot.id.desc()).first()
+
+
+def serialize_broker_position_snapshot(row: ExternalTradingBrokerPositionSnapshot) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "account_id": row.account_id,
+        "external_trading_account_id": row.external_trading_account_id,
+        "snapshot_date": row.snapshot_date.isoformat() if row.snapshot_date else None,
+        "snapshot_at": row.snapshot_at.isoformat() if row.snapshot_at else None,
+        "snapshot_source": row.snapshot_source,
+        "snapshot_kind": row.snapshot_kind,
+        "market_window_open": row.market_window_open,
+        "position_count": row.position_count,
+        "total_market_value": row.total_market_value,
+        "total_available_market_value": row.total_available_market_value,
+        "positions": row.positions or [],
+        "status": row.status,
+        "message": row.message,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def build_broker_position_diff(
+    snapshot: Optional[ExternalTradingBrokerPositionSnapshot],
+    ledger_positions: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    broker_positions = {}
+    for row in (snapshot.positions if snapshot else []) or []:
+        symbol = normalize_symbol(row.get("symbol") or row.get("client_symbol"))
+        if not symbol:
+            continue
+        broker_positions[symbol] = {
+            "symbol": symbol,
+            "client_symbol": row.get("client_symbol"),
+            "quantity": safe_int(row.get("quantity")),
+            "available_quantity": safe_int(row.get("available_quantity")),
+            "cost_price": safe_float(row.get("cost_price")),
+            "last_price": safe_float(row.get("last_price")),
+            "market_value": round_money(row.get("market_value")),
+        }
+
+    symbols = sorted(set(broker_positions.keys()) | set(ledger_positions.keys()))
+    rows = []
+    broker_total = 0.0
+    ledger_total = 0.0
+    quantity_diff_total = 0
+    available_quantity_diff_total = 0
+    matched_count = 0
+    mismatch_count = 0
+    broker_only_count = 0
+    ledger_only_count = 0
+    for symbol in symbols:
+        broker_row = broker_positions.get(symbol, {})
+        ledger_row = ledger_positions.get(symbol, {})
+        broker_quantity = safe_int(broker_row.get("quantity"))
+        ledger_quantity = safe_int(ledger_row.get("quantity"))
+        broker_available_quantity = safe_int(broker_row.get("available_quantity"))
+        ledger_available_quantity = safe_int(ledger_row.get("available_quantity"))
+        quantity_diff = broker_quantity - ledger_quantity
+        available_quantity_diff = broker_available_quantity - ledger_available_quantity
+        broker_market_value = round_money(broker_row.get("market_value"))
+        ledger_market_value = round_money(ledger_row.get("market_value"))
+        market_value_diff = round_money(broker_market_value - ledger_market_value)
+        if broker_quantity == ledger_quantity and broker_available_quantity == ledger_available_quantity:
+            diff_status = "MATCH"
+            matched_count += 1
+        elif broker_quantity > 0 and ledger_quantity <= 0:
+            diff_status = "BROKER_ONLY"
+            broker_only_count += 1
+        elif ledger_quantity > 0 and broker_quantity <= 0:
+            diff_status = "LEDGER_ONLY"
+            ledger_only_count += 1
+        else:
+            diff_status = "MISMATCH"
+            mismatch_count += 1
+        broker_total += broker_market_value
+        ledger_total += ledger_market_value
+        quantity_diff_total += quantity_diff
+        available_quantity_diff_total += available_quantity_diff
+        rows.append({
+            "symbol": symbol,
+            "client_symbol": broker_row.get("client_symbol"),
+            "broker_quantity": broker_quantity,
+            "broker_available_quantity": broker_available_quantity,
+            "broker_market_value": broker_market_value,
+            "ledger_quantity": ledger_quantity,
+            "ledger_available_quantity": ledger_available_quantity,
+            "ledger_market_value": ledger_market_value,
+            "quantity_diff": quantity_diff,
+            "available_quantity_diff": available_quantity_diff,
+            "market_value_diff": market_value_diff,
+            "diff_status": diff_status,
+            "broker": broker_row,
+            "ledger": ledger_row,
+        })
+
+    return {
+        "rows": rows,
+        "summary": {
+            "symbol_count": len(symbols),
+            "matched_count": matched_count,
+            "mismatch_count": mismatch_count,
+            "broker_only_count": broker_only_count,
+            "ledger_only_count": ledger_only_count,
+            "quantity_diff_total": quantity_diff_total,
+            "available_quantity_diff_total": available_quantity_diff_total,
+            "broker_market_value_total": round_money(broker_total),
+            "ledger_market_value_total": round_money(ledger_total),
+            "market_value_diff_total": round_money(broker_total - ledger_total),
+        },
     }
 
 

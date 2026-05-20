@@ -133,6 +133,30 @@ class ExternalTradingLedgerPosition(ExternalTradingBase):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class ExternalTradingBrokerPositionSnapshot(ExternalTradingBase):
+    """外部券商真实持仓快照。"""
+    __tablename__ = "external_trading_broker_position_snapshots"
+    __table_args__ = ()
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    snapshot_date = Column(Date, index=True, nullable=False)
+    snapshot_at = Column(DateTime, index=True, nullable=False)
+    snapshot_source = Column(String(32), index=True, nullable=False)
+    snapshot_kind = Column(String(32), index=True)
+    market_window_open = Column(Boolean, default=False, nullable=False)
+    position_count = Column(Integer, default=0, nullable=False)
+    total_market_value = Column(Float, default=0.0, nullable=False)
+    total_available_market_value = Column(Float, default=0.0, nullable=False)
+    positions = Column(JSON)
+    raw_payload = Column(JSON)
+    status = Column(String(16), default="SUCCESS", index=True, nullable=False)
+    message = Column(String(1000))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class ExternalTradingSubAccountNetAssetHistory(ExternalTradingBase):
     """虚拟子账户每日净资产快照。"""
     __tablename__ = "external_trading_sub_account_net_asset_history"
@@ -338,6 +362,8 @@ def ensure_external_trading_indexes():
         "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_identifier ON external_trading_accounts(account_id, identifier)",
         "CREATE INDEX IF NOT EXISTS idx_external_sub_accounts_strategy ON external_trading_sub_accounts(strategy_type, strategy_config_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_ledger_positions_sub_symbol ON external_trading_ledger_positions(sub_account_id, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_external_broker_position_snapshots_account_time ON external_trading_broker_position_snapshots(external_trading_account_id, snapshot_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_external_broker_position_snapshots_account_date ON external_trading_broker_position_snapshots(external_trading_account_id, snapshot_date, snapshot_source)",
         "CREATE INDEX IF NOT EXISTS idx_external_target_positions_sub_symbol ON external_trading_target_positions(sub_account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_account_date ON external_trading_sub_account_net_asset_history(account_id, external_trading_account_id, trading_date)",
         "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_sub_date ON external_trading_sub_account_net_asset_history(sub_account_id, trading_date)",

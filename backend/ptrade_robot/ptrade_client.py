@@ -111,6 +111,7 @@ def before_trading_start(context, data):
 def after_trading_end(context, data):
     update_current_context(context)
     process_pending_commands()
+    push_broker_positions_snapshot()
 
 
 def handle_data(context, data):
@@ -1740,6 +1741,24 @@ def push_deliver_records():
         log.info("push_deliver_records: pushed %d records from %s to %s" % (len(records), start_date_str, yesterday))
     except Exception as exc:
         log_warn("push_deliver_records failed: %s" % exc)
+
+
+def push_broker_positions_snapshot():
+    """在收盘后主动推送券商持仓快照给后端。"""
+    try:
+        payload = get_positions_payload()
+        payload["snapshot_kind"] = "close"
+        send_ws_event({
+            "type": "broker_positions_event",
+            "data": payload,
+            "ts": datetime.now().isoformat(),
+        })
+        log.info(
+            "push_broker_positions_snapshot: pushed %d positions at %s"
+            % (len(payload.get("positions") or []), payload.get("current_time"))
+        )
+    except Exception as exc:
+        log_warn("push_broker_positions_snapshot failed: %s" % exc)
 
 
 def normalize_position(pos):

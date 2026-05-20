@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -15,7 +16,11 @@ from ..external_trading_database import (
     ExternalTradingAccount,
     get_external_trading_db_ctx,
 )
-from .external_trading_ledger import process_order_events, process_trade_events
+from .external_trading_ledger import (
+    persist_broker_position_snapshot,
+    process_order_events,
+    process_trade_events,
+)
 from .external_trading_crypto import decrypt_message, encrypt_message
 
 logger = logging.getLogger(__name__)
@@ -79,6 +84,10 @@ def _is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
         A_SHARE_OPEN <= current_time <= A_SHARE_MORNING_CLOSE
         or A_SHARE_AFTERNOON_OPEN <= current_time <= A_SHARE_CLOSE
     )
+
+
+def is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
+    return _is_a_share_trading_window(now)
 
 
 def _ensure_ptrade_command_window(action: str) -> None:
@@ -244,6 +253,27 @@ class ExternalTradingHub:
                 logger.info("Processed deliver event from %s: %s", conn.name, result)
             except Exception as exc:
                 logger.exception("Failed to process deliver event from %s: %s", conn.name, exc)
+            return
+
+        if message_type == "broker_positions_event":
+            try:
+                payload = message.get("data") or {}
+                with get_external_trading_db_ctx() as db:
+                    snapshot = persist_broker_position_snapshot(
+                        db,
+                        account=SimpleNamespace(id=conn.account_pk, account_id=conn.account_id),
+                        payload=payload,
+                        snapshot_source="push",
+                        snapshot_kind=str(payload.get("snapshot_kind") or "close"),
+                        market_window_open=False,
+                    )
+                logger.info(
+                    "Processed broker positions snapshot from %s: %s positions",
+                    conn.name,
+                    snapshot.position_count,
+                )
+            except Exception as exc:
+                logger.exception("Failed to process broker positions snapshot from %s: %s", conn.name, exc)
             return
 
         logger.debug("Ignored external trading message from %s: %s", conn.name, message)
