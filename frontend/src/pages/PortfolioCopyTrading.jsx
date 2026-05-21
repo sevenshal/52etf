@@ -238,7 +238,6 @@ const PortfolioCopyTrading = () => {
                 setCurrentLogs(res.data); // IB returns List
                 setLogPagination(prev => ({ ...prev, current: 1, total: res.data.length })); // Fake pagination for IB
             } else {
-                params.cli_id = record.cli_id;
                 // Add specific filters
                 if (logFilters.combination_id) params.combination_id = logFilters.combination_id;
                 // Override with argument filters if provided (e.g. from search click)
@@ -278,7 +277,7 @@ const PortfolioCopyTrading = () => {
         if (type === 'ib') {
             setCurrentLogTitle(`跟单日志 - ${record.portfolio_name} (${record.portfolio_id})`);
         } else {
-            setCurrentLogTitle(`跟单日志 - ${record.cli_id}`);
+            setCurrentLogTitle(`跟单日志 - ${record.combination_name || record.combination_id}`);
         }
 
         // Initial fetch
@@ -597,10 +596,7 @@ const PortfolioCopyTrading = () => {
                 if (record.combination_id) {
                     const ids = record.combination_id.split(',');
                     const names = ids.map(id => {
-                        let config = snowballConfigs.find(c => c.combination_id === id && c.cli_id === record.cli_id);
-                        if (!config) {
-                            config = snowballConfigs.find(c => c.combination_id === id);
-                        }
+                        const config = snowballConfigs.find(c => c.combination_id === id);
                         return config ? config.combination_name : id;
                     });
                     return <Text style={{ fontSize: '12px' }} ellipsis={{ tooltip: names.join(', ') }}>{names.join(', ')}</Text>;
@@ -699,17 +695,6 @@ const PortfolioCopyTrading = () => {
                                             <Text strong>{r.combination_name || '未命名'}</Text>
                                             <Text type="secondary">ID: {r.combination_id}</Text>
                                         </Space>
-                                    )
-                                },
-                                {
-                                    title: 'API标识',
-                                    dataIndex: 'cli_id',
-                                    sorter: (a, b) => (a.cli_id || '').localeCompare(b.cli_id || ''),
-                                    filters: Array.from(new Set(snowballConfigs.map(c => c.cli_id))).filter(Boolean).map(id => ({ text: id, value: id })),
-                                    onFilter: (value, record) => record.cli_id === value,
-                                    filterSearch: true,
-                                    render: (id, record) => (
-                                        <Tag color="blue">{id}</Tag>
                                     )
                                 },
                                 {
@@ -829,7 +814,6 @@ const PortfolioCopyTrading = () => {
                             >
                                 <Select.Option key="AGGREGATED" value="AGGREGATED">AGGREGATED</Select.Option>
                                 {snowballConfigs
-                                    .filter(c => c.cli_id === activeLogConfig.record.cli_id)
                                     .map(c => (
                                         <Select.Option key={c.combination_id} value={c.combination_id}>
                                             {c.combination_name || c.combination_id}
@@ -1149,14 +1133,6 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                     </Row>
-                    <Row gutter={16}>
-                        <Col span={12}>
-                            <Form.Item name="cli_id" label="API调用标识 (CLI_ID)" rules={[{ required: true }]}>
-                                <Input placeholder="唯一ID, 用于API调用" />
-                            </Form.Item>
-                        </Col>
-                    </Row>
-
                     <Row gutter={16}>
                         <Col span={24}>
                             <Form.Item name="blacklisted_symbols" label="跟单黑名单 (不买入/若持有会卖出)">
