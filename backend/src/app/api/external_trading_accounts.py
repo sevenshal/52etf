@@ -58,11 +58,13 @@ from ...core.services.external_trading_ledger import (
     build_netted_target_execution_plan,
     build_broker_position_diff,
     collect_internal_cross_reference_symbols,
+    compute_position_sellability,
     empty_sub_account_fee_summary,
     get_account_ledger_positions,
     get_external_account_fee_summary,
     get_latest_broker_position_snapshot,
     get_ledger_positions,
+    get_today_buy_quantities,
     get_open_order_quantities,
     get_sub_account_fee_summaries,
     persist_broker_position_snapshot,
@@ -372,6 +374,7 @@ async def _serialize_sub_account_with_binding(
             .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
             .all()
         )
+    today_buy_by_key = get_today_buy_quantities(db, [sub_account.id])
     try:
         valuation = await calculate_sub_account_net_asset(
             db,
@@ -399,7 +402,13 @@ async def _serialize_sub_account_with_binding(
             ).first()
     item["effective_executor_policy"] = resolve_execution_policy(effective_account, sub_account) if effective_account else None
     if positions is not None:
-        item["positions"] = [serialize_ledger_position(pos) for pos in positions]
+        item["positions"] = [
+            serialize_ledger_position(
+                pos,
+                today_buy_quantity=today_buy_by_key.get((sub_account.id, normalize_symbol(pos.symbol)), 0),
+            )
+            for pos in positions
+        ]
     return item
 
 
@@ -625,10 +634,19 @@ def _serialize_target_position_status(
     ledger_position: Optional[ExternalTradingLedgerPosition],
     open_quantities: Optional[Dict[str, int]],
     strategy_name: Optional[str],
+    today_buy_quantity: int = 0,
 ) -> Dict[str, Any]:
     symbol = normalize_symbol(row.symbol)
     current_quantity = safe_int(getattr(ledger_position, "quantity", 0))
     available_quantity = safe_int(getattr(ledger_position, "available_quantity", current_quantity))
+    sellability = compute_position_sellability(ledger_position, today_buy_quantity) if ledger_position else {
+        "computed_sellable_quantity": 0,
+        "sellable_quantity": 0,
+        "t1_locked_quantity": 0,
+        "today_buy_quantity": 0,
+        "sellable_rule": None,
+        "sellable_security_type": None,
+    }
     pending_buy = safe_int((open_quantities or {}).get("BUY"))
     pending_sell = safe_int((open_quantities or {}).get("SELL"))
     effective_quantity = current_quantity + pending_buy - pending_sell
@@ -637,7 +655,7 @@ def _serialize_target_position_status(
     side = "BUY" if delta_quantity > 0 else "SELL" if delta_quantity < 0 else None
     demand_quantity = abs(delta_quantity)
     if side == "SELL":
-        demand_quantity = min(demand_quantity, max(available_quantity - pending_sell, 0))
+        demand_quantity = min(demand_quantity, max(safe_int(sellability.get("computed_sellable_quantity")) - pending_sell, 0))
 
     return {
         "id": row.id,
@@ -650,7 +668,14 @@ def _serialize_target_position_status(
         "symbol": symbol,
         "target_quantity": target_quantity,
         "current_quantity": current_quantity,
-        "available_quantity": available_quantity,
+        "raw_available_quantity": available_quantity,
+        "available_quantity": safe_int(sellability.get("computed_sellable_quantity")),
+        "computed_sellable_quantity": safe_int(sellability.get("computed_sellable_quantity")),
+        "sellable_quantity": safe_int(sellability.get("computed_sellable_quantity")),
+        "t1_locked_quantity": safe_int(sellability.get("t1_locked_quantity")),
+        "today_buy_quantity": safe_int(sellability.get("today_buy_quantity")),
+        "sellable_rule": sellability.get("sellable_rule"),
+        "sellable_security_type": sellability.get("sellable_security_type"),
         "pending_buy_quantity": pending_buy,
         "pending_sell_quantity": pending_sell,
         "effective_quantity": effective_quantity,
@@ -673,8 +698,9 @@ def _serialize_ledger_position_status(
     row: ExternalTradingLedgerPosition,
     sub_account: Optional[ExternalTradingSubAccount],
     strategy_name: Optional[str],
+    today_buy_quantity: int = 0,
 ) -> Dict[str, Any]:
-    item = serialize_ledger_position(row)
+    item = serialize_ledger_position(row, today_buy_quantity=today_buy_quantity)
     item["sub_account_name"] = sub_account.name if sub_account else None
     item["sub_account_enabled"] = sub_account.enabled if sub_account else None
     item["strategy_type"] = sub_account.strategy_type if sub_account else None
@@ -1254,6 +1280,7 @@ async def get_external_trading_executor_status(
         sub_account_id: get_ledger_positions(db, sub_account_id)
         for sub_account_id in sub_account_by_id.keys()
     }
+    today_buy_by_key = get_today_buy_quantities(db, list(sub_account_by_id.keys()))
     open_by_sub_account = {
         sub_account_id: get_open_order_quantities(db, sub_account_id)
         for sub_account_id in sub_account_by_id.keys()
@@ -1282,6 +1309,7 @@ async def get_external_trading_executor_status(
             ledger_by_sub_account.get(row.sub_account_id, {}).get(symbol),
             open_by_sub_account.get(row.sub_account_id, {}).get(symbol),
             strategy_name_by_sub_account_id.get(row.sub_account_id),
+            today_buy_by_key.get((row.sub_account_id, symbol), 0),
         ))
 
     ledger_rows = (
@@ -1302,6 +1330,7 @@ async def get_external_trading_executor_status(
             row,
             sub_account_by_id.get(row.sub_account_id),
             strategy_name_by_sub_account_id.get(row.sub_account_id),
+            today_buy_by_key.get((row.sub_account_id, normalize_symbol(row.symbol)), 0),
         )
         for row in ledger_rows
     ]

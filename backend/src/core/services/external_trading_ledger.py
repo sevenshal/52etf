@@ -2,8 +2,10 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import date, datetime
+import os
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -30,6 +32,7 @@ from .external_trading_execution_policy import (
 
 logger = logging.getLogger(__name__)
 
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 STRATEGY_W20 = "w20_momentum_live"
 STRATEGY_SNOWBALL = "snowball_copy_live"
 STRATEGY_FACTOR_LIVE = "factor_live_trading"
@@ -73,6 +76,26 @@ PTRADE_STATUS_MAP = {
     "V": "ACKNOWLEDGED",
 }
 PTRADE_ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
+A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
+A_SHARE_T0_ETF_PREFIXES = ("511", "513", "518", "520")
+A_SHARE_T0_ETF_NAME_KEYWORDS = (
+    "货币",
+    "现金",
+    "债",
+    "国债",
+    "信用",
+    "黄金",
+    "商品",
+    "纳指",
+    "标普",
+    "恒生",
+    "港股",
+    "港",
+    "日经",
+    "海外",
+    "跨境",
+    "QDII",
+)
 
 
 def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
@@ -97,6 +120,156 @@ def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
         return f"{parts[1]}.{market}"
     market = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}.get(second, second)
     return f"{parts[0]}.{market}"
+
+
+def _normalized_symbol_parts(symbol: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    normalized = normalize_symbol(symbol)
+    if not normalized or "." not in normalized:
+        return normalized, None
+    code, market = normalized.split(".", 1)
+    return code, market
+
+
+def _configured_t0_symbols() -> set:
+    return {
+        normalize_symbol(item)
+        for item in os.getenv("EXTERNAL_TRADING_T0_SYMBOLS", "").split(",")
+        if normalize_symbol(item)
+    }
+
+
+def is_convertible_bond_symbol(symbol: Optional[str]) -> bool:
+    code, market = _normalized_symbol_parts(symbol)
+    if not code or market not in {"SH", "SZ"} or not code.isdigit() or len(code) != 6:
+        return False
+    return code.startswith(("11", "12"))
+
+
+def is_a_share_etf_symbol(symbol: Optional[str]) -> bool:
+    code, market = _normalized_symbol_parts(symbol)
+    if not code or market not in {"SH", "SZ"} or not code.isdigit() or len(code) != 6:
+        return False
+    return code.startswith(A_SHARE_ETF_PREFIXES)
+
+
+def _a_share_etf_name(symbol: Optional[str]) -> Optional[str]:
+    try:
+        from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES
+
+        return A_STOCK_ETF_DAILY_NAMES.get(normalize_symbol(symbol))
+    except Exception:
+        return None
+
+
+def is_t0_etf_symbol(symbol: Optional[str]) -> bool:
+    normalized = normalize_symbol(symbol)
+    code, market = _normalized_symbol_parts(normalized)
+    if not normalized or not code or market not in {"SH", "SZ"} or not is_a_share_etf_symbol(normalized):
+        return False
+    if normalized in _configured_t0_symbols():
+        return True
+    if market == "SH" and code.startswith(A_SHARE_T0_ETF_PREFIXES):
+        return True
+    name = _a_share_etf_name(normalized)
+    if name and any(keyword.upper() in str(name).upper() for keyword in A_SHARE_T0_ETF_NAME_KEYWORDS):
+        return True
+    return False
+
+
+def sellable_rule_for_symbol(symbol: Optional[str]) -> Dict[str, Any]:
+    if is_convertible_bond_symbol(symbol):
+        return {"settlement_rule": "T+0", "security_type": "CONVERTIBLE_BOND"}
+    if is_t0_etf_symbol(symbol):
+        return {"settlement_rule": "T+0", "security_type": "ETF"}
+    if is_a_share_etf_symbol(symbol):
+        return {"settlement_rule": "T+1", "security_type": "ETF"}
+    code, market = _normalized_symbol_parts(symbol)
+    if code and market in {"SH", "SZ", "BJ"} and code.isdigit() and len(code) == 6:
+        return {"settlement_rule": "T+1", "security_type": "A_SHARE_STOCK"}
+    return {"settlement_rule": "T+0", "security_type": "OTHER"}
+
+
+def compute_sellability(
+    symbol: Optional[str],
+    *,
+    quantity: Any,
+    available_quantity: Any,
+    today_buy_quantity: Any = 0,
+) -> Dict[str, Any]:
+    total_quantity = max(safe_int(quantity), 0)
+    base_available_quantity = min(max(safe_int(available_quantity, total_quantity), 0), total_quantity)
+    today_buy = max(safe_int(today_buy_quantity), 0)
+    rule = sellable_rule_for_symbol(symbol)
+    t1_locked_quantity = 0
+    if rule["settlement_rule"] == "T+1":
+        t1_locked_quantity = min(today_buy, base_available_quantity)
+    computed_sellable_quantity = max(base_available_quantity - t1_locked_quantity, 0)
+    return {
+        "computed_sellable_quantity": computed_sellable_quantity,
+        "sellable_quantity": computed_sellable_quantity,
+        "t1_locked_quantity": t1_locked_quantity,
+        "today_buy_quantity": today_buy,
+        "sellable_rule": rule["settlement_rule"],
+        "sellable_security_type": rule["security_type"],
+    }
+
+
+def compute_position_sellability(
+    row: ExternalTradingLedgerPosition,
+    today_buy_quantity: Any = 0,
+) -> Dict[str, Any]:
+    return compute_sellability(
+        row.symbol,
+        quantity=row.quantity,
+        available_quantity=getattr(row, "available_quantity", row.quantity),
+        today_buy_quantity=today_buy_quantity,
+    )
+
+
+def _china_today() -> date:
+    return datetime.now(CHINA_TZ).date()
+
+
+def get_today_buy_quantities(
+    db: Session,
+    sub_account_ids: List[int],
+    *,
+    as_of_date: Optional[date] = None,
+) -> Dict[Tuple[int, str], int]:
+    ids = [safe_int(item) for item in dict.fromkeys(sub_account_ids or []) if safe_int(item) > 0]
+    if not ids:
+        return {}
+    trade_date = as_of_date or _china_today()
+    start_dt = datetime.combine(trade_date, datetime.min.time())
+    end_dt = start_dt + timedelta(days=1)
+    rows = (
+        db.query(ExternalTradingOrderFill)
+        .filter(
+            ExternalTradingOrderFill.sub_account_id.in_(ids),
+            ExternalTradingOrderFill.side == "BUY",
+            or_(
+                and_(
+                    ExternalTradingOrderFill.traded_at >= start_dt,
+                    ExternalTradingOrderFill.traded_at < end_dt,
+                ),
+                and_(
+                    ExternalTradingOrderFill.traded_at.is_(None),
+                    ExternalTradingOrderFill.created_at >= start_dt,
+                    ExternalTradingOrderFill.created_at < end_dt,
+                ),
+            ),
+        )
+        .all()
+    )
+    quantities: Dict[Tuple[int, str], int] = {}
+    for row in rows:
+        symbol = normalize_symbol(row.symbol)
+        sub_account_id = safe_int(row.sub_account_id)
+        if not symbol or sub_account_id <= 0:
+            continue
+        key = (sub_account_id, symbol)
+        quantities[key] = quantities.get(key, 0) + max(safe_int(row.quantity), 0)
+    return quantities
 
 
 def is_star_market_symbol(symbol: Optional[str]) -> bool:
@@ -391,6 +564,7 @@ def get_account_ledger_positions(db: Session, external_trading_account_id: int, 
     if not sub_account_ids:
         return {}
 
+    today_buy_by_key = get_today_buy_quantities(db, sub_account_ids)
     rows = (
         db.query(ExternalTradingLedgerPosition)
         .filter(ExternalTradingLedgerPosition.sub_account_id.in_(sub_account_ids))
@@ -405,6 +579,13 @@ def get_account_ledger_positions(db: Session, external_trading_account_id: int, 
             "symbol": symbol,
             "quantity": 0,
             "available_quantity": 0,
+            "raw_available_quantity": 0,
+            "computed_sellable_quantity": 0,
+            "sellable_quantity": 0,
+            "t1_locked_quantity": 0,
+            "today_buy_quantity": 0,
+            "sellable_rule": None,
+            "sellable_security_type": None,
             "_avg_cost_notional": 0.0,
             "_market_price_notional": 0.0,
             "_market_price_weight": 0,
@@ -413,8 +594,19 @@ def get_account_ledger_positions(db: Session, external_trading_account_id: int, 
         })
         quantity = safe_int(row.quantity)
         available_quantity = safe_int(getattr(row, "available_quantity", row.quantity), quantity)
+        sellability = compute_position_sellability(
+            row,
+            today_buy_by_key.get((safe_int(row.sub_account_id), symbol), 0),
+        )
         bucket["quantity"] += quantity
-        bucket["available_quantity"] += available_quantity
+        bucket["raw_available_quantity"] += available_quantity
+        bucket["computed_sellable_quantity"] += safe_int(sellability.get("computed_sellable_quantity"))
+        bucket["sellable_quantity"] += safe_int(sellability.get("sellable_quantity"))
+        bucket["available_quantity"] += safe_int(sellability.get("computed_sellable_quantity"))
+        bucket["t1_locked_quantity"] += safe_int(sellability.get("t1_locked_quantity"))
+        bucket["today_buy_quantity"] += safe_int(sellability.get("today_buy_quantity"))
+        bucket["sellable_rule"] = bucket["sellable_rule"] or sellability.get("sellable_rule")
+        bucket["sellable_security_type"] = bucket["sellable_security_type"] or sellability.get("sellable_security_type")
         bucket["realized_pnl"] = round_money(bucket["realized_pnl"] + safe_float(row.realized_pnl))
         bucket["market_value"] = round_money(bucket["market_value"] + safe_float(row.market_value))
         bucket["_avg_cost_notional"] += safe_float(row.avg_cost) * quantity
@@ -431,19 +623,28 @@ def get_account_ledger_positions(db: Session, external_trading_account_id: int, 
     return aggregated
 
 
-def serialize_ledger_position(row: ExternalTradingLedgerPosition) -> Dict[str, Any]:
-    return {
+def serialize_ledger_position(
+    row: ExternalTradingLedgerPosition,
+    *,
+    today_buy_quantity: Any = 0,
+) -> Dict[str, Any]:
+    item = {
         "id": row.id,
         "sub_account_id": row.sub_account_id,
         "symbol": row.symbol,
         "quantity": row.quantity,
         "available_quantity": row.available_quantity,
+        "raw_available_quantity": row.available_quantity,
         "avg_cost": row.avg_cost,
         "market_price": row.market_price,
         "market_value": row.market_value,
         "realized_pnl": row.realized_pnl,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+    sellability = compute_position_sellability(row, today_buy_quantity)
+    item.update(sellability)
+    item["available_quantity"] = safe_int(sellability.get("computed_sellable_quantity"))
+    return item
 
 
 def _normalize_broker_position(position: Dict[str, Any]) -> Dict[str, Any]:
@@ -585,6 +786,7 @@ def build_broker_position_diff(
     ledger_total = 0.0
     quantity_diff_total = 0
     available_quantity_diff_total = 0
+    sellable_quantity_diff_total = 0
     matched_count = 0
     mismatch_count = 0
     broker_only_count = 0
@@ -596,21 +798,25 @@ def build_broker_position_diff(
         ledger_quantity = safe_int(ledger_row.get("quantity"))
         broker_available_quantity = safe_int(broker_row.get("available_quantity"))
         ledger_available_quantity = safe_int(ledger_row.get("available_quantity"))
+        ledger_computed_sellable_quantity = safe_int(
+            ledger_row.get("computed_sellable_quantity", ledger_available_quantity)
+        )
         if (
             broker_quantity == 0
             and ledger_quantity == 0
             and broker_available_quantity == 0
-            and ledger_available_quantity == 0
+            and ledger_computed_sellable_quantity == 0
             and round_money(broker_row.get("market_value")) == 0
             and round_money(ledger_row.get("market_value")) == 0
         ):
             continue
         quantity_diff = broker_quantity - ledger_quantity
-        available_quantity_diff = broker_available_quantity - ledger_available_quantity
+        available_quantity_diff = broker_available_quantity - ledger_computed_sellable_quantity
+        sellable_quantity_diff = available_quantity_diff
         broker_market_value = round_money(broker_row.get("market_value"))
         ledger_market_value = round_money(ledger_row.get("market_value"))
         market_value_diff = round_money(broker_market_value - ledger_market_value)
-        if broker_quantity == ledger_quantity and broker_available_quantity == ledger_available_quantity:
+        if broker_quantity == ledger_quantity and broker_available_quantity == ledger_computed_sellable_quantity:
             diff_status = "MATCH"
             matched_count += 1
         elif broker_quantity > 0 and ledger_quantity <= 0:
@@ -626,17 +832,27 @@ def build_broker_position_diff(
         ledger_total += ledger_market_value
         quantity_diff_total += quantity_diff
         available_quantity_diff_total += available_quantity_diff
+        sellable_quantity_diff_total += sellable_quantity_diff
         rows.append({
             "symbol": symbol,
             "client_symbol": broker_row.get("client_symbol"),
             "broker_quantity": broker_quantity,
             "broker_available_quantity": broker_available_quantity,
+            "broker_sellable_quantity": broker_available_quantity,
             "broker_market_value": broker_market_value,
             "ledger_quantity": ledger_quantity,
             "ledger_available_quantity": ledger_available_quantity,
+            "ledger_raw_available_quantity": safe_int(ledger_row.get("raw_available_quantity", ledger_available_quantity)),
+            "ledger_computed_sellable_quantity": ledger_computed_sellable_quantity,
+            "ledger_sellable_quantity": ledger_computed_sellable_quantity,
+            "ledger_t1_locked_quantity": safe_int(ledger_row.get("t1_locked_quantity")),
+            "ledger_today_buy_quantity": safe_int(ledger_row.get("today_buy_quantity")),
+            "ledger_sellable_rule": ledger_row.get("sellable_rule"),
+            "ledger_sellable_security_type": ledger_row.get("sellable_security_type"),
             "ledger_market_value": ledger_market_value,
             "quantity_diff": quantity_diff,
             "available_quantity_diff": available_quantity_diff,
+            "sellable_quantity_diff": sellable_quantity_diff,
             "market_value_diff": market_value_diff,
             "diff_status": diff_status,
             "broker": broker_row,
@@ -653,6 +869,7 @@ def build_broker_position_diff(
             "ledger_only_count": ledger_only_count,
             "quantity_diff_total": quantity_diff_total,
             "available_quantity_diff_total": available_quantity_diff_total,
+            "sellable_quantity_diff_total": sellable_quantity_diff_total,
             "broker_market_value_total": round_money(broker_total),
             "ledger_market_value_total": round_money(ledger_total),
             "market_value_diff_total": round_money(broker_total - ledger_total),
@@ -1105,10 +1322,14 @@ def _block_type_for_quantity_clip(item: Dict[str, Any], requested_quantity: int)
     if position_quantity < 0:
         position_quantity = safe_int(item.get("sellable_quantity"), 0)
     if position_quantity >= requested_quantity:
+        sellable_rule = str(item.get("sellable_rule") or "").upper()
+        block_message = "可卖数量不足，阻断到下一交易日开盘后重试"
+        if sellable_rule == "T+1":
+            block_message = "A股 T+1 可卖数量不足，阻断到下一交易日开盘后重试"
         return (
             STATUS_BLOCKED_INSUFFICIENT_SELLABLE,
-            "insufficient_sellable_t_plus_1",
-            "A股 T+1 可卖数量不足，阻断到下一交易日开盘后重试",
+            "insufficient_sellable_quantity",
+            block_message,
         )
     return (
         STATUS_BLOCKED_INSUFFICIENT_POSITION,
@@ -1133,7 +1354,7 @@ def expire_insufficient_sellable_blocks(
     rows = query.all()
     for row in rows:
         row.status = "EXPIRED"
-        row.message = "A股 T+1 可卖数量阻断已到期，允许执行器重新尝试"
+        row.message = "可卖数量阻断已到期，允许执行器重新尝试"
         row.updated_at = current
     return len(rows)
 
@@ -1224,6 +1445,7 @@ def _get_account_level_sellable_quantities(
     if not sub_account_ids:
         return {}
 
+    today_buy_by_key = get_today_buy_quantities(db, sub_account_ids)
     positions = (
         db.query(ExternalTradingLedgerPosition)
         .filter(ExternalTradingLedgerPosition.sub_account_id.in_(sub_account_ids))
@@ -1252,7 +1474,11 @@ def _get_account_level_sellable_quantities(
         symbol = normalize_symbol(row.symbol)
         if not symbol:
             continue
-        available_quantity = safe_int(getattr(row, "available_quantity", row.quantity), safe_int(row.quantity))
+        sellability = compute_position_sellability(
+            row,
+            today_buy_by_key.get((safe_int(row.sub_account_id), symbol), 0),
+        )
+        available_quantity = safe_int(sellability.get("computed_sellable_quantity"))
         pending_sell = pending_sell_by_key.get((safe_int(row.sub_account_id), symbol), 0)
         remaining_sellable = max(available_quantity - pending_sell, 0)
         if remaining_sellable <= 0:
@@ -2981,6 +3207,7 @@ def _build_demand_rows(
         sub_account_id: get_ledger_positions(db, sub_account_id)
         for sub_account_id in sub_accounts.keys()
     }
+    today_buy_by_key = get_today_buy_quantities(db, list(sub_accounts.keys()))
     open_by_sub_account = {
         sub_account_id: get_open_order_quantities(db, sub_account_id)
         for sub_account_id in sub_accounts.keys()
@@ -3014,6 +3241,14 @@ def _build_demand_rows(
             continue
         ledger_position = ledger_by_sub_account.get(sub_account.id, {}).get(symbol)
         current_quantity = safe_int(getattr(ledger_position, "quantity", 0))
+        available_quantity_base = safe_int(getattr(ledger_position, "available_quantity", current_quantity))
+        today_buy_quantity = today_buy_by_key.get((sub_account.id, symbol), 0)
+        sellability = compute_sellability(
+            symbol,
+            quantity=current_quantity,
+            available_quantity=available_quantity_base,
+            today_buy_quantity=today_buy_quantity,
+        )
         open_quantities = open_by_sub_account.get(sub_account.id, {}).get(symbol, {})
         pending_buy = safe_int(open_quantities.get("BUY"))
         pending_sell = safe_int(open_quantities.get("SELL"))
@@ -3026,7 +3261,7 @@ def _build_demand_rows(
         quantity = abs(delta)
         available_quantity = 0
         if side == "SELL":
-            available_quantity = max(safe_int(getattr(ledger_position, "available_quantity", current_quantity)) - pending_sell, 0)
+            available_quantity = max(safe_int(sellability.get("computed_sellable_quantity")) - pending_sell, 0)
             quantity = min(quantity, available_quantity)
         if quantity <= 0:
             continue
@@ -3060,6 +3295,13 @@ def _build_demand_rows(
             "remaining_quantity": quantity,
             "current_quantity": current_quantity,
             "available_quantity": available_quantity if side == "SELL" else 0,
+            "raw_available_quantity": available_quantity_base,
+            "computed_sellable_quantity": safe_int(sellability.get("computed_sellable_quantity")),
+            "sellable_quantity": safe_int(sellability.get("computed_sellable_quantity")),
+            "t1_locked_quantity": safe_int(sellability.get("t1_locked_quantity")),
+            "today_buy_quantity": today_buy_quantity,
+            "sellable_rule": sellability.get("sellable_rule"),
+            "sellable_security_type": sellability.get("sellable_security_type"),
             "target_quantity": target_quantity,
             "effective_quantity": effective_quantity,
             "pending_buy_quantity": pending_buy,
@@ -3226,7 +3468,7 @@ def build_netted_target_execution_plan(
             "blocked_until": demand.get("blocked_until"),
             "blocked_status": demand.get("blocked_status"),
             "blocked_order_id": demand.get("blocked_order_id"),
-            "message": demand.get("blocked_message") or "A股 T+1 可卖数量不足，下一交易日再重试",
+            "message": demand.get("blocked_message") or "可卖数量不足，下一交易日再重试",
         })
 
     external_orders.sort(key=lambda row: (0 if str(row.get("side") or "").upper() == "SELL" else 1, str(row.get("symbol") or "")))
