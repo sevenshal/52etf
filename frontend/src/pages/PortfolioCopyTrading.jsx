@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
     Space, Tag, message, Typography, Switch, Row, Col, List,
@@ -53,6 +54,7 @@ const PortfolioCopyTrading = () => {
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
     const [snowballAccountForm] = Form.useForm();
+    const [snowballAccountConfig, setSnowballAccountConfig] = useState(null);
 
     const handlePreview = async (configId) => {
         setPreviewLoading(true);
@@ -145,7 +147,8 @@ const PortfolioCopyTrading = () => {
     const fetchSnowballAccountConfig = async () => {
         try {
             const response = await request.get('/api/snowball/account-config');
-            snowballAccountForm.setFieldsValue({ xueqiu_cookie: response.data.xueqiu_cookie });
+            setSnowballAccountConfig(response.data || null);
+            snowballAccountForm.setFieldsValue({ xueqiu_cookie: response.data?.xueqiu_cookie || '' });
         } catch (error) {
             message.error('获取雪球账号配置失败');
         }
@@ -155,6 +158,7 @@ const PortfolioCopyTrading = () => {
         try {
             await request.post('/api/snowball/account-config', values);
             message.success('保存雪球账号配置成功');
+            await fetchSnowballAccountConfig();
             setSnowballAccountModalVisible(false);
         } catch (error) {
             message.error('保存失败');
@@ -1440,6 +1444,9 @@ const PortfolioCopyTrading = () => {
                 width={700}
             >
                 <Form form={snowballAccountForm} layout="vertical" onFinish={handleSnowballAccountSave}>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+                        最近一次更新时间：{snowballAccountConfig?.updated_at ? dayjs(snowballAccountConfig.updated_at).format('YYYY-MM-DD HH:mm:ss') : '暂无'}
+                    </Text>
                     <Row gutter={16}>
                         <Col span={24}>
                             <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。所有组合将共用此配置。支持 'xq_a_token=...' 或完整Cookie字符串。">
