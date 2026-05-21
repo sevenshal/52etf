@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, PlayCircleOutlined, HistoryOutlined,
-    SettingOutlined, DeleteOutlined, EditOutlined, ClockCircleOutlined
+    SettingOutlined, DeleteOutlined, EditOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
@@ -24,7 +24,7 @@ const PortfolioCopyTrading = () => {
     const [currentLogTitle, setCurrentLogTitle] = useState('');
     const [activeLogConfig, setActiveLogConfig] = useState(null); // { record, type }
     const [logPagination, setLogPagination] = useState({ current: 1, pageSize: 20, total: 0 });
-    const [logFilters, setLogFilters] = useState({ combination_id: '', symbol: '' });
+    const [logFilters, setLogFilters] = useState({ combination_id: '' });
 
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -39,14 +39,16 @@ const PortfolioCopyTrading = () => {
 
     // Snowball States
     const [snowballConfigs, setSnowballConfigs] = useState([]);
-    const [snowballHeartbeat, setSnowballHeartbeat] = useState(null);
-    const [snowballHeartbeatLoading, setSnowballHeartbeatLoading] = useState(false);
     const [snowballModalVisible, setSnowballModalVisible] = useState(false);
     const [snowballForm] = Form.useForm();
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
     const selectedSnowballExternalTradingAccountId = Form.useWatch('external_trading_account_id', snowballForm);
     const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
     const [snowballLiveSubAccounts, setSnowballLiveSubAccounts] = useState([]);
+    const [snapshotModalVisible, setSnapshotModalVisible] = useState(false);
+    const [snapshotData, setSnapshotData] = useState(null);
+    const [snapshotLoading, setSnapshotLoading] = useState(false);
+    const [currentSnapshotTitle, setCurrentSnapshotTitle] = useState('');
 
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
@@ -136,21 +138,8 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const fetchSnowballHeartbeat = async () => {
-        setSnowballHeartbeatLoading(true);
-        try {
-            const response = await request.get('/api/snowball/heartbeat');
-            setSnowballHeartbeat(response.data);
-        } catch (error) {
-            console.error('获取雪球接口心跳失败', error);
-        } finally {
-            setSnowballHeartbeatLoading(false);
-        }
-    };
-
     const fetchSnowballTabData = () => {
         fetchSnowballConfigs();
-        fetchSnowballHeartbeat();
     };
 
     const fetchSnowballAccountConfig = async () => {
@@ -248,11 +237,8 @@ const PortfolioCopyTrading = () => {
                 params.cli_id = record.cli_id;
                 // Add specific filters
                 if (logFilters.combination_id) params.combination_id = logFilters.combination_id;
-                if (logFilters.symbol) params.symbol = logFilters.symbol;
-
                 // Override with argument filters if provided (e.g. from search click)
                 if (filters.combination_id !== undefined) params.combination_id = filters.combination_id;
-                if (filters.symbol !== undefined) params.symbol = filters.symbol;
 
                 const res = await request.get('/api/snowball/logs', { params });
                 // New Response: { total: 100, items: [...] }
@@ -279,7 +265,7 @@ const PortfolioCopyTrading = () => {
 
         // Auto-select combination_id if present (Snowball only)
         const initialCombId = record.combination_id || '';
-        const initialFilters = { combination_id: initialCombId, symbol: '' };
+        const initialFilters = { combination_id: initialCombId };
 
         // For IB, we don't have combination_id filter in state, but we need to ensure config_id is passed implicitly via 'record' in activeLogConfig
         setLogFilters(initialFilters);
@@ -349,6 +335,8 @@ const PortfolioCopyTrading = () => {
     const handleSnowballSave = async (values) => {
         try {
             const payload = { ...values };
+            delete payload.total_amount;
+            delete payload.total_position_ratio;
             if (snowballEditingConfig) {
                 await request.put(`/api/snowball/configs/${snowballEditingConfig.id}`, payload);
                 message.success('更新成功');
@@ -384,22 +372,20 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const handleSnowballInitLedger = (record) => {
-        Modal.confirm({
-            title: '从旧快照初始化子账户账本？',
-            content: '会把当前雪球快照持仓写入绑定的虚拟子账户账本，并同步为当前目标仓位。建议只在切换到通用执行器前执行一次。',
-            okText: '初始化',
-            cancelText: '取消',
-            onOk: async () => {
-                try {
-                    await request.post(`/api/snowball/configs/${record.id}/sync-snapshot-to-ledger`);
-                    message.success('初始化账本成功');
-                    fetchSnowballConfigs();
-                } catch (error) {
-                    message.error('初始化失败: ' + formatError(error, '初始化失败'));
-                }
-            },
-        });
+    const handleViewSnapshot = async (record) => {
+        setSnapshotLoading(true);
+        setSnapshotModalVisible(true);
+        setCurrentSnapshotTitle(`组合详情 - ${record.combination_name || record.combination_id}`);
+        setSnapshotData(null);
+
+        try {
+            const response = await request.get(`/api/snowball/snapshot/${record.id}`);
+            setSnapshotData(response.data);
+        } catch (error) {
+            message.error('获取组合详情失败: ' + formatError(error, '获取组合详情失败'));
+        } finally {
+            setSnapshotLoading(false);
+        }
     };
 
     useEffect(() => {
@@ -636,32 +622,6 @@ const PortfolioCopyTrading = () => {
             }
         },
         {
-            title: '标的',
-            dataIndex: 'symbol',
-            key: 'symbol',
-            width: 140, // Increased width for name
-            minWidth: 100,
-            render: (text, record) => (
-                <Space direction="vertical" size={0}>
-                    <Text style={{ fontSize: '12px', fontWeight: 'bold' }}>{text}</Text>
-                    {record.stock_name && <Text type="secondary" style={{ fontSize: '10px' }}>{record.stock_name}</Text>}
-                </Space>
-            )
-        },
-        {
-            title: '数量',
-            dataIndex: 'quantity',
-            key: 'quantity',
-            width: 80,
-        },
-        {
-            title: '价格',
-            dataIndex: 'price',
-            key: 'price',
-            width: 80,
-            render: (p) => p?.toFixed(2)
-        },
-        {
             title: '结果',
             key: 'status',
             width: 100,
@@ -678,67 +638,6 @@ const PortfolioCopyTrading = () => {
             render: (text) => <div style={{ fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'rgba(0, 0, 0, 0.45)' }}>{text}</div>
         }
     ];
-
-    // Snapshot Modal State
-    const [snapshotModalVisible, setSnapshotModalVisible] = useState(false);
-    const [snapshotData, setSnapshotData] = useState(null);
-    const [snapshotLoading, setSnapshotLoading] = useState(false);
-    const [currentSnapshotTitle, setCurrentSnapshotTitle] = useState('');
-
-    const handleViewSnapshot = async (record) => {
-        setSnapshotLoading(true);
-        setSnapshotModalVisible(true);
-        setCurrentSnapshotTitle(`组合详情 - ${record.combination_name || record.combination_id}`);
-        setSnapshotData(null);
-
-        try {
-            const response = await request.get(`/api/snowball/snapshot/${record.id}`);
-            setSnapshotData(response.data);
-        } catch (error) {
-            message.error('获取组合详情失败');
-        } finally {
-            setSnapshotLoading(false);
-        }
-    };
-
-    const formatHeartbeatAge = (seconds) => {
-        if (seconds === null || seconds === undefined) return '';
-        if (seconds < 60) return '刚刚';
-        if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
-        return `${Math.floor(seconds / 3600)}小时前`;
-    };
-
-    const renderSnowballHeartbeat = () => {
-        if (snowballHeartbeatLoading && !snowballHeartbeat) {
-            return <Text type="secondary">接口心跳加载中...</Text>;
-        }
-
-        const lastCalled = snowballHeartbeat?.last_called_at_text;
-        if (!lastCalled) {
-            return (
-                <Space size={6}>
-                    <ClockCircleOutlined />
-                    <Text type="secondary">接口心跳</Text>
-                    <Tag color="default">暂无调用</Tag>
-                </Space>
-            );
-        }
-
-        const isRecent = snowballHeartbeat?.is_recent;
-        const ageText = formatHeartbeatAge(snowballHeartbeat?.seconds_since_last_call);
-        return (
-            <Space size={6} wrap>
-                <ClockCircleOutlined />
-                <Text type="secondary">接口心跳</Text>
-                <Tag color={isRecent ? 'green' : 'red'}>{isRecent ? '正常' : '超时'}</Tag>
-                <Text>{lastCalled}</Text>
-                {ageText && <Text type="secondary">({ageText})</Text>}
-                {snowballHeartbeat?.last_cli_id && (
-                    <Text type="secondary">cli_id: {snowballHeartbeat.last_cli_id}</Text>
-                )}
-            </Space>
-        );
-    };
 
     return (
         <div style={{ padding: '24px' }}>
@@ -810,16 +709,13 @@ const PortfolioCopyTrading = () => {
                                     )
                                 },
                                 {
-                                    title: '资金/参数',
+                                    title: '净值/参数',
                                     key: 'params',
                                     render: (_, r) => (
                                         <Space direction="vertical" size={0}>
                                             <Text strong style={{ color: '#1890ff' }}>
-                                                当前市值: {r.snapshot_value ? r.snapshot_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : 0}
+                                                子账户净值: {formatMoney(r.snapshot_value)}
                                             </Text>
-                                            {r.total_amount && (
-                                                <Text type="secondary" style={{ fontSize: '12px' }}>配置金额: {r.total_amount.toLocaleString()}</Text>
-                                            )}
                                             <Text type="secondary" style={{ fontSize: '12px' }}>误差: {r.tracking_error_pct}%</Text>
                                             {r.blacklisted_symbols && r.blacklisted_symbols.length > 0 && (
                                                 <Text type="secondary" style={{ fontSize: '12px', color: 'red' }}>黑名单: {r.blacklisted_symbols.length}个</Text>
@@ -871,11 +767,6 @@ const PortfolioCopyTrading = () => {
                                             <Button
                                                 size="small"
                                                 disabled={!record.live_trade_enabled}
-                                                onClick={() => handleSnowballInitLedger(record)}
-                                            >初始化账本</Button>
-                                            <Button
-                                                size="small"
-                                                disabled={!record.live_trade_enabled}
                                                 onClick={() => handleSnowballSyncExternalTargets(record)}
                                             >同步目标</Button>
                                             <Button icon={<EditOutlined />} size="small" onClick={() => {
@@ -900,7 +791,7 @@ const PortfolioCopyTrading = () => {
                                 }}>添加雪球跟单配置</Button>
                             </div>
                             <div style={{ flex: 1, minWidth: 320, textAlign: 'center' }}>
-                                {renderSnowballHeartbeat()}
+                                <Text type="secondary">雪球同步状态以配置列表为准</Text>
                             </div>
                             <div>
                                 <Button icon={<SettingOutlined />} onClick={() => {
@@ -942,13 +833,6 @@ const PortfolioCopyTrading = () => {
                                     ))
                                 }
                             </Select>
-                            <Input
-                                placeholder="股票代码 (如 SH.600)"
-                                value={logFilters.symbol}
-                                onChange={e => setLogFilters(prev => ({ ...prev, symbol: e.target.value }))}
-                                style={{ width: 150 }}
-                                allowClear
-                            />
                             <Button type="primary" icon={<ReloadOutlined />} onClick={() => fetchLogs(1, logFilters)}>
                                 搜索
                             </Button>
@@ -1240,7 +1124,7 @@ const PortfolioCopyTrading = () => {
                 onOk={() => snowballForm.submit()}
                 width={700}
             >
-                <Form form={snowballForm} layout="vertical" onFinish={handleSnowballSave} initialValues={{ enabled: true, total_position_ratio: 100, tracking_error_pct: 1, live_trade_enabled: false }}>
+                <Form form={snowballForm} layout="vertical" onFinish={handleSnowballSave} initialValues={{ enabled: true, tracking_error_pct: 1, live_trade_enabled: false }}>
                     <Form.Item name="enabled" valuePropName="checked">
                         <Switch checkedChildren="开启" unCheckedChildren="关闭" />
                     </Form.Item>
@@ -1277,16 +1161,6 @@ const PortfolioCopyTrading = () => {
                         </Col>
                     </Row>
                     <Row gutter={16}>
-                        <Col span={8}>
-                            <Form.Item name="total_amount" label="总金额">
-                                <InputNumber style={{ width: '100%' }} placeholder="为空则使用Portfolio" />
-                            </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                            <Form.Item name="total_position_ratio" label="仓位比例 (%)">
-                                <InputNumber style={{ width: '100%' }} min={0} max={100} step={1} />
-                            </Form.Item>
-                        </Col>
                         <Col span={8}>
                             <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
                                 <InputNumber style={{ width: '100%' }} min={0} max={100} step={0.1} />
@@ -1353,26 +1227,6 @@ const PortfolioCopyTrading = () => {
                 </Form>
             </Modal>
 
-            {/* Snowball Account Config Modal */}
-            <Modal
-                title="雪球账号全局配置"
-                visible={snowballAccountModalVisible}
-                onCancel={() => setSnowballAccountModalVisible(false)}
-                onOk={() => snowballAccountForm.submit()}
-                width={700}
-            >
-                <Form form={snowballAccountForm} layout="vertical" onFinish={handleSnowballAccountSave}>
-                    <Row gutter={16}>
-                        <Col span={24}>
-                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。所有组合将共用此配置。支持 'xq_a_token=...' 或完整Cookie字符串。">
-                                <Input.TextArea rows={3} placeholder="xq_a_token=..." />
-                            </Form.Item>
-                        </Col>
-                    </Row>
-                </Form>
-            </Modal>
-
-            {/* Snowball Snapshot Modal */}
             <Modal
                 title={currentSnapshotTitle}
                 visible={snapshotModalVisible}
@@ -1387,20 +1241,8 @@ const PortfolioCopyTrading = () => {
                         <Row gutter={16} style={{ marginBottom: 20 }}>
                             <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>目标基准</Text>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>子账户净值</Text>
                                     <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#1890ff' }}>
-                                        {formatMoney(snapshotData.market_value)}
-                                    </div>
-                                    <div style={{ marginTop: 4 }}>
-                                        <Text type="secondary">持仓比例: </Text>
-                                        <Text>{formatPercent(snapshotData.position_ratio, 1)}</Text>
-                                    </div>
-                                </Card>
-                            </Col>
-                            <Col span={6}>
-                                <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>账本净资产</Text>
-                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#52c41a' }}>
                                         {formatMoney(snapshotData.ledger_net_asset)}
                                     </div>
                                     <div style={{ marginTop: 4 }}>
@@ -1410,25 +1252,37 @@ const PortfolioCopyTrading = () => {
                             </Col>
                             <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>股票市值差额</Text>
-                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: diffColor((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0)) }}>
-                                        {formatSignedMoney((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0))}
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>目标股票市值</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold' }}>
+                                        {formatMoney(snapshotData.target_market_value)}
                                     </div>
                                     <div style={{ marginTop: 4 }}>
-                                        <Text type="secondary">差异: </Text>
-                                        <Tag color={snapshotData.diff_count ? 'orange' : 'green'}>{snapshotData.diff_count || 0}</Tag>
+                                        <Text type="secondary">目标现金: </Text>
+                                        <Text>{formatMoney(snapshotData.target_cash)}</Text>
                                     </div>
                                 </Card>
                             </Col>
                             <Col span={6}>
                                 <Card size="small" bodyStyle={{ padding: '12px' }}>
-                                    <Text type="secondary" style={{ fontSize: '12px' }}>现金差额</Text>
-                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: diffColor(snapshotData.cash_diff) }}>
-                                        {formatSignedMoney(snapshotData.cash_diff)}
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>账本股票市值</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#52c41a' }}>
+                                        {formatMoney(snapshotData.ledger_market_value)}
                                     </div>
                                     <div style={{ marginTop: 4 }}>
-                                        <Text type="secondary">目标现金: </Text>
-                                        <Text>{formatMoney(snapshotData.target_cash)}</Text>
+                                        <Text type="secondary">现金: </Text>
+                                        <Text>{formatMoney(snapshotData.ledger_cash)}</Text>
+                                    </div>
+                                </Card>
+                            </Col>
+                            <Col span={6}>
+                                <Card size="small" bodyStyle={{ padding: '12px' }}>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>差异</Text>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: diffColor((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0)) }}>
+                                        {formatSignedMoney((snapshotData.target_market_value || 0) - (snapshotData.ledger_market_value || 0))}
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                        <Text type="secondary">标的差异: </Text>
+                                        <Tag color={snapshotData.diff_count ? 'orange' : 'green'}>{snapshotData.diff_count || 0}</Tag>
                                     </div>
                                 </Card>
                             </Col>
@@ -1437,9 +1291,8 @@ const PortfolioCopyTrading = () => {
                         <div style={{ marginBottom: 16 }}>
                             <Space wrap>
                                 <Text type="secondary">抓取时间: {new Date(snapshotData.updated_at).toLocaleString()}</Text>
-                                {snapshotData.snapshot_updated_at && (
-                                    <Text type="secondary">旧快照时间: {new Date(snapshotData.snapshot_updated_at).toLocaleString()}</Text>
-                                )}
+                                <Text type="secondary">现金差额: </Text>
+                                <Text style={{ color: diffColor(snapshotData.cash_diff) }}>{formatSignedMoney(snapshotData.cash_diff)}</Text>
                             </Space>
                         </div>
 
@@ -1554,6 +1407,22 @@ const PortfolioCopyTrading = () => {
                                     align: 'right',
                                     render: (val) => <Text style={{ color: diffColor(val) }}>{formatSignedPercent(val)}</Text>
                                 },
+                                {
+                                    title: '差异类型',
+                                    dataIndex: 'diff_type',
+                                    key: 'diff_type',
+                                    width: 100,
+                                    render: (val) => {
+                                        const colorMap = {
+                                            BUY: 'green',
+                                            SELL: 'red',
+                                            TARGET_ONLY: 'gold',
+                                            LEDGER_ONLY: 'orange',
+                                            MATCHED: 'default',
+                                        };
+                                        return <Tag color={colorMap[val] || 'default'}>{val}</Tag>;
+                                    }
+                                },
                             ]}
                         />
                     </div>
@@ -1561,6 +1430,26 @@ const PortfolioCopyTrading = () => {
                     <div style={{ textAlign: 'center', color: '#999' }}>暂无数据</div>
                 )}
             </Modal>
+
+            {/* Snowball Account Config Modal */}
+            <Modal
+                title="雪球账号全局配置"
+                visible={snowballAccountModalVisible}
+                onCancel={() => setSnowballAccountModalVisible(false)}
+                onOk={() => snowballAccountForm.submit()}
+                width={700}
+            >
+                <Form form={snowballAccountForm} layout="vertical" onFinish={handleSnowballAccountSave}>
+                    <Row gutter={16}>
+                        <Col span={24}>
+                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。所有组合将共用此配置。支持 'xq_a_token=...' 或完整Cookie字符串。">
+                                <Input.TextArea rows={3} placeholder="xq_a_token=..." />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                </Form>
+            </Modal>
+
         </div >
     );
 };
