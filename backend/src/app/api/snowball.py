@@ -33,6 +33,7 @@ from ...core.services.external_trading_executor import (
     next_a_share_trading_time,
     trigger_external_trading_executor,
 )
+from ...core.services.external_trading_execution_policy import resolve_execution_policy
 from ...core.services.external_trading_ledger import (
     STRATEGY_SNOWBALL,
     normalize_symbol as normalize_trading_symbol,
@@ -208,6 +209,11 @@ class SnowballSnapshotHolding(BaseModel):
     quantity_diff: int = 0
     value_diff: float = 0.0
     weight_diff_pct: float = 0.0
+    reference_price: Optional[float] = None
+    reference_price_source: Optional[str] = None
+    initial_protection_price: Optional[float] = None
+    execution_protection_price: Optional[float] = None
+    executor_max_slippage_pct: Optional[float] = None
     blacklisted: bool = False
     diff_type: str = "MATCHED"
 
@@ -1277,6 +1283,10 @@ async def get_snapshot(
     ledger_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
         ExternalTradingLedgerPosition.sub_account_id == sub_account.id
     ).all()
+    target_rows = trading_db.query(ExternalTradingTargetPosition).filter(
+        ExternalTradingTargetPosition.sub_account_id == sub_account.id,
+        ExternalTradingTargetPosition.status == "ACTIVE",
+    ).all()
     ledger_positions: Dict[str, ExternalTradingLedgerPosition] = {}
     for row in ledger_rows:
         trade_symbol = normalize_trading_symbol(row.symbol)
@@ -1293,12 +1303,28 @@ async def get_snapshot(
         if xq_symbol:
             all_xq_symbols.add(xq_symbol)
 
+    target_position_map: Dict[str, Dict[str, Any]] = {}
+    for row in target_rows:
+        trade_symbol = normalize_trading_symbol(row.symbol)
+        if not trade_symbol:
+            continue
+        target_position_map[trade_symbol] = {
+            "reference_price": safe_float(row.reference_price, None),
+            "reference_price_source": row.reference_price_source,
+        }
+
     try:
         valuation = await calculate_sub_account_net_asset(trading_db, sub_account, positions=ledger_rows)
     except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     quotes = await fetch_xueqiu_batch_quotes(sorted(all_xq_symbols), cookie)
+    policy_account = trading_db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == sub_account.external_trading_account_id,
+        ExternalTradingAccount.account_id == account_id,
+    ).first()
+    effective_policy = resolve_execution_policy(policy_account, sub_account) if policy_account else {}
+    max_slippage_pct = safe_float(effective_policy.get("max_slippage_pct"), 0.5)
     ledger_position_values = {
         normalize_trading_symbol(row.get("symbol")): row
         for row in valuation.get("positions", [])
@@ -1324,7 +1350,7 @@ async def get_snapshot(
 
     detailed_holdings = []
     target_market_value = 0.0
-    all_trade_symbols = set(target_weights.keys()) | set(ledger_positions.keys())
+    all_trade_symbols = set(target_weights.keys()) | set(ledger_positions.keys()) | set(target_position_map.keys())
     for trade_symbol in sorted(all_trade_symbols):
         quote_info = get_quote_info(trade_symbol)
         price = quote_info["price"]
@@ -1366,6 +1392,18 @@ async def get_snapshot(
         else:
             diff_type = "MATCHED"
 
+        target_meta = target_position_map.get(trade_symbol) or {}
+        reference_price = safe_float(target_meta.get("reference_price"), None)
+        reference_price_source = target_meta.get("reference_price_source")
+        initial_protection_price = None
+        execution_protection_price = None
+        if reference_price and reference_price > 0:
+            initial_protection_price = reference_price
+            if quantity_diff > 0:
+                execution_protection_price = round(reference_price * (1.0 + max_slippage_pct / 100.0), 4)
+            elif quantity_diff < 0:
+                execution_protection_price = round(reference_price * (1.0 - max_slippage_pct / 100.0), 4)
+
         detailed_holdings.append(SnowballSnapshotHolding(
             symbol=trade_symbol,
             xueqiu_symbol=target.get("xueqiu_symbol") or quote_info["xueqiu_symbol"],
@@ -1382,6 +1420,11 @@ async def get_snapshot(
             quantity_diff=quantity_diff,
             value_diff=value_diff,
             weight_diff_pct=weight_diff_pct,
+            reference_price=reference_price,
+            reference_price_source=reference_price_source,
+            initial_protection_price=initial_protection_price,
+            execution_protection_price=execution_protection_price,
+            executor_max_slippage_pct=max_slippage_pct,
             blacklisted=bool(target.get("blacklisted")),
             diff_type=diff_type,
         ))

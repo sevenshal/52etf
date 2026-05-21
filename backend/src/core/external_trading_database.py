@@ -205,8 +205,6 @@ class ExternalTradingTargetPosition(ExternalTradingBase):
     target_quantity = Column(Integer, default=0, nullable=False)
     target_weight_pct = Column(Float)
     target_value = Column(Float)
-    protection_limit_price = Column(Float)
-    protection_limit_source = Column(String(64))
     reference_price = Column(Float)
     reference_price_source = Column(String(64))
     signal_id = Column(String(128), index=True)
@@ -420,8 +418,6 @@ def ensure_external_trading_columns():
             "fee_source": "ALTER TABLE external_trading_order_fills ADD COLUMN fee_source VARCHAR(32)",
         },
         "external_trading_target_positions": {
-            "protection_limit_price": "ALTER TABLE external_trading_target_positions ADD COLUMN protection_limit_price FLOAT",
-            "protection_limit_source": "ALTER TABLE external_trading_target_positions ADD COLUMN protection_limit_source VARCHAR(64)",
             "reference_price": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price FLOAT",
             "reference_price_source": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price_source VARCHAR(64)",
         },

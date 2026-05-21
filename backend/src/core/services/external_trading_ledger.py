@@ -916,8 +916,6 @@ def sync_target_positions(
         row.target_quantity = safe_int(target.get("target_quantity"))
         row.target_weight_pct = safe_float(target.get("target_weight_pct"), None)
         row.target_value = safe_float(target.get("target_value"), None)
-        row.protection_limit_price = None
-        row.protection_limit_source = None
         row.reference_price = safe_float(target.get("reference_price"), None)
         row.reference_price_source = target.get("reference_price_source")
         row.signal_id = signal_id
@@ -936,8 +934,6 @@ def sync_target_positions(
             row.target_quantity = 0
             row.target_weight_pct = 0
             row.target_value = 0
-            row.protection_limit_price = None
-            row.protection_limit_source = None
             row.reference_price = None
             row.reference_price_source = None
             row.signal_id = signal_id
@@ -3319,8 +3315,6 @@ def _build_demand_rows(
             "signal_version": target.signal_version,
             "source_execution_id": target.source_execution_id,
             "target_updated_at": target.updated_at.isoformat() if target.updated_at else None,
-            "protection_limit_price": safe_float(target.protection_limit_price, None),
-            "protection_limit_source": target.protection_limit_source,
             "reference_price": safe_float(target.reference_price, None),
             "reference_price_source": target.reference_price_source,
             "execution_policy": execution_policy,

@@ -691,8 +691,6 @@ def _serialize_target_position_status(
         "demand_quantity": demand_quantity,
         "target_weight_pct": row.target_weight_pct,
         "target_value": row.target_value,
-        "protection_limit_price": row.protection_limit_price,
-        "protection_limit_source": row.protection_limit_source,
         "reference_price": row.reference_price,
         "reference_price_source": row.reference_price_source,
         "signal_id": row.signal_id,
