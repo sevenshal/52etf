@@ -1305,7 +1305,7 @@ const PortfolioCopyTrading = () => {
                             pagination={false}
                             size="small"
                             rowKey="symbol"
-                            scroll={{ x: 1200, y: 400 }}
+                            scroll={{ x: 1400, y: 400 }}
                             columns={[
                                 {
                                     title: '标的',
@@ -1378,6 +1378,25 @@ const PortfolioCopyTrading = () => {
                                     width: 90,
                                     align: 'right',
                                     render: (val) => formatMoney(val, 3)
+                                },
+                                {
+                                    title: '参考/保护价',
+                                    key: 'reference_protection_price',
+                                    width: 140,
+                                    align: 'right',
+                                    render: (_, record) => (
+                                        <Space direction="vertical" size={0}>
+                                            <Text>{record.reference_price ? formatMoney(record.reference_price, 3) : '-'}</Text>
+                                            <Text type="secondary" style={{ fontSize: '12px' }}>
+                                                {record.execution_protection_price ? `保护 ${formatMoney(record.execution_protection_price, 3)}` : '保护 -'}
+                                            </Text>
+                                            {record.executor_max_slippage_pct !== null && record.executor_max_slippage_pct !== undefined && (
+                                                <Text type="secondary" style={{ fontSize: '12px' }}>
+                                                    滑点 {record.executor_max_slippage_pct}%
+                                                </Text>
+                                            )}
+                                        </Space>
+                                    )
                                 },
                                 {
                                     title: '目标市值',
