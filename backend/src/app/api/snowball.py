@@ -481,13 +481,14 @@ def _snowball_reference_price(
     old_reference_price: Optional[float] = None,
 ) -> Optional[float]:
     delta_quantity = safe_int(final_quantity) - safe_int(old_quantity)
-    if delta_quantity == 0:
-        return safe_float(old_reference_price, None)
+    previous_reference_price = safe_float(old_reference_price, None)
+    if delta_quantity == 0 and previous_reference_price and previous_reference_price > 0:
+        return previous_reference_price
 
     fill = rebalance_prices.get(xq_symbol) or {}
     fill_price = safe_float(fill.get("price"))
     if fill_price <= 0:
-        return None
+        return previous_reference_price
     return round(fill_price, 4)
 
 
