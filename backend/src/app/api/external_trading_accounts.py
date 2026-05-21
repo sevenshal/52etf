@@ -42,6 +42,7 @@ from ...core.services.external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
+    MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     normalize_lot_size,
     normalize_clip_sell_to_available,
     normalize_max_replace_count,
@@ -124,7 +125,11 @@ class ExternalTradingAccountBase(BaseModel):
     executor_enabled: bool = True
     executor_price_level: int = Field(default=DEFAULT_EXECUTOR_PRICE_LEVEL)
     executor_lot_size: int = Field(default=DEFAULT_EXECUTOR_LOT_SIZE, ge=1)
-    executor_order_timeout_seconds: int = Field(default=DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS, ge=10, le=3600)
+    executor_order_timeout_seconds: int = Field(
+        default=DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+        ge=10,
+        le=MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    )
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
     executor_max_slippage_pct: float = Field(default=DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT, ge=0)
     executor_clip_sell_to_available: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE
@@ -186,7 +191,11 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_enabled: Optional[bool] = None
     executor_price_level: Optional[int] = None
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
-    executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
+    executor_order_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=10,
+        le=MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    )
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
@@ -321,7 +330,11 @@ class ExternalTradingSubAccountPayload(BaseModel):
     enabled: bool = True
     executor_price_level: Optional[int] = None
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
-    executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
+    executor_order_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=10,
+        le=MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    )
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
@@ -370,7 +383,7 @@ class NettedExecutorRequest(BaseModel):
     sub_account_ids: Optional[List[int]] = None
     price_level: Optional[int] = None
     lot_size: Optional[int] = Field(default=None, ge=1)
-    timeout_seconds: Optional[float] = Field(default=None, ge=10.0, le=3600.0)
+    timeout_seconds: Optional[float] = Field(default=None, ge=10.0, le=float(MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS))
     force: bool = False
 
     @validator("price_level")

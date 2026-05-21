@@ -5,6 +5,7 @@ ALLOWED_EXECUTOR_PRICE_LEVELS = {-1, 0, 1, 2, 3, 4, 5}
 DEFAULT_EXECUTOR_PRICE_LEVEL = 1
 DEFAULT_EXECUTOR_LOT_SIZE = 100
 DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS = 120
+MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS = 86400
 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT = 3
 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT = 0.5
 DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE = [1, 2, 3, 5, -1]
@@ -116,7 +117,7 @@ def normalize_timeout_seconds_sequence(value: Any, default: Optional[List[int]] 
     sequence: List[int] = []
     for item in raw_items:
         parsed = safe_int_or_none(item)
-        if parsed is not None and 10 <= parsed <= 3600:
+        if parsed is not None and 10 <= parsed <= MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS:
             sequence.append(int(parsed))
     return sequence or fallback
 
