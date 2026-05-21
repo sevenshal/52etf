@@ -258,6 +258,7 @@ class ExternalTradingHub:
         if message_type == "broker_positions_event":
             try:
                 payload = message.get("data") or {}
+                position_count = 0
                 with get_external_trading_db_ctx() as db:
                     snapshot = persist_broker_position_snapshot(
                         db,
@@ -267,10 +268,11 @@ class ExternalTradingHub:
                         snapshot_kind=str(payload.get("snapshot_kind") or "close"),
                         market_window_open=False,
                     )
+                    position_count = int(snapshot.position_count or 0)
                 logger.info(
                     "Processed broker positions snapshot from %s: %s positions",
                     conn.name,
-                    snapshot.position_count,
+                    position_count,
                 )
             except Exception as exc:
                 logger.exception("Failed to process broker positions snapshot from %s: %s", conn.name, exc)

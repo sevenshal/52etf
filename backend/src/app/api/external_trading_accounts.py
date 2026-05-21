@@ -25,7 +25,6 @@ from ...core.external_trading_database import (
     ExternalTradingTargetPosition,
     ExternalTradingSessionLocal as ExternalTradingDBSession,
     get_external_trading_db,
-    get_external_trading_db_ctx,
 )
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
@@ -1623,19 +1622,22 @@ async def get_external_broker_positions(
         if runtime_status.get("connected"):
             try:
                 payload = await external_trading_hub.get_positions(account.id, timeout=timeout_seconds)
-                with get_external_trading_db_ctx() as external_db:
-                    snapshot = persist_broker_position_snapshot(
-                        external_db,
-                        account=account,
-                        payload=payload,
-                        snapshot_source="refresh",
-                        snapshot_kind="intraday",
-                        market_window_open=True,
-                    )
+                snapshot = persist_broker_position_snapshot(
+                    db,
+                    account=account,
+                    payload=payload,
+                    snapshot_source="refresh",
+                    snapshot_kind="intraday",
+                    market_window_open=True,
+                )
+                db.commit()
+                db.refresh(snapshot)
                 refreshed = True
             except ExternalTradingConnectionError as exc:
+                db.rollback()
                 refresh_error = str(exc)
             except Exception as exc:
+                db.rollback()
                 refresh_error = str(exc)
         else:
             refresh_error = "外部交易账号未连接，已回退到快照"
