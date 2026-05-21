@@ -63,6 +63,8 @@ XUEQIU_HEADERS = {
 
 XUEQIU_STOCK_HEADERS = XUEQIU_HEADERS.copy()
 XUEQIU_STOCK_HEADERS["Host"] = "stock.xueqiu.com"
+XUEQIU_COOKIE_VALIDATE_URL = "https://xueqiu.com/user/setting/select.json"
+XUEQIU_COOKIE_VALIDATE_PARAMS = {"types": "like_receive"}
 
 # --- Globals for Token Refresh ---
 _last_token_refresh_time = None
@@ -116,6 +118,55 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
         logger.error(f"Failed to refresh Xueqiu guest token: {e}")
     finally:
         _is_refreshing_token = False
+
+
+async def _validate_xueqiu_cookie(cookie: str) -> Dict[str, Any]:
+    headers = {
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        "cookie": cookie,
+        "priority": "u=1, i",
+        "referer": "https://xueqiu.com/",
+        "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "x-requested-with": "XMLHttpRequest",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        response = await client.get(
+            XUEQIU_COOKIE_VALIDATE_URL,
+            params=XUEQIU_COOKIE_VALIDATE_PARAMS,
+            headers=headers,
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"雪球 cookie 校验失败: HTTP {response.status_code}")
+
+    try:
+        payload = response.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="雪球 cookie 校验失败: 响应不是 JSON")
+
+    if isinstance(payload, dict):
+        error_code = payload.get("error_code")
+        if error_code:
+            description = payload.get("error_description") or "雪球返回错误"
+            raise HTTPException(status_code=400, detail=f"雪球 cookie 校验失败: {description} ({error_code})")
+        if payload.get("uid"):
+            return payload
+        raise HTTPException(status_code=400, detail="雪球 cookie 校验失败: 未获取到有效登录信息")
+
+    if isinstance(payload, list) and payload:
+        first_item = payload[0]
+        if isinstance(first_item, dict) and first_item.get("uid") is not None:
+            return {"items": payload}
+
+    raise HTTPException(status_code=400, detail="雪球 cookie 校验失败: 登录态无效")
 
 # --- Models ---
 
@@ -921,6 +972,10 @@ async def update_account_config(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db)
 ):
+    cookie = (data.xueqiu_cookie or "").strip()
+    if cookie:
+        await _validate_xueqiu_cookie(cookie)
+
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
     if not config:
         config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=data.xueqiu_cookie)
@@ -948,6 +1003,7 @@ async def sync_xueqiu_cookie_from_browser_extension(
 
     token = match.group(1)
     normalized_cookie = f"xq_a_token={token};"
+    await _validate_xueqiu_cookie(normalized_cookie)
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
     if not config:
         config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=normalized_cookie)
