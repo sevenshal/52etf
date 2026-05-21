@@ -1,10 +1,10 @@
 from datetime import date, datetime, timedelta
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, validator
-from sqlalchemy import or_
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, root_validator, validator
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as OrmSession
 
 from ...core.analytics_database import AStockBasic, AStockFundBasic, get_analytics_db_ctx
@@ -39,6 +39,7 @@ from ...core.services.external_trading_execution_policy import (
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
     DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     normalize_lot_size,
@@ -48,6 +49,7 @@ from ...core.services.external_trading_execution_policy import (
     normalize_price_level,
     normalize_price_level_sequence,
     normalize_timeout_seconds,
+    normalize_timeout_seconds_sequence,
     resolve_execution_policy,
 )
 
@@ -82,6 +84,7 @@ from ...core.services.external_trading_ledger import (
 from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
+    get_realtime_price_details,
     get_realtime_reference_prices,
 )
 from ...core.services.external_trading_crypto import (
@@ -93,6 +96,25 @@ from .account import is_valid_account, valid_account
 
 router = APIRouter(prefix="/api/external-trading-accounts", tags=["external-trading-accounts"])
 logger = logging.getLogger(__name__)
+
+
+def _ensure_execution_sequence_lengths(
+    *,
+    price_level_sequence: List[int],
+    order_timeout_seconds_sequence: List[int],
+    max_replace_count: int,
+) -> None:
+    required_length = normalize_max_replace_count(max_replace_count) + 1
+    if len(price_level_sequence or []) < required_length:
+        raise ValueError(f"executor_price_level_sequence length must be greater than max_replace_count ({max_replace_count})")
+    if len(order_timeout_seconds_sequence or []) < required_length:
+        raise ValueError(
+            f"executor_order_timeout_seconds_sequence length must be greater than max_replace_count ({max_replace_count})"
+        )
+
+
+def _validation_http_error(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 class ExternalTradingAccountBase(BaseModel):
@@ -107,6 +129,9 @@ class ExternalTradingAccountBase(BaseModel):
     executor_max_slippage_pct: float = Field(default=DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT, ge=0)
     executor_clip_sell_to_available: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
+    executor_order_timeout_seconds_sequence: List[int] = Field(
+        default_factory=lambda: DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE.copy()
+    )
     commission_rate_pct: float = Field(default=0.025, ge=0)
     min_commission: float = Field(default=5.0, ge=0)
     stamp_tax_rate_pct: float = Field(default=0.05, ge=0)
@@ -130,6 +155,25 @@ class ExternalTradingAccountBase(BaseModel):
             raise ValueError("executor_price_level_sequence is invalid")
         return sequence
 
+    @validator("executor_order_timeout_seconds_sequence", pre=True)
+    def validate_executor_order_timeout_seconds_sequence(cls, value):
+        sequence = normalize_timeout_seconds_sequence(value)
+        if not sequence:
+            raise ValueError("executor_order_timeout_seconds_sequence is invalid")
+        return sequence
+
+    @root_validator(skip_on_failure=True)
+    def validate_executor_sequence_lengths(cls, values):
+        _ensure_execution_sequence_lengths(
+            price_level_sequence=values.get("executor_price_level_sequence") or DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
+            order_timeout_seconds_sequence=(
+                values.get("executor_order_timeout_seconds_sequence")
+                or DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE
+            ),
+            max_replace_count=values.get("executor_max_replace_count", DEFAULT_EXECUTOR_MAX_REPLACE_COUNT),
+        )
+        return values
+
 
 class ExternalTradingAccountCreate(ExternalTradingAccountBase):
     pass
@@ -147,6 +191,7 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
+    executor_order_timeout_seconds_sequence: Optional[List[int]] = None
     commission_rate_pct: Optional[float] = Field(default=None, ge=0)
     min_commission: Optional[float] = Field(default=None, ge=0)
     stamp_tax_rate_pct: Optional[float] = Field(default=None, ge=0)
@@ -168,6 +213,25 @@ class ExternalTradingAccountUpdate(BaseModel):
         if value is None:
             return value
         return normalize_price_level_sequence(value)
+
+    @validator("executor_order_timeout_seconds_sequence", pre=True)
+    def validate_executor_order_timeout_seconds_sequence(cls, value):
+        if value is None:
+            return value
+        return normalize_timeout_seconds_sequence(value)
+
+    @root_validator(skip_on_failure=True)
+    def validate_executor_sequence_lengths(cls, values):
+        max_replace_count = values.get("executor_max_replace_count")
+        price_sequence = values.get("executor_price_level_sequence")
+        timeout_sequence = values.get("executor_order_timeout_seconds_sequence")
+        if max_replace_count is not None and price_sequence is not None and timeout_sequence is not None:
+            _ensure_execution_sequence_lengths(
+                price_level_sequence=price_sequence,
+                order_timeout_seconds_sequence=timeout_sequence,
+                max_replace_count=max_replace_count,
+            )
+        return values
 
 
 class ExternalTradingAccountResponse(ExternalTradingAccountBase):
@@ -262,6 +326,7 @@ class ExternalTradingSubAccountPayload(BaseModel):
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
+    executor_order_timeout_seconds_sequence: Optional[List[int]] = None
 
     @validator("name", "remark", pre=True)
     def strip_sub_account_text(cls, value):
@@ -280,6 +345,25 @@ class ExternalTradingSubAccountPayload(BaseModel):
         if value is None or value == "":
             return None
         return normalize_price_level_sequence(value)
+
+    @validator("executor_order_timeout_seconds_sequence", pre=True)
+    def validate_executor_order_timeout_seconds_sequence(cls, value):
+        if value is None or value == "":
+            return None
+        return normalize_timeout_seconds_sequence(value)
+
+    @root_validator(skip_on_failure=True)
+    def validate_executor_sequence_lengths(cls, values):
+        max_replace_count = values.get("executor_max_replace_count")
+        price_sequence = values.get("executor_price_level_sequence")
+        timeout_sequence = values.get("executor_order_timeout_seconds_sequence")
+        if max_replace_count is not None and price_sequence is not None and timeout_sequence is not None:
+            _ensure_execution_sequence_lengths(
+                price_level_sequence=price_sequence,
+                order_timeout_seconds_sequence=timeout_sequence,
+                max_replace_count=max_replace_count,
+            )
+        return values
 
 
 class NettedExecutorRequest(BaseModel):
@@ -312,6 +396,11 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     executor_price_level_sequence = normalize_price_level_sequence(
         getattr(account, "executor_price_level_sequence", None)
     )
+    executor_order_timeout_seconds_sequence = normalize_timeout_seconds_sequence(
+        getattr(account, "executor_order_timeout_seconds_sequence", None),
+        default=[executor_order_timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE),
+    )
+    executor_order_timeout_seconds = executor_order_timeout_seconds_sequence[0]
     return {
         "id": account.id,
         "account_id": account.account_id,
@@ -326,6 +415,7 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_max_slippage_pct": executor_max_slippage_pct,
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
+        "executor_order_timeout_seconds_sequence": executor_order_timeout_seconds_sequence,
         "commission_rate_pct": _safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025),
         "min_commission": _safe_float(getattr(account, "min_commission", 5.0), 5.0),
         "stamp_tax_rate_pct": _safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05),
@@ -364,6 +454,50 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
     return sub_account.strategy_type
 
 
+def _stored_sub_account_valuation(
+    sub_account: ExternalTradingSubAccount,
+    positions: List[ExternalTradingLedgerPosition],
+) -> Dict[str, Any]:
+    position_market_value = 0.0
+    position_rows = []
+    for position in positions or []:
+        quantity = safe_int(position.quantity)
+        if quantity <= 0:
+            continue
+        symbol = normalize_symbol(position.symbol)
+        market_value = _safe_float(getattr(position, "market_value", 0))
+        market_price = _safe_float(getattr(position, "market_price", 0))
+        if market_value <= 0 and market_price > 0:
+            market_value = round(quantity * market_price, 2)
+        if market_value <= 0:
+            avg_cost = _safe_float(getattr(position, "avg_cost", 0))
+            market_price = market_price or avg_cost
+            market_value = round(quantity * market_price, 2) if market_price > 0 else 0.0
+        if market_price <= 0 and market_value > 0:
+            market_price = round(market_value / quantity, 6)
+        position_market_value += market_value
+        position_rows.append({
+            "symbol": symbol,
+            "quantity": quantity,
+            "price": market_price,
+            "market_value": round(market_value, 2),
+            "price_source": "stored_ledger",
+        })
+    cash_available = round(_safe_float(sub_account.cash_available), 2)
+    position_market_value = round(position_market_value, 2)
+    return {
+        "sub_account_id": sub_account.id,
+        "cash_available": cash_available,
+        "position_market_value": position_market_value,
+        "net_asset": round(cash_available + position_market_value, 2),
+        "positions": position_rows,
+        "position_symbols": [row["symbol"] for row in position_rows],
+        "price_details": {},
+        "valued_at": None,
+        "source": "stored_ledger",
+    }
+
+
 async def _serialize_sub_account_with_binding(
     db: OrmSession,
     sub_account: ExternalTradingSubAccount,
@@ -372,6 +506,8 @@ async def _serialize_sub_account_with_binding(
     main_db: OrmSession,
     account: Optional[ExternalTradingAccount] = None,
     update_position_valuation: bool = False,
+    prefetched_prices: Optional[Any] = None,
+    use_stored_valuation: bool = False,
     fee_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     item = serialize_sub_account(sub_account)
@@ -382,15 +518,19 @@ async def _serialize_sub_account_with_binding(
             .all()
         )
     today_buy_by_key = get_today_buy_quantities(db, [sub_account.id])
-    try:
-        valuation = await calculate_sub_account_net_asset(
-            db,
-            sub_account,
-            positions=positions,
-            update_positions=update_position_valuation,
-        )
-    except ExternalTradingValuationError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    if use_stored_valuation:
+        valuation = _stored_sub_account_valuation(sub_account, positions)
+    else:
+        try:
+            valuation = await calculate_sub_account_net_asset(
+                db,
+                sub_account,
+                positions=positions,
+                prefetched_prices=prefetched_prices,
+                update_positions=update_position_valuation,
+            )
+        except ExternalTradingValuationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
     item["position_market_value"] = valuation["position_market_value"]
     item["net_asset"] = valuation["net_asset"]
     item["valuation"] = valuation
@@ -784,13 +924,293 @@ def _serialize_fill_status(
     }
 
 
-async def _build_netted_executor_plan(
+def _dedupe_normalized_symbols(symbols: Iterable[Any]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for symbol in symbols or []:
+        normalized = normalize_symbol(symbol)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _collect_held_ledger_symbols(ledger_by_sub_account: Dict[int, Any]) -> List[str]:
+    symbols: List[str] = []
+    for positions in (ledger_by_sub_account or {}).values():
+        rows = positions.values() if isinstance(positions, dict) else (positions or [])
+        for row in rows:
+            if safe_int(getattr(row, "quantity", 0)) <= 0:
+                continue
+            symbols.append(getattr(row, "symbol", None))
+    return _dedupe_normalized_symbols(symbols)
+
+
+def _collect_payload_symbols(*payloads: Any) -> List[str]:
+    symbols = set()
+    for payload in payloads:
+        _collect_symbol_fields(payload, symbols)
+    return _dedupe_normalized_symbols(symbols)
+
+
+def _query_filter_values(value: Optional[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for item in str(value or "").split(","):
+        text = item.strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _query_filter_symbols(value: Optional[str]) -> List[str]:
+    return _dedupe_normalized_symbols(_query_filter_values(value))
+
+
+def _normalize_page(value: int) -> int:
+    return max(safe_int(value, 1), 1)
+
+
+def _normalize_page_size(value: int) -> int:
+    return min(max(safe_int(value, 10), 1), 200)
+
+
+def _pagination_meta(page: int, page_size: int, total: int) -> Dict[str, int]:
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": safe_int(total),
+    }
+
+
+def _paginate_query(query: Any, *, page: int, page_size: int) -> tuple:
+    page = _normalize_page(page)
+    page_size = _normalize_page_size(page_size)
+    total = query.count()
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    return rows, _pagination_meta(page, page_size, total)
+
+
+def _filter_options(values: Iterable[Any]) -> List[Dict[str, str]]:
+    normalized = sorted({
+        str(value).strip()
+        for value in values or []
+        if value is not None and str(value).strip()
+    }, key=lambda value: value.lower())
+    return [{"text": value, "value": value} for value in normalized]
+
+
+def _symbol_filter_options(symbols: Iterable[Any]) -> List[Dict[str, str]]:
+    normalized_symbols = _dedupe_normalized_symbols(symbols)
+    name_by_symbol = _load_a_stock_name_map(set(normalized_symbols))
+    return [
+        {
+            "text": f"{name_by_symbol.get(symbol)} {symbol}" if name_by_symbol.get(symbol) else symbol,
+            "value": symbol,
+        }
+        for symbol in normalized_symbols
+    ]
+
+
+def _sub_account_ids_by_name(
+    sub_accounts: List[ExternalTradingSubAccount],
+    values: List[str],
+) -> Optional[List[int]]:
+    if not values:
+        return None
+    value_set = set(values)
+    return [row.id for row in sub_accounts if row.name in value_set]
+
+
+def _sub_account_ids_by_strategy_name(
+    strategy_name_by_sub_account_id: Dict[int, Optional[str]],
+    values: List[str],
+) -> Optional[List[int]]:
+    if not values:
+        return None
+    value_set = set(values)
+    return [
+        sub_account_id
+        for sub_account_id, strategy_name in strategy_name_by_sub_account_id.items()
+        if strategy_name in value_set
+    ]
+
+
+def _apply_sub_account_filter(query: Any, column: Any, sub_account_ids: Optional[List[int]]) -> Any:
+    if sub_account_ids is None:
+        return query
+    if not sub_account_ids:
+        return query.filter(False)
+    return query.filter(column.in_(sub_account_ids))
+
+
+def _apply_symbol_filter(query: Any, column: Any, symbols: List[str]) -> Any:
+    if not symbols:
+        return query
+    return query.filter(column.in_(symbols))
+
+
+def _distinct_symbols(db: OrmSession, model: Any, account_id: str, external_account_id: int) -> List[str]:
+    rows = (
+        db.query(model.symbol)
+        .filter(
+            model.account_id == account_id,
+            model.external_trading_account_id == external_account_id,
+        )
+        .distinct()
+        .order_by(model.symbol.asc())
+        .all()
+    )
+    return _dedupe_normalized_symbols(row[0] for row in rows)
+
+
+def _distinct_active_target_symbols(db: OrmSession, account_id: str, external_account_id: int) -> List[str]:
+    rows = (
+        db.query(ExternalTradingTargetPosition.symbol)
+        .filter(
+            ExternalTradingTargetPosition.account_id == account_id,
+            ExternalTradingTargetPosition.external_trading_account_id == external_account_id,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+        .distinct()
+        .order_by(ExternalTradingTargetPosition.symbol.asc())
+        .all()
+    )
+    return _dedupe_normalized_symbols(row[0] for row in rows)
+
+
+def _role_filter_options(roles: Iterable[str]) -> List[Dict[str, str]]:
+    label_by_role = {
+        "PARENT": "父单",
+        "CHILD": "子单",
+        "BLOCK": "阻断",
+    }
+    result = []
+    for role in roles:
+        if not role:
+            continue
+        result.append({"text": label_by_role.get(role, role), "value": role})
+    return result
+
+
+def _load_executor_sub_account_context(
     db: OrmSession,
+    main_db: OrmSession,
     account: ExternalTradingAccount,
-    owner_account_id: str,
-    payload: NettedExecutorRequest,
+    account_id: str,
+) -> Dict[str, Any]:
+    sub_accounts = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == account.id,
+        )
+        .order_by(ExternalTradingSubAccount.id.asc())
+        .all()
+    )
+    sub_account_by_id = {row.id: row for row in sub_accounts}
+    strategy_name_by_sub_account_id = {
+        row.id: _strategy_binding_name(main_db, row)
+        for row in sub_accounts
+    }
+    return {
+        "sub_accounts": sub_accounts,
+        "sub_account_by_id": sub_account_by_id,
+        "strategy_name_by_sub_account_id": strategy_name_by_sub_account_id,
+    }
+
+
+def _attach_symbol_names_to_payloads(*payloads: Any) -> None:
+    symbols = set()
+    for payload in payloads:
+        _collect_symbol_fields(payload, symbols)
+    stock_name_by_symbol = _load_a_stock_name_map(symbols)
+    for payload in payloads:
+        _attach_symbol_names(payload, stock_name_by_symbol)
+
+
+def _apply_nullable_sub_account_name_filter(
+    query: Any,
+    column: Any,
+    sub_accounts: List[ExternalTradingSubAccount],
+    values: List[str],
     *,
-    require_connection: bool,
+    parent_label: str,
+) -> Any:
+    if not values:
+        return query
+    include_parent = parent_label in values or "-" in values
+    sub_account_ids = _sub_account_ids_by_name(
+        sub_accounts,
+        [value for value in values if value not in {parent_label, "-"}],
+    )
+    conditions = []
+    if sub_account_ids:
+        conditions.append(column.in_(sub_account_ids))
+    if include_parent:
+        conditions.append(column.is_(None))
+    if not conditions:
+        return query.filter(False)
+    return query.filter(or_(*conditions))
+
+
+def _apply_nullable_strategy_filter(
+    query: Any,
+    column: Any,
+    strategy_name_by_sub_account_id: Dict[int, Optional[str]],
+    values: List[str],
+    *,
+    parent_label: str,
+) -> Any:
+    if not values:
+        return query
+    include_parent = parent_label in values or "-" in values
+    sub_account_ids = _sub_account_ids_by_strategy_name(
+        strategy_name_by_sub_account_id,
+        [value for value in values if value not in {parent_label, "-"}],
+    )
+    conditions = []
+    if sub_account_ids:
+        conditions.append(column.in_(sub_account_ids))
+    if include_parent:
+        conditions.append(column.is_(None))
+    if not conditions:
+        return query.filter(False)
+    return query.filter(or_(*conditions))
+
+
+def _apply_fill_role_filter(query: Any, roles: List[str]) -> Any:
+    if not roles:
+        return query
+    role_set = set(roles)
+    conditions = []
+    if "PARENT" in role_set:
+        conditions.append(ExternalTradingOrderFill.sub_account_id.is_(None))
+    if "CHILD" in role_set:
+        conditions.append(ExternalTradingOrderFill.sub_account_id.isnot(None))
+    if not conditions:
+        return query.filter(False)
+    return query.filter(or_(*conditions))
+
+
+async def _prefetch_table_price_details(
+    account: ExternalTradingAccount,
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    symbols = _collect_payload_symbols(rows)
+    price_details = await _prefetch_realtime_price_details(
+        account,
+        [],
+        symbols,
+        timeout=min(normalize_timeout_seconds(account.executor_order_timeout_seconds), 15.0),
+    )
+    return _serialize_price_details(price_details, symbols)
+
+
+def _resolve_netted_executor_options(
+    account: ExternalTradingAccount,
+    payload: NettedExecutorRequest,
 ) -> Dict[str, Any]:
     price_level = normalize_price_level(payload.price_level, normalize_price_level(account.executor_price_level))
     lot_size = normalize_lot_size(payload.lot_size, normalize_lot_size(account.executor_lot_size))
@@ -798,18 +1218,128 @@ async def _build_netted_executor_plan(
         payload.timeout_seconds,
         normalize_timeout_seconds(account.executor_order_timeout_seconds),
     )
-    plan = build_netted_target_execution_plan(
+    timeout_sequence = (
+        [timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
+        if payload.timeout_seconds is not None
+        else normalize_timeout_seconds_sequence(
+            getattr(account, "executor_order_timeout_seconds_sequence", None),
+            default=[timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE),
+        )
+    )
+    timeout_seconds = timeout_sequence[0]
+    return {
+        "price_level": price_level,
+        "lot_size": lot_size,
+        "order_timeout_seconds": timeout_seconds,
+        "order_timeout_seconds_sequence": timeout_sequence,
+        "max_replace_count": normalize_max_replace_count(account.executor_max_replace_count),
+        "clip_sell_to_available": normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
+        "price_level_sequence": normalize_price_level_sequence(account.executor_price_level_sequence),
+    }
+
+
+def _build_netted_executor_base_plan(
+    db: OrmSession,
+    account: ExternalTradingAccount,
+    owner_account_id: str,
+    payload: NettedExecutorRequest,
+    *,
+    reference_prices: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    options = _resolve_netted_executor_options(account, payload)
+    return build_netted_target_execution_plan(
         db,
         account_id=owner_account_id,
         external_trading_account_id=account.id,
         sub_account_ids=payload.sub_account_ids,
-        price_level=price_level,
-        lot_size=lot_size,
-        order_timeout_seconds=timeout_seconds,
-        max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
-        clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
-        price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
+        reference_prices=reference_prices,
+        **options,
     )
+
+
+def _reference_prices_from_prefetched(
+    symbols: List[str],
+    prefetched_prices: Optional[Any],
+) -> Dict[str, float]:
+    if not prefetched_prices:
+        return {}
+    result: Dict[str, float] = {}
+    for symbol in _dedupe_normalized_symbols(symbols):
+        detail = prefetched_prices.get(symbol) if isinstance(prefetched_prices, dict) else None
+        price = _safe_float(detail.get("price") if isinstance(detail, dict) else detail)
+        if price > 0:
+            result[symbol] = price
+    return result
+
+
+def _serialize_price_details(
+    price_details: Optional[Dict[str, Dict[str, Any]]],
+    symbols: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    allowed_symbols = set(_dedupe_normalized_symbols(symbols)) if symbols is not None else None
+    result: Dict[str, Dict[str, Any]] = {}
+    for key, detail in (price_details or {}).items():
+        if not isinstance(detail, dict):
+            continue
+        symbol = normalize_symbol(detail.get("symbol") or key)
+        price = _safe_float(detail.get("price"))
+        if not symbol or price <= 0:
+            continue
+        if allowed_symbols is not None and symbol not in allowed_symbols:
+            continue
+        result[symbol] = {
+            "symbol": symbol,
+            "price": price,
+            "source": detail.get("source") or None,
+        }
+    return result
+
+
+async def _prefetch_realtime_price_details(
+    account: ExternalTradingAccount,
+    required_symbols: List[str],
+    optional_symbols: Optional[List[str]] = None,
+    *,
+    timeout: float,
+) -> Dict[str, Dict[str, Any]]:
+    required_symbols = _dedupe_normalized_symbols(required_symbols)
+    optional_symbols = _dedupe_normalized_symbols(optional_symbols or [])
+    all_symbols = _dedupe_normalized_symbols([*required_symbols, *optional_symbols])
+    price_details: Dict[str, Dict[str, Any]] = {}
+    if all_symbols:
+        try:
+            price_details = await get_realtime_price_details(
+                account.id,
+                all_symbols,
+                timeout=timeout,
+                raise_on_missing=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "External trading price prefetch failed for account %s: %s",
+                account.id,
+                exc,
+            )
+
+    missing_required_symbols = [symbol for symbol in required_symbols if symbol not in price_details]
+    if missing_required_symbols:
+        raise HTTPException(status_code=409, detail=f"无法获取以下标的最新价: {', '.join(missing_required_symbols)}")
+    return price_details
+
+
+async def _build_netted_executor_plan(
+    db: OrmSession,
+    account: ExternalTradingAccount,
+    owner_account_id: str,
+    payload: NettedExecutorRequest,
+    *,
+    require_connection: bool,
+    base_plan: Optional[Dict[str, Any]] = None,
+    prefetched_prices: Optional[Any] = None,
+) -> Dict[str, Any]:
+    options = _resolve_netted_executor_options(account, payload)
+    timeout_seconds = options["order_timeout_seconds"]
+    plan = base_plan or _build_netted_executor_base_plan(db, account, owner_account_id, payload)
     symbols = collect_internal_cross_reference_symbols(plan)
     connected = external_trading_hub.get_status(account.id).get("connected")
     if require_connection and not connected:
@@ -818,11 +1348,23 @@ async def _build_netted_executor_plan(
     reference_price_error = None
     if symbols:
         try:
-            reference_prices = await get_realtime_reference_prices(
-                account.id,
-                symbols,
-                timeout=min(timeout_seconds, 15.0),
-            )
+            if prefetched_prices is not None:
+                reference_prices = _reference_prices_from_prefetched(symbols, prefetched_prices)
+                missing_symbols = [
+                    symbol
+                    for symbol in _dedupe_normalized_symbols(symbols)
+                    if symbol not in reference_prices
+                ]
+                if missing_symbols:
+                    raise ExternalTradingValuationError(
+                        f"无法获取以下标的最新价: {', '.join(missing_symbols)}"
+                    )
+            else:
+                reference_prices = await get_realtime_reference_prices(
+                    account.id,
+                    symbols,
+                    timeout=min(timeout_seconds, 15.0),
+                )
         except ExternalTradingValuationError as exc:
             reference_price_error = str(exc)
             logger.warning(
@@ -838,17 +1380,11 @@ async def _build_netted_executor_plan(
                 exc,
             )
     if reference_prices:
-        plan = build_netted_target_execution_plan(
+        plan = _build_netted_executor_base_plan(
             db,
-            account_id=owner_account_id,
-            external_trading_account_id=account.id,
-            sub_account_ids=payload.sub_account_ids,
-            price_level=price_level,
-            lot_size=lot_size,
-            order_timeout_seconds=timeout_seconds,
-            max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
-            clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
-            price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
+            account,
+            owner_account_id,
+            payload,
             reference_prices=reference_prices,
         )
     plan["reference_prices"] = reference_prices
@@ -880,6 +1416,14 @@ async def create_external_trading_account(
     account_id: str = Depends(valid_account),
 ):
     _ensure_unique(db, account_id, payload.name, payload.identifier)
+    try:
+        _ensure_execution_sequence_lengths(
+            price_level_sequence=payload.executor_price_level_sequence,
+            order_timeout_seconds_sequence=payload.executor_order_timeout_seconds_sequence,
+            max_replace_count=payload.executor_max_replace_count,
+        )
+    except ValueError as exc:
+        raise _validation_http_error(exc)
     account = ExternalTradingAccount(
         account_id=account_id,
         name=payload.name,
@@ -888,11 +1432,12 @@ async def create_external_trading_account(
         executor_enabled=payload.executor_enabled,
         executor_price_level=payload.executor_price_level,
         executor_lot_size=payload.executor_lot_size,
-        executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
+        executor_order_timeout_seconds=payload.executor_order_timeout_seconds_sequence[0],
         executor_max_replace_count=payload.executor_max_replace_count,
         executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
+        executor_order_timeout_seconds_sequence=payload.executor_order_timeout_seconds_sequence,
         commission_rate_pct=payload.commission_rate_pct,
         min_commission=payload.min_commission,
         stamp_tax_rate_pct=payload.stamp_tax_rate_pct,
@@ -912,6 +1457,39 @@ async def update_external_trading_account(
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     update_data = payload.dict(exclude_unset=True)
+
+    current_timeout_seconds = normalize_timeout_seconds(getattr(account, "executor_order_timeout_seconds", None))
+    if "executor_order_timeout_seconds_sequence" in update_data:
+        update_data["executor_order_timeout_seconds"] = update_data["executor_order_timeout_seconds_sequence"][0]
+    elif "executor_order_timeout_seconds" in update_data:
+        current_timeout_seconds = normalize_timeout_seconds(update_data["executor_order_timeout_seconds"])
+        update_data["executor_order_timeout_seconds_sequence"] = [
+            current_timeout_seconds
+        ] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
+
+    effective_price_sequence = update_data.get(
+        "executor_price_level_sequence",
+        normalize_price_level_sequence(getattr(account, "executor_price_level_sequence", None)),
+    )
+    effective_timeout_sequence = update_data.get(
+        "executor_order_timeout_seconds_sequence",
+        normalize_timeout_seconds_sequence(
+            getattr(account, "executor_order_timeout_seconds_sequence", None),
+            default=[current_timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE),
+        ),
+    )
+    effective_max_replace_count = update_data.get(
+        "executor_max_replace_count",
+        normalize_max_replace_count(getattr(account, "executor_max_replace_count", None)),
+    )
+    try:
+        _ensure_execution_sequence_lengths(
+            price_level_sequence=effective_price_sequence,
+            order_timeout_seconds_sequence=effective_timeout_sequence,
+            max_replace_count=effective_max_replace_count,
+        )
+    except ValueError as exc:
+        raise _validation_http_error(exc)
 
     _ensure_unique(
         db,
@@ -1012,19 +1590,34 @@ async def list_external_trading_sub_accounts(
         account_id=account_id,
         external_trading_account_id=external_account_id,
     )
-    for sub_account in sub_accounts:
-        positions = (
-            db.query(ExternalTradingLedgerPosition)
-            .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
-            .order_by(ExternalTradingLedgerPosition.symbol.asc())
-            .all()
+    position_rows = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.account_id == account_id,
+            ExternalTradingLedgerPosition.external_trading_account_id == external_account_id,
         )
+        .order_by(
+            ExternalTradingLedgerPosition.sub_account_id.asc(),
+            ExternalTradingLedgerPosition.symbol.asc(),
+        )
+        .all()
+    )
+    positions_by_sub_account: Dict[int, List[ExternalTradingLedgerPosition]] = {}
+    for row in position_rows:
+        positions_by_sub_account.setdefault(row.sub_account_id, []).append(row)
+    price_details = await _prefetch_realtime_price_details(
+        account,
+        _collect_held_ledger_symbols(positions_by_sub_account),
+        timeout=10.0,
+    )
+    for sub_account in sub_accounts:
         result.append(await _serialize_sub_account_with_binding(
             db,
             sub_account,
-            positions,
+            positions_by_sub_account.get(sub_account.id, []),
             main_db=main_db,
             account=account,
+            prefetched_prices=price_details,
             fee_summary=fee_summaries.get(sub_account.id),
         ))
     return result
@@ -1095,6 +1688,26 @@ async def create_external_trading_sub_account(
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
+    account_policy = resolve_execution_policy(account)
+    stored_timeout_sequence = payload.executor_order_timeout_seconds_sequence
+    if stored_timeout_sequence is None and payload.executor_order_timeout_seconds is not None:
+        timeout_seconds = normalize_timeout_seconds(payload.executor_order_timeout_seconds)
+        stored_timeout_sequence = [timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
+    effective_price_sequence = payload.executor_price_level_sequence or account_policy.get("price_level_sequence")
+    effective_timeout_sequence = stored_timeout_sequence or account_policy.get("order_timeout_seconds_sequence")
+    effective_max_replace_count = (
+        payload.executor_max_replace_count
+        if payload.executor_max_replace_count is not None
+        else account_policy.get("max_replace_count")
+    )
+    try:
+        _ensure_execution_sequence_lengths(
+            price_level_sequence=effective_price_sequence,
+            order_timeout_seconds_sequence=effective_timeout_sequence,
+            max_replace_count=effective_max_replace_count,
+        )
+    except ValueError as exc:
+        raise _validation_http_error(exc)
     now = datetime.now()
     sub_account = ExternalTradingSubAccount(
         account_id=account_id,
@@ -1106,11 +1719,12 @@ async def create_external_trading_sub_account(
         enabled=payload.enabled,
         executor_price_level=payload.executor_price_level,
         executor_lot_size=payload.executor_lot_size,
-        executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
+        executor_order_timeout_seconds=stored_timeout_sequence[0] if stored_timeout_sequence else payload.executor_order_timeout_seconds,
         executor_max_replace_count=payload.executor_max_replace_count,
         executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
+        executor_order_timeout_seconds_sequence=stored_timeout_sequence,
         created_at=now,
         updated_at=now,
     )
@@ -1137,6 +1751,26 @@ async def update_external_trading_sub_account(
     ).first()
     if not sub_account:
         raise HTTPException(status_code=404, detail="External trading sub account not found")
+    account_policy = resolve_execution_policy(account)
+    stored_timeout_sequence = payload.executor_order_timeout_seconds_sequence
+    if stored_timeout_sequence is None and payload.executor_order_timeout_seconds is not None:
+        timeout_seconds = normalize_timeout_seconds(payload.executor_order_timeout_seconds)
+        stored_timeout_sequence = [timeout_seconds] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
+    effective_price_sequence = payload.executor_price_level_sequence or account_policy.get("price_level_sequence")
+    effective_timeout_sequence = stored_timeout_sequence or account_policy.get("order_timeout_seconds_sequence")
+    effective_max_replace_count = (
+        payload.executor_max_replace_count
+        if payload.executor_max_replace_count is not None
+        else account_policy.get("max_replace_count")
+    )
+    try:
+        _ensure_execution_sequence_lengths(
+            price_level_sequence=effective_price_sequence,
+            order_timeout_seconds_sequence=effective_timeout_sequence,
+            max_replace_count=effective_max_replace_count,
+        )
+    except ValueError as exc:
+        raise _validation_http_error(exc)
     previous_cash_allocated = _safe_float(sub_account.cash_allocated)
     sub_account.name = payload.name
     sub_account.cash_allocated = payload.cash_allocated
@@ -1151,11 +1785,14 @@ async def update_external_trading_sub_account(
     sub_account.enabled = payload.enabled
     sub_account.executor_price_level = payload.executor_price_level
     sub_account.executor_lot_size = payload.executor_lot_size
-    sub_account.executor_order_timeout_seconds = payload.executor_order_timeout_seconds
+    sub_account.executor_order_timeout_seconds = (
+        stored_timeout_sequence[0] if stored_timeout_sequence else payload.executor_order_timeout_seconds
+    )
     sub_account.executor_max_replace_count = payload.executor_max_replace_count
     sub_account.executor_max_slippage_pct = payload.executor_max_slippage_pct
     sub_account.executor_clip_sell_to_available = payload.executor_clip_sell_to_available
     sub_account.executor_price_level_sequence = payload.executor_price_level_sequence
+    sub_account.executor_order_timeout_seconds_sequence = stored_timeout_sequence
     sub_account.updated_at = datetime.now()
     db.commit()
     db.refresh(sub_account)
@@ -1278,25 +1915,10 @@ async def execute_external_trading_netted_executor(
 async def get_external_trading_executor_status(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
-    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
 
-    sub_accounts = (
-        db.query(ExternalTradingSubAccount)
-        .filter(
-            ExternalTradingSubAccount.account_id == account_id,
-            ExternalTradingSubAccount.external_trading_account_id == account.id,
-        )
-        .order_by(ExternalTradingSubAccount.id.asc())
-        .all()
-    )
-    sub_account_by_id = {row.id: row for row in sub_accounts}
-    strategy_name_by_sub_account_id = {
-        row.id: _strategy_binding_name(main_db, row)
-        for row in sub_accounts
-    }
     sub_account_fee_summaries = get_sub_account_fee_summaries(
         db,
         account_id=account_id,
@@ -1307,190 +1929,509 @@ async def get_external_trading_executor_status(
         account_id=account_id,
         external_trading_account_id=account.id,
     )
-    ledger_by_sub_account = {
-        sub_account_id: get_ledger_positions(db, sub_account_id)
-        for sub_account_id in sub_account_by_id.keys()
-    }
-    today_buy_by_key = get_today_buy_quantities(db, list(sub_account_by_id.keys()))
-    open_by_sub_account = {
-        sub_account_id: get_open_order_quantities(db, sub_account_id)
-        for sub_account_id in sub_account_by_id.keys()
-    }
 
-    target_rows = (
+    executor_status_payload = NettedExecutorRequest()
+    plan_error = None
+    base_plan = None
+    try:
+        base_plan = _build_netted_executor_base_plan(db, account, account_id, executor_status_payload)
+    except Exception as exc:
+        plan_error = str(exc)
+
+    plan_for_summary = base_plan or {}
+
+    attributed_trade_fee_total = round(
+        sum(
+            _safe_float((summary or {}).get("effective_fee_total"))
+            for summary in sub_account_fee_summaries.values()
+        ),
+        2,
+    )
+
+    order_status_counts = {
+        (status or "UNKNOWN"): safe_int(count)
+        for status, count in (
+            db.query(ExternalTradingOrder.status, func.count(ExternalTradingOrder.id))
+            .filter(
+                ExternalTradingOrder.account_id == account_id,
+                ExternalTradingOrder.external_trading_account_id == account.id,
+            )
+            .group_by(ExternalTradingOrder.status)
+            .all()
+        )
+    }
+    sub_account_count = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == account.id,
+        )
+        .count()
+    )
+    active_sub_account_count = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == account.id,
+            ExternalTradingSubAccount.enabled.is_(True),
+        )
+        .count()
+    )
+    target_position_count = (
         db.query(ExternalTradingTargetPosition)
         .filter(
             ExternalTradingTargetPosition.account_id == account_id,
             ExternalTradingTargetPosition.external_trading_account_id == account.id,
             ExternalTradingTargetPosition.status == "ACTIVE",
         )
-        .order_by(
-            ExternalTradingTargetPosition.sub_account_id.asc(),
-            ExternalTradingTargetPosition.symbol.asc(),
-        )
-        .all()
+        .count()
     )
-    target_positions = []
-    for row in target_rows:
-        sub_account = sub_account_by_id.get(row.sub_account_id)
-        symbol = normalize_symbol(row.symbol)
-        target_positions.append(_serialize_target_position_status(
-            row,
-            sub_account,
-            ledger_by_sub_account.get(row.sub_account_id, {}).get(symbol),
-            open_by_sub_account.get(row.sub_account_id, {}).get(symbol),
-            strategy_name_by_sub_account_id.get(row.sub_account_id),
-            today_buy_by_key.get((row.sub_account_id, symbol), 0),
-        ))
-
-    ledger_rows = (
+    nonzero_target_count = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(
+            ExternalTradingTargetPosition.account_id == account_id,
+            ExternalTradingTargetPosition.external_trading_account_id == account.id,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+            ExternalTradingTargetPosition.target_quantity != 0,
+        )
+        .count()
+    )
+    ledger_position_count = (
         db.query(ExternalTradingLedgerPosition)
         .filter(
             ExternalTradingLedgerPosition.account_id == account_id,
             ExternalTradingLedgerPosition.external_trading_account_id == account.id,
         )
-        .order_by(
-            ExternalTradingLedgerPosition.sub_account_id.asc(),
-            ExternalTradingLedgerPosition.market_value.desc(),
-            ExternalTradingLedgerPosition.symbol.asc(),
-        )
-        .all()
+        .count()
     )
-    ledger_positions = [
-        _serialize_ledger_position_status(
-            row,
-            sub_account_by_id.get(row.sub_account_id),
-            strategy_name_by_sub_account_id.get(row.sub_account_id),
-            today_buy_by_key.get((row.sub_account_id, normalize_symbol(row.symbol)), 0),
-        )
-        for row in ledger_rows
-    ]
-
-    order_rows = (
+    order_count = (
         db.query(ExternalTradingOrder)
         .filter(
             ExternalTradingOrder.account_id == account_id,
             ExternalTradingOrder.external_trading_account_id == account.id,
         )
-        .order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
-        .limit(300)
-        .all()
+        .count()
     )
-    orders = [
-        _serialize_order_status(
-            row,
-            sub_account_by_id.get(row.sub_account_id),
-            strategy_name_by_sub_account_id.get(row.sub_account_id),
+    active_order_count = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+            ExternalTradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
         )
-        for row in order_rows
-    ]
-
-    fill_rows = (
+        .count()
+    )
+    fill_count = (
         db.query(ExternalTradingOrderFill)
         .filter(
             ExternalTradingOrderFill.account_id == account_id,
             ExternalTradingOrderFill.external_trading_account_id == account.id,
         )
-        .order_by(ExternalTradingOrderFill.created_at.desc(), ExternalTradingOrderFill.id.desc())
-        .limit(300)
-        .all()
+        .count()
     )
-    fills = [
-        _serialize_fill_status(
-            row,
-            sub_account_by_id.get(row.sub_account_id),
-            strategy_name_by_sub_account_id.get(row.sub_account_id),
-        )
-        for row in fill_rows
-    ]
-
-    plan_error = None
-    try:
-        plan = await _build_netted_executor_plan(
-            db,
-            account,
-            account_id,
-            NettedExecutorRequest(),
-            require_connection=False,
-        )
-    except Exception as exc:
-        plan_error = str(exc)
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id=account_id,
-            external_trading_account_id=account.id,
-            price_level=normalize_price_level(account.executor_price_level),
-            lot_size=normalize_lot_size(account.executor_lot_size),
-            order_timeout_seconds=normalize_timeout_seconds(account.executor_order_timeout_seconds),
-            max_replace_count=normalize_max_replace_count(account.executor_max_replace_count),
-            clip_sell_to_available=normalize_clip_sell_to_available(account.executor_clip_sell_to_available),
-            price_level_sequence=normalize_price_level_sequence(account.executor_price_level_sequence),
-        )
-        plan["connected"] = external_trading_hub.get_status(account.id).get("connected")
-        plan["reference_prices"] = {}
-        plan["account_executor_policy"] = resolve_execution_policy(account)
-
-    order_status_counts: Dict[str, int] = {}
-    for row in order_rows:
-        key = row.status or "UNKNOWN"
-        order_status_counts[key] = order_status_counts.get(key, 0) + 1
-
-    serialized_sub_accounts = [
-        await _serialize_sub_account_with_binding(
-            db,
-            row,
-            list(ledger_by_sub_account.get(row.id, {}).values()),
-            main_db=main_db,
-            account=account,
-            fee_summary=sub_account_fee_summaries.get(row.id),
-        )
-        for row in sub_accounts
-    ]
-    attributed_trade_fee_total = round(
-        sum(
-            _safe_float((row.get("trade_fee_summary") or {}).get("effective_fee_total"))
-            for row in serialized_sub_accounts
-        ),
-        2,
-    )
-
-    symbols = set()
-    for payload in (serialized_sub_accounts, target_positions, ledger_positions, orders, fills, plan):
-        _collect_symbol_fields(payload, symbols)
-    stock_name_by_symbol = _load_a_stock_name_map(symbols)
-    for payload in (serialized_sub_accounts, target_positions, ledger_positions, orders, fills, plan):
-        _attach_symbol_names(payload, stock_name_by_symbol)
 
     return {
         "account": _serialize_account(account),
-        "sub_accounts": serialized_sub_accounts,
-        "target_positions": target_positions,
-        "ledger_positions": ledger_positions,
-        "orders": orders,
-        "fills": fills,
-        "plan": plan,
+        "sub_accounts": [],
+        "target_positions": [],
+        "ledger_positions": [],
+        "orders": [],
+        "fills": [],
+        "plan": {},
         "plan_error": plan_error,
+        "price_details": {},
         "fee_summary": account_fee_summary,
         "summary": {
-            "sub_account_count": len(sub_accounts),
-            "active_sub_account_count": len([row for row in sub_accounts if row.enabled]),
-            "target_position_count": len(target_positions),
-            "nonzero_target_count": len([row for row in target_positions if safe_int(row.get("target_quantity")) != 0]),
-            "pending_delta_count": len([row for row in target_positions if safe_int(row.get("demand_quantity")) > 0]),
-            "ledger_position_count": len(ledger_positions),
-            "active_order_count": len([row for row in order_rows if row.status in ACTIVE_ORDER_STATUSES]),
-            "order_count": len(order_rows),
-            "fill_count": len(fill_rows),
+            "sub_account_count": sub_account_count,
+            "active_sub_account_count": active_sub_account_count,
+            "target_position_count": target_position_count,
+            "nonzero_target_count": nonzero_target_count,
+            "pending_delta_count": len(plan_for_summary.get("demands") or []),
+            "ledger_position_count": ledger_position_count,
+            "active_order_count": active_order_count,
+            "order_count": order_count,
+            "fill_count": fill_count,
             "order_status_counts": order_status_counts,
-            "external_order_count": len(plan.get("external_orders") or []),
-            "internal_cross_count": len(plan.get("internal_crosses") or []),
-            "demand_count": len(plan.get("demands") or []),
+            "external_order_count": len(plan_for_summary.get("external_orders") or []),
+            "internal_cross_count": len(plan_for_summary.get("internal_crosses") or []),
+            "demand_count": len(plan_for_summary.get("demands") or []),
             "trade_fee_total": account_fee_summary["trade_fee_total"],
             "attributed_trade_fee_total": attributed_trade_fee_total,
             "non_trade_fee_total": account_fee_summary["non_trade_fee_total"],
             "non_trade_income_total": account_fee_summary["non_trade_income_total"],
             "non_trade_net_total": account_fee_summary["non_trade_net_total"],
             "total_fee": account_fee_summary["total_fee"],
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/sub-accounts")
+async def get_external_trading_executor_status_sub_accounts(
+    external_account_id: int,
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    sub_account_fee_summaries = get_sub_account_fee_summaries(
+        db,
+        account_id=account_id,
+        external_trading_account_id=account.id,
+    )
+    ledger_by_sub_account = {
+        sub_account_id: get_ledger_positions(db, sub_account_id)
+        for sub_account_id in sub_account_by_id.keys()
+    }
+    rows = [
+        await _serialize_sub_account_with_binding(
+            db,
+            row,
+            list(ledger_by_sub_account.get(row.id, {}).values()),
+            main_db=main_db,
+            account=account,
+            use_stored_valuation=True,
+            fee_summary=sub_account_fee_summaries.get(row.id),
+        )
+        for row in sub_accounts
+    ]
+    _attach_symbol_names_to_payloads(rows)
+    return {
+        "rows": rows,
+        "price_details": {},
+    }
+
+
+@router.get("/{external_account_id}/executor/status/plan")
+async def get_external_trading_executor_status_plan(
+    external_account_id: int,
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    payload = NettedExecutorRequest()
+    base_plan = None
+    plan_error = None
+    price_details: Dict[str, Dict[str, Any]] = {}
+    display_symbols: List[str] = []
+
+    try:
+        base_plan = _build_netted_executor_base_plan(db, account, account_id, payload)
+        reference_symbols = collect_internal_cross_reference_symbols(base_plan)
+        display_symbols = _collect_payload_symbols(base_plan)
+        price_details = await _prefetch_realtime_price_details(
+            account,
+            [],
+            [*reference_symbols, *display_symbols],
+            timeout=min(normalize_timeout_seconds(account.executor_order_timeout_seconds), 15.0),
+        )
+        plan = await _build_netted_executor_plan(
+            db,
+            account,
+            account_id,
+            payload,
+            require_connection=False,
+            base_plan=base_plan,
+            prefetched_prices=price_details,
+        )
+    except Exception as exc:
+        plan_error = str(exc)
+        if base_plan is None:
+            try:
+                base_plan = _build_netted_executor_base_plan(db, account, account_id, payload)
+                display_symbols = _collect_payload_symbols(base_plan)
+            except Exception:
+                base_plan = {}
+        plan = base_plan or {}
+        plan["connected"] = external_trading_hub.get_status(account.id).get("connected")
+        plan["reference_prices"] = {}
+        plan["account_executor_policy"] = resolve_execution_policy(account)
+
+    _attach_symbol_names_to_payloads(plan)
+    return {
+        "plan": plan,
+        "plan_error": plan_error,
+        "price_details": _serialize_price_details(price_details, display_symbols),
+    }
+
+
+@router.get("/{external_account_id}/executor/status/target-positions")
+async def get_external_trading_executor_status_target_positions(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+    sub_account: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
+
+    query = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(
+            ExternalTradingTargetPosition.account_id == account_id,
+            ExternalTradingTargetPosition.external_trading_account_id == account.id,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+    )
+    query = _apply_symbol_filter(query, ExternalTradingTargetPosition.symbol, _query_filter_symbols(symbol))
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingTargetPosition.sub_account_id,
+        _sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
+    )
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingTargetPosition.sub_account_id,
+        _sub_account_ids_by_strategy_name(strategy_name_by_sub_account_id, _query_filter_values(strategy)),
+    )
+    query = query.order_by(
+        ExternalTradingTargetPosition.sub_account_id.asc(),
+        ExternalTradingTargetPosition.symbol.asc(),
+    )
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    page_sub_account_ids = sorted({row.sub_account_id for row in rows if row.sub_account_id})
+    ledger_by_sub_account = {
+        sub_account_id: get_ledger_positions(db, sub_account_id)
+        for sub_account_id in page_sub_account_ids
+    }
+    today_buy_by_key = get_today_buy_quantities(db, page_sub_account_ids)
+    open_by_sub_account = {
+        sub_account_id: get_open_order_quantities(db, sub_account_id)
+        for sub_account_id in page_sub_account_ids
+    }
+    serialized_rows = []
+    for row in rows:
+        symbol_key = normalize_symbol(row.symbol)
+        serialized_rows.append(_serialize_target_position_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            ledger_by_sub_account.get(row.sub_account_id, {}).get(symbol_key),
+            open_by_sub_account.get(row.sub_account_id, {}).get(symbol_key),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+            today_buy_by_key.get((row.sub_account_id, symbol_key), 0),
+        ))
+    _attach_symbol_names_to_payloads(serialized_rows)
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": await _prefetch_table_price_details(account, serialized_rows),
+        "filter_options": {
+            "symbol": _symbol_filter_options(_distinct_active_target_symbols(db, account_id, account.id)),
+            "sub_account": _filter_options(row.name for row in sub_accounts),
+            "strategy": _filter_options(strategy_name_by_sub_account_id.values()),
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/ledger-positions")
+async def get_external_trading_executor_status_ledger_positions(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+    sub_account: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
+
+    query = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.account_id == account_id,
+            ExternalTradingLedgerPosition.external_trading_account_id == account.id,
+        )
+    )
+    query = _apply_symbol_filter(query, ExternalTradingLedgerPosition.symbol, _query_filter_symbols(symbol))
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingLedgerPosition.sub_account_id,
+        _sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
+    )
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingLedgerPosition.sub_account_id,
+        _sub_account_ids_by_strategy_name(strategy_name_by_sub_account_id, _query_filter_values(strategy)),
+    )
+    query = query.order_by(
+        ExternalTradingLedgerPosition.sub_account_id.asc(),
+        ExternalTradingLedgerPosition.market_value.desc(),
+        ExternalTradingLedgerPosition.symbol.asc(),
+    )
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    today_buy_by_key = get_today_buy_quantities(db, sorted({row.sub_account_id for row in rows if row.sub_account_id}))
+    serialized_rows = [
+        _serialize_ledger_position_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+            today_buy_by_key.get((row.sub_account_id, normalize_symbol(row.symbol)), 0),
+        )
+        for row in rows
+    ]
+    _attach_symbol_names_to_payloads(serialized_rows)
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": await _prefetch_table_price_details(account, serialized_rows),
+        "filter_options": {
+            "symbol": _symbol_filter_options(_distinct_symbols(db, ExternalTradingLedgerPosition, account_id, account.id)),
+            "sub_account": _filter_options(row.name for row in sub_accounts),
+            "strategy": _filter_options(strategy_name_by_sub_account_id.values()),
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/orders")
+async def get_external_trading_executor_status_orders(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+    sub_account: Optional[str] = Query(None),
+    role: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
+
+    query = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+        )
+    )
+    query = _apply_symbol_filter(query, ExternalTradingOrder.symbol, _query_filter_symbols(symbol))
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingOrder.sub_account_id,
+        _sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
+    )
+    roles = _query_filter_values(role)
+    if roles:
+        query = query.filter(ExternalTradingOrder.allocation_role.in_(roles))
+    query = query.order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    serialized_rows = [
+        _serialize_order_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        )
+        for row in rows
+    ]
+    _attach_symbol_names_to_payloads(serialized_rows)
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": await _prefetch_table_price_details(account, serialized_rows),
+        "filter_options": {
+            "symbol": _symbol_filter_options(_distinct_symbols(db, ExternalTradingOrder, account_id, account.id)),
+            "sub_account": _filter_options(row.name for row in sub_accounts),
+            "role": _role_filter_options(["PARENT", "CHILD", "BLOCK"]),
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/fills")
+async def get_external_trading_executor_status_fills(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+    sub_account: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    role: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
+
+    query = (
+        db.query(ExternalTradingOrderFill)
+        .filter(
+            ExternalTradingOrderFill.account_id == account_id,
+            ExternalTradingOrderFill.external_trading_account_id == account.id,
+        )
+    )
+    query = _apply_symbol_filter(query, ExternalTradingOrderFill.symbol, _query_filter_symbols(symbol))
+    query = _apply_nullable_sub_account_name_filter(
+        query,
+        ExternalTradingOrderFill.sub_account_id,
+        sub_accounts,
+        _query_filter_values(sub_account),
+        parent_label="净额父单",
+    )
+    query = _apply_nullable_strategy_filter(
+        query,
+        ExternalTradingOrderFill.sub_account_id,
+        strategy_name_by_sub_account_id,
+        _query_filter_values(strategy),
+        parent_label="券商原始成交",
+    )
+    query = _apply_fill_role_filter(query, _query_filter_values(role))
+    query = query.order_by(ExternalTradingOrderFill.created_at.desc(), ExternalTradingOrderFill.id.desc())
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    serialized_rows = [
+        _serialize_fill_status(
+            row,
+            sub_account_by_id.get(row.sub_account_id),
+            strategy_name_by_sub_account_id.get(row.sub_account_id),
+        )
+        for row in rows
+    ]
+    _attach_symbol_names_to_payloads(serialized_rows)
+    has_parent_fills = (
+        db.query(ExternalTradingOrderFill.id)
+        .filter(
+            ExternalTradingOrderFill.account_id == account_id,
+            ExternalTradingOrderFill.external_trading_account_id == account.id,
+            ExternalTradingOrderFill.sub_account_id.is_(None),
+        )
+        .first()
+        is not None
+    )
+    sub_account_options = [row.name for row in sub_accounts]
+    strategy_options = list(strategy_name_by_sub_account_id.values())
+    if has_parent_fills:
+        sub_account_options.append("净额父单")
+        strategy_options.append("券商原始成交")
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": await _prefetch_table_price_details(account, serialized_rows),
+        "filter_options": {
+            "symbol": _filter_options(_distinct_symbols(db, ExternalTradingOrderFill, account_id, account.id)),
+            "sub_account": _filter_options(sub_account_options),
+            "strategy": _filter_options(strategy_options),
+            "role": _role_filter_options(["PARENT", "CHILD"]),
         },
     }
 

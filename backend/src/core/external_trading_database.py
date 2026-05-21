@@ -69,6 +69,7 @@ class ExternalTradingAccount(ExternalTradingBase):
     executor_max_slippage_pct = Column(Float, default=0.5, nullable=False)
     executor_clip_sell_to_available = Column(Boolean, default=True, nullable=False)
     executor_price_level_sequence = Column(JSON)
+    executor_order_timeout_seconds_sequence = Column(JSON)
     commission_rate_pct = Column(Float, default=0.025, nullable=False)
     min_commission = Column(Float, default=5.0, nullable=False)
     stamp_tax_rate_pct = Column(Float, default=0.05, nullable=False)
@@ -109,6 +110,7 @@ class ExternalTradingSubAccount(ExternalTradingBase):
     executor_max_slippage_pct = Column(Float)
     executor_clip_sell_to_available = Column(Boolean)
     executor_price_level_sequence = Column(JSON)
+    executor_order_timeout_seconds_sequence = Column(JSON)
     remark = Column(String(1000))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -393,9 +395,11 @@ def ensure_external_trading_columns():
             "min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN min_commission FLOAT NOT NULL DEFAULT 5.0",
             "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",
             "executor_max_slippage_pct": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_slippage_pct FLOAT NOT NULL DEFAULT 0.5",
+            "executor_order_timeout_seconds_sequence": "ALTER TABLE external_trading_accounts ADD COLUMN executor_order_timeout_seconds_sequence JSON",
         },
         "external_trading_sub_accounts": {
             "executor_max_slippage_pct": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_slippage_pct FLOAT",
+            "executor_order_timeout_seconds_sequence": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_order_timeout_seconds_sequence JSON",
         },
         "external_trading_orders": {
             "estimated_commission": "ALTER TABLE external_trading_orders ADD COLUMN estimated_commission FLOAT NOT NULL DEFAULT 0.0",

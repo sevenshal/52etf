@@ -107,6 +107,7 @@ async def get_realtime_price_details(
     *,
     timeout: float = 10.0,
     prefetched_prices: Optional[Any] = None,
+    raise_on_missing: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     normalized_symbols = _normalize_symbols(symbols)
     result: Dict[str, Dict[str, Any]] = {}
@@ -149,7 +150,7 @@ async def get_realtime_price_details(
     await fetch_hub_for_missing()
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
-    if missing:
+    if missing and raise_on_missing:
         errors = []
         if longport_error:
             errors.append(f"longport: {longport_error}")

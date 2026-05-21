@@ -18,6 +18,7 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
     DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+    DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     normalize_clip_sell_to_available,
@@ -27,6 +28,7 @@ from .external_trading_execution_policy import (
     normalize_price_level,
     normalize_price_level_sequence,
     normalize_timeout_seconds,
+    normalize_timeout_seconds_sequence,
     resolve_execution_policy,
 )
 from .external_trading_ledger import (
@@ -170,6 +172,7 @@ def _load_accounts(
                 "executor_price_level": row.executor_price_level,
                 "executor_lot_size": row.executor_lot_size,
                 "executor_order_timeout_seconds": row.executor_order_timeout_seconds,
+                "executor_order_timeout_seconds_sequence": getattr(row, "executor_order_timeout_seconds_sequence", None),
                 "executor_max_replace_count": row.executor_max_replace_count,
                 "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
                 "executor_clip_sell_to_available": getattr(row, "executor_clip_sell_to_available", True),
@@ -444,10 +447,16 @@ def _apply_execution_metadata(
             default=DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
         )
         level = sequence[min(replace_count, len(sequence) - 1)]
-        timeout_seconds = normalize_timeout_seconds(
-            policy.get("order_timeout_seconds"),
-            DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+        timeout_sequence = normalize_timeout_seconds_sequence(
+            policy.get("order_timeout_seconds_sequence"),
+            default=[
+                normalize_timeout_seconds(
+                    policy.get("order_timeout_seconds"),
+                    DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
+                )
+            ] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE),
         )
+        timeout_seconds = timeout_sequence[min(replace_count, len(timeout_sequence) - 1)]
         enriched = dict(order)
         enriched["price_level"] = level
         enriched["replace_count"] = replace_count
@@ -458,6 +467,7 @@ def _apply_execution_metadata(
             "price_level": sequence[0],
             "price_level_sequence": sequence,
             "order_timeout_seconds": timeout_seconds,
+            "order_timeout_seconds_sequence": timeout_sequence,
             "max_replace_count": max_replace_count,
             "max_slippage_pct": normalize_max_slippage_pct(
                 policy.get("max_slippage_pct"),
@@ -526,6 +536,7 @@ async def _submit_current_targets(
             max_replace_count=account_policy.get("max_replace_count"),
             clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
+            order_timeout_seconds_sequence=account_policy.get("order_timeout_seconds_sequence"),
         )
         symbols = collect_internal_cross_reference_symbols(plan)
 
@@ -543,6 +554,7 @@ async def _submit_current_targets(
             max_replace_count=account_policy.get("max_replace_count"),
             clip_sell_to_available=account_policy.get("clip_sell_to_available"),
             price_level_sequence=account_policy.get("price_level_sequence"),
+            order_timeout_seconds_sequence=account_policy.get("order_timeout_seconds_sequence"),
             reference_prices=reference_prices,
         )
         plan["reference_prices"] = reference_prices
