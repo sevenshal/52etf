@@ -622,6 +622,8 @@ def normalize_depth_group(group):
             volume = int(price_volume[1])
         except Exception:
             continue
+        if price <= 0 or volume <= 0:
+            continue
         levels.append({
             "level": int(level),
             "price": price,
@@ -927,6 +929,7 @@ def apply_protection_limit_price(calculated, order_request, side, symbol):
 def calculate_order_price(symbol, side, quantity, price_level):
     level = get_int_or_none(price_level)
     if level is None or level == -1:
+        actual_level = -1
         gear_data = get_gear_price_for_symbol(symbol)
         if gear_data:
             try:
@@ -956,6 +959,7 @@ def calculate_order_price(symbol, side, quantity, price_level):
             bid = limit_price.get("bid")
             ask = limit_price.get("ask")
     elif level == 0:
+        actual_level = 0
         gear_data = get_gear_price_for_symbol(symbol)
         if not gear_data:
             raise Exception("获取 %s 盘口数据失败: get_gear_price 返回空" % symbol)
@@ -977,20 +981,28 @@ def calculate_order_price(symbol, side, quantity, price_level):
         quote = normalize_quote_from_gear_price(symbol, gear_data)
         levels = quote.get("ask_levels") if side == "BUY" else quote.get("bid_levels")
         price = None
+        actual_level = level
+        accumulated_volume = 0
         for item in levels or []:
-            if int(item.get("level") or 0) == level:
-                price = item.get("price")
+            item_level = int(item.get("level") or 0)
+            if item_level <= 0 or item_level > level:
+                continue
+            accumulated_volume += int(item.get("volume") or 0)
+            price = item.get("price")
+            actual_level = item_level
+            if accumulated_volume >= quantity:
                 break
-        source = "%s_level_%d" % ("ask" if side == "BUY" else "bid", level)
+        source = "%s_level_%d" % ("ask" if side == "BUY" else "bid", actual_level)
         snapshot_time = quote.get("timestamp")
         last_price = quote.get("price")
         bid = quote.get("bid")
         ask = quote.get("ask")
-        if price is None and not levels:
+        if price is None:
             log_warn("%s %s档目标侧盘口为空，尝试涨跌停价兜底" % (symbol, level))
             limit_price = get_price_limit_from_snapshot(symbol, side)
             price = limit_price.get("price")
             source = limit_price.get("price_source")
+            actual_level = limit_price.get("price_level")
             snapshot_time = limit_price.get("snapshot_time")
             last_price = limit_price.get("last_price")
             bid = limit_price.get("bid")
@@ -1004,14 +1016,14 @@ def calculate_order_price(symbol, side, quantity, price_level):
     price = float(price)
 
     log.info(
-        "%s 定价结果: price=%.4f source=%s level=%s bid=%s ask=%s"
-        % (symbol, price, source, level, bid, ask)
+        "%s 定价结果: price=%.4f source=%s requested_level=%s actual_level=%s bid=%s ask=%s"
+        % (symbol, price, source, level, actual_level, bid, ask)
     )
 
     return {
         "price": price,
         "price_source": source,
-        "price_level": level,
+        "price_level": actual_level,
         "snapshot_time": snapshot_time,
         "last_price": last_price,
         "bid": bid,

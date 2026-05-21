@@ -131,10 +131,7 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
         default=fallback.get("price_level_sequence") or DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     )
     policy = {
-        "price_level": normalize_price_level(
-            getattr(account, "executor_price_level", None),
-            normalize_price_level(fallback.get("price_level"), DEFAULT_EXECUTOR_PRICE_LEVEL),
-        ),
+        "price_level": account_sequence[0],
         "lot_size": normalize_lot_size(
             getattr(account, "executor_lot_size", None),
             normalize_lot_size(fallback.get("lot_size"), DEFAULT_EXECUTOR_LOT_SIZE),
@@ -166,9 +163,9 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
         sub_sequence = getattr(sub_account, "executor_price_level_sequence", None)
         if sub_sequence:
             policy["price_level_sequence"] = normalize_price_level_sequence(sub_sequence, default=account_sequence)
+            policy["price_level"] = policy["price_level_sequence"][0]
             policy["source"] = "sub_account"
         for field, normalizer in (
-            ("price_level", normalize_price_level),
             ("lot_size", normalize_lot_size),
             ("order_timeout_seconds", normalize_timeout_seconds),
             ("max_replace_count", normalize_max_replace_count),
@@ -192,8 +189,9 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
 def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     fallback = fallback or {}
     if not policies:
+        sequence = normalize_price_level_sequence(fallback.get("price_level_sequence"))
         return {
-            "price_level": normalize_price_level(fallback.get("price_level"), DEFAULT_EXECUTOR_PRICE_LEVEL),
+            "price_level": sequence[0],
             "lot_size": normalize_lot_size(fallback.get("lot_size"), DEFAULT_EXECUTOR_LOT_SIZE),
             "order_timeout_seconds": normalize_timeout_seconds(
                 fallback.get("order_timeout_seconds"),
@@ -211,16 +209,13 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
                 fallback.get("clip_sell_to_available"),
                 DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
             ),
-            "price_level_sequence": normalize_price_level_sequence(fallback.get("price_level_sequence")),
+            "price_level_sequence": sequence,
             "source": "fallback",
         }
 
-    price_level = most_aggressive_price_level([item.get("price_level") for item in policies])
     base_sequence = normalize_price_level_sequence(policies[0].get("price_level_sequence"))
-    if price_level not in base_sequence:
-        base_sequence = [price_level] + base_sequence
     return {
-        "price_level": price_level,
+        "price_level": base_sequence[0],
         "lot_size": max(normalize_lot_size(item.get("lot_size")) for item in policies),
         "order_timeout_seconds": min(normalize_timeout_seconds(item.get("order_timeout_seconds")) for item in policies),
         "max_replace_count": min(normalize_max_replace_count(item.get("max_replace_count")) for item in policies),

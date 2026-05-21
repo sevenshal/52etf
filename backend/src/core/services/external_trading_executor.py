@@ -343,16 +343,6 @@ async def _reference_prices_for_plan(account_pk: int, symbols: List[str]) -> Dic
         return {}
 
 
-def _price_level_sequence(initial_price_level: int) -> List[int]:
-    if initial_price_level == -1:
-        return [-1]
-    sequence = [initial_price_level]
-    for value in DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE:
-        if value not in sequence:
-            sequence.append(value)
-    return sequence
-
-
 def _order_signal_version(order: Dict[str, Any]) -> Optional[str]:
     versions = sorted({
         str(allocation.get("signal_version"))
@@ -451,7 +441,7 @@ def _apply_execution_metadata(
 
         sequence = normalize_price_level_sequence(
             policy.get("price_level_sequence"),
-            default=_price_level_sequence(normalize_price_level(policy.get("price_level"), price_level)),
+            default=DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
         )
         level = sequence[min(replace_count, len(sequence) - 1)]
         timeout_seconds = normalize_timeout_seconds(
@@ -465,7 +455,7 @@ def _apply_execution_metadata(
         enriched["deadline_at"] = (datetime.now() + timedelta(seconds=timeout_seconds)).isoformat()
         enriched["execution_policy"] = {
             **policy,
-            "price_level": normalize_price_level(policy.get("price_level"), price_level),
+            "price_level": sequence[0],
             "price_level_sequence": sequence,
             "order_timeout_seconds": timeout_seconds,
             "max_replace_count": max_replace_count,
