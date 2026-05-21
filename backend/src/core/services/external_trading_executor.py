@@ -364,7 +364,7 @@ def _order_signal_version(order: Dict[str, Any]) -> Optional[str]:
     return order.get("signal_version")
 
 
-def _reference_protection_limit_price(order: Dict[str, Any], side: str, replace_count: int) -> Optional[float]:
+def _reference_protection_limit_price(order: Dict[str, Any], side: str) -> Optional[float]:
     reference_prices = []
     for item in order.get("allocations") or []:
         reference_price = safe_float(item.get("reference_price"))
@@ -374,7 +374,8 @@ def _reference_protection_limit_price(order: Dict[str, Any], side: str, replace_
         return None
 
     policy = order.get("execution_policy") or {}
-    slippage_pct = 0.0 if replace_count <= 0 else normalize_max_slippage_pct(
+    price_level = normalize_price_level(order.get("price_level"), DEFAULT_EXECUTOR_PRICE_LEVEL)
+    slippage_pct = 0.0 if price_level == 0 else normalize_max_slippage_pct(
         policy.get("max_slippage_pct"),
         DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     )
@@ -473,12 +474,11 @@ def _apply_execution_metadata(
                 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
             ),
         }
-        protection_limit_price = _reference_protection_limit_price(enriched, side, replace_count)
+        protection_limit_price = _reference_protection_limit_price(enriched, side)
         if protection_limit_price:
             enriched["protection_limit_price"] = protection_limit_price
             enriched["protection_limit_source"] = (
-                "reference_price_no_slippage"
-                if replace_count <= 0
+                "reference_price_limit" if normalize_price_level(enriched.get("price_level"), price_level) == 0
                 else "reference_price_with_executor_slippage"
             )
         enriched["execution_pricing"] = "PTRADE_SNAPSHOT_AT_ORDER_TIME"
