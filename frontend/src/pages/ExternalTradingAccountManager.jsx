@@ -83,6 +83,7 @@ const createEmptyExecutorTables = () => executorServerTableKeys.reduce(
 );
 const DEFAULT_EXECUTOR_SEQUENCE = [1, 2, 3, 5, -1];
 const DEFAULT_TIMEOUT_SEQUENCE = [120, 120, 120, 120, 120];
+const MAX_TIMEOUT_SECONDS = 86400;
 const priceLevelTooltip = (
   <Space direction="vertical" size={4} style={{ color: '#fff', maxWidth: 420 }}>
     <span>0：参考价保护，按 reference_price 作为保护限价，不额外放大滑点。</span>
@@ -108,13 +109,13 @@ const parseSequence = (value, fallback = DEFAULT_EXECUTOR_SEQUENCE) => {
   return parsed.length ? Array.from(new Set(parsed)) : fallback;
 };
 const parseTimeoutSequence = (value, fallback = DEFAULT_TIMEOUT_SEQUENCE) => {
-  if (Array.isArray(value)) return value.map(item => Number(item)).filter(item => Number.isFinite(item) && item >= 10 && item <= 3600);
+  if (Array.isArray(value)) return value.map(item => Number(item)).filter(item => Number.isFinite(item) && item >= 10 && item <= MAX_TIMEOUT_SECONDS);
   const text = String(value || '').trim();
   if (!text) return fallback;
   const parsed = text
     .split(',')
     .map(item => Number(item.trim()))
-    .filter(item => Number.isFinite(item) && item >= 10 && item <= 3600)
+    .filter(item => Number.isFinite(item) && item >= 10 && item <= MAX_TIMEOUT_SECONDS)
     .map(item => Math.round(item));
   return parsed.length ? parsed : fallback;
 };
