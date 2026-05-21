@@ -60,7 +60,7 @@ const getBlockLabel = record => {
   if (record?.status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
   if (record?.blocked_status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
   if (record?.status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
-  return 'T+1阻断';
+  return '可卖阻断';
 };
 const normalizeFilterText = value => {
   if (value === undefined || value === null || value === '') return '-';
@@ -122,6 +122,22 @@ const renderDiffValue = value => (
   <Text style={{ color: diffTextColor(value) }}>
     {formatNumber(value)}
   </Text>
+);
+const renderSellability = (value, record) => (
+  <Space direction="vertical" size={0}>
+    <Text>{formatNumber(value)}</Text>
+    {record?.raw_available_quantity !== undefined ? (
+      <Text type="secondary">原始 {formatNumber(record.raw_available_quantity)}</Text>
+    ) : null}
+  </Space>
+);
+const renderTargetSellability = (_, record) => (
+  <Space direction="vertical" size={0}>
+    <Text>{formatNumber(record?.available_quantity)}</Text>
+    <Text type="secondary">
+      原始 {formatNumber(record?.raw_available_quantity)} / T+1锁定 {formatNumber(record?.t1_locked_quantity)} / 当日买入 {formatNumber(record?.today_buy_quantity)}
+    </Text>
+  </Space>
 );
 const getNetAssetHistoryOption = rows => {
   const dates = (rows || []).map(item => item.trading_date);
@@ -596,6 +612,7 @@ const ExternalTradingAccountManager = () => {
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(targetRows, symbolText) },
     { title: '目标', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatNumber(value) },
     { title: '账本', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatNumber(value) },
+    { title: '可卖', dataIndex: 'available_quantity', key: 'available_quantity', width: 150, render: renderTargetSellability },
     { title: '未成买', dataIndex: 'pending_buy_quantity', key: 'pending_buy_quantity', width: 90, render: value => formatNumber(value) },
     { title: '未成卖', dataIndex: 'pending_sell_quantity', key: 'pending_sell_quantity', width: 90, render: value => formatNumber(value) },
     { title: '有效', dataIndex: 'effective_quantity', key: 'effective_quantity', width: 100, render: value => formatNumber(value) },
@@ -617,7 +634,10 @@ const ExternalTradingAccountManager = () => {
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(ledgerRows, strategyText) },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(ledgerRows, symbolText) },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '可用', dataIndex: 'available_quantity', key: 'available_quantity', width: 100, render: value => formatNumber(value) },
+    { title: '原始可用', dataIndex: 'raw_available_quantity', key: 'raw_available_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '可卖', dataIndex: 'available_quantity', key: 'available_quantity', width: 150, render: renderSellability },
+    { title: 'T+1锁定', dataIndex: 't1_locked_quantity', key: 't1_locked_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '当日买入', dataIndex: 'today_buy_quantity', key: 'today_buy_quantity', width: 100, render: value => formatNumber(value) },
     { title: '成本价', dataIndex: 'avg_cost', key: 'avg_cost', width: 100, render: value => formatNumber(value, 4) },
     { title: '市值', dataIndex: 'market_value', key: 'market_value', width: 120, render: value => formatNumber(value, 2) },
     { title: '已实现盈亏', dataIndex: 'realized_pnl', key: 'realized_pnl', width: 120, render: value => formatNumber(value, 2) },
@@ -629,9 +649,10 @@ const ExternalTradingAccountManager = () => {
     { title: '券商数量', dataIndex: 'broker_quantity', key: 'broker_quantity', width: 110, render: value => formatNumber(value) },
     { title: '账本数量', dataIndex: 'ledger_quantity', key: 'ledger_quantity', width: 110, render: value => formatNumber(value) },
     { title: '数量差额', dataIndex: 'quantity_diff', key: 'quantity_diff', width: 110, render: renderDiffValue },
-    { title: '券商可用', dataIndex: 'broker_available_quantity', key: 'broker_available_quantity', width: 110, render: value => formatNumber(value) },
-    { title: '账本可用', dataIndex: 'ledger_available_quantity', key: 'ledger_available_quantity', width: 110, render: value => formatNumber(value) },
-    { title: '可用差额', dataIndex: 'available_quantity_diff', key: 'available_quantity_diff', width: 110, render: renderDiffValue },
+    { title: '券商可卖', dataIndex: 'broker_available_quantity', key: 'broker_available_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '账本原始可用', dataIndex: 'ledger_raw_available_quantity', key: 'ledger_raw_available_quantity', width: 120, render: value => formatNumber(value) },
+    { title: '账本可卖', dataIndex: 'ledger_computed_sellable_quantity', key: 'ledger_computed_sellable_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '可卖差额', dataIndex: 'sellable_quantity_diff', key: 'sellable_quantity_diff', width: 110, render: renderDiffValue },
     { title: '券商市值', dataIndex: 'broker_market_value', key: 'broker_market_value', width: 130, render: value => formatNumber(value, 2) },
     { title: '账本市值', dataIndex: 'ledger_market_value', key: 'ledger_market_value', width: 130, render: value => formatNumber(value, 2) },
     { title: '市值差额', dataIndex: 'market_value_diff', key: 'market_value_diff', width: 130, render: renderDiffValue },
@@ -1148,7 +1169,7 @@ const ExternalTradingAccountManager = () => {
             loading={brokerPositionsLoading}
             pagination={{ pageSize: 10 }}
             size="small"
-            scroll={{ x: 1680 }}
+            scroll={{ x: 1860 }}
             onRow={record => ({
               style: record.diff_status === 'MATCH' ? undefined : { background: '#fffbe6' }
             })}
@@ -1286,7 +1307,7 @@ const ExternalTradingAccountManager = () => {
                     loading={executorStatusLoading}
                     pagination={{ pageSize: 10 }}
                     size="small"
-                    scroll={{ x: 1600 }}
+                    scroll={{ x: 1780 }}
                   />
                 )
               },
@@ -1301,7 +1322,7 @@ const ExternalTradingAccountManager = () => {
                     loading={executorStatusLoading}
                     pagination={{ pageSize: 10 }}
                     size="small"
-                    scroll={{ x: 1180 }}
+                    scroll={{ x: 1560 }}
                   />
                 )
               },
