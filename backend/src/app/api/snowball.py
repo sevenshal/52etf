@@ -185,6 +185,7 @@ async def _validate_xueqiu_cookie(cookie: str) -> Dict[str, Any]:
 
 class SnowballAccountConfigModel(BaseModel):
     xueqiu_cookie: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
 class SnowballCookieSyncRequest(BaseModel):
     xueqiu_cookie: str
@@ -977,7 +978,10 @@ async def get_account_config(
     db: Session = Depends(get_db)
 ):
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    return SnowballAccountConfigModel(xueqiu_cookie=config.xueqiu_cookie if config else None)
+    return SnowballAccountConfigModel(
+        xueqiu_cookie=config.xueqiu_cookie if config else None,
+        updated_at=config.updated_at if config else None,
+    )
 
 @router.post("/account-config")
 async def update_account_config(
