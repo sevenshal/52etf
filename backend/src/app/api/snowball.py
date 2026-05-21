@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -10,6 +10,7 @@ import asyncio
 import re
 import hashlib
 import json
+import os
 from sqlalchemy.orm import Session
 from ...core.database import (
     get_db,
@@ -120,6 +121,9 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
 
 class SnowballAccountConfigModel(BaseModel):
     xueqiu_cookie: Optional[str] = None
+
+class SnowballCookieSyncRequest(BaseModel):
+    xueqiu_cookie: str
 
 class SnowballConfigCreate(BaseModel):
     cli_id: str
@@ -925,6 +929,33 @@ async def update_account_config(
         config.xueqiu_cookie = data.xueqiu_cookie
     db.commit()
     return {"message": "Success"}
+
+@router.post("/account-config/xueqiu-cookie-sync")
+async def sync_xueqiu_cookie_from_browser_extension(
+    data: SnowballCookieSyncRequest,
+    account_id: str = Depends(valid_account),
+    x_snowball_cookie_sync_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    expected_token = os.getenv("SNOWBALL_COOKIE_SYNC_TOKEN")
+    if expected_token and x_snowball_cookie_sync_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid sync token")
+
+    cookie = (data.xueqiu_cookie or "").strip()
+    match = re.search(r"(?:^|;\s*)xq_a_token=([^;\s]+)", cookie)
+    if not match:
+        raise HTTPException(status_code=400, detail="Missing xq_a_token")
+
+    token = match.group(1)
+    normalized_cookie = f"xq_a_token={token};"
+    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    if not config:
+        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=normalized_cookie)
+        db.add(config)
+    else:
+        config.xueqiu_cookie = normalized_cookie
+    db.commit()
+    return {"message": "Success", "updated_at": datetime.now().isoformat()}
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
