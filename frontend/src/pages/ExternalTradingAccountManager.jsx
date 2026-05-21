@@ -40,6 +40,17 @@ const formatNumber = (value, digits = 0) => {
   if (!Number.isFinite(num)) return '-';
   return num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
+const roleLabel = value => {
+  if (value === 'PARENT') return '父单';
+  if (value === 'CHILD') return '子单';
+  if (value === 'BLOCK') return '阻断';
+  return value || '-';
+};
+const roleFilterOptions = [
+  { text: '父单', value: 'PARENT' },
+  { text: '子单', value: 'CHILD' },
+  { text: '阻断', value: 'BLOCK' }
+];
 const DEFAULT_EXECUTOR_SEQUENCE = [1, 2, 3, 5, -1];
 const priceLevelLabel = value => {
   if (value === -1) return 'PTrade兜底';
@@ -672,7 +683,21 @@ const ExternalTradingAccountManager = () => {
 
   const orderLifecycleColumns = [
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
-    { title: '角色', dataIndex: 'allocation_role', key: 'allocation_role', width: 90, render: value => value === 'PARENT' ? <Tag color="purple">父单</Tag> : value === 'CHILD' ? <Tag color="blue">子单</Tag> : value === 'BLOCK' ? <Tag color="orange">阻断</Tag> : <Tag>{value || '-'}</Tag> },
+    {
+      title: '角色',
+      dataIndex: 'allocation_role',
+      key: 'allocation_role',
+      width: 90,
+      filters: roleFilterOptions,
+      filterSearch: true,
+      onFilter: (value, record) => record.allocation_role === value,
+      render: value => {
+        if (value === 'PARENT') return <Tag color="purple">父单</Tag>;
+        if (value === 'CHILD') return <Tag color="blue">子单</Tag>;
+        if (value === 'BLOCK') return <Tag color="orange">阻断</Tag>;
+        return <Tag>{value || '-'}</Tag>;
+      }
+    },
     {
       title: '子账户',
       dataIndex: 'sub_account_name',
@@ -725,7 +750,20 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const fillColumns = [
-    { title: '角色', dataIndex: 'allocation_role_label', key: 'allocation_role_label', width: 130, render: (_, record) => <Tag color={record.allocation_role === 'PARENT' ? 'purple' : 'blue'}>{record.allocation_role_label || '-'}</Tag> },
+    {
+      title: '角色',
+      dataIndex: 'allocation_role',
+      key: 'allocation_role',
+      width: 130,
+      filters: roleFilterOptions,
+      filterSearch: true,
+      onFilter: (value, record) => record.allocation_role === value,
+      render: (_, record) => (
+        <Tag color={record.allocation_role === 'PARENT' ? 'purple' : record.allocation_role === 'BLOCK' ? 'orange' : 'blue'}>
+          {roleLabel(record.allocation_role)}
+        </Tag>
+      )
+    },
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-', ...textColumnFilter(fillRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: value => value || '-', ...textColumnFilter(fillRows, strategyText) },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(fillRows, symbolText) },
