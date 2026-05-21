@@ -54,12 +54,13 @@ const roleFilterOptions = [
 ];
 const DEFAULT_EXECUTOR_SEQUENCE = [1, 2, 3, 5, -1];
 const priceLevelTooltip = (
-  <Space direction="vertical" size={0}>
-    <Text>0：参考价限价，按 reference_price 作为保护限价。</Text>
-    <Text>1：买用卖一，卖用买一，按最优一档定价。</Text>
-    <Text>2/3/4/5：买用卖二/三/四/五，卖用买二/三/四/五。</Text>
-    <Text>-1：PTrade 兜底，优先盘口深度，缺数据时再用涨跌停价。</Text>
-    <Text type="secondary">该序列用于重定价；首次提交由“初始限价档位”单独控制。</Text>
+  <Space direction="vertical" size={4} style={{ color: '#fff', maxWidth: 420 }}>
+    <span>0：参考价保护，按 reference_price 作为保护限价，不额外放大滑点。</span>
+    <span>1：最多用到一档，买看卖一，卖看买一。</span>
+    <span>2/3/4/5：最多用到二/三/四/五档；累计量够时按实际覆盖档位提交。</span>
+    <span>除 0 外，所有档位实际下单都会受 reference_price 加最大滑点形成的保护价约束。</span>
+    <span>-1：PTrade 兜底，不限制最大档位，优先按盘口深度覆盖委托量；盘口缺失时尝试涨跌停价。</span>
+    <span style={{ color: 'rgba(255,255,255,0.72)' }}>序列第一个档位用于首次提交，后续重定价按序列向后推进。最终仍可能触发 PTrade 的涨跌停价兜底。</span>
   </Space>
 );
 const priceLevelLabel = value => {
@@ -67,7 +68,6 @@ const priceLevelLabel = value => {
   if (value === 0) return '参考价限价';
   return `${value}档`;
 };
-const priceLevelOptions = [-1, 0, 1, 2, 3, 4, 5].map(value => ({ value, label: priceLevelLabel(value) }));
 const sequenceToText = value => (Array.isArray(value) && value.length ? value : DEFAULT_EXECUTOR_SEQUENCE).join(',');
 const parseSequence = (value, fallback = DEFAULT_EXECUTOR_SEQUENCE) => {
   if (Array.isArray(value)) return value;
@@ -115,13 +115,12 @@ const renderSymbol = (_, record) => {
 };
 const formatPolicy = policy => {
   if (!policy) return '-';
-  const level = policy.price_level ?? policy.executor_price_level;
   const timeout = policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds;
   const maxReplace = policy.max_replace_count ?? policy.executor_max_replace_count;
   const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
-  return `初始${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
+  return `档位序列${sequence} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
 const renderTradeFeeSummary = (_, record) => {
   const summary = record?.trade_fee_summary || {};
@@ -284,7 +283,6 @@ const ExternalTradingAccountManager = () => {
     form.setFieldsValue({
       enabled: true,
       executor_enabled: true,
-      executor_price_level: 1,
       executor_lot_size: 100,
       executor_order_timeout_seconds: 120,
       executor_max_replace_count: 3,
@@ -305,7 +303,6 @@ const ExternalTradingAccountManager = () => {
       identifier: record.identifier,
       enabled: record.enabled,
       executor_enabled: record.executor_enabled !== false,
-      executor_price_level: record.executor_price_level ?? 1,
       executor_lot_size: record.executor_lot_size ?? 100,
       executor_order_timeout_seconds: record.executor_order_timeout_seconds ?? 120,
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
@@ -392,7 +389,6 @@ const ExternalTradingAccountManager = () => {
     subForm.setFieldsValue({
       enabled: true,
       cash_allocated: 0,
-      executor_price_level: null,
       executor_lot_size: null,
       executor_order_timeout_seconds: null,
       executor_max_replace_count: null,
@@ -411,7 +407,6 @@ const ExternalTradingAccountManager = () => {
       cash_allocated: subAccount.cash_allocated,
       remark: subAccount.remark,
       enabled: subAccount.enabled,
-      executor_price_level: subAccount.executor_price_level,
       executor_lot_size: subAccount.executor_lot_size,
       executor_order_timeout_seconds: subAccount.executor_order_timeout_seconds,
       executor_max_replace_count: subAccount.executor_max_replace_count,
@@ -435,7 +430,6 @@ const ExternalTradingAccountManager = () => {
         cash_allocated: Number(values.cash_allocated || 0),
         remark: values.remark || null,
         enabled: values.enabled !== false,
-        executor_price_level: values.executor_price_level ?? null,
         executor_lot_size: values.executor_lot_size ?? null,
         executor_order_timeout_seconds: values.executor_order_timeout_seconds ?? null,
         executor_max_replace_count: values.executor_max_replace_count ?? null,
@@ -1031,15 +1025,12 @@ const ExternalTradingAccountManager = () => {
           <Form.Item name="executor_enabled" label="定时兜底执行器" valuePropName="checked">
             <Switch checkedChildren="启用" unCheckedChildren="停用" />
           </Form.Item>
-          <Form.Item name="executor_price_level" label="初始限价档位" rules={[{ required: true, message: '请选择初始限价档位' }]}>
-            <Select options={priceLevelOptions} />
-          </Form.Item>
           <Form.Item
             name="executor_price_level_sequence"
             label={(
               <Space size={4}>
                 <span>重定价档位序列</span>
-                <Tooltip title={priceLevelTooltip} placement="right">
+                <Tooltip title={priceLevelTooltip} placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
                   <InfoCircleOutlined />
                 </Tooltip>
               </Space>
@@ -1106,10 +1097,7 @@ const ExternalTradingAccountManager = () => {
             </Space>
           ) : null}
           <Divider orientation="left">执行策略覆盖</Divider>
-          <Text type="secondary">留空则继承外部交易账户默认策略；绑定策略保存时会同步它的限价档位和最小交易单位。</Text>
-          <Form.Item name="executor_price_level" label="初始限价档位">
-            <Select allowClear options={priceLevelOptions} placeholder="继承账户默认" />
-          </Form.Item>
+          <Text type="secondary">留空则继承外部交易账户默认策略；绑定策略保存时会同步它的档位序列和最小交易单位。</Text>
           <Form.Item name="executor_price_level_sequence" label="重定价档位序列">
             <Input placeholder="留空继承，例如：1,2,3,5,-1" />
           </Form.Item>
