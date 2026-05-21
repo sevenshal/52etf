@@ -25,6 +25,7 @@ import {
 import {
   DeleteOutlined,
   EditOutlined,
+  InfoCircleOutlined,
   LineChartOutlined,
   PlusOutlined,
   SyncOutlined
@@ -52,9 +53,18 @@ const roleFilterOptions = [
   { text: '阻断', value: 'BLOCK' }
 ];
 const DEFAULT_EXECUTOR_SEQUENCE = [1, 2, 3, 5, -1];
+const priceLevelTooltip = (
+  <Space direction="vertical" size={0}>
+    <Text>0：参考价限价，按 reference_price 作为保护限价。</Text>
+    <Text>1：买用卖一，卖用买一，按最优一档定价。</Text>
+    <Text>2/3/4/5：买用卖二/三/四/五，卖用买二/三/四/五。</Text>
+    <Text>-1：PTrade 兜底，优先盘口深度，缺数据时再用涨跌停价。</Text>
+    <Text type="secondary">该序列用于重定价；首次提交由“初始限价档位”单独控制。</Text>
+  </Space>
+);
 const priceLevelLabel = value => {
   if (value === -1) return 'PTrade兜底';
-  if (value === 0) return '最新价';
+  if (value === 0) return '参考价限价';
   return `${value}档`;
 };
 const priceLevelOptions = [-1, 0, 1, 2, 3, 4, 5].map(value => ({ value, label: priceLevelLabel(value) }));
@@ -111,7 +121,7 @@ const formatPolicy = policy => {
   const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
-  return `${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
+  return `初始${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
 const renderTradeFeeSummary = (_, record) => {
   const summary = record?.trade_fee_summary || {};
@@ -317,7 +327,7 @@ const ExternalTradingAccountManager = () => {
         enabled: values.enabled !== false,
         executor_enabled: values.executor_enabled !== false,
         executor_clip_sell_to_available: values.executor_clip_sell_to_available !== false,
-        executor_price_level_sequence: parseSequence(values.executor_price_level_sequence)
+        executor_price_level_sequence: parseSequence(values.executor_price_level_sequence),
       };
       if (editingAccount) {
         await request.put(`/api/external-trading-accounts/${editingAccount.id}`, payload);
@@ -627,6 +637,7 @@ const ExternalTradingAccountManager = () => {
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, render: value => value || '-', ...textColumnFilter(targetRows, record => record.sub_account_name) },
     { title: '策略', dataIndex: 'strategy_name', key: 'strategy_name', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...textColumnFilter(targetRows, strategyText) },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(targetRows, symbolText) },
+    { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: value => value ? formatNumber(value, 3) : '-' },
     { title: '目标', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatNumber(value) },
     { title: '账本', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatNumber(value) },
     { title: '可卖', dataIndex: 'available_quantity', key: 'available_quantity', width: 150, render: renderTargetSellability },
@@ -1023,7 +1034,17 @@ const ExternalTradingAccountManager = () => {
           <Form.Item name="executor_price_level" label="初始限价档位" rules={[{ required: true, message: '请选择初始限价档位' }]}>
             <Select options={priceLevelOptions} />
           </Form.Item>
-          <Form.Item name="executor_price_level_sequence" label="重定价档位序列">
+          <Form.Item
+            name="executor_price_level_sequence"
+            label={(
+              <Space size={4}>
+                <span>重定价档位序列</span>
+                <Tooltip title={priceLevelTooltip} placement="right">
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
             <Input placeholder="例如：1,2,3,5,-1" />
           </Form.Item>
           <Form.Item name="executor_order_timeout_seconds" label="订单超时秒数" rules={[{ required: true, message: '请输入订单超时秒数' }]}>
@@ -1357,7 +1378,7 @@ const ExternalTradingAccountManager = () => {
                     loading={executorStatusLoading}
                     pagination={{ pageSize: 10 }}
                     size="small"
-                    scroll={{ x: 1780 }}
+                    scroll={{ x: 1880 }}
                   />
                 )
               },
