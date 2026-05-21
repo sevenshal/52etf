@@ -121,10 +121,14 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
 
 
 async def _validate_xueqiu_cookie(cookie: str) -> Dict[str, Any]:
+    match = re.search(r"xq_a_token=([^;\s]+)", cookie or "")
+    if not match:
+        raise HTTPException(status_code=400, detail="雪球 cookie 校验失败: 缺少 xq_a_token")
+    token = match.group(1)
+
     headers = {
         "accept": "*/*",
         "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-        "cookie": cookie,
         "priority": "u=1, i",
         "referer": "https://xueqiu.com/",
         "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
@@ -142,15 +146,24 @@ async def _validate_xueqiu_cookie(cookie: str) -> Dict[str, Any]:
             XUEQIU_COOKIE_VALIDATE_URL,
             params=XUEQIU_COOKIE_VALIDATE_PARAMS,
             headers=headers,
+            cookies={"xq_a_token": token},
         )
 
     if response.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"雪球 cookie 校验失败: HTTP {response.status_code}")
+        snippet = response.text[:200].replace("\n", " ").replace("\r", " ")
+        raise HTTPException(
+            status_code=400,
+            detail=f"雪球 cookie 校验失败: HTTP {response.status_code} ({response.headers.get('content-type', 'unknown')}) {snippet}"
+        )
 
     try:
         payload = response.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="雪球 cookie 校验失败: 响应不是 JSON")
+        snippet = (response.text or "")[:300].replace("\n", " ").replace("\r", " ")
+        raise HTTPException(
+            status_code=400,
+            detail=f"雪球 cookie 校验失败: 响应不是 JSON ({response.headers.get('content-type', 'unknown')}) {snippet}"
+        )
 
     if isinstance(payload, dict):
         error_code = payload.get("error_code")
