@@ -135,7 +135,6 @@ class SnowballCookieSyncRequest(BaseModel):
     xueqiu_cookie: str
 
 class SnowballConfigCreate(BaseModel):
-    cli_id: str
     combination_id: str
     combination_name: Optional[str] = None
     enabled: bool = True
@@ -146,7 +145,6 @@ class SnowballConfigCreate(BaseModel):
     live_sub_account_id: Optional[int] = None
 
 class SnowballConfigUpdate(BaseModel):
-    cli_id: Optional[str] = None
     combination_id: Optional[str] = None
     combination_name: Optional[str] = None
     enabled: Optional[bool] = None
@@ -1085,6 +1083,7 @@ async def create_config(
         
     db_config = SnowballCopyConfig(**config.dict())
     db_config.account_id = account_id
+    db_config.cli_id = ""
 
     db.add(db_config)
     db.flush()
