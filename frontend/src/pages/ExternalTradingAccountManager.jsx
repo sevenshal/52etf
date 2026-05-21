@@ -931,7 +931,7 @@ const ExternalTradingAccountManager = () => {
       width: 220,
       render: (_, record) => (
         <Space direction="vertical" size={0}>
-          <Text>佣金 {formatNumber(record.commission_rate_pct, 4)}%</Text>
+          <Text>佣金 {formatNumber(record.commission_rate_pct, 5)}%</Text>
           <Text type="secondary">最低 {formatNumber(record.min_commission, 2)} / 印花税 {formatNumber(record.stamp_tax_rate_pct, 4)}%</Text>
         </Space>
       )
@@ -1034,7 +1034,7 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Divider orientation="left">交易费用估算</Divider>
           <Form.Item name="commission_rate_pct" label="佣金费率 (%)" rules={[{ required: true, message: '请输入佣金费率' }]}>
-            <InputNumber min={0} step={0.001} precision={4} style={{ width: '100%' }} />
+            <InputNumber min={0} step={0.00001} precision={5} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="min_commission" label="每笔最低佣金" rules={[{ required: true, message: '请输入每笔最低佣金' }]}>
             <InputNumber min={0} step={0.01} precision={2} style={{ width: '100%' }} />
