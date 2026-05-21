@@ -1,11 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import httpx
 import logging
-import collections
 import fnmatch
 import asyncio
 import re
@@ -16,10 +15,8 @@ from ...core.database import (
     get_db,
     get_db_ctx,
     Session,
-    SnowballApiHeartbeat,
     SnowballCopyConfig,
     SnowballCopyLog,
-    SnowballPortfolioSnapshot,
     SnowballAccountConfig,
 )
 from ...core.external_trading_database import (
@@ -47,11 +44,9 @@ from ...core.services.external_trading_valuation import (
     calculate_sub_account_net_asset,
 )
 from .account import valid_account
-from .trade import TradeRequest
 
 router = APIRouter(prefix="/api/snowball")
 logger = logging.getLogger(__name__)
-SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT = "snowball_opportunities"
 
 # --- Constants ---
 XUEQIU_HEADERS = {
@@ -71,29 +66,6 @@ XUEQIU_STOCK_HEADERS["Host"] = "stock.xueqiu.com"
 # --- Globals for Token Refresh ---
 _last_token_refresh_time = None
 _is_refreshing_token = False
-
-def _record_snowball_ptrade_heartbeat(db: Session, account_id: str, cli_id: str):
-    """记录 PTrade 对雪球交易机会接口的最近调用时间。"""
-    try:
-        now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
-        heartbeat = db.query(SnowballApiHeartbeat).filter(
-            SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
-        ).first()
-        if not heartbeat:
-            heartbeat = SnowballApiHeartbeat(
-                endpoint=SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT,
-                call_count=0,
-            )
-            db.add(heartbeat)
-
-        heartbeat.last_called_at = now
-        heartbeat.last_account_id = account_id
-        heartbeat.last_cli_id = cli_id
-        heartbeat.call_count = (heartbeat.call_count or 0) + 1
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.error("Failed to record Snowball PTrade heartbeat: %s", exc)
 
 async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str = None):
     global _last_token_refresh_time, _is_refreshing_token, XUEQIU_HEADERS, XUEQIU_STOCK_HEADERS
@@ -149,22 +121,11 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
 class SnowballAccountConfigModel(BaseModel):
     xueqiu_cookie: Optional[str] = None
 
-class SnowballHeartbeatResponse(BaseModel):
-    endpoint: str
-    last_called_at: Optional[datetime] = None
-    last_called_at_text: Optional[str] = None
-    last_cli_id: Optional[str] = None
-    call_count: int = 0
-    seconds_since_last_call: Optional[float] = None
-    is_recent: bool = False
-
 class SnowballConfigCreate(BaseModel):
     cli_id: str
     combination_id: str
     combination_name: Optional[str] = None
     enabled: bool = True
-    total_position_ratio: Optional[float] = 100.0
-    total_amount: Optional[float] = None
     tracking_error_pct: float = 1.0
     blacklisted_symbols: List[str] = []
     live_trade_enabled: bool = False
@@ -176,8 +137,6 @@ class SnowballConfigUpdate(BaseModel):
     combination_id: Optional[str] = None
     combination_name: Optional[str] = None
     enabled: Optional[bool] = None
-    total_position_ratio: Optional[float] = None
-    total_amount: Optional[float] = None
     tracking_error_pct: Optional[float] = None
     blacklisted_symbols: Optional[List[str]] = None
     live_trade_enabled: Optional[bool] = None
@@ -205,29 +164,58 @@ class SnowballLogResponse(BaseModel):
     timestamp: datetime
     combination_id: Optional[str]
     action: Optional[str]
-    symbol: Optional[str]
-    stock_name: Optional[str] = None # Added field
-    quantity: Optional[float]
-    price: Optional[float]
     status: Optional[str]
     message: Optional[str]
     
     class Config:
         from_attributes = True
 
-class TradeResponse(BaseModel):
-    opportunities: List[Any]
-    msg: Optional[str] = None
-
 class SnowballLogStatusUpdate(BaseModel):
     id: int
     status: str
     message: Optional[str] = None
-    price: Optional[float] = None
 
 class PaginatedSnowballLogs(BaseModel):
     total: int
     items: List[SnowballLogResponse]
+
+
+class SnowballSnapshotHolding(BaseModel):
+    symbol: str
+    xueqiu_symbol: Optional[str] = None
+    name: str = ""
+    price: float = 0.0
+    xueqiu_weight_pct: float = 0.0
+    target_weight_pct: float = 0.0
+    target_quantity: int = 0
+    target_value: float = 0.0
+    ledger_quantity: int = 0
+    ledger_available_quantity: int = 0
+    ledger_market_value: float = 0.0
+    ledger_weight_pct: float = 0.0
+    quantity_diff: int = 0
+    value_diff: float = 0.0
+    weight_diff_pct: float = 0.0
+    blacklisted: bool = False
+    diff_type: str = "MATCHED"
+
+
+class SnowballSnapshotResponse(BaseModel):
+    config_id: int
+    updated_at: datetime
+    source: str = "xueqiu_live_with_ledger_diff"
+    sub_account_id: Optional[int] = None
+    sub_account_name: Optional[str] = None
+    target_market_value: float = 0.0
+    target_cash: float = 0.0
+    ledger_market_value: float = 0.0
+    ledger_cash: float = 0.0
+    ledger_net_asset: float = 0.0
+    ledger_stock_ratio: float = 0.0
+    ledger_cash_ratio: float = 0.0
+    cash_diff: float = 0.0
+    diff_count: int = 0
+    holdings: List[SnowballSnapshotHolding] = []
 
 
 # --- Helpers ---
@@ -421,8 +409,7 @@ def _snowball_config_response(
     trading_db: Session,
 ) -> SnowballConfigResponse:
     resp = SnowballConfigResponse.from_orm(config)
-    snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config.id).first()
-    resp.snapshot_value = snapshot.market_value if snapshot else config.total_amount
+    resp.snapshot_value = 0.0
 
     if getattr(config, "external_trading_account_id", None):
         account = trading_db.query(ExternalTradingAccount).filter(
@@ -439,6 +426,37 @@ def _snowball_config_response(
         if sub_account:
             resp.live_sub_account_name = sub_account.name
             resp.live_sub_account_enabled = sub_account.enabled
+            position_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
+                ExternalTradingLedgerPosition.sub_account_id == sub_account.id
+            ).all()
+            ledger_market_value = sum(
+                safe_float(row.market_value)
+                for row in position_rows
+                if safe_int(row.quantity) > 0
+            )
+            resp.snapshot_value = round(safe_float(sub_account.cash_available) + ledger_market_value, 2)
+    return resp
+
+
+async def _snowball_config_response_with_net_asset(
+    db: Session,
+    config: SnowballCopyConfig,
+    trading_db: Session,
+) -> SnowballConfigResponse:
+    resp = _snowball_config_response(db, config, trading_db)
+    if not getattr(config, "live_sub_account_id", None):
+        return resp
+    sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == config.account_id,
+    ).first()
+    if not sub_account:
+        return resp
+    try:
+        valuation = await calculate_sub_account_net_asset(trading_db, sub_account)
+        resp.snapshot_value = safe_float(valuation.get("net_asset"))
+    except ExternalTradingValuationError as exc:
+        logger.warning("Failed to calculate Snowball sub-account net asset: config=%s error=%s", config.id, exc)
     return resp
 
 
@@ -621,8 +639,6 @@ def _load_snowball_external_sync_items(
                 "cli_id": config.cli_id,
                 "combination_id": config.combination_id,
                 "combination_name": config.combination_name,
-                "total_position_ratio": safe_float(config.total_position_ratio, 100.0),
-                "total_amount": safe_float(config.total_amount),
                 "tracking_error_pct": safe_float(config.tracking_error_pct, 1.0),
                 "blacklisted_symbols": config.blacklisted_symbols or [],
                 "external_trading_account_id": external_account.id,
@@ -702,8 +718,7 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
     all_symbols.update(_to_xueqiu_symbol(symbol) for symbol in (valuation.get("position_symbols") or []) if _to_xueqiu_symbol(symbol))
     quotes = await fetch_xueqiu_quotes(sorted(all_symbols), item.get("cookie"))
     net_asset = safe_float(valuation.get("net_asset"))
-    position_ratio = max(safe_float(item.get("total_position_ratio"), 100.0), 0.0) / 100.0
-    base_value = net_asset * position_ratio
+    base_value = net_asset
     if base_value <= 0:
         raise ValueError("雪球通用执行器目标净资产为空，请检查虚拟子账户现金和持仓市值")
 
@@ -911,35 +926,6 @@ async def update_account_config(
     db.commit()
     return {"message": "Success"}
 
-@router.get("/heartbeat", response_model=SnowballHeartbeatResponse)
-async def get_snowball_heartbeat(
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
-):
-    heartbeat = db.query(SnowballApiHeartbeat).filter(
-        SnowballApiHeartbeat.endpoint == SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT
-    ).first()
-    if not heartbeat:
-        return SnowballHeartbeatResponse(endpoint=SNOWBALL_PTRADE_HEARTBEAT_ENDPOINT)
-
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
-    seconds_since_last_call = (
-        (now - heartbeat.last_called_at).total_seconds()
-        if heartbeat.last_called_at else None
-    )
-    return SnowballHeartbeatResponse(
-        endpoint=heartbeat.endpoint,
-        last_called_at=heartbeat.last_called_at,
-        last_called_at_text=(
-            heartbeat.last_called_at.strftime("%Y-%m-%d %H:%M:%S")
-            if heartbeat.last_called_at else None
-        ),
-        last_cli_id=heartbeat.last_cli_id,
-        call_count=heartbeat.call_count or 0,
-        seconds_since_last_call=seconds_since_last_call,
-        is_recent=seconds_since_last_call is not None and seconds_since_last_call <= 300,
-    )
-
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
     account_id: str = Depends(valid_account),
@@ -947,7 +933,7 @@ async def list_configs(
     trading_db: Session = Depends(get_external_trading_db),
 ):
     configs = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.account_id == account_id).all()
-    return [_snowball_config_response(db, c, trading_db) for c in configs]
+    return [await _snowball_config_response_with_net_asset(db, c, trading_db) for c in configs]
 
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
@@ -974,7 +960,7 @@ async def create_config(
     trading_db.commit()
     db.commit()
     db.refresh(db_config)
-    return _snowball_config_response(db, db_config, trading_db)
+    return await _snowball_config_response_with_net_asset(db, db_config, trading_db)
 
 @router.put("/configs/{config_id}", response_model=SnowballConfigResponse)
 async def update_config(
@@ -1015,7 +1001,7 @@ async def update_config(
     trading_db.commit()
     db.commit()
     db.refresh(db_config)
-    return _snowball_config_response(db, db_config, trading_db)
+    return await _snowball_config_response_with_net_asset(db, db_config, trading_db)
 
 @router.delete("/configs/{config_id}")
 async def delete_config(
@@ -1061,7 +1047,6 @@ async def get_logs(
     page_size: int = 20,
     cli_id: Optional[str] = None,
     combination_id: Optional[str] = None,
-    symbol: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(SnowballCopyLog).filter(SnowballCopyLog.account_id == account_id)
@@ -1070,8 +1055,6 @@ async def get_logs(
         query = query.filter(SnowballCopyLog.cli_id == cli_id)
     if combination_id:
         query = query.filter(SnowballCopyLog.combination_id.contains(combination_id))
-    if symbol:
-        query = query.filter(SnowballCopyLog.symbol.contains(symbol))
         
     total = query.count()
     
@@ -1079,21 +1062,10 @@ async def get_logs(
         .offset((page - 1) * page_size)\
         .limit(page_size)\
         .all()
-        
-    # --- Fetch Stock Names ---
-    unique_symbols = {log.symbol for log in logs if log.symbol}
-    
-    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    cookie = acc_config.xueqiu_cookie if acc_config else None
-    
-    quotes = await fetch_xueqiu_batch_quotes(list(unique_symbols), cookie)
-    
+
     items = []
     for log in logs:
-        item = SnowballLogResponse.from_orm(log)
-        if log.symbol and log.symbol in quotes:
-            item.stock_name = quotes[log.symbol].get("name", "")
-        items.append(item)
+        items.append(SnowballLogResponse.from_orm(log))
         
     return PaginatedSnowballLogs(
         total=total,
@@ -1116,67 +1088,17 @@ async def update_log_status(
     log.status = status_update.status
     if status_update.message and status_update.message not in log.message:
         log.message = f"{log.message} | {status_update.message}"
-    if status_update.price:
-        log.price = status_update.price
         
     db.commit()
     return {"message": "Status updated"}
 
-class SnapshotHolding(BaseModel):
-    symbol: str
-    xueqiu_symbol: Optional[str] = None
-    name: str = ""
-    quantity: float = 0.0
-    price: float = 0.0
-    market_value: float = 0.0
-    ratio: float = 0.0
-    xueqiu_weight_pct: float = 0.0
-    target_weight_pct: float = 0.0
-    target_quantity: int = 0
-    target_value: float = 0.0
-    ledger_quantity: int = 0
-    ledger_available_quantity: int = 0
-    ledger_market_value: float = 0.0
-    ledger_weight_pct: float = 0.0
-    quantity_diff: int = 0
-    value_diff: float = 0.0
-    weight_diff_pct: float = 0.0
-    blacklisted: bool = False
-    diff_type: str = "MATCHED"
-
-class SnowballSnapshotResponse(BaseModel):
-    config_id: int
-    market_value: float # Total MV (Stocks + Cash)
-    cash: float
-    stock_ratio: float
-    cash_ratio: float
-    last_synced_amount: float
-    holdings: List[SnapshotHolding] = []
-    updated_at: datetime
-    source: str = "xueqiu_live"
-    sub_account_id: Optional[int] = None
-    sub_account_name: Optional[str] = None
-    position_ratio: float = 100.0
-    target_market_value: float = 0.0
-    target_cash: float = 0.0
-    ledger_market_value: float = 0.0
-    ledger_cash: float = 0.0
-    ledger_net_asset: float = 0.0
-    ledger_stock_ratio: float = 0.0
-    ledger_cash_ratio: float = 0.0
-    cash_diff: float = 0.0
-    diff_count: int = 0
-    snapshot_updated_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
 
 @router.get("/snapshot/{config_id}", response_model=SnowballSnapshotResponse)
 async def get_snapshot(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
-    trading_db: Session = Depends(get_external_trading_db)
+    trading_db: Session = Depends(get_external_trading_db),
 ):
     config = db.query(SnowballCopyConfig).filter(
         SnowballCopyConfig.id == config_id,
@@ -1184,17 +1106,22 @@ async def get_snapshot(
     ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        raise HTTPException(status_code=400, detail="请先为雪球配置选择外部交易账户和虚拟子账户")
 
-    snapshot = db.query(SnowballPortfolioSnapshot).filter(
-        SnowballPortfolioSnapshot.config_id == config_id,
-        SnowballPortfolioSnapshot.account_id == account_id,
+    sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == account_id,
+        ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
     ).first()
+    if not sub_account:
+        raise HTTPException(status_code=400, detail="绑定的虚拟子账户不存在")
 
     acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
     cookie = acc_config.xueqiu_cookie if acc_config else None
-
     xueqiu_holdings = await fetch_xueqiu_holdings(config.combination_id, cookie)
     blacklist = config.blacklisted_symbols or []
+
     target_weights: Dict[str, Dict[str, Any]] = {}
     all_xq_symbols = set()
     for holding in xueqiu_holdings:
@@ -1207,7 +1134,7 @@ async def get_snapshot(
             fnmatch.fnmatch(xq_symbol, pattern) or fnmatch.fnmatch(trade_symbol, pattern)
             for pattern in blacklist
         )
-        raw_weight = safe_float(holding.get("weight"))
+        weight = safe_float(holding.get("weight"))
         target_weights[trade_symbol] = {
             "xueqiu_symbol": xq_symbol,
             "name": (
@@ -1217,24 +1144,14 @@ async def get_snapshot(
                 or holding.get("stockNameCN")
                 or ""
             ),
-            "xueqiu_weight_pct": raw_weight,
-            "target_weight_pct": 0.0 if blacklisted else raw_weight,
+            "xueqiu_weight_pct": weight,
+            "target_weight_pct": 0.0 if blacklisted else weight,
             "blacklisted": blacklisted,
         }
 
-    sub_account = None
-    ledger_rows = []
-    if config.external_trading_account_id and config.live_sub_account_id:
-        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
-            ExternalTradingSubAccount.id == config.live_sub_account_id,
-            ExternalTradingSubAccount.account_id == account_id,
-            ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
-        ).first()
-        if sub_account:
-            ledger_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
-                ExternalTradingLedgerPosition.sub_account_id == sub_account.id
-            ).all()
-
+    ledger_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
+        ExternalTradingLedgerPosition.sub_account_id == sub_account.id
+    ).all()
     ledger_positions: Dict[str, ExternalTradingLedgerPosition] = {}
     for row in ledger_rows:
         trade_symbol = normalize_trading_symbol(row.symbol)
@@ -1251,38 +1168,34 @@ async def get_snapshot(
         if xq_symbol:
             all_xq_symbols.add(xq_symbol)
 
+    try:
+        valuation = await calculate_sub_account_net_asset(trading_db, sub_account, positions=ledger_rows)
+    except ExternalTradingValuationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     quotes = await fetch_xueqiu_batch_quotes(sorted(all_xq_symbols), cookie)
+    ledger_position_values = {
+        normalize_trading_symbol(row.get("symbol")): row
+        for row in valuation.get("positions", [])
+        if normalize_trading_symbol(row.get("symbol"))
+    }
+    ledger_cash = safe_float(valuation.get("cash_available"))
+    ledger_market_value = safe_float(valuation.get("position_market_value"))
+    ledger_net_asset = safe_float(valuation.get("net_asset"))
 
     def get_quote_info(trade_symbol: str) -> Dict[str, Any]:
         xq_symbol = _to_xueqiu_symbol(trade_symbol)
-        info = quotes.get(xq_symbol or "", {}) if xq_symbol else {}
+        quote = quotes.get(xq_symbol or "", {}) if xq_symbol else {}
+        ledger_value = ledger_position_values.get(trade_symbol) or {}
         row = ledger_positions.get(trade_symbol)
-        price = safe_float(info.get("price"))
+        price = safe_float(quote.get("price"), safe_float(ledger_value.get("price")))
         if price <= 0 and row:
             price = safe_float(row.market_price, safe_float(row.avg_cost))
         return {
             "xueqiu_symbol": xq_symbol,
-            "name": info.get("name") or target_weights.get(trade_symbol, {}).get("name") or "",
+            "name": quote.get("name") or target_weights.get(trade_symbol, {}).get("name") or "",
             "price": price,
         }
-
-    ledger_market_value = 0.0
-    for trade_symbol, row in ledger_positions.items():
-        quote_info = get_quote_info(trade_symbol)
-        quantity = safe_int(row.quantity)
-        market_value = safe_float(row.market_value)
-        if quote_info["price"] > 0 and quantity > 0:
-            market_value = round(quantity * quote_info["price"], 2)
-        ledger_market_value += market_value
-
-    ledger_cash = safe_float(getattr(sub_account, "cash_available", 0.0)) if sub_account else 0.0
-    ledger_net_asset = round(ledger_cash + ledger_market_value, 2)
-    position_ratio = max(safe_float(config.total_position_ratio, 100.0), 0.0)
-    fallback_base_value = safe_float(
-        config.total_amount,
-        safe_float(getattr(snapshot, "market_value", 0.0), safe_float(getattr(snapshot, "last_synced_amount", 0.0))),
-    )
-    base_value = ledger_net_asset * position_ratio / 100.0 if ledger_net_asset > 0 else fallback_base_value
 
     detailed_holdings = []
     target_market_value = 0.0
@@ -1298,7 +1211,7 @@ async def get_snapshot(
             "blacklisted": False,
         }
         target_weight_pct = safe_float(target.get("target_weight_pct"))
-        ideal_target_value = base_value * target_weight_pct / 100.0
+        ideal_target_value = ledger_net_asset * target_weight_pct / 100.0
         target_quantity = 0
         if price > 0 and ideal_target_value > 0:
             target_quantity = int((ideal_target_value / price) / 100) * 100
@@ -1306,10 +1219,11 @@ async def get_snapshot(
         target_market_value += target_value
 
         ledger_row = ledger_positions.get(trade_symbol)
+        valued_ledger = ledger_position_values.get(trade_symbol) or {}
         ledger_quantity = safe_int(getattr(ledger_row, "quantity", 0))
         ledger_available_quantity = safe_int(getattr(ledger_row, "available_quantity", ledger_quantity))
-        ledger_value = safe_float(getattr(ledger_row, "market_value", 0.0))
-        if price > 0 and ledger_quantity > 0:
+        ledger_value = safe_float(valued_ledger.get("market_value"), safe_float(getattr(ledger_row, "market_value", 0.0)))
+        if ledger_value <= 0 and price > 0 and ledger_quantity > 0:
             ledger_value = round(ledger_quantity * price, 2)
 
         quantity_diff = target_quantity - ledger_quantity
@@ -1327,14 +1241,11 @@ async def get_snapshot(
         else:
             diff_type = "MATCHED"
 
-        detailed_holdings.append(SnapshotHolding(
+        detailed_holdings.append(SnowballSnapshotHolding(
             symbol=trade_symbol,
             xueqiu_symbol=target.get("xueqiu_symbol") or quote_info["xueqiu_symbol"],
             name=quote_info["name"] or target.get("name") or "",
-            quantity=target_quantity,
             price=price,
-            market_value=target_value,
-            ratio=target_weight_pct,
             xueqiu_weight_pct=safe_float(target.get("xueqiu_weight_pct")),
             target_weight_pct=target_weight_pct,
             target_quantity=target_quantity,
@@ -1350,14 +1261,8 @@ async def get_snapshot(
             diff_type=diff_type,
         ))
 
-    target_cash = round(max(base_value - target_market_value, 0.0), 2)
-    stock_ratio = (target_market_value / base_value) * 100 if base_value > 0 else 0.0
-    cash_ratio = (target_cash / base_value) * 100 if base_value > 0 else 0.0
-    ledger_stock_ratio = (ledger_market_value / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0
-    ledger_cash_ratio = (ledger_cash / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0
+    target_cash = round(max(ledger_net_asset - target_market_value, 0.0), 2)
     cash_diff = round(target_cash - ledger_cash, 2)
-    diff_count = len([row for row in detailed_holdings if row.quantity_diff != 0])
-
     detailed_holdings.sort(
         key=lambda row: (abs(row.value_diff), row.target_value, row.ledger_market_value),
         reverse=True,
@@ -1365,27 +1270,19 @@ async def get_snapshot(
 
     return SnowballSnapshotResponse(
         config_id=config_id,
-        market_value=round(base_value, 2),
-        cash=target_cash,
-        stock_ratio=stock_ratio,
-        cash_ratio=cash_ratio,
-        last_synced_amount=safe_float(getattr(snapshot, "last_synced_amount", 0.0)),
-        holdings=detailed_holdings,
         updated_at=datetime.now(),
-        source="xueqiu_live_with_ledger_diff",
-        sub_account_id=getattr(sub_account, "id", None),
-        sub_account_name=getattr(sub_account, "name", None),
-        position_ratio=position_ratio,
+        sub_account_id=sub_account.id,
+        sub_account_name=sub_account.name,
         target_market_value=round(target_market_value, 2),
         target_cash=target_cash,
         ledger_market_value=round(ledger_market_value, 2),
         ledger_cash=round(ledger_cash, 2),
-        ledger_net_asset=ledger_net_asset,
-        ledger_stock_ratio=ledger_stock_ratio,
-        ledger_cash_ratio=ledger_cash_ratio,
+        ledger_net_asset=round(ledger_net_asset, 2),
+        ledger_stock_ratio=(ledger_market_value / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0,
+        ledger_cash_ratio=(ledger_cash / ledger_net_asset) * 100 if ledger_net_asset > 0 else 0.0,
         cash_diff=cash_diff,
-        diff_count=diff_count,
-        snapshot_updated_at=snapshot.updated_at if snapshot else None,
+        diff_count=len([row for row in detailed_holdings if row.quantity_diff != 0]),
+        holdings=detailed_holdings,
     )
 
 
@@ -1410,476 +1307,3 @@ async def sync_config_external_targets(
         trigger_source="manual",
         trigger_executor=True,
     )
-
-
-@router.post("/configs/{config_id}/sync-snapshot-to-ledger")
-async def sync_snapshot_to_external_ledger(
-    config_id: int,
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db),
-    trading_db: Session = Depends(get_external_trading_db),
-):
-    config = db.query(SnowballCopyConfig).filter(
-        SnowballCopyConfig.id == config_id,
-        SnowballCopyConfig.account_id == account_id,
-    ).first()
-    if not config:
-        raise HTTPException(status_code=404, detail="Config not found")
-    if not config.external_trading_account_id or not config.live_sub_account_id:
-        raise HTTPException(status_code=400, detail="请先为雪球配置选择外部交易账户和虚拟子账户")
-
-    sub_account = trading_db.query(ExternalTradingSubAccount).filter(
-        ExternalTradingSubAccount.id == config.live_sub_account_id,
-        ExternalTradingSubAccount.account_id == account_id,
-        ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
-    ).first()
-    if not sub_account:
-        raise HTTPException(status_code=400, detail="绑定的虚拟子账户不存在")
-    if sub_account.strategy_type != STRATEGY_SNOWBALL or sub_account.strategy_config_id != config.id:
-        raise HTTPException(status_code=400, detail="绑定的虚拟子账户尚未绑定当前雪球配置，请先保存配置")
-
-    snapshot = db.query(SnowballPortfolioSnapshot).filter(
-        SnowballPortfolioSnapshot.config_id == config_id,
-        SnowballPortfolioSnapshot.account_id == account_id,
-    ).first()
-    holdings = snapshot.holdings if snapshot else None
-    if not holdings:
-        raise HTTPException(status_code=400, detail="该雪球配置没有可同步的旧快照持仓")
-
-    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    cookie = acc_config.xueqiu_cookie if acc_config else None
-    xq_symbols = sorted({_to_xueqiu_symbol(symbol) for symbol in holdings.keys() if _to_xueqiu_symbol(symbol)})
-    quotes = await fetch_xueqiu_quotes(xq_symbols, cookie)
-
-    now = datetime.now()
-    existing_rows = {
-        normalize_trading_symbol(row.symbol): row
-        for row in trading_db.query(ExternalTradingLedgerPosition)
-        .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
-        .all()
-        if row.symbol
-    }
-    touched_symbols = set()
-    target_rows = []
-    total_market_value = safe_float(snapshot.market_value)
-    for raw_symbol, raw_quantity in holdings.items():
-        xq_symbol = _to_xueqiu_symbol(raw_symbol)
-        trade_symbol = _to_trade_symbol(raw_symbol)
-        quantity = safe_int(raw_quantity)
-        if not xq_symbol or not trade_symbol or quantity <= 0:
-            continue
-        touched_symbols.add(trade_symbol)
-        row = existing_rows.get(trade_symbol)
-        price = safe_float(quotes.get(xq_symbol))
-        if not row:
-            row = ExternalTradingLedgerPosition(
-                account_id=account_id,
-                external_trading_account_id=config.external_trading_account_id,
-                sub_account_id=sub_account.id,
-                symbol=trade_symbol,
-                quantity=0,
-                available_quantity=0,
-                avg_cost=0.0,
-                realized_pnl=0.0,
-                updated_at=now,
-            )
-            trading_db.add(row)
-            trading_db.flush()
-        if price <= 0:
-            price = safe_float(row.market_price, safe_float(row.avg_cost))
-        row.quantity = quantity
-        row.available_quantity = quantity
-        row.avg_cost = price if price > 0 else safe_float(row.avg_cost)
-        row.market_price = price if price > 0 else None
-        row.market_value = round(quantity * price, 2) if price > 0 else None
-        row.updated_at = now
-        market_value = safe_float(row.market_value)
-        target_rows.append({
-            "symbol": trade_symbol,
-            "target_quantity": quantity,
-            "target_weight_pct": round((market_value / total_market_value) * 100, 4) if total_market_value > 0 else None,
-            "target_value": market_value,
-        })
-
-    for symbol, row in existing_rows.items():
-        if symbol in touched_symbols:
-            continue
-        row.quantity = 0
-        row.available_quantity = 0
-        row.market_value = 0.0
-        row.updated_at = now
-
-    sub_account.cash_available = safe_float(snapshot.cash)
-    sub_account.updated_at = now
-
-    signal_version = _build_snowball_target_signal_version({
-        "id": config.id,
-        "combination_id": config.combination_id,
-    }, target_rows)
-    sync_target_positions(
-        trading_db,
-        sub_account=sub_account,
-        targets=target_rows,
-        signal_id=f"snowball:init:{config.combination_id}",
-        signal_version=signal_version,
-        source_execution_id=None,
-    )
-
-    config.last_external_sync_at = now
-    config.last_external_sync_status = "LEDGER_INIT"
-    config.last_external_sync_message = f"已从旧雪球快照初始化子账户账本和目标仓位，共 {len(target_rows)} 个标的"
-    db.add(SnowballCopyLog(
-        cli_id=config.cli_id,
-        combination_id=config.combination_id,
-        action="LEDGER_INIT",
-        quantity=len(target_rows),
-        status="SUCCESS",
-        message=config.last_external_sync_message,
-        account_id=account_id,
-    ))
-    trading_db.commit()
-    db.commit()
-
-    return {
-        "message": config.last_external_sync_message,
-        "sub_account_id": sub_account.id,
-        "position_count": len(target_rows),
-        "cash_available": sub_account.cash_available,
-        "signal_version": signal_version,
-    }
-
-# --- Core Logic ---
-
-@router.post("/opportunities", response_model=TradeResponse)
-async def get_snowball_opportunities(
-    request: TradeRequest,
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db)
-):
-    """
-    Calculate trading opportunities based on Snowball combination holdings.
-    External caller provides current positions and cli_id.
-    Supports multiple combinations per cli_id using Snapshot tracking.
-    """
-    cli_id = request.cli_id
-    _record_snowball_ptrade_heartbeat(db, account_id, cli_id)
-
-    # 1. Fetch Configs
-    _configs_orm = db.query(SnowballCopyConfig).filter(
-        SnowballCopyConfig.cli_id == cli_id,
-        SnowballCopyConfig.enabled == True,
-        SnowballCopyConfig.account_id == account_id
-    ).all()
-    if not _configs_orm:
-        return TradeResponse(opportunities=[], msg="Configuration not found or disabled")
-        
-    # Convert to dicts to avoid DetachedInstanceError across awaits
-    configs = []
-    for c in _configs_orm:
-        configs.append({
-            "id": c.id,
-            "combination_id": c.combination_id,
-            "combination_name": c.combination_name,
-            "total_amount": c.total_amount,
-            "tracking_error_pct": c.tracking_error_pct,
-            "cli_id": c.cli_id,
-            "blacklisted_symbols": c.blacklisted_symbols or []
-        })
-
-    # Fetch global account cookie
-    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    acc_cookie = acc_config.xueqiu_cookie if acc_config else None
-
-    # 0. Background Token Refresh
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
-    if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
-        asyncio.create_task(_refresh_xueqiu_guest_token_task(account_id, acc_cookie))
-
-    # 2. Pre-fetch Data
-    # 2.1 Gather all symbols (Held + Targets from all configs)
-    all_symbols = set()
-    
-    # Local cache for target holdings: {config_id: [{symbol, weight}]}
-    config_target_weights = {} 
-    
-    # A. From Request Positions
-    current_quantities = {} # symbol -> quantity
-    for pos in request.positions:
-            current_quantities[pos.symbol] = pos.quantity
-            all_symbols.add(pos.symbol)
-
-    # B. From Config Targets (Fetch XQ Holdings)
-    valid_configs = []
-    for config in configs:
-        try:
-            weights = await fetch_xueqiu_holdings(config['combination_id'], acc_cookie)
-            config_target_weights[config['id']] = weights
-            for w in weights:
-                all_symbols.add(w['symbol'])
-            valid_configs.append(config)
-        except Exception as e:
-            if "组合不存在" in str(e):
-                logger.warning(f"Skipping config {config['id']} ({config['combination_id']}) because it does not exist: {e}")
-                continue
-            raise e # Create a crash for other errors as requested
-            
-    # Upgrade configs list to only include valid ones to prevent liquidation on error
-    configs = valid_configs
-
-    # 2.2 Fetch Prices
-    prices = await fetch_xueqiu_quotes(list(all_symbols), acc_cookie)
-    
-    # Helper to get price
-    def get_price(sym):
-        p = prices.get(sym)
-        if not p:
-                pos = next((pos for pos in request.positions if pos.symbol == sym), None)
-                if pos: p = pos.cost_price
-        return p or 0.0
-
-    # 3. Process Snapshots & Aggregate Targets
-    aggregated_target_quantities = {} # symbol -> quantity
-    symbol_contributors = collections.defaultdict(set) # symbol -> set(combination_id)
-    symbol_needs = collections.defaultdict(list) # symbol -> list of {id, reason, diff}
-    
-    current_time = request.current_time or datetime.now()
-    # Reset Window: 14:55 - 15:00 (A-share closing)
-    is_closing_window = (current_time.hour == 14 and current_time.minute >= 50) or (current_time.hour == 15 and current_time.minute == 0)
-
-    logger.info(f"Current time: {current_time}, Is closing window: {is_closing_window}")
-
-    for config in configs:
-        snapshot = db.query(SnowballPortfolioSnapshot).filter_by(config_id=config['id']).first()
-        
-        # --- Initialize or Calculate Current Snapshot Value ---
-        if not snapshot:
-            snapshot = SnowballPortfolioSnapshot(
-                config_id=config['id'],
-                holdings={},
-                cash=0.0,
-                market_value=0.0,
-                last_synced_amount=0.0,
-                account_id=account_id
-            )
-            db.add(snapshot)
-            db.flush()
-        
-        # --- Determine Base Value for Rebalancing ---
-        # base_value 是本次 rebalance 的"目标总金额基准"
-        target_amt = config['total_amount'] or 0.0
-        synced_amt = snapshot.last_synced_amount or 0.0
-        amt_changed = abs(target_amt - synced_amt) > 1e-6
-
-        snap_holdings = snapshot.holdings or {}
-        snap_mv = sum(qty * get_price(sym) for sym, qty in snap_holdings.items())
-        snap_cash = max(snapshot.cash or 0.0, 0.0)  # 防止旧数据中存在负现金
-
-        if amt_changed and is_closing_window:
-            # ✅ 收盘窗口 + 金额有变化：以新配置金额作为基准（无论增资还是减资）
-            # 这样 rebalance 会自动计算 target_val = target_amt × weight，生成相应的买/卖信号
-            base_value = target_amt
-            snapshot.last_synced_amount = target_amt
-            logger.info(f"Config {config['id']} amount synced: {synced_amt} -> {target_amt}")
-        elif amt_changed and not is_closing_window:
-            # ⏳ 非收盘窗口 + 金额有变化：暂不生效，沿用当前快照市值
-            # 等到收盘窗口再统一处理，避免白天改配置立即触发大量信号
-            base_value = snap_mv + snap_cash
-            logger.info(f"Config {config['id']} amount change {synced_amt}->{target_amt} pending until closing window")
-        else:
-            # 金额未变化：正常用当前快照市值做 rebalance（处理权重调整、价格漂移等）
-            base_value = snap_mv + snap_cash
-
-        if base_value <= 0:
-            if target_amt > 0 and is_closing_window:
-                # 首次使用且在收盘窗口：直接用配置金额初始化
-                base_value = target_amt
-                snapshot.last_synced_amount = target_amt
-            else:
-                logger.warning(f"Config {config['id']} base_value={base_value}, skipping rebalance")
-                continue
-
-
-        # --- Calculate New Target State ---
-        new_snap_holdings = {}
-        used_cash = 0.0
-        
-        weights = config_target_weights.get(config['id'], [])
-        threshold_pct = config['tracking_error_pct'] or 1.0
-        
-        # Combine all symbols (Current Snapshot Holdings + Target symbols from XQ)
-        all_snap_symbols = set(snap_holdings.keys())
-        target_weights_map = {}
-        for item in weights:
-            # Blacklist Check: Treat target weight as 0 if blacklisted
-            is_blacklisted = any(
-                fnmatch.fnmatch(item['symbol'], pattern) 
-                for pattern in config.get('blacklisted_symbols', [])
-            )
-            if is_blacklisted:
-                continue
-                
-            all_snap_symbols.add(item['symbol'])
-            target_weights_map[item['symbol']] = item['weight']
-        
-        for sym in all_snap_symbols:
-            price = get_price(sym)
-            if price <= 0: continue
-            
-            # 1. Target Value = 目标金额 × 权重%
-            w = target_weights_map.get(sym, 0.0)
-            target_val = base_value * (w / 100.0)
-            
-            # 2. Current Snapshot Value (按上次快照的股数 × 当前价)
-            cur_q = snap_holdings.get(sym, 0)
-            cur_val = cur_q * price
-            
-            # 3. Deviation Check vs target_amt
-            diff_val = target_val - cur_val
-            diff_pct_of_total = (abs(diff_val) / base_value) * 100 if base_value > 0 else 100
-            
-            final_q = cur_q  # Default: Keep current quantity
-            
-            # If deviation > threshold OR need to clear (target=0), rebalance to target
-            if diff_pct_of_total >= threshold_pct or (target_val == 0 and cur_q > 0):
-                raw_q = target_val / price
-                final_q = int(raw_q / 100) * 100
-            
-            if final_q > 0:
-                new_snap_holdings[sym] = final_q
-                used_cash += final_q * price
-            
-            # Record Need & Reason for opportunity message
-            snapshot_diff = final_q - cur_q
-            if snapshot_diff != 0:
-                s_tgt_pct = (target_val / base_value) * 100 if base_value > 0 else 0
-                s_cur_pct = (cur_val / base_value) * 100 if base_value > 0 else 0
-                
-                combo_name = config['combination_name'] or config['combination_id'] or str(config['id'])
-                short_name = combo_name[:10]
-                need_reason = f"[{short_name}: {s_cur_pct:.1f}%->{s_tgt_pct:.1f}%]"
-                
-                symbol_needs[sym].append(need_reason)
-                symbol_contributors[sym].add(config['combination_id'])
-
-        # Update Snapshot: holdings 记录目标股数，cash 记录账面剩余
-        snapshot.holdings = new_snap_holdings
-        snapshot.cash = max(base_value - used_cash, 0.0)
-        snapshot.market_value = base_value
-
-        # Aggregate Targets across all configs for this cli_id
-        for sym, qty in new_snap_holdings.items():
-            aggregated_target_quantities[sym] = aggregated_target_quantities.get(sym, 0) + qty
-
-    # 4. Generate Opportunities (Diff vs Actual)
-    opportunities = []
-    
-    projected_cash = request.portfolio.available_cash
-    
-    # Identify all symbols needing action
-    all_op_symbols = set(aggregated_target_quantities.keys()) | set(current_quantities.keys())
-    
-    def get_diff_info(sym):
-        tgt_q = aggregated_target_quantities.get(sym, 0)
-        cur_q = current_quantities.get(sym, 0)
-        diff = tgt_q - cur_q
-        return sym, diff, tgt_q, cur_q
-
-    # Sort: Sells first (diff < 0)
-    sorted_ops = sorted([get_diff_info(s) for s in all_op_symbols], key=lambda x: x[1]) # diff ascending (negative first)
-    
-    for sym, diff_qty, tgt_q, cur_q in sorted_ops:
-        if diff_qty == 0:
-            continue
-            
-        price = get_price(sym)
-        if price <= 0: continue
-        
-        action = "BUY" if diff_qty > 0 else "SELL"
-        abs_qty = abs(diff_qty)
-        
-        # Min Qty Check (100 or 200 for STAR)
-        is_star = sym.startswith("SH.688")
-        min_qty = 200 if is_star else 100
-        
-        if abs_qty < min_qty:
-            continue
-        
-        final_qty = 0
-        reason_global = ""
-        
-        # Global Stats (Optional, maybe append at end?)
-        # total_actual_asset = request.portfolio.portfolio_value or 1.0
-        # cur_val = cur_q * price
-        # cur_pct = (cur_val / total_actual_asset) * 100
-        
-        if action == "SELL":
-            # T+1 Check
-            pos = next((p for p in request.positions if p.symbol == sym), None)
-            available = pos.available_quantity if pos and pos.available_quantity is not None else cur_q
-            
-            final_qty = min(abs_qty, available)
-            if final_qty < min_qty:
-                logger.info(f"Skipping SELL {sym}: Need {abs_qty}, Avail {available}")
-                continue
-                
-            proceeds = final_qty * price
-            projected_cash += proceeds
-            
-        elif action == "BUY":
-            # Cash Check
-            est_cost = abs_qty * price
-            if est_cost <= projected_cash:
-                final_qty = abs_qty
-                projected_cash -= est_cost
-            else:
-                # Partial buy
-                max_can_buy = int((projected_cash / price) / 100) * 100
-                if max_can_buy >= min_qty:
-                    final_qty = max_can_buy
-                    projected_cash -= final_qty * price
-                    reason_global = " [Cash Ltd]"
-                else:
-                    logger.info(f"Skipping BUY {sym}: Need {est_cost}, Have {projected_cash}")
-                    continue
-        
-        # Create Log & Opp
-        contributors = symbol_contributors.get(sym, set())
-        combo_id_str = ",".join(sorted(contributors)) if contributors else "AGGREGATED"
-        
-        # Concatenate Reasons
-        specific_reasons = " ".join(symbol_needs.get(sym, []))
-        final_message = f"{specific_reasons}{reason_global}"
-        if not final_message:
-            final_message = f"Adjusting to Target"
-
-        log_entry = SnowballCopyLog(
-            cli_id=cli_id,
-            combination_id=combo_id_str, # Mixed
-            action=action,
-            symbol=sym,
-            quantity=final_qty,
-            price=price,
-            status='SIGNAL',
-            message=final_message,
-            account_id=account_id
-        )
-            
-        db.add(log_entry)
-        db.flush()
-        
-        opportunities.append({
-            "symbol": sym,
-            "name": "",
-            "action": action,
-            "quantity": final_qty,
-            "price": price,
-            "reason": final_message,
-            "op_id": log_entry.id # Single ID as Int
-        })
-
-    db.commit()
-    
-    # Sort output: SELLs first
-    opportunities.sort(key=lambda x: 0 if x["action"] == "SELL" else 1)
-    
-    return TradeResponse(opportunities=opportunities, msg="Success")

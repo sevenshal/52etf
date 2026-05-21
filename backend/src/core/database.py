@@ -633,19 +633,6 @@ class SnowballAccountConfig(Base):
     xueqiu_cookie = Column(String, nullable=True) # 雪球全局Cookie
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class SnowballPortfolioSnapshot(Base):
-    """雪球组合持仓快照"""
-    __tablename__ = "snowball_portfolio_snapshots"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True) # 归属的 Web 账户 ID (迁移新增)
-    config_id = Column(Integer, ForeignKey("snowball_copy_configs.id"), nullable=False)
-    holdings = Column(JSON) # {symbol: quantity}
-    cash = Column(Float, default=0.0)
-    market_value = Column(Float, default=0.0)
-    last_synced_amount = Column(Float, default=0.0)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
 class SnowballCopyLog(Base):
     """雪球跟单日志"""
     __tablename__ = "snowball_copy_logs"
@@ -661,17 +648,6 @@ class SnowballCopyLog(Base):
     price = Column(Float)
     status = Column(String)
     message = Column(String)
-
-class SnowballApiHeartbeat(Base):
-    """雪球 PTrade 接口调用心跳"""
-    __tablename__ = "snowball_api_heartbeats"
-
-    endpoint = Column(String(64), primary_key=True)
-    last_called_at = Column(DateTime, default=datetime.now, index=True)
-    last_account_id = Column(String, index=True)
-    last_cli_id = Column(String, index=True)
-    call_count = Column(Integer, default=0)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
