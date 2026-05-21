@@ -535,6 +535,7 @@ def serialize_sub_account(sub_account: Optional[ExternalTradingSubAccount]) -> O
         "executor_lot_size": sub_account.executor_lot_size,
         "executor_order_timeout_seconds": sub_account.executor_order_timeout_seconds,
         "executor_max_replace_count": sub_account.executor_max_replace_count,
+        "executor_max_slippage_pct": sub_account.executor_max_slippage_pct,
         "executor_clip_sell_to_available": sub_account.executor_clip_sell_to_available,
         "executor_price_level_sequence": sub_account.executor_price_level_sequence,
         "remark": sub_account.remark,
@@ -915,6 +916,10 @@ def sync_target_positions(
         row.target_quantity = safe_int(target.get("target_quantity"))
         row.target_weight_pct = safe_float(target.get("target_weight_pct"), None)
         row.target_value = safe_float(target.get("target_value"), None)
+        row.protection_limit_price = None
+        row.protection_limit_source = None
+        row.reference_price = safe_float(target.get("reference_price"), None)
+        row.reference_price_source = target.get("reference_price_source")
         row.signal_id = signal_id
         row.signal_version = signal_version
         row.source_execution_id = source_execution_id
@@ -931,6 +936,10 @@ def sync_target_positions(
             row.target_quantity = 0
             row.target_weight_pct = 0
             row.target_value = 0
+            row.protection_limit_price = None
+            row.protection_limit_source = None
+            row.reference_price = None
+            row.reference_price_source = None
             row.signal_id = signal_id
             row.signal_version = signal_version
             row.source_execution_id = source_execution_id
@@ -3310,6 +3319,10 @@ def _build_demand_rows(
             "signal_version": target.signal_version,
             "source_execution_id": target.source_execution_id,
             "target_updated_at": target.updated_at.isoformat() if target.updated_at else None,
+            "protection_limit_price": safe_float(target.protection_limit_price, None),
+            "protection_limit_source": target.protection_limit_source,
+            "reference_price": safe_float(target.reference_price, None),
+            "reference_price_source": target.reference_price_source,
             "execution_policy": execution_policy,
             "price_level": execution_policy.get("price_level"),
             "lot_size": execution_policy.get("lot_size"),

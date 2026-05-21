@@ -6,6 +6,7 @@ DEFAULT_EXECUTOR_PRICE_LEVEL = 1
 DEFAULT_EXECUTOR_LOT_SIZE = 100
 DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS = 120
 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT = 3
+DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT = 0.5
 DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE = [1, 2, 3, 5, -1]
 DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE = True
 
@@ -60,6 +61,18 @@ def normalize_max_replace_count(value: Any, default: int = DEFAULT_EXECUTOR_MAX_
     if parsed is not None and parsed >= 0:
         return parsed
     return default
+
+
+def normalize_max_slippage_pct(value: Any, default: float = DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT) -> float:
+    try:
+        if value is None or value == "":
+            return float(default)
+        parsed = float(value)
+        if parsed >= 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
 
 
 def normalize_clip_sell_to_available(
@@ -134,6 +147,10 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             getattr(account, "executor_max_replace_count", None),
             normalize_max_replace_count(fallback.get("max_replace_count"), DEFAULT_EXECUTOR_MAX_REPLACE_COUNT),
         ),
+        "max_slippage_pct": normalize_max_slippage_pct(
+            getattr(account, "executor_max_slippage_pct", None),
+            normalize_max_slippage_pct(fallback.get("max_slippage_pct"), DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
+        ),
         "clip_sell_to_available": normalize_clip_sell_to_available(
             getattr(account, "executor_clip_sell_to_available", None),
             normalize_clip_sell_to_available(
@@ -155,6 +172,7 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             ("lot_size", normalize_lot_size),
             ("order_timeout_seconds", normalize_timeout_seconds),
             ("max_replace_count", normalize_max_replace_count),
+            ("max_slippage_pct", normalize_max_slippage_pct),
         ):
             attr = f"executor_{field}"
             value = getattr(sub_account, attr, None)
@@ -185,6 +203,10 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
                 fallback.get("max_replace_count"),
                 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
             ),
+            "max_slippage_pct": normalize_max_slippage_pct(
+                fallback.get("max_slippage_pct"),
+                DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
+            ),
             "clip_sell_to_available": normalize_clip_sell_to_available(
                 fallback.get("clip_sell_to_available"),
                 DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
@@ -202,6 +224,7 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         "lot_size": max(normalize_lot_size(item.get("lot_size")) for item in policies),
         "order_timeout_seconds": min(normalize_timeout_seconds(item.get("order_timeout_seconds")) for item in policies),
         "max_replace_count": min(normalize_max_replace_count(item.get("max_replace_count")) for item in policies),
+        "max_slippage_pct": min(normalize_max_slippage_pct(item.get("max_slippage_pct")) for item in policies),
         "clip_sell_to_available": any(
             normalize_clip_sell_to_available(
                 item.get("clip_sell_to_available"),

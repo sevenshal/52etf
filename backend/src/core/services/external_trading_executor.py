@@ -16,12 +16,14 @@ from .external_trading import ExternalTradingConnectionError, external_trading_h
 from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
+    DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     normalize_clip_sell_to_available,
     normalize_lot_size,
     normalize_max_replace_count,
+    normalize_max_slippage_pct,
     normalize_price_level,
     normalize_price_level_sequence,
     normalize_timeout_seconds,
@@ -38,6 +40,7 @@ from .external_trading_ledger import (
     normalize_symbol,
     record_cancel_result,
     record_submission_result,
+    safe_float,
     safe_int,
     serialize_order,
 )
@@ -168,6 +171,7 @@ def _load_accounts(
                 "executor_lot_size": row.executor_lot_size,
                 "executor_order_timeout_seconds": row.executor_order_timeout_seconds,
                 "executor_max_replace_count": row.executor_max_replace_count,
+                "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
                 "executor_clip_sell_to_available": getattr(row, "executor_clip_sell_to_available", True),
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }
@@ -360,6 +364,30 @@ def _order_signal_version(order: Dict[str, Any]) -> Optional[str]:
     return order.get("signal_version")
 
 
+def _reference_protection_limit_price(order: Dict[str, Any], side: str, replace_count: int) -> Optional[float]:
+    reference_prices = []
+    for item in order.get("allocations") or []:
+        reference_price = safe_float(item.get("reference_price"))
+        if safe_int(item.get("quantity")) > 0 and reference_price > 0:
+            reference_prices.append(reference_price)
+    if not reference_prices:
+        return None
+
+    policy = order.get("execution_policy") or {}
+    slippage_pct = 0.0 if replace_count <= 0 else normalize_max_slippage_pct(
+        policy.get("max_slippage_pct"),
+        DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
+    )
+    slippage_rate = max(slippage_pct, 0.0) / 100.0
+    if side == "BUY":
+        prices = [price * (1.0 + slippage_rate) for price in reference_prices]
+        return round(min(prices), 4)
+    if side == "SELL":
+        prices = [price * (1.0 - slippage_rate) for price in reference_prices]
+        return round(max(prices), 4)
+    return None
+
+
 def _max_replace_count_today(
     db,
     *,
@@ -440,7 +468,19 @@ def _apply_execution_metadata(
             "price_level_sequence": sequence,
             "order_timeout_seconds": timeout_seconds,
             "max_replace_count": max_replace_count,
+            "max_slippage_pct": normalize_max_slippage_pct(
+                policy.get("max_slippage_pct"),
+                DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
+            ),
         }
+        protection_limit_price = _reference_protection_limit_price(enriched, side, replace_count)
+        if protection_limit_price:
+            enriched["protection_limit_price"] = protection_limit_price
+            enriched["protection_limit_source"] = (
+                "reference_price_no_slippage"
+                if replace_count <= 0
+                else "reference_price_with_executor_slippage"
+            )
         enriched["execution_pricing"] = "PTRADE_SNAPSHOT_AT_ORDER_TIME"
         executable_orders.append(enriched)
     plan["external_orders"] = executable_orders

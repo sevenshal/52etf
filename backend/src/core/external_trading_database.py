@@ -66,6 +66,7 @@ class ExternalTradingAccount(ExternalTradingBase):
     executor_lot_size = Column(Integer, default=100, nullable=False)
     executor_order_timeout_seconds = Column(Integer, default=120, nullable=False)
     executor_max_replace_count = Column(Integer, default=3, nullable=False)
+    executor_max_slippage_pct = Column(Float, default=0.5, nullable=False)
     executor_clip_sell_to_available = Column(Boolean, default=True, nullable=False)
     executor_price_level_sequence = Column(JSON)
     commission_rate_pct = Column(Float, default=0.025, nullable=False)
@@ -105,6 +106,7 @@ class ExternalTradingSubAccount(ExternalTradingBase):
     executor_lot_size = Column(Integer)
     executor_order_timeout_seconds = Column(Integer)
     executor_max_replace_count = Column(Integer)
+    executor_max_slippage_pct = Column(Float)
     executor_clip_sell_to_available = Column(Boolean)
     executor_price_level_sequence = Column(JSON)
     remark = Column(String(1000))
@@ -203,6 +205,10 @@ class ExternalTradingTargetPosition(ExternalTradingBase):
     target_quantity = Column(Integer, default=0, nullable=False)
     target_weight_pct = Column(Float)
     target_value = Column(Float)
+    protection_limit_price = Column(Float)
+    protection_limit_source = Column(String(64))
+    reference_price = Column(Float)
+    reference_price_source = Column(String(64))
     signal_id = Column(String(128), index=True)
     signal_version = Column(String(64))
     source_execution_id = Column(Integer, index=True)
@@ -388,6 +394,10 @@ def ensure_external_trading_columns():
             "commission_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN commission_rate_pct FLOAT NOT NULL DEFAULT 0.025",
             "min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN min_commission FLOAT NOT NULL DEFAULT 5.0",
             "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",
+            "executor_max_slippage_pct": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_slippage_pct FLOAT NOT NULL DEFAULT 0.5",
+        },
+        "external_trading_sub_accounts": {
+            "executor_max_slippage_pct": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_slippage_pct FLOAT",
         },
         "external_trading_orders": {
             "estimated_commission": "ALTER TABLE external_trading_orders ADD COLUMN estimated_commission FLOAT NOT NULL DEFAULT 0.0",
@@ -408,6 +418,12 @@ def ensure_external_trading_columns():
             "actual_fee_total": "ALTER TABLE external_trading_order_fills ADD COLUMN actual_fee_total FLOAT",
             "fee_reconciled_at": "ALTER TABLE external_trading_order_fills ADD COLUMN fee_reconciled_at DATETIME",
             "fee_source": "ALTER TABLE external_trading_order_fills ADD COLUMN fee_source VARCHAR(32)",
+        },
+        "external_trading_target_positions": {
+            "protection_limit_price": "ALTER TABLE external_trading_target_positions ADD COLUMN protection_limit_price FLOAT",
+            "protection_limit_source": "ALTER TABLE external_trading_target_positions ADD COLUMN protection_limit_source VARCHAR(64)",
+            "reference_price": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price FLOAT",
+            "reference_price_source": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price_source VARCHAR(64)",
         },
     }
     with external_trading_engine.begin() as conn:

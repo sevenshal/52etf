@@ -274,6 +274,57 @@ async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
             logger.error(f"Failed to fetch Xueqiu holdings: {e}")
             raise e
 
+
+async def fetch_xueqiu_latest_rebalance_prices(symbol: str, cookie: str = None) -> Dict[str, Dict[str, Any]]:
+    """Fetch latest Snowball rebalance fill prices by Xueqiu symbol."""
+    headers = XUEQIU_HEADERS.copy()
+    headers["Host"] = "xueqiu.com"
+    headers["Referer"] = f"https://xueqiu.com/P/{symbol}"
+    headers["X-Requested-With"] = "XMLHttpRequest"
+    if cookie:
+        if "xq_a_token" in cookie:
+            headers["Cookie"] = cookie
+        else:
+            headers["Cookie"] = f"xq_a_token={cookie};"
+
+    params = {"cube_symbol": symbol, "count": 20, "page": 1}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                "https://xueqiu.com/cubes/rebalancing/history.json",
+                params=params,
+                headers=headers,
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            events = data.get("list") if isinstance(data, dict) else None
+            if not events:
+                return {}
+            result = {}
+            for event in events:
+                for row in event.get("rebalancing_histories") or []:
+                    xq_symbol = _to_xueqiu_symbol(row.get("stock_symbol"))
+                    price = safe_float(row.get("price"))
+                    if not xq_symbol or price <= 0 or xq_symbol in result:
+                        continue
+                    result[xq_symbol] = {
+                        "price": price,
+                        "event_id": event.get("id"),
+                        "created_at": event.get("created_at"),
+                        "target_weight": row.get("target_weight"),
+                        "previous_weight": (
+                            row.get("prev_weight_adjusted")
+                            if row.get("prev_weight_adjusted") is not None
+                            else row.get("prev_target_weight", row.get("prev_weight"))
+                        ),
+                    }
+            return result
+        except Exception as e:
+            logger.warning("Failed to fetch Xueqiu latest rebalance prices for %s: %s", symbol, e)
+            return {}
+
+
 async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Dict]:
     """Fetch cube info including name from Xueqiu"""
     ts = int(datetime.now().timestamp() * 1000)
@@ -413,6 +464,25 @@ def _to_xueqiu_symbol(symbol: Optional[str]) -> Optional[str]:
 
 def _to_trade_symbol(symbol: Optional[str]) -> Optional[str]:
     return normalize_trading_symbol(_to_xueqiu_symbol(symbol))
+
+
+def _snowball_reference_price(
+    *,
+    xq_symbol: str,
+    old_quantity: int,
+    final_quantity: int,
+    rebalance_prices: Dict[str, Dict[str, Any]],
+    old_reference_price: Optional[float] = None,
+) -> Optional[float]:
+    delta_quantity = safe_int(final_quantity) - safe_int(old_quantity)
+    if delta_quantity == 0:
+        return safe_float(old_reference_price, None)
+
+    fill = rebalance_prices.get(xq_symbol) or {}
+    fill_price = safe_float(fill.get("price"))
+    if fill_price <= 0:
+        return None
+    return round(fill_price, 4)
 
 
 def _snowball_config_response(
@@ -642,6 +712,8 @@ def _load_snowball_external_sync_items(
                         "target_quantity": safe_int(row.target_quantity),
                         "target_value": safe_float(row.target_value),
                         "signal_version": row.signal_version,
+                        "reference_price": safe_float(row.reference_price, None),
+                        "reference_price_source": row.reference_price_source,
                     }
 
             acc_config = db.query(SnowballAccountConfig).filter_by(account_id=config.account_id).first()
@@ -670,6 +742,7 @@ def _build_snowball_target_signal_version(item: Dict[str, Any], target_rows: Lis
             {
                 "symbol": row.get("symbol"),
                 "target_quantity": safe_int(row.get("target_quantity")),
+                "reference_price": safe_float(row.get("reference_price"), None),
             }
             for row in sorted(target_rows, key=lambda data: str(data.get("symbol") or ""))
         ],
@@ -701,6 +774,7 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
         asyncio.create_task(_refresh_xueqiu_guest_token_task(item.get("account_id"), item.get("cookie")))
 
     holdings = await fetch_xueqiu_holdings(item["combination_id"], item.get("cookie"))
+    rebalance_prices = await fetch_xueqiu_latest_rebalance_prices(item["combination_id"], item.get("cookie"))
     current_targets = item.get("current_targets") or {}
     target_weights = {}
     all_symbols = set(current_targets.keys())
@@ -762,6 +836,15 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
         if old_quantity != final_quantity:
             changed = True
 
+        reference_price = _snowball_reference_price(
+            xq_symbol=xq_symbol,
+            old_quantity=old_quantity,
+            final_quantity=final_quantity,
+            rebalance_prices=rebalance_prices,
+            old_reference_price=old_target.get("reference_price"),
+        )
+        reference_price_source = "snowball_latest_rebalance_fill_price" if reference_price else None
+
         row_target_value = target_value if weight > 0 else 0.0
         if price > 0 and final_quantity > 0:
             row_target_value = final_quantity * price
@@ -770,6 +853,8 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
             "target_quantity": final_quantity,
             "target_weight_pct": weight,
             "target_value": round(row_target_value, 2),
+            "reference_price": reference_price,
+            "reference_price_source": reference_price_source,
         })
 
     signal_version = _build_snowball_target_signal_version(item, target_rows)

@@ -37,12 +37,14 @@ from ...core.services.external_trading_execution_policy import (
     DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
     DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
+    DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
     normalize_lot_size,
     normalize_clip_sell_to_available,
     normalize_max_replace_count,
+    normalize_max_slippage_pct,
     normalize_price_level,
     normalize_price_level_sequence,
     normalize_timeout_seconds,
@@ -102,6 +104,7 @@ class ExternalTradingAccountBase(BaseModel):
     executor_lot_size: int = Field(default=DEFAULT_EXECUTOR_LOT_SIZE, ge=1)
     executor_order_timeout_seconds: int = Field(default=DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS, ge=10, le=3600)
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
+    executor_max_slippage_pct: float = Field(default=DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT, ge=0)
     executor_clip_sell_to_available: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
     commission_rate_pct: float = Field(default=0.025, ge=0)
@@ -141,6 +144,7 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
     executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
+    executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
     commission_rate_pct: Optional[float] = Field(default=None, ge=0)
@@ -255,6 +259,7 @@ class ExternalTradingSubAccountPayload(BaseModel):
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
     executor_order_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
+    executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_clip_sell_to_available: Optional[bool] = None
     executor_price_level_sequence: Optional[List[int]] = None
 
@@ -300,6 +305,7 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     executor_lot_size = normalize_lot_size(getattr(account, "executor_lot_size", None))
     executor_order_timeout_seconds = normalize_timeout_seconds(getattr(account, "executor_order_timeout_seconds", None))
     executor_max_replace_count = normalize_max_replace_count(getattr(account, "executor_max_replace_count", None))
+    executor_max_slippage_pct = normalize_max_slippage_pct(getattr(account, "executor_max_slippage_pct", None))
     executor_clip_sell_to_available = normalize_clip_sell_to_available(
         getattr(account, "executor_clip_sell_to_available", None)
     )
@@ -317,6 +323,7 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_lot_size": executor_lot_size,
         "executor_order_timeout_seconds": executor_order_timeout_seconds,
         "executor_max_replace_count": executor_max_replace_count,
+        "executor_max_slippage_pct": executor_max_slippage_pct,
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
         "commission_rate_pct": _safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025),
@@ -684,6 +691,10 @@ def _serialize_target_position_status(
         "demand_quantity": demand_quantity,
         "target_weight_pct": row.target_weight_pct,
         "target_value": row.target_value,
+        "protection_limit_price": row.protection_limit_price,
+        "protection_limit_source": row.protection_limit_source,
+        "reference_price": row.reference_price,
+        "reference_price_source": row.reference_price_source,
         "signal_id": row.signal_id,
         "signal_version": row.signal_version,
         "source_execution_id": row.source_execution_id,
@@ -862,6 +873,7 @@ async def create_external_trading_account(
         executor_lot_size=payload.executor_lot_size,
         executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
         executor_max_replace_count=payload.executor_max_replace_count,
+        executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
         commission_rate_pct=payload.commission_rate_pct,
@@ -1079,6 +1091,7 @@ async def create_external_trading_sub_account(
         executor_lot_size=payload.executor_lot_size,
         executor_order_timeout_seconds=payload.executor_order_timeout_seconds,
         executor_max_replace_count=payload.executor_max_replace_count,
+        executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_clip_sell_to_available=payload.executor_clip_sell_to_available,
         executor_price_level_sequence=payload.executor_price_level_sequence,
         created_at=now,
@@ -1123,6 +1136,7 @@ async def update_external_trading_sub_account(
     sub_account.executor_lot_size = payload.executor_lot_size
     sub_account.executor_order_timeout_seconds = payload.executor_order_timeout_seconds
     sub_account.executor_max_replace_count = payload.executor_max_replace_count
+    sub_account.executor_max_slippage_pct = payload.executor_max_slippage_pct
     sub_account.executor_clip_sell_to_available = payload.executor_clip_sell_to_available
     sub_account.executor_price_level_sequence = payload.executor_price_level_sequence
     sub_account.updated_at = datetime.now()

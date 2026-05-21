@@ -641,6 +641,54 @@ def first_numeric_value(obj, keys):
     return None
 
 
+def get_price_limit_from_snapshot(client_symbol, side):
+    """Return the exchange price limit from get_snapshot when depth is unavailable."""
+    snapshot = get_single_snapshot(client_symbol)
+    if not snapshot:
+        raise Exception("获取 %s 涨跌停价格失败: snapshot not found" % client_symbol)
+
+    if side == "BUY":
+        price = first_numeric_value(snapshot, (
+            "up_px",
+            "high_limit",
+            "upper_limit",
+            "up_limit",
+            "limit_up",
+            "high_limit_price",
+            "upper_limit_price",
+            "rise_limit_price",
+            "max_price",
+            "涨停价",
+        ))
+        source = "snapshot_limit_up_price"
+    else:
+        price = first_numeric_value(snapshot, (
+            "down_px",
+            "low_limit",
+            "lower_limit",
+            "down_limit",
+            "limit_down",
+            "low_limit_price",
+            "lower_limit_price",
+            "fall_limit_price",
+            "min_price",
+            "跌停价",
+        ))
+        source = "snapshot_limit_down_price"
+
+    if price is None or float(price) <= 0:
+        raise Exception("获取 %s 涨跌停价格失败: snapshot 无可用%s" % (client_symbol, source))
+    return {
+        "price": float(price),
+        "price_source": source,
+        "price_level": -1,
+        "snapshot_time": value_of(snapshot, "hsTimeStamp", datetime.now().isoformat()),
+        "last_price": first_numeric_value(snapshot, ("last_px",)),
+        "bid": None,
+        "ask": None,
+    }
+
+
 def get_gear_price_for_symbol(client_symbol):
     """Use get_gear_price to fetch bid/ask depth for a single symbol.
 
@@ -784,7 +832,7 @@ def get_quotes(symbols):
 
 def get_limit_price_from_gear_data(symbol, side, quantity, gear_data):
     """Use the order book from get_gear_price to pick a limit price that covers the requested quantity."""
-    if not gear_data or not value_of(gear_data, "bid_grp") or not value_of(gear_data, "offer_grp"):
+    if not gear_data:
         raise Exception("获取 %s 档位价格失败: 数据为空" % symbol)
 
     group = value_of(gear_data, "offer_grp") if side == "BUY" else value_of(gear_data, "bid_grp")
@@ -830,24 +878,103 @@ def get_int_or_none(value):
         return None
 
 
-def calculate_order_price(symbol, side, quantity, price_level):
-    gear_data = get_gear_price_for_symbol(symbol)
-    if not gear_data:
-        raise Exception("获取 %s 盘口数据失败: get_gear_price 返回空" % symbol)
+def get_float_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        parsed = float(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        return None
+    return None
 
-    quote = normalize_quote_from_gear_price(symbol, gear_data)
+
+def apply_protection_limit_price(calculated, order_request, side, symbol):
+    if side == "BUY":
+        raw_protection_price = order_request.get("protection_limit_price") or order_request.get("max_buy_price")
+    else:
+        raw_protection_price = order_request.get("protection_limit_price") or order_request.get("min_sell_price")
+    protection_price = get_float_or_none(raw_protection_price)
+    if protection_price is None:
+        return calculated
+
+    price = float(calculated.get("price"))
+    if side == "BUY" and price > protection_price:
+        log_warn(
+            "%s BUY 定价 %.4f 超过保护限价 %.4f，使用保护限价兜底"
+            % (symbol, price, protection_price)
+        )
+        calculated = dict(calculated)
+        calculated["price"] = protection_price
+        calculated["price_source"] = "%s_capped_by_protection_limit" % calculated.get("price_source")
+        calculated["protection_limit_price"] = protection_price
+    elif side == "SELL" and price < protection_price:
+        log_warn(
+            "%s SELL 定价 %.4f 低于保护限价 %.4f，使用保护限价兜底"
+            % (symbol, price, protection_price)
+        )
+        calculated = dict(calculated)
+        calculated["price"] = protection_price
+        calculated["price_source"] = "%s_floored_by_protection_limit" % calculated.get("price_source")
+        calculated["protection_limit_price"] = protection_price
+    else:
+        calculated = dict(calculated)
+        calculated["protection_limit_price"] = protection_price
+    return calculated
+
+
+def calculate_order_price(symbol, side, quantity, price_level):
     level = get_int_or_none(price_level)
     if level is None or level == -1:
-        price = get_limit_price_from_gear_data(symbol, side, quantity, gear_data)
-        source = "ptrade_depth_fallback"
+        gear_data = get_gear_price_for_symbol(symbol)
+        if gear_data:
+            try:
+                quote = normalize_quote_from_gear_price(symbol, gear_data)
+                price = get_limit_price_from_gear_data(symbol, side, quantity, gear_data)
+                source = "ptrade_depth_fallback"
+                snapshot_time = quote.get("timestamp")
+                last_price = quote.get("price")
+                bid = quote.get("bid")
+                ask = quote.get("ask")
+            except Exception as e:
+                log_warn("%s 深度定价失败，尝试涨跌停价兜底: %s" % (symbol, e))
+                limit_price = get_price_limit_from_snapshot(symbol, side)
+                price = limit_price.get("price")
+                source = limit_price.get("price_source")
+                snapshot_time = limit_price.get("snapshot_time")
+                last_price = limit_price.get("last_price")
+                bid = limit_price.get("bid")
+                ask = limit_price.get("ask")
+        else:
+            log_warn("%s get_gear_price 返回空，尝试涨跌停价兜底" % symbol)
+            limit_price = get_price_limit_from_snapshot(symbol, side)
+            price = limit_price.get("price")
+            source = limit_price.get("price_source")
+            snapshot_time = limit_price.get("snapshot_time")
+            last_price = limit_price.get("last_price")
+            bid = limit_price.get("bid")
+            ask = limit_price.get("ask")
     elif level == 0:
+        gear_data = get_gear_price_for_symbol(symbol)
+        if not gear_data:
+            raise Exception("获取 %s 盘口数据失败: get_gear_price 返回空" % symbol)
+        quote = normalize_quote_from_gear_price(symbol, gear_data)
         # level 0 = use best bid/ask mid or best opposite side price
         if side == "BUY":
             price = quote.get("ask") or quote.get("bid")
         else:
             price = quote.get("bid") or quote.get("ask")
         source = "best_price"
+        snapshot_time = quote.get("timestamp")
+        last_price = quote.get("price")
+        bid = quote.get("bid")
+        ask = quote.get("ask")
     elif 1 <= level <= 5:
+        gear_data = get_gear_price_for_symbol(symbol)
+        if not gear_data:
+            raise Exception("获取 %s 盘口数据失败: get_gear_price 返回空" % symbol)
+        quote = normalize_quote_from_gear_price(symbol, gear_data)
         levels = quote.get("ask_levels") if side == "BUY" else quote.get("bid_levels")
         price = None
         for item in levels or []:
@@ -855,6 +982,19 @@ def calculate_order_price(symbol, side, quantity, price_level):
                 price = item.get("price")
                 break
         source = "%s_level_%d" % ("ask" if side == "BUY" else "bid", level)
+        snapshot_time = quote.get("timestamp")
+        last_price = quote.get("price")
+        bid = quote.get("bid")
+        ask = quote.get("ask")
+        if price is None and not levels:
+            log_warn("%s %s档目标侧盘口为空，尝试涨跌停价兜底" % (symbol, level))
+            limit_price = get_price_limit_from_snapshot(symbol, side)
+            price = limit_price.get("price")
+            source = limit_price.get("price_source")
+            snapshot_time = limit_price.get("snapshot_time")
+            last_price = limit_price.get("last_price")
+            bid = limit_price.get("bid")
+            ask = limit_price.get("ask")
     else:
         raise Exception("不支持的价格档位: %s" % price_level)
 
@@ -865,17 +1005,17 @@ def calculate_order_price(symbol, side, quantity, price_level):
 
     log.info(
         "%s 定价结果: price=%.4f source=%s level=%s bid=%s ask=%s"
-        % (symbol, price, source, level, quote.get("bid"), quote.get("ask"))
+        % (symbol, price, source, level, bid, ask)
     )
 
     return {
         "price": price,
         "price_source": source,
         "price_level": level,
-        "snapshot_time": quote.get("timestamp"),
-        "last_price": quote.get("price"),
-        "bid": quote.get("bid"),
-        "ask": quote.get("ask"),
+        "snapshot_time": snapshot_time,
+        "last_price": last_price,
+        "bid": bid,
+        "ask": ask,
     }
 
 
@@ -1283,6 +1423,7 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
             quantity,
             order_request.get("price_level", -1),
         )
+    calculated = apply_protection_limit_price(calculated, order_request, side, client_symbol)
     limit_price = float(calculated["price"])
 
     signed_quantity = quantity if side == "BUY" else -quantity
@@ -1321,6 +1462,7 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
         "quantity": quantity,
         **order_clip_fields(order_request, quantity),
         "order_type": "LIMIT",
+        "protection_limit_price": calculated.get("protection_limit_price"),
         "calculated_price": limit_price,
         "price_source": calculated.get("price_source"),
         "price_level": calculated.get("price_level"),
