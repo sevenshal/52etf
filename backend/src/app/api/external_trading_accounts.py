@@ -494,14 +494,33 @@ def _serialize_sub_account_net_asset_history(row: ExternalTradingSubAccountNetAs
 def _serialize_broker_position_view(
     snapshot: Optional[ExternalTradingBrokerPositionSnapshot],
     ledger_positions: Dict[str, Dict[str, Any]],
+    target_positions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
-    diff = build_broker_position_diff(snapshot, ledger_positions)
+    diff = build_broker_position_diff(snapshot, ledger_positions, target_positions)
     snapshot_item = serialize_broker_position_snapshot(snapshot) if snapshot else None
     return {
         "snapshot": snapshot_item,
         "positions": diff["rows"],
         "summary": diff["summary"],
     }
+
+
+def _get_account_target_quantities(db: OrmSession, external_account_id: int, account_id: str) -> Dict[str, int]:
+    rows = (
+        db.query(ExternalTradingTargetPosition.symbol, ExternalTradingTargetPosition.target_quantity)
+        .filter(
+            ExternalTradingTargetPosition.account_id == account_id,
+            ExternalTradingTargetPosition.external_trading_account_id == external_account_id,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+        .all()
+    )
+    targets: Dict[str, int] = {}
+    for symbol, quantity in rows:
+        normalized = normalize_symbol(symbol)
+        if normalized:
+            targets[normalized] = targets.get(normalized, 0) + safe_int(quantity)
+    return targets
 
 
 def _stock_symbol_candidates(symbol: Any) -> List[str]:
@@ -1691,7 +1710,8 @@ async def get_external_broker_positions(
         )
 
     ledger_positions = get_account_ledger_positions(db, account.id, account_id)
-    response = _serialize_broker_position_view(snapshot, ledger_positions)
+    target_positions = _get_account_target_quantities(db, account.id, account_id)
+    response = _serialize_broker_position_view(snapshot, ledger_positions, target_positions)
     response["account"] = {
         "id": account.id,
         "account_id": account.account_id,

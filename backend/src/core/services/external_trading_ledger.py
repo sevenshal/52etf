@@ -765,7 +765,9 @@ def serialize_broker_position_snapshot(row: ExternalTradingBrokerPositionSnapsho
 def build_broker_position_diff(
     snapshot: Optional[ExternalTradingBrokerPositionSnapshot],
     ledger_positions: Dict[str, Dict[str, Any]],
+    target_positions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
+    target_positions = target_positions or {}
     broker_positions = {}
     for row in (snapshot.positions if snapshot else []) or []:
         symbol = normalize_symbol(row.get("symbol") or row.get("client_symbol"))
@@ -781,7 +783,7 @@ def build_broker_position_diff(
             "market_value": round_money(row.get("market_value")),
         }
 
-    symbols = sorted(set(broker_positions.keys()) | set(ledger_positions.keys()))
+    symbols = sorted(set(broker_positions.keys()) | set(ledger_positions.keys()) | set(target_positions.keys()))
     rows = []
     broker_total = 0.0
     ledger_total = 0.0
@@ -797,6 +799,7 @@ def build_broker_position_diff(
         ledger_row = ledger_positions.get(symbol, {})
         broker_quantity = safe_int(broker_row.get("quantity"))
         ledger_quantity = safe_int(ledger_row.get("quantity"))
+        ledger_target_quantity = safe_int(target_positions.get(symbol))
         broker_available_quantity = safe_int(broker_row.get("available_quantity"))
         ledger_available_quantity = safe_int(ledger_row.get("available_quantity"))
         ledger_computed_sellable_quantity = safe_int(
@@ -805,6 +808,7 @@ def build_broker_position_diff(
         if (
             broker_quantity == 0
             and ledger_quantity == 0
+            and ledger_target_quantity == 0
             and broker_available_quantity == 0
             and ledger_computed_sellable_quantity == 0
             and round_money(broker_row.get("market_value")) == 0
@@ -817,7 +821,11 @@ def build_broker_position_diff(
         broker_market_value = round_money(broker_row.get("market_value"))
         ledger_market_value = round_money(ledger_row.get("market_value"))
         market_value_diff = round_money(broker_market_value - ledger_market_value)
-        if broker_quantity == ledger_quantity and broker_available_quantity == ledger_computed_sellable_quantity:
+        if (
+            broker_quantity == ledger_quantity
+            and ledger_quantity == ledger_target_quantity
+            and broker_available_quantity == ledger_computed_sellable_quantity
+        ):
             diff_status = "MATCH"
             matched_count += 1
         elif broker_quantity > 0 and ledger_quantity <= 0:
@@ -842,6 +850,7 @@ def build_broker_position_diff(
             "broker_sellable_quantity": broker_available_quantity,
             "broker_market_value": broker_market_value,
             "ledger_quantity": ledger_quantity,
+            "ledger_target_quantity": ledger_target_quantity,
             "ledger_available_quantity": ledger_available_quantity,
             "ledger_raw_available_quantity": safe_int(ledger_row.get("raw_available_quantity", ledger_available_quantity)),
             "ledger_computed_sellable_quantity": ledger_computed_sellable_quantity,
