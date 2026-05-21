@@ -108,9 +108,10 @@ const formatPolicy = policy => {
   const level = policy.price_level ?? policy.executor_price_level;
   const timeout = policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds;
   const maxReplace = policy.max_replace_count ?? policy.executor_max_replace_count;
+  const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
-  return `${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
+  return `${priceLevelLabel(level)} / ${timeout || '-'}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${sequence} / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
 };
 const renderTradeFeeSummary = (_, record) => {
   const summary = record?.trade_fee_summary || {};
@@ -277,6 +278,7 @@ const ExternalTradingAccountManager = () => {
       executor_lot_size: 100,
       executor_order_timeout_seconds: 120,
       executor_max_replace_count: 3,
+      executor_max_slippage_pct: 0.5,
       executor_clip_sell_to_available: true,
       executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
       commission_rate_pct: 0.025,
@@ -297,6 +299,7 @@ const ExternalTradingAccountManager = () => {
       executor_lot_size: record.executor_lot_size ?? 100,
       executor_order_timeout_seconds: record.executor_order_timeout_seconds ?? 120,
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
+      executor_max_slippage_pct: record.executor_max_slippage_pct ?? 0.5,
       executor_clip_sell_to_available: record.executor_clip_sell_to_available !== false,
       executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
       commission_rate_pct: record.commission_rate_pct ?? 0.025,
@@ -383,6 +386,7 @@ const ExternalTradingAccountManager = () => {
       executor_lot_size: null,
       executor_order_timeout_seconds: null,
       executor_max_replace_count: null,
+      executor_max_slippage_pct: null,
       executor_clip_sell_to_available: 'inherit',
       executor_price_level_sequence: ''
     });
@@ -401,6 +405,7 @@ const ExternalTradingAccountManager = () => {
       executor_lot_size: subAccount.executor_lot_size,
       executor_order_timeout_seconds: subAccount.executor_order_timeout_seconds,
       executor_max_replace_count: subAccount.executor_max_replace_count,
+      executor_max_slippage_pct: subAccount.executor_max_slippage_pct,
       executor_clip_sell_to_available: subAccount.executor_clip_sell_to_available === null || subAccount.executor_clip_sell_to_available === undefined
         ? 'inherit'
         : subAccount.executor_clip_sell_to_available,
@@ -424,6 +429,7 @@ const ExternalTradingAccountManager = () => {
         executor_lot_size: values.executor_lot_size ?? null,
         executor_order_timeout_seconds: values.executor_order_timeout_seconds ?? null,
         executor_max_replace_count: values.executor_max_replace_count ?? null,
+        executor_max_slippage_pct: values.executor_max_slippage_pct ?? null,
         executor_clip_sell_to_available: values.executor_clip_sell_to_available === 'inherit'
           ? null
           : values.executor_clip_sell_to_available !== false,
@@ -1026,6 +1032,9 @@ const ExternalTradingAccountManager = () => {
           <Form.Item name="executor_max_replace_count" label="最大重定价次数" rules={[{ required: true, message: '请输入最大重定价次数' }]}>
             <InputNumber min={0} max={20} step={1} style={{ width: '100%' }} />
           </Form.Item>
+          <Form.Item name="executor_max_slippage_pct" label="最大滑点 (%)" rules={[{ required: true, message: '请输入最大滑点' }]}>
+            <InputNumber min={0} max={20} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
           <Form.Item name="executor_lot_size" label="默认最小交易单位" rules={[{ required: true, message: '请输入默认最小交易单位' }]}>
             <InputNumber min={1} step={100} style={{ width: '100%' }} />
           </Form.Item>
@@ -1088,6 +1097,9 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Form.Item name="executor_max_replace_count" label="最大重定价次数">
             <InputNumber min={0} max={20} step={1} style={{ width: '100%' }} placeholder="继承账户默认" />
+          </Form.Item>
+          <Form.Item name="executor_max_slippage_pct" label="最大滑点 (%)">
+            <InputNumber min={0} max={20} step={0.1} style={{ width: '100%' }} placeholder="继承账户默认" />
           </Form.Item>
           <Form.Item name="executor_lot_size" label="最小交易单位">
             <InputNumber min={1} step={100} style={{ width: '100%' }} placeholder="继承账户默认" />
