@@ -1143,6 +1143,23 @@ def _attach_symbol_names_to_payloads(*payloads: Any) -> None:
         _attach_symbol_names(payload, stock_name_by_symbol)
 
 
+def _attach_strategy_names(value: Any, strategy_name_by_sub_account_id: Dict[int, Optional[str]]) -> None:
+    if isinstance(value, dict):
+        sub_account_id = safe_int(value.get("sub_account_id"))
+        strategy_name = strategy_name_by_sub_account_id.get(sub_account_id)
+        if strategy_name and not value.get("strategy_name"):
+            value["strategy_name"] = strategy_name
+        for item in value.values():
+            if isinstance(item, (dict, list, tuple)):
+                _attach_strategy_names(item, strategy_name_by_sub_account_id)
+    elif isinstance(value, list):
+        for item in value:
+            _attach_strategy_names(item, strategy_name_by_sub_account_id)
+    elif isinstance(value, tuple):
+        for item in value:
+            _attach_strategy_names(item, strategy_name_by_sub_account_id)
+
+
 def _apply_nullable_sub_account_name_filter(
     query: Any,
     column: Any,
@@ -2121,9 +2138,12 @@ async def get_external_trading_executor_status_sub_accounts(
 async def get_external_trading_executor_status_plan(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
     payload = NettedExecutorRequest()
     base_plan = None
     plan_error = None
@@ -2162,6 +2182,7 @@ async def get_external_trading_executor_status_plan(
         plan["reference_prices"] = {}
         plan["account_executor_policy"] = resolve_execution_policy(account)
 
+    _attach_strategy_names(plan, strategy_name_by_sub_account_id)
     _attach_symbol_names_to_payloads(plan)
     return {
         "plan": plan,

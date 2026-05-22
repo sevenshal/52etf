@@ -76,6 +76,8 @@ PTRADE_STATUS_MAP = {
     "V": "ACKNOWLEDGED",
 }
 PTRADE_ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
+PTRADE_TRADE_FILL_STATUSES = {"7", "8"}
+PTRADE_TRADE_PARTIAL_CANCEL_STATUS = "5"
 A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
 A_SHARE_T0_ETF_PREFIXES = ("511", "513", "518", "520")
 A_SHARE_T0_ETF_NAME_KEYWORDS = (
@@ -1885,8 +1887,11 @@ def record_cancel_result(
         if item.get("ok") is False:
             row.message = item.get("message") or item.get("error") or "撤单失败"
         else:
-            row.status = "CANCEL_PENDING"
-            row.message = item.get("message") or "撤单指令已提交"
+            if row.status not in TERMINAL_ORDER_STATUSES:
+                row.status = "CANCEL_PENDING"
+                row.message = item.get("message") or "撤单指令已提交"
+            elif not row.message:
+                row.message = item.get("message") or row.message
             row.last_event_at = now
         row.raw_order_event = item
         row.updated_at = now
@@ -1928,6 +1933,43 @@ def _find_order_for_event(db: Session, external_trading_account_id: int, event: 
     return None
 
 
+def _apply_order_status_event(db: Session, row: ExternalTradingOrder, event: Dict[str, Any], now: datetime) -> None:
+    raw_status = event.get("status")
+    previous_filled_quantity = safe_int(row.filled_quantity)
+    filled_quantity = order_event_filled_quantity(
+        event,
+        raw_status,
+        current=row.filled_quantity,
+    )
+    row.ptrade_status = None if raw_status is None else str(raw_status)
+    row.status = merge_lifecycle_status(
+        row.status,
+        ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity),
+    )
+    row.broker_order_id = str(event.get("order_id")) if event.get("order_id") else row.broker_order_id
+    row.entrust_no = str(event.get("entrust_no")) if event.get("entrust_no") else row.entrust_no
+    row.filled_quantity = max(row.filled_quantity or 0, filled_quantity)
+    row.remaining_quantity = max(row.quantity - row.filled_quantity, 0)
+    if safe_int(row.filled_quantity) > previous_filled_quantity:
+        row.avg_fill_price = safe_float(
+            event.get("avg_fill_price", event.get("business_price", event.get("price"))),
+            row.avg_fill_price,
+        )
+    row.last_event_at = (
+        parse_dt(
+            event.get("event_time")
+            or event.get("traded_at")
+            or event.get("trade_time")
+            or event.get("business_time")
+            or event.get("submitted_at")
+        )
+        or now
+    )
+    row.raw_order_event = event
+    row.updated_at = now
+    _propagate_parent_order_state(db, row)
+
+
 def process_order_events(db: Session, *, external_trading_account_id: int, orders: List[Dict[str, Any]]) -> int:
     updated = 0
     now = datetime.now()
@@ -1936,26 +1978,7 @@ def process_order_events(db: Session, *, external_trading_account_id: int, order
         if not row:
             logger.warning("Unmatched external order event: %s", event)
             continue
-        raw_status = event.get("status")
-        filled_quantity = order_event_filled_quantity(
-            event,
-            raw_status,
-            current=row.filled_quantity,
-        )
-        row.ptrade_status = None if raw_status is None else str(raw_status)
-        row.status = merge_lifecycle_status(
-            row.status,
-            ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity),
-        )
-        row.broker_order_id = str(event.get("order_id")) if event.get("order_id") else row.broker_order_id
-        row.entrust_no = str(event.get("entrust_no")) if event.get("entrust_no") else row.entrust_no
-        row.filled_quantity = max(row.filled_quantity or 0, filled_quantity)
-        row.remaining_quantity = max(row.quantity - row.filled_quantity, 0)
-        row.avg_fill_price = safe_float(event.get("avg_fill_price", event.get("business_price")), row.avg_fill_price)
-        row.last_event_at = parse_dt(event.get("event_time") or event.get("submitted_at")) or now
-        row.raw_order_event = event
-        row.updated_at = now
-        _propagate_parent_order_state(db, row)
+        _apply_order_status_event(db, row, event, now)
         updated += 1
     return updated
 
@@ -1966,6 +1989,21 @@ def _trade_fill_key(event: Dict[str, Any]) -> str:
             return str(event.get(key))
     stable = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _is_trade_fill_event(event: Dict[str, Any]) -> bool:
+    raw_status = event.get("status")
+    business_no = event.get("business_no") or event.get("business_id")
+    if raw_status is not None:
+        status = str(raw_status)
+        if status not in PTRADE_TRADE_FILL_STATUSES:
+            if not (status == PTRADE_TRADE_PARTIAL_CANCEL_STATUS and business_no):
+                return False
+        if status == PTRADE_TRADE_PARTIAL_CANCEL_STATUS and not business_no:
+            return False
+    quantity = safe_int(event.get("quantity", event.get("business_amount", event.get("filled_quantity"))))
+    price = safe_float(event.get("price", event.get("business_price", event.get("avg_fill_price"))))
+    return quantity > 0 and price > 0
 
 
 def _get_or_create_ledger_position(db: Session, order: ExternalTradingOrder) -> ExternalTradingLedgerPosition:
@@ -2217,6 +2255,17 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
         if not order:
             logger.warning("Unmatched external trade event: %s", event)
             continue
+        if not _is_trade_fill_event(event):
+            logger.info(
+                "Processed non-fill external trade event as order status: order_id=%s entrust_no=%s status=%s quantity=%s price=%s",
+                event.get("order_id"),
+                event.get("entrust_no"),
+                event.get("status"),
+                event.get("quantity", event.get("business_amount", event.get("filled_quantity"))),
+                event.get("price", event.get("business_price", event.get("avg_fill_price"))),
+            )
+            _apply_order_status_event(db, order, event, now)
+            continue
         fill_key = _trade_fill_key(event)
         existing = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == fill_key).first()
         if existing:
@@ -2256,9 +2305,7 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
             _apply_fill_to_ledger(db, order, quantity, price, fee_total=estimated_fee_increment.get("fee_total", 0.0))
 
         _refresh_order_from_fill_totals(db, order)
-        _propagate_parent_order_state(db, order)
-        order.last_event_at = fill.traded_at
-        order.updated_at = now
+        _apply_order_status_event(db, order, event, now)
         inserted += 1
     return inserted
 
