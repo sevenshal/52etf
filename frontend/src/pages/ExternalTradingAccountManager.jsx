@@ -12,7 +12,6 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
-  Select,
   Space,
   Switch,
   Table,
@@ -188,8 +187,7 @@ const formatPolicy = policy => {
         ? [policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds]
         : DEFAULT_TIMEOUT_SEQUENCE)
   );
-  const clipSell = (policy.clip_sell_to_available ?? policy.executor_clip_sell_to_available) !== false;
-  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / ${clipSell ? '裁剪可卖' : '不裁剪可卖'}`;
+  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}%`;
 };
 const renderTradeFeeSummary = (_, record) => {
   const summary = record?.trade_fee_summary || {};
@@ -362,12 +360,10 @@ const ExternalTradingAccountManager = () => {
     form.resetFields();
     form.setFieldsValue({
       enabled: true,
-      executor_enabled: true,
       executor_lot_size: 100,
       executor_order_timeout_seconds_sequence: timeoutSequenceToText(DEFAULT_TIMEOUT_SEQUENCE),
       executor_max_replace_count: 3,
       executor_max_slippage_pct: 0.5,
-      executor_clip_sell_to_available: true,
       executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
       commission_rate_pct: 0.025,
       min_commission: 5,
@@ -382,7 +378,6 @@ const ExternalTradingAccountManager = () => {
       name: record.name,
       identifier: record.identifier,
       enabled: record.enabled,
-      executor_enabled: record.executor_enabled !== false,
       executor_lot_size: record.executor_lot_size ?? 100,
       executor_order_timeout_seconds_sequence: timeoutSequenceToText(
         record.executor_order_timeout_seconds_sequence
@@ -390,7 +385,6 @@ const ExternalTradingAccountManager = () => {
       ),
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
       executor_max_slippage_pct: record.executor_max_slippage_pct ?? 0.5,
-      executor_clip_sell_to_available: record.executor_clip_sell_to_available !== false,
       executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
       commission_rate_pct: record.commission_rate_pct ?? 0.025,
       min_commission: record.min_commission ?? 5,
@@ -412,8 +406,6 @@ const ExternalTradingAccountManager = () => {
       const payload = {
         ...values,
         enabled: values.enabled !== false,
-        executor_enabled: values.executor_enabled !== false,
-        executor_clip_sell_to_available: values.executor_clip_sell_to_available !== false,
         executor_price_level_sequence: priceSequence,
         executor_order_timeout_seconds_sequence: timeoutSequence,
         executor_order_timeout_seconds: timeoutSequence[0],
@@ -485,7 +477,6 @@ const ExternalTradingAccountManager = () => {
       executor_order_timeout_seconds_sequence: '',
       executor_max_replace_count: null,
       executor_max_slippage_pct: null,
-      executor_clip_sell_to_available: 'inherit',
       executor_price_level_sequence: ''
     });
     setSubModalVisible(true);
@@ -505,9 +496,6 @@ const ExternalTradingAccountManager = () => {
         : '',
       executor_max_replace_count: subAccount.executor_max_replace_count,
       executor_max_slippage_pct: subAccount.executor_max_slippage_pct,
-      executor_clip_sell_to_available: subAccount.executor_clip_sell_to_available === null || subAccount.executor_clip_sell_to_available === undefined
-        ? 'inherit'
-        : subAccount.executor_clip_sell_to_available,
       executor_price_level_sequence: Array.isArray(subAccount.executor_price_level_sequence)
         ? sequenceToText(subAccount.executor_price_level_sequence)
         : ''
@@ -551,9 +539,6 @@ const ExternalTradingAccountManager = () => {
         executor_order_timeout_seconds_sequence: timeoutSequence,
         executor_max_replace_count: values.executor_max_replace_count ?? null,
         executor_max_slippage_pct: values.executor_max_slippage_pct ?? null,
-        executor_clip_sell_to_available: values.executor_clip_sell_to_available === 'inherit'
-          ? null
-          : values.executor_clip_sell_to_available !== false,
         executor_price_level_sequence: priceSequence
       };
       if (editingSubAccount) {
@@ -1233,14 +1218,7 @@ const ExternalTradingAccountManager = () => {
       title: '执行策略',
       key: 'executor_policy',
       width: 320,
-      render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Text>{formatPolicy(record)}</Text>
-          <Text type={record.executor_enabled ? 'secondary' : 'danger'}>
-            {record.executor_enabled ? '定时兜底启用' : '定时兜底停用'}
-          </Text>
-        </Space>
-      )
+      render: (_, record) => formatPolicy(record)
     },
     {
       title: '费用估算',
@@ -1328,9 +1306,6 @@ const ExternalTradingAccountManager = () => {
             <Switch checkedChildren="启用" unCheckedChildren="停用" />
           </Form.Item>
           <Divider orientation="left">默认执行策略</Divider>
-          <Form.Item name="executor_enabled" label="定时兜底执行器" valuePropName="checked">
-            <Switch checkedChildren="启用" unCheckedChildren="停用" />
-          </Form.Item>
           <Form.Item
             name="executor_price_level_sequence"
             label={(
@@ -1359,9 +1334,6 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Form.Item name="executor_lot_size" label="默认最小交易单位" rules={[{ required: true, message: '请输入默认最小交易单位' }]}>
             <InputNumber min={1} step={100} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item name="executor_clip_sell_to_available" label="卖出按真实可卖数量裁剪" valuePropName="checked">
-            <Switch checkedChildren="裁剪" unCheckedChildren="不裁剪" />
           </Form.Item>
           <Divider orientation="left">交易费用估算</Divider>
           <Form.Item name="commission_rate_pct" label="佣金费率 (%)" rules={[{ required: true, message: '请输入佣金费率' }]}>
@@ -1422,15 +1394,6 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Form.Item name="executor_lot_size" label="最小交易单位">
             <InputNumber min={1} step={100} style={{ width: '100%' }} placeholder="继承账户默认" />
-          </Form.Item>
-          <Form.Item name="executor_clip_sell_to_available" label="卖出可卖数量裁剪">
-            <Select
-              options={[
-                { value: 'inherit', label: '继承账户默认' },
-                { value: true, label: '开启裁剪' },
-                { value: false, label: '关闭裁剪' }
-              ]}
-            />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={3} placeholder="可选" />
