@@ -142,7 +142,6 @@ const normalizeFilterText = value => {
   if (value === undefined || value === null || value === '') return '-';
   return String(value);
 };
-const strategyText = record => normalizeFilterText(record?.strategy_name || record?.strategy_type);
 const filterOptionsFromRows = (rows, getter) => {
   const values = Array.from(new Set((rows || []).map(getter).map(normalizeFilterText).filter(value => value !== '-')));
   return values.sort((a, b) => a.localeCompare(b, 'zh-CN')).map(value => ({ text: value, value }));
@@ -896,10 +895,15 @@ const ExternalTradingAccountManager = () => {
     return detail?.source ? <Tooltip title={`来源: ${detail.source}`}>{text}</Tooltip> : text;
   };
   const marketPriceColumn = { title: '市价', key: 'market_price', width: 100, render: renderMarketPrice };
+  const renderSubAccountStrategy = (_, record) => (
+    <Space direction="vertical" size={0}>
+      <Text>{record.sub_account_name || record.name || '-'}</Text>
+      <Text type="secondary">策略: {record.strategy_name || record.strategy_type || record.binding_label || '-'}</Text>
+    </Space>
+  );
 
   const demandColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 180, ...textColumnFilter(demandRows, record => record.sub_account_name) },
-    { title: '策略', dataIndex: 'strategy_type', key: 'strategy_type', width: 150, render: value => value || '-', ...textColumnFilter(demandRows, strategyText) },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 240, render: renderSubAccountStrategy, ...textColumnFilter(demandRows, record => record.sub_account_name) },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(demandRows, symbolText) },
     marketPriceColumn,
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
@@ -939,8 +943,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const targetPositionColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 180, render: value => value || '-', ...serverFilterProps('target_positions', 'sub_account') },
-    { title: '策略', dataIndex: 'strategy_name', key: 'strategy', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...serverFilterProps('target_positions', 'strategy') },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('target_positions', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('target_positions', 'symbol') },
     marketPriceColumn,
     { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: value => value ? formatNumber(value, 3) : '-' },
@@ -964,8 +967,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const ledgerPositionColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 180, render: value => value || '-', ...serverFilterProps('ledger_positions', 'sub_account') },
-    { title: '策略', dataIndex: 'strategy_name', key: 'strategy', width: 200, render: (_, record) => record.strategy_name || record.strategy_type || '-', ...serverFilterProps('ledger_positions', 'strategy') },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('ledger_positions', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('ledger_positions', 'symbol') },
     marketPriceColumn,
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
@@ -1025,12 +1027,7 @@ const ExternalTradingAccountManager = () => {
       dataIndex: 'sub_account_name',
       key: 'sub_account',
       width: 240,
-      render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Text>{record.sub_account_name || '-'}</Text>
-          <Text type="secondary">策略: {record.strategy_name || record.strategy_type || '-'}</Text>
-        </Space>
-      ),
+      render: renderSubAccountStrategy,
       ...serverFilterProps('orders', 'sub_account')
     },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('orders', 'symbol') },
@@ -1085,8 +1082,7 @@ const ExternalTradingAccountManager = () => {
         </Tag>
       )
     },
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 180, render: value => value || '-', ...serverFilterProps('fills', 'sub_account') },
-    { title: '策略', dataIndex: 'strategy_name', key: 'strategy', width: 200, render: value => value || '-', ...serverFilterProps('fills', 'strategy') },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('fills', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('fills', 'symbol') },
     marketPriceColumn,
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
@@ -1101,8 +1097,7 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const executorSubAccountColumns = [
-    { title: '子账户', dataIndex: 'name', key: 'name', width: 180, render: value => value || '-', ...textColumnFilter(executorSubAccountRows, record => record.name) },
-    { title: '绑定策略', dataIndex: 'binding_label', key: 'binding_label', width: 220, render: (_, record) => record.binding_status === 'BOUND' ? <Tag color="blue">{record.strategy_name || record.binding_label}</Tag> : <Tag>空闲</Tag>, ...textColumnFilter(executorSubAccountRows, record => record.strategy_name || record.binding_label) },
+    { title: '子账户', dataIndex: 'name', key: 'name', width: 240, render: renderSubAccountStrategy, ...textColumnFilter(executorSubAccountRows, record => record.name) },
     { title: '分配资金', dataIndex: 'cash_allocated', key: 'cash_allocated', width: 120, render: value => formatNumber(value, 2) },
     { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', width: 120, render: value => formatNumber(value, 2) },
     { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', width: 120, render: value => formatNumber(value, 2) },
