@@ -771,241 +771,6 @@ class FactorLiveTradingLog(Base):
     message = Column(String(1000))
     payload = Column(JSON)
 
-class W20MomentumLiveConfig(Base):
-    """历史 W20 风险调整 ETF 动量配置。"""
-    __tablename__ = "w20_momentum_live_configs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="历史 W20 风险调整 ETF 动量")
-    enabled = Column(Boolean, default=True, nullable=False)
-    symbols = Column(JSON, nullable=False)
-    benchmark_symbols = Column(JSON)
-    initial_capital = Column(Float, nullable=False, default=1_000_000.0)
-    start_date = Column(Date, nullable=False)
-    window = Column(Integer, nullable=False, default=20)
-    top_weights = Column(JSON, nullable=False)
-    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
-    drift_threshold_pct = Column(Float, nullable=False, default=100.0)
-    commission_pct = Column(Float, nullable=False, default=0.03)
-    slippage_pct = Column(Float, nullable=False, default=0.02)
-    lot_size = Column(Integer, nullable=False, default=100)
-    auto_signal_enabled = Column(Boolean, default=True, nullable=False)
-    auto_signal_time = Column(String(5), default="18:35", nullable=False)
-    auto_virtual_trade_enabled = Column(Boolean, default=True, nullable=False)
-    auto_virtual_trade_time = Column(String(5), default="09:31", nullable=False)
-    last_auto_signal_at = Column(DateTime)
-    last_auto_virtual_trade_at = Column(DateTime)
-    live_trade_enabled = Column(Boolean, default=False, nullable=False)
-    external_trading_account_id = Column(Integer, nullable=True)
-    live_trade_total_amount = Column(Float, nullable=True)
-    live_sub_account_id = Column(Integer, nullable=True)
-    last_sync_at = Column(DateTime)
-    last_sync_status = Column(String(16))
-    last_sync_message = Column(String(500))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class W20MomentumLiveEquity(Base):
-    """历史 W20 每日净值。"""
-    __tablename__ = "w20_momentum_live_equity"
-
-    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
-    date = Column(Date, primary_key=True)
-    account_id = Column(String, index=True)
-    value = Column(Float, nullable=False)
-    benchmark_value = Column(Float)
-    drawdown = Column(Float)
-    benchmark_drawdown = Column(Float)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class W20MomentumLiveTrade(Base):
-    """历史 W20 模拟成交记录。"""
-    __tablename__ = "w20_momentum_live_trades"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    date = Column(Date, index=True)
-    signal_date = Column(Date)
-    action = Column(String(8), nullable=False)
-    symbol = Column(String(32), index=True)
-    price = Column(Float)
-    open_price = Column(Float)
-    quantity = Column(Integer)
-    amount = Column(Float)
-    commission = Column(Float)
-    reason = Column(String(64))
-    reason_detail = Column(String(1000))
-    cash_after = Column(Float)
-    portfolio_value_after = Column(Float)
-    symbol_market_value_after = Column(Float)
-    symbol_weight_pct_after = Column(Float)
-    price_source = Column(String(32))
-    quote_timestamp = Column(DateTime)
-    target_symbols = Column(JSON)
-    target_weights_pct = Column(JSON)
-    created_at = Column(DateTime, default=datetime.now)
-
-class W20MomentumLiveHolding(Base):
-    """历史 W20 最新持仓快照。"""
-    __tablename__ = "w20_momentum_live_holdings"
-
-    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), primary_key=True)
-    symbol = Column(String(32), primary_key=True)
-    account_id = Column(String, index=True)
-    shares = Column(Integer, nullable=False, default=0)
-    price = Column(Float)
-    market_value = Column(Float)
-    actual_weight_pct = Column(Float)
-    target_weight_pct = Column(Float)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class W20MomentumLiveLog(Base):
-    """历史 W20 运行/信号日志。"""
-    __tablename__ = "w20_momentum_live_logs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("w20_momentum_live_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    timestamp = Column(DateTime, default=datetime.now, index=True)
-    date = Column(Date, index=True)
-    level = Column(String(16), default="INFO")
-    action = Column(String(32), nullable=False)
-    message = Column(String(1000))
-    payload = Column(JSON)
-
-class USStockSignalVirtualConfig(Base):
-    """历史美股多因子策略配置。"""
-    __tablename__ = "us_stock_signal_virtual_configs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="历史美股多因子策略")
-    enabled = Column(Boolean, default=True, nullable=False)
-    candidate_etfs = Column(JSON, nullable=False)
-    initial_capital = Column(Float, nullable=False, default=100_000.0)
-    start_date = Column(Date, nullable=False)
-    window = Column(Integer, nullable=False, default=20)
-    stabilization_period = Column(Integer, nullable=False, default=10)
-    volatility_floor_pct = Column(Float, nullable=False, default=15.0)
-    volatility_cap_pct = Column(Float, nullable=False, default=45.0)
-    min_listing_days = Column(Integer, nullable=False, default=365)
-    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 0.05, "60": 0.20, "120": 0.75})
-    volume_std_multiplier = Column(Float, nullable=False, default=1.0)
-    max_positions = Column(Integer, nullable=False, default=7)
-    sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
-    index_weight_blend = Column(Float, nullable=False, default=0.4)
-    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
-    commission_pct = Column(Float, nullable=False, default=0.03)
-    slippage_pct = Column(Float, nullable=False, default=0.02)
-    lot_size = Column(Integer, nullable=False, default=1)
-    legs = Column(JSON, nullable=True)
-    auto_sync_enabled = Column(Boolean, default=True, nullable=False)
-    auto_sync_time = Column(String(5), default="16:15", nullable=False)
-    auto_trade_time = Column(String(5), default="09:31", nullable=False)
-    last_auto_sync_at = Column(DateTime)
-    last_auto_trade_at = Column(DateTime)
-    last_sync_at = Column(DateTime)
-    last_sync_status = Column(String(16))
-    last_sync_message = Column(String(500))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class USStockSignalVirtualEvent(Base):
-    """历史美股多因子策略排名事件。"""
-    __tablename__ = "us_stock_signal_virtual_events"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    symbol = Column(String(32), nullable=False, index=True)
-    date = Column(Date, nullable=False, index=True)
-    direction = Column(String(8), nullable=False)
-    signal_price = Column(Float)
-    turnover = Column(Float)
-    annualized_volatility_pct = Column(Float)
-    threshold_pct = Column(Float)
-    payload = Column(JSON)
-    price_source = Column(String(32), default="daily_close")
-    created_at = Column(DateTime, default=datetime.now)
-    __table_args__ = (
-        UniqueConstraint("config_id", "symbol", "date", "direction", name="uniq_us_stock_signal_virtual_event"),
-    )
-
-class USStockSignalVirtualEquity(Base):
-    """历史美股多因子策略每日净值。"""
-    __tablename__ = "us_stock_signal_virtual_equity"
-
-    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
-    date = Column(Date, primary_key=True)
-    account_id = Column(String, index=True)
-    value = Column(Float, nullable=False)
-    cash = Column(Float)
-    position_value = Column(Float)
-    drawdown = Column(Float)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class USStockSignalVirtualTrade(Base):
-    """历史美股多因子策略模拟成交。"""
-    __tablename__ = "us_stock_signal_virtual_trades"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    date = Column(Date, index=True)
-    signal_date = Column(Date)
-    action = Column(String(8), nullable=False)
-    symbol = Column(String(32), index=True)
-    price = Column(Float)
-    execution_price = Column(Float)
-    quantity = Column(Integer)
-    amount = Column(Float)
-    commission = Column(Float)
-    profit = Column(Float)
-    profit_pct = Column(Float)
-    reason = Column(String(64))
-    reason_detail = Column(String(1000))
-    cash_after = Column(Float)
-    portfolio_value_after = Column(Float)
-    symbol_market_value_after = Column(Float)
-    symbol_weight_pct_after = Column(Float)
-    price_source = Column(String(32))
-    quote_timestamp = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.now)
-
-class USStockSignalVirtualHolding(Base):
-    """历史美股多因子策略最新持仓快照。"""
-    __tablename__ = "us_stock_signal_virtual_holdings"
-
-    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), primary_key=True)
-    symbol = Column(String(32), primary_key=True)
-    account_id = Column(String, index=True)
-    shares = Column(Integer, nullable=False, default=0)
-    price = Column(Float)
-    avg_cost = Column(Float)
-    entry_date = Column(Date)
-    market_value = Column(Float)
-    actual_weight_pct = Column(Float)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class USStockSignalVirtualLog(Base):
-    """历史美股多因子策略运行日志。"""
-    __tablename__ = "us_stock_signal_virtual_logs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("us_stock_signal_virtual_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    timestamp = Column(DateTime, default=datetime.now, index=True)
-    date = Column(Date, index=True)
-    level = Column(String(16), default="INFO")
-    action = Column(String(32), nullable=False)
-    message = Column(String(1000))
-    payload = Column(JSON)
-
-
 class FactorBacktestSearchState(Base):
     """因子回测批量搜索全局状态。只保留最近一次搜索。"""
     __tablename__ = "factor_backtest_search_state"
@@ -1070,148 +835,76 @@ class FactorBacktestSearchResult(Base):
     request_payload = Column(JSON)
     created_at = Column(DateTime, default=datetime.now)
 
-class AStockInnovationMomentumConfig(Base):
-    """历史 A股创新100风险调整混合动量配置。"""
-    __tablename__ = "a_stock_innovation_momentum_configs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, index=True)
-    name = Column(String(100), nullable=False, default="历史A股创新100风险调整混合动量")
-    enabled = Column(Boolean, default=True, nullable=False)
-    initial_capital = Column(Float, nullable=False, default=1_000_000.0)
-    start_date = Column(Date, nullable=False)
-    min_listing_days = Column(Integer, nullable=False, default=365)
-    momentum_weights = Column(JSON, nullable=False, default=lambda: {"20": 0.0, "60": 0.20, "120": 0.80})
-    fundamental_weights = Column(JSON, nullable=False, default=lambda: {"circ_mv": 0.34, "revenue_growth_3y": 0.33, "rd_exp_ratio": 0.33})
-    fundamental_blend = Column(Float, nullable=False, default=0.0)
-    max_positions = Column(Integer, nullable=False, default=5)
-    sell_rank_multiplier = Column(Float, nullable=False, default=2.0)
-    index_weight_blend = Column(Float, nullable=False, default=0.8)
-    rebalance_frequency = Column(String(16), nullable=False, default="weekly")
-    commission_pct = Column(Float, nullable=False, default=0.03)
-    slippage_pct = Column(Float, nullable=False, default=0.02)
-    lot_size = Column(Integer, nullable=False, default=100)
-    auto_sync_enabled = Column(Boolean, default=True, nullable=False)
-    auto_sync_time = Column(String(5), default="15:30", nullable=False)
-    last_auto_sync_at = Column(DateTime)
-    last_sync_at = Column(DateTime)
-    last_sync_status = Column(String(16))
-    last_sync_message = Column(String(500))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class AStockInnovationMomentumEvent(Base):
-    """A股创新100风险调整混合动量排名事件"""
-    __tablename__ = "a_stock_innovation_momentum_events"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    symbol = Column(String(32), nullable=False, index=True)
-    date = Column(Date, nullable=False, index=True)
-    direction = Column(String(8), nullable=False)
-    signal_price = Column(Float)
-    turnover = Column(Float)
-    annualized_volatility_pct = Column(Float)
-    threshold_pct = Column(Float)
-    payload = Column(JSON)
-    price_source = Column(String(32), default="daily_close")
-    created_at = Column(DateTime, default=datetime.now)
-    __table_args__ = (
-        UniqueConstraint("config_id", "symbol", "date", "direction", name="uniq_a_stock_innovation_momentum_event"),
-    )
-
-class AStockInnovationMomentumEquity(Base):
-    """历史 A股创新100风险调整混合动量每日净值。"""
-    __tablename__ = "a_stock_innovation_momentum_equity"
-
-    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
-    date = Column(Date, primary_key=True)
-    account_id = Column(String, index=True)
-    value = Column(Float, nullable=False)
-    cash = Column(Float)
-    position_value = Column(Float)
-    drawdown = Column(Float)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class AStockInnovationMomentumTrade(Base):
-    """历史 A股创新100风险调整混合动量模拟成交。"""
-    __tablename__ = "a_stock_innovation_momentum_trades"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    date = Column(Date, index=True)
-    signal_date = Column(Date)
-    action = Column(String(8), nullable=False)
-    symbol = Column(String(32), index=True)
-    name = Column(String(64))
-    price = Column(Float)
-    quantity = Column(Integer)
-    amount = Column(Float)
-    commission = Column(Float)
-    profit = Column(Float)
-    profit_pct = Column(Float)
-    reason = Column(String(64))
-    reason_detail = Column(String(1000))
-    cash_after = Column(Float)
-    portfolio_value_after = Column(Float)
-    symbol_market_value_after = Column(Float)
-    symbol_weight_pct_after = Column(Float)
-    price_source = Column(String(32))
-    created_at = Column(DateTime, default=datetime.now)
-
-class AStockInnovationMomentumHolding(Base):
-    """历史 A股创新100风险调整混合动量最新持仓快照。"""
-    __tablename__ = "a_stock_innovation_momentum_holdings"
-
-    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), primary_key=True)
-    symbol = Column(String(32), primary_key=True)
-    account_id = Column(String, index=True)
-    name = Column(String(64))
-    shares = Column(Integer, nullable=False, default=0)
-    price = Column(Float)
-    avg_cost = Column(Float)
-    entry_date = Column(Date)
-    market_value = Column(Float)
-    actual_weight_pct = Column(Float)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-class AStockInnovationMomentumLog(Base):
-    """历史 A股创新100风险调整混合动量运行日志。"""
-    __tablename__ = "a_stock_innovation_momentum_logs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("a_stock_innovation_momentum_configs.id"), index=True)
-    account_id = Column(String, index=True)
-    timestamp = Column(DateTime, default=datetime.now, index=True)
-    date = Column(Date, index=True)
-    level = Column(String(16), default="INFO")
-    action = Column(String(32), nullable=False)
-    message = Column(String(1000))
-    payload = Column(JSON)
-
 # 创建所有表
 Base.metadata.create_all(engine)
 
 def drop_deprecated_tables():
-    """删除已经迁移出 SQLite 的旧缓存表。"""
+    """删除已经迁移或下线的 SQLite 旧表。"""
     deprecated_tables = [
         "stock_klines",
         "etf_emotions",
+        "multi_factor_sim_accounts",
+        "multi_factor_sim_daily_history",
+        "snowball_api_heartbeats",
+        "snowball_portfolio_snapshots",
         "external_trading_order_fills",
         "external_trading_orders",
         "external_trading_target_positions",
         "external_trading_ledger_positions",
         "external_trading_sub_accounts",
         "external_trading_accounts",
+        "w20_momentum_live_executions",
+        "w20_momentum_live_equity",
+        "w20_momentum_live_trades",
+        "w20_momentum_live_holdings",
+        "w20_momentum_live_logs",
+        "w20_momentum_live_configs",
+        "us_stock_signal_virtual_events",
+        "us_stock_signal_virtual_equity",
+        "us_stock_signal_virtual_trades",
+        "us_stock_signal_virtual_holdings",
+        "us_stock_signal_virtual_logs",
+        "us_stock_signal_virtual_configs",
+        "a_stock_innovation_momentum_events",
+        "a_stock_innovation_momentum_equity",
+        "a_stock_innovation_momentum_trades",
+        "a_stock_innovation_momentum_holdings",
+        "a_stock_innovation_momentum_logs",
+        "a_stock_innovation_momentum_configs",
     ]
     with engine.begin() as conn:
         for table_name in deprecated_tables:
             conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
 drop_deprecated_tables()
+
+def drop_deprecated_columns():
+    """删除存量库中已经不再由模型定义的旧字段。"""
+    deprecated_columns = {
+        "automated_trading_configs": [
+            "fixed_quantity",
+        ],
+        "evc_account_configs": [
+            "access_token",
+            "access_token_expired_at",
+        ],
+        "snowball_copy_configs": [
+            "max_slippage_pct",
+            "xueqiu_cookie",
+        ],
+    }
+
+    with engine.begin() as conn:
+        for table_name, columns in deprecated_columns.items():
+            existing = {
+                row[1]
+                for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            }
+            for column_name in columns:
+                if column_name in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+
+drop_deprecated_columns()
 
 def ensure_performance_indexes():
     """为高频查询补充索引（幂等执行，适配存量数据库）。"""
@@ -1225,13 +918,6 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_levels_date ON a_stock_innovation100_levels(index_code, date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_rebalances_date ON a_stock_innovation100_rebalances(index_code, rebalance_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation100_constituents_symbol ON a_stock_innovation100_constituents(index_code, ts_code, rebalance_date)",
-        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_configs_account ON w20_momentum_live_configs(account_id)",
-        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_trades_config_date ON w20_momentum_live_trades(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_w20_momentum_live_logs_config_time ON w20_momentum_live_logs(config_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_configs_account ON us_stock_signal_virtual_configs(account_id)",
-        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_events_config_date ON us_stock_signal_virtual_events(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_trades_config_date ON us_stock_signal_virtual_trades(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_us_stock_signal_logs_config_time ON us_stock_signal_virtual_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_rank ON factor_backtest_search_results(search_id, rank)",
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_case ON factor_backtest_search_results(search_id, case_index)",
         "CREATE INDEX IF NOT EXISTS idx_factor_backtest_search_results_objective ON factor_backtest_search_results(search_id, objective_value)",
@@ -1243,10 +929,6 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_account ON factor_live_trading_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_enabled ON factor_live_trading_configs(enabled)",
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_logs_config_time ON factor_live_trading_logs(config_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_configs_account ON a_stock_innovation_momentum_configs(account_id)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_events_config_date ON a_stock_innovation_momentum_events(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_trades_config_date ON a_stock_innovation_momentum_trades(config_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_a_stock_innovation_momentum_logs_config_time ON a_stock_innovation_momentum_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
@@ -1265,41 +947,6 @@ def ensure_table_columns():
             "evc_password": "ALTER TABLE evc_account_configs ADD COLUMN evc_password VARCHAR",
             "evc_cookie": "ALTER TABLE evc_account_configs ADD COLUMN evc_cookie VARCHAR",
             "cookie_expires_at": "ALTER TABLE evc_account_configs ADD COLUMN cookie_expires_at DATETIME",
-        },
-        "w20_momentum_live_trades": {
-            "price_source": "ALTER TABLE w20_momentum_live_trades ADD COLUMN price_source VARCHAR(32)",
-            "quote_timestamp": "ALTER TABLE w20_momentum_live_trades ADD COLUMN quote_timestamp DATETIME",
-        },
-        "us_stock_signal_virtual_configs": {
-            "min_listing_days": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN min_listing_days INTEGER NOT NULL DEFAULT 365",
-            "momentum_weights": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN momentum_weights JSON NOT NULL DEFAULT '{\"20\":0.05,\"60\":0.20,\"120\":0.75}'",
-            "sell_rank_multiplier": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN sell_rank_multiplier FLOAT NOT NULL DEFAULT 2.0",
-            "index_weight_blend": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN index_weight_blend FLOAT NOT NULL DEFAULT 0.4",
-            "rebalance_frequency": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly'",
-            "lot_size": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN lot_size INTEGER NOT NULL DEFAULT 1",
-            "legs": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN legs JSON",
-            "auto_trade_time": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN auto_trade_time VARCHAR(5) NOT NULL DEFAULT '09:31'",
-            "last_auto_trade_at": "ALTER TABLE us_stock_signal_virtual_configs ADD COLUMN last_auto_trade_at DATETIME",
-        },
-        "us_stock_signal_virtual_trades": {
-            "execution_price": "ALTER TABLE us_stock_signal_virtual_trades ADD COLUMN execution_price FLOAT",
-            "quote_timestamp": "ALTER TABLE us_stock_signal_virtual_trades ADD COLUMN quote_timestamp DATETIME",
-        },
-        "a_stock_innovation_momentum_configs": {
-            "fundamental_weights": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_weights JSON NOT NULL DEFAULT '{\"circ_mv\":0.34,\"revenue_growth_3y\":0.33,\"rd_exp_ratio\":0.33}'",
-            "fundamental_blend": "ALTER TABLE a_stock_innovation_momentum_configs ADD COLUMN fundamental_blend FLOAT NOT NULL DEFAULT 0.0",
-        },
-        "w20_momentum_live_configs": {
-            "auto_signal_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_signal_enabled BOOLEAN NOT NULL DEFAULT 1",
-            "auto_signal_time": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_signal_time VARCHAR(5) NOT NULL DEFAULT '18:35'",
-            "auto_virtual_trade_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_virtual_trade_enabled BOOLEAN NOT NULL DEFAULT 1",
-            "auto_virtual_trade_time": "ALTER TABLE w20_momentum_live_configs ADD COLUMN auto_virtual_trade_time VARCHAR(5) NOT NULL DEFAULT '09:31'",
-            "last_auto_signal_at": "ALTER TABLE w20_momentum_live_configs ADD COLUMN last_auto_signal_at DATETIME",
-            "last_auto_virtual_trade_at": "ALTER TABLE w20_momentum_live_configs ADD COLUMN last_auto_virtual_trade_at DATETIME",
-            "live_trade_enabled": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
-            "external_trading_account_id": "ALTER TABLE w20_momentum_live_configs ADD COLUMN external_trading_account_id INTEGER",
-            "live_trade_total_amount": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_trade_total_amount FLOAT",
-            "live_sub_account_id": "ALTER TABLE w20_momentum_live_configs ADD COLUMN live_sub_account_id INTEGER",
         },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",

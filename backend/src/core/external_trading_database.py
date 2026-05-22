@@ -437,6 +437,32 @@ def ensure_external_trading_columns():
                     conn.exec_driver_sql(ddl)
 
 
+def drop_deprecated_external_trading_columns():
+    """删除存量外部交易库里已经不再由模型定义的旧字段。"""
+    deprecated_columns = {
+        "external_trading_accounts": [
+            "executor_initial_price_source",
+        ],
+        "external_trading_sub_accounts": [
+            "executor_initial_price_source",
+        ],
+        "external_trading_target_positions": [
+            "protection_limit_price",
+            "protection_limit_source",
+        ],
+    }
+    with external_trading_engine.begin() as conn:
+        for table_name, columns in deprecated_columns.items():
+            existing = {
+                row[1]
+                for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            }
+            for column_name in columns:
+                if column_name in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+
+
 ExternalTradingBase.metadata.create_all(external_trading_engine)
 ensure_external_trading_columns()
+drop_deprecated_external_trading_columns()
 ensure_external_trading_indexes()
