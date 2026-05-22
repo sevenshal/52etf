@@ -21,7 +21,6 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
-    normalize_clip_sell_to_available,
     normalize_lot_size,
     normalize_max_replace_count,
     normalize_max_slippage_pct,
@@ -168,14 +167,14 @@ def _load_accounts(
                 "name": row.name,
                 "identifier": row.identifier,
                 "enabled": row.enabled,
-                "executor_enabled": getattr(row, "executor_enabled", True),
+                "executor_enabled": True,
                 "executor_price_level": row.executor_price_level,
                 "executor_lot_size": row.executor_lot_size,
                 "executor_order_timeout_seconds": row.executor_order_timeout_seconds,
                 "executor_order_timeout_seconds_sequence": getattr(row, "executor_order_timeout_seconds_sequence", None),
                 "executor_max_replace_count": row.executor_max_replace_count,
                 "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
-                "executor_clip_sell_to_available": getattr(row, "executor_clip_sell_to_available", True),
+                "executor_clip_sell_to_available": True,
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }
             for row in rows
@@ -520,9 +519,7 @@ async def _submit_current_targets(
         "price_level": price_level,
         "lot_size": lot_size,
         "order_timeout_seconds": order_timeout_seconds,
-        "clip_sell_to_available": normalize_clip_sell_to_available(
-            account.get("executor_clip_sell_to_available"),
-        ),
+        "clip_sell_to_available": True,
     })
 
     with get_external_trading_db_ctx() as db:
@@ -614,13 +611,6 @@ async def _run_account_executor(
     order_timeout_seconds: int,
 ) -> Dict[str, Any]:
     account_pk = int(account["id"])
-    if trigger_source == "robot_timer" and not account.get("executor_enabled", True):
-        return {
-            "account_id": account_pk,
-            "account_name": account.get("name"),
-            "status": "SKIPPED",
-            "reason": "executor_timer_disabled",
-        }
     if not external_trading_hub.get_status(account_pk).get("connected"):
         return {
             "account_id": account_pk,

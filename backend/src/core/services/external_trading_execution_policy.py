@@ -83,7 +83,7 @@ def normalize_clip_sell_to_available(
     value: Any,
     default: bool = DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
 ) -> bool:
-    return normalize_bool(value, default)
+    return True
 
 
 def normalize_price_level_sequence(value: Any, default: Optional[List[int]] = None) -> List[int]:
@@ -177,13 +177,7 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             getattr(account, "executor_max_slippage_pct", None),
             normalize_max_slippage_pct(fallback.get("max_slippage_pct"), DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
         ),
-        "clip_sell_to_available": normalize_clip_sell_to_available(
-            getattr(account, "executor_clip_sell_to_available", None),
-            normalize_clip_sell_to_available(
-                fallback.get("clip_sell_to_available"),
-                DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
-            ),
-        ),
+        "clip_sell_to_available": True,
         "price_level_sequence": account_sequence,
         "order_timeout_seconds_sequence": account_timeout_sequence,
         "source": "account",
@@ -223,13 +217,6 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
                 policy["order_timeout_seconds"]
             ] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
             policy["source"] = "sub_account"
-        clip_value = getattr(sub_account, "executor_clip_sell_to_available", None)
-        if clip_value is not None:
-            policy["clip_sell_to_available"] = normalize_clip_sell_to_available(
-                clip_value,
-                policy["clip_sell_to_available"],
-            )
-            policy["source"] = "sub_account"
     return policy
 
 
@@ -258,10 +245,7 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
                 fallback.get("max_slippage_pct"),
                 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
             ),
-            "clip_sell_to_available": normalize_clip_sell_to_available(
-                fallback.get("clip_sell_to_available"),
-                DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
-            ),
+            "clip_sell_to_available": True,
             "price_level_sequence": sequence,
             "order_timeout_seconds_sequence": timeout_sequence,
             "source": "fallback",
@@ -288,16 +272,7 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         "order_timeout_seconds": timeout_sequence[0],
         "max_replace_count": min(normalize_max_replace_count(item.get("max_replace_count")) for item in policies),
         "max_slippage_pct": min(normalize_max_slippage_pct(item.get("max_slippage_pct")) for item in policies),
-        "clip_sell_to_available": any(
-            normalize_clip_sell_to_available(
-                item.get("clip_sell_to_available"),
-                normalize_clip_sell_to_available(
-                    fallback.get("clip_sell_to_available"),
-                    DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
-                ),
-            )
-            for item in policies
-        ),
+        "clip_sell_to_available": True,
         "price_level_sequence": normalize_price_level_sequence(base_sequence),
         "order_timeout_seconds_sequence": timeout_sequence,
         "source": "aggregated",

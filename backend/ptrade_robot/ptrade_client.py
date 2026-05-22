@@ -1165,13 +1165,7 @@ def get_position_quantities(client_symbol, api_symbol):
 
 
 def apply_sell_quantity_clip(order_request, client_symbol, api_symbol, side, quantity):
-    clip_enabled = bool_value(
-        order_request.get(
-            "clip_sell_to_available",
-            order_request.get("clip_sell_quantity_to_available", False),
-        ),
-        False,
-    )
+    clip_enabled = side == "SELL"
     meta = {
         "requested_quantity": quantity,
         "submitted_quantity": quantity,
@@ -1212,7 +1206,7 @@ def order_clip_fields(order_request, quantity):
         "requested_quantity": requested_quantity,
         "submitted_quantity": submitted_quantity,
         "quantity_clipped": quantity_clipped,
-        "clip_sell_to_available": bool_value(order_request.get("clip_sell_to_available"), False),
+        "clip_sell_to_available": bool_value(order_request.get("clip_sell_to_available"), True),
         "sellable_quantity": order_request.get("_sellable_quantity"),
         "position_quantity": order_request.get("_position_quantity"),
         "block_reason": order_request.get("_block_reason"),

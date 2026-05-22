@@ -538,7 +538,7 @@ def serialize_sub_account(sub_account: Optional[ExternalTradingSubAccount]) -> O
         "executor_order_timeout_seconds": sub_account.executor_order_timeout_seconds,
         "executor_max_replace_count": sub_account.executor_max_replace_count,
         "executor_max_slippage_pct": sub_account.executor_max_slippage_pct,
-        "executor_clip_sell_to_available": sub_account.executor_clip_sell_to_available,
+        "executor_clip_sell_to_available": True,
         "executor_price_level_sequence": sub_account.executor_price_level_sequence,
         "executor_order_timeout_seconds_sequence": getattr(sub_account, "executor_order_timeout_seconds_sequence", None),
         "remark": sub_account.remark,
