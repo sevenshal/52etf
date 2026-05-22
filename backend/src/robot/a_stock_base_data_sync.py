@@ -34,7 +34,6 @@ from .a_stock_base_data_config import (
     A_STOCK_FEAR_SAFE_HAVEN_INDEXES,
     A_STOCK_FACTOR_INDEX_POOLS,
     A_STOCK_ETF_DAILY_NAMES,
-    A_STOCK_ETF_DAILY_SYMBOLS,
     A_STOCK_INDEX_FEAR_GREED_TARGETS,
     BENCHMARK_INDEXES,
     CHINABOND_CREDIT_CURVES,
@@ -293,6 +292,8 @@ class AStockBaseDataSyncService:
         self.chinabond = ChinaBondYieldCurveService()
         self.progress_callback = progress_callback
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._listed_etf_basic_frame: Optional[pd.DataFrame] = None
+        self._listed_etf_symbols: Optional[List[str]] = None
 
     def close(self):
         if self._owns_analytics_db:
@@ -307,6 +308,33 @@ class AStockBaseDataSyncService:
         self.logger.info("%s (%s%%)", message, payload["progress"])
         if self.progress_callback:
             self.progress_callback(payload)
+
+    def _load_listed_etf_basic_frame(self) -> pd.DataFrame:
+        if self._listed_etf_basic_frame is None:
+            frame = self.tushare.get_a_stock_etf_basic_frame(list_status="L")
+            if not isinstance(frame, pd.DataFrame) or frame.empty or "ts_code" not in frame.columns:
+                raise RuntimeError("Tushare etf_basic(list_status='L') returned no ETF basic rows")
+            result = frame.copy()
+            result["ts_code"] = result["ts_code"].astype("string").str.strip().str.upper()
+            result = result[result["ts_code"].str.contains(r"\.(?:SH|SZ)$", na=False, regex=True)]
+            if "list_status" in result.columns:
+                result = result[result["list_status"].astype("string").str.upper().fillna("L") == "L"]
+            result = result.drop_duplicates(subset=["ts_code"], keep="last")
+            if result.empty:
+                raise RuntimeError("Tushare etf_basic(list_status='L') returned no listed SH/SZ ETF symbols")
+            self._listed_etf_basic_frame = result
+        return self._listed_etf_basic_frame.copy()
+
+    def _load_listed_etf_symbols(self) -> List[str]:
+        if self._listed_etf_symbols is None:
+            frame = self._load_listed_etf_basic_frame()
+            symbols = [
+                str(symbol or "").strip().upper()
+                for symbol in frame["ts_code"].dropna().tolist()
+                if str(symbol or "").strip()
+            ]
+            self._listed_etf_symbols = list(dict.fromkeys(symbols))
+        return list(self._listed_etf_symbols)
 
     def sync_reference_data(self, start_date: date, end_date: date):
         self._progress("同步A股基础信息", 2)
@@ -374,8 +402,8 @@ class AStockBaseDataSyncService:
         self._replace_analytics_table(AStockBasic, mappings)
 
     def sync_fund_basic(self) -> int:
-        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
-        frame = self.tushare.get_a_stock_fund_basic_frame(symbols)
+        frame = self._load_listed_etf_basic_frame()
+        symbols = self._load_listed_etf_symbols()
         return self._upsert_fund_basic(frame, symbols)
 
     def _upsert_fund_basic(self, frame: pd.DataFrame, symbols: List[str]) -> int:
@@ -388,8 +416,13 @@ class AStockBaseDataSyncService:
                     continue
                 mappings_by_symbol[ts_code] = {
                     "ts_code": ts_code,
-                    "name": _clean_text(row.get("name")) or A_STOCK_ETF_DAILY_NAMES.get(ts_code),
-                    "market": _clean_text(row.get("market")),
+                    "name": (
+                        _clean_text(row.get("extname"))
+                        or _clean_text(row.get("csname"))
+                        or _clean_text(row.get("name"))
+                        or A_STOCK_ETF_DAILY_NAMES.get(ts_code)
+                    ),
+                    "market": _clean_text(row.get("exchange")) or _clean_text(row.get("market")),
                     "list_date": _parse_date(row.get("list_date")),
                     "updated_at": now,
                 }
@@ -993,7 +1026,7 @@ class AStockBaseDataSyncService:
     ) -> Dict:
         end_value = _parse_date(end_date)
         default_start = _parse_date(start_date)
-        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
+        symbols = self._load_listed_etf_symbols()
         if not default_start or not end_value or default_start > end_value or not symbols:
             return {"symbol_count": len(symbols), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
 
@@ -1092,7 +1125,7 @@ class AStockBaseDataSyncService:
     ) -> Dict:
         end_value = _parse_date(end_date)
         default_start = _parse_date(start_date)
-        symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol))
+        symbols = self._load_listed_etf_symbols()
         if not default_start or not end_value or default_start > end_value or not symbols:
             return {"symbol_count": len(symbols), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
 
@@ -1988,7 +2021,7 @@ class AStockBaseDataSyncService:
             qfq_view="a_stock_fund_daily_qfq",
             start_date=_parse_date(fund_daily_result.get("start_date")) or fund_display_start,
             end_date=end_value,
-            symbols=list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS if symbol)),
+            symbols=self._load_listed_etf_symbols(),
         )
         self.analytics_db.commit()
 

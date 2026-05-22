@@ -93,6 +93,7 @@ class TushareService(QuoteProvider):
         self.pro = ts.pro_api(self.token)
         self._stock_basic_frame: Optional[pd.DataFrame] = None
         self._fund_basic_frame: Optional[pd.DataFrame] = None
+        self._etf_basic_frames: Dict[str, pd.DataFrame] = {}
         self._daily_basic_frame: Optional[pd.DataFrame] = None
         self._fund_share_frame: Optional[pd.DataFrame] = None
         self._fina_indicator_cache: Dict[str, Dict] = {}
@@ -1039,6 +1040,24 @@ class TushareService(QuoteProvider):
         if requested_symbols and "ts_code" in result.columns:
             result = result[result["ts_code"].astype("string").str.upper().isin(requested_symbols)]
         return result
+
+    def get_a_stock_etf_basic_frame(self, list_status: str = "L") -> pd.DataFrame:
+        """获取A股ETF基础信息。"""
+        status = (list_status or "L").strip().upper()
+        if status not in self._etf_basic_frames:
+            try:
+                frame = self.pro.etf_basic(
+                    list_status=status,
+                    fields=(
+                        "ts_code,csname,extname,index_code,index_name,"
+                        "exchange,etf_type,list_date,list_status"
+                    ),
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare etf_basic fetch failed for list_status=%s: %s", status, exc)
+                frame = pd.DataFrame()
+            self._etf_basic_frames[status] = frame
+        return self._etf_basic_frames[status]
 
     def _load_daily_basic_frame(self) -> pd.DataFrame:
         if self._daily_basic_frame is None:

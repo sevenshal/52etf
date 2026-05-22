@@ -45,6 +45,7 @@ from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
 )
+from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
 from .account import valid_account
 
 router = APIRouter(prefix="/api/snowball")
@@ -1339,6 +1340,8 @@ async def get_snapshot(
     ledger_cash = safe_float(valuation.get("cash_available"))
     ledger_market_value = safe_float(valuation.get("position_market_value"))
     ledger_net_asset = safe_float(valuation.get("net_asset"))
+    all_trade_symbols = set(target_weights.keys()) | set(ledger_positions.keys()) | set(target_position_map.keys())
+    symbol_name_map = load_symbol_name_map(all_trade_symbols, db)
 
     def get_quote_info(trade_symbol: str) -> Dict[str, Any]:
         xq_symbol = _to_xueqiu_symbol(trade_symbol)
@@ -1348,15 +1351,19 @@ async def get_snapshot(
         price = safe_float(quote.get("price"), safe_float(ledger_value.get("price")))
         if price <= 0 and row:
             price = safe_float(row.market_price, safe_float(row.avg_cost))
+        normalized_symbol = normalize_symbol_for_name(trade_symbol)
+        symbol_name = symbol_name_map.get(normalized_symbol or "")
         return {
             "xueqiu_symbol": xq_symbol,
-            "name": quote.get("name") or target_weights.get(trade_symbol, {}).get("name") or "",
+            "name": quote.get("name")
+            or target_weights.get(trade_symbol, {}).get("name")
+            or symbol_name
+            or "",
             "price": price,
         }
 
     detailed_holdings = []
     target_market_value = 0.0
-    all_trade_symbols = set(target_weights.keys()) | set(ledger_positions.keys()) | set(target_position_map.keys())
     for trade_symbol in sorted(all_trade_symbols):
         quote_info = get_quote_info(trade_symbol)
         price = quote_info["price"]

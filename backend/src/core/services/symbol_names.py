@@ -26,6 +26,13 @@ def normalize_symbol_for_name(symbol: Any) -> Optional[str]:
     text = str(symbol or "").strip().upper()
     if not text:
         return None
+    if (
+        "." not in text
+        and len(text) == 8
+        and text[:2] in {"SH", "SZ", "BJ"}
+        and text[2:].isdigit()
+    ):
+        return f"{text[2:]}.{text[:2]}"
     if "." not in text and len(text) == 6 and text.isdigit():
         if text.startswith(("60", "68", "51", "52", "56", "58", "50", "11")):
             return f"{text}.SH"
@@ -36,10 +43,11 @@ def normalize_symbol_for_name(symbol: Any) -> Optional[str]:
     parts = text.split(".")
     if len(parts) == 2:
         first, second = parts
-        if first in {"SH", "SS", "SZ", "BJ"}:
-            market = "SH" if first in {"SH", "SS"} else first
+        market_aliases = {"SS": "SH", "XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}
+        if first in {"SH", "SS", "XSHG", "SZ", "XSHE", "BJ", "XBSE"}:
+            market = market_aliases.get(first, first)
             return f"{second}.{market}"
-        market = "SH" if second in {"SH", "SS"} else second
+        market = market_aliases.get(second, second)
         return f"{first}.{market}"
     return normalize_us_equity_symbol(text) or text
 

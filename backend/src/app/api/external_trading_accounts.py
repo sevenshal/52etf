@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field, root_validator, validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as OrmSession
 
-from ...core.analytics_database import AStockBasic, AStockFundBasic, get_analytics_db_ctx
 from ...core.database import (
     FactorLiveTradingConfig,
     SnowballCopyConfig,
@@ -92,7 +91,7 @@ from ...core.services.external_trading_crypto import (
     ExternalTradingCryptoError,
     verify_handshake_signature,
 )
-from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES
+from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
 from .account import is_valid_account, valid_account
 
 router = APIRouter(prefix="/api/external-trading-accounts", tags=["external-trading-accounts"])
@@ -676,36 +675,10 @@ def _get_account_target_quantities(db: OrmSession, external_account_id: int, acc
     return targets
 
 
-def _stock_symbol_candidates(symbol: Any) -> List[str]:
-    normalized = normalize_symbol(symbol)
-    if not normalized:
-        return []
-    candidates = [normalized]
-    parts = normalized.split(".")
-    if len(parts) == 2:
-        code, market = parts
-        candidates.append(code)
-        candidates.append(f"{market}.{code}")
-        if market == "SH":
-            candidates.extend([f"{code}.SS", f"SS.{code}", f"{code}.XSHG", f"XSHG.{code}"])
-        elif market == "SZ":
-            candidates.extend([f"{code}.XSHE", f"XSHE.{code}"])
-        elif market == "BJ":
-            candidates.extend([f"{code}.XBSE", f"XBSE.{code}"])
-    result = []
-    seen = set()
-    for candidate in candidates:
-        key = str(candidate).strip().upper()
-        if key and key not in seen:
-            seen.add(key)
-            result.append(key)
-    return result
-
-
 def _collect_symbol_fields(value: Any, symbols: set) -> None:
     if isinstance(value, dict):
         for key in ("symbol", "client_symbol"):
-            symbol = normalize_symbol(value.get(key))
+            symbol = normalize_symbol_for_name(value.get(key))
             if symbol:
                 symbols.add(symbol)
         for item in value.values():
@@ -716,80 +689,18 @@ def _collect_symbol_fields(value: Any, symbols: set) -> None:
             _collect_symbol_fields(item, symbols)
 
 
-def _remember_symbol_name(name_by_key: Dict[str, str], symbol: Any, name: Any, *, overwrite: bool = False) -> None:
-    text = str(name or "").strip()
-    if not text:
-        return
-    for key in _stock_symbol_candidates(symbol):
-        if overwrite or key not in name_by_key:
-            name_by_key[key] = text
-
-
 def _load_a_stock_name_map(symbols: set) -> Dict[str, str]:
-    normalized_symbols = sorted({normalize_symbol(symbol) for symbol in symbols if normalize_symbol(symbol)})
-    if not normalized_symbols:
-        return {}
-
-    candidates = set()
-    codes = set()
-    for symbol in normalized_symbols:
-        symbol_candidates = _stock_symbol_candidates(symbol)
-        candidates.update(symbol_candidates)
-        parts = symbol.split(".")
-        if parts:
-            codes.add(parts[0])
-
-    name_by_key: Dict[str, str] = {}
-
-    try:
-        with get_analytics_db_ctx() as analytics_db:
-            try:
-                rows = (
-                    analytics_db.query(AStockBasic.ts_code, AStockBasic.symbol, AStockBasic.name)
-                    .filter(
-                        or_(
-                            AStockBasic.ts_code.in_(sorted(candidates)),
-                            AStockBasic.symbol.in_(sorted(codes)),
-                        )
-                    )
-                    .all()
-                )
-                for ts_code, raw_code, name in rows:
-                    _remember_symbol_name(name_by_key, ts_code, name, overwrite=True)
-                    if raw_code:
-                        _remember_symbol_name(name_by_key, raw_code, name, overwrite=True)
-            except Exception:
-                logger.exception("Failed to load A stock names from a_stock_basic")
-
-            try:
-                fund_rows = (
-                    analytics_db.query(AStockFundBasic.ts_code, AStockFundBasic.name)
-                    .filter(AStockFundBasic.ts_code.in_(sorted(candidates)))
-                    .all()
-                )
-                for ts_code, name in fund_rows:
-                    _remember_symbol_name(name_by_key, ts_code, name, overwrite=True)
-            except Exception:
-                logger.exception("Failed to load A stock ETF names from a_stock_fund_basic")
-    except Exception:
-        logger.exception("Failed to open analytics database for symbol names")
-
-    for symbol, name in A_STOCK_ETF_DAILY_NAMES.items():
-        _remember_symbol_name(name_by_key, symbol, name)
-
-    result = {}
-    for symbol in normalized_symbols:
-        for key in _stock_symbol_candidates(symbol):
-            name = name_by_key.get(key)
-            if name:
-                result[symbol] = name
-                break
-    return result
+    normalized_symbols = sorted({
+        normalized
+        for normalized in (normalize_symbol_for_name(symbol) for symbol in symbols)
+        if normalized
+    })
+    return load_symbol_name_map(normalized_symbols)
 
 
 def _attach_symbol_names(value: Any, stock_name_by_symbol: Dict[str, str]) -> None:
     if isinstance(value, dict):
-        symbol = normalize_symbol(value.get("symbol") or value.get("client_symbol"))
+        symbol = normalize_symbol_for_name(value.get("symbol") or value.get("client_symbol"))
         if symbol:
             symbol_name = stock_name_by_symbol.get(symbol)
             if symbol_name:
