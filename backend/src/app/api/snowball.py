@@ -715,6 +715,7 @@ def _load_snowball_external_sync_items(
                 if xq_symbol:
                     current_targets[xq_symbol] = {
                         "target_quantity": safe_int(row.target_quantity),
+                        "target_weight_pct": safe_float(row.target_weight_pct, None),
                         "target_value": safe_float(row.target_value),
                         "signal_version": row.signal_version,
                         "reference_price": safe_float(row.reference_price, None),
@@ -822,24 +823,35 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
         if not trade_symbol:
             continue
         old_target = current_targets.get(xq_symbol) or {}
+        has_old_target = xq_symbol in current_targets
         old_quantity = safe_int(old_target.get("target_quantity"))
+        old_weight = safe_float(old_target.get("target_weight_pct"), None)
         weight = safe_float(target_weights.get(xq_symbol))
         price = safe_float(quotes.get(xq_symbol))
-        target_value = base_value * (weight / 100.0)
+        latest_target_value = base_value * (weight / 100.0)
         final_quantity = old_quantity
+        accepted_weight = old_weight if old_weight is not None else weight
 
         if weight <= 0:
             final_quantity = 0
+            accepted_weight = 0.0
+            if old_quantity != 0 or safe_float(old_weight) != 0:
+                changed = True
         elif price <= 0:
             skipped.append({"symbol": trade_symbol, "message": "缺少雪球行情价格，保留原目标仓位"})
+            if not has_old_target:
+                continue
+            accepted_weight = old_weight if old_weight is not None else 0.0
         else:
-            current_value = old_quantity * price
-            diff_pct = (abs(target_value - current_value) / base_value) * 100 if base_value > 0 else 100
-            if diff_pct >= threshold_pct:
-                final_quantity = int((target_value / price) / 100) * 100
+            weight_diff_pct = abs(weight - old_weight) if old_weight is not None else threshold_pct
+            should_recalculate = (not has_old_target) or old_weight is None or weight_diff_pct >= threshold_pct
+            if should_recalculate:
+                final_quantity = int((latest_target_value / price) / 100) * 100
+                accepted_weight = weight
+                if old_quantity != final_quantity or old_weight is None or abs(weight - old_weight) > 1e-9:
+                    changed = True
 
-        if old_quantity != final_quantity:
-            changed = True
+        target_value = base_value * (accepted_weight / 100.0)
 
         reference_price = _snowball_reference_price(
             xq_symbol=xq_symbol,
@@ -856,19 +868,13 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
         target_rows.append({
             "symbol": trade_symbol,
             "target_quantity": final_quantity,
-            "target_weight_pct": weight,
+            "target_weight_pct": accepted_weight,
             "target_value": round(row_target_value, 2),
             "reference_price": reference_price,
             "reference_price_source": reference_price_source,
         })
 
     signal_version = _build_snowball_target_signal_version(item, target_rows)
-    old_versions = {
-        data.get("signal_version")
-        for data in current_targets.values()
-        if data.get("signal_version")
-    }
-    changed = changed or (bool(target_rows) and signal_version not in old_versions)
 
     with get_db_ctx() as db, get_external_trading_db_ctx() as trading_db:
         config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == item["id"]).first()
@@ -895,7 +901,7 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
             f"{trigger_source}: 同步目标仓位 {len(target_rows)} 个"
             + (f"，跳过 {len(skipped)} 个缺价标的" if skipped else "")
         )[:500]
-        if changed or trigger_source in {"manual", "notification"}:
+        if changed:
             db.add(SnowballCopyLog(
                 cli_id=config.cli_id,
                 combination_id=config.combination_id,
