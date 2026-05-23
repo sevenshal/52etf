@@ -1,12 +1,13 @@
 import logging
 import os
+import re
 import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from heapq import heappush, heapreplace
 from itertools import product
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -14,44 +15,139 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError, validator
 
 from ...core.database import ETFFearGreedCloneHistory, Session
+from ...core.services.factor_backtest_engine import load_price_frame
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
+from ...robot.a_stock_base_data_config import (
+    A_STOCK_ETF_DAILY_NAMES,
+    A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
+    A_STOCK_INDEX_FEAR_GREED_TARGETS,
+)
 from ...robot.cnn_fear_index import CNN_HISTORY_SYMBOL
 from .account import valid_account
 
-router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["SOXL Fear Backtest"])
+router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["Fear Volume Backtest"])
 logger = logging.getLogger(__name__)
 SEARCH_JOBS: Dict[str, Dict] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="soxl-fear-search")
 SEARCH_EVAL_MAX_WORKERS = min(8, max(2, (os.cpu_count() or 4) // 2))
+SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
+SIGNAL_LOOKBACK_DAYS = 90
+A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
+A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH",)
+
+US_TARGET_OPTIONS = [
+    {"label": "SOXL.US", "value": "SOXL.US", "market": "us"},
+    {"label": "TQQQ.US", "value": "TQQQ.US", "market": "us"},
+    {"label": "UPRO.US", "value": "UPRO.US", "market": "us"},
+    {"label": "SOXX.US", "value": "SOXX.US", "market": "us"},
+    {"label": "QQQ.US", "value": "QQQ.US", "market": "us"},
+    {"label": "SPY.US", "value": "SPY.US", "market": "us"},
+]
+
+
+def _normalize_symbol(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
+def _fear_source_key_for_symbol(symbol: str) -> str:
+    normalized = _normalize_symbol(symbol)
+    return "a_stock_" + re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")
+
+
+def _a_stock_fear_label(target: Dict[str, Any]) -> str:
+    return f"{target.get('ticker') or target.get('label') or target['symbol']} 指数贪恐"
+
+
+def _build_a_stock_fear_sources() -> Dict[str, Dict[str, Any]]:
+    inno100_target = {
+        "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
+        "ticker": "A创100",
+        "label": "A创100",
+    }
+    sources: Dict[str, Dict[str, Any]] = {}
+    for target in [inno100_target, *A_STOCK_INDEX_FEAR_GREED_TARGETS]:
+        symbol = _normalize_symbol(target["symbol"])
+        sources[_fear_source_key_for_symbol(symbol)] = {
+            "label": _a_stock_fear_label(target),
+            "column": "etf_fear_greed",
+            "symbol": symbol,
+            "market": "a_stock",
+        }
+    return sources
+
+
+def _build_a_stock_target_options() -> List[Dict[str, Any]]:
+    options = []
+    for symbol in [*A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS, *A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS]:
+        normalized = _normalize_symbol(symbol)
+        name = A_STOCK_ETF_DAILY_NAMES.get(normalized, normalized)
+        options.append({
+            "label": f"{name} {normalized}",
+            "value": normalized,
+            "market": "a_stock",
+        })
+    return options
+
+
+def _build_a_stock_preset_pairs() -> List[Dict[str, Any]]:
+    pairs = []
+    for target, etf_symbol in zip(A_STOCK_INDEX_FEAR_GREED_TARGETS, A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS):
+        fear_symbol = _normalize_symbol(target["symbol"])
+        target_symbol = _normalize_symbol(etf_symbol)
+        target_label = f"{A_STOCK_ETF_DAILY_NAMES.get(target_symbol, target_symbol)} {target_symbol}"
+        fear_label = _a_stock_fear_label(target)
+        pairs.append({
+            "key": f"{target_symbol}:{fear_symbol}",
+            "target_symbol": target_symbol,
+            "target_label": target_label,
+            "fear_source": _fear_source_key_for_symbol(fear_symbol),
+            "fear_symbol": fear_symbol,
+            "fear_label": fear_label,
+            "label": f"{target_label} × {fear_label}",
+        })
+    return pairs
+
+
+A_STOCK_FEAR_SOURCE_OPTIONS = _build_a_stock_fear_sources()
+A_STOCK_TARGET_OPTIONS = _build_a_stock_target_options()
+A_STOCK_PRESET_PAIRS = _build_a_stock_preset_pairs()
 
 FEAR_SOURCE_OPTIONS = {
     "cnn": {
         "label": "CNN贪恐",
         "column": "cnn_fear_greed",
+        "market": "us",
     },
     "soxx_clone": {
         "label": "SOXX 半导体自算贪恐",
         "column": "etf_fear_greed",
         "symbol": "SOXX.US",
+        "market": "us",
     },
     "spy_clone": {
         "label": "SPY 标普500自算贪恐",
         "column": "etf_fear_greed",
         "symbol": "SPY.US",
+        "market": "us",
     },
     "qqq_clone": {
         "label": "QQQ 纳指100自算贪恐",
         "column": "etf_fear_greed",
         "symbol": "QQQ.US",
+        "market": "us",
     },
     "dia_clone": {
         "label": "DIA 道琼斯自算贪恐",
         "column": "etf_fear_greed",
         "symbol": "DIA.US",
+        "market": "us",
     },
+    **A_STOCK_FEAR_SOURCE_OPTIONS,
 }
+
+TARGET_OPTIONS = [*US_TARGET_OPTIONS, *A_STOCK_TARGET_OPTIONS]
 
 
 class SOXLFearStrategyParams(BaseModel):
@@ -112,6 +208,7 @@ class SOXLFearStrategyParams(BaseModel):
 
 class SOXLFearSearchParams(BaseModel):
     symbol: str = "SOXL.US"
+    volume_signal_symbol: Optional[str] = None
     fear_source_values: List[str] = Field(default_factory=lambda: ["cnn"])
     initial_capital: float = 100000.0
     start_date: str = "2021-01-01"
@@ -131,6 +228,22 @@ class SOXLFearSearchParams(BaseModel):
     sell_price_above_avg_cost_values: List[bool] = Field(default_factory=lambda: [True, False])
     max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [1, 2, 3])
     min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [5.0, 10.0, 15.0])
+
+    @validator("symbol")
+    def validate_symbol(cls, value):
+        symbol = _normalize_symbol(value)
+        if not symbol or not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("symbol 格式不正确")
+        return symbol
+
+    @validator("volume_signal_symbol")
+    def validate_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("volume_signal_symbol 格式不正确")
+        return symbol
 
     @validator("top_n")
     def validate_top_n(cls, value):
@@ -235,6 +348,20 @@ def _describe_df_range(df: pd.DataFrame, date_col: str = "date") -> str:
     return f"{len(df)} rows, {df.iloc[0][date_col]} ~ {df.iloc[-1][date_col]}"
 
 
+def _symbol_label(symbol: str) -> str:
+    normalized = _normalize_symbol(symbol)
+    option = next((item for item in TARGET_OPTIONS if _normalize_symbol(item.get("value")) == normalized), None)
+    if option:
+        return str(option.get("label") or normalized)
+    return f"{A_STOCK_ETF_DAILY_NAMES.get(normalized, normalized)} {normalized}" if not normalized.endswith(".US") else normalized
+
+
+def _normalize_price_dates(df: pd.DataFrame) -> pd.DataFrame:
+    frame = df.copy()
+    frame["date"] = pd.to_datetime(frame["date"]).dt.date
+    return frame.sort_values("date").reset_index(drop=True)
+
+
 def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
     db = Session()
     try:
@@ -271,7 +398,7 @@ def _fetch_etf_clone_history(fear_source: str, start_date: date, end_date: date)
     source_config = FEAR_SOURCE_OPTIONS[fear_source]
     symbol = source_config.get("symbol")
     if not symbol:
-        raise ValueError(f"{source_config['label']} 未配置 ETF 标的")
+        raise ValueError(f"{source_config['label']} 未配置贪恐标的")
 
     db = Session()
     try:
@@ -332,7 +459,42 @@ def _fetch_fear_history(
     }
 
 
+def _fetch_local_price_history(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
+    frame = load_price_frame([symbol], start_date, end_date)
+    records = frame.to_dicts() if frame is not None and not frame.is_empty() else []
+    if not records:
+        raise ValueError(f"{symbol} 在本地分析库指定区间内没有行情数据，请先执行对应基础数据同步")
+
+    rows = []
+    for item in records:
+        trade_date = item.get("trade_date")
+        close_value = _safe_float(item.get("close"))
+        if close_value is None or close_value <= 0:
+            continue
+        open_value = _safe_float(item.get("open")) or close_value
+        high_value = _safe_float(item.get("high")) or max(open_value, close_value)
+        low_value = _safe_float(item.get("low")) or min(open_value, close_value)
+        rows.append({
+            "date": trade_date,
+            "open": open_value,
+            "high": high_value,
+            "low": low_value,
+            "close": close_value,
+            "volume": _safe_float(item.get("volume")) or 0.0,
+            "turnover": _safe_float(item.get("turnover")) or 0.0,
+        })
+
+    df = pd.DataFrame(rows).sort_values("date") if rows else pd.DataFrame()
+    if df.empty:
+        raise ValueError(f"{symbol} 在本地分析库指定区间内没有可用行情")
+    return _normalize_price_dates(df)
+
+
 def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
+    symbol = _normalize_symbol(symbol)
+    if not symbol.endswith(".US"):
+        return _fetch_local_price_history(symbol, start_date, end_date)
+
     quote_service = QuoteService(LongPortService.get_instance())
     klines = quote_service.get_klines(
         symbol=symbol,
@@ -356,7 +518,17 @@ def _fetch_price_history(symbol: str, start_date: date, end_date: date) -> pd.Da
     ]).sort_values("date")
     if df.empty:
         raise ValueError(f"{symbol} 在指定区间内没有可用 K 线")
-    return df
+    return _normalize_price_dates(df)
+
+
+def _fetch_signal_price_history(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
+    symbol = _normalize_symbol(symbol)
+    try:
+        return _fetch_local_price_history(symbol, start_date, end_date)
+    except ValueError:
+        if symbol.endswith(".US"):
+            return _fetch_price_history(symbol, start_date, end_date)
+        raise
 
 
 def _prepare_base_dataframe(
@@ -364,27 +536,77 @@ def _prepare_base_dataframe(
     start_date: date,
     end_date: date,
     fear_source: str = "cnn",
+    volume_signal_symbol: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
-    price_df = _fetch_price_history(symbol, start_date, end_date)
-    fear_df, fear_meta = _fetch_fear_history(fear_source, start_date, end_date)
+    symbol = _normalize_symbol(symbol)
+    signal_symbol = _normalize_symbol(volume_signal_symbol or symbol)
+    lookback_start_date = start_date - timedelta(days=SIGNAL_LOOKBACK_DAYS)
+    price_df = _fetch_price_history(symbol, lookback_start_date, end_date)
+    fear_df, fear_meta = _fetch_fear_history(fear_source, lookback_start_date, end_date)
 
-    merged_df = price_df.merge(fear_df, on="date", how="left")
-    merged_df = merged_df.sort_values("date").reset_index(drop=True)
-    merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce").ffill()
-    merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
-    merged_df["ma20"] = merged_df["close"].rolling(20).mean()
-    merged_df["volume_ma20"] = merged_df["volume"].shift(1).rolling(20).mean()
-    merged_df["volume_ratio"] = np.where(
-        merged_df["volume_ma20"] > 0,
-        merged_df["volume"] / merged_df["volume_ma20"],
+    price_df = _normalize_price_dates(price_df)
+    price_df["ma20"] = pd.to_numeric(price_df["close"], errors="coerce").rolling(20).mean()
+    price_df["date_ts"] = pd.to_datetime(price_df["date"])
+
+    if signal_symbol == symbol:
+        signal_price_df = price_df[["date", "volume"]].copy()
+    else:
+        signal_price_df = _fetch_signal_price_history(signal_symbol, lookback_start_date, end_date)[["date", "volume"]].copy()
+    signal_price_df = _normalize_price_dates(signal_price_df)
+    signal_price_df["signal_volume"] = pd.to_numeric(signal_price_df["volume"], errors="coerce")
+    signal_price_df["volume_ma20"] = signal_price_df["signal_volume"].shift(1).rolling(20).mean()
+    signal_price_df["volume_ratio"] = np.where(
+        signal_price_df["volume_ma20"] > 0,
+        signal_price_df["signal_volume"] / signal_price_df["volume_ma20"],
         np.nan,
     )
-    base_df = merged_df.dropna(subset=["fear_greed", "ma20", "volume_ma20"]).reset_index(drop=True)
+    signal_price_df["signal_date"] = signal_price_df["date"]
+    signal_price_df["date_ts"] = pd.to_datetime(signal_price_df["date"])
+
+    fear_df = fear_df.copy()
+    fear_df["fear_date"] = fear_df["date"]
+    fear_df["date_ts"] = pd.to_datetime(fear_df["date"])
+    fear_df = fear_df.sort_values("date_ts")
+    signal_df = pd.merge_asof(
+        signal_price_df.sort_values("date_ts"),
+        fear_df[["date_ts", "fear_greed", "fear_date"]].sort_values("date_ts"),
+        on="date_ts",
+        direction="backward",
+    )
+    signal_df["fear_greed"] = pd.to_numeric(signal_df["fear_greed"], errors="coerce")
+    signal_df = signal_df.dropna(subset=["fear_greed", "volume_ma20", "volume_ratio", "signal_volume"])
+    signal_df = signal_df[[
+        "date_ts",
+        "signal_date",
+        "fear_date",
+        "fear_greed",
+        "signal_volume",
+        "volume_ma20",
+        "volume_ratio",
+    ]].rename(columns={"date_ts": "signal_ts"})
+
+    merged_df = pd.merge_asof(
+        price_df.sort_values("date_ts"),
+        signal_df.sort_values("signal_ts"),
+        left_on="date_ts",
+        right_on="signal_ts",
+        direction="backward",
+        allow_exact_matches=False,
+    )
+    merged_df = merged_df[merged_df["date"] >= start_date].sort_values("date").reset_index(drop=True)
+    merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce")
+    merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
+    merged_df["execution_price"] = pd.to_numeric(merged_df["open"], errors="coerce")
+    base_df = merged_df.dropna(
+        subset=["fear_greed", "ma20", "volume_ma20", "volume_ratio", "execution_price", "signal_date"]
+    ).reset_index(drop=True)
 
     if base_df.empty:
         diagnostics = (
             f"price={_describe_df_range(price_df)}; "
             f"fear={_describe_df_range(fear_df)}; "
+            f"signal_price={_describe_df_range(signal_price_df)}; "
+            f"signal={_describe_df_range(signal_df, 'signal_date')}; "
             f"merged={_describe_df_range(merged_df)}; "
             f"merged_non_null_fear={int(merged_df['fear_greed'].notna().sum()) if 'fear_greed' in merged_df else 0}; "
             f"merged_non_null_ma20={int(merged_df['ma20'].notna().sum()) if 'ma20' in merged_df else 0}; "
@@ -408,9 +630,18 @@ def _prepare_base_dataframe(
         "fear_source": fear_meta["fear_source"],
         "fear_source_label": fear_meta["fear_source_label"],
         "price_points": int(len(price_df)),
+        "volume_signal_symbol": signal_symbol,
+        "volume_signal_label": _symbol_label(signal_symbol),
+        "volume_signal_points": int(len(signal_price_df)),
+        "execution_price_type": "next_open",
+        "execution_price_label": "当日开盘价",
+        "signal_lag_label": "使用前一可用信号日数据",
     }
     base_df.attrs["fear_source"] = fear_meta["fear_source"]
     base_df.attrs["fear_source_label"] = fear_meta["fear_source_label"]
+    base_df.attrs["volume_signal_symbol"] = signal_symbol
+    base_df.attrs["volume_signal_label"] = _symbol_label(signal_symbol)
+    base_df.attrs["execution_price_label"] = "当日开盘价"
     return base_df, meta
 
 
@@ -419,6 +650,7 @@ def _prepare_search_dataframes(
     start_date: date,
     end_date: date,
     fear_sources: List[str],
+    volume_signal_symbol: Optional[str] = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict], Dict]:
     base_dfs: Dict[str, pd.DataFrame] = {}
     source_metas: Dict[str, Dict] = {}
@@ -430,6 +662,7 @@ def _prepare_search_dataframes(
             start_date,
             end_date,
             fear_source,
+            volume_signal_symbol,
         )
         base_dfs[fear_source] = base_df
         source_metas[fear_source] = meta
@@ -457,6 +690,12 @@ def _prepare_search_dataframes(
         "effective_end_date": max(item["effective_end_date"] for item in meta_items),
         "trading_days": sum(int(item["trading_days"]) for item in summary_meta_items),
         "price_points": max(int(item["price_points"]) for item in meta_items),
+        "volume_signal_symbol": meta_items[0].get("volume_signal_symbol"),
+        "volume_signal_label": meta_items[0].get("volume_signal_label"),
+        "volume_signal_points": max(int(item.get("volume_signal_points") or 0) for item in meta_items),
+        "execution_price_type": meta_items[0].get("execution_price_type"),
+        "execution_price_label": meta_items[0].get("execution_price_label"),
+        "signal_lag_label": meta_items[0].get("signal_lag_label"),
         "cnn_points": sum(int(item.get("cnn_points") or 0) for item in summary_meta_items),
         "fear_points": sum(int(item["fear_points"]) for item in summary_meta_items),
         "fear_sources": fear_sources,
@@ -691,18 +930,28 @@ def _compute_equity_metrics(date_values: List, equity_values: np.ndarray) -> Tup
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
     dates = base_df["date"].tolist()
     date_strings = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
+    open_prices = base_df["open"].to_numpy(dtype=float, copy=False)
+    high_prices = base_df["high"].to_numpy(dtype=float, copy=False)
+    low_prices = base_df["low"].to_numpy(dtype=float, copy=False)
     close_prices = base_df["close"].to_numpy(dtype=float, copy=False)
+    if "execution_price" in base_df.columns:
+        execution_prices = base_df["execution_price"].to_numpy(dtype=float, copy=False)
+    else:
+        execution_prices = close_prices
     volumes = base_df["volume"].to_numpy(dtype=float, copy=False)
     ma20_values = base_df["ma20"].to_numpy(dtype=float, copy=False)
     volume_ma20_values = base_df["volume_ma20"].to_numpy(dtype=float, copy=False)
     volume_ratios = base_df["volume_ratio"].to_numpy(dtype=float, copy=False)
     fear_values = base_df["fear_greed"].to_numpy(dtype=float, copy=False)
+    signal_volumes = (
+        base_df["signal_volume"].to_numpy(dtype=float, copy=False)
+        if "signal_volume" in base_df.columns
+        else volumes
+    )
+    signal_dates = base_df["signal_date"].tolist() if "signal_date" in base_df.columns else dates
+    fear_dates = base_df["fear_date"].tolist() if "fear_date" in base_df.columns else signal_dates
     fear_source_label = str(base_df.attrs.get("fear_source_label") or "贪恐")
-
-    if detailed:
-        open_prices = base_df["open"].to_numpy(dtype=float, copy=False)
-        high_prices = base_df["high"].to_numpy(dtype=float, copy=False)
-        low_prices = base_df["low"].to_numpy(dtype=float, copy=False)
+    execution_price_label = str(base_df.attrs.get("execution_price_label") or "收盘价")
 
     cash = float(initial_capital)
     shares = 0
@@ -718,12 +967,18 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     equity_values = np.empty(len(close_prices), dtype=float)
     benchmark_values = np.empty(len(close_prices), dtype=float)
 
-    benchmark_shares = _floor_share_count(initial_capital / float(close_prices[0])) if float(close_prices[0]) > 0 else 0
-    benchmark_cash = initial_capital - benchmark_shares * float(close_prices[0]) if float(close_prices[0]) > 0 else initial_capital
+    first_execution_price = float(execution_prices[0])
+    benchmark_shares = _floor_share_count(initial_capital / first_execution_price) if first_execution_price > 0 else 0
+    benchmark_cash = initial_capital - benchmark_shares * first_execution_price if first_execution_price > 0 else initial_capital
 
     for index in range(len(close_prices)):
         current_date = date_strings[index]
         close_price = float(close_prices[index])
+        execution_price = float(execution_prices[index])
+        signal_date = signal_dates[index]
+        signal_date_text = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date)
+        fear_date = fear_dates[index]
+        fear_date_text = fear_date.isoformat() if hasattr(fear_date, "isoformat") else str(fear_date)
         fear_score = float(fear_values[index])
         volume_ratio = float(volume_ratios[index])
         can_trade = cooldown_remaining == 0
@@ -738,7 +993,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         if shares > 0:
             if is_greedy:
-                greed_peak_price = max(greed_peak_price or close_price, close_price)
+                greed_peak_price = max(greed_peak_price or execution_price, execution_price)
             else:
                 greed_peak_price = None
                 take_profit_sell_count_in_cycle = 0
@@ -753,14 +1008,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             and greed_peak_price
             and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
         ):
-            drawdown_from_peak = ((greed_peak_price - close_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
-            sell_price_guard_passed = (not params.sell_price_above_avg_cost) or close_price > float(avg_cost)
+            drawdown_from_peak = ((greed_peak_price - execution_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
+            sell_price_guard_passed = (not params.sell_price_above_avg_cost) or execution_price > float(avg_cost)
             if drawdown_from_peak >= params.trailing_stop_pct and sell_price_guard_passed:
-                portfolio_value = cash + shares * close_price
-                current_position_pct = (shares * close_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                portfolio_value = cash + shares * execution_price
+                current_position_pct = (shares * execution_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
                 min_hold_shares = (
-                    portfolio_value * (params.min_position_pct_after_take_profit / 100.0) / close_price
-                    if portfolio_value > 0 and close_price > 0
+                    portfolio_value * (params.min_position_pct_after_take_profit / 100.0) / execution_price
+                    if portfolio_value > 0 and execution_price > 0
                     else 0.0
                 )
                 max_sell_shares = max(0, shares - _floor_share_count(min_hold_shares))
@@ -768,25 +1023,25 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     requested_sell_shares = _floor_share_count(shares * (params.sell_position_pct / 100.0))
                 else:
                     requested_sell_shares = _floor_share_count(
-                        portfolio_value * (params.sell_position_pct / 100.0) / close_price
+                        portfolio_value * (params.sell_position_pct / 100.0) / execution_price
                     )
                 sell_shares = min(shares, requested_sell_shares, max_sell_shares)
 
                 if current_position_pct > params.min_position_pct_after_take_profit and sell_shares >= 1:
-                    sell_amount = sell_shares * close_price
+                    sell_amount = sell_shares * execution_price
                     sell_adjustment_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
                     if sell_adjustment_pct <= params.rebalance_threshold_pct:
                         sell_shares = 0
 
                 if current_position_pct > params.min_position_pct_after_take_profit and sell_shares >= 1:
-                    sell_amount = sell_shares * close_price
+                    sell_amount = sell_shares * execution_price
                     cost_amount = sell_shares * avg_cost
                     profit = sell_amount - cost_amount
-                    profit_pct = ((close_price / avg_cost) - 1) * 100 if avg_cost > 0 else 0.0
+                    profit_pct = ((execution_price / avg_cost) - 1) * 100 if avg_cost > 0 else 0.0
 
                     cash += sell_amount
                     shares -= sell_shares
-                    holdings_value_after = shares * close_price
+                    holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
                     if shares <= 0:
                         shares = 0
@@ -797,7 +1052,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         # Reset the trailing-stop anchor after a partial take-profit.
                         # This avoids repeatedly selling against the same historical peak
                         # without a fresh rebound/new high inside the take-profit regime.
-                        greed_peak_price = close_price
+                        greed_peak_price = execution_price
                         take_profit_sell_count_in_cycle += 1
 
                     cooldown_remaining = params.cooldown_days
@@ -809,7 +1064,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     trades.append({
                         "date": current_date,
                         "action": "SELL",
-                        "price": close_price,
+                        "price": execution_price,
+                        "execution_price": execution_price,
+                        "mark_price": close_price,
+                        "execution_price_label": execution_price_label,
+                        "signal_date": signal_date_text,
+                        "fear_date": fear_date_text,
                         "shares": sell_shares,
                         "amount": sell_amount,
                         "cash_after": cash,
@@ -828,20 +1088,21 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,
+                        "signal_volume": float(signal_volumes[index]),
                     })
 
         if not action_taken and is_fear and volume_ratio >= params.volume_ratio_threshold and can_trade:
-            portfolio_value = cash + shares * close_price
+            portfolio_value = cash + shares * execution_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
             if buy_amount > 0:
-                buy_shares = min(_floor_share_count(buy_amount / close_price), _floor_share_count(cash / close_price))
+                buy_shares = min(_floor_share_count(buy_amount / execution_price), _floor_share_count(cash / execution_price))
                 if buy_shares >= 1:
-                    actual_buy_amount = buy_shares * close_price
+                    actual_buy_amount = buy_shares * execution_price
                     buy_adjustment_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
                     if buy_adjustment_pct <= params.rebalance_threshold_pct:
                         buy_shares = 0
                 if buy_shares >= 1:
-                    actual_buy_amount = buy_shares * close_price
+                    actual_buy_amount = buy_shares * execution_price
                     total_cost = shares * avg_cost + actual_buy_amount
                     shares += buy_shares
                     avg_cost = total_cost / shares if shares > 0 else 0.0
@@ -849,13 +1110,18 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     cooldown_remaining = params.cooldown_days
                     greed_peak_price = None
                     take_profit_sell_count_in_cycle = 0
-                    holdings_value_after = shares * close_price
+                    holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
 
                     trades.append({
                         "date": current_date,
                         "action": "BUY",
-                        "price": close_price,
+                        "price": execution_price,
+                        "execution_price": execution_price,
+                        "mark_price": close_price,
+                        "execution_price_label": execution_price_label,
+                        "signal_date": signal_date_text,
+                        "fear_date": fear_date_text,
                         "shares": buy_shares,
                         "amount": actual_buy_amount,
                         "cash_after": cash,
@@ -870,6 +1136,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,
+                        "signal_volume": float(signal_volumes[index]),
                     })
 
         equity_value = cash + shares * close_price
@@ -889,7 +1156,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "high": float(high_prices[index]),
                 "low": float(low_prices[index]),
                 "close": close_price,
+                "execution_price": execution_price,
+                "execution_price_label": execution_price_label,
                 "volume": float(volumes[index]),
+                "signal_date": signal_date_text,
+                "fear_date": fear_date_text,
+                "signal_volume": float(signal_volumes[index]),
                 "ma20": float(ma20_values[index]),
                 "volume_ma20": float(volume_ma20_values[index]),
                 "volume_ratio": volume_ratio,
@@ -1210,10 +1482,12 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         start_date,
         end_date,
         payload.fear_source_values,
+        payload.volume_signal_symbol,
     )
     logger.info(
-        "Starting SOXL fear parameter search, symbol=%s, fear_sources=%s, combinations=%s, top_n=%s",
+        "Starting SOXL fear parameter search, symbol=%s, volume_signal_symbol=%s, fear_sources=%s, combinations=%s, top_n=%s",
         payload.symbol,
+        payload.volume_signal_symbol or payload.symbol,
         payload.fear_source_values,
         total_combinations,
         payload.top_n,
@@ -1312,9 +1586,10 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         )
 
         logger.info(
-            "Starting SOXL fear parameter search job, task_id=%s, symbol=%s, fear_sources=%s, start_date=%s, end_date=%s, combinations=%s, top_n=%s",
+            "Starting SOXL fear parameter search job, task_id=%s, symbol=%s, volume_signal_symbol=%s, fear_sources=%s, start_date=%s, end_date=%s, combinations=%s, top_n=%s",
             task_id,
             payload.symbol,
+            payload.volume_signal_symbol or payload.symbol,
             payload.fear_source_values,
             start_date,
             end_date,
@@ -1327,6 +1602,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             start_date,
             end_date,
             payload.fear_source_values,
+            payload.volume_signal_symbol,
         )
 
         def progress_callback(index: int, total: int, skipped: int):
@@ -1419,6 +1695,33 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         )
 
 
+@router.get("/options")
+def get_soxl_fear_backtest_options(
+    account_id: str = Depends(valid_account),
+):
+    return {
+        "symbol_options": TARGET_OPTIONS,
+        "volume_signal_symbol_options": TARGET_OPTIONS,
+        "fear_source_options": [
+            {
+                "label": config["label"],
+                "value": key,
+                "symbol": config.get("symbol"),
+                "market": config.get("market") or "us",
+            }
+            for key, config in FEAR_SOURCE_OPTIONS.items()
+        ],
+        "a_stock_preset_pairs": A_STOCK_PRESET_PAIRS,
+        "default_request": {
+            "symbol": "SOXL.US",
+            "volume_signal_symbol": None,
+            "fear_source_values": ["cnn"],
+            "a_stock_symbol": A_STOCK_PRESET_PAIRS[0]["target_symbol"] if A_STOCK_PRESET_PAIRS else None,
+            "a_stock_fear_source": A_STOCK_PRESET_PAIRS[0]["fear_source"] if A_STOCK_PRESET_PAIRS else None,
+        },
+    }
+
+
 @router.post("/search")
 def search_soxl_fear_params(
     payload: SOXLFearSearchParams,
@@ -1485,12 +1788,29 @@ def get_soxl_fear_search_job_status(
 
 class SOXLFearRunParams(BaseModel):
     symbol: str = "SOXL.US"
+    volume_signal_symbol: Optional[str] = None
     fear_source: str = "cnn"
     compare_fear_sources: Optional[List[str]] = None
     initial_capital: float = 100000.0
     start_date: str = "2021-01-01"
     end_date: Optional[str] = None
     params: SOXLFearStrategyParams
+
+    @validator("symbol")
+    def validate_symbol(cls, value):
+        symbol = _normalize_symbol(value)
+        if not symbol or not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("symbol 格式不正确")
+        return symbol
+
+    @validator("volume_signal_symbol")
+    def validate_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("volume_signal_symbol 格式不正确")
+        return symbol
 
     @validator("fear_source")
     def validate_fear_source(cls, value):
@@ -1529,6 +1849,7 @@ def run_soxl_fear_backtest(
             start_date,
             end_date,
             compare_sources,
+            payload.volume_signal_symbol,
         )
         base_df = base_dfs[payload.fear_source]
         meta = source_metas[payload.fear_source]

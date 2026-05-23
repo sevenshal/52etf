@@ -76,6 +76,7 @@ A_STOCK_ETF_DAILY_NAMES = {
     "513100.SH": "纳指ETF",
     "518880.SH": "黄金ETF",
     "510300.SH": "沪深300ETF",
+    "501225.SH": "全球芯片LOF",
 }
 A_STOCK_ETF_DAILY_SYMBOLS = tuple(
     dict.fromkeys(
@@ -85,6 +86,7 @@ A_STOCK_ETF_DAILY_SYMBOLS = tuple(
             "513100.SH",
             "518880.SH",
             "510300.SH",
+            "501225.SH",
         ]
     )
 )
