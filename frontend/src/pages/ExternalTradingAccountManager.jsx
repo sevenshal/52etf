@@ -40,6 +40,10 @@ const formatNumber = (value, digits = 0) => {
   if (!Number.isFinite(num)) return '-';
   return num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
+const sumNumberField = (rows, field) => (rows || []).reduce((total, row) => {
+  const value = Number(row?.[field] || 0);
+  return Number.isFinite(value) ? total + value : total;
+}, 0);
 const roleLabel = value => {
   if (value === 'PARENT') return '父单';
   if (value === 'CHILD') return '子单';
@@ -860,6 +864,11 @@ const ExternalTradingAccountManager = () => {
   const lifecycleRows = executorStatusTables.orders?.rows || [];
   const fillRows = executorStatusTables.fills?.rows || [];
   const executorSubAccountRows = executorSubAccountStatus?.rows || [];
+  const executorSubAccountTotals = {
+    cashAllocated: sumNumberField(executorSubAccountRows, 'cash_allocated'),
+    netAsset: sumNumberField(executorSubAccountRows, 'net_asset'),
+    cashAvailable: sumNumberField(executorSubAccountRows, 'cash_available')
+  };
   const brokerPositionRows = brokerPositions?.positions || [];
   const brokerPositionSummary = brokerPositions?.summary || {};
   const brokerSnapshot = brokerPositions?.snapshot || null;
@@ -1610,6 +1619,9 @@ const ExternalTradingAccountManager = () => {
             <Text>待执行差额 {executorStatus?.summary?.pending_delta_count ?? 0}</Text>
             <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
             <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
+            <Text>总分配资金 {formatNumber(executorSubAccountTotals.cashAllocated, 2)}</Text>
+            <Text>总净资产 {formatNumber(executorSubAccountTotals.netAsset, 2)}</Text>
+            <Text>总可用资金 {formatNumber(executorSubAccountTotals.cashAvailable, 2)}</Text>
             <Text>交易费 {formatNumber(executorStatus?.summary?.trade_fee_total, 2)}</Text>
             <Text>归因交易费 {formatNumber(executorStatus?.summary?.attributed_trade_fee_total, 2)}</Text>
             <Text>非交易费 {formatNumber(executorStatus?.summary?.non_trade_fee_total, 2)}</Text>
