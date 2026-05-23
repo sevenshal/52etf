@@ -129,7 +129,7 @@ const Profile = () => {
           arrow: true
         },
         {
-          title: 'SOXL情绪量能回测',
+          title: 'ETF情绪量能回测',
           onClick: () => navigate('/soxl-fear-backtest'),
           arrow: true
         },

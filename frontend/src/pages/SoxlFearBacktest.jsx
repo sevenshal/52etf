@@ -75,7 +75,7 @@ const objectiveOptions = [
   { label: '按夏普最大', value: 'sharpe_ratio' },
 ];
 
-const symbolOptions = [
+const DEFAULT_SYMBOL_OPTIONS = [
   { label: 'SOXL.US', value: 'SOXL.US' },
   { label: 'TQQQ.US', value: 'TQQQ.US' },
   { label: 'UPRO.US', value: 'UPRO.US' },
@@ -94,7 +94,7 @@ const sellPriceAboveAvgCostOptions = [
   { label: '关闭', value: 'false' },
 ];
 
-const fearSourceOptions = [
+const DEFAULT_FEAR_SOURCE_OPTIONS = [
   { label: 'CNN贪恐', value: 'cnn' },
   { label: 'SOXX 半导体自算贪恐', value: 'soxx_clone' },
   { label: 'SPY 标普500自算贪恐', value: 'spy_clone' },
@@ -111,19 +111,39 @@ const fearSourceColorMap = {
 
 const getObjectiveLabel = (value) => objectiveOptions.find(item => item.value === value)?.label || value;
 const getSellReductionBasisLabel = (value) => sellReductionBasisOptions.find(item => item.value === value)?.label || value;
-const getFearSourceLabel = (value) => fearSourceOptions.find(item => item.value === value)?.label || value;
-const formatFearSourceLabels = (value) => {
+const getFearSourceLabelFromOptions = (options, value) => options.find(item => item.value === value)?.label || value;
+const formatFearSourceLabelsFromOptions = (options, value) => {
   if (Array.isArray(value)) {
-    return value.map(item => getFearSourceLabel(item)).join('、');
+    return value.map(item => getFearSourceLabelFromOptions(options, item)).join('、');
   }
-  return getFearSourceLabel(value);
+  return getFearSourceLabelFromOptions(options, value);
 };
 
 const SoxlFearBacktest = () => {
   const [form] = Form.useForm();
   const location = useLocation();
   const navigate = useNavigate();
+  const [backtestOptions, setBacktestOptions] = useState({
+    symbol_options: DEFAULT_SYMBOL_OPTIONS,
+    volume_signal_symbol_options: DEFAULT_SYMBOL_OPTIONS,
+    fear_source_options: DEFAULT_FEAR_SOURCE_OPTIONS,
+    a_stock_preset_pairs: [],
+  });
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const symbolOptions = backtestOptions.symbol_options?.length
+    ? backtestOptions.symbol_options
+    : DEFAULT_SYMBOL_OPTIONS;
+  const volumeSignalSymbolOptions = backtestOptions.volume_signal_symbol_options?.length
+    ? backtestOptions.volume_signal_symbol_options
+    : symbolOptions;
+  const fearSourceOptions = backtestOptions.fear_source_options?.length
+    ? backtestOptions.fear_source_options
+    : DEFAULT_FEAR_SOURCE_OPTIONS;
+  const aStockPresetPairs = backtestOptions.a_stock_preset_pairs || [];
+  const getFearSourceLabel = (value) => getFearSourceLabelFromOptions(fearSourceOptions, value);
+  const formatFearSourceLabels = (value) => formatFearSourceLabelsFromOptions(fearSourceOptions, value);
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
+  const selectedVolumeSignalSymbol = Form.useWatch('volume_signal_symbol', form) || selectedSymbol;
   const selectedFearSources = Form.useWatch('fear_source_values', form) || ['cnn'];
   const selectedFearSourceLabel = formatFearSourceLabels(selectedFearSources);
   const [loading, setLoading] = useState(false);
@@ -142,11 +162,45 @@ const SoxlFearBacktest = () => {
   const pollingTimerRef = useRef(null);
   const detailLoadingRef = useRef(false);
   const hasAutoRunRef = useRef(false);
+  const handleSearchRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadOptions = async () => {
+      setOptionsLoading(true);
+      try {
+        const { data } = await request.get('/api/soxl-fear-backtest/options');
+        if (!cancelled) {
+          setBacktestOptions({
+            symbol_options: data.symbol_options?.length ? data.symbol_options : DEFAULT_SYMBOL_OPTIONS,
+            volume_signal_symbol_options: data.volume_signal_symbol_options?.length
+              ? data.volume_signal_symbol_options
+              : (data.symbol_options?.length ? data.symbol_options : DEFAULT_SYMBOL_OPTIONS),
+            fear_source_options: data.fear_source_options?.length ? data.fear_source_options : DEFAULT_FEAR_SOURCE_OPTIONS,
+            a_stock_preset_pairs: data.a_stock_preset_pairs || [],
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          message.error(error.response?.data?.detail || '加载回测选项失败');
+        }
+      } finally {
+        if (!cancelled) {
+          setOptionsLoading(false);
+        }
+      }
+    };
+    loadOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const buildPayload = (values) => {
     const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
     return {
       symbol: values.symbol || 'SOXL.US',
+      volume_signal_symbol: values.volume_signal_symbol || undefined,
       fear_source_values: values.fear_source_values?.length ? values.fear_source_values : ['cnn'],
       initial_capital: values.initial_capital,
       start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
@@ -183,6 +237,40 @@ const SoxlFearBacktest = () => {
     min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
+
+  const applyAStockPresetPair = (pair) => {
+    if (!pair) {
+      return;
+    }
+    form.setFieldsValue({
+      a_stock_pair: pair.key,
+      symbol: pair.target_symbol,
+      volume_signal_symbol: undefined,
+      fear_source_values: [pair.fear_source],
+    });
+  };
+
+  const handleAStockPresetPairChange = (value) => {
+    const pair = aStockPresetPairs.find(item => item.key === value);
+    applyAStockPresetPair(pair);
+  };
+
+  const handleSymbolChange = (value) => {
+    const pair = aStockPresetPairs.find(item => item.target_symbol === value);
+    if (pair) {
+      applyAStockPresetPair(pair);
+      return;
+    }
+    if (value === '501225.SH') {
+      form.setFieldsValue({
+        a_stock_pair: undefined,
+        fear_source_values: ['cnn'],
+        volume_signal_symbol: 'SOXL.US',
+      });
+      return;
+    }
+    form.setFieldsValue({ a_stock_pair: undefined, volume_signal_symbol: undefined });
+  };
 
   const stopPolling = () => {
     if (pollingTimerRef.current) {
@@ -260,6 +348,7 @@ const SoxlFearBacktest = () => {
     } finally {
     }
   };
+  handleSearchRef.current = handleSearch;
 
   useEffect(() => () => {
     stopPolling();
@@ -284,7 +373,7 @@ const SoxlFearBacktest = () => {
 
     form.setFieldsValue(mergedValues);
     setTimeout(() => {
-      handleSearch(mergedValues);
+      handleSearchRef.current?.(mergedValues);
     }, 0);
 
     navigate(location.pathname, { replace: true, state: null });
@@ -301,6 +390,7 @@ const SoxlFearBacktest = () => {
       const values = form.getFieldsValue();
       const payload = {
         symbol: values.symbol || 'SOXL.US',
+        volume_signal_symbol: values.volume_signal_symbol || undefined,
         fear_source: record.fear_source || values.fear_source_values?.[0] || 'cnn',
         compare_fear_sources: values.fear_source_values?.length ? values.fear_source_values : [record.fear_source || 'cnn'],
         initial_capital: values.initial_capital,
@@ -328,7 +418,7 @@ const SoxlFearBacktest = () => {
       width: 190,
       fixed: 'left',
       render: (value, record) => (
-        <Tag color={fearSourceColorMap[record.fear_source] || 'blue'}>
+        <Tag color={fearSourceColorMap[record.fear_source] || (String(record.fear_source || '').startsWith('a_stock_') ? 'orange' : 'blue')}>
           {value || getFearSourceLabel(record.fear_source)}
         </Tag>
       ),
@@ -780,13 +870,13 @@ const SoxlFearBacktest = () => {
 
   return (
     <div style={{ padding: 24 }}>
-      <Card title={`${selectedSymbol} 情绪 + 量能 超参数回测`} style={{ marginBottom: 24 }}>
+      <Card title={`${selectedSymbol} 情绪 + 量能 超参数回测`} style={{ marginBottom: 24 }} loading={optionsLoading}>
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description={`使用所选贪恐来源（${selectedFearSourceLabel}）；当贪恐分数低于等于买入触发阈值，且 ${selectedSymbol} 成交量 / 20日均量 放大时分批买入；当贪恐分数高于等于进入止盈区阈值后，若价格再从区内高点回撤，则按回撤规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
+          description={`使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的前一可用交易日量比信号；当贪恐分数低于等于买入触发阈值，且量比放大时，在 ${selectedSymbol} 当日开盘价分批买入；当贪恐分数高于等于进入止盈区阈值后，若开盘价再从区内高点回撤，则按回撤规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
         />
         <Form
           form={form}
@@ -815,9 +905,32 @@ const SoxlFearBacktest = () => {
           }}
         >
           <Row gutter={16}>
+            <Col xs={24} md={6}>
+              <Form.Item name="a_stock_pair" label="A股指数ETF组合">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="选择后自动填入标的和贪恐来源"
+                  options={aStockPresetPairs.map(item => ({ label: item.label, value: item.key }))}
+                  onChange={handleAStockPresetPairChange}
+                />
+              </Form.Item>
+            </Col>
             <Col xs={24} md={4}>
               <Form.Item name="symbol" label="标的">
-                <Select options={symbolOptions} />
+                <Select showSearch optionFilterProp="label" options={symbolOptions} onChange={handleSymbolChange} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="volume_signal_symbol" label="量比来源标的">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="默认使用标的自身"
+                  options={volumeSignalSymbolOptions}
+                />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -847,7 +960,7 @@ const SoxlFearBacktest = () => {
             </Col>
             <Col xs={24} md={4}>
               <Form.Item name="fear_source_values" label="贪恐来源候选">
-                <Select mode="multiple" maxTagCount="responsive" options={fearSourceOptions} />
+                <Select mode="multiple" showSearch optionFilterProp="label" maxTagCount="responsive" options={fearSourceOptions} />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -948,6 +1061,8 @@ const SoxlFearBacktest = () => {
             <Descriptions.Item label="搜索组合数">{searchMeta.searched_combinations}</Descriptions.Item>
             <Descriptions.Item label="搜索目标">{getObjectiveLabel(searchMeta.objective)}</Descriptions.Item>
             <Descriptions.Item label="贪恐来源">{searchMeta.fear_source_labels || formatFearSourceLabels(searchMeta.fear_sources || searchMeta.fear_source)}</Descriptions.Item>
+            <Descriptions.Item label="量比来源">{searchMeta.volume_signal_label || searchMeta.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
+            <Descriptions.Item label="成交口径">{searchMeta.execution_price_label || '当日开盘价'}</Descriptions.Item>
             <Descriptions.Item label="贪恐数据点">{searchMeta.fear_points}</Descriptions.Item>
             <Descriptions.Item label="并发进程数">{searchMeta.eval_workers}</Descriptions.Item>
             <Descriptions.Item label="有效组合数">{searchMeta.valid_combinations}</Descriptions.Item>
@@ -1018,6 +1133,8 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
+              <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
+              <Descriptions.Item label="成交口径">{detailedResult.meta?.execution_price_label || '当日开盘价'}</Descriptions.Item>
               <Descriptions.Item label="有效区间">{detailedResult.meta?.effective_start_date} ~ {detailedResult.meta?.effective_end_date}</Descriptions.Item>
               <Descriptions.Item label="交易日数">{detailedResult.meta?.trading_days}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital}</Descriptions.Item>
