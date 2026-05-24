@@ -34,6 +34,7 @@
 | Alpha134 | Alpha134：12日价量反转 | `(CLOSE-DELAY(CLOSE,12))/DELAY(CLOSE,12)*VOLUME` | 12 日涨跌幅乘成交量，刻画价量复合强度。 | 低值更优 | -0.0297 | -0.0102 |
 | Alpha135 | Alpha135：平滑20日动量 | `SMA(DELAY(CLOSE/DELAY(CLOSE,20),1), 20, 1)` | 延迟 1 日的 20 日价格比值再做 SMA 平滑，刻画平滑动量。 | 低值更优 | -0.0398 | -0.0356 |
 | Alpha139 | Alpha139：开盘量价背离 | `-CORR(OPEN,VOLUME,10)` | 开盘价与成交量 10 日相关性的相反数，刻画开盘量价背离。 | 高值更优 | 0.0280 | 0.0143 |
+| Alpha144 | Alpha144：下跌日非流动性 | `SUMIF(ABS(CLOSE/DELAY(CLOSE,1)-1)/AMOUNT,20,CLOSE<DELAY(CLOSE,1))/COUNT(CLOSE<DELAY(CLOSE,1),20)` | 下跌日单位成交额对应的绝对价格变动，刻画非流动性/价格冲击暴露。 | 高值更优 | — | 0.0355 |
 | Alpha145 | Alpha145：成交量均线背离 | `(MA(VOLUME,9)-MA(VOLUME,26))/MA(VOLUME,12)*100` | 成交量 9 日均线与 26 日均线之差，相对 12 日均线归一化。 | 低值更优 | -0.0304 | -0.0116 |
 | Alpha147 | Alpha147：12日均价趋势斜率 | `REGBETA(MA(CLOSE,12), SEQUENCE(12))` | 12 日均价对时间序列的回归斜率，刻画中短期趋势。 | 低值更优 | — | -0.0304 |
 | Alpha151 | Alpha151：平滑20日价差反转 | `SMA(CLOSE-DELAY(CLOSE,20),20,1)` | 20 日绝对价差的平滑值，刻画平滑后的中短期价差动量/反转。 | 低值更优 | — | -0.0341 |
@@ -52,4 +53,4 @@
 - A创100 全量筛选脚本为 `lab/screen_gtja191_inno100.py`；最近一次结果留存在 `/private/tmp/gtja_alpha191_inno100_screen.csv`，不可计算/无有效IC的编号留存在 `/private/tmp/gtja_alpha191_inno100_errors.csv`。
 - 中证500 Rank IC 来自 `/private/tmp/gtja_alpha_screen.csv`；未在该文件覆盖的新增因子用 `—` 标记。
 - 本次补充优先选择公式较简单、且不依赖 `VWAP=AMOUNT/VOLUME` 与复权价混算的因子；`Alpha012/013/120/126/164/173` 等长样本也强，但涉及 VWAP/价格尺度口径，暂不作为默认新增。
-- `Alpha132` 已从短样本高值更优改为长样本低值更优；`Alpha006` 因 A创100长样本 IC 接近 0、`Alpha144` 因方向冲突，已从默认因子库剔除。
+- `Alpha132` 已从短样本高值更优改为长样本低值更优；`Alpha006` 因 A创100长样本 IC 接近 0，已从默认因子库剔除；`Alpha144` 已按非流动性含义加回，本次 A创100 T+20 长样本 Rank IC 为正，但 2025 年后样本外方向反转，需继续用不同股票池验证方向稳定性。

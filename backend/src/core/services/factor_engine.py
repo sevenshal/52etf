@@ -746,6 +746,40 @@ def _compute_alpha139(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     )
 
 
+def _compute_alpha144(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty() or not {"close", "turnover"}.issubset(df.columns):
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .with_columns(pl.col("close").shift(1).over("symbol").alias("_alpha144_close_lag_1"))
+        .with_columns(
+            (
+                (pl.col("_alpha144_close_lag_1") > 0)
+                & (pl.col("close") < pl.col("_alpha144_close_lag_1"))
+                & pl.col("turnover").is_not_null()
+                & (pl.col("turnover") > 0)
+            ).alias("_alpha144_valid_down_day")
+        )
+        .with_columns(
+            pl.when(pl.col("_alpha144_valid_down_day"))
+            .then((pl.col("close") / pl.col("_alpha144_close_lag_1") - 1).abs() / pl.col("turnover"))
+            .otherwise(0.0)
+            .alias("_alpha144_down_illiquidity"),
+            pl.when(pl.col("_alpha144_valid_down_day")).then(1.0).otherwise(0.0).alias("_alpha144_down_count"),
+        )
+        .with_columns(
+            pl.col("_alpha144_down_illiquidity").rolling_sum(20, min_samples=20).over("symbol").alias("_alpha144_down_sum_20"),
+            pl.col("_alpha144_down_count").rolling_sum(20, min_samples=20).over("symbol").alias("_alpha144_down_count_20"),
+        )
+        .with_columns(
+            pl.when(pl.col("_alpha144_down_count_20") > 0)
+            .then(pl.col("_alpha144_down_sum_20") / pl.col("_alpha144_down_count_20"))
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
 def _compute_alpha145(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty() or "volume" not in df.columns:
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -1384,6 +1418,17 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_alpha139,
+    ),
+    "alpha144": FactorDefinition(
+        key="alpha144",
+        label="Alpha144：下跌日非流动性",
+        group="国君191",
+        description="原 Alpha144：SUMIF(ABS(CLOSE/DELAY(CLOSE,1)-1)/AMOUNT,20,CLOSE<DELAY(CLOSE,1))/COUNT(CLOSE<DELAY(CLOSE,1),20)，刻画下跌日单位成交额对应的价格冲击；高值代表更强非流动性暴露。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="higher_is_better",
+        compute=_compute_alpha144,
     ),
     "alpha145": FactorDefinition(
         key="alpha145",
