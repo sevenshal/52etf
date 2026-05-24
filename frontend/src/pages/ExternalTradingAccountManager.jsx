@@ -12,6 +12,7 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
+  Select,
   Space,
   Switch,
   Table,
@@ -33,6 +34,19 @@ import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 
 const { Text, Title } = Typography;
+const MARKET_TYPE_A_STOCK = 'A_STOCK';
+const MARKET_TYPE_US_STOCK = 'US_STOCK';
+const MARKET_TYPE_OPTIONS = [
+  { label: 'A股', value: MARKET_TYPE_A_STOCK },
+  { label: '美股', value: MARKET_TYPE_US_STOCK }
+];
+const marketTypeLabel = value => (value === MARKET_TYPE_US_STOCK ? '美股' : 'A股');
+const marketTypeColor = value => (value === MARKET_TYPE_US_STOCK ? 'blue' : 'red');
+const marketDefaultFields = value => (
+  value === MARKET_TYPE_US_STOCK
+    ? { executor_lot_size: 1, stamp_tax_rate_pct: 0 }
+    : { executor_lot_size: 100, stamp_tax_rate_pct: 0.05 }
+);
 
 const formatTime = value => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-');
 const formatNumber = (value, digits = 0) => {
@@ -363,6 +377,7 @@ const ExternalTradingAccountManager = () => {
     setEditingAccount(null);
     form.resetFields();
     form.setFieldsValue({
+      market_type: MARKET_TYPE_A_STOCK,
       enabled: true,
       executor_lot_size: 100,
       executor_order_timeout_seconds_sequence: timeoutSequenceToText(DEFAULT_TIMEOUT_SEQUENCE),
@@ -381,6 +396,7 @@ const ExternalTradingAccountManager = () => {
     form.setFieldsValue({
       name: record.name,
       identifier: record.identifier,
+      market_type: record.market_type || MARKET_TYPE_A_STOCK,
       enabled: record.enabled,
       executor_lot_size: record.executor_lot_size ?? 100,
       executor_order_timeout_seconds_sequence: timeoutSequenceToText(
@@ -409,6 +425,7 @@ const ExternalTradingAccountManager = () => {
       }
       const payload = {
         ...values,
+        market_type: values.market_type || MARKET_TYPE_A_STOCK,
         enabled: values.enabled !== false,
         executor_price_level_sequence: priceSequence,
         executor_order_timeout_seconds_sequence: timeoutSequence,
@@ -428,6 +445,10 @@ const ExternalTradingAccountManager = () => {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleAccountMarketTypeChange = value => {
+    form.setFieldsValue(marketDefaultFields(value));
   };
 
   const handleDelete = async id => {
@@ -576,8 +597,10 @@ const ExternalTradingAccountManager = () => {
     try {
       const { data } = await request.post(`/api/external-trading-accounts/${executorStatusAccount.id}/executor/execute`, { force });
       const accountResult = data?.accounts?.[0] || {};
-      if (data?.status === 'SKIPPED' && data?.reason === 'market_closed') {
-        message.warning(`当前不在 A股交易时段，执行器将在 ${formatTime(data.next_run_at)} 后继续处理`);
+      const marketClosedResult = accountResult?.reason === 'market_closed' ? accountResult : data;
+      if (marketClosedResult?.status === 'SKIPPED' && marketClosedResult?.reason === 'market_closed') {
+        const marketLabel = marketClosedResult.market_label || marketTypeLabel(executorStatusAccount?.market_type);
+        message.warning(`当前不在 ${marketLabel}交易时段，执行器将在 ${formatTime(marketClosedResult.next_run_at)} 后继续处理`);
       } else if (accountResult?.status === 'CANCEL_REQUESTED') {
         message.success('已提交撤单，等待回报后执行器会继续撮合');
       } else {
@@ -1191,6 +1214,13 @@ const ExternalTradingAccountManager = () => {
       render: value => <Tag>{value}</Tag>
     },
     {
+      title: '市场',
+      dataIndex: 'market_type',
+      key: 'market_type',
+      width: 90,
+      render: value => <Tag color={marketTypeColor(value)}>{marketTypeLabel(value)}</Tag>
+    },
+    {
       title: '启用',
       dataIndex: 'enabled',
       key: 'enabled',
@@ -1281,7 +1311,7 @@ const ExternalTradingAccountManager = () => {
           dataSource={accounts}
           loading={loading}
           pagination={false}
-          scroll={{ x: 1400 }}
+          scroll={{ x: 1500 }}
           expandable={{
             expandedRowRender,
             onExpand: (expanded, record) => {
@@ -1310,6 +1340,9 @@ const ExternalTradingAccountManager = () => {
           </Form.Item>
           <Form.Item name="identifier" label="唯一标识" rules={[{ required: true, message: '请输入唯一标识' }]}>
             <Input placeholder="例如：GS66301027527" />
+          </Form.Item>
+          <Form.Item name="market_type" label="市场类型" rules={[{ required: true, message: '请选择市场类型' }]}>
+            <Select options={MARKET_TYPE_OPTIONS} onChange={handleAccountMarketTypeChange} />
           </Form.Item>
           <Form.Item name="enabled" label="是否启用" valuePropName="checked">
             <Switch checkedChildren="启用" unCheckedChildren="停用" />
