@@ -23,6 +23,7 @@ from .external_trading_ledger import (
 )
 from .external_trading_market import (
     EXTERNAL_TRADING_MARKET_A_STOCK,
+    EXTERNAL_TRADING_MARKET_US_STOCK,
     external_trading_market_label,
     external_trading_market_timezone,
     is_external_trading_market_open,
@@ -92,6 +93,8 @@ def _ensure_ptrade_command_window(action: str, market_type: Optional[str] = None
     if action not in PTRADE_MARKET_HOURS_ENFORCED_ACTIONS:
         return
     normalized_market_type = normalize_external_trading_market_type(market_type)
+    if normalized_market_type == EXTERNAL_TRADING_MARKET_US_STOCK:
+        return
     if is_external_trading_market_open(normalized_market_type):
         return
     timezone = external_trading_market_timezone(normalized_market_type)
