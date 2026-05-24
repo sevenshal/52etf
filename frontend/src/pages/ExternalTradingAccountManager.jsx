@@ -109,7 +109,7 @@ const parseSequence = (value, fallback = DEFAULT_EXECUTOR_SEQUENCE) => {
   const text = String(value || '').trim();
   if (!text) return fallback;
   const parsed = text.split(',').map(item => Number(item.trim())).filter(item => [-1, 0, 1, 2, 3, 4, 5].includes(item));
-  return parsed.length ? Array.from(new Set(parsed)) : fallback;
+  return parsed.length ? parsed : fallback;
 };
 const parseTimeoutSequence = (value, fallback = DEFAULT_TIMEOUT_SEQUENCE) => {
   if (Array.isArray(value)) return value.map(item => Number(item)).filter(item => Number.isFinite(item) && item >= 10 && item <= MAX_TIMEOUT_SECONDS);
