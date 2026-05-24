@@ -117,6 +117,16 @@ async def delete_ib_account(
     ).first()
     if not config:
         raise HTTPException(status_code=404, detail="Account not found")
+
+    if config.container_name:
+        exists_result = IBAccountService.container_exists(config.container_name)
+        if not exists_result["success"]:
+            raise HTTPException(status_code=500, detail=f"无法确认容器状态: {exists_result['message']}")
+        if exists_result["exists"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"容器 '{config.container_name}' 仍存在，请先停止并删除容器后再删除账户记录。"
+            )
     
     db.delete(config)
     db.commit()
@@ -162,6 +172,28 @@ async def restart_ib_gateway(
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result["message"])
         
+    return result
+
+@router.delete("/{config_id}/container")
+async def remove_ib_gateway(
+    config_id: int,
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_account)
+):
+    config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config_id,
+        IBKRAccountConfig.account_id == account_id
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if not config.container_name:
+        raise HTTPException(status_code=400, detail="未配置容器名称")
+
+    result = IBAccountService.remove_gateway(config.container_name)
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+
     return result
 
 

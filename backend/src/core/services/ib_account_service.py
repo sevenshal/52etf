@@ -93,6 +93,64 @@ class IBAccountService:
             return {"success": False, "message": str(e)}
 
     @staticmethod
+    def container_exists(container_name: str) -> Dict:
+        """检查 Docker 容器是否存在（包含已停止容器）"""
+        if not container_name:
+            return {"success": True, "exists": False, "message": "Container name is empty"}
+
+        try:
+            docker_bin = os.getenv('DOCKER_BINARY_PATH', 'docker')
+            result = subprocess.run(
+                [docker_bin, "inspect", "--type", "container", container_name],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                return {"success": True, "exists": True, "message": f"Container {container_name} exists"}
+
+            error_message = result.stderr or result.stdout or ""
+            if "No such object" in error_message or "No such container" in error_message:
+                return {"success": True, "exists": False, "message": f"Container {container_name} does not exist"}
+
+            logger.error(f"Docker inspect failed: {error_message}")
+            return {"success": False, "exists": None, "message": error_message or "Docker inspect failed"}
+        except Exception as e:
+            logger.error(f"Docker inspect error: {e}")
+            return {"success": False, "exists": None, "message": str(e)}
+
+    @staticmethod
+    def remove_gateway(container_name: str) -> Dict:
+        """停止并删除对应的 Docker 容器"""
+        if not container_name:
+            return {"success": False, "message": "Container name is empty"}
+
+        exists_result = IBAccountService.container_exists(container_name)
+        if not exists_result["success"]:
+            return exists_result
+
+        if not exists_result["exists"]:
+            return {"success": True, "message": f"Container {container_name} does not exist"}
+
+        try:
+            docker_bin = os.getenv('DOCKER_BINARY_PATH', 'docker')
+            result = subprocess.run(
+                [docker_bin, "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            logger.info(f"Docker remove success: {container_name}")
+            return {"success": True, "message": f"Container {container_name} removed", "container_id": result.stdout.strip()}
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Docker remove failed: {e.stderr}")
+            return {"success": False, "message": e.stderr or str(e)}
+        except Exception as e:
+            logger.error(f"Docker remove error: {e}")
+            return {"success": False, "message": str(e)}
+
+    @staticmethod
     def deploy_gateway(config) -> Dict:
         """根据配置部署/更新 Docker 容器"""
         if not config.container_name:
