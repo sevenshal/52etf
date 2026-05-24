@@ -99,7 +99,7 @@ def normalize_price_level_sequence(value: Any, default: Optional[List[int]] = No
     sequence: List[int] = []
     for item in raw_items:
         parsed = safe_int_or_none(item)
-        if parsed in ALLOWED_EXECUTOR_PRICE_LEVELS and parsed not in sequence:
+        if parsed in ALLOWED_EXECUTOR_PRICE_LEVELS:
             sequence.append(int(parsed))
     return sequence or fallback
 
