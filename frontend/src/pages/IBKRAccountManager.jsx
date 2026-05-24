@@ -9,7 +9,7 @@ import {
     PlusOutlined, ReloadOutlined, SyncOutlined,
     ThunderboltOutlined, DeleteOutlined, EditOutlined,
     GlobalOutlined, ContainerOutlined, LockOutlined,
-    ClockCircleOutlined, SettingOutlined, FileTextOutlined
+    ClockCircleOutlined, SettingOutlined, FileTextOutlined, StopOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 
@@ -81,6 +81,20 @@ const IBKRAccountManager = () => {
         }
     };
 
+    const handleRemoveContainer = async (id) => {
+        try {
+            message.loading({ content: '正在停止并删除容器...', key: 'remove-container' });
+            await request.delete(`/api/ib-accounts/${id}/container`);
+            message.success({ content: '容器已停止并删除，现在可以删除账户记录', key: 'remove-container' });
+            setStatuses(prev => ({ ...prev, [id]: { connected: false, message: '容器已删除' } }));
+        } catch (error) {
+            message.error({
+                content: `删除容器失败: ${error.response?.data?.detail || error.message}`,
+                key: 'remove-container'
+            });
+        }
+    };
+
     const handleSave = async (values) => {
         try {
             // 转换时间选择器为字符串格式 "hh:mm A"
@@ -104,7 +118,7 @@ const IBKRAccountManager = () => {
             message.success('删除成功');
             fetchAccounts();
         } catch (error) {
-            message.error('删除失败');
+            message.error(error.response?.data?.detail || '删除失败');
         }
     };
 
@@ -206,6 +220,15 @@ const IBKRAccountManager = () => {
                             <Button icon={<ReloadOutlined />} size="small" danger />
                         </Popconfirm>
                     </Tooltip>
+                    <Tooltip title="停止并删除容器">
+                        <Popconfirm
+                            title="确定停止并删除该 IB Gateway 容器吗？该操作不会删除账户记录。"
+                            onConfirm={() => handleRemoveContainer(record.id)}
+                            disabled={!record.container_name}
+                        >
+                            <Button icon={<StopOutlined />} size="small" danger disabled={!record.container_name} />
+                        </Popconfirm>
+                    </Tooltip>
                     <Button
                         icon={<EditOutlined />}
                         onClick={() => {
@@ -219,7 +242,7 @@ const IBKRAccountManager = () => {
                         }}
                         size="small"
                     />
-                    <Popconfirm title="确定删除吗？" onConfirm={() => handleDelete(record.id)}>
+                    <Popconfirm title="确定删除账户记录吗？删除前必须先停止并删除容器。" onConfirm={() => handleDelete(record.id)}>
                         <Button icon={<DeleteOutlined />} size="small" danger />
                     </Popconfirm>
                 </Space>
