@@ -60,6 +60,7 @@ class ExternalTradingAccount(ExternalTradingBase):
     account_id = Column(String, index=True, nullable=False)
     name = Column(String(100), nullable=False)
     identifier = Column(String(128), nullable=False)
+    market_type = Column(String(32), default="A_STOCK", nullable=False)
     enabled = Column(Boolean, default=True, nullable=False)
     executor_enabled = Column(Boolean, default=True, nullable=False)
     executor_price_level = Column(Integer, default=1, nullable=False)
@@ -391,6 +392,7 @@ def ensure_external_trading_indexes():
 def ensure_external_trading_columns():
     table_columns = {
         "external_trading_accounts": {
+            "market_type": "ALTER TABLE external_trading_accounts ADD COLUMN market_type VARCHAR(32) NOT NULL DEFAULT 'A_STOCK'",
             "commission_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN commission_rate_pct FLOAT NOT NULL DEFAULT 0.025",
             "min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN min_commission FLOAT NOT NULL DEFAULT 5.0",
             "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",

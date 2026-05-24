@@ -21,6 +21,13 @@ from .external_trading_ledger import (
     process_order_events,
     process_trade_events,
 )
+from .external_trading_market import (
+    EXTERNAL_TRADING_MARKET_A_STOCK,
+    external_trading_market_label,
+    external_trading_market_timezone,
+    is_external_trading_market_open,
+    normalize_external_trading_market_type,
+)
 from .external_trading_crypto import decrypt_message, encrypt_message
 
 logger = logging.getLogger(__name__)
@@ -74,30 +81,23 @@ def _is_china_trading_day(check_date: date) -> bool:
 
 
 def _is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
-    current = now or _china_now()
-    if current.tzinfo:
-        current = current.astimezone(CHINA_TZ)
-    if not _is_china_trading_day(current.date()):
-        return False
-    current_time = current.time()
-    return (
-        A_SHARE_OPEN <= current_time <= A_SHARE_MORNING_CLOSE
-        or A_SHARE_AFTERNOON_OPEN <= current_time <= A_SHARE_CLOSE
-    )
+    return is_external_trading_market_open(EXTERNAL_TRADING_MARKET_A_STOCK, now)
 
 
 def is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
     return _is_a_share_trading_window(now)
 
 
-def _ensure_ptrade_command_window(action: str) -> None:
+def _ensure_ptrade_command_window(action: str, market_type: Optional[str] = None) -> None:
     if action not in PTRADE_MARKET_HOURS_ENFORCED_ACTIONS:
         return
-    if _is_a_share_trading_window():
+    normalized_market_type = normalize_external_trading_market_type(market_type)
+    if is_external_trading_market_open(normalized_market_type):
         return
-    now_text = _china_now().strftime("%Y-%m-%d %H:%M:%S")
+    timezone = external_trading_market_timezone(normalized_market_type)
+    now_text = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
     raise ExternalTradingConnectionError(
-        f"当前非A股开盘时段（Asia/Shanghai {now_text}），拒绝发送 {action} 指令到 PTrade"
+        f"当前非{external_trading_market_label(normalized_market_type)}开盘时段（{timezone.key} {now_text}），拒绝发送 {action} 指令到外部交易客户端"
     )
 
 
@@ -107,6 +107,7 @@ class ExternalTradingConnection:
     account_id: str
     name: str
     identifier: str
+    market_type: str
     websocket: WebSocket
     connection_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     connected_at: datetime = field(default_factory=datetime.now)
@@ -128,6 +129,7 @@ class ExternalTradingHub:
         account_id = account.account_id
         account_name = account.name
         account_identifier = account.identifier
+        market_type = normalize_external_trading_market_type(getattr(account, "market_type", None))
 
         await websocket.accept()
         conn = ExternalTradingConnection(
@@ -135,6 +137,7 @@ class ExternalTradingHub:
             account_id=account_id,
             name=account_name,
             identifier=account_identifier,
+            market_type=market_type,
             websocket=websocket,
         )
 
@@ -155,6 +158,7 @@ class ExternalTradingHub:
             "account_id": account_id,
             "name": account_name,
             "identifier": account_identifier,
+            "market_type": market_type,
             "connected_at": conn.connected_at.isoformat(),
         }))
         logger.info("External trading account connected: %s/%s", account_id, account_name)
@@ -292,7 +296,7 @@ class ExternalTradingHub:
             conn = self._connections.get(account_pk)
             if not conn:
                 raise ExternalTradingConnectionError("外部交易账号未连接")
-            _ensure_ptrade_command_window(action)
+            _ensure_ptrade_command_window(action, conn.market_type)
 
             request_id = uuid.uuid4().hex
             loop = asyncio.get_running_loop()

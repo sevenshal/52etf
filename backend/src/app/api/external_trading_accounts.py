@@ -27,7 +27,6 @@ from ...core.external_trading_database import (
 )
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
-    is_a_share_trading_window,
     external_trading_hub,
 )
 from ...core.services.external_trading_executor import trigger_external_trading_executor
@@ -49,6 +48,13 @@ from ...core.services.external_trading_execution_policy import (
     normalize_timeout_seconds,
     normalize_timeout_seconds_sequence,
     resolve_execution_policy,
+)
+from ...core.services.external_trading_market import (
+    EXTERNAL_TRADING_MARKET_A_STOCK,
+    EXTERNAL_TRADING_MARKET_US_STOCK,
+    external_trading_market_label,
+    is_external_trading_market_open,
+    normalize_external_trading_market_type,
 )
 
 from ...core.services.external_trading_ledger import (
@@ -118,6 +124,7 @@ def _validation_http_error(exc: ValueError) -> HTTPException:
 class ExternalTradingAccountBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     identifier: str = Field(..., min_length=1, max_length=128)
+    market_type: str = Field(default=EXTERNAL_TRADING_MARKET_A_STOCK)
     enabled: bool = True
     executor_price_level: int = Field(default=DEFAULT_EXECUTOR_PRICE_LEVEL)
     executor_lot_size: int = Field(default=DEFAULT_EXECUTOR_LOT_SIZE, ge=1)
@@ -136,11 +143,25 @@ class ExternalTradingAccountBase(BaseModel):
     min_commission: float = Field(default=5.0, ge=0)
     stamp_tax_rate_pct: float = Field(default=0.05, ge=0)
 
+    @root_validator(pre=True)
+    def apply_market_defaults(cls, values):
+        if not isinstance(values, dict):
+            return values
+        market_type = normalize_external_trading_market_type(values.get("market_type"))
+        if market_type == EXTERNAL_TRADING_MARKET_US_STOCK:
+            values.setdefault("executor_lot_size", 1)
+            values.setdefault("stamp_tax_rate_pct", 0)
+        return values
+
     @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
         if isinstance(value, str):
             return value.strip()
         return value
+
+    @validator("market_type", pre=True, always=True)
+    def validate_market_type(cls, value):
+        return normalize_external_trading_market_type(value)
 
     @validator("executor_price_level")
     def validate_executor_price_level(cls, value):
@@ -182,6 +203,7 @@ class ExternalTradingAccountCreate(ExternalTradingAccountBase):
 class ExternalTradingAccountUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     identifier: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    market_type: Optional[str] = None
     enabled: Optional[bool] = None
     executor_price_level: Optional[int] = None
     executor_lot_size: Optional[int] = Field(default=None, ge=1)
@@ -198,11 +220,30 @@ class ExternalTradingAccountUpdate(BaseModel):
     min_commission: Optional[float] = Field(default=None, ge=0)
     stamp_tax_rate_pct: Optional[float] = Field(default=None, ge=0)
 
+    @root_validator(pre=True)
+    def apply_market_defaults(cls, values):
+        if not isinstance(values, dict) or "market_type" not in values or values.get("market_type") is None:
+            return values
+        market_type = normalize_external_trading_market_type(values.get("market_type"))
+        if market_type == EXTERNAL_TRADING_MARKET_US_STOCK:
+            values.setdefault("executor_lot_size", 1)
+            values.setdefault("stamp_tax_rate_pct", 0)
+        elif market_type == EXTERNAL_TRADING_MARKET_A_STOCK:
+            values.setdefault("executor_lot_size", DEFAULT_EXECUTOR_LOT_SIZE)
+            values.setdefault("stamp_tax_rate_pct", 0.05)
+        return values
+
     @validator("name", "identifier", pre=True)
     def strip_text(cls, value):
         if isinstance(value, str):
             return value.strip()
         return value
+
+    @validator("market_type", pre=True)
+    def validate_market_type(cls, value):
+        if value is None:
+            return value
+        return normalize_external_trading_market_type(value)
 
     @validator("executor_price_level")
     def validate_executor_price_level(cls, value):
@@ -409,6 +450,7 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "account_id": account.account_id,
         "name": account.name,
         "identifier": account.identifier,
+        "market_type": normalize_external_trading_market_type(getattr(account, "market_type", None)),
         "enabled": account.enabled,
         "executor_enabled": True,
         "executor_price_level": executor_price_level,
@@ -1360,6 +1402,7 @@ async def create_external_trading_account(
         account_id=account_id,
         name=payload.name,
         identifier=payload.identifier,
+        market_type=payload.market_type,
         enabled=payload.enabled,
         executor_enabled=True,
         executor_price_level=payload.executor_price_level,
@@ -1391,6 +1434,11 @@ async def update_external_trading_account(
     update_data = payload.dict(exclude_unset=True)
     update_data.pop("executor_enabled", None)
     update_data.pop("executor_clip_sell_to_available", None)
+    if update_data.get("market_type") is None:
+        update_data.pop("market_type", None)
+    market_type_updated = "market_type" in update_data and update_data["market_type"] != normalize_external_trading_market_type(
+        getattr(account, "market_type", None)
+    )
 
     current_timeout_seconds = normalize_timeout_seconds(getattr(account, "executor_order_timeout_seconds", None))
     if "executor_order_timeout_seconds_sequence" in update_data:
@@ -1443,6 +1491,8 @@ async def update_external_trading_account(
 
     if account.enabled is False:
         await external_trading_hub.disconnect_account(account.id, reason="account disabled")
+    elif market_type_updated:
+        await external_trading_hub.disconnect_account(account.id, reason="account market type updated")
     elif "name" in update_data or "identifier" in update_data:
         await external_trading_hub.disconnect_account(account.id, reason="account credentials updated")
 
@@ -2553,7 +2603,8 @@ async def get_external_broker_positions(
         raise HTTPException(status_code=400, detail="External trading account is disabled")
 
     runtime_status = external_trading_hub.get_status(account.id)
-    market_window_open = bool(is_a_share_trading_window())
+    market_type = normalize_external_trading_market_type(getattr(account, "market_type", None))
+    market_window_open = bool(is_external_trading_market_open(market_type))
     refresh_attempted = bool(refresh_if_open and market_window_open)
     refresh_error = None
     refreshed = False
@@ -2598,6 +2649,7 @@ async def get_external_broker_positions(
         "account_id": account.account_id,
         "name": account.name,
         "identifier": account.identifier,
+        "market_type": market_type,
         "connected": bool(runtime_status.get("connected")),
         "pending_count": runtime_status.get("pending_count", 0),
         "connected_at": runtime_status.get("connected_at"),
@@ -2607,6 +2659,8 @@ async def get_external_broker_positions(
         "attempted": refresh_attempted,
         "refreshed": refreshed,
         "market_window_open": market_window_open,
+        "market_type": market_type,
+        "market_label": external_trading_market_label(market_type),
         "connected": bool(runtime_status.get("connected")),
         "refresh_if_open": refresh_if_open,
         "error": refresh_error,

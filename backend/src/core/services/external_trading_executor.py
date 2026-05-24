@@ -30,6 +30,14 @@ from .external_trading_execution_policy import (
     normalize_timeout_seconds_sequence,
     resolve_execution_policy,
 )
+from .external_trading_market import (
+    EXTERNAL_TRADING_MARKET_A_STOCK,
+    external_trading_market_label,
+    is_external_trading_market_open,
+    next_external_trading_day_open,
+    next_external_trading_time,
+    normalize_external_trading_market_type,
+)
 from .external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STRATEGY_NETTED_EXECUTOR,
@@ -90,49 +98,19 @@ def _is_china_trading_day(check_date: date) -> bool:
 
 
 def is_a_share_trading_window(now: Optional[datetime] = None) -> bool:
-    current = now or _china_now()
-    if current.tzinfo:
-        current = current.astimezone(CHINA_TZ)
-    if not _is_china_trading_day(current.date()):
-        return False
-    current_time = current.time()
-    return (
-        A_SHARE_OPEN <= current_time <= A_SHARE_MORNING_CLOSE
-        or A_SHARE_AFTERNOON_OPEN <= current_time <= A_SHARE_CLOSE
-    )
+    return is_external_trading_market_open(EXTERNAL_TRADING_MARKET_A_STOCK, now)
 
 
 def next_a_share_trading_time(now: Optional[datetime] = None) -> datetime:
-    current = now or _china_now()
-    if current.tzinfo:
-        current = current.astimezone(CHINA_TZ)
-
-    if _is_china_trading_day(current.date()):
-        current_time = current.time()
-        if current_time < A_SHARE_OPEN:
-            return current.replace(hour=A_SHARE_OPEN.hour, minute=A_SHARE_OPEN.minute, second=0, microsecond=0)
-        if A_SHARE_MORNING_CLOSE < current_time < A_SHARE_AFTERNOON_OPEN:
-            return current.replace(
-                hour=A_SHARE_AFTERNOON_OPEN.hour,
-                minute=A_SHARE_AFTERNOON_OPEN.minute,
-                second=0,
-                microsecond=0,
-            )
-
-    next_day = current.date() + timedelta(days=1)
-    while not _is_china_trading_day(next_day):
-        next_day += timedelta(days=1)
-    return datetime.combine(next_day, A_SHARE_OPEN, tzinfo=CHINA_TZ)
+    return next_external_trading_time(EXTERNAL_TRADING_MARKET_A_STOCK, now)
 
 
 def next_a_share_trading_day_open(now: Optional[datetime] = None) -> datetime:
-    current = now or _china_now()
-    if current.tzinfo:
-        current = current.astimezone(CHINA_TZ)
-    next_day = current.date() + timedelta(days=1)
-    while not _is_china_trading_day(next_day):
-        next_day += timedelta(days=1)
-    return datetime.combine(next_day, A_SHARE_OPEN, tzinfo=CHINA_TZ)
+    return next_external_trading_day_open(EXTERNAL_TRADING_MARKET_A_STOCK, now)
+
+
+def _market_deadline_as_naive_china(market_type: Optional[str]) -> datetime:
+    return next_external_trading_day_open(market_type).astimezone(CHINA_TZ).replace(tzinfo=None)
 
 
 def _try_mark_running(account_pk: int) -> bool:
@@ -166,6 +144,7 @@ def _load_accounts(
                 "account_id": row.account_id,
                 "name": row.name,
                 "identifier": row.identifier,
+                "market_type": normalize_external_trading_market_type(getattr(row, "market_type", None)),
                 "enabled": row.enabled,
                 "executor_enabled": True,
                 "executor_price_level": row.executor_price_level,
@@ -514,6 +493,7 @@ async def _submit_current_targets(
     order_timeout_seconds: int,
 ) -> Dict[str, Any]:
     account_pk = int(account["id"])
+    market_type = normalize_external_trading_market_type(account.get("market_type"))
     reference_prices: Dict[str, float] = {}
     account_policy = resolve_execution_policy(SimpleNamespace(**account), fallback={
         "price_level": price_level,
@@ -587,7 +567,7 @@ async def _submit_current_targets(
                     db,
                     external_trading_account_id=account_pk,
                     response_orders=result.get("orders") or [],
-                    insufficient_sellable_block_until=next_a_share_trading_day_open().replace(tzinfo=None),
+                    insufficient_sellable_block_until=_market_deadline_as_naive_china(market_type),
                 )
         except ExternalTradingConnectionError as exc:
             _mark_submission_error(parent_client_order_ids, str(exc))
@@ -661,17 +641,6 @@ async def trigger_external_trading_executor(
     lot_size: int = DEFAULT_EXECUTOR_LOT_SIZE,
     order_timeout_seconds: int = DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
-    now = _china_now()
-    if not force and not is_a_share_trading_window(now):
-        next_run_at = next_a_share_trading_time(now)
-        return {
-            "status": "SKIPPED",
-            "reason": "market_closed",
-            "trigger_source": trigger_source,
-            "next_run_at": next_run_at.isoformat(),
-            "accounts": [],
-        }
-
     accounts = _load_accounts(account_id=account_id, external_account_id=external_account_id)
     result = {
         "status": "OK",
@@ -682,13 +651,31 @@ async def trigger_external_trading_executor(
         "failed": 0,
         "accounts": [],
     }
+    market_closed_next_run_at: List[datetime] = []
     for account in accounts:
         account_pk = int(account["id"])
+        market_type = normalize_external_trading_market_type(account.get("market_type"))
+        if not force and not is_external_trading_market_open(market_type):
+            next_run_at = next_external_trading_time(market_type)
+            market_closed_next_run_at.append(next_run_at)
+            result["skipped"] += 1
+            result["accounts"].append({
+                "account_id": account_pk,
+                "account_name": account.get("name"),
+                "market_type": market_type,
+                "market_label": external_trading_market_label(market_type),
+                "status": "SKIPPED",
+                "reason": "market_closed",
+                "next_run_at": next_run_at.isoformat(),
+            })
+            continue
         if not _try_mark_running(account_pk):
             result["skipped"] += 1
             result["accounts"].append({
                 "account_id": account_pk,
                 "account_name": account.get("name"),
+                "market_type": market_type,
+                "market_label": external_trading_market_label(market_type),
                 "status": "SKIPPED",
                 "reason": "executor_already_running",
             })
@@ -719,14 +706,13 @@ async def trigger_external_trading_executor(
             _clear_running(account_pk)
     if result["failed"]:
         result["status"] = "PARTIAL_FAILED" if result["processed"] else "FAILED"
+    elif result["checked"] and result["processed"] == 0 and result["skipped"] == result["checked"]:
+        result["status"] = "SKIPPED"
+        if market_closed_next_run_at and len(market_closed_next_run_at) == result["checked"]:
+            result["reason"] = "market_closed"
+            result["next_run_at"] = min(market_closed_next_run_at).isoformat()
     return result
 
 
 def process_external_trading_executor_for_robot() -> Dict[str, Any]:
-    if not is_a_share_trading_window():
-        return {
-            "status": "SKIPPED",
-            "reason": "market_closed",
-            "accounts": [],
-        }
     return asyncio.run(trigger_external_trading_executor(trigger_source="robot_timer"))
