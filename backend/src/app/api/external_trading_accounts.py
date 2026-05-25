@@ -82,6 +82,7 @@ from ...core.services.external_trading_ledger import (
     persist_broker_position_snapshot,
     mark_block_order_manual_success,
     normalize_symbol,
+    repair_parent_order_manual_fill,
     resolve_manual_block_fill_price,
     safe_int,
     serialize_broker_position_snapshot,
@@ -351,6 +352,18 @@ class OrderCancelBatchRequest(BaseModel):
 
 class ManualBlockSuccessRequest(BaseModel):
     price: Optional[float] = Field(default=None, gt=0)
+    traded_at: Optional[datetime] = None
+    note: Optional[str] = Field(default=None, max_length=500)
+
+    @validator("note", pre=True)
+    def strip_note(cls, value):
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+
+class ManualParentFillRepairRequest(BaseModel):
+    price: float = Field(..., gt=0)
     traded_at: Optional[datetime] = None
     note: Optional[str] = Field(default=None, max_length=500)
 
@@ -866,6 +879,59 @@ def _serialize_order_status(
     item["strategy_name"] = strategy_name
     item["created_at"] = _iso(row.created_at)
     return item
+
+
+def _load_parent_order_child_repair_summaries(
+    db: OrmSession,
+    parent_order_ids: List[int],
+) -> Dict[int, Dict[str, Any]]:
+    if not parent_order_ids:
+        return {}
+    summaries: Dict[int, Dict[str, Any]] = {
+        parent_id: {
+            "child_count": 0,
+            "child_remaining_quantity": 0,
+            "child_unfilled_count": 0,
+        }
+        for parent_id in parent_order_ids
+    }
+    children = (
+        db.query(ExternalTradingOrder)
+        .filter(ExternalTradingOrder.parent_order_id.in_(parent_order_ids))
+        .all()
+    )
+    for child in children:
+        parent_id = child.parent_order_id
+        if parent_id not in summaries:
+            continue
+        remaining = max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0)
+        summaries[parent_id]["child_count"] += 1
+        summaries[parent_id]["child_remaining_quantity"] += remaining
+        if remaining > 0:
+            summaries[parent_id]["child_unfilled_count"] += 1
+    return summaries
+
+
+def _attach_parent_order_repair_summary(
+    item: Dict[str, Any],
+    row: ExternalTradingOrder,
+    repair_summary: Optional[Dict[str, Any]],
+) -> None:
+    if (row.allocation_role or "").upper() != "PARENT":
+        return
+    summary = repair_summary or {
+        "child_count": 0,
+        "child_remaining_quantity": 0,
+        "child_unfilled_count": 0,
+    }
+    item.update(summary)
+    status = (row.status or "").upper()
+    ptrade_status = str(row.ptrade_status or "")
+    item["needs_fill_repair"] = (
+        summary.get("child_count", 0) > 0
+        and safe_int(summary.get("child_remaining_quantity")) > 0
+        and (status == "FILLED" or ptrade_status == "8" or safe_int(row.filled_quantity) > 0)
+    )
 
 
 def _serialize_fill_status(
@@ -2391,14 +2457,23 @@ async def get_external_trading_executor_status_orders(
         query = query.filter(ExternalTradingOrder.allocation_role.in_(roles))
     query = query.order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
     rows, pagination = _paginate_query(query, page=page, page_size=page_size)
-    serialized_rows = [
-        _serialize_order_status(
+    repair_summaries = _load_parent_order_child_repair_summaries(
+        db,
+        [
+            row.id
+            for row in rows
+            if (row.allocation_role or "").upper() == "PARENT"
+        ],
+    )
+    serialized_rows = []
+    for row in rows:
+        item = _serialize_order_status(
             row,
             sub_account_by_id.get(row.sub_account_id),
             strategy_name_by_sub_account_id.get(row.sub_account_id),
         )
-        for row in rows
-    ]
+        _attach_parent_order_repair_summary(item, row, repair_summaries.get(row.id))
+        serialized_rows.append(item)
     _attach_symbol_names_to_payloads(serialized_rows)
     return {
         "rows": serialized_rows,
@@ -2622,6 +2697,60 @@ async def mark_external_block_order_success(
             "traded_at": fill.traded_at.isoformat() if fill.traded_at else None,
         },
         "price_source": price_source,
+    }
+
+
+@router.post("/{external_account_id}/orders/{order_id}/repair-parent-fill")
+async def repair_external_parent_order_fill(
+    external_account_id: int,
+    order_id: int,
+    payload: ManualParentFillRepairRequest,
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    order = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.id == order_id,
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+        )
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="External trading order not found")
+
+    try:
+        result = repair_parent_order_manual_fill(
+            db,
+            order=order,
+            fill_price=payload.price,
+            traded_at=payload.traded_at,
+            note=payload.note,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    parent_fill = result["parent_fill"]
+    updated_children = result["updated_children"]
+    return {
+        "message": f"已按 {result['fill_price']:.2f} 元补成交 {result['repair_quantity']} 股并分配到子单",
+        "order": serialize_order(order),
+        "parent_fill": {
+            "id": parent_fill.id,
+            "fill_key": parent_fill.fill_key,
+            "quantity": parent_fill.quantity,
+            "price": parent_fill.price,
+            "amount": parent_fill.amount,
+            "traded_at": parent_fill.traded_at.isoformat() if parent_fill.traded_at else None,
+        },
+        "updated_child_order_ids": [child.id for child in updated_children],
     }
 
 

@@ -1730,6 +1730,185 @@ def mark_block_order_manual_success(
     return fill
 
 
+def _allocate_parent_fill_quantities(
+    db: Session,
+    parent: ExternalTradingOrder,
+    quantity: int,
+) -> List[Dict[str, Any]]:
+    children = [
+        {
+            "child": child,
+            "remaining": max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0),
+        }
+        for child in _child_orders(db, parent.id)
+    ]
+    children = [item for item in children if safe_int(item.get("remaining")) > 0]
+    if not children or quantity <= 0:
+        return []
+
+    total_remaining = sum(safe_int(item.get("remaining")) for item in children)
+    if total_remaining <= 0:
+        return []
+
+    quantity = min(quantity, total_remaining)
+    raw_allocations = []
+    allocated_quantity = 0
+    for item in children:
+        remaining = safe_int(item.get("remaining"))
+        exact = quantity * remaining / total_remaining
+        base = min(int(exact), remaining)
+        raw_allocations.append({
+            "child": item["child"],
+            "remaining": remaining,
+            "quantity": base,
+            "remainder": exact - base,
+        })
+        allocated_quantity += base
+
+    leftover = min(quantity - allocated_quantity, total_remaining - allocated_quantity)
+    for item in sorted(raw_allocations, key=lambda data: data["remainder"], reverse=True):
+        if leftover <= 0:
+            break
+        if item["quantity"] < item["remaining"]:
+            item["quantity"] += 1
+            leftover -= 1
+    return raw_allocations
+
+
+def _ensure_sell_allocations_have_ledger_quantity(
+    db: Session,
+    parent: ExternalTradingOrder,
+    allocations: List[Dict[str, Any]],
+) -> None:
+    if str(parent.side or "").upper() != "SELL":
+        return
+    required_by_key: Dict[Tuple[int, str], int] = {}
+    for item in allocations:
+        child = item.get("child")
+        child_quantity = safe_int(item.get("quantity"))
+        if not child or child_quantity <= 0:
+            continue
+        sub_account_id = safe_int(getattr(child, "sub_account_id", None))
+        symbol = normalize_symbol(getattr(child, "symbol", None) or parent.symbol)
+        if not sub_account_id or not symbol:
+            raise ValueError("子单缺少子账户或标的信息，无法补成交")
+        key = (sub_account_id, symbol)
+        required_by_key[key] = required_by_key.get(key, 0) + child_quantity
+
+    for (sub_account_id, symbol), required_quantity in required_by_key.items():
+        position = (
+            db.query(ExternalTradingLedgerPosition)
+            .filter(
+                ExternalTradingLedgerPosition.sub_account_id == sub_account_id,
+                ExternalTradingLedgerPosition.symbol == symbol,
+            )
+            .first()
+        )
+        if not position or safe_int(position.quantity) < required_quantity:
+            raise ValueError(f"{symbol} 子账户账本持仓不足，无法补成交 {required_quantity} 股")
+
+
+def repair_parent_order_manual_fill(
+    db: Session,
+    *,
+    order: ExternalTradingOrder,
+    fill_price: float,
+    traded_at: Optional[datetime] = None,
+    note: Optional[str] = None,
+) -> Dict[str, Any]:
+    if _role(order) != "PARENT":
+        raise ValueError("只有父单支持补成交分配")
+    side = str(order.side or "").upper()
+    if side not in {"BUY", "SELL"}:
+        raise ValueError("父单方向必须是 BUY 或 SELL")
+
+    order_quantity = safe_int(order.quantity)
+    if order_quantity <= 0:
+        raise ValueError("父单数量无效，无法补成交")
+
+    status = str(order.status or "").upper()
+    ptrade_status = str(order.ptrade_status or "")
+    reported_filled_quantity = safe_int(order.filled_quantity)
+    if status not in {"FILLED", "PARTIALLY_FILLED"} and ptrade_status not in {"7", "8"} and reported_filled_quantity <= 0:
+        raise ValueError("父单没有明确成交状态，不能补成交")
+
+    target_quantity = reported_filled_quantity
+    if status == "FILLED" or ptrade_status == "8":
+        target_quantity = order_quantity
+    target_quantity = min(max(target_quantity, 0), order_quantity)
+    if target_quantity <= 0:
+        raise ValueError("父单已成数量为 0，无法补成交")
+
+    existing_fill_quantity, _ = _order_fill_totals(db, order.id)
+    missing_parent_fill_quantity = max(target_quantity - existing_fill_quantity, 0)
+    allocations = _allocate_parent_fill_quantities(db, order, missing_parent_fill_quantity)
+    repair_quantity = sum(safe_int(item.get("quantity")) for item in allocations)
+    if repair_quantity <= 0:
+        raise ValueError("没有可补的子单剩余数量，或父单成交已补齐")
+
+    fill_price = round_money(safe_float(fill_price))
+    if fill_price <= 0:
+        raise ValueError("成交价必须大于 0")
+
+    _ensure_sell_allocations_have_ledger_quantity(db, order, allocations)
+
+    fill_key = f"manual:parent-fill-repair:{order.id}"
+    if db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == fill_key).first():
+        raise ValueError("这条父单已经补成交过了")
+
+    traded_time = traded_at or order.last_event_at or datetime.now()
+    estimated_fee_increment = _estimated_fee_increment_for_order(db, order, repair_quantity * fill_price)
+    event = {
+        "type": "manual_parent_fill_repair",
+        "note": note,
+        "quantity": repair_quantity,
+        "price": fill_price,
+        "traded_at": traded_time.isoformat(),
+        "source_status": order.status,
+        "source_ptrade_status": order.ptrade_status,
+        "source_message": order.message,
+    }
+    parent_fill = _insert_fill_row(
+        db,
+        order=order,
+        fill_key=fill_key,
+        quantity=repair_quantity,
+        price=fill_price,
+        traded_at=traded_time,
+        event=event,
+        estimated_commission=estimated_fee_increment.get("commission", 0.0),
+        estimated_stamp_tax=estimated_fee_increment.get("stamp_tax", 0.0),
+        estimated_fee_total=estimated_fee_increment.get("fee_total", 0.0),
+    )
+    updated_children = _allocate_quantity_to_child_orders(
+        db,
+        order,
+        fill_key,
+        repair_quantity,
+        fill_price,
+        traded_time,
+        event,
+        estimated_fee_increment=estimated_fee_increment,
+    )
+    _refresh_order_from_fill_totals(db, order)
+    order.submitted_price = safe_float(order.submitted_price, fill_price) or fill_price
+    order.avg_fill_price = order.avg_fill_price or fill_price
+    order.submitted_at = order.submitted_at or traded_time
+    order.last_event_at = traded_time
+    order.raw_order_event = event
+    order.message = (
+        f"人工补成交分配，按 {fill_price:.2f} 元补 {repair_quantity} 股"
+        + (f"（{note}）" if note else "")
+    )[:1000]
+    order.updated_at = datetime.now()
+    return {
+        "parent_fill": parent_fill,
+        "updated_children": updated_children,
+        "repair_quantity": repair_quantity,
+        "fill_price": fill_price,
+    }
+
+
 def _apply_submission_quantity_clip(
     db: Session,
     row: ExternalTradingOrder,
@@ -2164,39 +2343,9 @@ def _allocate_quantity_to_child_orders(
     event: Dict[str, Any],
     estimated_fee_increment: Optional[Dict[str, float]] = None,
 ) -> List[ExternalTradingOrder]:
-    children = [
-        child
-        for child in _child_orders(db, parent.id)
-        if safe_int(child.remaining_quantity, child.quantity - child.filled_quantity) > 0
-    ]
-    if not children or quantity <= 0:
+    raw_allocations = _allocate_parent_fill_quantities(db, parent, quantity)
+    if not raw_allocations:
         return []
-
-    total_remaining = sum(max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0) for child in children)
-    if total_remaining <= 0:
-        return []
-
-    raw_allocations = []
-    allocated_quantity = 0
-    for child in children:
-        remaining = max(safe_int(child.remaining_quantity, child.quantity - child.filled_quantity), 0)
-        exact = quantity * remaining / total_remaining
-        base = min(int(exact), remaining)
-        raw_allocations.append({
-            "child": child,
-            "remaining": remaining,
-            "quantity": base,
-            "remainder": exact - base,
-        })
-        allocated_quantity += base
-
-    leftover = min(quantity - allocated_quantity, total_remaining - allocated_quantity)
-    for item in sorted(raw_allocations, key=lambda data: data["remainder"], reverse=True):
-        if leftover <= 0:
-            break
-        if item["quantity"] < item["remaining"]:
-            item["quantity"] += 1
-            leftover -= 1
 
     payable_allocations = [
         item
