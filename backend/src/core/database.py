@@ -654,6 +654,57 @@ class SnowballCopyLog(Base):
     status = Column(String)
     message = Column(String)
 
+class SnowballBacktestRun(Base):
+    """雪球组合跟单回测运行记录"""
+    __tablename__ = "snowball_backtest_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    config_id = Column(Integer, index=True, nullable=False)
+    combination_id = Column(String, index=True, nullable=False)
+    combination_name = Column(String)
+    status = Column(String(16), default="RUNNING", index=True, nullable=False)
+    slippage_pct = Column(Float, default=0.1, nullable=False)
+    requested_start_date = Column(Date)
+    requested_end_date = Column(Date)
+    effective_start_date = Column(Date)
+    actual_nav_start = Column(Date)
+    actual_nav_end = Column(Date)
+    actual_rebalance_start = Column(DateTime)
+    benchmark_symbol = Column(String(32), default="000905.SH")
+    benchmark_name = Column(String(64), default="中证500")
+    performance_raw = Column(JSON)
+    performance_after_slippage = Column(JSON)
+    benchmark_metrics = Column(JSON)
+    slippage = Column(JSON)
+    comparison = Column(JSON)
+    rebalancing = Column(JSON)
+    rebalance_fetch = Column(JSON)
+    yearly_returns = Column(JSON)
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class SnowballBacktestCurvePoint(Base):
+    """雪球组合回测收益曲线点"""
+    __tablename__ = "snowball_backtest_curve_points"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("snowball_backtest_runs.id"), index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)
+    raw_nav = Column(Float)
+    slippage_nav = Column(Float)
+    benchmark_nav = Column(Float)
+    raw_return_pct = Column(Float)
+    slippage_return_pct = Column(Float)
+    benchmark_return_pct = Column(Float)
+    raw_drawdown_pct = Column(Float)
+    slippage_drawdown_pct = Column(Float)
+    benchmark_drawdown_pct = Column(Float)
+    slippage_cost_pct = Column(Float)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"
@@ -934,6 +985,9 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_account ON factor_live_trading_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_configs_enabled ON factor_live_trading_configs(enabled)",
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_logs_config_time ON factor_live_trading_logs(config_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_account_config ON snowball_backtest_runs(account_id, config_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_status ON snowball_backtest_runs(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_curve_run_date ON snowball_backtest_curve_points(run_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",

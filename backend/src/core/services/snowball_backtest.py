@@ -1,40 +1,30 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 import math
-import os
 import time as time_module
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import duckdb
 import pandas as pd
 import requests
 
+from ..analytics_database import ANALYTICS_DB_PATH
+
 
 SH_TZ = ZoneInfo("Asia/Shanghai")
+BENCHMARK_SYMBOL = "000905.SH"
+BENCHMARK_NAME = "中证500"
+DEFAULT_START_DATE = date(2000, 1, 1)
 MAX_REBALANCE_PAGES = 50
 REBALANCE_COUNT_CANDIDATES = (50, 40, 30, 25, 20)
 DEFAULT_UA = (
     "Xueqiu iPhone 14.90.2"
 )
 XUEQIU_API_BASE_URL = "https://api.xueqiu.com"
-XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
-
-
-@dataclass
-class AnalysisArtifacts:
-    output_dir: Path
-    details_csv: Path
-    events_csv: Path
-    nav_csv: Path
-    slippage_schedule_csv: Path
-    summary_json: Path
-    report_md: Path
 
 
 @dataclass
@@ -45,90 +35,6 @@ class RebalanceFetchResult:
     page_limit_hit: bool
     oldest_fetched_date: Optional[date]
     pages_fetched: int
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fetch Xueqiu cube rebalance history and performance summary."
-    )
-    parser.add_argument("--cube-symbol", required=True, help="Cube symbol, e.g. ZH1189922")
-    parser.add_argument(
-        "--start-date",
-        default="20160101",
-        help="Requested start date in YYYYMMDD format. Default: 20160101",
-    )
-    parser.add_argument(
-        "--end-date",
-        default=datetime.now(SH_TZ).strftime("%Y%m%d"),
-        help="Requested end date in YYYYMMDD format. Default: today in Asia/Shanghai",
-    )
-    parser.add_argument(
-        "--cookie",
-        default=os.getenv("XUEQIU_COOKIE"),
-        help="Full Xueqiu cookie string. Defaults to env XUEQIU_COOKIE.",
-    )
-    parser.add_argument(
-        "--cookie-file",
-        help="Optional file containing the full Xueqiu cookie string.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        help="Directory for CSV/JSON/Markdown outputs. Defaults to lab/output/<cube_symbol>.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=30.0,
-        help="HTTP timeout in seconds. Default: 30",
-    )
-    parser.add_argument(
-        "--slippage-pct",
-        type=float,
-        default=0.1,
-        help="Single-side slippage in percent. Default: 0.1 means 10 bps per trade side.",
-    )
-    return parser.parse_args()
-
-
-def parse_yyyymmdd(value: str) -> date:
-    return datetime.strptime(value, "%Y%m%d").date()
-
-
-def read_cookie(args: argparse.Namespace) -> str:
-    cookie = args.cookie
-    if args.cookie_file:
-        cookie = Path(args.cookie_file).read_text(encoding="utf-8").strip()
-    if not cookie:
-        raise ValueError("Missing cookie. Use --cookie, --cookie-file, or env XUEQIU_COOKIE.")
-    return cookie
-
-
-def build_session(cookie: str, cube_symbol: str) -> requests.Session:
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/json",
-            "Accept-Language": "zh-Hans-CN;q=1, en-CN;q=0.9",
-            "Referer": f"{XUEQIU_WEB_BASE_URL}/P/{cube_symbol}",
-            "User-Agent": DEFAULT_UA,
-            "X-Device-OS": "iOS 26.4.2",
-            "X-Device-Model-Name": "iPhone 16 Pro Max_iPhone17,2",
-            "Cookie": cookie,
-        }
-    )
-    return session
-
-
-def dt_to_ms(dt_obj: datetime) -> int:
-    if dt_obj.tzinfo is None:
-        dt_obj = dt_obj.replace(tzinfo=SH_TZ)
-    return int(dt_obj.astimezone(timezone.utc).timestamp() * 1000)
-
-
-def ms_to_shanghai(ms: Optional[int]) -> Optional[datetime]:
-    if ms is None:
-        return None
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(SH_TZ)
 
 
 def normalize_value(value: Any) -> Any:
@@ -155,6 +61,34 @@ def json_safe(value: Any) -> Any:
     return normalize_value(value)
 
 
+def build_session(cookie: str, cube_symbol: str) -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/json",
+            "Accept-Language": "zh-Hans-CN;q=1, en-CN;q=0.9",
+            "Referer": f"https://xueqiu.com/P/{cube_symbol}",
+            "User-Agent": DEFAULT_UA,
+            "X-Device-OS": "iOS 26.4.2",
+            "X-Device-Model-Name": "iPhone 16 Pro Max_iPhone17,2",
+            "Cookie": cookie,
+        }
+    )
+    return session
+
+
+def dt_to_ms(dt_obj: datetime) -> int:
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=SH_TZ)
+    return int(dt_obj.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def ms_to_shanghai(ms: Optional[int]) -> Optional[datetime]:
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(SH_TZ)
+
+
 def fetch_rebalance_page(
     session: requests.Session,
     cube_symbol: str,
@@ -173,11 +107,19 @@ def fetch_rebalance_page(
                 timeout=timeout,
             )
             if response.status_code >= 400:
+                error_code = None
+                try:
+                    error_payload = response.json()
+                    error_code = str(error_payload.get("error_code") or "")
+                except ValueError:
+                    pass
                 snippet = response.text[:300]
-                raise requests.HTTPError(
+                error = requests.HTTPError(
                     f"HTTP {response.status_code} on page {page}: {snippet}",
                     response=response,
                 )
+                setattr(error, "xueqiu_error_code", error_code)
+                raise error
             payload = response.json()
             if not isinstance(payload, dict) or "list" not in payload:
                 raise ValueError(f"Unexpected rebalance payload on page {page}: {payload}")
@@ -186,7 +128,11 @@ def fetch_rebalance_page(
             last_error = exc
             if attempt >= max_retries - 1:
                 break
-            time_module.sleep(0.6 * (attempt + 1))
+            error_code = getattr(exc, "xueqiu_error_code", None)
+            retry_delay = 0.6 * (attempt + 1)
+            if error_code in {"10026", "400016"}:
+                retry_delay = min(45.0, 5.0 * (attempt + 1))
+            time_module.sleep(retry_delay)
     if last_error is not None:
         raise last_error
     raise RuntimeError(f"Unknown error fetching rebalance page {page}")
@@ -211,13 +157,7 @@ def _choose_rebalance_count(
     last_error: Optional[Exception] = None
     for count in REBALANCE_COUNT_CANDIDATES:
         try:
-            payload = fetch_rebalance_page(
-                session,
-                cube_symbol,
-                1,
-                count=count,
-                timeout=timeout,
-            )
+            payload = fetch_rebalance_page(session, cube_symbol, 1, count=count, timeout=timeout)
             return count, payload
         except Exception as exc:
             last_error = exc
@@ -233,6 +173,7 @@ def fetch_all_rebalances(
     *,
     start_date: Optional[date] = None,
     timeout: float = 30.0,
+    max_pages: int = MAX_REBALANCE_PAGES,
 ) -> RebalanceFetchResult:
     count, first_payload = _choose_rebalance_count(session, cube_symbol, timeout=timeout)
     page = 1
@@ -259,7 +200,7 @@ def fetch_all_rebalances(
             break
         if total_expected and len(all_items) >= int(total_expected):
             break
-        if page >= MAX_REBALANCE_PAGES:
+        if page >= max_pages:
             page_limit_hit = True
             break
         page += 1
@@ -384,12 +325,15 @@ def flatten_rebalance_history(items: Iterable[Dict[str, Any]]) -> Tuple[pd.DataF
             }
         )
 
-    event_df = pd.DataFrame(event_rows).sort_values(
-        by=["created_at", "event_id"], ascending=[True, True]
-    ).reset_index(drop=True)
-    detail_df = pd.DataFrame(detail_rows).sort_values(
-        by=["event_created_at", "event_id", "stock_symbol"], ascending=[True, True, True]
-    ).reset_index(drop=True)
+    event_df = pd.DataFrame(event_rows)
+    detail_df = pd.DataFrame(detail_rows)
+    if not event_df.empty:
+        event_df = event_df.sort_values(by=["created_at", "event_id"], ascending=[True, True]).reset_index(drop=True)
+    if not detail_df.empty:
+        detail_df = detail_df.sort_values(
+            by=["event_created_at", "event_id", "stock_symbol"],
+            ascending=[True, True, True],
+        ).reset_index(drop=True)
     return event_df, detail_df
 
 
@@ -456,7 +400,6 @@ def build_slippage_adjusted_dataframe(
         "slippage_cost_rate",
         "slippage_cost_pct",
     ]
-
     if enriched_events.empty or not bool(enriched_events["slippage_applied"].any()):
         schedule_df = pd.DataFrame({"date": pd.to_datetime(nav_df["date"])})
         for column in cost_columns:
@@ -565,7 +508,7 @@ def compute_performance_metrics(
     reference_start_value: Optional[float] = None,
 ) -> Dict[str, Any]:
     if nav_df.empty:
-        raise ValueError("No NAV data returned by Xueqiu.")
+        raise ValueError("No NAV data returned.")
 
     date_index = pd.to_datetime(nav_df["date"])
     nav_series = pd.Series(pd.to_numeric(nav_df[nav_col], errors="coerce").values, index=date_index)
@@ -734,219 +677,153 @@ def compute_rebalance_metrics(event_df: pd.DataFrame, detail_df: pd.DataFrame) -
     }
 
 
-def build_output_paths(base_dir: Path, cube_symbol: str) -> AnalysisArtifacts:
-    output_dir = base_dir / cube_symbol
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return AnalysisArtifacts(
-        output_dir=output_dir,
-        details_csv=output_dir / "rebalancing_details.csv",
-        events_csv=output_dir / "rebalancing_events.csv",
-        nav_csv=output_dir / "nav_curve.csv",
-        slippage_schedule_csv=output_dir / "slippage_schedule.csv",
-        summary_json=output_dir / "performance_summary.json",
-        report_md=output_dir / "performance_report.md",
+def build_benchmark_dataframe(nav_df: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:
+    nav_dates = pd.DataFrame({"date": pd.to_datetime(nav_df["date"])})
+    if nav_dates.empty:
+        return nav_dates
+
+    try:
+        connection = duckdb.connect(ANALYTICS_DB_PATH, read_only=True)
+        try:
+            rows = connection.execute(
+                """
+                SELECT CAST(trade_date AS DATE) AS date, CAST(close AS DOUBLE) AS close
+                FROM a_stock_index_daily
+                WHERE ts_code = ?
+                  AND trade_date BETWEEN ? AND ?
+                  AND close IS NOT NULL
+                  AND close > 0
+                ORDER BY trade_date
+                """,
+                [BENCHMARK_SYMBOL, start_date, end_date],
+            ).fetchall()
+        finally:
+            connection.close()
+    except Exception:
+        rows = []
+
+    if not rows:
+        benchmark = nav_dates.copy()
+        benchmark["benchmark_nav"] = None
+        benchmark["benchmark_cumulative_return_pct"] = None
+        benchmark["benchmark_daily_return"] = None
+        benchmark["benchmark_drawdown_pct"] = None
+        return benchmark
+
+    benchmark_raw = pd.DataFrame(rows, columns=["date", "close"])
+    benchmark_raw["date"] = pd.to_datetime(benchmark_raw["date"])
+    benchmark_raw["close"] = pd.to_numeric(benchmark_raw["close"], errors="coerce")
+    benchmark_raw = benchmark_raw.dropna(subset=["close"]).sort_values("date")
+    benchmark = pd.merge_asof(
+        nav_dates.sort_values("date"),
+        benchmark_raw,
+        on="date",
+        direction="backward",
     )
+    benchmark["close"] = benchmark["close"].ffill().bfill()
+    if benchmark["close"].dropna().empty:
+        benchmark["benchmark_nav"] = None
+        benchmark["benchmark_cumulative_return_pct"] = None
+        benchmark["benchmark_daily_return"] = None
+        benchmark["benchmark_drawdown_pct"] = None
+        return benchmark.drop(columns=["close"], errors="ignore")
+
+    start_close = float(benchmark["close"].dropna().iloc[0])
+    benchmark["benchmark_nav"] = benchmark["close"] / start_close
+    benchmark["benchmark_cumulative_return_pct"] = (benchmark["benchmark_nav"] / benchmark["benchmark_nav"].iloc[0] - 1.0) * 100.0
+    benchmark["benchmark_daily_return"] = benchmark["benchmark_nav"].pct_change()
+    benchmark["benchmark_drawdown_pct"] = (benchmark["benchmark_nav"] / benchmark["benchmark_nav"].cummax() - 1.0) * 100.0
+    return benchmark.drop(columns=["close"], errors="ignore")
 
 
-def render_report(
-    *,
-    cube_symbol: str,
-    cube_name: Optional[str],
-    requested_start_date: date,
-    requested_end_date: date,
-    actual_rebalance_start: Optional[str],
-    actual_nav_start: str,
-    summary: Dict[str, Any],
-) -> str:
-    raw_perf = summary["performance_raw"]
-    slip_perf = summary["performance_after_slippage"]
-    comparison = summary["comparison"]
-    slippage = summary["slippage"]
-    rebalance = summary["rebalancing"]
-    fetch_info = summary["rebalance_fetch"]
-    effective_start_date = summary.get("effective_start_date")
-
-    def fmt_pct(value: Optional[float], digits: int = 2) -> str:
-        if value is None:
-            return "N/A"
-        return f"{value:.{digits}f}%"
-
-    def fmt_num(value: Optional[float], digits: int = 3) -> str:
-        if value is None:
-            return "N/A"
-        return f"{value:.{digits}f}"
-
-    lines = [
-        f"# Xueqiu Cube Report: {cube_symbol}",
-        "",
-        f"- Cube name: {cube_name or 'N/A'}",
-        f"- Requested range: {requested_start_date.isoformat()} to {requested_end_date.isoformat()}",
-        f"- Effective range start: {effective_start_date}",
-        f"- First rebalance available: {actual_rebalance_start or 'N/A'}",
-        f"- First NAV available: {actual_nav_start}",
-        f"- Rebalance page size used: {fetch_info['page_size']}",
-        f"- Rebalance pages fetched: {fetch_info['pages_fetched']}",
-        f"- Page limit fallback triggered: {'Yes' if fetch_info['page_limit_hit'] else 'No'}",
-        "",
-        "## Slippage Assumption",
-        "",
-        f"- Single-side slippage: {fmt_pct(slippage['slippage_pct_per_side'])}",
-        "- Cost formula: gross turnover x single-side slippage",
-        f"- Rebalances applied within NAV window: {int(slippage['applied_rebalance_count'])}",
-        f"- Rebalances beyond latest NAV date: {int(slippage['unapplied_rebalance_count'])}",
-        f"- Aggregate slippage cost deducted: {fmt_pct(slippage['total_slippage_cost_pct'])}",
-        f"- Ending NAV drag vs raw: {fmt_pct(slippage['ending_nav_drag_pct'])}",
-        "",
-        "## Performance Comparison",
-        "",
-        "| Metric | Raw | After Slippage | Delta |",
-        "| --- | ---: | ---: | ---: |",
-        f"| End NAV | {raw_perf['nav_end']:.4f} | {slip_perf['nav_end']:.4f} | {fmt_pct(comparison['ending_nav_ratio_pct'])} |",
-        f"| Total return | {fmt_pct(raw_perf['total_return_pct'])} | {fmt_pct(slip_perf['total_return_pct'])} | {fmt_pct(comparison['total_return_drag_pct_points'])} |",
-        f"| Annualized return | {fmt_pct(raw_perf['annualized_return_pct'])} | {fmt_pct(slip_perf['annualized_return_pct'])} | {fmt_pct(comparison['annualized_return_drag_pct_points'])} |",
-        f"| Max drawdown | {fmt_pct(raw_perf['max_drawdown_pct'])} | {fmt_pct(slip_perf['max_drawdown_pct'])} | {fmt_pct(comparison['max_drawdown_delta_pct_points'])} |",
-        f"| Annualized volatility | {fmt_pct(raw_perf['annualized_volatility_pct'])} | {fmt_pct(slip_perf['annualized_volatility_pct'])} | {fmt_pct(comparison['annualized_volatility_delta_pct_points'])} |",
-        f"| Sharpe | {fmt_num(raw_perf['sharpe'])} | {fmt_num(slip_perf['sharpe'])} | {fmt_num(comparison['sharpe_delta'])} |",
-        f"| Calmar | {fmt_num(raw_perf['calmar'])} | {fmt_num(slip_perf['calmar'])} | {fmt_num(comparison['calmar_delta'])} |",
-        f"| Daily win rate | {fmt_pct(raw_perf['daily_win_rate_pct'])} | {fmt_pct(slip_perf['daily_win_rate_pct'])} | {fmt_pct(comparison['daily_win_rate_delta_pct_points'])} |",
-        f"| Monthly win rate | {fmt_pct(raw_perf['monthly_win_rate_pct'])} | {fmt_pct(slip_perf['monthly_win_rate_pct'])} | {fmt_pct(comparison['monthly_win_rate_delta_pct_points'])} |",
-        "",
-        "## Rebalancing",
-        "",
-        f"- Rebalance count: {rebalance['rebalance_count']}",
-        f"- Average gross turnover: {rebalance['average_gross_turnover_pct']:.2f}%"
-        if rebalance["average_gross_turnover_pct"] is not None
-        else "- Average gross turnover: N/A",
-        f"- Average one-way turnover: {rebalance['average_one_way_turnover_pct']:.2f}%"
-        if rebalance["average_one_way_turnover_pct"] is not None
-        else "- Average one-way turnover: N/A",
-        f"- Median one-way turnover: {rebalance['median_one_way_turnover_pct']:.2f}%"
-        if rebalance["median_one_way_turnover_pct"] is not None
-        else "- Median one-way turnover: N/A",
-        f"- Average holdings count: {rebalance['average_holdings_count']:.2f}"
-        if rebalance["average_holdings_count"] is not None
-        else "- Average holdings count: N/A",
-        "",
-        "## Best/Worst",
-        "",
-        f"- Raw best day: {raw_perf['best_day']} ({raw_perf['best_day_return_pct']:.2f}%)"
-        if raw_perf["best_day"]
-        else "- Raw best day: N/A",
-        f"- Raw worst day: {raw_perf['worst_day']} ({raw_perf['worst_day_return_pct']:.2f}%)"
-        if raw_perf["worst_day"]
-        else "- Raw worst day: N/A",
-        f"- Slippage best day: {slip_perf['best_day']} ({slip_perf['best_day_return_pct']:.2f}%)"
-        if slip_perf["best_day"]
-        else "- Best day: N/A",
-        f"- Slippage worst day: {slip_perf['worst_day']} ({slip_perf['worst_day_return_pct']:.2f}%)"
-        if slip_perf["worst_day"]
-        else "- Slippage worst day: N/A",
-        f"- Raw best month: {raw_perf['best_month']} ({raw_perf['best_month_return_pct']:.2f}%)"
-        if raw_perf["best_month"]
-        else "- Raw best month: N/A",
-        f"- Raw worst month: {raw_perf['worst_month']} ({raw_perf['worst_month_return_pct']:.2f}%)"
-        if raw_perf["worst_month"]
-        else "- Raw worst month: N/A",
-        "",
-        "## Yearly Returns",
-        "",
-        "| Year | Raw | After Slippage |",
-        "| --- | ---: | ---: |",
+def merge_yearly_returns(
+    raw_metrics: Dict[str, Any],
+    slippage_metrics: Dict[str, Any],
+    benchmark_metrics: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    raw_years = {row["year"]: row["return_pct"] for row in raw_metrics.get("yearly_returns") or []}
+    slip_years = {row["year"]: row["return_pct"] for row in slippage_metrics.get("yearly_returns") or []}
+    benchmark_years = {
+        row["year"]: row["return_pct"]
+        for row in (benchmark_metrics or {}).get("yearly_returns") or []
+    }
+    all_years = sorted(set(raw_years) | set(slip_years) | set(benchmark_years))
+    return [
+        {
+            "year": year,
+            "raw_return_pct": raw_years.get(year),
+            "slippage_return_pct": slip_years.get(year),
+            "benchmark_return_pct": benchmark_years.get(year),
+            "excess_return_after_slippage_pct": (
+                slip_years[year] - benchmark_years[year]
+                if year in slip_years and year in benchmark_years
+                else None
+            ),
+        }
+        for year in all_years
     ]
 
-    raw_years = {row["year"]: row["return_pct"] for row in raw_perf["yearly_returns"]}
-    slip_years = {row["year"]: row["return_pct"] for row in slip_perf["yearly_returns"]}
-    all_years = sorted(set(raw_years) | set(slip_years))
-    for year in all_years:
-        lines.append(
-            f"| {year} | {fmt_pct(raw_years.get(year))} | {fmt_pct(slip_years.get(year))} |"
+
+def build_curve_points(nav_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in nav_df.to_dict(orient="records"):
+        row_date = pd.Timestamp(row["date"]).date().isoformat()
+        rows.append(
+            {
+                "date": row_date,
+                "raw_nav": normalize_value(row.get("nav")),
+                "slippage_nav": normalize_value(row.get("nav_after_slippage")),
+                "benchmark_nav": normalize_value(row.get("benchmark_nav")),
+                "raw_return_pct": normalize_value(row.get("cumulative_return_pct")),
+                "slippage_return_pct": normalize_value(row.get("cumulative_return_after_slippage_pct")),
+                "benchmark_return_pct": normalize_value(row.get("benchmark_cumulative_return_pct")),
+                "raw_drawdown_pct": normalize_value(row.get("drawdown_pct")),
+                "slippage_drawdown_pct": normalize_value(row.get("drawdown_after_slippage_pct")),
+                "benchmark_drawdown_pct": normalize_value(row.get("benchmark_drawdown_pct")),
+                "slippage_cost_pct": normalize_value(row.get("slippage_cost_pct")),
+            }
         )
-
-    lines.extend(
-        [
-            "",
-            "## Top Traded Symbols",
-            "",
-            "| Symbol | Name | Event Rows |",
-            "| --- | --- | ---: |",
-        ]
-    )
-    for row in rebalance["top_traded_symbols"]:
-        lines.append(
-            f"| {row.get('stock_symbol') or ''} | {row.get('stock_name') or ''} | {int(row.get('event_rows') or 0)} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
+    return rows
 
 
-def save_outputs(
-    artifacts: AnalysisArtifacts,
+def run_snowball_cube_backtest(
     *,
-    event_df: pd.DataFrame,
-    detail_df: pd.DataFrame,
-    nav_df: pd.DataFrame,
-    slippage_schedule_df: pd.DataFrame,
-    summary: Dict[str, Any],
-    report: str,
-) -> None:
-    event_df.to_csv(artifacts.events_csv, index=False)
-    detail_df.to_csv(artifacts.details_csv, index=False)
-    nav_df.to_csv(artifacts.nav_csv, index=False)
-    slippage_schedule_df.to_csv(artifacts.slippage_schedule_csv, index=False)
-    artifacts.summary_json.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    artifacts.report_md.write_text(report, encoding="utf-8")
+    cube_symbol: str,
+    cookie: str,
+    slippage_pct: float,
+    start_date: date = DEFAULT_START_DATE,
+    end_date: Optional[date] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    cube_symbol = str(cube_symbol or "").strip().upper()
+    if not cube_symbol:
+        raise ValueError("Missing cube symbol")
+    if not cookie:
+        raise ValueError("Missing Xueqiu cookie")
 
-
-def main() -> None:
-    args = parse_args()
-    cube_symbol = args.cube_symbol.strip().upper()
-    requested_start = parse_yyyymmdd(args.start_date)
-    requested_end = parse_yyyymmdd(args.end_date)
-    if requested_start > requested_end:
-        raise ValueError("start-date must be <= end-date")
-
-    cookie = read_cookie(args)
-    if args.output_dir:
-        explicit_dir = Path(args.output_dir).expanduser()
-        explicit_dir.mkdir(parents=True, exist_ok=True)
-        artifacts = AnalysisArtifacts(
-            output_dir=explicit_dir,
-            details_csv=explicit_dir / "rebalancing_details.csv",
-            events_csv=explicit_dir / "rebalancing_events.csv",
-            nav_csv=explicit_dir / "nav_curve.csv",
-            slippage_schedule_csv=explicit_dir / "slippage_schedule.csv",
-            summary_json=explicit_dir / "performance_summary.json",
-            report_md=explicit_dir / "performance_report.md",
-        )
-    else:
-        base_dir = Path(__file__).resolve().parent / "output"
-        artifacts = build_output_paths(base_dir, cube_symbol)
-
+    requested_end = end_date or datetime.now(SH_TZ).date()
     session = build_session(cookie, cube_symbol)
     rebalance_fetch = fetch_all_rebalances(
         session,
         cube_symbol,
-        start_date=requested_start,
-        timeout=args.timeout,
+        start_date=start_date,
+        timeout=timeout,
     )
-    effective_start = requested_start
+    effective_start = start_date
     if (
         rebalance_fetch.page_limit_hit
         and rebalance_fetch.oldest_fetched_date
-        and rebalance_fetch.oldest_fetched_date > requested_start
+        and rebalance_fetch.oldest_fetched_date > start_date
     ):
         effective_start = rebalance_fetch.oldest_fetched_date
+
     cube_name, nav_points = fetch_nav_history(
         session,
         cube_symbol,
         effective_start,
         requested_end,
-        timeout=args.timeout,
+        timeout=timeout,
     )
-
     event_df, detail_df = flatten_rebalance_history(rebalance_fetch.items)
     nav_df = build_nav_dataframe(nav_points)
 
@@ -964,12 +841,8 @@ def main() -> None:
         ].reset_index(drop=True)
 
     performance_raw = compute_performance_metrics(nav_df)
-    nav_with_slippage_df, event_with_slippage_df, slippage_schedule_df, slippage_summary = (
-        build_slippage_adjusted_dataframe(
-            nav_df,
-            event_df,
-            slippage_pct=args.slippage_pct,
-        )
+    nav_with_slippage_df, event_with_slippage_df, _slippage_schedule_df, slippage_summary = (
+        build_slippage_adjusted_dataframe(nav_df, event_df, slippage_pct=slippage_pct)
     )
     performance_after_slippage = compute_performance_metrics(
         nav_with_slippage_df,
@@ -978,21 +851,40 @@ def main() -> None:
         drawdown_col="drawdown_after_slippage_pct",
         reference_start_value=float(nav_df["nav"].iloc[0]),
     )
+
+    actual_start_date = datetime.strptime(performance_raw["start_date"], "%Y-%m-%d").date()
+    actual_end_date = datetime.strptime(performance_raw["end_date"], "%Y-%m-%d").date()
+    benchmark_df = build_benchmark_dataframe(nav_with_slippage_df, actual_start_date, actual_end_date)
+    nav_with_slippage_df = nav_with_slippage_df.merge(benchmark_df, on="date", how="left")
+
+    benchmark_metrics = None
+    if "benchmark_nav" in nav_with_slippage_df.columns and not nav_with_slippage_df["benchmark_nav"].dropna().empty:
+        benchmark_metrics = compute_performance_metrics(
+            nav_with_slippage_df.dropna(subset=["benchmark_nav"]).reset_index(drop=True),
+            nav_col="benchmark_nav",
+            daily_return_col="benchmark_daily_return",
+            drawdown_col="benchmark_drawdown_pct",
+        )
+
     comparison = build_performance_comparison(performance_raw, performance_after_slippage)
     rebalancing = compute_rebalance_metrics(event_with_slippage_df, detail_df)
     actual_rebalance_start = (
         event_with_slippage_df["created_at"].iloc[0].isoformat() if not event_with_slippage_df.empty else None
     )
-    actual_nav_start = performance_raw["start_date"]
+    curve_points = build_curve_points(nav_with_slippage_df)
+    yearly_returns = merge_yearly_returns(performance_raw, performance_after_slippage, benchmark_metrics)
 
     summary = {
         "cube_symbol": cube_symbol,
         "cube_name": cube_name,
-        "requested_start_date": requested_start.isoformat(),
+        "requested_start_date": start_date.isoformat(),
         "requested_end_date": requested_end.isoformat(),
         "effective_start_date": effective_start.isoformat(),
         "actual_rebalance_start": actual_rebalance_start,
-        "actual_nav_start": actual_nav_start,
+        "actual_nav_start": performance_raw["start_date"],
+        "actual_nav_end": performance_raw["end_date"],
+        "benchmark_symbol": BENCHMARK_SYMBOL,
+        "benchmark_name": BENCHMARK_NAME,
         "rebalance_fetch": {
             "page_size": rebalance_fetch.page_size,
             "pages_fetched": rebalance_fetch.pages_fetched,
@@ -1004,44 +896,11 @@ def main() -> None:
         },
         "performance_raw": performance_raw,
         "performance_after_slippage": performance_after_slippage,
+        "benchmark_metrics": benchmark_metrics,
         "slippage": slippage_summary,
         "comparison": comparison,
         "rebalancing": rebalancing,
-        "files": {
-            "output_dir": str(artifacts.output_dir),
-            "events_csv": str(artifacts.events_csv),
-            "details_csv": str(artifacts.details_csv),
-            "nav_csv": str(artifacts.nav_csv),
-            "slippage_schedule_csv": str(artifacts.slippage_schedule_csv),
-            "summary_json": str(artifacts.summary_json),
-            "report_md": str(artifacts.report_md),
-        },
+        "yearly_returns": yearly_returns,
+        "curve_points": curve_points,
     }
-    summary = json_safe(summary)
-
-    report = render_report(
-        cube_symbol=cube_symbol,
-        cube_name=cube_name,
-        requested_start_date=requested_start,
-        requested_end_date=requested_end,
-        actual_rebalance_start=actual_rebalance_start,
-        actual_nav_start=actual_nav_start,
-        summary=summary,
-    )
-    save_outputs(
-        artifacts,
-        event_df=event_with_slippage_df,
-        detail_df=detail_df,
-        nav_df=nav_with_slippage_df,
-        slippage_schedule_df=slippage_schedule_df,
-        summary=summary,
-        report=report,
-    )
-
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print()
-    print(f"Saved outputs to: {artifacts.output_dir}")
-
-
-if __name__ == "__main__":
-    main()
+    return json_safe(summary)

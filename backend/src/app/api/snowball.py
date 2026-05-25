@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import httpx
 import logging
@@ -19,6 +19,8 @@ from ...core.database import (
     SnowballCopyConfig,
     SnowballCopyLog,
     SnowballAccountConfig,
+    SnowballBacktestRun,
+    SnowballBacktestCurvePoint,
 )
 from ...core.external_trading_database import (
     ExternalTradingAccount,
@@ -46,6 +48,7 @@ from ...core.services.external_trading_valuation import (
     calculate_sub_account_net_asset,
 )
 from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
+from ...core.services.snowball_backtest import run_snowball_cube_backtest
 from .account import valid_account
 
 router = APIRouter(prefix="/api/snowball")
@@ -54,14 +57,17 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 SNOWBALL_A_SHARE_LOT_SIZE = 100
 SNOWBALL_MIN_ROUND_UP_QUANTITY = 50
+XUEQIU_API_BASE_URL = "https://api.xueqiu.com"
+XUEQIU_STOCK_BASE_URL = "https://stock.xueqiu.com"
+XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
 XUEQIU_HEADERS = {
     "Host": "api.xueqiu.com",
     "Cookie": "xq_a_token=91eabb39aba7af77c2b00d8f8ac5700ade3cf02b;",
     "accept": "application/json",
     "accept-language": "zh-Hans-CN;q=1, en-CN;q=0.9",
-    "x-device-os": "iOS 26.1",
+    "x-device-os": "iOS 26.4.2",
     "x-device-model-name": "iPhone 16 Pro Max_iPhone17,2",
-    "user-agent": "Xueqiu iPhone 14.81.1",
+    "user-agent": "Xueqiu iPhone 14.90.2",
     "priority": "u=3, i"
 }
 
@@ -86,16 +92,12 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
     try:
         logger.info("Starting background refresh of Xueqiu guest token...")
         async with httpx.AsyncClient() as client:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            if cookie:
-                if "xq_a_token" in cookie:
-                    headers["Cookie"] = cookie
-                else:
-                    headers["Cookie"] = f"xq_a_token={cookie};"
+            headers = XUEQIU_HEADERS.copy()
+            headers["Host"] = "xueqiu.com"
+            headers["Referer"] = XUEQIU_WEB_BASE_URL
+            _apply_xueqiu_cookie(headers, cookie)
                     
-            response = await client.get("https://xueqiu.com/about/contact-us", headers=headers, timeout=10.0)
+            response = await client.get(f"{XUEQIU_WEB_BASE_URL}/about/contact-us", headers=headers, timeout=10.0)
             _last_token_refresh_time = datetime.now() # Record the attempt time to enforce the 1-hour limit
             
             for cookie in response.cookies.jar:
@@ -127,6 +129,16 @@ def _normalize_xueqiu_cookie(cookie: str) -> str:
     if not match:
         raise HTTPException(status_code=400, detail="Missing xq_a_token")
     return f"xq_a_token={match.group(1)};"
+
+
+def _apply_xueqiu_cookie(headers: Dict[str, str], cookie: Optional[str]) -> Dict[str, str]:
+    if not cookie:
+        return headers
+    if "xq_a_token" in cookie:
+        headers["Cookie"] = cookie
+    else:
+        headers["Cookie"] = f"xq_a_token={cookie};"
+    return headers
 
 # --- Models ---
 
@@ -192,6 +204,64 @@ class SnowballLogStatusUpdate(BaseModel):
 class PaginatedSnowballLogs(BaseModel):
     total: int
     items: List[SnowballLogResponse]
+
+
+class SnowballBacktestStartRequest(BaseModel):
+    slippage_pct: float = 0.1
+
+
+class SnowballBacktestRunResponse(BaseModel):
+    id: int
+    config_id: int
+    combination_id: str
+    combination_name: Optional[str] = None
+    status: str
+    slippage_pct: float
+    requested_start_date: Optional[date] = None
+    requested_end_date: Optional[date] = None
+    effective_start_date: Optional[date] = None
+    actual_nav_start: Optional[date] = None
+    actual_nav_end: Optional[date] = None
+    actual_rebalance_start: Optional[datetime] = None
+    benchmark_symbol: Optional[str] = None
+    benchmark_name: Optional[str] = None
+    performance_raw: Optional[Dict[str, Any]] = None
+    performance_after_slippage: Optional[Dict[str, Any]] = None
+    benchmark_metrics: Optional[Dict[str, Any]] = None
+    slippage: Optional[Dict[str, Any]] = None
+    comparison: Optional[Dict[str, Any]] = None
+    rebalancing: Optional[Dict[str, Any]] = None
+    rebalance_fetch: Optional[Dict[str, Any]] = None
+    yearly_returns: List[Dict[str, Any]] = []
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SnowballBacktestCurvePointResponse(BaseModel):
+    date: date
+    raw_nav: Optional[float] = None
+    slippage_nav: Optional[float] = None
+    benchmark_nav: Optional[float] = None
+    raw_return_pct: Optional[float] = None
+    slippage_return_pct: Optional[float] = None
+    benchmark_return_pct: Optional[float] = None
+    raw_drawdown_pct: Optional[float] = None
+    slippage_drawdown_pct: Optional[float] = None
+    benchmark_drawdown_pct: Optional[float] = None
+    slippage_cost_pct: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SnowballBacktestDetailResponse(SnowballBacktestRunResponse):
+    curve_points: List[SnowballBacktestCurvePointResponse] = []
 
 
 class SnowballSnapshotHolding(BaseModel):
@@ -267,18 +337,10 @@ def _snowball_target_quantity(target_value: float, price: float) -> int:
 
 async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
-    url = f"https://api.xueqiu.com/cube/center/cube/holdSymbols.json?symbol={symbol}"
+    url = f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json?symbol={symbol}"
     
     headers = XUEQIU_HEADERS.copy()
-    if cookie:
-        # If user provided a raw cookie string (key=value), use it. 
-        # If they provided just the token, we might need to format it, but let's assume raw cookie for simplicity or just replace xq_a_token.
-        # But safest is to treat it as the full Cookie header value if it contains '='
-        if "xq_a_token" in cookie:
-             headers["Cookie"] = cookie
-        else:
-             # Assume it's just the token value
-             headers["Cookie"] = f"xq_a_token={cookie};"
+    _apply_xueqiu_cookie(headers, cookie)
     
     async with httpx.AsyncClient() as client:
         try:
@@ -301,20 +363,14 @@ async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
 async def fetch_xueqiu_latest_rebalance_prices(symbol: str, cookie: str = None) -> Dict[str, Dict[str, Any]]:
     """Fetch latest Snowball rebalance fill prices by Xueqiu symbol."""
     headers = XUEQIU_HEADERS.copy()
-    headers["Host"] = "xueqiu.com"
-    headers["Referer"] = f"https://xueqiu.com/P/{symbol}"
-    headers["X-Requested-With"] = "XMLHttpRequest"
-    if cookie:
-        if "xq_a_token" in cookie:
-            headers["Cookie"] = cookie
-        else:
-            headers["Cookie"] = f"xq_a_token={cookie};"
+    headers["Referer"] = f"{XUEQIU_WEB_BASE_URL}/P/{symbol}"
+    _apply_xueqiu_cookie(headers, cookie)
 
     params = {"cube_symbol": symbol, "count": 20, "page": 1}
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(
-                "https://xueqiu.com/cubes/rebalancing/history.json",
+                f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/history.json",
                 params=params,
                 headers=headers,
                 timeout=10.0,
@@ -351,16 +407,11 @@ async def fetch_xueqiu_latest_rebalance_prices(symbol: str, cookie: str = None) 
 async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Dict]:
     """Fetch cube info including name from Xueqiu"""
     ts = int(datetime.now().timestamp() * 1000)
-    url = f"https://xueqiu.com/cubes/nav_daily/all.json?cube_symbol={symbol}&since={ts}&until={ts}"
+    url = f"{XUEQIU_API_BASE_URL}/cubes/nav_daily/all.json?cube_symbol={symbol}&since={ts}&until={ts}"
     
     headers = XUEQIU_HEADERS.copy()
-    headers["Referer"] = f"https://xueqiu.com/P/{symbol}"
-    
-    if cookie:
-        if "xq_a_token" in cookie:
-             headers["Cookie"] = cookie
-        else:
-             headers["Cookie"] = f"xq_a_token={cookie};"
+    headers["Referer"] = f"{XUEQIU_WEB_BASE_URL}/P/{symbol}"
+    _apply_xueqiu_cookie(headers, cookie)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -392,14 +443,10 @@ async def fetch_xueqiu_quotes(symbols: List[str], cookie: str = None) -> Dict[st
     raw_to_dotted = {s.replace(".", ""): s for s in symbols}
     raw_symbol_str = ",".join(raw_to_dotted.keys())
     
-    url = f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={raw_symbol_str}"
+    url = f"{XUEQIU_STOCK_BASE_URL}/v5/stock/realtime/quotec.json?symbol={raw_symbol_str}"
     
     headers = XUEQIU_STOCK_HEADERS.copy()
-    if cookie:
-        if "xq_a_token" in cookie:
-             headers["Cookie"] = cookie
-        else:
-             headers["Cookie"] = f"xq_a_token={cookie};"
+    _apply_xueqiu_cookie(headers, cookie)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -427,14 +474,10 @@ async def fetch_xueqiu_batch_quotes(symbols: List[str], cookie: str = None) -> D
     raw_to_dotted = {s.replace(".", ""): s for s in symbols}
     raw_symbol_str = ",".join(raw_to_dotted.keys())
     
-    url = f"https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol={raw_symbol_str}"
+    url = f"{XUEQIU_STOCK_BASE_URL}/v5/stock/batch/quote.json?symbol={raw_symbol_str}"
     
     headers = XUEQIU_STOCK_HEADERS.copy()
-    if cookie:
-        if "xq_a_token" in cookie:
-             headers["Cookie"] = cookie
-        else:
-             headers["Cookie"] = f"xq_a_token={cookie};"
+    _apply_xueqiu_cookie(headers, cookie)
              
     async with httpx.AsyncClient() as client:
         try:
@@ -1013,6 +1056,176 @@ async def sync_snowball_external_trading_config_ids(
 def process_snowball_external_trading_sync_for_robot() -> Dict[str, Any]:
     return asyncio.run(sync_snowball_external_trading_config_ids(trigger_source="robot_timer"))
 
+
+def _parse_iso_date(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    return date.fromisoformat(str(value)[:10])
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo:
+        parsed = parsed.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    return parsed
+
+
+def _snowball_backtest_run_response(run: SnowballBacktestRun) -> SnowballBacktestRunResponse:
+    return SnowballBacktestRunResponse(
+        id=run.id,
+        config_id=run.config_id,
+        combination_id=run.combination_id,
+        combination_name=run.combination_name,
+        status=run.status,
+        slippage_pct=safe_float(run.slippage_pct),
+        requested_start_date=run.requested_start_date,
+        requested_end_date=run.requested_end_date,
+        effective_start_date=run.effective_start_date,
+        actual_nav_start=run.actual_nav_start,
+        actual_nav_end=run.actual_nav_end,
+        actual_rebalance_start=run.actual_rebalance_start,
+        benchmark_symbol=run.benchmark_symbol,
+        benchmark_name=run.benchmark_name,
+        performance_raw=run.performance_raw,
+        performance_after_slippage=run.performance_after_slippage,
+        benchmark_metrics=run.benchmark_metrics,
+        slippage=run.slippage,
+        comparison=run.comparison,
+        rebalancing=run.rebalancing,
+        rebalance_fetch=run.rebalance_fetch,
+        yearly_returns=run.yearly_returns or [],
+        error_message=run.error_message,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        updated_at=run.updated_at,
+    )
+
+
+def _mark_snowball_backtest_failed(run_id: int, message: str) -> None:
+    with get_db_ctx() as db:
+        run = db.query(SnowballBacktestRun).filter(SnowballBacktestRun.id == run_id).first()
+        if not run:
+            return
+        now = datetime.now()
+        run.status = "FAILED"
+        run.error_message = (message or "回测失败")[:4000]
+        run.completed_at = now
+        run.updated_at = now
+        db.add(SnowballCopyLog(
+            cli_id="",
+            combination_id=run.combination_id,
+            action="BACKTEST",
+            status="FAILED",
+            message=run.error_message[:1000],
+            account_id=run.account_id,
+        ))
+
+
+def _store_snowball_backtest_result(run_id: int, result: Dict[str, Any]) -> None:
+    with get_db_ctx() as db:
+        run = db.query(SnowballBacktestRun).filter(SnowballBacktestRun.id == run_id).first()
+        if not run:
+            return
+
+        run.status = "SUCCESS"
+        run.combination_name = result.get("cube_name") or run.combination_name
+        run.requested_start_date = _parse_iso_date(result.get("requested_start_date"))
+        run.requested_end_date = _parse_iso_date(result.get("requested_end_date"))
+        run.effective_start_date = _parse_iso_date(result.get("effective_start_date"))
+        run.actual_nav_start = _parse_iso_date(result.get("actual_nav_start"))
+        run.actual_nav_end = _parse_iso_date(result.get("actual_nav_end"))
+        run.actual_rebalance_start = _parse_iso_datetime(result.get("actual_rebalance_start"))
+        run.benchmark_symbol = result.get("benchmark_symbol")
+        run.benchmark_name = result.get("benchmark_name")
+        run.performance_raw = result.get("performance_raw")
+        run.performance_after_slippage = result.get("performance_after_slippage")
+        run.benchmark_metrics = result.get("benchmark_metrics")
+        run.slippage = result.get("slippage")
+        run.comparison = result.get("comparison")
+        run.rebalancing = result.get("rebalancing")
+        run.rebalance_fetch = result.get("rebalance_fetch")
+        run.yearly_returns = result.get("yearly_returns") or []
+        run.error_message = None
+        now = datetime.now()
+        run.completed_at = now
+        run.updated_at = now
+
+        db.query(SnowballBacktestCurvePoint).filter(
+            SnowballBacktestCurvePoint.run_id == run.id
+        ).delete(synchronize_session=False)
+        for point in result.get("curve_points") or []:
+            point_date = _parse_iso_date(point.get("date"))
+            if not point_date:
+                continue
+            db.add(SnowballBacktestCurvePoint(
+                run_id=run.id,
+                date=point_date,
+                raw_nav=safe_float(point.get("raw_nav"), None),
+                slippage_nav=safe_float(point.get("slippage_nav"), None),
+                benchmark_nav=safe_float(point.get("benchmark_nav"), None),
+                raw_return_pct=safe_float(point.get("raw_return_pct"), None),
+                slippage_return_pct=safe_float(point.get("slippage_return_pct"), None),
+                benchmark_return_pct=safe_float(point.get("benchmark_return_pct"), None),
+                raw_drawdown_pct=safe_float(point.get("raw_drawdown_pct"), None),
+                slippage_drawdown_pct=safe_float(point.get("slippage_drawdown_pct"), None),
+                benchmark_drawdown_pct=safe_float(point.get("benchmark_drawdown_pct"), None),
+                slippage_cost_pct=safe_float(point.get("slippage_cost_pct"), None),
+            ))
+
+        total_return = (run.performance_after_slippage or {}).get("total_return_pct")
+        message = (
+            f"雪球组合回测完成：单边滑点 {run.slippage_pct:.2f}%，"
+            f"滑点后总收益 {total_return:.2f}%"
+            if total_return is not None
+            else f"雪球组合回测完成：单边滑点 {run.slippage_pct:.2f}%"
+        )
+        db.add(SnowballCopyLog(
+            cli_id="",
+            combination_id=run.combination_id,
+            action="BACKTEST",
+            status="SUCCESS",
+            message=message,
+            account_id=run.account_id,
+        ))
+
+
+def _run_snowball_backtest_task(run_id: int) -> None:
+    try:
+        with get_db_ctx() as db:
+            run = db.query(SnowballBacktestRun).filter(SnowballBacktestRun.id == run_id).first()
+            if not run:
+                return
+            config = db.query(SnowballCopyConfig).filter(
+                SnowballCopyConfig.id == run.config_id,
+                SnowballCopyConfig.account_id == run.account_id,
+            ).first()
+            if not config:
+                raise ValueError("雪球跟单配置不存在")
+            account_config = db.query(SnowballAccountConfig).filter_by(account_id=run.account_id).first()
+            cookie = account_config.xueqiu_cookie if account_config else None
+            if not cookie:
+                raise ValueError("未配置雪球全局 Cookie")
+            now = datetime.now()
+            run.status = "RUNNING"
+            run.started_at = run.started_at or now
+            run.updated_at = now
+            cube_symbol = config.combination_id
+            slippage_pct = safe_float(run.slippage_pct)
+
+        result = run_snowball_cube_backtest(
+            cube_symbol=cube_symbol,
+            cookie=cookie,
+            slippage_pct=slippage_pct,
+        )
+        _store_snowball_backtest_result(run_id, result)
+    except Exception as exc:
+        logger.exception("Snowball backtest failed: run_id=%s", run_id)
+        _mark_snowball_backtest_failed(run_id, str(exc))
+
+
 @router.get("/info/{symbol}")
 async def get_combination_info(
     symbol: str, 
@@ -1195,6 +1408,107 @@ async def delete_config(
     trading_db.commit()
     db.commit()
     return {"message": "Deleted successfully"}
+
+
+@router.post("/configs/{config_id}/backtests", response_model=SnowballBacktestRunResponse)
+async def start_config_backtest(
+    config_id: int,
+    request: SnowballBacktestStartRequest,
+    background_tasks: BackgroundTasks,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    slippage_pct = safe_float(request.slippage_pct, 0.1)
+    if slippage_pct < 0 or slippage_pct > 10:
+        raise HTTPException(status_code=400, detail="滑点必须在 0% 到 10% 之间")
+
+    account_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    if not account_config or not account_config.xueqiu_cookie:
+        raise HTTPException(status_code=400, detail="请先配置雪球全局 Cookie")
+
+    now = datetime.now()
+    run = SnowballBacktestRun(
+        account_id=account_id,
+        config_id=config.id,
+        combination_id=config.combination_id,
+        combination_name=config.combination_name,
+        status="RUNNING",
+        slippage_pct=slippage_pct,
+        benchmark_symbol="000905.SH",
+        benchmark_name="中证500",
+        created_at=now,
+        started_at=now,
+        updated_at=now,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    background_tasks.add_task(_run_snowball_backtest_task, run.id)
+    return _snowball_backtest_run_response(run)
+
+
+@router.get("/configs/{config_id}/backtests", response_model=List[SnowballBacktestRunResponse])
+async def list_config_backtests(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = db.query(SnowballCopyConfig).filter(
+        SnowballCopyConfig.id == config_id,
+        SnowballCopyConfig.account_id == account_id,
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    runs = db.query(SnowballBacktestRun).filter(
+        SnowballBacktestRun.account_id == account_id,
+        SnowballBacktestRun.config_id == config_id,
+    ).order_by(SnowballBacktestRun.created_at.desc(), SnowballBacktestRun.id.desc()).limit(50).all()
+    return [_snowball_backtest_run_response(run) for run in runs]
+
+
+@router.get("/backtests/{run_id}", response_model=SnowballBacktestDetailResponse)
+async def get_backtest_detail(
+    run_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    run = db.query(SnowballBacktestRun).filter(
+        SnowballBacktestRun.id == run_id,
+        SnowballBacktestRun.account_id == account_id,
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+
+    points = db.query(SnowballBacktestCurvePoint).filter(
+        SnowballBacktestCurvePoint.run_id == run.id,
+    ).order_by(SnowballBacktestCurvePoint.date.asc()).all()
+    base = _snowball_backtest_run_response(run).dict()
+    base["curve_points"] = [
+        SnowballBacktestCurvePointResponse(
+            date=point.date,
+            raw_nav=point.raw_nav,
+            slippage_nav=point.slippage_nav,
+            benchmark_nav=point.benchmark_nav,
+            raw_return_pct=point.raw_return_pct,
+            slippage_return_pct=point.slippage_return_pct,
+            benchmark_return_pct=point.benchmark_return_pct,
+            raw_drawdown_pct=point.raw_drawdown_pct,
+            slippage_drawdown_pct=point.slippage_drawdown_pct,
+            benchmark_drawdown_pct=point.benchmark_drawdown_pct,
+            slippage_cost_pct=point.slippage_cost_pct,
+        )
+        for point in points
+    ]
+    return SnowballBacktestDetailResponse(**base)
+
 
 @router.get("/logs", response_model=PaginatedSnowballLogs)
 async def get_logs(
