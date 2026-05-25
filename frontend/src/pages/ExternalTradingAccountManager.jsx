@@ -349,6 +349,9 @@ const ExternalTradingAccountManager = () => {
   const [markBlockSuccessOrderId, setMarkBlockSuccessOrderId] = useState(null);
   const [markBlockSuccessModalVisible, setMarkBlockSuccessModalVisible] = useState(false);
   const [markBlockSuccessRecord, setMarkBlockSuccessRecord] = useState(null);
+  const [repairParentFillOrderId, setRepairParentFillOrderId] = useState(null);
+  const [repairParentFillModalVisible, setRepairParentFillModalVisible] = useState(false);
+  const [repairParentFillRecord, setRepairParentFillRecord] = useState(null);
   const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
   const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
@@ -357,6 +360,7 @@ const ExternalTradingAccountManager = () => {
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
   const [markBlockSuccessForm] = Form.useForm();
+  const [repairParentFillForm] = Form.useForm();
   const statusWsRef = useRef(null);
   const statusWsReconnectTimerRef = useRef(null);
 
@@ -876,6 +880,45 @@ const ExternalTradingAccountManager = () => {
     markBlockSuccessForm.resetFields();
   };
 
+  const handleRepairParentFill = async record => {
+    if (!executorStatusAccount?.id || !record?.id) return;
+    setRepairParentFillOrderId(record.id);
+    try {
+      const values = await repairParentFillForm.validateFields();
+      const { data } = await request.post(
+        `/api/external-trading-accounts/${executorStatusAccount.id}/orders/${record.id}/repair-parent-fill`,
+        { price: values.price }
+      );
+      message.success(data?.message || '父单补成交完成');
+      setRepairParentFillModalVisible(false);
+      setRepairParentFillRecord(null);
+      repairParentFillForm.resetFields();
+      refreshExecutorStatus(executorStatusAccount);
+    } catch (error) {
+      if (!error?.errorFields) {
+        message.error(error.response?.data?.detail || '父单补成交失败');
+      }
+    } finally {
+      setRepairParentFillOrderId(null);
+    }
+  };
+
+  const openRepairParentFillModal = record => {
+    const defaultPrice = Number(record?.avg_fill_price || record?.submitted_price || 0);
+    setRepairParentFillRecord(record);
+    setRepairParentFillModalVisible(true);
+    repairParentFillForm.setFieldsValue({
+      price: Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice : undefined
+    });
+  };
+
+  const closeRepairParentFillModal = () => {
+    if (repairParentFillOrderId) return;
+    setRepairParentFillModalVisible(false);
+    setRepairParentFillRecord(null);
+    repairParentFillForm.resetFields();
+  };
+
   const openExecutorStatus = account => {
     const tableState = createDefaultExecutorTableState();
     setExecutorStatusAccount(account);
@@ -1092,6 +1135,37 @@ const ExternalTradingAccountManager = () => {
     }
   ];
 
+  const renderOrderActions = record => {
+    const actions = [];
+    if (record?.allocation_role === 'BLOCK' && record?.status === 'BLOCKED_INSUFFICIENT_POSITION') {
+      actions.push(
+        <Button
+          key="mark-success"
+          size="small"
+          type="link"
+          loading={markBlockSuccessOrderId === record.id}
+          onClick={() => openMarkBlockSuccessModal(record)}
+        >
+          标记成功
+        </Button>
+      );
+    }
+    if (record?.allocation_role === 'PARENT' && record?.needs_fill_repair) {
+      actions.push(
+        <Button
+          key="repair-parent-fill"
+          size="small"
+          type="link"
+          loading={repairParentFillOrderId === record.id}
+          onClick={() => openRepairParentFillModal(record)}
+        >
+          补成交
+        </Button>
+      );
+    }
+    return actions.length ? <Space size={4}>{actions}</Space> : '-';
+  };
+
   const orderLifecycleColumns = [
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
     {
@@ -1139,18 +1213,7 @@ const ExternalTradingAccountManager = () => {
       key: 'action',
       width: 120,
       fixed: 'right',
-      render: (_, record) => (
-        record?.allocation_role === 'BLOCK' && record?.status === 'BLOCKED_INSUFFICIENT_POSITION' ? (
-          <Button
-            size="small"
-            type="link"
-            loading={markBlockSuccessOrderId === record.id}
-            onClick={() => openMarkBlockSuccessModal(record)}
-          >
-            标记成功
-          </Button>
-        ) : '-'
-      )
+      render: (_, record) => renderOrderActions(record)
     }
   ];
 
@@ -1656,6 +1719,49 @@ const ExternalTradingAccountManager = () => {
                 step={0.01}
                 style={{ width: '100%' }}
                 placeholder="请输入人工成交价"
+              />
+            </Form.Item>
+          </Form>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="补父单成交"
+        visible={repairParentFillModalVisible}
+        onCancel={closeRepairParentFillModal}
+        onOk={() => handleRepairParentFill(repairParentFillRecord)}
+        confirmLoading={repairParentFillOrderId === repairParentFillRecord?.id}
+        okText="补成交"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Text>
+            系统会按你输入的成交价补写父单成交，并把成交数量分配到子单和子账户账本；此操作当前不支持自动撤销。
+          </Text>
+          <Space wrap>
+            <Tag>{repairParentFillRecord?.symbol_name || repairParentFillRecord?.symbol || '-'}</Tag>
+            <Tag color={repairParentFillRecord?.side === 'SELL' ? 'green' : 'red'}>
+              {repairParentFillRecord?.side || '-'}
+            </Tag>
+            <Tag>父单数量 {formatNumber(repairParentFillRecord?.quantity)}</Tag>
+            <Tag>待分配 {formatNumber(repairParentFillRecord?.child_remaining_quantity)}</Tag>
+          </Space>
+          <Form form={repairParentFillForm} layout="vertical">
+            <Form.Item
+              name="price"
+              label="成交价"
+              rules={[
+                { required: true, message: '请输入成交价' },
+                { type: 'number', min: 0.0001, message: '成交价必须大于 0' }
+              ]}
+            >
+              <InputNumber
+                min={0.0001}
+                precision={4}
+                step={0.01}
+                style={{ width: '100%' }}
+                placeholder="请输入实际成交价"
               />
             </Form.Item>
           </Form>
