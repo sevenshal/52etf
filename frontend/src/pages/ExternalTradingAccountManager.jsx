@@ -115,12 +115,12 @@ const priceLevelTooltip = (
     <span>1：最多用到一档，买看卖一，卖看买一。</span>
     <span>2/3/4/5：最多用到二/三/四/五档；累计量够时按实际覆盖档位提交。</span>
     <span>除 0 外，所有档位实际下单都会受 reference_price 加最大滑点形成的保护价约束。</span>
-    <span>-1：PTrade 兜底，不限制最大档位，优先按盘口深度覆盖委托量；盘口缺失时尝试涨跌停价。</span>
+    <span>-1：本方最优价，买单按买一档，卖单按卖一档；盘口缺失时尝试涨跌停价。</span>
     <span style={{ color: 'rgba(255,255,255,0.72)' }}>序列第一个档位用于首次提交，后续重定价按序列向后推进。最终仍可能触发 PTrade 的涨跌停价兜底。</span>
   </Space>
 );
 const priceLevelLabel = value => {
-  if (value === -1) return 'PTrade兜底';
+  if (value === -1) return '本方最优价';
   if (value === 0) return '参考价限价';
   return `${value}档`;
 };
