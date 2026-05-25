@@ -52,6 +52,8 @@ router = APIRouter(prefix="/api/snowball")
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
+SNOWBALL_A_SHARE_LOT_SIZE = 100
+SNOWBALL_MIN_ROUND_UP_QUANTITY = 50
 XUEQIU_HEADERS = {
     "Host": "api.xueqiu.com",
     "Cookie": "xq_a_token=91eabb39aba7af77c2b00d8f8ac5700ade3cf02b;",
@@ -246,6 +248,22 @@ def normalize_symbol(symbol: str) -> str:
     if len(symbol) > 2 and (symbol.startswith("SH") or symbol.startswith("SZ") or symbol.startswith("BJ")):
         return f"{symbol[:2]}.{symbol[2:]}"
     return symbol
+
+
+def _snowball_target_quantity(target_value: float, price: float) -> int:
+    target_value = safe_float(target_value)
+    price = safe_float(price)
+    if target_value <= 0 or price <= 0:
+        return 0
+
+    raw_quantity = target_value / price
+    quantity = (
+        int(raw_quantity / SNOWBALL_A_SHARE_LOT_SIZE)
+        * SNOWBALL_A_SHARE_LOT_SIZE
+    )
+    if quantity == 0 and raw_quantity > SNOWBALL_MIN_ROUND_UP_QUANTITY:
+        return SNOWBALL_A_SHARE_LOT_SIZE
+    return quantity
 
 async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
@@ -847,7 +865,7 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
             weight_diff_pct = abs(weight - old_weight) if old_weight is not None else threshold_pct
             should_recalculate = (not has_old_target) or old_weight is None or weight_diff_pct >= threshold_pct
             if should_recalculate:
-                final_quantity = int((latest_target_value / price) / 100) * 100
+                final_quantity = _snowball_target_quantity(latest_target_value, price)
                 accepted_weight = weight
                 if old_quantity != final_quantity or old_weight is None or abs(weight - old_weight) > 1e-9:
                     changed = True
@@ -1378,7 +1396,7 @@ async def get_snapshot(
         ideal_target_value = ledger_net_asset * target_weight_pct / 100.0
         target_quantity = 0
         if price > 0 and ideal_target_value > 0:
-            target_quantity = int((ideal_target_value / price) / 100) * 100
+            target_quantity = _snowball_target_quantity(ideal_target_value, price)
         target_value = round(target_quantity * price, 2) if price > 0 else round(ideal_target_value, 2)
         target_market_value += target_value
 
