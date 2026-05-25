@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 STRATEGY_W20 = "w20_momentum_live"
 STRATEGY_SNOWBALL = "snowball_copy_live"
+STRATEGY_PORTFOLIO_COPY = "portfolio_copy_live"
 STRATEGY_FACTOR_LIVE = "factor_live_trading"
 STRATEGY_NETTED_EXECUTOR = "netted_executor"
 STATUS_BLOCKED_INSUFFICIENT_SELLABLE = "BLOCKED_INSUFFICIENT_SELLABLE"

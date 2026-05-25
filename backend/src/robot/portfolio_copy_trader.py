@@ -5,6 +5,8 @@ import time
 import logging
 import requests
 import math
+import hashlib
+import json
 import pytz
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -14,10 +16,30 @@ from ..core.utils import mask_account_id, send_alert_email
 import traceback
 from ..core.services.ib_service import IBKRService
 from ..core.services.market import MarketService
-from ..core.services.longport import LongPortService
-import numpy as np
+from ..core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+    get_external_trading_db_ctx,
+)
+from ..core.services.external_trading_executor import trigger_external_trading_executor
+from ..core.services.external_trading_ledger import (
+    STRATEGY_PORTFOLIO_COPY,
+    safe_float,
+    safe_int,
+    sync_target_positions,
+)
+from ..core.services.external_trading_market import (
+    EXTERNAL_TRADING_MARKET_US_STOCK,
+    normalize_external_trading_market_type,
+)
+from ..core.services.external_trading_valuation import calculate_sub_account_net_asset
+from ..core.utils import normalize_us_equity_symbol
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_PORTFOLIO_COPY_PLATFORMS = {"futu", "star_wealth", "yingli"}
 
 class PortfolioCopyTrader:
     _instance = None
@@ -331,6 +353,42 @@ class PortfolioCopyTrader:
         await service.connect()
         return service
 
+    async def _fetch_portfolio_source_positions(self, config: PortfolioCopyConfig) -> tuple[Dict[str, float], Dict[str, float]]:
+        positions_map: Dict[str, float] = {}
+        price_map: Dict[str, float] = {}
+        platform = getattr(config, 'platform', 'futu') or 'futu'
+        if platform not in SUPPORTED_PORTFOLIO_COPY_PLATFORMS:
+            raise ValueError(f"Unsupported portfolio copy platform: {platform}")
+
+        if platform == 'star_wealth':
+            records = await self._run_in_executor(self.get_starwealth_positions_sync, config.portfolio_id, config.api_headers or {})
+            for row in records:
+                symbol = str(row["symbol"]).upper()
+                ratio = row["ratio_pct"] / 100.0
+                positions_map[symbol] = positions_map.get(symbol, 0) + ratio
+                if row["price"] > 0:
+                    price_map[symbol] = row["price"]
+        elif platform == 'yingli':
+            records = await self._run_in_executor(self.get_yingli_positions_sync, config.portfolio_id, config.api_headers or {})
+            for row in records:
+                symbol = str(row["symbol"]).upper()
+                ratio = row["ratio_pct"] / 100.0
+                positions_map[symbol] = positions_map.get(symbol, 0) + ratio
+                if row["price"] > 0:
+                    price_map[symbol] = row["price"]
+        else:
+            futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
+            for row in futu_records:
+                symbol = row["stock_code"].replace('US.', '').upper()
+                ratio = row["position_ratio"] / 1000000000.0
+                if ratio > 1.0:
+                    ratio /= 100.0
+                positions_map[symbol] = positions_map.get(symbol, 0) + ratio
+                if "current_price" in row and row["current_price"]:
+                    price_map[symbol] = float(row["current_price"]) / 1000000000.0
+
+        return positions_map, price_map
+
     async def calculate_rebalance_plan(self, config: PortfolioCopyConfig, client_id: Optional[int] = None) -> List[dict]:
         """计算调仓计划但不执行 (Should run in worker loop)"""
         masked_account_id = mask_account_id(config.account_id)
@@ -338,6 +396,9 @@ class PortfolioCopyTrader:
         # Dispatch to Longport Trader if configured
         if config.account_type == "longport":
              return await self.longport_trader.calculate_rebalance_plan(config)
+        if config.account_type == "external":
+             plan, _ = await self._build_external_target_plan(config)
+             return plan
              
         logger.info(f"Calculating rebalance plan for account {masked_account_id} for portfolio {config.portfolio_id}")
         
@@ -363,72 +424,7 @@ class PortfolioCopyTrader:
         plan = []
         try:
             # 1. Fetch and Parse Positions based on Platform
-            futu_positions_map = {}
-            futu_price_map = {}
-
-            if getattr(config, 'platform', 'futu') == 'star_wealth':
-                # StarWealth Logic
-                records = await self._run_in_executor(self.get_starwealth_positions_sync, config.portfolio_id, config.api_headers or {})
-                for r in records:
-                    symbol = r["symbol"]
-                    ratio = r["ratio_pct"] / 100.0 # 6.11 -> 0.0611
-                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
-                    if r["price"] > 0:
-                        futu_price_map[symbol] = r["price"]
-            elif getattr(config, 'platform', 'futu') == 'yingli':
-                # Yingli Logic
-                records = await self._run_in_executor(self.get_yingli_positions_sync, config.portfolio_id, config.api_headers or {})
-                for r in records:
-                    symbol = r["symbol"]
-                    ratio = r["ratio_pct"] / 100.0
-                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
-                    if r["price"] > 0:
-                        futu_price_map[symbol] = r["price"]
-            elif getattr(config, 'platform', 'futu') == 'daily_ma':
-                # Daily MA Strategy Logic
-                symbol = config.symbol
-                if symbol:
-                    
-                    longport_svc = LongPortService.get_instance()
-                    ma_s = config.ma_short or 5
-                    ma_l = config.ma_long or 25
-                    required_count = max(ma_s, ma_l) + 10
-                    
-                    # Normalize symbol for Longport (usually expects SUFFIX .US like TQQQ.US)
-                    longport_sym = symbol.upper()
-                    if longport_sym.startswith('US.'):
-                        longport_sym = longport_sym.replace('US.', '') + '.US'
-                    elif not longport_sym.endswith('.US') and not longport_sym.endswith('.HK'):
-                        longport_sym = longport_sym + '.US'
-                    
-                    klines = await self._run_in_executor(longport_svc.get_candlesticks, longport_sym, required_count, 'd')
-                    
-                    if klines and len(klines) >= max(ma_s, ma_l):
-                        closes = np.array([float(k['close']) for k in klines])
-                        short_ma = np.mean(closes[-ma_s:])
-                        long_ma = np.mean(closes[-ma_l:])
-                        
-                        target_ratio = 1.0 if short_ma > long_ma else 0.0
-                        
-                        clean_symbol = symbol.upper().replace('US.', '').replace('.US', '')  # Convert to pure 'TQQQ' for IB compatibility
-                        
-                        # Set target based on MA
-                        futu_positions_map[clean_symbol] = target_ratio
-                        futu_price_map[clean_symbol] = float(klines[-1]['close'])
-                        logger.info(f"Daily MA Strategy for {clean_symbol}: short_ma={short_ma:.2f}, long_ma={long_ma:.2f}. target_ratio={target_ratio}")
-                    else:
-                        logger.error(f"Not enough K-lines to calculate MA for {symbol}")
-            else:
-                # Futu Logic (Snapshot of logic below)
-                futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
-                for r in futu_records:
-                    symbol = r["stock_code"].replace('US.', '')
-                    ratio = r["position_ratio"] / 1000000000.0
-                    if ratio > 1.0: # 14.0 represents 14%
-                        ratio /= 100.0
-                    futu_positions_map[symbol] = futu_positions_map.get(symbol, 0) + ratio
-                    if "current_price" in r and r["current_price"]:
-                        futu_price_map[symbol] = float(r["current_price"]) / 1000000000.0
+            futu_positions_map, futu_price_map = await self._fetch_portfolio_source_positions(config)
 
             # 2. IB 状态已经在 _ensure_ib_connected 中准备好
             net_liq = ib.get_net_liquidation()
@@ -519,6 +515,248 @@ class PortfolioCopyTrader:
             raise
         # 注意：这里我们不再 disconnect，因为是保持长连接或者复用连接
 
+    def _portfolio_copy_signal_version(self, config: PortfolioCopyConfig, targets: List[Dict[str, Any]]) -> str:
+        payload = {
+            "strategy": STRATEGY_PORTFOLIO_COPY,
+            "config_id": config.id,
+            "portfolio_id": config.portfolio_id,
+            "targets": [
+                {
+                    "symbol": row.get("symbol"),
+                    "target_quantity": safe_int(row.get("target_quantity")),
+                    "reference_price": safe_float(row.get("reference_price"), None),
+                }
+                for row in sorted(targets, key=lambda item: str(item.get("symbol") or ""))
+            ],
+        }
+        digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        return f"portfolio_copy:{config.id}:{digest[:16]}"[:64]
+
+    async def _build_external_target_plan(self, config: PortfolioCopyConfig) -> tuple[List[dict], List[dict]]:
+        source_positions, source_prices = await self._fetch_portfolio_source_positions(config)
+        target_ratios: Dict[str, float] = {}
+        target_prices: Dict[str, float] = {}
+        for raw_symbol, ratio in source_positions.items():
+            symbol = normalize_us_equity_symbol(raw_symbol)
+            if not symbol:
+                continue
+            target_ratios[symbol] = target_ratios.get(symbol, 0.0) + safe_float(ratio)
+        for raw_symbol, price in source_prices.items():
+            symbol = normalize_us_equity_symbol(raw_symbol)
+            if symbol and safe_float(price) > 0:
+                target_prices[symbol] = safe_float(price)
+
+        with get_external_trading_db_ctx() as trading_db:
+            external_account = trading_db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == config.external_trading_account_id,
+                ExternalTradingAccount.account_id == config.account_id,
+                ExternalTradingAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not external_account:
+                raise ValueError("美股跟单绑定的外部交易账户不存在或未启用")
+            if normalize_external_trading_market_type(external_account.market_type) != EXTERNAL_TRADING_MARKET_US_STOCK:
+                raise ValueError("美股跟单只能绑定美股外部交易账户")
+
+            sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+                ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+                ExternalTradingSubAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not sub_account:
+                raise ValueError("美股跟单绑定的虚拟子账户不存在或未启用")
+            if sub_account.strategy_type != STRATEGY_PORTFOLIO_COPY or sub_account.strategy_config_id != config.id:
+                raise ValueError("美股跟单绑定的虚拟子账户归属不匹配")
+
+            valuation = await calculate_sub_account_net_asset(trading_db, sub_account)
+            net_asset = safe_float(valuation.get("net_asset"))
+            if net_asset <= 0 and not config.total_amount:
+                raise ValueError("外部交易虚拟子账户净资产为空，请检查现金和持仓市值")
+
+            ledger_rows = trading_db.query(ExternalTradingLedgerPosition).filter(
+                ExternalTradingLedgerPosition.sub_account_id == sub_account.id,
+            ).all()
+            ledger_positions: Dict[str, int] = {}
+            ledger_values: Dict[str, float] = {}
+            ledger_prices: Dict[str, float] = {}
+            for row in ledger_rows:
+                symbol = normalize_us_equity_symbol(row.symbol)
+                if not symbol:
+                    continue
+                quantity = safe_int(row.quantity)
+                ledger_positions[symbol] = quantity
+                ledger_values[symbol] = safe_float(row.market_value)
+                market_price = safe_float(row.market_price)
+                if market_price <= 0 and quantity:
+                    market_price = safe_float(row.market_value) / abs(quantity)
+                if market_price > 0:
+                    ledger_prices[symbol] = market_price
+
+            current_target_rows = trading_db.query(ExternalTradingTargetPosition).filter(
+                ExternalTradingTargetPosition.sub_account_id == sub_account.id,
+                ExternalTradingTargetPosition.strategy_type == STRATEGY_PORTFOLIO_COPY,
+                ExternalTradingTargetPosition.strategy_config_id == config.id,
+                ExternalTradingTargetPosition.status == "ACTIVE",
+            ).all()
+            current_targets = {}
+            for row in current_target_rows:
+                symbol = normalize_us_equity_symbol(row.symbol)
+                if symbol:
+                    current_targets[symbol] = {
+                        "target_quantity": safe_int(row.target_quantity),
+                        "target_weight_pct": safe_float(row.target_weight_pct, 0.0),
+                        "target_value": safe_float(row.target_value, 0.0),
+                        "reference_price": safe_float(row.reference_price, None),
+                    }
+
+        total_target_amount = config.total_amount or (net_asset * safe_float(config.total_position_ratio, 100.0) / 100.0)
+        if total_target_amount <= 0:
+            raise ValueError("外部交易目标跟单金额为空")
+
+        all_symbols = set(target_ratios.keys()) | set(ledger_positions.keys()) | set(current_targets.keys())
+        plan: List[dict] = []
+        targets: List[dict] = []
+        for symbol in sorted(all_symbols):
+            target_ratio = safe_float(target_ratios.get(symbol))
+            current_qty = safe_int(ledger_positions.get(symbol))
+            current_value = safe_float(ledger_values.get(symbol))
+            price = target_prices.get(symbol) or ledger_prices.get(symbol)
+            old_target = current_targets.get(symbol)
+
+            if target_ratio > 0 and (not price or math.isnan(price) or price <= 0):
+                if old_target:
+                    target_qty = safe_int(old_target.get("target_quantity"))
+                    accepted_weight_pct = safe_float(old_target.get("target_weight_pct"), 0.0)
+                    target_value = safe_float(old_target.get("target_value"), 0.0)
+                    reference_price = safe_float(old_target.get("reference_price"), None)
+                else:
+                    logger.warning("Skipping external target %s due to missing price", symbol)
+                    continue
+            else:
+                target_qty = int((total_target_amount * target_ratio) / price) if target_ratio > 0 and price else 0
+                target_value = target_qty * safe_float(price)
+                accepted_weight_pct = (target_value / net_asset * 100.0) if net_asset > 0 else target_ratio * 100.0
+                reference_price = safe_float(price, None) if target_qty > 0 else None
+
+            trade_qty = target_qty - current_qty
+            current_ratio = (current_value / total_target_amount) if total_target_amount > 0 else 0.0
+            action = "HOLD"
+            if target_ratio == 0:
+                if current_qty > 0 or (old_target and safe_int(old_target.get("target_quantity")) != 0):
+                    action = "SELL"
+            else:
+                absolute_diff_pct = abs(target_ratio - current_ratio) * 100
+                if absolute_diff_pct > (config.tracking_error_pct or 0) and trade_qty != 0:
+                    action = "BUY" if trade_qty > 0 else "SELL"
+
+            targets.append({
+                "symbol": symbol,
+                "target_quantity": target_qty,
+                "target_weight_pct": round(accepted_weight_pct, 6),
+                "target_value": round(target_value, 2),
+                "reference_price": reference_price,
+                "reference_price_source": "portfolio_copy_source_price" if reference_price else None,
+            })
+            plan.append({
+                "symbol": symbol,
+                "action": action,
+                "quantity": abs(trade_qty),
+                "current_qty": current_qty,
+                "pending_qty": 0,
+                "target_qty": target_qty,
+                "price": price,
+                "current_ratio": round(current_ratio * 100, 2),
+                "target_ratio": round(target_ratio * 100, 2),
+            })
+
+        return plan, targets
+
+    async def sync_external_targets(
+        self,
+        config: PortfolioCopyConfig,
+        *,
+        trigger_source: str,
+        trigger_executor: bool = True,
+    ) -> Dict[str, Any]:
+        if config.account_type != "external":
+            raise ValueError("Portfolio copy config is not bound to an external trading account")
+
+        plan, targets = await self._build_external_target_plan(config)
+        signal_version = self._portfolio_copy_signal_version(config, targets)
+        changed = False
+        with get_external_trading_db_ctx() as trading_db:
+            sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+                ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+                ExternalTradingSubAccount.strategy_type == STRATEGY_PORTFOLIO_COPY,
+                ExternalTradingSubAccount.strategy_config_id == config.id,
+            ).first()
+            if not sub_account:
+                raise ValueError("美股跟单绑定的虚拟子账户不存在")
+
+            current_rows = trading_db.query(ExternalTradingTargetPosition).filter(
+                ExternalTradingTargetPosition.sub_account_id == sub_account.id,
+                ExternalTradingTargetPosition.status == "ACTIVE",
+            ).all()
+            current_qty_map = {
+                normalize_us_equity_symbol(row.symbol): safe_int(row.target_quantity)
+                for row in current_rows
+                if normalize_us_equity_symbol(row.symbol)
+            }
+            next_qty_map = {
+                normalize_us_equity_symbol(row.get("symbol")): safe_int(row.get("target_quantity"))
+                for row in targets
+                if normalize_us_equity_symbol(row.get("symbol"))
+            }
+            changed = current_qty_map != next_qty_map
+
+            sync_target_positions(
+                trading_db,
+                sub_account=sub_account,
+                targets=targets,
+                signal_id=f"portfolio_copy:{config.portfolio_id}",
+                signal_version=signal_version,
+                source_execution_id=None,
+            )
+
+        with Session() as db:
+            db_config = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.id == config.id).first()
+            if db_config:
+                db_config.last_external_sync_at = datetime.now()
+                db_config.last_external_sync_status = "SYNCED"
+                db_config.last_external_sync_message = f"{trigger_source}: 同步目标仓位 {len(targets)} 个"[:500]
+                db.add(PortfolioCopyLog(
+                    account_id=db_config.account_id,
+                    config_id=db_config.id,
+                    portfolio_id=db_config.portfolio_id,
+                    action="TARGET_SYNC",
+                    status="TARGET_SYNCED",
+                    quantity=len(targets),
+                    message=db_config.last_external_sync_message,
+                ))
+                db.commit()
+
+        executor_result = None
+        if trigger_executor and (changed or trigger_source == "manual"):
+            executor_result = await trigger_external_trading_executor(
+                account_id=config.account_id,
+                external_account_id=config.external_trading_account_id,
+                trigger_source=f"portfolio_copy_{trigger_source}",
+            )
+
+        return {
+            "config_id": config.id,
+            "portfolio_id": config.portfolio_id,
+            "external_trading_account_id": config.external_trading_account_id,
+            "live_sub_account_id": config.live_sub_account_id,
+            "target_count": len(targets),
+            "changed": changed,
+            "signal_version": signal_version,
+            "executor_result": executor_result,
+            "plan": plan,
+        }
+
     async def rebalance(self, config: PortfolioCopyConfig, client_id: Optional[int] = None):
         """执行调仓逻辑 (由 worker_loop 调用)"""
         masked_account_id = mask_account_id(config.account_id)
@@ -526,6 +764,8 @@ class PortfolioCopyTrader:
         # Dispatch to Longport Trader
         if config.account_type == "longport":
             return await self.longport_trader.rebalance(config)
+        if config.account_type == "external":
+            return await self.sync_external_targets(config, trigger_source="rebalance", trigger_executor=True)
 
         try:
             # 1. Check Market Status
@@ -694,6 +934,9 @@ class PortfolioCopyTrader:
                 try:
                     active_configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.enabled == True).all()
                     for config in active_configs:
+                        if (config.platform or 'futu') not in SUPPORTED_PORTFOLIO_COPY_PLATFORMS:
+                            continue
+
                         # Ensure unique key per configuration entry (using config.id)
                         key = f"cfg_{config.id}"
                         
@@ -746,6 +989,9 @@ class PortfolioCopyTrader:
             configs = query.all()
 
             for config in configs:
+                if (config.platform or 'futu') not in SUPPORTED_PORTFOLIO_COPY_PLATFORMS:
+                    continue
+
                 # Check if portfolio name is valid and exists in content
                 if config.portfolio_name and config.portfolio_name.strip() and config.portfolio_name in content:
                     

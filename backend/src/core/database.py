@@ -576,14 +576,19 @@ class PortfolioCopyConfig(Base):
     portfolio_name = Column(String(100))
     
     # 新增字段以支持长桥
-    account_type = Column(String, default="ib") # "ib" or "longport"
+    account_type = Column(String, default="ib") # "ib", "longport", or "external"
     longport_account_id = Column(String, nullable=True) # 关联的长桥账户 ID (lp_account_id)
-    platform = Column(String, default="futu") # "futu", "star_wealth", "yingli", or "daily_ma"
+    external_trading_account_id = Column(Integer, nullable=True) # 绑定的外部交易账号
+    live_sub_account_id = Column(Integer, nullable=True) # 绑定的虚拟子账户
+    platform = Column(String, default="futu") # "futu", "star_wealth", or "yingli"
     
-    # 新增字段以支持日均线策略
+    # 历史字段：日均线策略已停止支持，保留列以兼容旧数据
     symbol = Column(String, nullable=True) # 交易标
     ma_short = Column(Integer, nullable=True) # 短周期
     ma_long = Column(Integer, nullable=True)  # 长周期
+    last_external_sync_at = Column(DateTime, nullable=True)
+    last_external_sync_status = Column(String(16), nullable=True)
+    last_external_sync_message = Column(String(500), nullable=True)
     
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -955,6 +960,13 @@ def ensure_table_columns():
             "last_external_sync_at": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_at DATETIME",
             "last_external_sync_status": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_status VARCHAR(16)",
             "last_external_sync_message": "ALTER TABLE snowball_copy_configs ADD COLUMN last_external_sync_message VARCHAR(500)",
+        },
+        "portfolio_copy_configs": {
+            "external_trading_account_id": "ALTER TABLE portfolio_copy_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_sub_account_id": "ALTER TABLE portfolio_copy_configs ADD COLUMN live_sub_account_id INTEGER",
+            "last_external_sync_at": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_at DATETIME",
+            "last_external_sync_status": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_status VARCHAR(16)",
+            "last_external_sync_message": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_message VARCHAR(500)",
         },
         "scheduled_task_configs": {
             "cron_rule": "ALTER TABLE scheduled_task_configs ADD COLUMN cron_rule VARCHAR(1000)",

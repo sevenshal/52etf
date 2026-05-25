@@ -1,14 +1,17 @@
+import asyncio
 from datetime import date, datetime, timedelta
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, root_validator, validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as OrmSession
 
 from ...core.database import (
     FactorLiveTradingConfig,
+    PortfolioCopyConfig,
     SnowballCopyConfig,
     get_db,
 )
@@ -61,6 +64,7 @@ from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
     STRATEGY_SNOWBALL,
+    STRATEGY_PORTFOLIO_COPY,
     STRATEGY_FACTOR_LIVE,
     STRATEGY_W20,
     build_netted_target_execution_plan,
@@ -477,6 +481,16 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
     }
 
 
+def _list_serialized_accounts(db: OrmSession, account_id: str) -> List[Dict[str, Any]]:
+    accounts = (
+        db.query(ExternalTradingAccount)
+        .filter(ExternalTradingAccount.account_id == account_id)
+        .order_by(ExternalTradingAccount.id.desc())
+        .all()
+    )
+    return [_serialize_account(account) for account in accounts]
+
+
 def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubAccount) -> Optional[str]:
     if not sub_account.strategy_type or not sub_account.strategy_config_id:
         return None
@@ -490,6 +504,14 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
         if config:
             return config.combination_name or config.combination_id or "A股雪球跟单"
         return "A股雪球跟单（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_PORTFOLIO_COPY:
+        config = main_db.query(PortfolioCopyConfig).filter(
+            PortfolioCopyConfig.id == sub_account.strategy_config_id,
+            PortfolioCopyConfig.account_id == sub_account.account_id,
+        ).first()
+        if config:
+            return config.portfolio_name or config.portfolio_id or "美股账户跟单"
+        return "美股账户跟单（配置已删除）"
     if sub_account.strategy_type == STRATEGY_FACTOR_LIVE:
         config = main_db.query(FactorLiveTradingConfig).filter(
             FactorLiveTradingConfig.id == sub_account.strategy_config_id,
@@ -1374,13 +1396,39 @@ async def list_external_trading_accounts(
     db: OrmSession = Depends(get_external_trading_db),
     account_id: str = Depends(valid_account),
 ):
-    accounts = (
-        db.query(ExternalTradingAccount)
-        .filter(ExternalTradingAccount.account_id == account_id)
-        .order_by(ExternalTradingAccount.updated_at.desc())
-        .all()
-    )
-    return [_serialize_account(account) for account in accounts]
+    return _list_serialized_accounts(db, account_id)
+
+
+@router.websocket("/status/ws")
+async def external_trading_account_status_websocket(websocket: WebSocket):
+    account_id = websocket.query_params.get("account_id")
+    if not account_id or not is_valid_account(account_id):
+        await websocket.accept()
+        await websocket.close(code=1008, reason="invalid account_id")
+        return
+
+    await websocket.accept()
+    try:
+        while True:
+            db = ExternalTradingDBSession()
+            try:
+                payload = {
+                    "type": "external_trading_accounts",
+                    "accounts": _list_serialized_accounts(db, account_id),
+                    "pushed_at": datetime.now(),
+                }
+            finally:
+                db.close()
+            await websocket.send_json(jsonable_encoder(payload))
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        logger.exception("External trading account status WebSocket failed: %s", exc)
+        try:
+            await websocket.close(code=1011, reason="status websocket error")
+        except Exception:
+            pass
 
 
 @router.post("", response_model=ExternalTradingAccountResponse)
@@ -1517,6 +1565,14 @@ async def delete_external_trading_account(
         config.live_sub_account_id = None
         config.live_trade_enabled = False
         config.updated_at = now
+    for config in main_db.query(PortfolioCopyConfig).filter(
+        PortfolioCopyConfig.account_id == account_id,
+        PortfolioCopyConfig.external_trading_account_id == account_pk,
+    ).all():
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        config.account_type = "ib"
+        config.updated_at = now
     for config in main_db.query(FactorLiveTradingConfig).filter(
         FactorLiveTradingConfig.account_id == account_id,
         FactorLiveTradingConfig.external_trading_account_id == account_pk,
@@ -1567,7 +1623,7 @@ async def list_external_trading_sub_accounts(
             ExternalTradingSubAccount.account_id == account_id,
             ExternalTradingSubAccount.external_trading_account_id == external_account_id,
         )
-        .order_by(ExternalTradingSubAccount.updated_at.desc(), ExternalTradingSubAccount.id.desc())
+        .order_by(ExternalTradingSubAccount.id.desc())
         .all()
     )
     result = []
@@ -1816,6 +1872,17 @@ async def delete_external_trading_sub_account(
     ).all()
     for config in bound_snowball_configs:
         config.live_sub_account_id = None
+        config.updated_at = now
+
+    bound_portfolio_copy_configs = main_db.query(PortfolioCopyConfig).filter(
+        PortfolioCopyConfig.account_id == account_id,
+        PortfolioCopyConfig.live_sub_account_id == sub_account.id,
+    ).all()
+    for config in bound_portfolio_copy_configs:
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        if config.account_type == "external":
+            config.account_type = "ib"
         config.updated_at = now
 
     bound_factor_live_configs = main_db.query(FactorLiveTradingConfig).filter(
