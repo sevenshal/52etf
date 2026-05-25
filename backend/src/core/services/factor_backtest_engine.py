@@ -2414,6 +2414,7 @@ def run_factor_backtest(
     events: List[Dict[str, Any]] = []
     trades: List[Dict[str, Any]] = []
     closed_profits: List[float] = []
+    symbol_pnl_stats: Dict[str, Dict[str, Any]] = {}
     peak_value = cash
     universe_size_by_date: Dict[str, int] = {}
     rebalance_count = 0
@@ -2488,6 +2489,141 @@ def run_factor_backtest(
             "buy_weights": _cash_fill_buy_weights(buy_symbols),
             "should_rebalance": should_rebalance,
         }
+
+    def _symbol_pnl_stat(symbol: str) -> Dict[str, Any]:
+        if symbol not in symbol_pnl_stats:
+            symbol_pnl_stats[symbol] = {
+                "symbol": symbol,
+                "buy_trade_count": 0,
+                "sell_trade_count": 0,
+                "buy_quantity": 0,
+                "sell_quantity": 0,
+                "buy_amount": 0.0,
+                "sell_amount": 0.0,
+                "buy_cost": 0.0,
+                "realized_cost_basis": 0.0,
+                "buy_commission": 0.0,
+                "sell_commission": 0.0,
+                "realized_profit": 0.0,
+                "total_holding_days": 0,
+                "open_since": None,
+                "first_buy_date": None,
+                "last_buy_date": None,
+                "last_sell_date": None,
+                "last_trade_date": None,
+            }
+        return symbol_pnl_stats[symbol]
+
+    def _record_symbol_buy(
+        symbol: str,
+        trade_date: date,
+        quantity: int,
+        amount: float,
+        commission: float,
+        was_flat: bool,
+    ):
+        stat = _symbol_pnl_stat(symbol)
+        stat["buy_trade_count"] += 1
+        stat["buy_quantity"] += int(quantity)
+        stat["buy_amount"] += float(amount)
+        stat["buy_cost"] += float(amount) + float(commission)
+        stat["buy_commission"] += float(commission)
+        trade_date_text = trade_date.isoformat()
+        if not stat.get("first_buy_date"):
+            stat["first_buy_date"] = trade_date_text
+        stat["last_buy_date"] = trade_date_text
+        stat["last_trade_date"] = trade_date_text
+        if was_flat:
+            stat["open_since"] = trade_date
+
+    def _record_symbol_sell(
+        symbol: str,
+        trade_date: date,
+        quantity: int,
+        amount: float,
+        commission: float,
+        cost_basis_sold: float,
+        profit: float,
+        fully_closed: bool,
+        entry_date: Optional[date],
+    ):
+        stat = _symbol_pnl_stat(symbol)
+        stat["sell_trade_count"] += 1
+        stat["sell_quantity"] += int(quantity)
+        stat["sell_amount"] += float(amount)
+        stat["sell_commission"] += float(commission)
+        stat["realized_cost_basis"] += float(cost_basis_sold)
+        stat["realized_profit"] += float(profit)
+        trade_date_text = trade_date.isoformat()
+        stat["last_sell_date"] = trade_date_text
+        stat["last_trade_date"] = trade_date_text
+        if fully_closed:
+            open_since = stat.get("open_since") or entry_date
+            if isinstance(open_since, date):
+                stat["total_holding_days"] += max(0, (trade_date - open_since).days)
+            stat["open_since"] = None
+
+    def _build_symbol_pnl_summary(last_backtest_date: date, portfolio_end_value: float) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for symbol, stat in symbol_pnl_stats.items():
+            position = positions.get(symbol) or {}
+            current_shares = int(position.get("shares") or 0)
+            price = float(last_prices.get(symbol) or position.get("last_price") or position.get("avg_cost") or 0)
+            current_market_value = current_shares * price
+            current_cost_basis = float(position.get("cost_basis") or 0.0)
+            realized_cost_basis = float(stat.get("realized_cost_basis") or 0.0)
+            realized_profit = float(stat.get("realized_profit") or 0.0)
+            unrealized_profit = current_market_value - current_cost_basis if current_shares > 0 else 0.0
+            total_profit = realized_profit + unrealized_profit
+            total_cost_basis = realized_cost_basis + current_cost_basis
+            open_since = stat.get("open_since")
+            holding_days = int(stat.get("total_holding_days") or 0)
+            if isinstance(open_since, date):
+                holding_days += max(0, (last_backtest_date - open_since).days)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "first_buy_date": stat.get("first_buy_date"),
+                    "last_buy_date": stat.get("last_buy_date"),
+                    "last_sell_date": stat.get("last_sell_date"),
+                    "last_trade_date": stat.get("last_trade_date"),
+                    "buy_trade_count": int(stat.get("buy_trade_count") or 0),
+                    "sell_trade_count": int(stat.get("sell_trade_count") or 0),
+                    "trade_count": int(stat.get("buy_trade_count") or 0) + int(stat.get("sell_trade_count") or 0),
+                    "buy_quantity": int(stat.get("buy_quantity") or 0),
+                    "sell_quantity": int(stat.get("sell_quantity") or 0),
+                    "current_shares": current_shares,
+                    "price": _safe_float(price, 4),
+                    "buy_amount": _safe_float(stat.get("buy_amount"), 2),
+                    "sell_amount": _safe_float(stat.get("sell_amount"), 2),
+                    "total_cost_basis": _safe_float(total_cost_basis, 2),
+                    "current_cost_basis": _safe_float(current_cost_basis, 2),
+                    "current_market_value": _safe_float(current_market_value, 2),
+                    "current_weight_pct": _safe_float(
+                        current_market_value / portfolio_end_value * 100 if portfolio_end_value > 0 else 0,
+                        2,
+                    ),
+                    "commission": _safe_float(float(stat.get("buy_commission") or 0.0) + float(stat.get("sell_commission") or 0.0), 2),
+                    "realized_profit": _safe_float(realized_profit, 2),
+                    "realized_profit_pct": _safe_float(
+                        realized_profit / realized_cost_basis * 100 if realized_cost_basis > 0 else None,
+                        2,
+                    ),
+                    "unrealized_profit": _safe_float(unrealized_profit, 2),
+                    "unrealized_profit_pct": _safe_float(
+                        unrealized_profit / current_cost_basis * 100 if current_cost_basis > 0 else None,
+                        2,
+                    ),
+                    "total_profit": _safe_float(total_profit, 2),
+                    "total_profit_pct": _safe_float(
+                        total_profit / total_cost_basis * 100 if total_cost_basis > 0 else None,
+                        2,
+                    ),
+                    "holding_days": holding_days,
+                    "is_open": current_shares > 0,
+                }
+            )
+        return sorted(rows, key=lambda item: (item.get("total_profit") or 0, item.get("symbol") or ""), reverse=True)
 
     def append_trade(
         trade_date: date,
@@ -2571,6 +2707,17 @@ def run_factor_backtest(
         profit_pct = profit / cost_basis_sold * 100 if cost_basis_sold > 0 else None
         closed_profits.append(profit)
         remaining_shares = old_shares - quantity
+        _record_symbol_sell(
+            symbol,
+            trade_date,
+            quantity,
+            amount,
+            commission,
+            cost_basis_sold,
+            profit,
+            remaining_shares <= 0,
+            position.get("entry_date"),
+        )
         if remaining_shares <= 0:
             del positions[symbol]
         else:
@@ -2621,6 +2768,7 @@ def run_factor_backtest(
         commission = amount * commission_rate
         if amount + commission > cash + 1e-9:
             return
+        was_flat = symbol not in positions or int(positions.get(symbol, {}).get("shares") or 0) <= 0
         cash -= amount + commission
         if symbol not in positions:
             positions[symbol] = {
@@ -2636,6 +2784,7 @@ def run_factor_backtest(
             position["cost_basis"] = float(position.get("cost_basis") or 0) + amount + commission
             position["avg_cost"] = position["cost_basis"] / position["shares"] if position["shares"] > 0 else 0.0
             position["last_price"] = price
+        _record_symbol_buy(symbol, trade_date, quantity, amount, commission, was_flat)
         last_prices[symbol] = price
         append_trade(
             trade_date,
@@ -3023,6 +3172,7 @@ def run_factor_backtest(
     annualized_return = ((1 + total_return / 100) ** (365 / elapsed_days) - 1) * 100 if elapsed_days > 0 and total_return > -100 else 0.0
     win_count = sum(1 for item in closed_profits if item > 0)
     risk_metrics = _compute_equity_risk_metrics(equity_curve, annualized_return)
+    last_backtest_date = date.fromisoformat(equity_curve[-1]["date"]) if equity_curve else (end_date or request.start_date)
 
     holdings: List[Dict[str, Any]] = []
     for symbol, position in positions.items():
@@ -3040,6 +3190,7 @@ def run_factor_backtest(
             }
         )
     holdings.sort(key=lambda item: item.get("market_value") or 0, reverse=True)
+    symbol_pnl = _build_symbol_pnl_summary(last_backtest_date, current_value)
 
     metrics = {
         "total_return": _safe_float(total_return, 2),
@@ -3057,6 +3208,7 @@ def run_factor_backtest(
         "ending_value": _safe_float(current_value, 2),
         "cash": equity_curve[-1]["cash"] if equity_curve else _safe_float(cash, 2),
         "holding_count": len(holdings),
+        "held_symbol_count": len(symbol_pnl),
         "pending_signal_date": pending_rebalance["signal_date"].isoformat() if pending_rebalance else None,
         **risk_metrics,
     }
@@ -3075,10 +3227,12 @@ def run_factor_backtest(
     symbols_for_names.update(request.custom_symbols or [])
     symbols_for_names.update(row.get("symbol") for row in trades)
     symbols_for_names.update(row.get("symbol") for row in holdings)
+    symbols_for_names.update(row.get("symbol") for row in symbol_pnl)
     symbols_for_names.update(row.get("primary_benchmark_symbol") for row in yearly_stats)
     symbol_names = load_symbol_name_map(symbols_for_names, db)
     attach_symbol_names(trades, symbol_names)
     attach_symbol_names(holdings, symbol_names)
+    attach_symbol_names(symbol_pnl, symbol_names)
     for row in yearly_stats:
         benchmark_symbol = normalize_symbol_for_name(row.get("primary_benchmark_symbol"))
         row["primary_benchmark_symbol_name"] = symbol_names.get(benchmark_symbol)
@@ -3094,6 +3248,7 @@ def run_factor_backtest(
         "events": events,
         "trades": trades,
         "current_holdings": holdings,
+        "symbol_pnl": symbol_pnl,
         "component_correlation": [],
         "errors": [],
     }
