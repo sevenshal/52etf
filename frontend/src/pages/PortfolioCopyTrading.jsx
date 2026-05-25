@@ -15,6 +15,12 @@ import { useAccount } from '../contexts/AccountContext';
 const { Title, Text } = Typography;
 const { TextArea } = Input;
 
+const PORTFOLIO_COPY_PLATFORMS = {
+    futu: { label: '富途牛牛', color: 'cyan' },
+    star_wealth: { label: '星财富', color: 'gold' },
+    yingli: { label: '盈立', color: 'purple' },
+};
+
 const PortfolioCopyTrading = () => {
     const { accountId } = useAccount();
     const [configs, setConfigs] = useState([]);
@@ -31,6 +37,7 @@ const PortfolioCopyTrading = () => {
     const [modalVisible, setModalVisible] = useState(false);
     const [editingConfig, setEditingConfig] = useState(null);
     const [form] = Form.useForm();
+    const selectedPortfolioExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
     const [activeTab, setActiveTab] = useState('ib_configs'); // Changed default to ib_configs
     const [ibAccounts, setIbAccounts] = useState([]);
     const [longportAccounts, setLongportAccounts] = useState([]);
@@ -45,6 +52,7 @@ const PortfolioCopyTrading = () => {
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
     const selectedSnowballExternalTradingAccountId = Form.useWatch('external_trading_account_id', snowballForm);
     const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
+    const [portfolioLiveSubAccounts, setPortfolioLiveSubAccounts] = useState([]);
     const [snowballLiveSubAccounts, setSnowballLiveSubAccounts] = useState([]);
     const [snapshotModalVisible, setSnapshotModalVisible] = useState(false);
     const [snapshotData, setSnapshotData] = useState(null);
@@ -124,6 +132,22 @@ const PortfolioCopyTrading = () => {
         } catch (error) {
             message.error(formatError(error, '获取虚拟子账户失败'));
             setSnowballLiveSubAccounts([]);
+            return [];
+        }
+    };
+
+    const fetchPortfolioLiveSubAccounts = async (externalAccountId) => {
+        if (!externalAccountId) {
+            setPortfolioLiveSubAccounts([]);
+            return [];
+        }
+        try {
+            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+            setPortfolioLiveSubAccounts(response.data || []);
+            return response.data || [];
+        } catch (error) {
+            message.error(formatError(error, '获取虚拟子账户失败'));
+            setPortfolioLiveSubAccounts([]);
             return [];
         }
     };
@@ -290,6 +314,16 @@ const PortfolioCopyTrading = () => {
                 ...values,
                 id: editingConfig?.id
             };
+            if (values.account_type !== 'external') {
+                payload.external_trading_account_id = undefined;
+                payload.live_sub_account_id = undefined;
+            }
+            if (values.account_type !== 'longport') {
+                payload.longport_account_id = undefined;
+            }
+            if (values.account_type !== 'ib') {
+                payload.ib_account_id = undefined;
+            }
 
             // Process Yingli specific fields
             if (values.platform === 'yingli') {
@@ -305,7 +339,7 @@ const PortfolioCopyTrading = () => {
             setModalVisible(false);
             fetchConfigs();
         } catch (error) {
-            message.error('保存失败');
+            message.error('保存失败: ' + formatError(error, '保存失败'));
         }
     };
 
@@ -316,6 +350,16 @@ const PortfolioCopyTrading = () => {
             fetchConfigs();
         } catch (error) {
             message.error('删除失败');
+        }
+    };
+
+    const handlePortfolioSyncExternalTargets = async (record) => {
+        try {
+            await request.post(`/api/ib-copy-trading/configs/${record.id}/sync-external-targets`);
+            message.success('已同步目标仓位并触发通用执行器');
+            fetchConfigs();
+        } catch (error) {
+            message.error('同步失败: ' + formatError(error, '同步失败'));
         }
     };
 
@@ -396,6 +440,10 @@ const PortfolioCopyTrading = () => {
     }, [selectedSnowballExternalTradingAccountId]);
 
     useEffect(() => {
+        fetchPortfolioLiveSubAccounts(selectedPortfolioExternalTradingAccountId);
+    }, [selectedPortfolioExternalTradingAccountId]);
+
+    useEffect(() => {
         if (accountId) {
             if (activeTab === 'ib_configs') {
                 fetchConfigs();
@@ -414,6 +462,35 @@ const PortfolioCopyTrading = () => {
         value: account.id,
         disabled: !account.enabled,
     })), [externalTradingAccounts]);
+
+    const usExternalTradingAccountOptions = useMemo(() => externalTradingAccounts
+        .filter(account => account.market_type === 'US_STOCK')
+        .map(account => ({
+            label: `${account.name} (${account.identifier})${account.connected ? ' 在线' : ' 离线'}`,
+            value: account.id,
+            disabled: !account.enabled,
+        })), [externalTradingAccounts]);
+
+    const portfolioLiveSubAccountOptions = useMemo(() => {
+        const currentConfigId = Number(editingConfig?.id || 0);
+        return (portfolioLiveSubAccounts || [])
+            .filter(item => item.enabled)
+            .map(item => {
+                const isFree = !item.strategy_type && !item.strategy_config_id;
+                const isCurrentBinding = (
+                    item.strategy_type === 'portfolio_copy_live'
+                    && currentConfigId > 0
+                    && Number(item.strategy_config_id) === currentConfigId
+                );
+                const disabled = !(isFree || isCurrentBinding);
+                const statusText = isFree ? '空闲' : `已绑定：${item.strategy_name || item.binding_label || item.strategy_type || '其他策略'}`;
+                return {
+                    value: item.id,
+                    disabled,
+                    label: `${item.name} / ${formatMoney(item.cash_allocated, 2)} / ${statusText}`,
+                };
+            });
+    }, [portfolioLiveSubAccounts, editingConfig]);
 
     const snowballLiveSubAccountOptions = useMemo(() => {
         const currentConfigId = Number(snowballEditingConfig?.id || 0);
@@ -447,29 +524,15 @@ const PortfolioCopyTrading = () => {
             title: '组合信息',
             key: 'portfolio',
             render: (_, record) => {
-                if (record.platform === 'daily_ma') {
-                    return (
-                        <Space direction="vertical" size={0}>
-                            <Text strong>{record.portfolio_name || record.symbol || '未设置标的'}</Text>
-                            <Space size="small">
-                                <Text type="secondary" style={{ fontSize: '12px' }}>{record.symbol} {record.ma_short}日线 / {record.ma_long}日线</Text>
-                                <Tag color="green" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>日均线策略</Tag>
-                            </Space>
-                        </Space>
-                    );
-                }
+                const platform = PORTFOLIO_COPY_PLATFORMS[record.platform || 'futu'];
                 return (
                     <Space direction="vertical" size={0}>
                         <Text strong>{record.portfolio_name || '未命名'}</Text>
                         <Space size="small">
-                            <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id}</Text>
-                            {record.platform === 'star_wealth' ? (
-                                <Tag color="gold" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>星财富</Tag>
-                            ) : record.platform === 'yingli' ? (
-                                <Tag color="purple" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>盈立</Tag>
-                            ) : (
-                                <Tag color="cyan" style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>富途牛牛</Tag>
-                            )}
+                            <Text type="secondary" style={{ fontSize: '12px' }}>ID: {record.portfolio_id || '-'}</Text>
+                            <Tag color={platform?.color || 'default'} style={{ fontSize: '10px', lineHeight: '14px', height: '16px' }}>
+                                {platform?.label || '不支持的来源'}
+                            </Tag>
                         </Space>
                     </Space>
                 );
@@ -489,6 +552,20 @@ const PortfolioCopyTrading = () => {
             title: '跟单账户',
             key: 'account',
             render: (_, record) => {
+                if (record.account_type === 'external') {
+                    return (
+                        <Space direction="vertical" size={0}>
+                            <Tag color="green">外部交易账户</Tag>
+                            <Text>{record.external_trading_account_name || '-'}</Text>
+                            <Text type="secondary" style={{ fontSize: '12px' }}>子账户: {record.live_sub_account_name || '-'}</Text>
+                            {record.last_external_sync_status && (
+                                <Text type="secondary" style={{ fontSize: '12px' }}>
+                                    {record.last_external_sync_status}: {record.last_external_sync_message || ''}
+                                </Text>
+                            )}
+                        </Space>
+                    );
+                }
                 if (record.account_type === 'longport') {
                     if (record.longport_account_id) {
                         const account = longportAccounts.find(a => a.lp_account_id === record.longport_account_id);
@@ -532,9 +609,7 @@ const PortfolioCopyTrading = () => {
                     ) : (
                         <Text type="secondary" style={{ fontSize: '12px' }}>仓位占比: {record.total_position_ratio}%</Text>
                     )}
-                    {record.platform !== 'daily_ma' && (
-                        <Text type="secondary" style={{ fontSize: '12px' }}>跟踪误差: {record.tracking_error_pct}%</Text>
-                    )}
+                    <Text type="secondary" style={{ fontSize: '12px' }}>跟踪误差: {record.tracking_error_pct}%</Text>
                 </Space>
             )
         },
@@ -554,20 +629,31 @@ const PortfolioCopyTrading = () => {
                         onClick={() => handlePreview(record.id)}
                         size="small"
                         title="预览调仓"
+                        disabled={!PORTFOLIO_COPY_PLATFORMS[record.platform || 'futu']}
                     />
+                    {record.account_type === 'external' && (
+                        <Button
+                            onClick={() => handlePortfolioSyncExternalTargets(record)}
+                            size="small"
+                            title="同步目标仓位并触发通用执行器"
+                        >同步目标</Button>
+                    )}
                     <Button
                         icon={<EditOutlined />}
                         onClick={() => {
                             setEditingConfig(record);
                             const formValues = { ...record };
+                            formValues.platform = record.platform || 'futu';
                             if (record.platform === 'yingli' && record.api_headers) {
                                 formValues.yingli_invest_id = record.api_headers.investId;
                                 formValues.yingli_auth = record.api_headers.Authorization;
                             }
                             form.setFieldsValue(formValues);
+                            fetchPortfolioLiveSubAccounts(record.external_trading_account_id);
                             setModalVisible(true);
                         }}
                         size="small"
+                        disabled={!PORTFOLIO_COPY_PLATFORMS[record.platform || 'futu']}
                     />
                     <Button
                         icon={<DeleteOutlined />}
@@ -670,6 +756,7 @@ const PortfolioCopyTrading = () => {
                             <Button type="primary" icon={<PlusOutlined />} onClick={() => {
                                 setEditingConfig(null);
                                 form.resetFields();
+                                setPortfolioLiveSubAccounts([]);
                                 setModalVisible(true);
                             }}>添加跟单配置</Button>
                         </div>
@@ -924,10 +1011,9 @@ const PortfolioCopyTrading = () => {
                         <Col span={6}>
                             <Form.Item name="platform" label="组合来源">
                                 <Select>
-                                    <Select.Option value="futu">富途牛牛</Select.Option>
-                                    <Select.Option value="star_wealth">星财富</Select.Option>
-                                    <Select.Option value="yingli">盈立 (Yingli)</Select.Option>
-                                    <Select.Option value="daily_ma">日均线策略 (Daily MA)</Select.Option>
+                                    {Object.entries(PORTFOLIO_COPY_PLATFORMS).map(([value, platform]) => (
+                                        <Select.Option key={value} value={value}>{platform.label}</Select.Option>
+                                    ))}
                                 </Select>
                             </Form.Item>
                         </Col>
@@ -954,63 +1040,27 @@ const PortfolioCopyTrading = () => {
                                     </Row>
                                 );
                             }
-                            if (platform === 'daily_ma') {
-                                return (
-                                    <Row gutter={16}>
-                                        <Col span={6}>
-                                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
-                                                <Input placeholder="输入策略名称" />
-                                            </Form.Item>
-                                        </Col>
-                                        <Col span={6}>
-                                            <Form.Item name="symbol" label="交易标的" rules={[{ required: true }]}>
-                                                <Input placeholder="如: US.TQQQ" />
-                                            </Form.Item>
-                                        </Col>
-                                        <Col span={6}>
-                                            <Form.Item name="ma_short" label="短周期(如 5)" rules={[{ required: true }]}>
-                                                <InputNumber style={{ width: '100%' }} min={1} />
-                                            </Form.Item>
-                                        </Col>
-                                        <Col span={6}>
-                                            <Form.Item name="ma_long" label="长周期(如 25)" rules={[{ required: true }]}>
-                                                <InputNumber style={{ width: '100%' }} min={1} />
-                                            </Form.Item>
-                                        </Col>
-                                    </Row>
-                                );
-                            }
                             return null;
                         }}
                     </Form.Item>
 
-                    <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
-                        {() => {
-                            const platform = form.getFieldValue('platform');
-                            if (platform !== 'daily_ma') {
-                                return (
-                                    <Row gutter={16}>
-                                        <Col span={10}>
-                                            <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
-                                                <Space.Compact style={{ width: '100%' }}>
-                                                    <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
-                                                        <Input placeholder="例如: 158919" />
-                                                    </Form.Item>
-                                                    <Button onClick={fetchPortfolioName}>获取</Button>
-                                                </Space.Compact>
-                                            </Form.Item>
-                                        </Col>
-                                        <Col span={8}>
-                                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
-                                                <Input placeholder="自动获取" />
-                                            </Form.Item>
-                                        </Col>
-                                    </Row>
-                                );
-                            }
-                            return null;
-                        }}
-                    </Form.Item>
+                    <Row gutter={16}>
+                        <Col span={10}>
+                            <Form.Item label="投资组合 ID" rules={[{ required: true }]}>
+                                <Space.Compact style={{ width: '100%' }}>
+                                    <Form.Item name="portfolio_id" noStyle rules={[{ required: true }]}>
+                                        <Input placeholder="例如: 158919" />
+                                    </Form.Item>
+                                    <Button onClick={fetchPortfolioName}>获取</Button>
+                                </Space.Compact>
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                            <Form.Item name="portfolio_name" label="组合名称" rules={[{ required: true }]}>
+                                <Input placeholder="自动获取" />
+                            </Form.Item>
+                        </Col>
+                    </Row>
 
                     <Row gutter={16}>
                         <Col span={12}>
@@ -1029,21 +1079,57 @@ const PortfolioCopyTrading = () => {
                     </Row>
 
                     <Row gutter={16}>
-                        <Col span={12}>
+                        <Col span={8}>
                             <Form.Item name="account_type" label="账户类型" rules={[{ required: true }]}>
                                 <Select onChange={() => {
-                                    // Reset account fields on type change
-                                    form.setFieldsValue({ ib_account_id: undefined, longport_account_id: undefined });
+                                    form.setFieldsValue({
+                                        ib_account_id: undefined,
+                                        longport_account_id: undefined,
+                                        external_trading_account_id: undefined,
+                                        live_sub_account_id: undefined,
+                                    });
+                                    setPortfolioLiveSubAccounts([]);
                                 }}>
                                     <Select.Option value="ib">Interactive Brokers (IB)</Select.Option>
                                     <Select.Option value="longport">长桥证券 (Longport)</Select.Option>
+                                    <Select.Option value="external">外部交易账户</Select.Option>
                                 </Select>
                             </Form.Item>
                         </Col>
-                        <Col span={12}>
+                        <Col span={16}>
                             <Form.Item shouldUpdate={(prev, curr) => prev.account_type !== curr.account_type}>
                                 {() => {
                                     const type = form.getFieldValue('account_type');
+                                    if (type === 'external') {
+                                        return (
+                                            <Row gutter={16}>
+                                                <Col span={12}>
+                                                    <Form.Item name="external_trading_account_id" label="外部交易账户" rules={[{ required: true, message: '请选择外部交易账户' }]}>
+                                                        <Select
+                                                            allowClear
+                                                            showSearch
+                                                            optionFilterProp="label"
+                                                            options={usExternalTradingAccountOptions}
+                                                            placeholder="选择美股外部交易账户"
+                                                            onChange={() => form.setFieldsValue({ live_sub_account_id: undefined })}
+                                                        />
+                                                    </Form.Item>
+                                                </Col>
+                                                <Col span={12}>
+                                                    <Form.Item name="live_sub_account_id" label="虚拟子账户" rules={[{ required: true, message: '请选择虚拟子账户' }]}>
+                                                        <Select
+                                                            allowClear
+                                                            showSearch
+                                                            optionFilterProp="label"
+                                                            options={portfolioLiveSubAccountOptions}
+                                                            placeholder={selectedPortfolioExternalTradingAccountId ? '选择虚拟子账户' : '先选择外部账户'}
+                                                            disabled={!selectedPortfolioExternalTradingAccountId}
+                                                        />
+                                                    </Form.Item>
+                                                </Col>
+                                            </Row>
+                                        );
+                                    }
                                     if (type === 'longport') {
                                         return (
                                             <Form.Item name="longport_account_id" label="长桥账户" rules={[{ required: true, message: '请选择长桥账户' }]}>
@@ -1086,18 +1172,8 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={8}>
-                            <Form.Item shouldUpdate={(prev, curr) => prev.platform !== curr.platform} noStyle>
-                                {() => {
-                                    const platform = form.getFieldValue('platform');
-                                    if (platform !== 'daily_ma') {
-                                        return (
-                                            <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
-                                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
-                                            </Form.Item>
-                                        );
-                                    }
-                                    return null;
-                                }}
+                            <Form.Item name="tracking_error_pct" label="跟踪误差 (%)">
+                                <InputNumber style={{ width: '100%' }} min={0} max={100} />
                             </Form.Item>
                         </Col>
                     </Row>

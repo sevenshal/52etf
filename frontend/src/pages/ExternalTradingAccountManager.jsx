@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import {
   Alert,
@@ -32,6 +32,7 @@ import {
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
+import { useAccount } from '../contexts/AccountContext';
 
 const { Text, Title } = Typography;
 const MARKET_TYPE_A_STOCK = 'A_STOCK';
@@ -47,6 +48,13 @@ const marketDefaultFields = value => (
     ? { executor_lot_size: 1, stamp_tax_rate_pct: 0 }
     : { executor_lot_size: 100, stamp_tax_rate_pct: 0.05 }
 );
+const buildExternalTradingStatusWsUrl = accountId => {
+  const apiUrl = process.env.REACT_APP_API_URL || '';
+  const wsHost = apiUrl
+    ? apiUrl.replace(/^http/, 'ws')
+    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+  return `${wsHost}/api/external-trading-accounts/status/ws?account_id=${encodeURIComponent(accountId)}`;
+};
 
 const formatTime = value => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-');
 const formatNumber = (value, digits = 0) => {
@@ -308,6 +316,7 @@ const getNetAssetHistoryOption = rows => {
 };
 
 const ExternalTradingAccountManager = () => {
+  const { accountId } = useAccount();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -348,8 +357,16 @@ const ExternalTradingAccountManager = () => {
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
   const [markBlockSuccessForm] = Form.useForm();
+  const statusWsRef = useRef(null);
+  const statusWsReconnectTimerRef = useRef(null);
 
-  const fetchAccounts = async (silent = false) => {
+  const fetchAccounts = useCallback(async (silent = false) => {
+    if (!accountId) {
+      if (!silent) {
+        setLoading(false);
+      }
+      return;
+    }
     if (!silent) {
       setLoading(true);
     }
@@ -365,13 +382,64 @@ const ExternalTradingAccountManager = () => {
         setLoading(false);
       }
     }
-  };
+  }, [accountId]);
 
   useEffect(() => {
+    if (!accountId) {
+      return undefined;
+    }
     fetchAccounts();
-    const timer = setInterval(() => fetchAccounts(true), 5000);
-    return () => clearInterval(timer);
-  }, []);
+  }, [accountId, fetchAccounts]);
+
+  useEffect(() => {
+    if (!accountId) {
+      return undefined;
+    }
+
+    let stopped = false;
+    const connectStatusWs = () => {
+      const ws = new WebSocket(buildExternalTradingStatusWsUrl(accountId));
+      statusWsRef.current = ws;
+
+      ws.onmessage = event => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (Array.isArray(payload?.accounts)) {
+            setAccounts(payload.accounts);
+          }
+        } catch (error) {
+          console.warn('解析外部交易账号状态推送失败', error);
+        }
+      };
+
+      ws.onclose = () => {
+        if (statusWsRef.current === ws) {
+          statusWsRef.current = null;
+        }
+        if (!stopped) {
+          statusWsReconnectTimerRef.current = window.setTimeout(connectStatusWs, 3000);
+        }
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connectStatusWs();
+
+    return () => {
+      stopped = true;
+      if (statusWsReconnectTimerRef.current) {
+        window.clearTimeout(statusWsReconnectTimerRef.current);
+        statusWsReconnectTimerRef.current = null;
+      }
+      if (statusWsRef.current) {
+        statusWsRef.current.close();
+        statusWsRef.current = null;
+      }
+    };
+  }, [accountId]);
 
   const openCreateModal = () => {
     setEditingAccount(null);
