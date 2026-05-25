@@ -5,6 +5,13 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
+from decimal import (
+    Decimal,
+    InvalidOperation,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+)
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -51,9 +58,97 @@ PTRADE_MARKET_HOURS_ENFORCED_ACTIONS = {
 }
 _trading_day_cache: Dict[date, bool] = {}
 
+PENNY_PRICE_TICK = Decimal("0.01")
+PENNY_PRICE_MARKET_TYPES = {
+    EXTERNAL_TRADING_MARKET_A_STOCK,
+    EXTERNAL_TRADING_MARKET_US_STOCK,
+}
+PENNY_ORDER_PRICE_FIELDS = (
+    "price",
+    "limit_price",
+    "protection_limit_price",
+    "market_limit_price",
+    "max_buy_price",
+    "min_sell_price",
+)
+
 
 class ExternalTradingConnectionError(Exception):
     """Raised when an external trading account is unavailable or rejects a command."""
+
+
+def _as_positive_decimal(value: Any) -> Optional[Decimal]:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _round_penny_order_price(value: Any, side: str) -> Any:
+    price = _as_positive_decimal(value)
+    if price is None:
+        return value
+
+    upper_side = str(side or "").upper()
+    if upper_side == "BUY":
+        rounding = ROUND_FLOOR
+    elif upper_side == "SELL":
+        rounding = ROUND_CEILING
+    else:
+        rounding = ROUND_HALF_UP
+
+    adjusted = (
+        (price / PENNY_PRICE_TICK).to_integral_value(rounding=rounding)
+        * PENNY_PRICE_TICK
+    )
+    adjusted = adjusted.quantize(PENNY_PRICE_TICK)
+    if adjusted <= 0:
+        return value
+    return float(adjusted)
+
+
+def _normalize_penny_order_prices(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    normalized_payload = dict(payload or {})
+    orders = normalized_payload.get("orders")
+    if not isinstance(orders, list):
+        return normalized_payload
+
+    normalized_orders = []
+    for order in orders:
+        if not isinstance(order, dict):
+            normalized_orders.append(order)
+            continue
+
+        normalized_order = dict(order)
+        side = str(normalized_order.get("side") or "").upper()
+        for field in PENNY_ORDER_PRICE_FIELDS:
+            if field in normalized_order:
+                normalized_order[field] = _round_penny_order_price(
+                    normalized_order.get(field),
+                    side,
+                )
+        normalized_orders.append(normalized_order)
+
+    normalized_payload["orders"] = normalized_orders
+    return normalized_payload
+
+
+def _prepare_command_payload(
+    action: str,
+    payload: Optional[Dict[str, Any]],
+    market_type: Optional[str],
+) -> Dict[str, Any]:
+    prepared = payload or {}
+    if action != "place_orders":
+        return prepared
+    if normalize_external_trading_market_type(market_type) not in PENNY_PRICE_MARKET_TYPES:
+        return prepared
+    return _normalize_penny_order_prices(prepared)
 
 
 def _china_now() -> datetime:
@@ -305,11 +400,12 @@ class ExternalTradingHub:
             loop = asyncio.get_running_loop()
             future = loop.create_future()
             conn.pending[request_id] = future
+            prepared_payload = _prepare_command_payload(action, payload, conn.market_type)
             message = {
                 "type": "command",
                 "id": request_id,
                 "action": action,
-                "payload": payload or {},
+                "payload": prepared_payload,
                 "ts": datetime.now().isoformat(),
             }
 
