@@ -16,6 +16,32 @@ DEFAULT_CANDIDATE_ETFS = ["SPY.US", "QQQ.US"]
 DEFAULT_PROVIDER = "fmp"
 DEFAULT_DAILY_SINGLE_REQUEST_LIMIT = 900
 US_COMMON_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.]*\.US$")
+FMP_INDUSTRY_SKIP_SYMBOLS_ENV = "FMP_INDUSTRY_SKIP_SYMBOLS"
+
+# Historical/invalid SPY/QQQ holding tickers that FMP stable/profile no longer resolves.
+DEFAULT_FMP_PROFILE_SKIP_SYMBOLS = {
+    "BHGE.US",
+    "CBS.US",
+    "CELG.US",
+    "CTL.US",
+    "CTRP.US",
+    "CXO.US",
+    "ETFC.US",
+    "FLIR.US",
+    "JEC.US",
+    "MYL.US",
+    "NBL.US",
+    "NQM6.US",
+    "RTN.US",
+    "SYMC.US",
+    "TIF.US",
+    "UNHN.US",
+    "UTX.US",
+    "VAR.US",
+    "VIAB.US",
+    "WCG.US",
+    "XEC.US",
+}
 
 
 def _clean_text(value) -> Optional[str]:
@@ -39,6 +65,23 @@ def _symbol_to_fmp(symbol: str) -> Optional[str]:
     if not normalized or not normalized.endswith(".US"):
         return None
     return normalized[:-3].replace(".", "-")
+
+
+def _normalize_symbol_set(symbols: Optional[Sequence[str]]) -> Set[str]:
+    normalized_symbols: Set[str] = set()
+    for symbol in symbols or []:
+        normalized = normalize_us_equity_symbol(symbol)
+        if normalized:
+            normalized_symbols.add(normalized)
+    return normalized_symbols
+
+
+def _profile_skip_symbols(extra_symbols: Optional[Sequence[str]] = None) -> Set[str]:
+    env_symbols = re.split(r"[\s,;]+", os.getenv(FMP_INDUSTRY_SKIP_SYMBOLS_ENV, "").strip())
+    skip_symbols = set(DEFAULT_FMP_PROFILE_SKIP_SYMBOLS)
+    skip_symbols.update(_normalize_symbol_set(env_symbols))
+    skip_symbols.update(_normalize_symbol_set(extra_symbols))
+    return skip_symbols
 
 
 def _candidate_etf_component_symbols(
@@ -92,6 +135,7 @@ class USStockIndustrySync:
         limit: Optional[int] = None,
         force: bool = False,
         snapshot_date: Optional[date] = None,
+        profile_skip_symbols: Optional[Sequence[str]] = None,
     ) -> Dict:
         snapshot_date = snapshot_date or date.today()
         symbols = _candidate_etf_component_symbols(self.db, candidate_etfs)
@@ -101,11 +145,16 @@ class USStockIndustrySync:
                 "symbols": 0,
                 "saved": 0,
                 "skipped_existing": 0,
+                "skipped_profile_unavailable": 0,
+                "skipped_profile_unavailable_symbols": [],
                 "errors": [],
             }
 
-        target_symbols = symbols if force else self._filter_missing_symbols(symbols)
-        skipped_existing = len(symbols) - len(target_symbols)
+        profile_skip_set = _profile_skip_symbols(profile_skip_symbols)
+        skipped_profile_unavailable_symbols = [symbol for symbol in symbols if symbol in profile_skip_set]
+        eligible_symbols = [symbol for symbol in symbols if symbol not in profile_skip_set]
+        target_symbols = eligible_symbols if force else self._filter_missing_symbols(eligible_symbols)
+        skipped_existing = len(eligible_symbols) - len(target_symbols)
         saved_symbols: Set[str] = set()
         errors: List[Dict] = []
         api_calls = 0
@@ -137,6 +186,8 @@ class USStockIndustrySync:
             "target_symbols": len(target_symbols),
             "saved": len(saved_symbols),
             "skipped_existing": skipped_existing,
+            "skipped_profile_unavailable": len(skipped_profile_unavailable_symbols),
+            "skipped_profile_unavailable_symbols": skipped_profile_unavailable_symbols,
             "remaining": len(target_symbols) - len(saved_symbols),
             "remaining_after_limit": remaining_after_limit,
             "api_calls": api_calls,
@@ -218,6 +269,7 @@ def sync_us_stock_industry_snapshots(
     candidate_etfs: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
     force: bool = False,
+    profile_skip_symbols: Optional[Sequence[str]] = None,
 ) -> Dict:
     syncer = USStockIndustrySync()
     try:
@@ -225,6 +277,7 @@ def sync_us_stock_industry_snapshots(
             candidate_etfs=candidate_etfs,
             limit=limit,
             force=force,
+            profile_skip_symbols=profile_skip_symbols,
         )
     finally:
         syncer.close()

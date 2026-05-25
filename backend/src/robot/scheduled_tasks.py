@@ -95,12 +95,13 @@ def _run_us_stock_industry_sync():
     logging.getLogger("ScheduledTaskManager").info(
         (
             "US stock industry synced: symbols=%s target=%s saved=%s skipped=%s "
-            "remaining=%s api_calls=%s errors=%s"
+            "profile_skipped=%s remaining=%s api_calls=%s errors=%s"
         ),
         result.get("symbols"),
         result.get("target_symbols"),
         result.get("saved"),
         result.get("skipped_existing"),
+        result.get("skipped_profile_unavailable"),
         result.get("remaining"),
         result.get("api_calls"),
         len(result.get("errors") or []),
@@ -118,6 +119,7 @@ def _run_us_stock_industry_sync():
         f"target={result.get('target_symbols')} "
         f"saved={result.get('saved')} "
         f"skipped={result.get('skipped_existing')} "
+        f"profile_skipped={result.get('skipped_profile_unavailable')} "
         f"remaining={result.get('remaining')} "
         f"api_calls={result.get('api_calls')} "
         f"errors={len(errors)}"
