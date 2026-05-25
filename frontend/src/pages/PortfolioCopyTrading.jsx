@@ -3,12 +3,13 @@ import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
     Space, Tag, message, Typography, Switch, Row, Col, List,
-    Tabs, Select
+    Tabs, Select, Empty
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, PlayCircleOutlined, HistoryOutlined,
-    SettingOutlined, DeleteOutlined, EditOutlined
+    SettingOutlined, DeleteOutlined, EditOutlined, LineChartOutlined
 } from '@ant-design/icons';
+import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
 
@@ -58,6 +59,15 @@ const PortfolioCopyTrading = () => {
     const [snapshotData, setSnapshotData] = useState(null);
     const [snapshotLoading, setSnapshotLoading] = useState(false);
     const [currentSnapshotTitle, setCurrentSnapshotTitle] = useState('');
+    const [snowballBacktestModalVisible, setSnowballBacktestModalVisible] = useState(false);
+    const [snowballBacktestForm] = Form.useForm();
+    const [snowballBacktestTarget, setSnowballBacktestTarget] = useState(null);
+    const [snowballBacktestLoading, setSnowballBacktestLoading] = useState(false);
+    const [snowballBacktestHistoryVisible, setSnowballBacktestHistoryVisible] = useState(false);
+    const [snowballBacktestRuns, setSnowballBacktestRuns] = useState([]);
+    const [snowballBacktestRunsLoading, setSnowballBacktestRunsLoading] = useState(false);
+    const [selectedSnowballBacktest, setSelectedSnowballBacktest] = useState(null);
+    const [selectedSnowballBacktestLoading, setSelectedSnowballBacktestLoading] = useState(false);
 
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
@@ -85,6 +95,14 @@ const PortfolioCopyTrading = () => {
 
     const formatError = (error, fallback) => error.response?.data?.detail || error.message || fallback;
     const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
+    const formatOptionalPercent = (value, digits = 2) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+        return `${Number(value).toFixed(digits)}%`;
+    };
+    const formatOptionalNumber = (value, digits = 2) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+        return Number(value).toFixed(digits);
+    };
     const formatSignedPercent = (value, digits = 2) => {
         const number = Number(value || 0);
         return `${number > 0 ? '+' : ''}${number.toFixed(digits)}%`;
@@ -434,6 +452,130 @@ const PortfolioCopyTrading = () => {
             setSnapshotLoading(false);
         }
     };
+
+    const openSnowballBacktestModal = (record) => {
+        setSnowballBacktestTarget(record);
+        snowballBacktestForm.setFieldsValue({ slippage_pct: 0.5 });
+        setSnowballBacktestModalVisible(true);
+    };
+
+    const fetchSnowballBacktestDetail = async (run) => {
+        if (!run?.id) return;
+        setSelectedSnowballBacktestLoading(true);
+        try {
+            const response = await request.get(`/api/snowball/backtests/${run.id}`);
+            setSelectedSnowballBacktest(response.data);
+        } catch (error) {
+            message.error('获取回测详情失败: ' + formatError(error, '获取回测详情失败'));
+        } finally {
+            setSelectedSnowballBacktestLoading(false);
+        }
+    };
+
+    const fetchSnowballBacktestRuns = async (record = snowballBacktestTarget, preferredRunId = null) => {
+        if (!record?.id) return;
+        setSnowballBacktestRunsLoading(true);
+        try {
+            const response = await request.get(`/api/snowball/configs/${record.id}/backtests`);
+            const runs = response.data || [];
+            setSnowballBacktestRuns(runs);
+            const nextRun = runs.find(item => item.id === preferredRunId) || runs[0];
+            if (nextRun) {
+                await fetchSnowballBacktestDetail(nextRun);
+            } else {
+                setSelectedSnowballBacktest(null);
+            }
+        } catch (error) {
+            message.error('获取回测历史失败: ' + formatError(error, '获取回测历史失败'));
+        } finally {
+            setSnowballBacktestRunsLoading(false);
+        }
+    };
+
+    const handleViewSnowballBacktests = async (record) => {
+        setSnowballBacktestTarget(record);
+        setSnowballBacktestHistoryVisible(true);
+        setSelectedSnowballBacktest(null);
+        setSnowballBacktestRuns([]);
+        await fetchSnowballBacktestRuns(record);
+    };
+
+    const handleSnowballBacktestSubmit = async (values) => {
+        if (!snowballBacktestTarget?.id) return;
+        setSnowballBacktestLoading(true);
+        try {
+            const response = await request.post(
+                `/api/snowball/configs/${snowballBacktestTarget.id}/backtests`,
+                { slippage_pct: values.slippage_pct }
+            );
+            message.success('回测已开始');
+            setSnowballBacktestModalVisible(false);
+            setSnowballBacktestHistoryVisible(true);
+            await fetchSnowballBacktestRuns(snowballBacktestTarget, response.data?.id);
+        } catch (error) {
+            message.error('启动回测失败: ' + formatError(error, '启动回测失败'));
+        } finally {
+            setSnowballBacktestLoading(false);
+        }
+    };
+
+    const getSnowballBacktestChartOption = () => {
+        const rows = selectedSnowballBacktest?.curve_points || [];
+        const dates = rows.map(item => item.date);
+        return {
+            tooltip: {
+                trigger: 'axis',
+                valueFormatter: value => value === null || value === undefined ? '-' : `${Number(value).toFixed(2)}%`,
+            },
+            legend: { data: ['滑点后', '原始', '中证500'] },
+            grid: { left: 48, right: 24, top: 48, bottom: 72 },
+            dataZoom: [{ type: 'inside' }, { type: 'slider', height: 24 }],
+            xAxis: { type: 'category', data: dates, boundaryGap: false },
+            yAxis: { type: 'value', name: '收益率', axisLabel: { formatter: '{value}%' } },
+            series: [
+                {
+                    name: '滑点后',
+                    type: 'line',
+                    data: rows.map(item => item.slippage_return_pct),
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { width: 2 },
+                },
+                {
+                    name: '原始',
+                    type: 'line',
+                    data: rows.map(item => item.raw_return_pct),
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { width: 1.5 },
+                },
+                {
+                    name: '中证500',
+                    type: 'line',
+                    data: rows.map(item => item.benchmark_return_pct),
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { width: 1.5, type: 'dashed' },
+                },
+            ],
+        };
+    };
+
+    useEffect(() => {
+        if (!snowballBacktestHistoryVisible || !snowballBacktestTarget?.id) return undefined;
+        const hasRunning = snowballBacktestRuns.some(item => item.status === 'RUNNING');
+        if (!hasRunning && selectedSnowballBacktest?.status !== 'RUNNING') return undefined;
+        const timer = setInterval(() => {
+            fetchSnowballBacktestRuns(snowballBacktestTarget, selectedSnowballBacktest?.id);
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [
+        snowballBacktestHistoryVisible,
+        snowballBacktestTarget,
+        snowballBacktestRuns,
+        selectedSnowballBacktest?.id,
+        selectedSnowballBacktest?.status,
+    ]);
 
     useEffect(() => {
         fetchSnowballLiveSubAccounts(selectedSnowballExternalTradingAccountId);
@@ -840,6 +982,16 @@ const PortfolioCopyTrading = () => {
                                                 size="small"
                                                 onClick={() => handleViewSnapshot(record)}
                                             >详情</Button>
+                                            <Button
+                                                icon={<PlayCircleOutlined />}
+                                                size="small"
+                                                onClick={() => openSnowballBacktestModal(record)}
+                                            >回测</Button>
+                                            <Button
+                                                icon={<LineChartOutlined />}
+                                                size="small"
+                                                onClick={() => handleViewSnowballBacktests(record)}
+                                            >回测历史</Button>
                                             <Button
                                                 size="small"
                                                 disabled={!record.live_trade_enabled}
@@ -1504,6 +1656,179 @@ const PortfolioCopyTrading = () => {
                 ) : (
                     <div style={{ textAlign: 'center', color: '#999' }}>暂无数据</div>
                 )}
+            </Modal>
+
+            <Modal
+                title={`雪球回测 - ${snowballBacktestTarget?.combination_name || snowballBacktestTarget?.combination_id || ''}`}
+                visible={snowballBacktestModalVisible}
+                onCancel={() => setSnowballBacktestModalVisible(false)}
+                onOk={() => snowballBacktestForm.submit()}
+                confirmLoading={snowballBacktestLoading}
+                width={420}
+            >
+                <Form
+                    form={snowballBacktestForm}
+                    layout="vertical"
+                    onFinish={handleSnowballBacktestSubmit}
+                    initialValues={{ slippage_pct: 0.5 }}
+                >
+                    <Form.Item
+                        name="slippage_pct"
+                        label="单边滑点 (%)"
+                        rules={[{ required: true, message: '请输入单边滑点' }]}
+                    >
+                        <InputNumber style={{ width: '100%' }} min={0} max={10} step={0.1} precision={2} />
+                    </Form.Item>
+                </Form>
+            </Modal>
+
+            <Modal
+                title={`雪球回测历史 - ${snowballBacktestTarget?.combination_name || snowballBacktestTarget?.combination_id || ''}`}
+                visible={snowballBacktestHistoryVisible}
+                onCancel={() => setSnowballBacktestHistoryVisible(false)}
+                footer={null}
+                width={1280}
+            >
+                <Row gutter={16}>
+                    <Col span={8}>
+                        <div style={{ marginBottom: 12 }}>
+                            <Button
+                                icon={<ReloadOutlined />}
+                                onClick={() => fetchSnowballBacktestRuns()}
+                                loading={snowballBacktestRunsLoading}
+                            >刷新</Button>
+                        </div>
+                        <Table
+                            dataSource={snowballBacktestRuns}
+                            rowKey="id"
+                            size="small"
+                            loading={snowballBacktestRunsLoading}
+                            pagination={{ pageSize: 8, showSizeChanger: false }}
+                            onRow={record => ({
+                                onClick: () => fetchSnowballBacktestDetail(record),
+                            })}
+                            columns={[
+                                {
+                                    title: '时间',
+                                    dataIndex: 'created_at',
+                                    width: 150,
+                                    render: value => value ? dayjs(value).format('MM-DD HH:mm') : '-',
+                                },
+                                {
+                                    title: '滑点',
+                                    dataIndex: 'slippage_pct',
+                                    width: 70,
+                                    align: 'right',
+                                    render: value => formatOptionalPercent(value),
+                                },
+                                {
+                                    title: '状态',
+                                    dataIndex: 'status',
+                                    width: 90,
+                                    render: value => {
+                                        const color = value === 'SUCCESS' ? 'green' : value === 'RUNNING' ? 'blue' : 'red';
+                                        return <Tag color={color}>{value}</Tag>;
+                                    },
+                                },
+                                {
+                                    title: '滑点后收益',
+                                    key: 'return',
+                                    align: 'right',
+                                    render: (_, record) => formatOptionalPercent(record.performance_after_slippage?.total_return_pct),
+                                },
+                            ]}
+                        />
+                    </Col>
+                    <Col span={16}>
+                        {selectedSnowballBacktestLoading ? (
+                            <div style={{ textAlign: 'center', padding: 48 }}><ReloadOutlined spin /> 加载中...</div>
+                        ) : selectedSnowballBacktest ? (
+                            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                                <Space wrap>
+                                    <Tag color={selectedSnowballBacktest.status === 'SUCCESS' ? 'green' : selectedSnowballBacktest.status === 'RUNNING' ? 'blue' : 'red'}>
+                                        {selectedSnowballBacktest.status}
+                                    </Tag>
+                                    <Text type="secondary">
+                                        区间: {selectedSnowballBacktest.actual_nav_start || '-'} 至 {selectedSnowballBacktest.actual_nav_end || '-'}
+                                    </Text>
+                                    <Text type="secondary">
+                                        调仓: {selectedSnowballBacktest.rebalancing?.rebalance_count ?? '-'} 次
+                                    </Text>
+                                </Space>
+                                {selectedSnowballBacktest.error_message && (
+                                    <Text type="danger">{selectedSnowballBacktest.error_message}</Text>
+                                )}
+                                <Row gutter={12}>
+                                    {[
+                                        ['滑点后', selectedSnowballBacktest.performance_after_slippage],
+                                        ['原始', selectedSnowballBacktest.performance_raw],
+                                        ['中证500', selectedSnowballBacktest.benchmark_metrics],
+                                    ].map(([label, metrics]) => (
+                                        <Col span={8} key={label}>
+                                            <Card size="small" bodyStyle={{ padding: 12 }}>
+                                                <Text type="secondary">{label}</Text>
+                                                <div style={{ marginTop: 8, fontSize: 20, fontWeight: 600 }}>
+                                                    {formatOptionalPercent(metrics?.total_return_pct)}
+                                                </div>
+                                                <Space direction="vertical" size={0} style={{ marginTop: 8 }}>
+                                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                                        年化 {formatOptionalPercent(metrics?.annualized_return_pct)}
+                                                    </Text>
+                                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                                        夏普 {formatOptionalNumber(metrics?.sharpe)}
+                                                    </Text>
+                                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                                        最大回撤 {formatOptionalPercent(metrics?.max_drawdown_pct)}
+                                                    </Text>
+                                                </Space>
+                                            </Card>
+                                        </Col>
+                                    ))}
+                                </Row>
+                                {(selectedSnowballBacktest.curve_points || []).length ? (
+                                    <ReactECharts option={getSnowballBacktestChartOption()} style={{ height: 380 }} />
+                                ) : (
+                                    <Empty description="暂无曲线数据" />
+                                )}
+                                <Table
+                                    dataSource={selectedSnowballBacktest.yearly_returns || []}
+                                    rowKey="year"
+                                    size="small"
+                                    pagination={false}
+                                    columns={[
+                                        { title: '年份', dataIndex: 'year', width: 90 },
+                                        {
+                                            title: '滑点后',
+                                            dataIndex: 'slippage_return_pct',
+                                            align: 'right',
+                                            render: value => formatOptionalPercent(value),
+                                        },
+                                        {
+                                            title: '原始',
+                                            dataIndex: 'raw_return_pct',
+                                            align: 'right',
+                                            render: value => formatOptionalPercent(value),
+                                        },
+                                        {
+                                            title: '中证500',
+                                            dataIndex: 'benchmark_return_pct',
+                                            align: 'right',
+                                            render: value => formatOptionalPercent(value),
+                                        },
+                                        {
+                                            title: '超额',
+                                            dataIndex: 'excess_return_after_slippage_pct',
+                                            align: 'right',
+                                            render: value => formatOptionalPercent(value),
+                                        },
+                                    ]}
+                                />
+                            </Space>
+                        ) : (
+                            <Empty description="暂无回测记录" />
+                        )}
+                    </Col>
+                </Row>
             </Modal>
 
             {/* Snowball Account Config Modal */}
