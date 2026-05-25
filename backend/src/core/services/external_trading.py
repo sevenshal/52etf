@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -58,12 +59,25 @@ PTRADE_MARKET_HOURS_ENFORCED_ACTIONS = {
 }
 _trading_day_cache: Dict[date, bool] = {}
 
-PENNY_PRICE_TICK = Decimal("0.01")
-PENNY_PRICE_MARKET_TYPES = {
-    EXTERNAL_TRADING_MARKET_A_STOCK,
-    EXTERNAL_TRADING_MARKET_US_STOCK,
-}
-PENNY_ORDER_PRICE_FIELDS = (
+PRICE_TICK_001 = Decimal("0.001")
+PRICE_TICK_01 = Decimal("0.01")
+A_STOCK_MILLI_PRICE_PREFIXES = (
+    "10",
+    "11",
+    "12",
+    "13",
+    "15",
+    "16",
+    "18",
+    "50",
+    "51",
+    "52",
+    "53",
+    "56",
+    "58",
+    "59",
+)
+ORDER_PRICE_FIELDS = (
     "price",
     "limit_price",
     "protection_limit_price",
@@ -89,7 +103,31 @@ def _as_positive_decimal(value: Any) -> Optional[Decimal]:
     return parsed
 
 
-def _round_penny_order_price(value: Any, side: str) -> Any:
+def _a_stock_symbol_code(symbol: Any) -> Optional[str]:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return None
+    match = re.search(r"\d{6}", text)
+    return match.group(0) if match else None
+
+
+def _a_stock_order_price_tick(symbol: Any) -> Decimal:
+    code = _a_stock_symbol_code(symbol)
+    if code and code.startswith(A_STOCK_MILLI_PRICE_PREFIXES):
+        return PRICE_TICK_001
+    return PRICE_TICK_01
+
+
+def _order_price_tick(market_type: Optional[str], symbol: Any) -> Optional[Decimal]:
+    normalized_market_type = normalize_external_trading_market_type(market_type)
+    if normalized_market_type == EXTERNAL_TRADING_MARKET_US_STOCK:
+        return PRICE_TICK_01
+    if normalized_market_type == EXTERNAL_TRADING_MARKET_A_STOCK:
+        return _a_stock_order_price_tick(symbol)
+    return None
+
+
+def _round_order_price(value: Any, side: str, tick: Decimal) -> Any:
     price = _as_positive_decimal(value)
     if price is None:
         return value
@@ -103,16 +141,19 @@ def _round_penny_order_price(value: Any, side: str) -> Any:
         rounding = ROUND_HALF_UP
 
     adjusted = (
-        (price / PENNY_PRICE_TICK).to_integral_value(rounding=rounding)
-        * PENNY_PRICE_TICK
+        (price / tick).to_integral_value(rounding=rounding)
+        * tick
     )
-    adjusted = adjusted.quantize(PENNY_PRICE_TICK)
+    adjusted = adjusted.quantize(tick)
     if adjusted <= 0:
         return value
     return float(adjusted)
 
 
-def _normalize_penny_order_prices(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _normalize_order_prices(
+    payload: Optional[Dict[str, Any]],
+    market_type: Optional[str],
+) -> Dict[str, Any]:
     normalized_payload = dict(payload or {})
     orders = normalized_payload.get("orders")
     if not isinstance(orders, list):
@@ -126,11 +167,16 @@ def _normalize_penny_order_prices(payload: Optional[Dict[str, Any]]) -> Dict[str
 
         normalized_order = dict(order)
         side = str(normalized_order.get("side") or "").upper()
-        for field in PENNY_ORDER_PRICE_FIELDS:
+        tick = _order_price_tick(market_type, normalized_order.get("symbol"))
+        if tick is None:
+            normalized_orders.append(normalized_order)
+            continue
+        for field in ORDER_PRICE_FIELDS:
             if field in normalized_order:
-                normalized_order[field] = _round_penny_order_price(
+                normalized_order[field] = _round_order_price(
                     normalized_order.get(field),
                     side,
+                    tick,
                 )
         normalized_orders.append(normalized_order)
 
@@ -146,9 +192,7 @@ def _prepare_command_payload(
     prepared = payload or {}
     if action != "place_orders":
         return prepared
-    if normalize_external_trading_market_type(market_type) not in PENNY_PRICE_MARKET_TYPES:
-        return prepared
-    return _normalize_penny_order_prices(prepared)
+    return _normalize_order_prices(prepared, market_type)
 
 
 def _china_now() -> datetime:
