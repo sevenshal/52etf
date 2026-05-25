@@ -934,14 +934,20 @@ def calculate_order_price(symbol, side, quantity, price_level):
         if gear_data:
             try:
                 quote = normalize_quote_from_gear_price(symbol, gear_data)
-                price = get_limit_price_from_gear_data(symbol, side, quantity, gear_data)
-                source = "ptrade_depth_fallback"
+                if side == "BUY":
+                    price = quote.get("bid")
+                    source = "best_bid_price"
+                else:
+                    price = quote.get("ask")
+                    source = "best_ask_price"
                 snapshot_time = quote.get("timestamp")
                 last_price = quote.get("price")
                 bid = quote.get("bid")
                 ask = quote.get("ask")
+                if price is None or float(price) <= 0:
+                    raise Exception("%s 无可用最优%s价" % (symbol, "买一" if side == "BUY" else "卖一"))
             except Exception as e:
-                log_warn("%s 深度定价失败，尝试涨跌停价兜底: %s" % (symbol, e))
+                log_warn("%s 最优价定价失败，尝试涨跌停价兜底: %s" % (symbol, e))
                 limit_price = get_price_limit_from_snapshot(symbol, side)
                 price = limit_price.get("price")
                 source = limit_price.get("price_source")
