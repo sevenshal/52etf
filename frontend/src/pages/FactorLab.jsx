@@ -242,6 +242,18 @@ const percentFormatter = value => {
   return `${Number(value).toFixed(2)}%`;
 };
 
+const pnlNumberFormatter = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  const number = Number(value);
+  return <Text type={number > 0 ? 'success' : (number < 0 ? 'danger' : undefined)}>{numberFormatter(number)}</Text>;
+};
+
+const pnlPercentFormatter = value => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  const number = Number(value);
+  return <Text type={number > 0 ? 'success' : (number < 0 ? 'danger' : undefined)}>{percentFormatter(number)}</Text>;
+};
+
 const icFormatter = value => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return Number(value).toFixed(4);
@@ -1298,6 +1310,23 @@ const backtestHoldingColumns = [
   { title: '入场日', dataIndex: 'entry_date', width: 112 },
   { title: '市值', dataIndex: 'market_value', align: 'right', render: numberFormatter },
   { title: '权重', dataIndex: 'actual_weight_pct', align: 'right', render: percentFormatter },
+];
+
+const backtestSymbolPnlColumns = [
+  { title: '标的', dataIndex: 'symbol', width: 160, fixed: 'left', render: renderSymbolCell },
+  { title: '状态', dataIndex: 'is_open', width: 88, render: value => <Tag color={value ? 'blue' : 'default'}>{value ? '持仓中' : '已清仓'}</Tag> },
+  { title: '买入次数', dataIndex: 'buy_trade_count', align: 'right', render: numberFormatter },
+  { title: '卖出次数', dataIndex: 'sell_trade_count', align: 'right', render: numberFormatter },
+  { title: '当前股数', dataIndex: 'current_shares', align: 'right', render: numberFormatter },
+  { title: '投入成本', dataIndex: 'total_cost_basis', align: 'right', render: numberFormatter },
+  { title: '已实现盈亏', dataIndex: 'realized_profit', align: 'right', render: pnlNumberFormatter },
+  { title: '未实现盈亏', dataIndex: 'unrealized_profit', align: 'right', render: pnlNumberFormatter },
+  { title: '总盈亏', dataIndex: 'total_profit', align: 'right', render: pnlNumberFormatter },
+  { title: '盈亏率', dataIndex: 'total_profit_pct', align: 'right', render: pnlPercentFormatter },
+  { title: '当前市值', dataIndex: 'current_market_value', align: 'right', render: numberFormatter },
+  { title: '持有天数', dataIndex: 'holding_days', align: 'right', render: numberFormatter },
+  { title: '首次买入', dataIndex: 'first_buy_date', width: 112 },
+  { title: '最后交易', dataIndex: 'last_trade_date', width: 112 },
 ];
 
 const backtestTradeColumns = [
@@ -2818,6 +2847,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const backtestYearlyRows = backtestResult?.yearly_stats || [];
   const backtestHoldingRows = backtestResult?.current_holdings || [];
   const backtestTradeRows = backtestResult?.trades || [];
+  const backtestSymbolPnlRows = backtestResult?.symbol_pnl || [];
   const backtestComponents = backtestMetadata.components || [];
   const backtestCustomSymbolSelectOptions = useMemo(() => (
     mergeSymbolOptions(
@@ -4538,6 +4568,21 @@ const FactorLab = ({ initialTab = 'single' }) => {
                     style={{ height: 380 }}
                   />
                 ) : <Empty />}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title="标的盈亏" bordered={false}>
+                <Table
+                  rowKey="symbol"
+                  size="small"
+                  columns={backtestSymbolPnlColumns}
+                  dataSource={backtestSymbolPnlRows}
+                  pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100] }}
+                  scroll={{ x: 1500 }}
+                />
               </Card>
             </Col>
           </Row>
