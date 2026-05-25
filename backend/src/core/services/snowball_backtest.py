@@ -679,6 +679,7 @@ def compute_rebalance_metrics(event_df: pd.DataFrame, detail_df: pd.DataFrame) -
 
 def build_benchmark_dataframe(nav_df: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:
     nav_dates = pd.DataFrame({"date": pd.to_datetime(nav_df["date"])})
+    nav_dates["date"] = nav_dates["date"].astype("datetime64[ns]")
     if nav_dates.empty:
         return nav_dates
 
@@ -712,6 +713,7 @@ def build_benchmark_dataframe(nav_df: pd.DataFrame, start_date: date, end_date: 
 
     benchmark_raw = pd.DataFrame(rows, columns=["date", "close"])
     benchmark_raw["date"] = pd.to_datetime(benchmark_raw["date"])
+    benchmark_raw["date"] = benchmark_raw["date"].astype("datetime64[ns]")
     benchmark_raw["close"] = pd.to_numeric(benchmark_raw["close"], errors="coerce")
     benchmark_raw = benchmark_raw.dropna(subset=["close"]).sort_values("date")
     benchmark = pd.merge_asof(
