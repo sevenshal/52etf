@@ -819,6 +819,12 @@ async def create_xueqiu_rebalance(
         "holdings": json.dumps(payload["holdings"], ensure_ascii=False, separators=(",", ":")),
         "market": payload.get("market") or "cn",
     }
+    request_debug = {
+        "cube_id": payload.get("cube_id"),
+        "cash": payload.get("cash"),
+        "market": payload.get("market") or "cn",
+        "holdings": payload.get("holdings") or [],
+    }
     async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
         response = await client.post(
             f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/create.json",
@@ -832,7 +838,8 @@ async def create_xueqiu_rebalance(
         if response.status_code >= 400:
             raise RuntimeError(
                 "Xueqiu rebalance HTTP "
-                f"{response.status_code}: {json.dumps(result, ensure_ascii=False)}"
+                f"{response.status_code}: {json.dumps(result, ensure_ascii=False)}; "
+                f"request={json.dumps(request_debug, ensure_ascii=False, separators=(',', ':'))}"
             )
     if isinstance(result, dict) and result.get("error_code") and not result.get("id"):
         raise RuntimeError(f"Xueqiu rebalance failed: {result}")
