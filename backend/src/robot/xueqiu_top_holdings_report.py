@@ -847,6 +847,42 @@ async def create_xueqiu_rebalance(
     return result
 
 
+def extract_rebalance_action_lines(rebalance_response: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(rebalance_response, dict):
+        return []
+
+    lines: List[str] = []
+    comment = rebalance_response.get("comment")
+    if isinstance(comment, str):
+        lines.extend(line.strip() for line in comment.splitlines() if line.strip())
+
+    histories = rebalance_response.get("rebalancing_histories") or []
+    if isinstance(histories, list) and histories:
+        lines.append("调仓明细:")
+        for history in histories:
+            if isinstance(history, dict):
+                def first_present(*keys: str) -> Any:
+                    for key in keys:
+                        if key in history and history[key] is not None:
+                            return history[key]
+                    return None
+
+                stock_name = first_present("stock_name", "stockName", "name")
+                stock_symbol = first_present("stock_symbol", "stockSymbol", "symbol")
+                prev_weight = first_present("prev_weight", "prevWeight", "old_weight")
+                target_weight = first_present("target_weight", "targetWeight", "weight")
+                if stock_name or stock_symbol or prev_weight is not None or target_weight is not None:
+                    lines.append(
+                        f"{stock_name or ''} {stock_symbol or ''}: "
+                        f"{fmt_number(prev_weight, suffix='%')} -> {fmt_number(target_weight, suffix='%')}"
+                    )
+                else:
+                    lines.append(json.dumps(history, ensure_ascii=False, separators=(",", ":")))
+            elif history is not None:
+                lines.append(str(history))
+    return lines
+
+
 def build_report(
     *,
     run_at: datetime,
@@ -909,6 +945,10 @@ def build_report(
                 for item in rebalance_skipped_items[:10]
             ]
             lines.append(f"已跳过不可调仓标的: {'; '.join(skipped_preview)}")
+        rebalance_action_lines = extract_rebalance_action_lines(rebalance_response)
+        if rebalance_action_lines:
+            lines.extend(["", "雪球返回调仓动作:"])
+            lines.extend(f"- {line}" for line in rebalance_action_lines)
     lines.extend(
         [
             "",
@@ -1004,6 +1044,7 @@ def build_report_html(
                 for item in rebalance_skipped_items[:10]
             ]
             summary_rows.append(("已跳过不可调仓标的", "; ".join(skipped_preview)))
+    rebalance_action_lines = extract_rebalance_action_lines(rebalance_response)
 
     rows_html = "\n".join(
         f"<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>"
@@ -1032,6 +1073,10 @@ def build_report_html(
             for result in failed_results[:10]
         )
         failed_html = f"<h2>拉取失败样例</h2><ul>{failed_items}</ul>"
+    rebalance_action_html = ""
+    if rebalance_action_lines:
+        action_items = "".join(f"<li>{esc(line)}</li>" for line in rebalance_action_lines)
+        rebalance_action_html = f"<h2>雪球返回调仓动作</h2><ul>{action_items}</ul>"
 
     return f"""<!doctype html>
 <html>
@@ -1052,6 +1097,7 @@ def build_report_html(
 <body>
   <h1>雪球年榜1000组合综合持仓权重 Top{top_n}</h1>
   <table class="summary">{rows_html}</table>
+  {rebalance_action_html}
   <p>统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。</p>
   <p>最终权重: 选取综合权重最高的 Top{top_n} 后，在 Top{top_n} 内按综合权重重新归一化到 100%。</p>
   <table>
