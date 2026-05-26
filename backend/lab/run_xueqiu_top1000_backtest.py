@@ -39,6 +39,7 @@ CSV_FIELDS = [
     "symbol",
     "cube_name",
     "screen_name",
+    "cube_follower_count",
     "status",
     "error",
     "sharpe_bucket",
@@ -131,6 +132,13 @@ def safe_float(value: Any) -> Optional[float]:
     return number
 
 
+def safe_int(value: Any) -> Optional[int]:
+    number = safe_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
 def sharpe_bucket(value: Any) -> Optional[int]:
     number = safe_float(value)
     if number is None:
@@ -189,6 +197,11 @@ def row_from_result(info: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, A
         "symbol": info.get("symbol"),
         "cube_name": result.get("cube_name") or info.get("cube_name"),
         "screen_name": info.get("screen_name"),
+        "cube_follower_count": safe_int(
+            info.get("cube_follower_count")
+            if info.get("cube_follower_count") is not None
+            else info.get("follower_count")
+        ),
         "status": "SUCCESS",
         "error": "",
         "sharpe_bucket": sharpe_bucket(slip_sharpe),
@@ -238,6 +251,11 @@ def row_from_failure(info: Dict[str, Any], error: str) -> Dict[str, Any]:
             "symbol": info.get("symbol"),
             "cube_name": info.get("cube_name"),
             "screen_name": info.get("screen_name"),
+            "cube_follower_count": safe_int(
+                info.get("cube_follower_count")
+                if info.get("cube_follower_count") is not None
+                else info.get("follower_count")
+            ),
             "status": "FAILED",
             "error": error,
             "xueqiu_year_gain_pct": safe_float(info.get("year_gain")),
@@ -268,6 +286,13 @@ def format_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if number is None:
         return "-"
     return f"{number:.{digits}f}{suffix}"
+
+
+def format_integer(value: Any) -> str:
+    number = safe_int(value)
+    if number is None:
+        return "-"
+    return str(number)
 
 
 def md_escape(value: Any) -> str:
@@ -329,6 +354,15 @@ def write_report(
         "- 排序：先按滑点后夏普值向下取整分档降序，再按同档滑点后年化收益率降序",
         f"- 成功：{len(success_rows)}，失败/未完成：{len(failed_rows)}",
         "",
+        "## 口径说明",
+        "",
+        "- 原始曲线：雪球官方组合净值曲线。",
+        "- 滑点后曲线：在雪球官方净值曲线基础上，按每次调仓的总换手率扣减单边滑点成本。",
+        f"- 单次调仓成本：`sum(abs(target_weight - previous_weight)) * {slippage_pct:.2f}%`。",
+        "- 多次调仓成本：按每日成本生成累计折扣乘数，`滑点后净值 = 原始净值 * 累计乘数`。",
+        "- 本文排序和分档均使用“滑点后夏普”；夏普分档为向下取整。",
+        "- 加自选人数：雪球组合详情接口返回的 `follower_count`。",
+        "",
         "## 夏普分档统计",
         "",
         "| 夏普分档 | 数量 |",
@@ -346,8 +380,8 @@ def write_report(
             "",
             "## 分档排序明细",
             "",
-            "| 排名 | 夏普分档 | 年榜排名 | 组合 | 名称 | 创建者 | 实际净值起点 | 调仓数 | 月均调仓 | 滑点后夏普 | 滑点后年化 | 原始总收益 | 滑点后总收益 | 中证500 | 滑点后最大回撤 |",
-            "| ---: | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| 排名 | 夏普分档 | 年榜排名 | 组合 | 名称 | 创建者 | 加自选人数 | 实际净值起点 | 调仓数 | 月均调仓 | 滑点后夏普 | 滑点后年化 | 原始总收益 | 滑点后总收益 | 中证500 | 滑点后最大回撤 |",
+            "| ---: | ---: | ---: | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for index, row in enumerate(success_rows, start=1):
@@ -361,6 +395,7 @@ def write_report(
                     md_escape(row.get("symbol")),
                     md_escape(row.get("cube_name")),
                     md_escape(row.get("screen_name")),
+                    format_integer(row.get("cube_follower_count")),
                     md_escape(row.get("actual_nav_start")),
                     str(row.get("rebalance_count") or 0),
                     format_number(row.get("avg_monthly_rebalances")),
