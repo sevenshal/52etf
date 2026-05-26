@@ -1874,8 +1874,8 @@ const PortfolioCopyTrading = () => {
                     </Text>
                     <Row gutter={16}>
                         <Col span={24}>
-                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认Token失效，可在浏览器抓包获取Cookie并在此时填入。所有组合将共用此配置。支持 'xq_a_token=...' 或完整Cookie字符串。">
-                                <Input.TextArea rows={3} placeholder="xq_a_token=..." />
+                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="读持仓可只填 xq_a_token；关注组合需要完整登录 Cookie，至少包含 xq_a_token、xq_id_token、u。所有组合将共用此配置。">
+                                <Input.TextArea rows={3} placeholder="xq_a_token=...;xq_id_token=...;u=...;xq_is_login=1" />
                             </Form.Item>
                         </Col>
                     </Row>
