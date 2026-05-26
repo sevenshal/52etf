@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import html
 import json
 import logging
 import math
@@ -943,6 +944,132 @@ def build_report(
     return "\n".join(lines)
 
 
+def build_report_html(
+    *,
+    run_at: datetime,
+    cubes: List[CubeInfo],
+    aggregate: Dict[str, Any],
+    top_n: int,
+    rank_cache_fetched_at: Optional[datetime],
+    rank_cache_refreshed: bool,
+    rebalance_skipped_items: Optional[List[Dict[str, Any]]] = None,
+    target_cube_symbol: Optional[str] = None,
+    rebalance_payload: Optional[Dict[str, Any]] = None,
+    rebalance_response: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+) -> str:
+    ranking = aggregate["ranking"]
+    top_items = (
+        rebalance_payload.get("top_items")
+        if rebalance_payload
+        else add_top_normalized_weights(ranking, top_n)
+    )
+    failed_results = aggregate["failed_results"]
+    success_count = aggregate["success_count"]
+    total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
+
+    def esc(value: Any) -> str:
+        return html.escape(str(value if value is not None else ""))
+
+    summary_rows = [
+        ("统计时间", run_at.strftime("%Y-%m-%d %H:%M:%S %Z")),
+        ("年榜缓存时间", rank_cache_fetched_at.strftime("%Y-%m-%d %H:%M:%S") if rank_cache_fetched_at else "-"),
+        ("年榜本次刷新", "是" if rank_cache_refreshed else "否"),
+        ("组合总数", len(cubes)),
+        ("拉取成功", success_count),
+        ("拉取失败", len(failed_results)),
+        ("覆盖股票数", len(ranking)),
+        ("非现金持仓合计权重", fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix="%")),
+    ]
+    if rebalance_payload:
+        status = "dry-run" if dry_run else "已提交"
+        if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
+            status = "已跳过"
+        elif isinstance(rebalance_response, dict) and rebalance_response.get("status"):
+            status = str(rebalance_response.get("status"))
+        summary_rows.extend(
+            [
+                ("目标组合", f"{target_cube_symbol or rebalance_payload.get('target_cube_symbol')} / cube_id={rebalance_payload.get('cube_id')}"),
+                ("调仓状态", status),
+                ("目标现金", fmt_number(rebalance_payload.get("cash"), suffix="%")),
+            ]
+        )
+        if isinstance(rebalance_response, dict) and rebalance_response.get("error_message"):
+            summary_rows.append(("雪球提示", rebalance_response.get("error_message")))
+        if isinstance(rebalance_response, dict) and rebalance_response.get("message"):
+            summary_rows.append(("任务提示", rebalance_response.get("message")))
+        if rebalance_skipped_items:
+            skipped_preview = [
+                f"{item.get('stock_symbol')}({item.get('stock_name') or ''}, {item.get('rebalance_skip_reason')})"
+                for item in rebalance_skipped_items[:10]
+            ]
+            summary_rows.append(("已跳过不可调仓标的", "; ".join(skipped_preview)))
+
+    rows_html = "\n".join(
+        f"<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>"
+        for label, value in summary_rows
+    )
+    table_rows = []
+    for index, item in enumerate(top_items[:top_n], start=1):
+        table_rows.append(
+            "<tr>"
+            f"<td class=\"num\">{index}</td>"
+            f"<td>{esc(item.get('stock_symbol'))}</td>"
+            f"<td>{esc(item.get('stock_name') or '')}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('composite_weight_pct'), suffix='%'))}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('top_normalized_weight_pct'), suffix='%'))}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('rebalance_weight_pct'), suffix='%'))}</td>"
+            f"<td class=\"num\">{esc(item.get('holding_cube_count'))}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('holding_cube_ratio_pct'), suffix='%'))}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('average_weight_pct'), suffix='%'))}</td>"
+            f"<td>{esc('、'.join(item.get('example_cubes') or []))}</td>"
+            "</tr>"
+        )
+    failed_html = ""
+    if failed_results:
+        failed_items = "".join(
+            f"<li>{esc(result.cube.symbol)} {esc(result.cube.cube_name)}: {esc(result.error)}</li>"
+            for result in failed_results[:10]
+        )
+        failed_html = f"<h2>拉取失败样例</h2><ul>{failed_items}</ul>"
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111827; line-height: 1.45; }}
+    h1 {{ font-size: 20px; margin: 0 0 16px; }}
+    h2 {{ font-size: 16px; margin: 20px 0 8px; }}
+    p {{ margin: 8px 0; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 13px; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 7px 9px; vertical-align: top; }}
+    th {{ background: #f3f4f6; text-align: left; font-weight: 600; }}
+    .summary th {{ width: 160px; }}
+    .num {{ text-align: right; white-space: nowrap; }}
+  </style>
+</head>
+<body>
+  <h1>雪球年榜1000组合综合持仓权重 Top{top_n}</h1>
+  <table class="summary">{rows_html}</table>
+  <p>统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。</p>
+  <p>最终权重: 选取综合权重最高的 Top{top_n} 后，在 Top{top_n} 内按综合权重重新归一化到 100%。</p>
+  <table>
+    <thead>
+      <tr>
+        <th>排名</th><th>股票</th><th>名称</th><th>综合权重</th><th>最终归一权重</th><th>调仓权重</th>
+        <th>持仓组合数</th><th>占成功组合</th><th>持有组合平均权重</th><th>示例组合</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(table_rows)}
+    </tbody>
+  </table>
+  {failed_html}
+</body>
+</html>"""
+
+
 def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as file:
@@ -1204,6 +1331,19 @@ async def run_top_holdings_job(
         rebalance_response=rebalance_response,
         dry_run=dry_run,
     )
+    report_html = build_report_html(
+        run_at=run_at,
+        cubes=cubes,
+        aggregate=aggregate,
+        top_n=top_n,
+        rank_cache_fetched_at=rank_cache_fetched_at,
+        rank_cache_refreshed=rank_cache_refreshed,
+        rebalance_skipped_items=rebalance_skipped_items,
+        target_cube_symbol=target_cube_symbol if execute_rebalance else None,
+        rebalance_payload=rebalance_payload,
+        rebalance_response=rebalance_response,
+        dry_run=dry_run,
+    )
     output_path = write_outputs(
         output_dir=Path(output_dir).expanduser(),
         run_at=run_at,
@@ -1246,7 +1386,7 @@ async def run_top_holdings_job(
             if execute_rebalance
             else f"雪球年榜1000组合综合持仓权重 Top{top_n} - {run_at.strftime('%Y-%m-%d')}"
         )
-        sendmail(receiver, subject, report_text)
+        sendmail(receiver, subject, report_html, mimeType="html")
     return {
         "skipped": False,
         "record_id": record_id,
