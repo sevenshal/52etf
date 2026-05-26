@@ -11,6 +11,7 @@ import re
 import hashlib
 import json
 import os
+import secrets
 from sqlalchemy.orm import Session
 from ...core.database import (
     get_db,
@@ -125,11 +126,50 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
         _is_refreshing_token = False
 
 
+def _parse_xueqiu_cookie_pairs(cookie: Optional[str]) -> Dict[str, str]:
+    cookie_text = (cookie or "").strip()
+    if cookie_text.lower().startswith("cookie:"):
+        cookie_text = cookie_text.split(":", 1)[1].strip()
+
+    pairs: Dict[str, str] = {}
+    for part in cookie_text.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if name and value:
+            pairs[name] = value
+    return pairs
+
+
+def _format_xueqiu_cookie_pairs(pairs: Dict[str, str]) -> str:
+    ordered_names = ["xq_a_token", "xq-dj-token", "xq_id_token", "u", "xq_is_login"]
+    ordered = []
+    seen = set()
+    for name in ordered_names:
+        value = pairs.get(name)
+        if value:
+            ordered.append(f"{name}={value}")
+            seen.add(name)
+    for name, value in pairs.items():
+        if name not in seen and value:
+            ordered.append(f"{name}={value}")
+    return ";".join(ordered) + ";"
+
+
 def _normalize_xueqiu_cookie(cookie: str) -> str:
-    match = re.search(r"(?:^|;\s*)xq_a_token=([^;\s]+)", (cookie or "").strip())
-    if not match:
+    cookie_text = (cookie or "").strip()
+    pairs = _parse_xueqiu_cookie_pairs(cookie_text)
+    if not pairs:
+        token_value = cookie_text.rstrip(";")
+        if token_value:
+            pairs["xq_a_token"] = token_value
+
+    token_value = pairs.get("xq_a_token")
+    if not token_value:
         raise HTTPException(status_code=400, detail="Missing xq_a_token")
-    return f"xq_a_token={match.group(1)};"
+    return _format_xueqiu_cookie_pairs(pairs)
 
 
 def _apply_xueqiu_cookie(headers: Dict[str, str], cookie: Optional[str]) -> Dict[str, str]:
@@ -144,20 +184,22 @@ def _apply_xueqiu_cookie(headers: Dict[str, str], cookie: Optional[str]) -> Dict
 
 def _build_xueqiu_login_cookie(cookie: Optional[str]) -> str:
     cookie_text = (cookie or "").strip()
-    token = re.search(r"(?:^|;\s*)xq_a_token=([^;\s]+)", cookie_text)
-    token_value = token.group(1) if token else cookie_text.rstrip(";")
+    pairs = _parse_xueqiu_cookie_pairs(cookie_text)
+    token_value = pairs.get("xq_a_token") or cookie_text.rstrip(";")
     if not token_value:
         raise HTTPException(status_code=400, detail="Missing xq_a_token")
 
-    if "xq_a_token" not in cookie_text:
-        cookie_text = f"xq_a_token={token_value};"
-    cookie_text = cookie_text.rstrip(";")
+    pairs["xq_a_token"] = token_value
+    if not pairs.get("xq-dj-token"):
+        pairs["xq-dj-token"] = token_value
+    if not pairs.get("xq_is_login"):
+        pairs["xq_is_login"] = "1"
+    return _format_xueqiu_cookie_pairs(pairs)
 
-    if "xq-dj-token" not in cookie_text:
-        cookie_text = f"{cookie_text};xq-dj-token={token_value}"
-    if "xq_is_login" not in cookie_text:
-        cookie_text = f"{cookie_text};xq_is_login=1"
-    return f"{cookie_text};"
+
+def _has_full_xueqiu_login_cookie(cookie: Optional[str]) -> bool:
+    pairs = _parse_xueqiu_cookie_pairs(cookie)
+    return bool(pairs.get("xq_a_token") and pairs.get("xq_id_token") and pairs.get("u"))
 
 # --- Models ---
 
@@ -491,7 +533,13 @@ async def follow_xueqiu_cube(symbol: str, cookie: str, info: Optional[Dict] = No
         "right": "0",
         "status": _build_xueqiu_cube_follow_status(symbol, info),
     }
-    params = {"_": int(datetime.now().timestamp() * 1000)}
+    now_ms = int(datetime.now().timestamp() * 1000)
+    device_id = headers.get("x-device-id") or ""
+    params = {
+        "_": now_ms,
+        "_s": secrets.token_hex(3),
+        "_t": f"{device_id}.0.{now_ms - 60000}.{now_ms - 10000}",
+    }
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(
@@ -501,6 +549,15 @@ async def follow_xueqiu_cube(symbol: str, cookie: str, info: Optional[Dict] = No
             headers=headers,
         )
     if response.status_code >= 400:
+        if response.status_code == 400 and not _has_full_xueqiu_login_cookie(cookie):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Xueqiu follow failed: 当前保存的雪球 Cookie 不完整。"
+                    "关注接口需要完整登录 Cookie（至少包含 xq_a_token、xq_id_token、u），"
+                    f"雪球返回: {response.text}"
+                ),
+            )
         raise HTTPException(
             status_code=400,
             detail=f"Xueqiu follow failed: HTTP {response.status_code}: {response.text}",
