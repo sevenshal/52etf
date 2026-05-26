@@ -141,6 +141,24 @@ def _apply_xueqiu_cookie(headers: Dict[str, str], cookie: Optional[str]) -> Dict
         headers["Cookie"] = f"xq_a_token={cookie};"
     return headers
 
+
+def _build_xueqiu_login_cookie(cookie: Optional[str]) -> str:
+    cookie_text = (cookie or "").strip()
+    token = re.search(r"(?:^|;\s*)xq_a_token=([^;\s]+)", cookie_text)
+    token_value = token.group(1) if token else cookie_text.rstrip(";")
+    if not token_value:
+        raise HTTPException(status_code=400, detail="Missing xq_a_token")
+
+    if "xq_a_token" not in cookie_text:
+        cookie_text = f"xq_a_token={token_value};"
+    cookie_text = cookie_text.rstrip(";")
+
+    if "xq-dj-token" not in cookie_text:
+        cookie_text = f"{cookie_text};xq-dj-token={token_value}"
+    if "xq_is_login" not in cookie_text:
+        cookie_text = f"{cookie_text};xq_is_login=1"
+    return f"{cookie_text};"
+
 # --- Models ---
 
 class SnowballAccountConfigModel(BaseModel):
@@ -460,7 +478,7 @@ async def follow_xueqiu_cube(symbol: str, cookie: str, info: Optional[Dict] = No
     headers = XUEQIU_HEADERS.copy()
     headers["Content-Type"] = "application/x-www-form-urlencoded"
     headers["Referer"] = f"{XUEQIU_WEB_BASE_URL}/P/{symbol}"
-    _apply_xueqiu_cookie(headers, cookie)
+    headers["Cookie"] = _build_xueqiu_login_cookie(cookie)
 
     payload = {
         "ai_disclose": "0",
