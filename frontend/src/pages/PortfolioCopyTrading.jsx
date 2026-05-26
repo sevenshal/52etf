@@ -7,13 +7,13 @@ import {
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, PlayCircleOutlined, HistoryOutlined,
-    SettingOutlined, DeleteOutlined, EditOutlined, LineChartOutlined
+    SettingOutlined, DeleteOutlined, EditOutlined, LineChartOutlined, LinkOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
 
-const { Title, Text } = Typography;
+const { Title, Text, Link } = Typography;
 const { TextArea } = Input;
 
 const PORTFOLIO_COPY_PLATFORMS = {
@@ -52,6 +52,7 @@ const PortfolioCopyTrading = () => {
     const [snowballForm] = Form.useForm();
     const [snowballEditingConfig, setSnowballEditingConfig] = useState(null);
     const selectedSnowballExternalTradingAccountId = Form.useWatch('external_trading_account_id', snowballForm);
+    const watchedSnowballCombinationId = Form.useWatch('combination_id', snowballForm);
     const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
     const [portfolioLiveSubAccounts, setPortfolioLiveSubAccounts] = useState([]);
     const [snowballLiveSubAccounts, setSnowballLiveSubAccounts] = useState([]);
@@ -68,7 +69,6 @@ const PortfolioCopyTrading = () => {
     const [snowballBacktestRunsLoading, setSnowballBacktestRunsLoading] = useState(false);
     const [selectedSnowballBacktest, setSelectedSnowballBacktest] = useState(null);
     const [selectedSnowballBacktestLoading, setSelectedSnowballBacktestLoading] = useState(false);
-    const [snowballFollowLoading, setSnowballFollowLoading] = useState(false);
 
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
@@ -397,27 +397,6 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const followSnowballCombination = async () => {
-        const id = snowballForm.getFieldValue('combination_id');
-        const symbol = String(id || '').trim().toUpperCase();
-        if (!symbol) {
-            message.warning('请先输入雪球组合 ID');
-            return;
-        }
-        setSnowballFollowLoading(true);
-        try {
-            const response = await request.post(`/api/snowball/follow/${encodeURIComponent(symbol)}`);
-            if (response.data?.name) {
-                snowballForm.setFieldsValue({ combination_name: response.data.name });
-            }
-            message.success(`已关注: ${response.data?.name || snowballForm.getFieldValue('combination_name') || symbol}`);
-        } catch (error) {
-            message.error('关注失败: ' + formatError(error, '关注失败'));
-        } finally {
-            setSnowballFollowLoading(false);
-        }
-    };
-
     // Snowball Handlers
     const handleSnowballSave = async (values) => {
         try {
@@ -676,6 +655,11 @@ const PortfolioCopyTrading = () => {
                 };
             });
     }, [snowballLiveSubAccounts, snowballEditingConfig]);
+
+    const snowballOfficialSymbol = String(watchedSnowballCombinationId || '').trim().toUpperCase();
+    const snowballOfficialUrl = snowballOfficialSymbol
+        ? `https://xueqiu.com/P/${encodeURIComponent(snowballOfficialSymbol)}`
+        : undefined;
 
     const configColumns = [
         {
@@ -944,7 +928,17 @@ const PortfolioCopyTrading = () => {
                                     render: (_, r) => (
                                         <Space direction="vertical" size={0}>
                                             <Text strong>{r.combination_name || '未命名'}</Text>
-                                            <Text type="secondary">ID: {r.combination_id}</Text>
+                                            {r.combination_id ? (
+                                                <Link
+                                                    href={`https://xueqiu.com/P/${encodeURIComponent(String(r.combination_id).trim().toUpperCase())}`}
+                                                    target="_blank"
+                                                    style={{ fontSize: 12 }}
+                                                >
+                                                    ID: {r.combination_id}
+                                                </Link>
+                                            ) : (
+                                                <Text type="secondary">ID: -</Text>
+                                            )}
                                         </Space>
                                     )
                                 },
@@ -1383,8 +1377,13 @@ const PortfolioCopyTrading = () => {
                                     <Form.Item name="combination_name" noStyle>
                                         <Input placeholder="自动获取或手动输入" />
                                     </Form.Item>
-                                    <Button onClick={followSnowballCombination} loading={snowballFollowLoading}>
-                                        关注
+                                    <Button
+                                        icon={<LinkOutlined />}
+                                        href={snowballOfficialUrl}
+                                        target="_blank"
+                                        disabled={!snowballOfficialUrl}
+                                    >
+                                        雪球页面
                                     </Button>
                                 </Space.Compact>
                             </Form.Item>
@@ -1874,8 +1873,8 @@ const PortfolioCopyTrading = () => {
                     </Text>
                     <Row gutter={16}>
                         <Col span={24}>
-                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="读持仓可只填 xq_a_token；关注组合需要完整登录 Cookie，至少包含 xq_a_token、xq_id_token、u。所有组合将共用此配置。">
-                                <Input.TextArea rows={3} placeholder="xq_a_token=...;xq_id_token=...;u=...;xq_is_login=1" />
+                            <Form.Item name="xueqiu_cookie" label="雪球全局 Cookie" help="若默认 Token 失效，可在浏览器抓包获取 xq_a_token 并在此填入。所有组合将共用此配置。">
+                                <Input.TextArea rows={3} placeholder="xq_a_token=..." />
                             </Form.Item>
                         </Col>
                     </Row>
