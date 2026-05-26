@@ -1177,25 +1177,12 @@ async def run_top_holdings_job(
             timeout=timeout,
         )
         top_items = rebalance_payload["top_items"]
-        if (
-            not dry_run
-            and isinstance(latest_target_rebalance, dict)
-            and str(latest_target_rebalance.get("status") or "").lower() == "pending"
-        ):
-            rebalance_response = {
-                "skipped": True,
-                "reason": "pending_rebalance_exists",
-                "id": latest_target_rebalance.get("id"),
-                "status": latest_target_rebalance.get("status"),
-                "message": "目标雪球组合已有待成交调仓，跳过本次提交。",
-            }
-        else:
-            rebalance_response = await create_xueqiu_rebalance(
-                cookie=cookie,
-                payload=rebalance_payload,
-                dry_run=dry_run,
-                timeout=timeout,
-            )
+        rebalance_response = await create_xueqiu_rebalance(
+            cookie=cookie,
+            payload=rebalance_payload,
+            dry_run=dry_run,
+            timeout=timeout,
+        )
 
     report_text = build_report(
         run_at=run_at,
