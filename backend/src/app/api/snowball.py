@@ -67,6 +67,7 @@ XUEQIU_HEADERS = {
     "accept-language": "zh-Hans-CN;q=1, en-CN;q=0.9",
     "x-device-os": "iOS 26.4.2",
     "x-device-model-name": "iPhone 16 Pro Max_iPhone17,2",
+    "x-device-id": "933A28E8-45D4-447A-AA4D-93FECC7B78C5",
     "user-agent": "Xueqiu iPhone 14.90.2",
     "priority": "u=3, i"
 }
@@ -432,6 +433,68 @@ async def fetch_xueqiu_cube_info(symbol: str, cookie: str = None) -> Optional[Di
         except Exception as e:
             logger.error(f"Failed to fetch Xueqiu cube info: {e}")
             return None
+
+
+def _format_xueqiu_cube_net_value(info: Optional[Dict]) -> str:
+    for key in ("net_value", "netValue", "nav", "unit_net_value", "current_net_value"):
+        value = safe_float((info or {}).get(key))
+        if value > 0:
+            return f"{value:.4f}"
+    return "1.0000"
+
+
+def _build_xueqiu_cube_follow_status(symbol: str, info: Optional[Dict]) -> str:
+    name = str((info or {}).get("name") or symbol).strip()
+    net_value = _format_xueqiu_cube_net_value(info)
+    return f"我刚刚关注了雪球组合 ${name}({symbol})$ ，当前净值{net_value}。"
+
+
+async def follow_xueqiu_cube(symbol: str, cookie: str, info: Optional[Dict] = None) -> Dict:
+    """Follow a Xueqiu cube by posting the iOS-style cube status update."""
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Missing Xueqiu combination ID")
+    if not cookie:
+        raise HTTPException(status_code=400, detail="请先配置雪球全局 Cookie")
+
+    headers = XUEQIU_HEADERS.copy()
+    headers["Content-Type"] = "application/x-www-form-urlencoded"
+    headers["Referer"] = f"{XUEQIU_WEB_BASE_URL}/P/{symbol}"
+    _apply_xueqiu_cookie(headers, cookie)
+
+    payload = {
+        "ai_disclose": "0",
+        "allow_reward": "0",
+        "card_param": symbol,
+        "card_type": "cube",
+        "is_private": "0",
+        "legal_user_visible": "0",
+        "original": "0",
+        "right": "0",
+        "status": _build_xueqiu_cube_follow_status(symbol, info),
+    }
+    params = {"_": int(datetime.now().timestamp() * 1000)}
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"{XUEQIU_API_BASE_URL}/statuses/update.json",
+            params=params,
+            data=payload,
+            headers=headers,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Xueqiu follow failed: HTTP {response.status_code}: {response.text}",
+        )
+    data = response.json()
+    if isinstance(data, dict) and data.get("error_code"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Xueqiu follow failed: {data.get('error_description') or data}",
+        )
+    return data
+
 
 async def fetch_xueqiu_quotes(symbols: List[str], cookie: str = None) -> Dict[str, float]:
     """Fetch real-time quotes using the lightweight API (Price Only)"""
@@ -1240,6 +1303,37 @@ async def get_combination_info(
     if not info:
          raise HTTPException(status_code=404, detail="Combination not found or Xueqiu API error")
     return info
+
+
+@router.post("/follow/{symbol}")
+async def follow_combination(
+    symbol: str,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    """Follow a Xueqiu combination using the current account token."""
+    cube_symbol = symbol.strip().upper()
+    if not cube_symbol:
+        raise HTTPException(status_code=400, detail="Missing Xueqiu combination ID")
+
+    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    cookie = acc_config.xueqiu_cookie if acc_config else None
+    if not cookie:
+        raise HTTPException(status_code=400, detail="请先配置雪球全局 Cookie")
+
+    info = await fetch_xueqiu_cube_info(cube_symbol, cookie)
+    if not info:
+        raise HTTPException(status_code=404, detail="Combination not found or Xueqiu API error")
+
+    result = await follow_xueqiu_cube(cube_symbol, cookie, info)
+    return {
+        "success": True,
+        "symbol": cube_symbol,
+        "name": info.get("name"),
+        "status_id": result.get("id") if isinstance(result, dict) else None,
+        "message": "Success",
+    }
+
 
 # --- Endpoints ---
 
