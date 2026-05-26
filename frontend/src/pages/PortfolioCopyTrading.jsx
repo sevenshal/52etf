@@ -68,6 +68,7 @@ const PortfolioCopyTrading = () => {
     const [snowballBacktestRunsLoading, setSnowballBacktestRunsLoading] = useState(false);
     const [selectedSnowballBacktest, setSelectedSnowballBacktest] = useState(null);
     const [selectedSnowballBacktestLoading, setSelectedSnowballBacktestLoading] = useState(false);
+    const [snowballFollowLoading, setSnowballFollowLoading] = useState(false);
 
     // Snowball Account Config State
     const [snowballAccountModalVisible, setSnowballAccountModalVisible] = useState(false);
@@ -393,6 +394,27 @@ const PortfolioCopyTrading = () => {
             message.success('获取成功: ' + response.data.name);
         } catch (error) {
             message.error('获取组合名称失败: ' + (error.response?.data?.detail || error.message));
+        }
+    };
+
+    const followSnowballCombination = async () => {
+        const id = snowballForm.getFieldValue('combination_id');
+        const symbol = String(id || '').trim().toUpperCase();
+        if (!symbol) {
+            message.warning('请先输入雪球组合 ID');
+            return;
+        }
+        setSnowballFollowLoading(true);
+        try {
+            const response = await request.post(`/api/snowball/follow/${encodeURIComponent(symbol)}`);
+            if (response.data?.name) {
+                snowballForm.setFieldsValue({ combination_name: response.data.name });
+            }
+            message.success(`已关注: ${response.data?.name || snowballForm.getFieldValue('combination_name') || symbol}`);
+        } catch (error) {
+            message.error('关注失败: ' + formatError(error, '关注失败'));
+        } finally {
+            setSnowballFollowLoading(false);
         }
     };
 
@@ -1356,8 +1378,15 @@ const PortfolioCopyTrading = () => {
                             </Form.Item>
                         </Col>
                         <Col span={12}>
-                            <Form.Item name="combination_name" label="组合名称">
-                                <Input placeholder="自动获取或手动输入" />
+                            <Form.Item label="组合名称">
+                                <Space.Compact style={{ width: '100%' }}>
+                                    <Form.Item name="combination_name" noStyle>
+                                        <Input placeholder="自动获取或手动输入" />
+                                    </Form.Item>
+                                    <Button onClick={followSnowballCombination} loading={snowballFollowLoading}>
+                                        关注
+                                    </Button>
+                                </Space.Compact>
                             </Form.Item>
                         </Col>
                     </Row>
