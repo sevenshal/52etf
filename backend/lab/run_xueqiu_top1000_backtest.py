@@ -22,7 +22,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.core.database import SessionLocal, SnowballAccountConfig  # noqa: E402
-from src.core.services.snowball_backtest import run_snowball_cube_backtest  # noqa: E402
+from src.core.services.snowball_backtest import (  # noqa: E402
+    build_curve_points,
+    build_performance_comparison,
+    compute_performance_metrics,
+    merge_yearly_returns,
+    run_snowball_cube_backtest,
+)
 
 
 DEFAULT_OUTPUT_DIR = (
@@ -40,6 +46,7 @@ CSV_FIELDS = [
     "cube_name",
     "screen_name",
     "cube_follower_count",
+    "cube_age_days",
     "status",
     "error",
     "sharpe_bucket",
@@ -202,6 +209,7 @@ def row_from_result(info: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, A
             if info.get("cube_follower_count") is not None
             else info.get("follower_count")
         ),
+        "cube_age_days": safe_int(raw.get("elapsed_days")),
         "status": "SUCCESS",
         "error": "",
         "sharpe_bucket": sharpe_bucket(slip_sharpe),
@@ -256,6 +264,7 @@ def row_from_failure(info: Dict[str, Any], error: str) -> Dict[str, Any]:
                 if info.get("cube_follower_count") is not None
                 else info.get("follower_count")
             ),
+            "cube_age_days": None,
             "status": "FAILED",
             "error": error,
             "xueqiu_year_gain_pct": safe_float(info.get("year_gain")),
@@ -362,6 +371,7 @@ def write_report(
         "- 多次调仓成本：按每日成本生成累计折扣乘数，`滑点后净值 = 原始净值 * 累计乘数`。",
         "- 本文排序和分档均使用“滑点后夏普”；夏普分档为向下取整。",
         "- 加自选人数：雪球组合详情接口返回的 `follower_count`。",
+        "- 成立天数：按组合实际可用净值起点到本次回测结束日的自然日天数计算。",
         "",
         "## 夏普分档统计",
         "",
@@ -380,8 +390,8 @@ def write_report(
             "",
             "## 分档排序明细",
             "",
-            "| 排名 | 夏普分档 | 年榜排名 | 组合 | 名称 | 创建者 | 加自选人数 | 实际净值起点 | 调仓数 | 月均调仓 | 滑点后夏普 | 滑点后年化 | 原始总收益 | 滑点后总收益 | 中证500 | 滑点后最大回撤 |",
-            "| ---: | ---: | ---: | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| 排名 | 夏普分档 | 年榜排名 | 组合 | 名称 | 创建者 | 加自选人数 | 成立天数 | 实际净值起点 | 调仓数 | 月均调仓 | 滑点后夏普 | 滑点后年化 | 原始总收益 | 滑点后总收益 | 中证500 | 滑点后最大回撤 |",
+            "| ---: | ---: | ---: | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for index, row in enumerate(success_rows, start=1):
@@ -396,6 +406,7 @@ def write_report(
                     md_escape(row.get("cube_name")),
                     md_escape(row.get("screen_name")),
                     format_integer(row.get("cube_follower_count")),
+                    format_integer(row.get("cube_age_days")),
                     md_escape(row.get("actual_nav_start")),
                     str(row.get("rebalance_count") or 0),
                     format_number(row.get("avg_monthly_rebalances")),
@@ -444,6 +455,126 @@ def save_state_from_rows(state_path: Path, rows: List[Dict[str, Any]]) -> None:
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
     write_json_atomic(state_path, state)
+
+
+def recompute_slippage_result(result: Dict[str, Any], target_slippage_pct: float) -> Dict[str, Any]:
+    curve_points = result.get("curve_points") or []
+    if not curve_points:
+        raise ValueError("Missing curve_points in source result")
+
+    source_slippage_pct = safe_float((result.get("slippage") or {}).get("slippage_pct_per_side"))
+    if source_slippage_pct is None or source_slippage_pct <= 0:
+        raise ValueError("Missing positive source slippage_pct_per_side")
+
+    scale = float(target_slippage_pct) / source_slippage_pct
+    nav_df = pd.DataFrame(curve_points).copy()
+    nav_df["date"] = pd.to_datetime(nav_df["date"])
+    nav_df = nav_df.sort_values("date").reset_index(drop=True)
+    nav_df["nav"] = pd.to_numeric(nav_df["raw_nav"], errors="coerce")
+    nav_df["benchmark_nav"] = pd.to_numeric(nav_df.get("benchmark_nav"), errors="coerce")
+    nav_df["benchmark_cumulative_return_pct"] = pd.to_numeric(
+        nav_df.get("benchmark_return_pct"),
+        errors="coerce",
+    )
+    nav_df["benchmark_drawdown_pct"] = pd.to_numeric(
+        nav_df.get("benchmark_drawdown_pct"),
+        errors="coerce",
+    )
+    nav_df["slippage_cost_pct"] = (
+        pd.to_numeric(nav_df.get("slippage_cost_pct"), errors="coerce").fillna(0.0) * scale
+    )
+    nav_df["slippage_cost_rate"] = nav_df["slippage_cost_pct"] / 100.0
+    nav_df["cumulative_return_pct"] = (nav_df["nav"] / nav_df["nav"].iloc[0] - 1.0) * 100.0
+    nav_df["daily_return"] = nav_df["nav"].pct_change()
+    nav_df["drawdown_pct"] = (nav_df["nav"] / nav_df["nav"].cummax() - 1.0) * 100.0
+    nav_df["slippage_multiplier"] = 1.0 - nav_df["slippage_cost_rate"]
+    nav_df["cumulative_slippage_multiplier"] = nav_df["slippage_multiplier"].cumprod()
+    nav_df["nav_after_slippage"] = nav_df["nav"] * nav_df["cumulative_slippage_multiplier"]
+    raw_start_nav = float(nav_df["nav"].iloc[0])
+    nav_df["cumulative_return_after_slippage_pct"] = (
+        nav_df["nav_after_slippage"] / raw_start_nav - 1.0
+    ) * 100.0
+    nav_df["daily_return_after_slippage"] = nav_df["nav_after_slippage"].pct_change()
+    nav_df["drawdown_after_slippage_pct"] = (
+        nav_df["nav_after_slippage"] / nav_df["nav_after_slippage"].cummax() - 1.0
+    ) * 100.0
+
+    performance_raw = result.get("performance_raw") or {}
+    benchmark_metrics = result.get("benchmark_metrics")
+    performance_after_slippage = compute_performance_metrics(
+        nav_df,
+        nav_col="nav_after_slippage",
+        daily_return_col="daily_return_after_slippage",
+        drawdown_col="drawdown_after_slippage_pct",
+        reference_start_value=raw_start_nav,
+    )
+    comparison = build_performance_comparison(performance_raw, performance_after_slippage)
+
+    source_slippage = result.get("slippage") or {}
+    adjusted_end_nav = float(nav_df["nav_after_slippage"].iloc[-1])
+    raw_end_nav = float(nav_df["nav"].iloc[-1])
+    applied_rebalance_count = safe_int(source_slippage.get("applied_rebalance_count")) or 0
+    total_slippage_cost_pct = float(nav_df["slippage_cost_pct"].sum())
+    slippage_summary = dict(source_slippage)
+    slippage_summary.update(
+        {
+            "slippage_pct_per_side": float(target_slippage_pct),
+            "total_slippage_cost_pct": total_slippage_cost_pct,
+            "average_slippage_cost_pct_per_rebalance": (
+                total_slippage_cost_pct / applied_rebalance_count
+                if applied_rebalance_count > 0
+                else None
+            ),
+            "max_single_day_slippage_cost_pct": float(nav_df["slippage_cost_pct"].max()),
+            "ending_nav_drag_pct": ((adjusted_end_nav / raw_end_nav) - 1.0) * 100.0
+            if raw_end_nav
+            else None,
+            "ending_return_drag_pct_points": ((raw_end_nav - adjusted_end_nav) / raw_start_nav) * 100.0
+            if raw_start_nav
+            else None,
+        }
+    )
+
+    new_result = json.loads(json.dumps(result, ensure_ascii=False))
+    new_result["performance_after_slippage"] = performance_after_slippage
+    new_result["slippage"] = slippage_summary
+    new_result["comparison"] = comparison
+    new_result["curve_points"] = build_curve_points(nav_df)
+    new_result["yearly_returns"] = merge_yearly_returns(
+        performance_raw,
+        performance_after_slippage,
+        benchmark_metrics,
+    )
+    return new_result
+
+
+def recompute_slippage_outputs(
+    items: List[Dict[str, Any]],
+    *,
+    source_dir: Path,
+    output_dir: Path,
+    slippage_pct: float,
+) -> Dict[str, int]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(output_dir / "top1000_list.json", items)
+    success = 0
+    failed = 0
+    for item in items:
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+        source_result = existing_result(source_dir, symbol)
+        if not source_result:
+            failed += 1
+            continue
+        try:
+            result = recompute_slippage_result(source_result, slippage_pct)
+            write_result_files(output_dir, symbol, result)
+            success += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL recompute {symbol}: {exc}", flush=True)
+    return {"success": success, "failed": failed}
 
 
 def refresh_outputs(
@@ -515,6 +646,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-rank", type=int, default=1)
     parser.add_argument("--end-rank", type=int, default=1000)
     parser.add_argument("--refresh-only", action="store_true")
+    parser.add_argument(
+        "--recompute-slippage-from-output-dir",
+        type=Path,
+        default=None,
+        help="Reuse existing backtest curve/cost outputs from this directory and recompute only slippage.",
+    )
     return parser.parse_args()
 
 
@@ -533,6 +670,32 @@ def main() -> None:
         for item in items
         if args.start_rank <= int(item.get("year_rank") or 0) <= args.end_rank
     ]
+
+    if args.recompute_slippage_from_output_dir:
+        recompute_status = recompute_slippage_outputs(
+            items,
+            source_dir=args.recompute_slippage_from_output_dir,
+            output_dir=output_dir,
+            slippage_pct=args.slippage,
+        )
+        print(
+            f"RECOMPUTE success={recompute_status['success']} failed={recompute_status['failed']}",
+            flush=True,
+        )
+        final_status = refresh_outputs(
+            items,
+            output_dir,
+            state_path,
+            slippage_pct=args.slippage,
+            start_date=DEFAULT_START_DATE,
+            end_date=DEFAULT_END_DATE,
+        )
+        print(
+            f"FINAL success={final_status['success']} "
+            f"failed_or_pending={final_status['failed_or_pending']}",
+            flush=True,
+        )
+        return
 
     status = refresh_outputs(
         items,
