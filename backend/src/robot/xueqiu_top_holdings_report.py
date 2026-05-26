@@ -19,12 +19,15 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+import duckdb
+
 from ..core.database import (
     SessionLocal,
     SnowballAccountConfig,
     XueqiuCubeRankCache,
     XueqiuTopHoldingsRun,
 )
+from ..core.analytics_database import ANALYTICS_DB_PATH
 from ..core.utils import send_alert_email, sendmail
 
 
@@ -44,6 +47,8 @@ DEFAULT_RECEIVER_EMAIL = "405290618@qq.com"
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
+XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES = {11}
+REBALANCE_QUOTE_BATCH_SIZE = 50
 
 
 logger = logging.getLogger("xueqiu_top_holdings_report")
@@ -114,6 +119,42 @@ def to_raw_xueqiu_symbol(symbol: Any) -> str:
     if not normalized:
         return ""
     return normalized.replace(".", "")
+
+
+def to_tushare_symbol(symbol: Any) -> Optional[str]:
+    normalized = normalize_xueqiu_symbol(symbol)
+    if not normalized or "." not in normalized:
+        return None
+    market, code = normalized.split(".", 1)
+    if market not in {"SH", "SZ", "BJ"} or not re.fullmatch(r"\d{6}", code):
+        return None
+    return f"{code}.{market}"
+
+
+def fetch_local_a_stock_industry(symbol: Any) -> Optional[str]:
+    ts_code = to_tushare_symbol(symbol)
+    if not ts_code:
+        return None
+    try:
+        connection = duckdb.connect(ANALYTICS_DB_PATH, read_only=True)
+        try:
+            row = connection.execute(
+                """
+                SELECT industry
+                FROM a_stock_basic
+                WHERE ts_code = ?
+                  AND industry IS NOT NULL
+                  AND industry <> ''
+                LIMIT 1
+                """,
+                [ts_code],
+            ).fetchone()
+        finally:
+            connection.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to load local industry for %s: %s", ts_code, exc)
+        return None
 
 
 def get_holding_name(holding: Dict[str, Any]) -> str:
@@ -569,6 +610,58 @@ async def fetch_batch_quotes(
     return result
 
 
+def describe_rebalance_quote_rejection(raw_symbol: str, quote: Dict[str, Any]) -> Optional[str]:
+    quote_type = safe_int(quote.get("type"))
+    price = safe_float(quote.get("current"))
+    status = safe_int(quote.get("status"))
+    if quote_type not in XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES:
+        return f"quote_type={quote_type} not allowed"
+    if not price or price <= 0:
+        return "missing valid current price"
+    if status is not None and status <= 0:
+        return f"status={status}"
+    if not raw_symbol:
+        return "missing symbol"
+    return None
+
+
+async def select_rebalance_top_items(
+    *,
+    cookie: str,
+    ranking: List[Dict[str, Any]],
+    top_n: int,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    selected: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    candidates = [item for item in ranking if to_raw_xueqiu_symbol(item.get("stock_symbol"))]
+
+    for start in range(0, len(candidates), REBALANCE_QUOTE_BATCH_SIZE):
+        chunk = candidates[start:start + REBALANCE_QUOTE_BATCH_SIZE]
+        quotes = await fetch_batch_quotes(
+            cookie=cookie,
+            symbols=[item["stock_symbol"] for item in chunk],
+            timeout=timeout,
+        )
+        for item in chunk:
+            raw_symbol = to_raw_xueqiu_symbol(item.get("stock_symbol"))
+            quote = (quotes.get(raw_symbol) or {}).get("quote") or {}
+            rejection = describe_rebalance_quote_rejection(raw_symbol, quote)
+            if rejection:
+                skipped_item = dict(item)
+                skipped_item["rebalance_skip_reason"] = rejection
+                skipped_item["rebalance_quote_type"] = safe_int(quote.get("type"))
+                skipped.append(skipped_item)
+                continue
+            selected.append(dict(item))
+            if len(selected) >= top_n:
+                return add_top_normalized_weights(selected, top_n), skipped
+
+    raise RuntimeError(
+        f"Unable to select {top_n} Xueqiu-rebalanceable stocks; selected={len(selected)} skipped={len(skipped)}"
+    )
+
+
 async def fetch_stock_metadata(
     *,
     cookie: str,
@@ -598,7 +691,7 @@ async def fetch_stock_metadata(
     return {
         "stock_id": safe_int(exact.get("stock_id")),
         "stock_name": exact.get("name") or "",
-        "segment_name": exact.get("ind_name") or "",
+        "segment_name": exact.get("ind_name") or fetch_local_a_stock_industry(symbol) or "",
         "raw": exact,
     }
 
@@ -634,6 +727,26 @@ async def resolve_target_cube_id(
     fallback_cube_id: Optional[int],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
+    event = await fetch_latest_target_rebalance(
+        cookie=cookie,
+        target_cube_symbol=target_cube_symbol,
+        timeout=timeout,
+    )
+    if event:
+        cube_id = safe_int(event.get("cube_id"))
+        if cube_id:
+            return cube_id
+    if fallback_cube_id:
+        return int(fallback_cube_id)
+    raise RuntimeError(f"Unable to resolve cube_id for {target_cube_symbol}")
+
+
+async def fetch_latest_target_rebalance(
+    *,
+    cookie: str,
+    target_cube_symbol: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Optional[Dict[str, Any]]:
     headers = build_headers(
         cookie,
         referer=f"{XUEQIU_WEB_BASE_URL}/P/{target_cube_symbol}",
@@ -647,15 +760,10 @@ async def resolve_target_cube_id(
             response.raise_for_status()
             payload = response.json()
         events = payload.get("list") or []
-        for event in events:
-            cube_id = safe_int(event.get("cube_id"))
-            if cube_id:
-                return cube_id
+        return events[0] if events else None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to resolve target cube_id for %s: %s", target_cube_symbol, exc)
-    if fallback_cube_id:
-        return int(fallback_cube_id)
-    raise RuntimeError(f"Unable to resolve cube_id for {target_cube_symbol}")
+        logger.warning("Failed to load latest target rebalance for %s: %s", target_cube_symbol, exc)
+        return None
 
 
 async def build_rebalance_payload(
@@ -677,6 +785,10 @@ async def build_rebalance_payload(
         weight = safe_float(item.get("rebalance_weight_pct")) or 0.0
         quote = quotes.get(raw_symbol) or {}
         metadata = metadata_map.get(raw_symbol) or {}
+        quote_body = (quote.get("quote") or {})
+        rejection = describe_rebalance_quote_rejection(raw_symbol, quote_body)
+        if rejection:
+            raise RuntimeError(f"Unsupported Xueqiu rebalance stock {raw_symbol}: {rejection}")
         price = safe_float(quote.get("price"))
         if not price or price <= 0:
             raise RuntimeError(f"Missing valid current price for {raw_symbol}")
@@ -686,15 +798,14 @@ async def build_rebalance_payload(
             "stock_symbol": raw_symbol,
             "volume": volume,
             "weight": weight,
-            "proactive": False,
+            "proactive": True,
             "stock_name": stock_name,
         }
         stock_id = metadata.get("stock_id")
         if stock_id:
             holding["stock_id"] = stock_id
-        segment_name = metadata.get("segment_name")
-        if segment_name:
-            holding["segment_name"] = segment_name
+        segment_name = metadata.get("segment_name") or item.get("segment_name") or fetch_local_a_stock_industry(raw_symbol) or "其他"
+        holding["segment_name"] = segment_name
         holdings.append(holding)
         item["rebalance_weight_pct"] = weight
         item["rebalance_volume"] = volume
@@ -753,8 +864,15 @@ async def create_xueqiu_rebalance(
             params={"_": int(datetime.now(CHINA_TZ).timestamp() * 1000)},
             data=form_data,
         )
-        response.raise_for_status()
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError:
+            result = {"raw_response": response.text}
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "Xueqiu rebalance HTTP "
+                f"{response.status_code}: {json.dumps(result, ensure_ascii=False)}"
+            )
     if isinstance(result, dict) and result.get("error_code") and not result.get("id"):
         raise RuntimeError(f"Xueqiu rebalance failed: {result}")
     return result
@@ -768,6 +886,7 @@ def build_report(
     top_n: int,
     rank_cache_fetched_at: Optional[datetime],
     rank_cache_refreshed: bool,
+    rebalance_skipped_items: Optional[List[Dict[str, Any]]] = None,
     target_cube_symbol: Optional[str] = None,
     rebalance_payload: Optional[Dict[str, Any]] = None,
     rebalance_response: Optional[Dict[str, Any]] = None,
@@ -799,7 +918,9 @@ def build_report(
     ]
     if rebalance_payload:
         status = "dry-run" if dry_run else "已提交"
-        if isinstance(rebalance_response, dict) and rebalance_response.get("status"):
+        if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
+            status = "已跳过"
+        elif isinstance(rebalance_response, dict) and rebalance_response.get("status"):
             status = str(rebalance_response.get("status"))
         lines.extend(
             [
@@ -811,6 +932,14 @@ def build_report(
         )
         if isinstance(rebalance_response, dict) and rebalance_response.get("error_message"):
             lines.append(f"雪球提示: {rebalance_response.get('error_message')}")
+        if isinstance(rebalance_response, dict) and rebalance_response.get("message"):
+            lines.append(f"任务提示: {rebalance_response.get('message')}")
+        if rebalance_skipped_items:
+            skipped_preview = [
+                f"{item.get('stock_symbol')}({item.get('stock_name') or ''}, {item.get('rebalance_skip_reason')})"
+                for item in rebalance_skipped_items[:10]
+            ]
+            lines.append(f"已跳过不可调仓标的: {'; '.join(skipped_preview)}")
     lines.extend(
         [
             "",
@@ -872,6 +1001,7 @@ def write_outputs(
     top_items: List[Dict[str, Any]],
     rebalance_payload: Optional[Dict[str, Any]],
     rebalance_response: Optional[Dict[str, Any]],
+    rebalance_skipped_items: Optional[List[Dict[str, Any]]],
     rank_cache_fetched_at: Optional[datetime],
     rank_cache_refreshed: bool,
 ) -> Path:
@@ -901,6 +1031,7 @@ def write_outputs(
         "top": top_items,
         "rebalance_payload": rebalance_payload,
         "rebalance_response": rebalance_response,
+        "rebalance_skipped": rebalance_skipped_items or [],
         "failed": [
             {
                 "symbol": result.cube.symbol,
@@ -1054,17 +1185,28 @@ async def run_top_holdings_job(
     )
     aggregate = aggregate_holdings(results)
     top_items = add_top_normalized_weights(aggregate["ranking"], top_n)
+    rebalance_skipped_items: List[Dict[str, Any]] = []
     rebalance_payload = None
     rebalance_response = None
     resolved_target_cube_id = None
+    latest_target_rebalance = None
 
     if execute_rebalance:
+        top_items, rebalance_skipped_items = await select_rebalance_top_items(
+            cookie=cookie,
+            ranking=aggregate["ranking"],
+            top_n=top_n,
+            timeout=timeout,
+        )
         fallback_cube_id = target_cube_id or safe_int(os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_ID")) or DEFAULT_TARGET_CUBE_ID
-        resolved_target_cube_id = await resolve_target_cube_id(
+        latest_target_rebalance = await fetch_latest_target_rebalance(
             cookie=cookie,
             target_cube_symbol=target_cube_symbol,
-            fallback_cube_id=fallback_cube_id,
             timeout=timeout,
+        )
+        resolved_target_cube_id = (
+            safe_int((latest_target_rebalance or {}).get("cube_id"))
+            or fallback_cube_id
         )
         rebalance_payload = await build_rebalance_payload(
             cookie=cookie,
@@ -1074,12 +1216,25 @@ async def run_top_holdings_job(
             timeout=timeout,
         )
         top_items = rebalance_payload["top_items"]
-        rebalance_response = await create_xueqiu_rebalance(
-            cookie=cookie,
-            payload=rebalance_payload,
-            dry_run=dry_run,
-            timeout=timeout,
-        )
+        if (
+            not dry_run
+            and isinstance(latest_target_rebalance, dict)
+            and str(latest_target_rebalance.get("status") or "").lower() == "pending"
+        ):
+            rebalance_response = {
+                "skipped": True,
+                "reason": "pending_rebalance_exists",
+                "id": latest_target_rebalance.get("id"),
+                "status": latest_target_rebalance.get("status"),
+                "message": "目标雪球组合已有待成交调仓，跳过本次提交。",
+            }
+        else:
+            rebalance_response = await create_xueqiu_rebalance(
+                cookie=cookie,
+                payload=rebalance_payload,
+                dry_run=dry_run,
+                timeout=timeout,
+            )
 
     report_text = build_report(
         run_at=run_at,
@@ -1088,6 +1243,7 @@ async def run_top_holdings_job(
         top_n=top_n,
         rank_cache_fetched_at=rank_cache_fetched_at,
         rank_cache_refreshed=rank_cache_refreshed,
+        rebalance_skipped_items=rebalance_skipped_items,
         target_cube_symbol=target_cube_symbol if execute_rebalance else None,
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
@@ -1102,10 +1258,13 @@ async def run_top_holdings_job(
         top_items=top_items,
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
+        rebalance_skipped_items=rebalance_skipped_items,
         rank_cache_fetched_at=rank_cache_fetched_at,
         rank_cache_refreshed=rank_cache_refreshed,
     )
     status = "DRY_RUN" if dry_run and execute_rebalance else "SUCCESS"
+    if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
+        status = "SKIPPED"
     message = (
         f"success={aggregate['success_count']} failed={len(aggregate['failed_results'])} "
         f"stocks={len(aggregate['ranking'])} output={output_path}"
@@ -1146,6 +1305,7 @@ async def run_top_holdings_job(
         "target_cube_id": resolved_target_cube_id,
         "dry_run": dry_run,
         "rebalance_response": rebalance_response,
+        "rebalance_skipped": rebalance_skipped_items,
         "top": top_items,
     }
 
@@ -1175,6 +1335,7 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         f"success={result.get('success_count')} "
         f"failed={result.get('failed_count')} "
         f"stocks={result.get('stock_count')} "
+        f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
         f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"
     )

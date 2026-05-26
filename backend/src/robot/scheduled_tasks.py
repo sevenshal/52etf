@@ -21,6 +21,9 @@ SERVER_TZ = ZoneInfo("Asia/Shanghai")
 LAST_RUN_MESSAGE_MAX_LENGTH = 4000
 TASK_ERROR_PREVIEW_LIMIT = 20
 TASK_ERROR_PREVIEW_MAX_LENGTH = 3600
+NO_STARTUP_CATCH_UP_TASK_KEYS = {"xueqiu_top_holdings_rebalance"}
+
+
 def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
     if not message:
         return None
@@ -1080,6 +1083,8 @@ class ScheduledTaskManager:
 
     def should_run_on_startup(self, task_key: str, now: Optional[datetime] = None) -> bool:
         now = now or datetime.now()
+        if task_key in NO_STARTUP_CATCH_UP_TASK_KEYS:
+            return False
         return (
             self.is_task_enabled(task_key)
             and self.has_missed_schedule_today(task_key, now=now)
