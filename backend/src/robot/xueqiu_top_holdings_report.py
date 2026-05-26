@@ -19,15 +19,12 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-import duckdb
-
 from ..core.database import (
     SessionLocal,
     SnowballAccountConfig,
     XueqiuCubeRankCache,
     XueqiuTopHoldingsRun,
 )
-from ..core.analytics_database import ANALYTICS_DB_PATH
 from ..core.utils import send_alert_email, sendmail
 
 
@@ -47,7 +44,7 @@ DEFAULT_RECEIVER_EMAIL = "405290618@qq.com"
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
-XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES = {11}
+XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES = {11, 82}
 REBALANCE_QUOTE_BATCH_SIZE = 50
 
 
@@ -119,42 +116,6 @@ def to_raw_xueqiu_symbol(symbol: Any) -> str:
     if not normalized:
         return ""
     return normalized.replace(".", "")
-
-
-def to_tushare_symbol(symbol: Any) -> Optional[str]:
-    normalized = normalize_xueqiu_symbol(symbol)
-    if not normalized or "." not in normalized:
-        return None
-    market, code = normalized.split(".", 1)
-    if market not in {"SH", "SZ", "BJ"} or not re.fullmatch(r"\d{6}", code):
-        return None
-    return f"{code}.{market}"
-
-
-def fetch_local_a_stock_industry(symbol: Any) -> Optional[str]:
-    ts_code = to_tushare_symbol(symbol)
-    if not ts_code:
-        return None
-    try:
-        connection = duckdb.connect(ANALYTICS_DB_PATH, read_only=True)
-        try:
-            row = connection.execute(
-                """
-                SELECT industry
-                FROM a_stock_basic
-                WHERE ts_code = ?
-                  AND industry IS NOT NULL
-                  AND industry <> ''
-                LIMIT 1
-                """,
-                [ts_code],
-            ).fetchone()
-        finally:
-            connection.close()
-        return str(row[0]) if row and row[0] else None
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Failed to load local industry for %s: %s", ts_code, exc)
-        return None
 
 
 def get_holding_name(holding: Dict[str, Any]) -> str:
@@ -691,7 +652,7 @@ async def fetch_stock_metadata(
     return {
         "stock_id": safe_int(exact.get("stock_id")),
         "stock_name": exact.get("name") or "",
-        "segment_name": exact.get("ind_name") or fetch_local_a_stock_industry(symbol) or "",
+        "segment_name": exact.get("ind_name") or "",
         "raw": exact,
     }
 
@@ -804,7 +765,7 @@ async def build_rebalance_payload(
         stock_id = metadata.get("stock_id")
         if stock_id:
             holding["stock_id"] = stock_id
-        segment_name = metadata.get("segment_name") or item.get("segment_name") or fetch_local_a_stock_industry(raw_symbol) or "其他"
+        segment_name = metadata.get("segment_name") or item.get("segment_name") or "其他"
         holding["segment_name"] = segment_name
         holdings.append(holding)
         item["rebalance_weight_pct"] = weight
