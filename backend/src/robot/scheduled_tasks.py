@@ -534,6 +534,21 @@ def _run_external_trading_sub_account_net_asset_snapshot():
     )
 
 
+def _run_xueqiu_top_holdings_rebalance():
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过雪球Top1000综合持仓自动调仓: {today_shanghai} 不是A股交易日"
+
+    from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_rebalance_for_robot
+
+    result = process_xueqiu_top_holdings_rebalance_for_robot()
+    logging.getLogger("ScheduledTaskManager").info(
+        "Xueqiu top holdings rebalance result: %s",
+        result,
+    )
+    return result
+
+
 @dataclass(frozen=True)
 class TaskDefinition:
     task_key: str
@@ -696,6 +711,16 @@ class ScheduledTaskManager:
                 sort_order=24,
                 runner=_run_external_trading_sub_account_net_asset_snapshot,
                 default_cron_rule="5 15 * * mon-fri",
+            ),
+            "xueqiu_top_holdings_rebalance": TaskDefinition(
+                task_key="xueqiu_top_holdings_rebalance",
+                name="雪球Top1000综合持仓自动调仓",
+                description="A股交易日14:40拉取/缓存雪球组合年榜前1000，统计全部组合持仓综合权重Top10，并按Top10归一权重调仓目标雪球组合。",
+                default_time="14:40",
+                default_enabled=True,
+                sort_order=25,
+                runner=_run_xueqiu_top_holdings_rebalance,
+                default_cron_rule="40 14 * * mon-fri",
             ),
         }
 

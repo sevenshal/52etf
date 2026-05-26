@@ -705,6 +705,57 @@ class SnowballBacktestCurvePoint(Base):
     benchmark_drawdown_pct = Column(Float)
     slippage_cost_pct = Column(Float)
 
+class XueqiuCubeRankCache(Base):
+    """雪球组合榜单缓存。"""
+    __tablename__ = "xueqiu_cube_rank_cache"
+    __table_args__ = (
+        UniqueConstraint("rank_type", "year_rank", name="uniq_xueqiu_cube_rank_type_rank"),
+        UniqueConstraint("rank_type", "symbol", name="uniq_xueqiu_cube_rank_type_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rank_type = Column(String(32), default="year", nullable=False, index=True)
+    year_rank = Column(Integer, nullable=False, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    cube_id = Column(Integer)
+    cube_name = Column(String(200))
+    screen_name = Column(String(200))
+    daily_gain = Column(Float)
+    week_gain = Column(Float)
+    year_gain = Column(Float)
+    recommend_count = Column(Integer)
+    net_value = Column(Float)
+    raw_data = Column(JSON)
+    fetched_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class XueqiuTopHoldingsRun(Base):
+    """雪球年榜组合综合持仓权重与自动调仓运行记录。"""
+    __tablename__ = "xueqiu_top_holdings_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    target_cube_symbol = Column(String(32), nullable=False, index=True)
+    target_cube_id = Column(Integer)
+    status = Column(String(16), nullable=False, default="RUNNING", index=True)
+    message = Column(Text)
+    dry_run = Column(Boolean, default=False, nullable=False)
+    rank_cache_fetched_at = Column(DateTime)
+    rank_cache_refreshed = Column(Boolean, default=False, nullable=False)
+    cube_count = Column(Integer)
+    success_count = Column(Integer)
+    failed_count = Column(Integer)
+    stock_count = Column(Integer)
+    top_n = Column(Integer, default=10, nullable=False)
+    cash_pct = Column(Float)
+    top_holdings = Column(JSON)
+    failed_cubes = Column(JSON)
+    rebalance_payload = Column(JSON)
+    rebalance_response = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"
@@ -988,6 +1039,8 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_account_config ON snowball_backtest_runs(account_id, config_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_status ON snowball_backtest_runs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_curve_run_date ON snowball_backtest_curve_points(run_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_rank_cache_type_fetched ON xueqiu_cube_rank_cache(rank_type, fetched_at)",
+        "CREATE INDEX IF NOT EXISTS idx_xueqiu_top_holdings_runs_target_time ON xueqiu_top_holdings_runs(target_cube_symbol, run_at)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
