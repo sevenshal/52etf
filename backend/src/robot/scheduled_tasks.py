@@ -540,6 +540,15 @@ def _run_external_trading_sub_account_net_asset_snapshot():
 
 def _run_xueqiu_top_holdings_rebalance():
     today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if today_shanghai.weekday() == 5:
+        from .xueqiu_top_holdings_report import process_xueqiu_year_rank_refresh_for_robot
+
+        result = process_xueqiu_year_rank_refresh_for_robot()
+        logging.getLogger("ScheduledTaskManager").info(
+            "Xueqiu year rank refresh result: %s",
+            result,
+        )
+        return result
     if not _is_china_trading_day(today_shanghai):
         return f"跳过雪球Top1000综合持仓自动调仓: {today_shanghai} 不是A股交易日"
 
@@ -719,12 +728,12 @@ class ScheduledTaskManager:
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
                 name="雪球Top1000综合持仓自动调仓",
-                description="A股交易日14:40拉取/缓存雪球组合年榜前1000，统计全部组合持仓综合权重Top10，并按Top10归一权重调仓目标雪球组合。",
+                description="每日14:40执行；A股交易日按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合；周六只刷新雪球年榜Top1000缓存。",
                 default_time="14:40",
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
-                default_cron_rule="40 14 * * mon-fri",
+                default_cron_rule="40 14 * * *",
             ),
         }
 
@@ -782,6 +791,11 @@ class ScheduledTaskManager:
                 config.name = task.name
                 config.description = task.description
                 config.sort_order = task.sort_order
+                if (
+                    task.task_key == "xueqiu_top_holdings_rebalance"
+                    and str(config.cron_rule or "").strip() == "40 14 * * mon-fri"
+                ):
+                    config.cron_rule = default_cron_rule
                 if not self.is_valid_time(config.schedule_time):
                     config.schedule_time = task.default_time
                 if not self.is_valid_cron_rule(config.cron_rule):

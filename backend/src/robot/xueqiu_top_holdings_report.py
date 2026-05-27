@@ -35,7 +35,7 @@ XUEQIU_API_BASE_URL = "https://api.xueqiu.com"
 XUEQIU_STOCK_BASE_URL = "https://stock.xueqiu.com"
 XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
 RANK_CACHE_TYPE = "year"
-RANK_CACHE_TTL_DAYS = 30
+RANK_CACHE_TTL_DAYS = 7
 RANK_PAGE_SIZE = 20
 RANK_TARGET_COUNT = 1000
 DEFAULT_TARGET_CUBE_SYMBOL = "ZH3630096"
@@ -47,6 +47,9 @@ DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
 XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES = {11, 82}
 REBALANCE_QUOTE_BATCH_SIZE = 50
+BUFFER_STRATEGY_TOP_N = 10
+BUFFER_STRATEGY_SELL_RANK = 12
+BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
 
 
 logger = logging.getLogger("xueqiu_top_holdings_report")
@@ -421,6 +424,30 @@ async def fetch_all_holdings(
         return results
 
 
+async def fetch_target_cube_holdings(
+    *,
+    cookie: str,
+    target_cube_symbol: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> List[Dict[str, Any]]:
+    headers = build_headers(
+        cookie,
+        referer=f"{XUEQIU_WEB_BASE_URL}/P/{target_cube_symbol}",
+    )
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
+        response = await client.get(
+            f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json",
+            params={"symbol": target_cube_symbol},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if payload.get("result_code") == 0 and payload.get("success"):
+        holdings = payload.get("data") or []
+        if isinstance(holdings, list):
+            return holdings
+    raise RuntimeError(f"Unexpected target cube holdings payload for {target_cube_symbol}: {payload}")
+
+
 def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
     stock_to_cubes: Dict[str, Set[str]] = defaultdict(set)
     stock_names: Dict[str, str] = {}
@@ -539,6 +566,172 @@ def rounded_rebalance_weights(top_items: List[Dict[str, Any]]) -> List[Dict[str,
     for item, weight in zip(selected, rounded_weights):
         item["rebalance_weight_pct"] = weight
     return selected
+
+
+def extract_current_target_holdings(holdings: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    current: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for holding in holdings:
+        symbol = normalize_xueqiu_symbol(holding.get("symbol") or holding.get("stock_symbol"))
+        weight = get_holding_weight(holding)
+        if not symbol or weight is None or weight <= 0 or symbol in seen:
+            continue
+        seen.add(symbol)
+        current.append(
+            {
+                "stock_symbol": symbol,
+                "stock_name": get_holding_name(holding),
+                "weight_pct": weight,
+                "raw": holding,
+            }
+        )
+    return current
+
+
+def _ranked_rebalance_candidates(ranking: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for index, item in enumerate(ranking, start=1):
+        symbol = normalize_xueqiu_symbol(item.get("stock_symbol"))
+        if not symbol or not to_raw_xueqiu_symbol(symbol):
+            continue
+        candidate = dict(item)
+        candidate["stock_symbol"] = symbol
+        candidate["strategy_rank"] = index
+        candidates.append(candidate)
+    return candidates
+
+
+def _symbol_label(symbol: str, item_by_symbol: Dict[str, Dict[str, Any]], current_by_symbol: Dict[str, Dict[str, Any]]) -> str:
+    item = item_by_symbol.get(symbol) or {}
+    current = current_by_symbol.get(symbol) or {}
+    return f"{symbol}({item.get('stock_name') or current.get('stock_name') or ''})"
+
+
+def build_equal_top10_top12_buffer_plan(
+    *,
+    ranking: List[Dict[str, Any]],
+    current_holdings: List[Dict[str, Any]],
+    top_n: int = BUFFER_STRATEGY_TOP_N,
+    sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
+) -> Dict[str, Any]:
+    candidates = _ranked_rebalance_candidates(ranking)
+    if len(candidates) < max(top_n, sell_rank):
+        raise RuntimeError(
+            f"Not enough ranked stocks for buffered rebalance plan: "
+            f"candidates={len(candidates)} top_n={top_n} sell_rank={sell_rank}"
+        )
+
+    top10_items = candidates[:top_n]
+    top12_items = candidates[:sell_rank]
+    top10_symbols = [item["stock_symbol"] for item in top10_items]
+    top12_symbols = {item["stock_symbol"] for item in top12_items}
+    item_by_symbol = {item["stock_symbol"]: item for item in candidates}
+
+    current_items = extract_current_target_holdings(current_holdings)
+    current_by_symbol = {item["stock_symbol"]: item for item in current_items}
+    current_symbols = [item["stock_symbol"] for item in current_items]
+
+    retained_symbols = [symbol for symbol in current_symbols if symbol in top12_symbols]
+    removed_symbols = [symbol for symbol in current_symbols if symbol not in top12_symbols]
+    trim_removed_symbols: List[str] = []
+    if len(retained_symbols) > top_n:
+        ranked_retained = sorted(
+            retained_symbols,
+            key=lambda symbol: (
+                safe_int((item_by_symbol.get(symbol) or {}).get("strategy_rank")) or 999999,
+                symbol,
+            ),
+        )
+        retained_symbols = ranked_retained[:top_n]
+        trim_removed_symbols = ranked_retained[top_n:]
+        removed_symbols.extend(trim_removed_symbols)
+
+    added_symbols: List[str] = []
+    retained_set = set(retained_symbols)
+    for symbol in top10_symbols:
+        if len(retained_symbols) + len(added_symbols) >= top_n:
+            break
+        if symbol not in retained_set and symbol not in added_symbols:
+            added_symbols.append(symbol)
+
+    final_symbols = retained_symbols + added_symbols
+    if len(final_symbols) < top_n:
+        raise RuntimeError(
+            f"Unable to fill buffered target holdings to {top_n}: "
+            f"retained={len(retained_symbols)} added={len(added_symbols)}"
+        )
+
+    final_symbols = sorted(
+        final_symbols,
+        key=lambda symbol: (
+            safe_int((item_by_symbol.get(symbol) or {}).get("strategy_rank")) or 999999,
+            symbol,
+        ),
+    )
+    final_symbol_set = set(final_symbols)
+    current_symbol_set = set(current_symbols)
+    component_changed = final_symbol_set != current_symbol_set
+    equal_weight = 100.0 / len(final_symbols) if final_symbols else 0.0
+
+    target_items: List[Dict[str, Any]] = []
+    for symbol in final_symbols:
+        item = dict(item_by_symbol.get(symbol) or {})
+        item["stock_symbol"] = symbol
+        item["stock_name"] = item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or ""
+        item["top_normalized_weight_pct"] = equal_weight
+        item["rebalance_weight_pct"] = equal_weight
+        item["strategy_action"] = "buy" if symbol in added_symbols else "keep"
+        item["current_weight_pct"] = (current_by_symbol.get(symbol) or {}).get("weight_pct")
+        target_items.append(item)
+
+    removed_items: List[Dict[str, Any]] = []
+    for symbol in removed_symbols:
+        item = dict(item_by_symbol.get(symbol) or {})
+        item["stock_symbol"] = symbol
+        item["stock_name"] = item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or ""
+        item["strategy_action"] = "trim" if symbol in trim_removed_symbols else "sell"
+        item["current_weight_pct"] = (current_by_symbol.get(symbol) or {}).get("weight_pct")
+        removed_items.append(item)
+
+    return {
+        "strategy_name": BUFFER_STRATEGY_NAME,
+        "top_n": top_n,
+        "sell_rank": sell_rank,
+        "top10_symbols": top10_symbols,
+        "top12_symbols": [item["stock_symbol"] for item in top12_items],
+        "current_symbols": current_symbols,
+        "retained_symbols": retained_symbols,
+        "removed_symbols": removed_symbols,
+        "trim_removed_symbols": trim_removed_symbols,
+        "added_symbols": added_symbols,
+        "final_symbols": final_symbols,
+        "component_changed": component_changed,
+        "target_items": target_items,
+        "removed_items": removed_items,
+        "current_items": current_items,
+        "summary": {
+            "current": [
+                _symbol_label(symbol, item_by_symbol, current_by_symbol)
+                for symbol in current_symbols
+            ],
+            "retained": [
+                _symbol_label(symbol, item_by_symbol, current_by_symbol)
+                for symbol in retained_symbols
+            ],
+            "removed": [
+                _symbol_label(symbol, item_by_symbol, current_by_symbol)
+                for symbol in removed_symbols
+            ],
+            "added": [
+                _symbol_label(symbol, item_by_symbol, current_by_symbol)
+                for symbol in added_symbols
+            ],
+            "final": [
+                _symbol_label(symbol, item_by_symbol, current_by_symbol)
+                for symbol in final_symbols
+            ],
+        },
+    }
 
 
 async def fetch_batch_quotes(
@@ -787,7 +980,7 @@ async def build_rebalance_payload(
         "target_cube_symbol": target_cube_symbol,
         "cube_id": target_cube_id,
         "cash": cash_pct,
-        "comment": f"自动按雪球年榜Top1000综合持仓权重调仓 {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M')}",
+        "comment": f"自动按雪球年榜Top10等权缓冲策略调仓 {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M')}",
         "market": "cn",
         "holdings": holdings,
         "top_items": rebalance_items,
@@ -895,12 +1088,15 @@ def build_report(
     target_cube_symbol: Optional[str] = None,
     rebalance_payload: Optional[Dict[str, Any]] = None,
     rebalance_response: Optional[Dict[str, Any]] = None,
+    strategy_plan: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
     top_items = (
         rebalance_payload.get("top_items")
         if rebalance_payload
+        else strategy_plan.get("target_items")
+        if strategy_plan
         else add_top_normalized_weights(ranking, top_n)
     )
     failed_results = aggregate["failed_results"]
@@ -919,8 +1115,22 @@ def build_report(
         f"非现金持仓合计权重: {fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix='%')}",
         "",
         "统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。",
-        f"最终权重: 选取综合权重最高的 Top{top_n} 后，在 Top{top_n} 内按综合权重重新归一化到 100%。",
+        f"调仓策略: {strategy_plan.get('strategy_name') if strategy_plan else f'选取综合权重最高的 Top{top_n} 后归一化'}。",
     ]
+    if strategy_plan:
+        plan_summary = strategy_plan.get("summary") or {}
+        lines.extend(
+            [
+                f"买入/补位: 从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只。",
+                f"卖出: 已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖。",
+                "权重: 成分发生变化时，最终持仓等权；成分无变化不提交调仓。",
+                f"当前持仓: {'、'.join(plan_summary.get('current') or []) or '-'}",
+                f"保留: {'、'.join(plan_summary.get('retained') or []) or '-'}",
+                f"卖出: {'、'.join(plan_summary.get('removed') or []) or '-'}",
+                f"买入: {'、'.join(plan_summary.get('added') or []) or '-'}",
+                f"最终持仓: {'、'.join(plan_summary.get('final') or []) or '-'}",
+            ]
+        )
     if rebalance_payload:
         status = "dry-run" if dry_run else "已提交"
         if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
@@ -949,11 +1159,13 @@ def build_report(
         if rebalance_action_lines:
             lines.extend(["", "雪球返回调仓动作:"])
             lines.extend(f"- {line}" for line in rebalance_action_lines)
+    elif isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
+        lines.extend(["", "调仓状态: 已跳过", f"任务提示: {rebalance_response.get('message') or '-'}"])
     lines.extend(
         [
             "",
-            "| 排名 | 股票 | 名称 | 综合权重 | 最终归一权重 | 调仓权重 | 持仓组合数 | 占成功组合 | 持有组合平均权重 | 示例组合 |",
-            "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| 综合排名 | 股票 | 名称 | 综合权重 | 目标权重 | 调仓权重 | 策略动作 | 当前权重 | 持仓组合数 | 占成功组合 | 持有组合平均权重 | 示例组合 |",
+            "| ---: | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for index, item in enumerate(top_items[:top_n], start=1):
@@ -961,13 +1173,15 @@ def build_report(
             "| "
             + " | ".join(
                 [
-                    str(index),
-                    item["stock_symbol"],
+                    str(item.get("strategy_rank") or index),
+                    str(item.get("stock_symbol") or ""),
                     str(item.get("stock_name") or ""),
                     fmt_number(item.get("composite_weight_pct"), suffix="%"),
                     fmt_number(item.get("top_normalized_weight_pct"), suffix="%"),
                     fmt_number(item.get("rebalance_weight_pct"), suffix="%"),
-                    str(item["holding_cube_count"]),
+                    str(item.get("strategy_action") or ""),
+                    fmt_number(item.get("current_weight_pct"), suffix="%"),
+                    str(item.get("holding_cube_count") or ""),
                     fmt_number(item.get("holding_cube_ratio_pct"), suffix="%"),
                     fmt_number(item.get("average_weight_pct"), suffix="%"),
                     "、".join(item.get("example_cubes") or []),
@@ -996,12 +1210,15 @@ def build_report_html(
     target_cube_symbol: Optional[str] = None,
     rebalance_payload: Optional[Dict[str, Any]] = None,
     rebalance_response: Optional[Dict[str, Any]] = None,
+    strategy_plan: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
     top_items = (
         rebalance_payload.get("top_items")
         if rebalance_payload
+        else strategy_plan.get("target_items")
+        if strategy_plan
         else add_top_normalized_weights(ranking, top_n)
     )
     failed_results = aggregate["failed_results"]
@@ -1020,7 +1237,22 @@ def build_report_html(
         ("拉取失败", len(failed_results)),
         ("覆盖股票数", len(ranking)),
         ("非现金持仓合计权重", fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix="%")),
+        ("调仓策略", strategy_plan.get("strategy_name") if strategy_plan else f"Top{top_n}综合权重归一"),
     ]
+    if strategy_plan:
+        plan_summary = strategy_plan.get("summary") or {}
+        summary_rows.extend(
+            [
+                ("买入/补位", f"从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只"),
+                ("卖出规则", f"已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖"),
+                ("权重规则", "成分发生变化时等权；成分无变化不提交调仓"),
+                ("当前持仓", "、".join(plan_summary.get("current") or []) or "-"),
+                ("保留", "、".join(plan_summary.get("retained") or []) or "-"),
+                ("卖出", "、".join(plan_summary.get("removed") or []) or "-"),
+                ("买入", "、".join(plan_summary.get("added") or []) or "-"),
+                ("最终持仓", "、".join(plan_summary.get("final") or []) or "-"),
+            ]
+        )
     if rebalance_payload:
         status = "dry-run" if dry_run else "已提交"
         if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
@@ -1044,6 +1276,9 @@ def build_report_html(
                 for item in rebalance_skipped_items[:10]
             ]
             summary_rows.append(("已跳过不可调仓标的", "; ".join(skipped_preview)))
+    elif isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
+        summary_rows.append(("调仓状态", "已跳过"))
+        summary_rows.append(("任务提示", rebalance_response.get("message") or "-"))
     rebalance_action_lines = extract_rebalance_action_lines(rebalance_response)
 
     rows_html = "\n".join(
@@ -1054,12 +1289,14 @@ def build_report_html(
     for index, item in enumerate(top_items[:top_n], start=1):
         table_rows.append(
             "<tr>"
-            f"<td class=\"num\">{index}</td>"
+            f"<td class=\"num\">{esc(item.get('strategy_rank') or index)}</td>"
             f"<td>{esc(item.get('stock_symbol'))}</td>"
             f"<td>{esc(item.get('stock_name') or '')}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('composite_weight_pct'), suffix='%'))}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('top_normalized_weight_pct'), suffix='%'))}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('rebalance_weight_pct'), suffix='%'))}</td>"
+            f"<td>{esc(item.get('strategy_action') or '')}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('current_weight_pct'), suffix='%'))}</td>"
             f"<td class=\"num\">{esc(item.get('holding_cube_count'))}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('holding_cube_ratio_pct'), suffix='%'))}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('average_weight_pct'), suffix='%'))}</td>"
@@ -1099,11 +1336,11 @@ def build_report_html(
   <table class="summary">{rows_html}</table>
   {rebalance_action_html}
   <p>统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。</p>
-  <p>最终权重: 选取综合权重最高的 Top{top_n} 后，在 Top{top_n} 内按综合权重重新归一化到 100%。</p>
+  <p>最终权重: {BUFFER_STRATEGY_NAME if strategy_plan else f"选取综合权重最高的 Top{top_n} 后归一化"}。</p>
   <table>
     <thead>
       <tr>
-        <th>排名</th><th>股票</th><th>名称</th><th>综合权重</th><th>最终归一权重</th><th>调仓权重</th>
+        <th>综合排名</th><th>股票</th><th>名称</th><th>综合权重</th><th>目标权重</th><th>调仓权重</th><th>策略动作</th><th>当前权重</th>
         <th>持仓组合数</th><th>占成功组合</th><th>持有组合平均权重</th><th>示例组合</th>
       </tr>
     </thead>
@@ -1145,6 +1382,7 @@ def write_outputs(
     rebalance_skipped_items: Optional[List[Dict[str, Any]]],
     rank_cache_fetched_at: Optional[datetime],
     rank_cache_refreshed: bool,
+    strategy_plan: Optional[Dict[str, Any]] = None,
 ) -> Path:
     run_dir = output_dir / run_at.strftime("%Y-%m-%d")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1156,8 +1394,11 @@ def write_outputs(
         enriched = dict(row)
         top_row = top_by_symbol.get(row["stock_symbol"])
         if top_row:
+            enriched["strategy_rank"] = top_row.get("strategy_rank")
             enriched["top_normalized_weight_pct"] = top_row.get("top_normalized_weight_pct")
             enriched["rebalance_weight_pct"] = top_row.get("rebalance_weight_pct")
+            enriched["strategy_action"] = top_row.get("strategy_action")
+            enriched["current_weight_pct"] = top_row.get("current_weight_pct")
         ranking_rows.append(enriched)
 
     metadata = {
@@ -1170,6 +1411,7 @@ def write_outputs(
         "stock_count": len(ranking),
         "total_stock_weight_pct": aggregate.get("total_stock_weight_pct"),
         "top": top_items,
+        "strategy_plan": strategy_plan,
         "rebalance_payload": rebalance_payload,
         "rebalance_response": rebalance_response,
         "rebalance_skipped": rebalance_skipped_items or [],
@@ -1191,12 +1433,15 @@ def write_outputs(
         run_dir / "top_stocks.csv",
         ranking_rows,
         [
+            "strategy_rank",
             "stock_symbol",
             "stock_name",
             "composite_weight_pct",
             "global_normalized_weight_pct",
             "top_normalized_weight_pct",
             "rebalance_weight_pct",
+            "strategy_action",
+            "current_weight_pct",
             "holding_cube_count",
             "holding_cube_ratio_pct",
             "total_weight_pct",
@@ -1329,16 +1574,11 @@ async def run_top_holdings_job(
     rebalance_skipped_items: List[Dict[str, Any]] = []
     rebalance_payload = None
     rebalance_response = None
+    strategy_plan: Optional[Dict[str, Any]] = None
     resolved_target_cube_id = None
     latest_target_rebalance = None
 
     if execute_rebalance:
-        top_items, rebalance_skipped_items = await select_rebalance_top_items(
-            cookie=cookie,
-            ranking=aggregate["ranking"],
-            top_n=top_n,
-            timeout=timeout,
-        )
         fallback_cube_id = target_cube_id or safe_int(os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_ID")) or DEFAULT_TARGET_CUBE_ID
         latest_target_rebalance = await fetch_latest_target_rebalance(
             cookie=cookie,
@@ -1349,20 +1589,42 @@ async def run_top_holdings_job(
             safe_int((latest_target_rebalance or {}).get("cube_id"))
             or fallback_cube_id
         )
-        rebalance_payload = await build_rebalance_payload(
+        current_target_holdings = await fetch_target_cube_holdings(
             cookie=cookie,
             target_cube_symbol=target_cube_symbol,
-            target_cube_id=resolved_target_cube_id,
-            top_items=top_items,
             timeout=timeout,
         )
-        top_items = rebalance_payload["top_items"]
-        rebalance_response = await create_xueqiu_rebalance(
-            cookie=cookie,
-            payload=rebalance_payload,
-            dry_run=dry_run,
-            timeout=timeout,
+        strategy_plan = build_equal_top10_top12_buffer_plan(
+            ranking=aggregate["ranking"],
+            current_holdings=current_target_holdings,
+            top_n=top_n,
+            sell_rank=max(BUFFER_STRATEGY_SELL_RANK, top_n),
         )
+        top_items = strategy_plan["target_items"]
+        if strategy_plan.get("component_changed"):
+            rebalance_payload = await build_rebalance_payload(
+                cookie=cookie,
+                target_cube_symbol=target_cube_symbol,
+                target_cube_id=resolved_target_cube_id,
+                top_items=top_items,
+                timeout=timeout,
+            )
+            rebalance_payload["strategy"] = strategy_plan.get("strategy_name")
+            rebalance_payload["strategy_plan"] = strategy_plan
+            top_items = rebalance_payload["top_items"]
+            rebalance_response = await create_xueqiu_rebalance(
+                cookie=cookie,
+                payload=rebalance_payload,
+                dry_run=dry_run,
+                timeout=timeout,
+            )
+        else:
+            rebalance_response = {
+                "skipped": True,
+                "message": "目标组合成分未变化，按Top10等权缓冲策略不提交调仓。",
+                "strategy": strategy_plan.get("strategy_name"),
+                "strategy_plan": strategy_plan,
+            }
 
     report_text = build_report(
         run_at=run_at,
@@ -1375,6 +1637,7 @@ async def run_top_holdings_job(
         target_cube_symbol=target_cube_symbol if execute_rebalance else None,
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
+        strategy_plan=strategy_plan,
         dry_run=dry_run,
     )
     report_html = build_report_html(
@@ -1388,6 +1651,7 @@ async def run_top_holdings_job(
         target_cube_symbol=target_cube_symbol if execute_rebalance else None,
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
+        strategy_plan=strategy_plan,
         dry_run=dry_run,
     )
     output_path = write_outputs(
@@ -1402,6 +1666,7 @@ async def run_top_holdings_job(
         rebalance_skipped_items=rebalance_skipped_items,
         rank_cache_fetched_at=rank_cache_fetched_at,
         rank_cache_refreshed=rank_cache_refreshed,
+        strategy_plan=strategy_plan,
     )
     status = "DRY_RUN" if dry_run and execute_rebalance else "SUCCESS"
     if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
@@ -1479,6 +1744,35 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
         f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"
+    )
+
+
+def process_xueqiu_year_rank_refresh_for_robot() -> str:
+    async def _run() -> Dict[str, Any]:
+        cookie = get_latest_cookie()
+        fetched_at = datetime.now()
+        cubes = await fetch_year_top_cubes(
+            cookie=cookie,
+            target_count=RANK_TARGET_COUNT,
+            page_size=RANK_PAGE_SIZE,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        save_year_top_cubes(cubes, fetched_at)
+        return {
+            "fetched_at": fetched_at,
+            "count": len(cubes),
+            "first_symbol": cubes[0].symbol if cubes else None,
+            "last_symbol": cubes[-1].symbol if cubes else None,
+        }
+
+    result = asyncio.run(_run())
+    fetched_at = result["fetched_at"]
+    return (
+        "雪球年榜Top1000缓存刷新 "
+        f"count={result.get('count')} "
+        f"fetched_at={fetched_at.strftime('%Y-%m-%d %H:%M:%S')} "
+        f"first={result.get('first_symbol')} "
+        f"last={result.get('last_symbol')}"
     )
 
 
