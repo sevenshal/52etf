@@ -12,6 +12,10 @@ from ..external_trading_database import (
 )
 from .external_trading import external_trading_hub
 from .external_trading_ledger import reconcile_deliver_records
+from .external_trading_market import (
+    EXTERNAL_TRADING_MARKET_A_STOCK,
+    normalize_external_trading_market_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +129,20 @@ def check_and_alert_missing_deliver_records(today: Optional[date] = None) -> Dic
     target_date = previous_a_share_trading_day(today_date)
     db = ExternalTradingSessionLocal()
     try:
-        accounts = (
+        enabled_accounts = (
             db.query(ExternalTradingAccount)
             .filter(ExternalTradingAccount.enabled == True)  # noqa: E712
             .order_by(ExternalTradingAccount.id.asc())
             .all()
         )
+        accounts = [
+            account
+            for account in enabled_accounts
+            if normalize_external_trading_market_type(getattr(account, "market_type", None))
+            == EXTERNAL_TRADING_MARKET_A_STOCK
+        ]
         checked = len(accounts)
+        skipped_non_a_stock = len(enabled_accounts) - checked
         reconciled = 0
         missing_accounts = []
 
@@ -159,6 +170,7 @@ def check_and_alert_missing_deliver_records(today: Optional[date] = None) -> Dic
         "reconciled": reconciled,
         "missing": len(missing_accounts),
         "missing_accounts": missing_accounts,
+        "skipped_non_a_stock": skipped_non_a_stock,
     }
 
     if missing_accounts:

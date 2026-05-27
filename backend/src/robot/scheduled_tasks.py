@@ -459,7 +459,8 @@ def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
         f"trade_date={result.get('trade_date')} "
         f"checked={result.get('checked')} "
         f"reconciled={result.get('reconciled')} "
-        f"missing={result.get('missing')}"
+        f"missing={result.get('missing')} "
+        f"skipped_non_a_stock={result.get('skipped_non_a_stock', 0)}"
     )
 
 
