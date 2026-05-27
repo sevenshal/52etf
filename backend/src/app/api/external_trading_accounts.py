@@ -613,6 +613,7 @@ async def _serialize_sub_account_with_binding(
             raise HTTPException(status_code=409, detail=str(exc))
     item["position_market_value"] = valuation["position_market_value"]
     item["net_asset"] = valuation["net_asset"]
+    item["position_count"] = len(valuation.get("positions") or [])
     item["valuation"] = valuation
     strategy_name = _strategy_binding_name(main_db, sub_account)
     item["strategy_name"] = strategy_name
