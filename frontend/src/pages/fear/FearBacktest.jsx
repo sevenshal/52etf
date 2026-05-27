@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, Form, InputNumber, Button, message, Space, Table, Progress, Modal, DatePicker, Input, Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
+import { subscribeBackendEvent } from '../../utils/backendEvents';
 import dayjs from 'dayjs';
 
 const { RangePicker } = DatePicker;
@@ -15,7 +16,6 @@ const FearBacktest = () => {
   const [status, setStatus] = useState(null);
   const [result, setResult] = useState(null);
   const [verifyResult, setVerifyResult] = useState(null);
-  const [polling, setPolling] = useState(false);
   const [showVerifyModal, setShowVerifyModal] = useState(false);
   const [selectedEtf, setSelectedEtf] = useState(null);
   const [etfList, setEtfList] = useState([]);
@@ -29,22 +29,11 @@ const FearBacktest = () => {
   useEffect(() => {
     checkStatus();
     fetchEtfList();
-    return () => {
-      setPolling(false);
-    };
   }, []);
 
   useEffect(() => {
-    let timer;
-    if (polling) {
-      timer = setInterval(checkStatus, 2000);
-    }
-    return () => {
-      if (timer) {
-        clearInterval(timer);
-      }
-    };
-  }, [polling]);
+    return subscribeBackendEvent('fear_backtest_status', applyBacktestStatus);
+  }, []);
 
   const fetchEtfList = async () => {
     try {
@@ -60,28 +49,27 @@ const FearBacktest = () => {
   const checkStatus = async () => {
     try {
       const response = await request.get('/api/backtest/status');
-      setStatus(response.data);
-      
-      // 如果任务已完成（有结果或错误）或任务未运行
-      if (!response.data.is_running || response.data.result || response.data.error) {
-        if (response.data.result) {
-          if (response.data.result.trades) {
-            // 如果是回测结果
-            setResult(response.data.result);
-          } else {
-            // 如果是验证结果
-            setVerifyResult(response.data.result);
-          }
-        }
-        setPolling(false);  // 停止轮询
-      } else if (response.data.is_running && !polling) {
-        setPolling(true);
-      }
+      applyBacktestStatus(response.data);
     } catch (error) {
       message.error('获取状态失败');
-      setPolling(false);  // 发生错误时也停止轮询
     }
   };
+
+  function applyBacktestStatus(nextStatus) {
+    setStatus(nextStatus);
+
+    if (!nextStatus?.is_running || nextStatus.result || nextStatus.error) {
+      if (nextStatus?.result) {
+        if (nextStatus.result.trades) {
+          setResult(nextStatus.result);
+        } else {
+          setVerifyResult(nextStatus.result);
+        }
+      }
+      setLoading(false);
+      setVerifying(false);
+    }
+  }
 
   const handleStart = async (values) => {
     try {
@@ -125,7 +113,7 @@ const FearBacktest = () => {
       
       await request.post('/api/backtest/start', params);
       message.success('回测任务已启动');
-      setPolling(true);
+      setStatus({ is_running: true, progress: 0, result: null, error: null });
     } catch (error) {
       message.error('启动回测失败：' + (error.response?.data?.detail || '未知错误'));
     } finally {
@@ -137,7 +125,7 @@ const FearBacktest = () => {
     try {
       await request.post('/api/backtest/cancel');
       message.success('回测任务已取消');
-      setPolling(false);
+      setStatus(prev => ({ ...(prev || {}), is_running: false, error: '任务已取消' }));
     } catch (error) {
       message.error('取消回测失败：' + (error.response?.data?.detail || '未知错误'));
     }
@@ -162,7 +150,7 @@ const FearBacktest = () => {
       
       await request.post('/api/backtest/verify', params);
       message.success('验证任务已启动');
-      setPolling(true);
+      setStatus({ is_running: true, progress: 0, result: null, error: null });
       setShowVerifyModal(false);
     } catch (error) {
       message.error('启动验证失败：' + (error.response?.data?.detail || '未知错误'));

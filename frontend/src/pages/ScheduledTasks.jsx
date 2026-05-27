@@ -23,6 +23,7 @@ import {
   SaveOutlined,
 } from '@ant-design/icons';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 
 const { Title, Text } = Typography;
 const RESULT_PREVIEW_LENGTH = 96;
@@ -231,6 +232,14 @@ const ScheduledTasks = () => {
     fetchTasks();
   }, []);
 
+  useEffect(() => {
+    return subscribeBackendEvent('scheduled_tasks', (data) => {
+      if (Array.isArray(data.tasks)) {
+        setTasks(data.tasks);
+      }
+    });
+  }, []);
+
   const updateTaskField = (taskKey, patch) => {
     setTasks((prev) =>
       prev.map((task) => (task.task_key === taskKey ? { ...task, ...patch } : task))
@@ -261,8 +270,6 @@ const ScheduledTasks = () => {
       const { data } = await request.post(`/api/scheduled-tasks/${task.task_key}/run`, options);
       updateTaskField(task.task_key, data);
       message.success(data.is_queued ? '任务已加入执行队列' : '任务已开始执行');
-      setTimeout(() => fetchTasks(false), 3000);
-      setTimeout(() => fetchTasks(false), 12000);
     } catch (error) {
       message.warning(error.response?.data?.detail || '触发失败');
     } finally {

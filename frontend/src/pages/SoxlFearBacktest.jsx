@@ -22,6 +22,7 @@ import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 
 const { RangePicker } = DatePicker;
 
@@ -159,7 +160,7 @@ const SoxlFearBacktest = () => {
   const [searchProcessed, setSearchProcessed] = useState(0);
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchStatus, setSearchStatus] = useState(null);
-  const pollingTimerRef = useRef(null);
+  const searchTaskIdRef = useRef(null);
   const detailLoadingRef = useRef(false);
   const hasAutoRunRef = useRef(false);
   const handleSearchRef = useRef(null);
@@ -272,57 +273,40 @@ const SoxlFearBacktest = () => {
     form.setFieldsValue({ a_stock_pair: undefined, volume_signal_symbol: undefined });
   };
 
-  const stopPolling = () => {
-    if (pollingTimerRef.current) {
-      clearTimeout(pollingTimerRef.current);
-      pollingTimerRef.current = null;
-    }
-  };
+  const applySearchJobStatus = (data) => {
+    setSearchStatus(data.status);
+    setSearchProgress(data.progress || 0);
+    setSearchProgressText(data.message || '');
+    setSearchProcessed(data.processed_combinations || 0);
+    setSearchTotal(data.total_combinations || 0);
 
-  const pollSearchJob = async (taskId) => {
-    try {
-      const { data } = await request.get(`/api/soxl-fear-backtest/search/jobs/${taskId}`, {
-        timeout: 30 * 1000,
-      });
-
-      setSearchStatus(data.status);
-      setSearchProgress(data.progress || 0);
-      setSearchProgressText(data.message || '');
-      setSearchProcessed(data.processed_combinations || 0);
-      setSearchTotal(data.total_combinations || 0);
-
-      if (data.status === 'completed') {
-        stopPolling();
-        setLoading(false);
-        setSearchTaskId(null);
-        setSearchMeta(data.result?.meta || null);
-        setSearchResults(data.result?.results || []);
-        setDetailedResult(data.result?.best_result || null);
-        message.success(`搜索完成，共评估 ${data.result?.meta?.searched_combinations || 0} 组参数`);
-        return;
-      }
-
-      if (data.status === 'failed') {
-        stopPolling();
-        setLoading(false);
-        setSearchTaskId(null);
-        message.error(data.error || '搜索失败');
-        return;
-      }
-
-      pollingTimerRef.current = setTimeout(() => {
-        pollSearchJob(taskId);
-      }, 1000);
-    } catch (error) {
-      stopPolling();
+    if (data.status === 'completed') {
       setLoading(false);
+      searchTaskIdRef.current = null;
       setSearchTaskId(null);
-      message.error(error.response?.data?.detail || '获取搜索进度失败');
+      setSearchMeta(data.result?.meta || null);
+      setSearchResults(data.result?.results || []);
+      setDetailedResult(data.result?.best_result || null);
+      message.success(`搜索完成，共评估 ${data.result?.meta?.searched_combinations || 0} 组参数`);
+      return;
+    }
+
+    if (data.status === 'failed') {
+      setLoading(false);
+      searchTaskIdRef.current = null;
+      setSearchTaskId(null);
+      message.error(data.error || '搜索失败');
     }
   };
+
+  useEffect(() => {
+    return subscribeBackendEvent('soxl_fear_search', (data) => {
+      if (data.task_id !== searchTaskIdRef.current) return;
+      applySearchJobStatus(data);
+    });
+  }, []);
 
   const handleSearch = async (values) => {
-    stopPolling();
     setLoading(true);
     setSearchMeta(null);
     setSearchResults([]);
@@ -336,23 +320,20 @@ const SoxlFearBacktest = () => {
       const { data } = await request.post('/api/soxl-fear-backtest/search/jobs', payload, {
         timeout: 60 * 1000,
       });
+      searchTaskIdRef.current = data.task_id;
       setSearchTaskId(data.task_id);
       setSearchTotal(data.total_combinations || 0);
       setSearchProgressText(`任务已创建，准备评估 ${data.total_combinations || 0} 组参数`);
-      pollSearchJob(data.task_id);
     } catch (error) {
       setSearchStatus('failed');
       message.error(error.response?.data?.detail || '搜索失败');
       setLoading(false);
+      searchTaskIdRef.current = null;
       setSearchTaskId(null);
     } finally {
     }
   };
   handleSearchRef.current = handleSearch;
-
-  useEffect(() => () => {
-    stopPolling();
-  }, []);
 
   useEffect(() => {
     const autoRunBacktest = location.state?.autoRunBacktest;

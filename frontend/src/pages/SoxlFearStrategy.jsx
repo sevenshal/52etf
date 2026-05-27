@@ -34,6 +34,7 @@ import {
 import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 
 const { Title, Text } = Typography;
 
@@ -96,6 +97,18 @@ const SoxlFearStrategy = () => {
   useEffect(() => {
     fetchInitialData();
   }, []);
+
+  useEffect(() => {
+    return subscribeBackendEvent('soxl_fear_strategy_run', async (data) => {
+      await fetchConfigs();
+      if (selectedConfig?.id === data.config_id) {
+        await fetchConfigDetail(data.config_id);
+        if (activeTab === 'logs') {
+          await fetchLogs(data.config_id);
+        }
+      }
+    });
+  }, [selectedConfig?.id, activeTab]);
 
   const accountMaps = useMemo(() => {
     const ibMap = new Map(ibAccounts.map((account) => [account.id, account]));
@@ -242,16 +255,7 @@ const SoxlFearStrategy = () => {
     setManualLoadingId(record.id);
     try {
       await request.post(`/api/soxl-fear-strategy/configs/${record.id}/manual-check`);
-      message.success('已触发一次后台检查，请稍后刷新日志');
-      setTimeout(async () => {
-        await fetchConfigs();
-        if (selectedConfig?.id === record.id) {
-          await fetchConfigDetail(record.id);
-          if (activeTab === 'logs') {
-            await fetchLogs(record.id);
-          }
-        }
-      }, 3000);
+      message.success('已触发一次后台检查，完成后会自动刷新');
     } catch (error) {
       message.error(error.response?.data?.detail || '手动执行失败');
     } finally {

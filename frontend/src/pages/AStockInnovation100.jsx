@@ -26,6 +26,7 @@ import {
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 
 const { Title, Text } = Typography;
 
@@ -71,13 +72,11 @@ const AStockInnovation100 = () => {
   const [job, setJob] = useState(null);
   const [startDate, setStartDate] = useState(dayjs('2020-01-01'));
   const [selectedRebalanceId, setSelectedRebalanceId] = useState(null);
-  const pollingRef = useRef(null);
+  const jobTaskIdRef = useRef(null);
+  const finishedJobRef = useRef(null);
 
   useEffect(() => {
     fetchDetail();
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
-    };
   }, []);
 
   const fetchDetail = async (rebalanceId = selectedRebalanceId) => {
@@ -97,42 +96,36 @@ const AStockInnovation100 = () => {
     }
   };
 
-  const pollJob = (taskId) => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    pollingRef.current = setInterval(async () => {
-      try {
-        const { data } = await request.get(`/api/a-stock-innovation100/jobs/${taskId}`);
-        setJob(data);
-        if (data.status === 'completed') {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
-          setRebuildLoading(false);
-          message.success('A股创新100回跑完成');
-          await fetchDetail(data.result?.latest_rebalance_id || null);
-        } else if (data.status === 'failed') {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
-          setRebuildLoading(false);
-          message.error(data.error || 'A股创新100回跑失败');
-        }
-      } catch (error) {
-        clearInterval(pollingRef.current);
-        pollingRef.current = null;
+  useEffect(() => {
+    return subscribeBackendEvent('a_stock_innovation100_job', async (data) => {
+      if (data.task_id !== jobTaskIdRef.current) return;
+      setJob(data);
+      if (data.status === 'completed' && finishedJobRef.current !== data.task_id) {
+        finishedJobRef.current = data.task_id;
+        jobTaskIdRef.current = null;
         setRebuildLoading(false);
-        message.error(formatErrorMessage(error, '查询回跑任务失败'));
+        message.success('A股创新100回跑完成');
+        await fetchDetail(data.result?.latest_rebalance_id || null);
+      } else if (data.status === 'failed' && finishedJobRef.current !== data.task_id) {
+        finishedJobRef.current = data.task_id;
+        jobTaskIdRef.current = null;
+        setRebuildLoading(false);
+        message.error(data.error || 'A股创新100回跑失败');
       }
-    }, 2500);
-  };
+    });
+  }, []);
 
   const handleRebuild = async () => {
     setRebuildLoading(true);
     setJob({ status: 'queued', progress: 0, message: '任务已创建，等待执行' });
+    jobTaskIdRef.current = null;
+    finishedJobRef.current = null;
     try {
       const { data } = await request.post('/api/a-stock-innovation100/rebuild', {
         start_date: startDate ? startDate.format('YYYY-MM-DD') : '2020-01-01',
       });
+      jobTaskIdRef.current = data.task_id;
       setJob(data);
-      pollJob(data.task_id);
     } catch (error) {
       setRebuildLoading(false);
       message.error(formatErrorMessage(error, '启动A股创新100回跑失败'));

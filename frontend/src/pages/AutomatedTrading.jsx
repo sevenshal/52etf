@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, Form, Select, InputNumber, Button, Switch, Table, Tabs, message, Tag, Space, Typography } from 'antd';
 import { SettingOutlined, HistoryOutlined } from '@ant-design/icons';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 import dayjs from 'dayjs';
 
 const { Option } = Select;
@@ -19,6 +20,12 @@ const AutomatedTrading = () => {
     useEffect(() => {
         fetchConfig();
         fetchLogs();
+    }, []);
+
+    useEffect(() => {
+        return subscribeBackendEvent('automated_trading_logs', () => {
+            fetchLogs();
+        });
     }, []);
 
     const fetchConfig = async () => {
@@ -66,8 +73,7 @@ const AutomatedTrading = () => {
     const onManualCheck = async () => {
         try {
             await request.post('/api/trading/manual-check');
-            message.info('Manual check triggered. Check logs in a few seconds.');
-            setTimeout(fetchLogs, 3000);
+            message.info('Manual check triggered. Logs will refresh when it finishes.');
         } catch (error) {
             message.error(error.response?.data?.detail || 'Manual check failed');
         }

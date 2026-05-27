@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 import { useAccount } from '../contexts/AccountContext';
 
 const { Title, Text, Link } = Typography;
@@ -564,18 +565,14 @@ const PortfolioCopyTrading = () => {
 
     useEffect(() => {
         if (!snowballBacktestHistoryVisible || !snowballBacktestTarget?.id) return undefined;
-        const hasRunning = snowballBacktestRuns.some(item => item.status === 'RUNNING');
-        if (!hasRunning && selectedSnowballBacktest?.status !== 'RUNNING') return undefined;
-        const timer = setInterval(() => {
-            fetchSnowballBacktestRuns(snowballBacktestTarget, selectedSnowballBacktest?.id);
-        }, 5000);
-        return () => clearInterval(timer);
+        return subscribeBackendEvent('snowball_backtest', (data) => {
+            if (Number(data.config_id) !== Number(snowballBacktestTarget.id)) return;
+            fetchSnowballBacktestRuns(snowballBacktestTarget, selectedSnowballBacktest?.id || data.id);
+        });
     }, [
         snowballBacktestHistoryVisible,
         snowballBacktestTarget,
-        snowballBacktestRuns,
         selectedSnowballBacktest?.id,
-        selectedSnowballBacktest?.status,
     ]);
 
     useEffect(() => {

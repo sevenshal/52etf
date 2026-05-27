@@ -35,6 +35,7 @@ import {
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
 import './FactorLab.css';
 
@@ -2069,28 +2070,10 @@ const FactorLab = ({ initialTab = 'single' }) => {
   }, [selectedLiveConfigId, loadLiveConfigLogs]);
 
   useEffect(() => {
-    const shouldPoll = BACKTEST_SEARCH_RUNNING_STATUSES.includes(backtestSearchJob?.status);
-    if (!shouldPoll) return undefined;
-
-    let disposed = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const { data } = await request.get('/api/factor-lab/backtest-search/status');
-        if (!disposed) {
-          setBacktestSearchJob(data);
-        }
-      } catch (error) {
-        if (!disposed) {
-          message.error(getErrorMessage(error, '刷新批量搜索进度失败'));
-        }
-      }
-    }, 2000);
-
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [backtestSearchJob?.status]);
+    return subscribeBackendEvent('factor_backtest_search', (data) => {
+      setBacktestSearchJob(data);
+    });
+  }, []);
 
   useEffect(() => {
     if (!backtestSearchJob || backtestSearchJob.status === 'idle') return;

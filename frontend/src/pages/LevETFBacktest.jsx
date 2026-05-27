@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Card, Form, Select, InputNumber, Button, DatePicker, Table, Statistic, Row, Col, message, Progress } from 'antd';
 import request from '../utils/request';
+import { subscribeBackendEvent } from '../utils/backendEvents';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 
@@ -12,43 +13,46 @@ const LevETFBacktest = () => {
     const [batchResults, setBatchResults] = useState(null);
     const [detailedResult, setDetailedResult] = useState(null);
 
-    // Async Polling State
+    // Async task state
     const [taskId, setTaskId] = useState(null);
     const [progress, setProgress] = useState(0);
-    const pollingTimer = useRef(null);
+    const taskIdRef = useRef(null);
 
     const [form] = Form.useForm();
 
-    // Clean up timer on unmount
     useEffect(() => {
-        return () => {
-            if (pollingTimer.current) clearInterval(pollingTimer.current);
-        };
+        taskIdRef.current = taskId;
+    }, [taskId]);
+
+    const applyTaskStatus = ({ status, result, progress: jobProgress, error }) => {
+        setProgress(jobProgress || 0);
+        if (status === 'completed') {
+            setBatchResults(result || []);
+            setLoading(false);
+            taskIdRef.current = null;
+            setTaskId(null);
+            message.success(`Backtest completed. Found ${(result || []).length} combinations.`);
+        } else if (status === 'failed') {
+            setLoading(false);
+            taskIdRef.current = null;
+            setTaskId(null);
+            message.error(`Backtest failed: ${error}`);
+        }
+    };
+
+    useEffect(() => {
+        return subscribeBackendEvent('lev_etf_batch_backtest', (data) => {
+            if (data.task_id !== taskIdRef.current) return;
+            applyTaskStatus(data);
+        });
     }, []);
 
-    const pollStatus = async (id) => {
+    const loadExistingTaskStatus = async (id) => {
         try {
             const response = await request.get(`/api/lev-etf-backtest/batch-run/${id}`);
-            const { status, result, progress: jobProgress, error } = response.data;
-
-            setProgress(jobProgress);
-
-            if (status === 'completed') {
-                clearInterval(pollingTimer.current);
-                setBatchResults(result);
-                setLoading(false);
-                setTaskId(null);
-                message.success(`Backtest completed. Found ${result.length} combinations.`);
-            } else if (status === 'failed') {
-                clearInterval(pollingTimer.current);
-                setLoading(false);
-                setTaskId(null);
-                message.error(`Backtest failed: ${error}`);
-            }
-            // If running or pending, continue polling...
-
+            applyTaskStatus(response.data);
         } catch (error) {
-            console.error("Polling error", error);
+            console.error("Failed to load backtest status", error);
         }
     };
 
@@ -75,10 +79,11 @@ const LevETFBacktest = () => {
             const response = await request.post('/api/lev-etf-backtest/batch-run', payload);
             const { task_id, status } = response.data;
 
+            taskIdRef.current = task_id;
             setTaskId(task_id);
-
-            // Start Polling
-            pollingTimer.current = setInterval(() => pollStatus(task_id), 1000);
+            if (status === 'completed' || status === 'failed') {
+                await loadExistingTaskStatus(task_id);
+            }
 
         } catch (error) {
             console.error(error);
