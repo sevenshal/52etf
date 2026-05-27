@@ -91,10 +91,20 @@ def _normalize_enum_list(values) -> List[str]:
 def _is_request_rate_limit_error(error) -> bool:
     return "code=301606" in str(error) or "request rate limit" in str(error).lower()
 
+def _is_history_kline_quota_error(error) -> bool:
+    err = str(error).lower()
+    return "code=301607" in err or "history kline symbol count out of limit" in err
+
+
 @sleep_and_retry
 @limits(calls=LONGPORT_CANDLESTICK_RATE_LIMIT_CALLS, period=LONGPORT_CANDLESTICK_RATE_LIMIT_PERIOD)
 def _limited_candlestick_request(callable_obj, *args, **kwargs):
     return callable_obj(*args, **kwargs)
+
+
+class LongPortKlineQuotaExceeded(RuntimeError):
+    """LongPort 历史K线额度耗尽或超限。"""
+
 
 class LongPortService(QuoteProvider, TradeService):
     """长桥接口服务"""
@@ -555,16 +565,15 @@ class LongPortService(QuoteProvider, TradeService):
                         self._remember_invalid_kline_symbol(symbol, err)
                         logging.warning(f"跳过无效标的 {symbol}: {err}")
                         return []
-                    if "code=301607" in err and request_count > 100:
-                        next_count = max(100, request_count // 2)
-                        if next_count == request_count:
-                            break
-                        logging.warning(f"获取{symbol} K线数量{request_count}超限，降级为{next_count}后重试")
-                        request_count = next_count
-                        continue
+                    if _is_history_kline_quota_error(e):
+                        raise LongPortKlineQuotaExceeded(
+                            f"LongPort历史K线额度耗尽或超限: {symbol}: {err}"
+                        ) from e
                     raise
             return []
         except Exception as e:
+            if isinstance(e, LongPortKlineQuotaExceeded):
+                raise
             logging.error(f"获取{symbol} K线数据失败: {str(e)}")
             return []
 
@@ -597,6 +606,10 @@ class LongPortService(QuoteProvider, TradeService):
                         logging.warning(f"获取{symbol}历史K线触发长桥限频，等待{sleep_seconds}s后重试: {str(e)}")
                         time.sleep(sleep_seconds)
                         continue
+                    if _is_history_kline_quota_error(e):
+                        raise LongPortKlineQuotaExceeded(
+                            f"LongPort历史K线额度耗尽或超限: {symbol}: {str(e)}"
+                        ) from e
                     raise
                 
                 if not resp:
@@ -642,6 +655,8 @@ class LongPortService(QuoteProvider, TradeService):
                 self._remember_invalid_kline_symbol(symbol, err)
                 logging.warning(f"跳过无效标的 {symbol}: {err}")
                 return []
+            if isinstance(e, LongPortKlineQuotaExceeded):
+                raise
             logging.error(f"获取{symbol}历史K线数据失败: {err}")
             return []
 

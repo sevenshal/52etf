@@ -60,25 +60,28 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
     parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
     us_result = sync_us_stock_base_data(start_date=parsed_start_date)
     static_result = us_result.get("static_snapshot") or {}
+    daily_errors = us_result.get("daily_errors") or []
 
     logging.getLogger("ScheduledTaskManager").info(
         (
-            "US stock base data synced: static_symbols=%s static_fetched=%s "
+            "US stock base data synced: status=%s static_symbols=%s static_fetched=%s "
             "daily_symbols=%s us_static_info_fetched=%s daily_saved_rows=%s "
             "daily_adjustment_refreshes=%s daily_errors=%s tables=%s"
         ),
+        us_result.get("status"),
         static_result.get("symbols"),
         static_result.get("fetched"),
         us_result.get("daily_symbols"),
         us_result.get("static_info_fetched"),
         us_result.get("daily_saved_rows"),
         us_result.get("daily_adjustment_refresh_count"),
-        len(us_result.get("daily_errors") or []),
+        len(daily_errors),
         us_result.get("tables"),
     )
 
-    return (
+    result_message = (
         "US stock base data sync "
+        f"status={us_result.get('status')} "
         f"static_symbols={static_result.get('symbols')} "
         f"static_fetched={static_result.get('fetched')} "
         f"daily_symbols={us_result.get('daily_symbols')} "
@@ -86,9 +89,18 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
         f"daily_fetched_symbols={us_result.get('daily_fetched_symbols')} "
         f"daily_saved_rows={us_result.get('daily_saved_rows')} "
         f"daily_adjustment_refreshes={us_result.get('daily_adjustment_refresh_count')} "
-        f"daily_errors={len(us_result.get('daily_errors') or [])} "
+        f"daily_errors={len(daily_errors)} "
         f"tables={us_result.get('tables')}"
     )
+    if daily_errors:
+        preview = _format_error_preview(
+            daily_errors,
+            lambda item: f"{item.get('symbol')}: {item.get('error')}",
+        )
+        raise RuntimeError(
+            f"{result_message} finished with {len(daily_errors)} daily errors: {preview}"
+        )
+    return result_message
 
 
 def _run_us_stock_industry_sync():

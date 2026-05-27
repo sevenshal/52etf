@@ -13,7 +13,7 @@ from sqlalchemy import distinct, or_
 
 from ..core.analytics_database import ANALYTICS_DB_PATH, USStockDaily
 from ..core.database import ETFHolding, Session, StockEVC, StockStaticInfoHistory, StockStaticInfoSnapshot
-from ..core.services.longport import LongPortService
+from ..core.services.longport import LongPortKlineQuotaExceeded, LongPortService
 from ..core.static_info import STATIC_INFO_FIELDS
 from ..core.utils import normalize_us_equity_symbol
 
@@ -837,7 +837,10 @@ class USStockBaseDataSyncService:
                 fetched_symbols += 1
             except Exception as exc:
                 self.logger.warning("Fetch US daily klines failed for %s: %s", symbol, exc)
-                errors.append({"symbol": symbol, "error": str(exc)})
+                error_payload = {"symbol": symbol, "error": str(exc)}
+                if isinstance(exc, LongPortKlineQuotaExceeded):
+                    error_payload["error_type"] = "longport_kline_quota_exceeded"
+                errors.append(error_payload)
                 continue
 
             if index % US_STOCK_DAILY_INSERT_BATCH_SYMBOLS == 0:
@@ -900,7 +903,7 @@ class USStockBaseDataSyncService:
         daily_rows = _count_table_rows(USStockDaily.__tablename__)
         total_seconds = round(time.perf_counter() - started, 3)
         result = {
-            "status": "success",
+            "status": "partial_failed" if daily_result.get("daily_errors") else "success",
             "start_date": (start_date or DEFAULT_START_DATE).isoformat(),
             "end_date": end_value.isoformat(),
             "symbols": len(static_symbols),
