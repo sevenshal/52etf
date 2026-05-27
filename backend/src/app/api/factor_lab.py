@@ -277,6 +277,7 @@ DEFAULT_TIMING_TARGET_OPTIONS = [
 BACKTEST_SEARCH_COMPONENT_FACTOR_CACHE_LIMIT = 8
 BACKTEST_SEARCH_FACTOR_VALUES_CACHE_LIMIT = 8
 BACKTEST_SEARCH_MIN_CPU_CORES = 4
+BACKTEST_SEARCH_LOW_CPU_MAX_CASES_PER_CORE = 4
 BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
 BACKTEST_SEARCH_STATE_ID = 1
 BACKTEST_SEARCH_ACTIVE_JOB: Optional[Dict[str, Any]] = None
@@ -298,14 +299,15 @@ def _effective_cpu_count() -> int:
     return int(os.cpu_count() or 1)
 
 
-def _ensure_backtest_search_cpu_capacity() -> int:
+def _ensure_backtest_search_cpu_capacity(total_cases: int) -> int:
     cpu_count = _effective_cpu_count()
-    if cpu_count < BACKTEST_SEARCH_MIN_CPU_CORES:
+    low_cpu_case_limit = cpu_count * BACKTEST_SEARCH_LOW_CPU_MAX_CASES_PER_CORE
+    if cpu_count < BACKTEST_SEARCH_MIN_CPU_CORES and total_cases > low_cpu_case_limit:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"当前机器可用 CPU 核心数为 {cpu_count}，少于批量搜参要求的 "
-                f"{BACKTEST_SEARCH_MIN_CPU_CORES} 核，已拒绝执行"
+                f"当前机器可用 CPU 核心数为 {cpu_count}，批量搜参组合数为 {total_cases}，"
+                f"超过低 CPU 机器限制的 {low_cpu_case_limit} 个组合，已拒绝执行"
             ),
         )
     return cpu_count
@@ -5307,7 +5309,8 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
 def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, account_id: str) -> Dict[str, Any]:
     global BACKTEST_SEARCH_ACTIVE_JOB, BACKTEST_SEARCH_ACTIVE_THREAD
 
-    available_cpu_cores = _ensure_backtest_search_cpu_capacity()
+    total_cases = _estimate_backtest_search_cases(search_request)
+    available_cpu_cores = _ensure_backtest_search_cpu_capacity(total_cases)
     with BACKTEST_SEARCH_JOBS_LOCK:
         active_job = BACKTEST_SEARCH_ACTIVE_JOB
         active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
@@ -5319,7 +5322,6 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         ):
             raise HTTPException(status_code=409, detail="批量搜索正在运行，请先取消或等待完成")
 
-    total_cases = _estimate_backtest_search_cases(search_request)
     job = {
         "account_id": account_id,
         "status": "queued",
