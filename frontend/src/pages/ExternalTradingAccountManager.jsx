@@ -1287,7 +1287,7 @@ const ExternalTradingAccountManager = () => {
       { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', render: value => Number(value || 0).toLocaleString() },
       { title: '累计交易费', dataIndex: 'cumulative_trade_fee_total', key: 'cumulative_trade_fee_total', width: 170, render: renderTradeFeeSummary },
       { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
-      { title: '持仓数', dataIndex: 'positions', key: 'positions', render: value => (value || []).length },
+      { title: '持仓数', dataIndex: 'position_count', key: 'position_count', render: value => formatNumber(value) },
       { title: '启用', dataIndex: 'enabled', key: 'enabled', render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
       {
         title: '操作',
