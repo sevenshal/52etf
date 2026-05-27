@@ -1,14 +1,7 @@
 import logging
+from ..core.logging_config import configure_logging
 
-# 设置全局日志格式
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(process)d] [%(threadName)s] %(levelname)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+configure_logging()
 
 from contextlib import asynccontextmanager
 import threading
