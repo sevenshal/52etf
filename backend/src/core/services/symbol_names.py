@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Optional, Set
 from sqlalchemy.orm import Session
 
 from ..database import StockStaticInfoSnapshot
+from ..duckdb_utils import connect_duckdb
 from ..utils import normalize_us_equity_symbol
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_FACTOR_INDEX_POOLS
 
@@ -91,7 +92,7 @@ def _load_a_stock_names(normalized_symbols: Iterable[str], name_by_key: Dict[str
     try:
         import duckdb
 
-        connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:
             placeholders = ", ".join(["?"] * len(candidates))
             raw_placeholders = ", ".join(["?"] * len(raw_codes or {"__empty__"}))

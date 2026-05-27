@@ -35,6 +35,8 @@ from ...core.database import (
     get_db,
     get_db_ctx,
 )
+from ...core.duckdb_utils import connect_duckdb
+from ...core.event_stream import publish_event
 from ...core.external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingSubAccount,
@@ -1212,9 +1214,9 @@ def _import_duckdb():
 
 
 def _connect_duckdb():
-    duckdb = _import_duckdb()
+    _import_duckdb()
     try:
-        return duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+        return connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -5038,6 +5040,18 @@ def _serialize_backtest_search_status_from_job(job: Optional[Dict[str, Any]]) ->
     }
 
 
+def _publish_backtest_search_job(job: Optional[Dict[str, Any]]) -> None:
+    if not job:
+        return
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        snapshot = dict(job)
+    publish_event(
+        snapshot.get("account_id"),
+        "factor_backtest_search",
+        _serialize_backtest_search_status_from_job(snapshot),
+    )
+
+
 def _serialize_backtest_search_status(db: ORMSession) -> Dict[str, Any]:
     with BACKTEST_SEARCH_JOBS_LOCK:
         active_job = BACKTEST_SEARCH_ACTIVE_JOB
@@ -5213,6 +5227,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
             job["current_case"] = "准备基础数据和基础因子"
             job["updated_at"] = datetime.now()
         _persist_active_backtest_search_job(db, job)
+        _publish_backtest_search_job(job)
 
         base_resolved_legs = _resolve_factor_legs(search_request.request.legs)
         prepared_data = _prepare_factor_backtest_base_data(search_request.request, db, base_resolved_legs)
@@ -5231,6 +5246,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                     cancel_snapshot = None
             if cancel_snapshot is not None:
                 _persist_backtest_search_job(db, cancel_snapshot)
+                _publish_backtest_search_job(cancel_snapshot)
                 return
 
             with BACKTEST_SEARCH_JOBS_LOCK:
@@ -5238,6 +5254,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                 job["updated_at"] = datetime.now()
                 job["current_case"] = _format_backtest_search_params(case_request, legs)
             _persist_active_backtest_search_job(db, job)
+            _publish_backtest_search_job(job)
 
             try:
                 result = _run_factor_backtest(case_request, db, prepared_data=prepared_data)
@@ -5255,6 +5272,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                     job["failed_cases"] += 1
                     job["updated_at"] = datetime.now()
             _persist_active_backtest_search_job(db, job)
+            _publish_backtest_search_job(job)
 
         with BACKTEST_SEARCH_JOBS_LOCK:
             if job.get("status") != "cancelled":
@@ -5264,6 +5282,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                 job["current_case"] = None
                 job["cancel_requested"] = False
         _persist_active_backtest_search_job(db, job)
+        _publish_backtest_search_job(job)
     except Exception as exc:
         logger.exception("Factor backtest search job failed")
         with BACKTEST_SEARCH_JOBS_LOCK:
@@ -5275,6 +5294,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
             job["cancel_requested"] = False
         try:
             _persist_active_backtest_search_job(db, job)
+            _publish_backtest_search_job(job)
         except Exception:
             logger.exception("Persist factor backtest search failure state failed")
     finally:
@@ -5347,6 +5367,7 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         BACKTEST_SEARCH_ACTIVE_JOB = job
         BACKTEST_SEARCH_ACTIVE_THREAD = thread
     thread.start()
+    _publish_backtest_search_job(job)
     return response
 
 

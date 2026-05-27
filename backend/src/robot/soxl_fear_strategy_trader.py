@@ -21,6 +21,7 @@ from ..core.database import (
     SoxlFearStrategyState,
     get_db_ctx,
 )
+from ..core.event_stream import publish_event
 from ..core.services.ib_service import IBKRService
 from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
@@ -769,6 +770,8 @@ class SoxlFearStrategyTrader:
                 f"SOXL情绪量能自动交易报错: {masked_account_id}#{config_id}",
                 f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
             )
+        finally:
+            publish_event(config.account_id, "soxl_fear_strategy_run", {"config_id": config_id})
 
     async def run_config_id_once(
         self,

@@ -16,6 +16,7 @@ from ...core.database import (
     get_db,
     get_db_ctx,
 )
+from ...core.event_stream import publish_event
 from ...robot.a_stock_innovation100 import (
     DEFAULT_START_DATE,
     INDEX_CODE,
@@ -41,10 +42,15 @@ class AStockInnovation100RebuildRequest(BaseModel):
 
 
 def _update_job(task_id: str, **kwargs):
+    event_payload = None
+    account_id = None
     with JOBS_LOCK:
         job = JOBS.setdefault(task_id, {})
         job.update(kwargs)
         job["updated_at"] = datetime.now().isoformat()
+        account_id = job.get("account_id")
+        event_payload = {"task_id": task_id, **job}
+    publish_event(account_id, "a_stock_innovation100_job", event_payload)
 
 
 def _get_job(task_id: str) -> Dict:

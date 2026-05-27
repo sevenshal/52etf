@@ -22,6 +22,7 @@ from ...core.database import (
     SnowballBacktestRun,
     SnowballBacktestCurvePoint,
 )
+from ...core.event_stream import publish_event
 from ...core.external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingLedgerPosition,
@@ -1107,6 +1108,14 @@ def _snowball_backtest_run_response(run: SnowballBacktestRun) -> SnowballBacktes
     )
 
 
+def _publish_snowball_backtest_run(run: SnowballBacktestRun) -> None:
+    publish_event(
+        run.account_id,
+        "snowball_backtest",
+        _snowball_backtest_run_response(run).dict(),
+    )
+
+
 def _mark_snowball_backtest_failed(run_id: int, message: str) -> None:
     with get_db_ctx() as db:
         run = db.query(SnowballBacktestRun).filter(SnowballBacktestRun.id == run_id).first()
@@ -1125,6 +1134,7 @@ def _mark_snowball_backtest_failed(run_id: int, message: str) -> None:
             message=run.error_message[:1000],
             account_id=run.account_id,
         ))
+        _publish_snowball_backtest_run(run)
 
 
 def _store_snowball_backtest_result(run_id: int, result: Dict[str, Any]) -> None:
@@ -1193,6 +1203,7 @@ def _store_snowball_backtest_result(run_id: int, result: Dict[str, Any]) -> None
             message=message,
             account_id=run.account_id,
         ))
+        _publish_snowball_backtest_run(run)
 
 
 def _run_snowball_backtest_task(run_id: int) -> None:
@@ -1217,6 +1228,7 @@ def _run_snowball_backtest_task(run_id: int) -> None:
             run.updated_at = now
             cube_symbol = config.combination_id
             slippage_pct = safe_float(run.slippage_pct)
+            _publish_snowball_backtest_run(run)
 
         result = run_snowball_cube_backtest(
             cube_symbol=cube_symbol,
@@ -1454,6 +1466,7 @@ async def start_config_backtest(
     db.add(run)
     db.commit()
     db.refresh(run)
+    _publish_snowball_backtest_run(run)
     background_tasks.add_task(_run_snowball_backtest_task, run.id)
     return _snowball_backtest_run_response(run)
 

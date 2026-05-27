@@ -21,6 +21,7 @@ from ..database import (
     ETFHolding,
     USStockIndustrySnapshot,
 )
+from ..duckdb_utils import connect_duckdb
 from .factor_engine import (
     DEFAULT_MOMENTUM_WEIGHTS,
     FACTOR_DIRECTION_OPTIONS,
@@ -407,9 +408,9 @@ def _import_duckdb():
 
 
 def _connect_duckdb():
-    duckdb = _import_duckdb()
+    _import_duckdb()
     try:
-        return duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+        return connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     except Exception as exc:
         raise RuntimeError(f"DuckDB分析库当前不可读，可能正在同步写入或被其他进程占用: {exc}") from exc
 

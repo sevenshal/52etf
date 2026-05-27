@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 
 from ..core.database import ScheduledTaskConfig, SnowballCopyConfig, get_db_ctx
+from ..core.event_stream import publish_event
 from ..core.utils import send_alert_email
 
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -1072,6 +1073,15 @@ class ScheduledTaskManager:
             is_queued = task_key in self._queued_tasks
         return self._serialize_task(config, job, is_running, is_queued)
 
+    def _publish_tasks_event(self, task_key: Optional[str] = None):
+        try:
+            publish_event(None, "scheduled_tasks", {
+                "task_key": task_key,
+                "tasks": self.list_tasks(),
+            })
+        except Exception:
+            self.logger.exception("Failed to publish scheduled task event")
+
     def is_task_enabled(self, task_key: str) -> bool:
         self.bootstrap()
         self._require_task(task_key)
@@ -1161,7 +1171,9 @@ class ScheduledTaskManager:
             config.updated_at = datetime.now()
 
         self.reload_jobs()
-        return self.get_task(task_key)
+        task_snapshot = self.get_task(task_key)
+        self._publish_tasks_event(task_key)
+        return task_snapshot
 
     def trigger_task(
         self,
@@ -1222,6 +1234,8 @@ class ScheduledTaskManager:
                 queue_size,
             )
 
+        self._publish_tasks_event(task_key)
+
         if done_event:
             done_event.wait()
 
@@ -1259,6 +1273,8 @@ class ScheduledTaskManager:
                 queued_run = self._task_queue.popleft()
                 self._queued_tasks.discard(queued_run.task.task_key)
                 self._running_tasks.add(queued_run.task.task_key)
+
+            self._publish_tasks_event(queued_run.task.task_key)
 
             try:
                 self._execute_task(
@@ -1334,6 +1350,7 @@ class ScheduledTaskManager:
                 status,
                 duration_seconds,
             )
+            self._publish_tasks_event(task.task_key)
 
     def _serialize_task(
         self,

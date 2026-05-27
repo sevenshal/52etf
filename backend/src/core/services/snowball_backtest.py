@@ -12,7 +12,7 @@ import duckdb
 import pandas as pd
 import requests
 
-from ..analytics_database import ANALYTICS_DB_PATH
+from ..duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 
 
 SH_TZ = ZoneInfo("Asia/Shanghai")
@@ -684,7 +684,7 @@ def build_benchmark_dataframe(nav_df: pd.DataFrame, start_date: date, end_date: 
         return nav_dates
 
     try:
-        connection = duckdb.connect(ANALYTICS_DB_PATH, read_only=True)
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:
             rows = connection.execute(
                 """

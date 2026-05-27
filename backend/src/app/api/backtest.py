@@ -5,6 +5,7 @@ from datetime import datetime
 import asyncio
 import multiprocessing
 from ...robot.etf_backtest import ETFBacktest
+from ...core.event_stream import publish_event
 from .account import valid_account
 import logging
 from logging.handlers import RotatingFileHandler
@@ -28,6 +29,13 @@ class BacktestSession:
             "start_time": None,
             "end_time": None
         }
+
+
+def _publish_backtest_status(session_id: str):
+    session = backtest_sessions.get(session_id)
+    if not session:
+        return
+    publish_event(session_id, "fear_backtest_status", dict(session.status))
 
 class ETFParams(BaseModel):
     max_position_ratio: float
@@ -123,9 +131,13 @@ async def monitor_process(session_id: str, result_queue: multiprocessing.Queue, 
     try:
         while session.process.is_alive():
             # 检查进度更新
+            has_progress_update = False
             while not progress_queue.empty():
                 progress = progress_queue.get()
                 session.status["progress"] = progress
+                has_progress_update = True
+            if has_progress_update:
+                _publish_backtest_status(session_id)
             await asyncio.sleep(2)  # 缩短检查间隔以更及时更新进度
             
         # 进程结束后获取结果
@@ -139,6 +151,7 @@ async def monitor_process(session_id: str, result_queue: multiprocessing.Queue, 
         session.status["is_running"] = False
         session.status["end_time"] = datetime.now()
         session.process = None
+        _publish_backtest_status(session_id)
 
 def run_verify_process(session_id: str, params_dict: dict, result_queue: multiprocessing.Queue, progress_queue: multiprocessing.Queue):
     """在单独的进程中运行验证"""
@@ -222,6 +235,7 @@ async def start_backtest(
         "start_time": datetime.now(),
         "end_time": None
     }
+    _publish_backtest_status(session_id)
     
     # 创建结果队列和进度队列
     result_queue = multiprocessing.Queue()
@@ -258,6 +272,7 @@ async def cancel_backtest(account_id: str = Depends(valid_account)):
         session.status["error"] = "任务已取消"
         session.status["end_time"] = datetime.now()
         session.process = None
+        _publish_backtest_status(session_id)
     
     return {"message": "回测任务已取消"}
 
@@ -288,6 +303,7 @@ async def verify_backtest_params(
         "start_time": datetime.now(),
         "end_time": None
     }
+    _publish_backtest_status(session_id)
     
     # 创建结果队列和进度队列
     result_queue = multiprocessing.Queue()

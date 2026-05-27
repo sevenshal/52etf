@@ -7,6 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 from ...core.database import get_db, AutomatedTradingConfig, AutomatedTradeLog
+from ...core.event_stream import publish_event
 from .account import valid_account
 from ...core.services.trading_strategy import execute_trading_strategy
 
@@ -103,6 +104,7 @@ async def manual_strategy_check(
         except Exception as e:
             logging.getLogger(__name__).error(f"Manual strategy execution failed: {e}")
         finally:
+            publish_event(acc_id, "automated_trading_logs", {})
             loop.close()
     try:
         t = threading.Thread(target=task_runner, args=(account_id,), daemon=True)

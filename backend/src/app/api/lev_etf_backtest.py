@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import uuid
 import hashlib
 import json
+from ...core.event_stream import publish_event
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from .account import valid_account
@@ -75,6 +76,22 @@ def get_params_hash(params: BatchBacktestParams) -> str:
     # Create a deterministic hash of the parameters to deduplicate jobs
     params_str = json.dumps(params.dict() if hasattr(params, 'dict') else params.model_dump(), sort_keys=True)
     return hashlib.md5(params_str.encode()).hexdigest()
+
+
+def _serialize_batch_job(task_id: str) -> Dict:
+    job = JOBS.get(task_id) or {}
+    return {
+        "task_id": task_id,
+        "status": job.get("status"),
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "progress": job.get("progress", 0),
+    }
+
+
+def _publish_batch_job(task_id: str):
+    job = JOBS.get(task_id) or {}
+    publish_event(job.get("account_id"), "lev_etf_batch_backtest", _serialize_batch_job(task_id))
 
 def calculate_strategy_metrics(df: pd.DataFrame, short_window: int, long_window: int, initial_capital: float, start_date: datetime.date, detailed: bool = False, alt_prices: Dict[datetime.date, float] = None) -> Dict:
     # Copy DF to avoid modifying original if reused
@@ -328,6 +345,7 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
         # Update status to running
         JOBS[task_id]["status"] = "running"
         JOBS[task_id]["progress"] = 0
+        _publish_batch_job(task_id)
 
         # Initialize Services
         trade_service = LongPortService.get_instance()
@@ -383,6 +401,7 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
                     total_combinations += 1
         
         processed_count = 0
+        last_progress = 0
         
         # Iterate short/long windows
         for short in range(params.short_window_min, params.short_window_max + 1):
@@ -413,17 +432,23 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
                 
                 processed_count += 1
                 if total_combinations > 0:
-                     JOBS[task_id]["progress"] = int((processed_count / total_combinations) * 100)
+                    progress = int((processed_count / total_combinations) * 100)
+                    JOBS[task_id]["progress"] = progress
+                    if progress != last_progress:
+                        last_progress = progress
+                        _publish_batch_job(task_id)
 
         JOBS[task_id]["result"] = results
         JOBS[task_id]["status"] = "completed"
         JOBS[task_id]["progress"] = 100
+        _publish_batch_job(task_id)
         print(f"Task {task_id} completed successfully.")
 
     except Exception as e:
         print(f"Task {task_id} failed: {e}")
         JOBS[task_id]["status"] = "failed"
         JOBS[task_id]["error"] = str(e)
+        _publish_batch_job(task_id)
 
 
 @router.post("/batch-run", response_model=AsyncJobResponse)
@@ -445,12 +470,15 @@ async def start_batch_backtest(
     
     # Init Job
     JOBS[task_id] = {
+        "task_id": task_id,
+        "account_id": account_id,
         "status": "pending",
         "result": None,
         "error": None,
         "timestamp": datetime.now(),
         "progress": 0
     }
+    _publish_batch_job(task_id)
     
     # Start Background Task
     background_tasks.add_task(background_batch_backtest, task_id, params, account_id)
@@ -462,13 +490,7 @@ async def get_batch_backtest_status(task_id: str):
     if task_id not in JOBS:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    job = JOBS[task_id]
-    return {
-        "status": job["status"],
-        "result": job["result"],
-        "error": job["error"],
-        "progress": job.get("progress", 0)
-    }
+    return _serialize_batch_job(task_id)
 
 @router.post("/run", response_model=BacktestResult)
 async def run_lev_etf_backtest(

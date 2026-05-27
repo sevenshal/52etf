@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError, validator
 
 from ...core.database import ETFFearGreedCloneHistory, Session
+from ...core.event_stream import publish_event
 from ...core.services.factor_backtest_engine import load_price_frame
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
@@ -1555,6 +1556,16 @@ def _cleanup_finished_jobs(max_age_hours: int = 12):
             SEARCH_JOBS.pop(task_id, None)
 
 
+def _publish_search_job(task_id: str):
+    with SEARCH_JOBS_LOCK:
+        job = SEARCH_JOBS.get(task_id)
+        if not job:
+            return
+        account_id = job.get("account_id")
+        payload = SOXLFearSearchJobStatus(**job).dict()
+    publish_event(account_id, "soxl_fear_search", payload)
+
+
 def _update_search_job(task_id: str, **updates):
     with SEARCH_JOBS_LOCK:
         job = SEARCH_JOBS.get(task_id)
@@ -1562,6 +1573,7 @@ def _update_search_job(task_id: str, **updates):
             return
         job.update(updates)
         job["updated_at"] = datetime.now().timestamp()
+    _publish_search_job(task_id)
 
 
 def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
@@ -1753,6 +1765,7 @@ def create_soxl_fear_search_job(
         with SEARCH_JOBS_LOCK:
             SEARCH_JOBS[task_id] = {
                 "task_id": task_id,
+                "account_id": account_id,
                 "status": "pending",
                 "progress": 0,
                 "processed_combinations": 0,
@@ -1764,6 +1777,7 @@ def create_soxl_fear_search_job(
                 "updated_at": datetime.now().timestamp(),
             }
 
+        _publish_search_job(task_id)
         SEARCH_JOB_EXECUTOR.submit(_run_search_job, task_id, payload)
         return SOXLFearSearchJobCreated(
             task_id=task_id,

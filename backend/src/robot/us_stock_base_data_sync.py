@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 from sqlalchemy import distinct, or_
 
-from ..core.analytics_database import ANALYTICS_DB_PATH, USStockDaily
+from ..core.analytics_database import ANALYTICS_DB_PATH, USStockDaily, connect_duckdb
 from ..core.database import ETFHolding, Session, StockEVC, StockStaticInfoHistory, StockStaticInfoSnapshot
 from ..core.services.longport import LongPortKlineQuotaExceeded, LongPortService
 from ..core.static_info import STATIC_INFO_FIELDS
@@ -200,7 +200,7 @@ def _insert_or_replace_frame(
 def _daily_date_bounds() -> Dict[str, Tuple[date, date]]:
     import duckdb  # type: ignore
 
-    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
         rows = connection.execute(
             """
@@ -224,7 +224,7 @@ def _daily_date_bounds() -> Dict[str, Tuple[date, date]]:
 def _existing_daily_prices(symbol: str, start_date: date, end_date: date) -> Dict[date, Dict]:
     import duckdb  # type: ignore
 
-    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
         rows = connection.execute(
             """
@@ -256,7 +256,7 @@ def _existing_daily_prices(symbol: str, start_date: date, end_date: date) -> Dic
 def _count_table_rows(table_name: str) -> int:
     import duckdb  # type: ignore
 
-    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=True)
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
         row = connection.execute(
             f"SELECT COUNT(*) FROM {_quote_duckdb_identifier(table_name)}"
