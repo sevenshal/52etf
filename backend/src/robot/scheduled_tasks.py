@@ -550,7 +550,7 @@ def _run_xueqiu_top_holdings_rebalance():
         )
         return result
     if not _is_china_trading_day(today_shanghai):
-        return f"跳过雪球Top1000综合持仓自动调仓: {today_shanghai} 不是A股交易日"
+        return f"跳过雪球Top1000活跃90天综合持仓自动调仓: {today_shanghai} 不是A股交易日"
 
     from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_rebalance_for_robot
 
@@ -727,8 +727,8 @@ class ScheduledTaskManager:
             ),
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
-                name="雪球Top1000综合持仓自动调仓",
-                description="每日14:40执行；A股交易日按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合；周六只刷新雪球年榜Top1000缓存。",
+                name="雪球Top1000活跃90天综合持仓自动调仓",
+                description="每日14:40执行；A股交易日先筛选最近90天有调仓的年榜Top1000组合，再按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合；周六只刷新雪球年榜Top1000缓存。",
                 default_time="14:40",
                 default_enabled=True,
                 sort_order=25,

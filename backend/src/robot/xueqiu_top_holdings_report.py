@@ -50,6 +50,8 @@ REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
+ACTIVE_REBALANCE_LOOKBACK_DAYS = 90
+ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
 
 
 logger = logging.getLogger("xueqiu_top_holdings_report")
@@ -77,6 +79,18 @@ class CubeFetchResult:
     error: Optional[str] = None
 
 
+@dataclass
+class CubeCurrentResult:
+    cube: CubeInfo
+    holdings: List[Dict[str, Any]]
+    latest_rebalance_at: Optional[datetime] = None
+    latest_rebalance_id: Optional[int] = None
+    latest_rebalance_status: str = ""
+    holdings_source: str = ""
+    active: bool = False
+    error: Optional[str] = None
+
+
 def safe_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -95,6 +109,17 @@ def safe_int(value: Any) -> Optional[int]:
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def xueqiu_timestamp_to_datetime(value: Any) -> Optional[datetime]:
+    number = safe_float(value)
+    if number is None:
+        return None
+    seconds = number / 1000.0 if number > 10_000_000_000 else number
+    try:
+        return datetime.fromtimestamp(seconds, tz=CHINA_TZ)
+    except (OSError, OverflowError, ValueError):
         return None
 
 
@@ -370,58 +395,181 @@ def is_china_trading_day(check_date: date) -> bool:
     return True
 
 
-async def fetch_cube_holdings(
+def extract_current_rebalance_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if "last_rb" in payload or "last_success_rb" in payload:
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict) and ("last_rb" in data or "last_success_rb" in data):
+        return data
+    return payload
+
+
+def select_current_holdings(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    last_success_rb = payload.get("last_success_rb")
+    last_rb = payload.get("last_rb")
+    if isinstance(last_success_rb, dict):
+        holdings = last_success_rb.get("holdings")
+        if isinstance(holdings, list):
+            return holdings, "last_success_rb"
+    if isinstance(last_rb, dict):
+        holdings = last_rb.get("holdings")
+        if isinstance(holdings, list):
+            return holdings, "last_rb"
+    return [], ""
+
+
+async def fetch_cube_current(
     client: httpx.AsyncClient,
     cube: CubeInfo,
     *,
+    active_since: datetime,
     semaphore: asyncio.Semaphore,
     retries: int,
-) -> CubeFetchResult:
-    url = f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json"
+) -> CubeCurrentResult:
+    url = f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/current.json"
     last_error: Optional[BaseException] = None
     async with semaphore:
         for attempt in range(1, retries + 1):
             try:
-                response = await client.get(url, params={"symbol": cube.symbol})
-                response.raise_for_status()
+                response = await client.get(url, params={"cube_symbol": cube.symbol})
+                if response.status_code >= 400:
+                    error_code = ""
+                    try:
+                        error_payload = response.json()
+                        error_code = str(error_payload.get("error_code") or "")
+                    except ValueError:
+                        pass
+                    error = RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+                    setattr(error, "xueqiu_error_code", error_code)
+                    raise error
                 payload = response.json()
-                if payload.get("result_code") == 0 and payload.get("success"):
-                    holdings = payload.get("data") or []
-                    if not isinstance(holdings, list):
-                        raise ValueError(f"Unexpected holdings payload: {payload}")
-                    return CubeFetchResult(cube=cube, holdings=holdings)
-                raise ValueError(payload.get("message") or f"Xueqiu API error: {payload}")
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Unexpected current payload for {cube.symbol}: {payload}")
+                payload = extract_current_rebalance_payload(payload)
+                last_rb = payload.get("last_rb")
+                if not isinstance(last_rb, dict):
+                    last_rb = {}
+                latest_at = xueqiu_timestamp_to_datetime(last_rb.get("created_at"))
+                latest_id = safe_int(last_rb.get("id"))
+                latest_status = str(last_rb.get("status") or "")
+                holdings, holdings_source = select_current_holdings(payload)
+                return CubeCurrentResult(
+                    cube=cube,
+                    holdings=holdings,
+                    latest_rebalance_at=latest_at,
+                    latest_rebalance_id=latest_id,
+                    latest_rebalance_status=latest_status,
+                    holdings_source=holdings_source,
+                    active=bool(latest_at and latest_at >= active_since),
+                )
             except BaseException as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt < retries:
-                    await asyncio.sleep(min(6.0, 0.8 * attempt))
-        return CubeFetchResult(cube=cube, holdings=[], error=repr(last_error))
+                    retry_delay = min(10.0, 0.8 * attempt)
+                    if getattr(exc, "xueqiu_error_code", "") in {"10026", "400016"}:
+                        retry_delay = min(45.0, 5.0 * attempt)
+                    await asyncio.sleep(retry_delay)
+        return CubeCurrentResult(cube=cube, holdings=[], error=repr(last_error))
 
 
-async def fetch_all_holdings(
+async def fetch_all_cube_current(
     cubes: List[CubeInfo],
     *,
     cookie: str,
     workers: int,
     timeout: float,
     retries: int,
-) -> List[CubeFetchResult]:
-    headers = build_headers(cookie)
+    active_since: datetime,
+) -> List[CubeCurrentResult]:
+    headers = build_headers(cookie, referer=XUEQIU_WEB_BASE_URL)
     timeout_config = httpx.Timeout(timeout)
-    limits = httpx.Limits(max_connections=max(workers, 1), max_keepalive_connections=max(workers, 1))
-    semaphore = asyncio.Semaphore(max(workers, 1))
+    current_workers = max(1, workers)
+    limits = httpx.Limits(max_connections=current_workers, max_keepalive_connections=current_workers)
+    semaphore = asyncio.Semaphore(current_workers)
     async with httpx.AsyncClient(headers=headers, timeout=timeout_config, limits=limits) as client:
         tasks = [
-            fetch_cube_holdings(client, cube, semaphore=semaphore, retries=retries)
+            fetch_cube_current(
+                client,
+                cube,
+                active_since=active_since,
+                semaphore=semaphore,
+                retries=retries,
+            )
             for cube in cubes
         ]
-        results: List[CubeFetchResult] = []
+        results: List[CubeCurrentResult] = []
         for index, task in enumerate(asyncio.as_completed(tasks), start=1):
             result = await task
             results.append(result)
             if index % 100 == 0:
-                logger.info("Fetched holdings for %s/%s cubes", index, len(cubes))
+                logger.info("Fetched current snapshots for %s/%s cubes", index, len(cubes))
         return results
+
+
+def build_active_filter_summary(
+    *,
+    source_cubes: List[CubeInfo],
+    current_results: List[CubeCurrentResult],
+    active_since: datetime,
+    lookback_days: int,
+) -> Dict[str, Any]:
+    active_results = [result for result in current_results if result.active and not result.error]
+    failed_results = [result for result in current_results if result.error]
+    inactive_results = [result for result in current_results if not result.active and not result.error]
+    fallback_results = [result for result in current_results if result.holdings_source == "last_rb"]
+    latest_times = [
+        result.latest_rebalance_at
+        for result in current_results
+        if result.latest_rebalance_at is not None
+    ]
+    active_latest_times = [
+        result.latest_rebalance_at
+        for result in active_results
+        if result.latest_rebalance_at is not None
+    ]
+    return {
+        "enabled": True,
+        "lookback_days": lookback_days,
+        "active_since": active_since.isoformat(),
+        "source_cube_count": len(source_cubes),
+        "active_cube_count": len(active_results),
+        "inactive_cube_count": len(inactive_results),
+        "activity_failed_count": len(failed_results),
+        "current_snapshot_failed_count": len(failed_results),
+        "holdings_fallback_count": len(fallback_results),
+        "latest_rebalance_at_max": max(latest_times).isoformat() if latest_times else None,
+        "latest_rebalance_at_min_active": min(active_latest_times).isoformat() if active_latest_times else None,
+        "failed_examples": [
+            {
+                "symbol": result.cube.symbol,
+                "cube_name": result.cube.cube_name,
+                "error": result.error,
+            }
+            for result in failed_results[:10]
+        ],
+    }
+
+
+async def fetch_target_cube_current_payload(
+    *,
+    cookie: str,
+    target_cube_symbol: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    headers = build_headers(
+        cookie,
+        referer=f"{XUEQIU_WEB_BASE_URL}/P/{target_cube_symbol}",
+    )
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
+        response = await client.get(
+            f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/current.json",
+            params={"cube_symbol": target_cube_symbol},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected target cube current payload for {target_cube_symbol}: {payload}")
+    return extract_current_rebalance_payload(payload)
 
 
 async def fetch_target_cube_holdings(
@@ -430,21 +578,14 @@ async def fetch_target_cube_holdings(
     target_cube_symbol: str,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> List[Dict[str, Any]]:
-    headers = build_headers(
-        cookie,
-        referer=f"{XUEQIU_WEB_BASE_URL}/P/{target_cube_symbol}",
+    payload = await fetch_target_cube_current_payload(
+        cookie=cookie,
+        target_cube_symbol=target_cube_symbol,
+        timeout=timeout,
     )
-    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
-        response = await client.get(
-            f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json",
-            params={"symbol": target_cube_symbol},
-        )
-        response.raise_for_status()
-        payload = response.json()
-    if payload.get("result_code") == 0 and payload.get("success"):
-        holdings = payload.get("data") or []
-        if isinstance(holdings, list):
-            return holdings
+    holdings, source = select_current_holdings(payload)
+    if source:
+        return holdings
     raise RuntimeError(f"Unexpected target cube holdings payload for {target_cube_symbol}: {payload}")
 
 
@@ -464,7 +605,11 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
         success_count += 1
         seen_symbols: Set[str] = set()
         for holding in result.holdings:
-            symbol = normalize_xueqiu_symbol(holding.get("symbol"))
+            symbol = normalize_xueqiu_symbol(
+                holding.get("symbol")
+                or holding.get("stock_symbol")
+                or holding.get("stockSymbol")
+            )
             weight = get_holding_weight(holding)
             if not symbol or weight is None or weight <= 0:
                 continue
@@ -535,6 +680,19 @@ def fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if number is None:
         return "-"
     return f"{number:.{digits}f}{suffix}"
+
+
+def fmt_datetime_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        dt_value = value
+    elif isinstance(value, str) and value:
+        try:
+            dt_value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    else:
+        return "-"
+    return dt_value.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def add_top_normalized_weights(ranking: List[Dict[str, Any]], top_n: int) -> List[Dict[str, Any]]:
@@ -902,20 +1060,14 @@ async def fetch_latest_target_rebalance(
     target_cube_symbol: str,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> Optional[Dict[str, Any]]:
-    headers = build_headers(
-        cookie,
-        referer=f"{XUEQIU_WEB_BASE_URL}/P/{target_cube_symbol}",
-    )
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
-            response = await client.get(
-                f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/history.json",
-                params={"cube_symbol": target_cube_symbol, "count": 1, "page": 1},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        events = payload.get("list") or []
-        return events[0] if events else None
+        payload = await fetch_target_cube_current_payload(
+            cookie=cookie,
+            target_cube_symbol=target_cube_symbol,
+            timeout=timeout,
+        )
+        event = payload.get("last_rb")
+        return event if isinstance(event, dict) else None
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load latest target rebalance for %s: %s", target_cube_symbol, exc)
         return None
@@ -980,7 +1132,7 @@ async def build_rebalance_payload(
         "target_cube_symbol": target_cube_symbol,
         "cube_id": target_cube_id,
         "cash": cash_pct,
-        "comment": f"自动按雪球年榜Top10等权缓冲策略调仓 {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M')}",
+        "comment": "自动按雪球年榜Top10等权缓冲策略调仓",
         "market": "cn",
         "holdings": holdings,
         "top_items": rebalance_items,
@@ -1089,6 +1241,7 @@ def build_report(
     rebalance_payload: Optional[Dict[str, Any]] = None,
     rebalance_response: Optional[Dict[str, Any]] = None,
     strategy_plan: Optional[Dict[str, Any]] = None,
+    active_filter_summary: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
@@ -1102,21 +1255,47 @@ def build_report(
     failed_results = aggregate["failed_results"]
     success_count = aggregate["success_count"]
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
+    filter_label = (
+        f"活跃{active_filter_summary.get('lookback_days')}天"
+        if active_filter_summary
+        else ""
+    )
     lines = [
-        f"雪球年榜1000组合综合持仓权重 Top{top_n}",
+        f"雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}",
         "",
         f"统计时间: {run_at.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"年榜缓存时间: {rank_cache_fetched_at.strftime('%Y-%m-%d %H:%M:%S') if rank_cache_fetched_at else '-'}",
         f"年榜本次刷新: {'是' if rank_cache_refreshed else '否'}",
         f"组合总数: {len(cubes)}",
-        f"拉取成功: {success_count}",
-        f"拉取失败: {len(failed_results)}",
-        f"覆盖股票数: {len(ranking)}",
-        f"非现金持仓合计权重: {fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix='%')}",
-        "",
-        "统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。",
-        f"调仓策略: {strategy_plan.get('strategy_name') if strategy_plan else f'选取综合权重最高的 Top{top_n} 后归一化'}。",
     ]
+    if active_filter_summary:
+        lines.extend(
+            [
+                f"活跃筛选: 最近 {active_filter_summary.get('lookback_days')} 天有调仓",
+                f"活跃截止时间: {fmt_datetime_value(active_filter_summary.get('active_since'))}",
+                f"活跃组合: {active_filter_summary.get('active_cube_count')}",
+                f"非活跃组合: {active_filter_summary.get('inactive_cube_count')}",
+                f"活跃检查失败: {active_filter_summary.get('activity_failed_count')}",
+                f"持仓回退到last_rb: {active_filter_summary.get('holdings_fallback_count')}",
+            ]
+        )
+    scope_text = (
+        f"先筛选最近 {active_filter_summary.get('lookback_days')} 天有调仓的组合；"
+        "再把成功拉取的活跃组合等权合成一个组合"
+        if active_filter_summary
+        else "把成功拉取的组合等权合成一个组合"
+    )
+    lines.extend(
+        [
+            f"拉取成功: {success_count}",
+            f"拉取失败: {len(failed_results)}",
+            f"覆盖股票数: {len(ranking)}",
+            f"非现金持仓合计权重: {fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix='%')}",
+            "",
+            f"统计口径: {scope_text}；个股综合权重 = 该股票在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。",
+            f"调仓策略: {strategy_plan.get('strategy_name') if strategy_plan else f'选取综合权重最高的 Top{top_n} 后归一化'}。",
+        ]
+    )
     if strategy_plan:
         plan_summary = strategy_plan.get("summary") or {}
         lines.extend(
@@ -1211,6 +1390,7 @@ def build_report_html(
     rebalance_payload: Optional[Dict[str, Any]] = None,
     rebalance_response: Optional[Dict[str, Any]] = None,
     strategy_plan: Optional[Dict[str, Any]] = None,
+    active_filter_summary: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
@@ -1224,6 +1404,17 @@ def build_report_html(
     failed_results = aggregate["failed_results"]
     success_count = aggregate["success_count"]
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
+    filter_label = (
+        f"活跃{active_filter_summary.get('lookback_days')}天"
+        if active_filter_summary
+        else ""
+    )
+    scope_text = (
+        f"先筛选最近 {active_filter_summary.get('lookback_days')} 天有调仓的组合；"
+        "再把成功拉取的活跃组合等权合成一个组合"
+        if active_filter_summary
+        else "把成功拉取的组合等权合成一个组合"
+    )
 
     def esc(value: Any) -> str:
         return html.escape(str(value if value is not None else ""))
@@ -1233,12 +1424,27 @@ def build_report_html(
         ("年榜缓存时间", rank_cache_fetched_at.strftime("%Y-%m-%d %H:%M:%S") if rank_cache_fetched_at else "-"),
         ("年榜本次刷新", "是" if rank_cache_refreshed else "否"),
         ("组合总数", len(cubes)),
-        ("拉取成功", success_count),
-        ("拉取失败", len(failed_results)),
-        ("覆盖股票数", len(ranking)),
-        ("非现金持仓合计权重", fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix="%")),
-        ("调仓策略", strategy_plan.get("strategy_name") if strategy_plan else f"Top{top_n}综合权重归一"),
     ]
+    if active_filter_summary:
+        summary_rows.extend(
+            [
+                ("活跃筛选", f"最近 {active_filter_summary.get('lookback_days')} 天有调仓"),
+                ("活跃截止时间", fmt_datetime_value(active_filter_summary.get("active_since"))),
+                ("活跃组合", active_filter_summary.get("active_cube_count")),
+                ("非活跃组合", active_filter_summary.get("inactive_cube_count")),
+                ("活跃检查失败", active_filter_summary.get("activity_failed_count")),
+                ("持仓回退到last_rb", active_filter_summary.get("holdings_fallback_count")),
+            ]
+        )
+    summary_rows.extend(
+        [
+            ("拉取成功", success_count),
+            ("拉取失败", len(failed_results)),
+            ("覆盖股票数", len(ranking)),
+            ("非现金持仓合计权重", fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix="%")),
+            ("调仓策略", strategy_plan.get("strategy_name") if strategy_plan else f"Top{top_n}综合权重归一"),
+        ]
+    )
     if strategy_plan:
         plan_summary = strategy_plan.get("summary") or {}
         summary_rows.extend(
@@ -1332,10 +1538,10 @@ def build_report_html(
   </style>
 </head>
 <body>
-  <h1>雪球年榜1000组合综合持仓权重 Top{top_n}</h1>
+  <h1>雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}</h1>
   <table class="summary">{rows_html}</table>
   {rebalance_action_html}
-  <p>统计口径: 把成功拉取的组合等权合成一个组合；个股综合权重 = 该股票在所有成功组合中的持仓权重之和 / 成功组合数，未持有记为 0。</p>
+  <p>统计口径: {esc(scope_text)}；个股综合权重 = 该股票在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。</p>
   <p>最终权重: {BUFFER_STRATEGY_NAME if strategy_plan else f"选取综合权重最高的 Top{top_n} 后归一化"}。</p>
   <table>
     <thead>
@@ -1383,6 +1589,7 @@ def write_outputs(
     rank_cache_fetched_at: Optional[datetime],
     rank_cache_refreshed: bool,
     strategy_plan: Optional[Dict[str, Any]] = None,
+    active_filter_summary: Optional[Dict[str, Any]] = None,
 ) -> Path:
     run_dir = output_dir / run_at.strftime("%Y-%m-%d")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1406,6 +1613,7 @@ def write_outputs(
         "rank_cache_fetched_at": rank_cache_fetched_at.isoformat() if rank_cache_fetched_at else None,
         "rank_cache_refreshed": rank_cache_refreshed,
         "cube_count": len(cubes),
+        "active_filter": active_filter_summary,
         "success_count": aggregate["success_count"],
         "failed_count": len(failed_results),
         "stock_count": len(ranking),
@@ -1538,6 +1746,7 @@ async def run_top_holdings_job(
     dry_run: bool = False,
     target_cube_symbol: str = DEFAULT_TARGET_CUBE_SYMBOL,
     target_cube_id: Optional[int] = None,
+    active_rebalance_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     run_at = datetime.now(CHINA_TZ)
     if not force and not is_china_trading_day(run_at.date()):
@@ -1562,13 +1771,54 @@ async def run_top_holdings_job(
     if not cubes:
         raise RuntimeError("No Xueqiu cubes available.")
 
-    results = await fetch_all_holdings(
+    active_filter_summary: Optional[Dict[str, Any]] = None
+    active_since = run_at - timedelta(days=active_rebalance_days or 0)
+    current_results = await fetch_all_cube_current(
         cubes,
         cookie=cookie,
         workers=workers,
         timeout=timeout,
         retries=retries,
+        active_since=active_since,
     )
+    if active_rebalance_days and active_rebalance_days > 0:
+        active_filter_summary = build_active_filter_summary(
+            source_cubes=cubes,
+            current_results=current_results,
+            active_since=active_since,
+            lookback_days=active_rebalance_days,
+        )
+        logger.info(
+            "Filtered Xueqiu cubes by latest rebalance within %s days using current snapshots: "
+            "active=%s source=%s failed=%s fallback_holdings=%s",
+            active_rebalance_days,
+            active_filter_summary["active_cube_count"],
+            active_filter_summary["source_cube_count"],
+            active_filter_summary["activity_failed_count"],
+            active_filter_summary["holdings_fallback_count"],
+        )
+        failure_limit = max(
+            5,
+            math.ceil(len(cubes) * ACTIVE_REBALANCE_MAX_FAILED_RATIO),
+        )
+        if active_filter_summary["activity_failed_count"] > failure_limit:
+            raise RuntimeError(
+                "Xueqiu current snapshot fetch failed for too many cubes: "
+                f"failed={active_filter_summary['activity_failed_count']} "
+                f"limit={failure_limit} source={len(cubes)}"
+            )
+        current_results = [
+            result
+            for result in current_results
+            if result.active or result.error
+        ]
+        if not any(not result.error for result in current_results):
+            raise RuntimeError(f"No Xueqiu cubes rebalanced within {active_rebalance_days} days.")
+
+    results = [
+        CubeFetchResult(cube=result.cube, holdings=result.holdings, error=result.error)
+        for result in current_results
+    ]
     aggregate = aggregate_holdings(results)
     top_items = add_top_normalized_weights(aggregate["ranking"], top_n)
     rebalance_skipped_items: List[Dict[str, Any]] = []
@@ -1611,6 +1861,7 @@ async def run_top_holdings_job(
             )
             rebalance_payload["strategy"] = strategy_plan.get("strategy_name")
             rebalance_payload["strategy_plan"] = strategy_plan
+            rebalance_payload["active_filter"] = active_filter_summary
             top_items = rebalance_payload["top_items"]
             rebalance_response = await create_xueqiu_rebalance(
                 cookie=cookie,
@@ -1624,6 +1875,7 @@ async def run_top_holdings_job(
                 "message": "目标组合成分未变化，按Top10等权缓冲策略不提交调仓。",
                 "strategy": strategy_plan.get("strategy_name"),
                 "strategy_plan": strategy_plan,
+                "active_filter": active_filter_summary,
             }
 
     report_text = build_report(
@@ -1638,6 +1890,7 @@ async def run_top_holdings_job(
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
         strategy_plan=strategy_plan,
+        active_filter_summary=active_filter_summary,
         dry_run=dry_run,
     )
     report_html = build_report_html(
@@ -1652,6 +1905,7 @@ async def run_top_holdings_job(
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
         strategy_plan=strategy_plan,
+        active_filter_summary=active_filter_summary,
         dry_run=dry_run,
     )
     output_path = write_outputs(
@@ -1667,13 +1921,20 @@ async def run_top_holdings_job(
         rank_cache_fetched_at=rank_cache_fetched_at,
         rank_cache_refreshed=rank_cache_refreshed,
         strategy_plan=strategy_plan,
+        active_filter_summary=active_filter_summary,
     )
     status = "DRY_RUN" if dry_run and execute_rebalance else "SUCCESS"
     if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
         status = "SKIPPED"
+    active_message = ""
+    if active_filter_summary:
+        active_message = (
+            f" active={active_filter_summary.get('active_cube_count')}/"
+            f"{active_filter_summary.get('source_cube_count')}"
+        )
     message = (
         f"success={aggregate['success_count']} failed={len(aggregate['failed_results'])} "
-        f"stocks={len(aggregate['ranking'])} output={output_path}"
+        f"stocks={len(aggregate['ranking'])}{active_message} output={output_path}"
     )
     record_id = save_run_record(
         run_at=run_at,
@@ -1692,10 +1953,15 @@ async def run_top_holdings_job(
     )
     if not no_email:
         receiver = receiver_email or os.getenv("XUEQIU_TOP_HOLDINGS_EMAIL") or DEFAULT_RECEIVER_EMAIL
+        subject_filter = (
+            f"活跃{active_filter_summary.get('lookback_days')}天"
+            if active_filter_summary
+            else ""
+        )
         subject = (
-            f"雪球年榜1000组合Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
+            f"雪球年榜1000{subject_filter}组合Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
             if execute_rebalance
-            else f"雪球年榜1000组合综合持仓权重 Top{top_n} - {run_at.strftime('%Y-%m-%d')}"
+            else f"雪球年榜1000{subject_filter}组合综合持仓权重 Top{top_n} - {run_at.strftime('%Y-%m-%d')}"
         )
         sendmail(receiver, subject, report_html, mimeType="html")
     return {
@@ -1712,6 +1978,7 @@ async def run_top_holdings_job(
         "dry_run": dry_run,
         "rebalance_response": rebalance_response,
         "rebalance_skipped": rebalance_skipped_items,
+        "active_filter": active_filter_summary,
         "top": top_items,
     }
 
@@ -1728,19 +1995,27 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
             timeout=DEFAULT_TIMEOUT,
             retries=DEFAULT_RETRIES,
             target_cube_symbol=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL),
+            active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
         )
     )
     if result.get("skipped"):
         return str(result.get("message"))
     response = result.get("rebalance_response") or {}
+    active_filter = result.get("active_filter") or {}
+    active_message = (
+        f"active={active_filter.get('active_cube_count')}/{active_filter.get('source_cube_count')} "
+        if active_filter
+        else ""
+    )
     return (
-        "雪球Top1000综合持仓自动调仓 "
+        "雪球Top1000活跃90天综合持仓自动调仓 "
         f"record_id={result.get('record_id')} "
         f"target={result.get('target_cube_symbol')} "
         f"cube_id={result.get('target_cube_id')} "
         f"success={result.get('success_count')} "
         f"failed={result.get('failed_count')} "
         f"stocks={result.get('stock_count')} "
+        f"{active_message}"
         f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
         f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"
@@ -1793,6 +2068,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Build rebalance payload without sending it.")
     parser.add_argument("--target-cube-symbol", default=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL))
     parser.add_argument("--target-cube-id", type=int, default=safe_int(os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_ID")))
+    parser.add_argument(
+        "--active-rebalance-days",
+        type=int,
+        default=safe_int(os.getenv("XUEQIU_TOP_HOLDINGS_ACTIVE_REBALANCE_DAYS")),
+        help="Only include cubes whose latest rebalance is within N days. Use 0 to disable.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1821,6 +2102,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 dry_run=args.dry_run,
                 target_cube_symbol=args.target_cube_symbol,
                 target_cube_id=args.target_cube_id,
+                active_rebalance_days=args.active_rebalance_days,
             )
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
