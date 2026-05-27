@@ -1022,6 +1022,12 @@ const ExternalTradingAccountManager = () => {
     const text = formatNumber(price, 3);
     return detail?.source ? <Tooltip title={`来源: ${detail.source}`}>{text}</Tooltip> : text;
   };
+  const renderLifecyclePrice = (value, source) => {
+    const price = Number(value || 0);
+    if (!Number.isFinite(price) || price <= 0) return '-';
+    const text = formatNumber(price, 4);
+    return source ? <Tooltip title={`来源: ${source}`}>{text}</Tooltip> : text;
+  };
   const marketPriceColumn = { title: '市价', key: 'market_price', width: 100, render: renderMarketPrice };
   const renderSubAccountStrategy = (_, record) => (
     <Space direction="vertical" size={0}>
@@ -1192,17 +1198,19 @@ const ExternalTradingAccountManager = () => {
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('orders', 'symbol') },
     marketPriceColumn,
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
+    { title: '状态', dataIndex: 'status', key: 'status', width: 130, render: value => <Tag color={orderStatusColor(value)}>{value || '-'}</Tag> },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatNumber(value) },
     { title: '未成', dataIndex: 'remaining_quantity', key: 'remaining_quantity', width: 100, render: value => formatNumber(value) },
+    { title: '提交价', dataIndex: 'submitted_price', key: 'submitted_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
     { title: '均价', dataIndex: 'avg_fill_price', key: 'avg_fill_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
+    { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.reference_price_source) },
+    { title: '保护价', dataIndex: 'protection_limit_price', key: 'protection_limit_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.protection_limit_source) },
     { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
     { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
     { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 130, render: value => <Tag color={orderStatusColor(value)}>{value || '-'}</Tag> },
     { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100, render: value => value || '-' },
     { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
-    { title: '提交价', dataIndex: 'submitted_price', key: 'submitted_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
     { title: '档位', dataIndex: 'price_level', key: 'price_level', width: 90, render: value => value === null || value === undefined ? '-' : priceLevelLabel(value) },
     { title: '重定价', dataIndex: 'replace_count', key: 'replace_count', width: 90, render: value => formatNumber(value) },
     { title: '超时点', dataIndex: 'deadline_at', key: 'deadline_at', width: 170, render: formatTime },
