@@ -3875,6 +3875,91 @@ def create_netted_execution_orders(
     return enriched_orders, parent_rows
 
 
+def _dict_payload(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _positive_float(value: Any) -> Optional[float]:
+    parsed = safe_float(value, None)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _order_allocation_reference_price(row: ExternalTradingOrder) -> Optional[float]:
+    raw_request = _dict_payload(row.raw_request)
+    direct_price = _positive_float(raw_request.get("reference_price"))
+    if direct_price is not None:
+        return round(direct_price, 4)
+
+    prices = []
+    for allocation in raw_request.get("allocations") or []:
+        if not isinstance(allocation, dict):
+            continue
+        price = _positive_float(allocation.get("reference_price"))
+        if price is None:
+            continue
+        prices.append(price)
+    if prices:
+        side = str(row.side or "").upper()
+        if side == "BUY":
+            return round(min(prices), 4)
+        if side == "SELL":
+            return round(max(prices), 4)
+        return round(prices[0], 4)
+    return None
+
+
+def _order_reference_price_source(row: ExternalTradingOrder) -> Optional[str]:
+    raw_request = _dict_payload(row.raw_request)
+    direct_source = raw_request.get("reference_price_source")
+    if direct_source:
+        return str(direct_source)
+
+    sources = []
+    for allocation in raw_request.get("allocations") or []:
+        if not isinstance(allocation, dict):
+            continue
+        source = allocation.get("reference_price_source")
+        if source:
+            sources.append(str(source))
+    unique_sources = sorted(set(sources))
+    if len(unique_sources) == 1:
+        return unique_sources[0]
+    if unique_sources:
+        return ",".join(unique_sources)[:64]
+    return None
+
+
+def _order_protection_limit_price(row: ExternalTradingOrder) -> Optional[float]:
+    raw_request = _dict_payload(row.raw_request)
+    raw_submit_result = _dict_payload(row.raw_submit_result)
+    nested_submit_result = _dict_payload(raw_request.get("submit_result"))
+    latest_block = _dict_payload(raw_request.get("latest_block"))
+    latest_block_submit_result = _dict_payload(latest_block.get("submit_result"))
+
+    side = str(row.side or "").upper()
+    side_fallback_key = "max_buy_price" if side == "BUY" else "min_sell_price"
+    for payload in (raw_request, raw_submit_result, nested_submit_result, latest_block_submit_result):
+        for key in ("protection_limit_price", "market_limit_price", side_fallback_key):
+            price = _positive_float(payload.get(key))
+            if price is not None:
+                return round(price, 4)
+    return None
+
+
+def _order_protection_limit_source(row: ExternalTradingOrder) -> Optional[str]:
+    raw_request = _dict_payload(row.raw_request)
+    raw_submit_result = _dict_payload(row.raw_submit_result)
+    nested_submit_result = _dict_payload(raw_request.get("submit_result"))
+    latest_block = _dict_payload(raw_request.get("latest_block"))
+    latest_block_submit_result = _dict_payload(latest_block.get("submit_result"))
+
+    for payload in (raw_request, raw_submit_result, nested_submit_result, latest_block_submit_result):
+        source = payload.get("protection_limit_source")
+        if source:
+            return str(source)
+    return None
+
+
 def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
     return {
         "id": row.id,
@@ -3902,6 +3987,10 @@ def serialize_order(row: ExternalTradingOrder) -> Dict[str, Any]:
         "filled_quantity": row.filled_quantity,
         "remaining_quantity": row.remaining_quantity,
         "avg_fill_price": row.avg_fill_price,
+        "reference_price": _order_allocation_reference_price(row),
+        "reference_price_source": _order_reference_price_source(row),
+        "protection_limit_price": _order_protection_limit_price(row),
+        "protection_limit_source": _order_protection_limit_source(row),
         "status": row.status,
         "ptrade_status": row.ptrade_status,
         "message": row.message,
