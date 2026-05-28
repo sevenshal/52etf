@@ -1132,7 +1132,7 @@ async def build_rebalance_payload(
         "target_cube_symbol": target_cube_symbol,
         "cube_id": target_cube_id,
         "cash": cash_pct,
-        "comment": "自动按雪球年榜Top10等权缓冲策略调仓",
+        "comment": "",
         "market": "cn",
         "holdings": holdings,
         "top_items": rebalance_items,
