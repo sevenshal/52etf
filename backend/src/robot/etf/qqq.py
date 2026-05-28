@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+from typing import Optional
 
 import httpx
 
@@ -22,13 +23,9 @@ class QQQDataFetcher(ETFDataFetcher):
         self.name = "纳斯达克100ETF"
         self.headers.update(
             {
-                "accept": "*/*",
+                "accept": "application/json, text/plain, */*",
                 "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-                "origin": "https://www.invesco.com",
                 "referer": "https://www.invesco.com/",
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site",
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -105,15 +102,21 @@ class QQQDataFetcher(ETFDataFetcher):
             raise
 
     def _get_holdings_response(self) -> httpx.Response:
-        try:
-            with httpx.Client(proxy=self.PROXY, timeout=30) as client:
-                response = client.get(self.HOLDINGS_URL, headers=self.headers)
-                response.raise_for_status()
-                return response
-        except (httpx.ConnectError, httpx.ProxyError) as exc:
-            self.logger.warning("通过代理获取 QQQ 持仓失败，尝试直连: %s", exc)
+        if self.PROXY:
+            try:
+                return self._fetch_holdings(proxy=self.PROXY)
+            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                self.logger.warning("通过代理获取 QQQ 持仓失败，尝试直连: %s", exc)
 
-        with httpx.Client(timeout=30) as client:
+        return self._fetch_holdings(proxy=None)
+
+    def _fetch_holdings(self, proxy: Optional[str] = None) -> httpx.Response:
+        client_kwargs = {"timeout": 30}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        # 服务端请求不需要 Origin；Invesco/Fastly 对不完整的 CORS 模拟请求会返回 406。
+        with httpx.Client(**client_kwargs) as client:
             response = client.get(self.HOLDINGS_URL, headers=self.headers)
             response.raise_for_status()
             return response
