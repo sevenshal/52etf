@@ -1,4 +1,5 @@
 from datetime import datetime
+import inspect
 import os
 from typing import Optional
 
@@ -105,7 +106,7 @@ class QQQDataFetcher(ETFDataFetcher):
         if self.PROXY:
             try:
                 return self._fetch_holdings(proxy=self.PROXY)
-            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            except (httpx.RequestError, httpx.HTTPStatusError, TypeError) as exc:
                 self.logger.warning("通过代理获取 QQQ 持仓失败，尝试直连: %s", exc)
 
         return self._fetch_holdings(proxy=None)
@@ -113,13 +114,22 @@ class QQQDataFetcher(ETFDataFetcher):
     def _fetch_holdings(self, proxy: Optional[str] = None) -> httpx.Response:
         client_kwargs = {"timeout": 30}
         if proxy:
-            client_kwargs["proxy"] = proxy
+            client_kwargs.update(self._proxy_client_kwargs(proxy))
 
         # 服务端请求不需要 Origin；Invesco/Fastly 对不完整的 CORS 模拟请求会返回 406。
         with httpx.Client(**client_kwargs) as client:
             response = client.get(self.HOLDINGS_URL, headers=self.headers)
             response.raise_for_status()
             return response
+
+    @staticmethod
+    def _proxy_client_kwargs(proxy: str) -> dict:
+        parameters = inspect.signature(httpx.Client.__init__).parameters
+        if "proxy" in parameters:
+            return {"proxy": proxy}
+        if "proxies" in parameters:
+            return {"proxies": proxy}
+        raise TypeError("httpx.Client does not support proxy configuration")
 
     def _map_asset_class(self, holding_data: dict) -> str:
         ticker = str(holding_data.get("ticker") or "").strip().upper()
