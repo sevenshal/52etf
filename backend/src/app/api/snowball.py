@@ -39,6 +39,7 @@ from ...core.services.external_trading_executor import (
 from ...core.services.external_trading_execution_policy import resolve_execution_policy
 from ...core.services.external_trading_ledger import (
     STRATEGY_SNOWBALL,
+    is_star_market_symbol,
     normalize_symbol as normalize_trading_symbol,
     safe_float,
     safe_int,
@@ -58,6 +59,8 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 SNOWBALL_A_SHARE_LOT_SIZE = 100
 SNOWBALL_MIN_ROUND_UP_QUANTITY = 50
+SNOWBALL_STAR_MARKET_MIN_ROUND_UP_QUANTITY = 150
+SNOWBALL_STAR_MARKET_MIN_BUY_QUANTITY = 200
 XUEQIU_API_BASE_URL = "https://api.xueqiu.com"
 XUEQIU_STOCK_BASE_URL = "https://stock.xueqiu.com"
 XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
@@ -323,7 +326,7 @@ def normalize_symbol(symbol: str) -> str:
     return symbol
 
 
-def _snowball_target_quantity(target_value: float, price: float) -> int:
+def _snowball_target_quantity(target_value: float, price: float, symbol: Optional[str] = None) -> int:
     target_value = safe_float(target_value)
     price = safe_float(price)
     if target_value <= 0 or price <= 0:
@@ -334,6 +337,12 @@ def _snowball_target_quantity(target_value: float, price: float) -> int:
         int(raw_quantity / SNOWBALL_A_SHARE_LOT_SIZE)
         * SNOWBALL_A_SHARE_LOT_SIZE
     )
+    if (
+        is_star_market_symbol(symbol)
+        and quantity <= SNOWBALL_A_SHARE_LOT_SIZE
+        and raw_quantity > SNOWBALL_STAR_MARKET_MIN_ROUND_UP_QUANTITY
+    ):
+        return SNOWBALL_STAR_MARKET_MIN_BUY_QUANTITY
     if quantity == 0 and raw_quantity > SNOWBALL_MIN_ROUND_UP_QUANTITY:
         return SNOWBALL_A_SHARE_LOT_SIZE
     return quantity
@@ -912,7 +921,7 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
             weight_diff_pct = abs(weight - old_weight) if old_weight is not None else threshold_pct
             should_recalculate = (not has_old_target) or old_weight is None or weight_diff_pct >= threshold_pct
             if should_recalculate:
-                final_quantity = _snowball_target_quantity(latest_target_value, price)
+                final_quantity = _snowball_target_quantity(latest_target_value, price, xq_symbol)
                 accepted_weight = weight
                 if old_quantity != final_quantity or old_weight is None or abs(weight - old_weight) > 1e-9:
                     changed = True
@@ -1727,7 +1736,7 @@ async def get_snapshot(
         ideal_target_value = ledger_net_asset * target_weight_pct / 100.0
         target_quantity = 0
         if price > 0 and ideal_target_value > 0:
-            target_quantity = _snowball_target_quantity(ideal_target_value, price)
+            target_quantity = _snowball_target_quantity(ideal_target_value, price, trade_symbol)
         target_value = round(target_quantity * price, 2) if price > 0 else round(ideal_target_value, 2)
         target_market_value += target_value
 
