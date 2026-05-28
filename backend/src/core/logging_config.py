@@ -1,10 +1,71 @@
 import logging
 import sys
 from typing import TextIO
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 
 LOG_FORMAT = "%(asctime)s [%(process)d] [%(threadName)s] %(levelname)s %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+REDACTED = "<redacted>"
+SENSITIVE_QUERY_PARAMS = {
+    "account_id",
+    "identifier",
+    "ts",
+    "nonce",
+    "signature",
+    "token",
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "auth",
+    "api_key",
+    "apikey",
+    "secret",
+}
+
+
+def redact_sensitive_query_params(value):
+    if not isinstance(value, str) or "?" not in value or "=" not in value:
+        return value
+
+    split_result = urlsplit(value)
+    if not split_result.query:
+        return value
+
+    pairs = parse_qsl(split_result.query, keep_blank_values=True)
+    redacted = False
+    sanitized_pairs = []
+    for key, param_value in pairs:
+        if key.lower() in SENSITIVE_QUERY_PARAMS:
+            sanitized_pairs.append((key, REDACTED))
+            redacted = True
+            continue
+        sanitized_pairs.append((key, param_value))
+
+    if not redacted:
+        return value
+
+    sanitized_query = "&".join(
+        f"{quote(str(key), safe='')}={quote(str(param_value), safe='<>')}"
+        for key, param_value in sanitized_pairs
+    )
+    return urlunsplit(split_result._replace(query=sanitized_query))
+
+
+def _sanitize_logging_value(value):
+    if isinstance(value, tuple):
+        return tuple(_sanitize_logging_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _sanitize_logging_value(item) for key, item in value.items()}
+    return redact_sensitive_query_params(value)
+
+
+class SensitiveQueryParamFilter(logging.Filter):
+    def filter(self, record):
+        record.msg = _sanitize_logging_value(record.msg)
+        if record.args:
+            record.args = _sanitize_logging_value(record.args)
+        return True
 
 
 def configure_logging(stdout: TextIO = None, stderr: TextIO = None):
@@ -21,3 +82,7 @@ def configure_logging(stdout: TextIO = None, stderr: TextIO = None):
         handlers=[stdout_handler, stderr_handler],
         force=True,
     )
+
+    access_log_filter = SensitiveQueryParamFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(access_log_filter)
