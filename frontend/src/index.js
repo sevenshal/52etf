@@ -5,6 +5,8 @@ import './index.css';
 import App from './App';
 import appLogo from './logo';
 
+const appTitle = process.env.NODE_ENV === 'production' ? '我爱ETF' : '我爱ETF (dev)';
+
 const setFavicon = (href) => {
   const existingIcon = document.querySelector('link[rel="icon"]');
   const icon = existingIcon || document.createElement('link');
@@ -18,6 +20,7 @@ const setFavicon = (href) => {
   }
 };
 
+document.title = appTitle;
 setFavicon(appLogo);
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
