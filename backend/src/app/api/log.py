@@ -1,9 +1,30 @@
 import asyncio
 import os
+from typing import Optional, Tuple
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 router = APIRouter()
+
+DEFAULT_LOG_FILE_KEY = "service"
+LOG_FILES = {
+    "service": "/var/log/quant/service.log",
+    "error": "/var/log/quant/error.log",
+}
+LOG_FILE_ALIASES = {
+    "service.log": "service",
+    "error.log": "error",
+}
+
+
+def _resolve_log_file(log_file_key: Optional[str] = None) -> Tuple[str, str]:
+    normalized_key = (log_file_key or DEFAULT_LOG_FILE_KEY).strip().lower()
+    normalized_key = LOG_FILE_ALIASES.get(normalized_key, normalized_key)
+    if normalized_key not in LOG_FILES:
+        raise ValueError(f"Unsupported log file: {log_file_key}")
+    return normalized_key, LOG_FILES[normalized_key]
+
 
 def _read_last_lines(path: str, num_lines: int = 10, chunk_size: int = 8192):
     """Read the last `num_lines` lines from a file efficiently."""
@@ -27,12 +48,21 @@ def _read_last_lines(path: str, num_lines: int = 10, chunk_size: int = 8192):
         print(f"Error reading last lines: {e}")
         return []
 
+
 @router.websocket("/ws/log")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    log_file_key = websocket.query_params.get("file", DEFAULT_LOG_FILE_KEY)
     try:
-        log_file = "/var/log/quant/service.log"
-        print(f"Attempting to open and tail log file: {log_file}")
+        resolved_log_key, log_file = _resolve_log_file(log_file_key)
+    except ValueError:
+        available_logs = ", ".join(sorted(LOG_FILES.keys()))
+        await websocket.send_text(f"Unsupported log file: {log_file_key}. Available: {available_logs}")
+        await websocket.close(code=1008)
+        return
+
+    try:
+        print(f"Attempting to open and tail log file: {resolved_log_key} ({log_file})")
         # Send last 10 lines immediately upon connection
         for initial_line in _read_last_lines(log_file, num_lines=10):
             if initial_line:

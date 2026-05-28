@@ -16,6 +16,6 @@ RestartSec=5
 Environment=ENV=prod
 # 日志处理
 StandardOutput=append:/var/log/quant/service.log
-StandardError=inherit
+StandardError=append:/var/log/quant/error.log
 [Install]
 WantedBy=multi-user.target
