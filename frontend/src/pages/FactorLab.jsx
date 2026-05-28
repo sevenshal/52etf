@@ -2832,6 +2832,29 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const backtestTradeRows = backtestResult?.trades || [];
   const backtestSymbolPnlRows = backtestResult?.symbol_pnl || [];
   const backtestComponents = backtestMetadata.components || [];
+  const backtestTradeColumnsWithFilters = useMemo(() => {
+    const itemsBySymbol = new Map();
+    backtestTradeRows.forEach(row => {
+      const symbol = normalizeDisplaySymbol(row?.symbol);
+      if (!symbol || itemsBySymbol.has(symbol)) return;
+      const name = String(row?.symbol_name || getSymbolNameFromMap(symbol, backtestMetadata.symbol_names) || '').trim();
+      itemsBySymbol.set(symbol, {
+        text: formatSymbolDisplay(symbol, backtestMetadata.symbol_names, name),
+        value: symbol,
+      });
+    });
+    const filters = Array.from(itemsBySymbol.values())
+      .sort((left, right) => left.text.localeCompare(right.text, 'zh-CN'));
+    return backtestTradeColumns.map(column => {
+      if (column.dataIndex !== 'symbol') return column;
+      return {
+        ...column,
+        filters,
+        filterSearch: true,
+        onFilter: (value, row) => normalizeDisplaySymbol(row?.symbol) === normalizeDisplaySymbol(value),
+      };
+    });
+  }, [backtestTradeRows, backtestMetadata.symbol_names]);
   const backtestCustomSymbolSelectOptions = useMemo(() => (
     mergeSymbolOptions(
       customSymbolOptions,
@@ -4603,7 +4626,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
                 <Table
                   rowKey={(row, index) => `${row.date}-${row.action}-${row.symbol}-${index}`}
                   size="small"
-                  columns={backtestTradeColumns}
+                  columns={backtestTradeColumnsWithFilters}
                   dataSource={backtestTradeRows}
                   pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100] }}
                   scroll={{ x: 1200 }}
