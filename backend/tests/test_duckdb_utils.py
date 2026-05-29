@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 from unittest import TestCase
 
 import duckdb
@@ -66,3 +69,39 @@ class DuckDBUtilsTest(TestCase):
             read_connection.close()
 
         self.assertEqual(0, row[0])
+
+    def test_analytics_session_uses_same_duckdb_configuration(self):
+        code = textwrap.dedent(
+            """
+            from sqlalchemy import text
+
+            from src.core.analytics_database import (
+                ANALYTICS_DB_PATH,
+                AnalyticsSession,
+                analytics_engine,
+                connect_duckdb,
+            )
+
+            direct_connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+            try:
+                session = AnalyticsSession()
+                try:
+                    assert session.execute(text("SELECT 1")).fetchone()[0] == 1
+                finally:
+                    AnalyticsSession.remove()
+            finally:
+                direct_connection.close()
+
+            with analytics_engine.connect() as engine_connection:
+                direct_connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+                try:
+                    assert engine_connection.execute(text("SELECT 2")).fetchone()[0] == 2
+                    assert direct_connection.execute("SELECT 3").fetchone()[0] == 3
+                finally:
+                    direct_connection.close()
+            """
+        )
+        env = os.environ.copy()
+        env["ANALYTICS_DB_PATH"] = self.path
+
+        subprocess.run([sys.executable, "-c", code], env=env, check=True)
