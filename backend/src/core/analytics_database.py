@@ -7,35 +7,16 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
 
+from .duckdb_utils import (
+    ANALYTICS_DB_PATH,
+    DUCKDB_CONFIG_MISMATCH_MESSAGE,
+    connect_duckdb,
+    is_duckdb_config_mismatch,
+)
 
-ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
 ANALYTICS_DB_DIR = os.path.dirname(ANALYTICS_DB_PATH)
 if ANALYTICS_DB_DIR:
     os.makedirs(ANALYTICS_DB_DIR, exist_ok=True)
-
-DUCKDB_CONFIG_MISMATCH_MESSAGE = "Can't open a connection to same database file with a different configuration than existing connections"
-
-
-def is_duckdb_config_mismatch(exc: Exception) -> bool:
-    return DUCKDB_CONFIG_MISMATCH_MESSAGE in str(exc)
-
-
-def connect_duckdb(database: str = ANALYTICS_DB_PATH, prefer_read_only: bool = True):
-    import duckdb
-
-    attempts = [True, False] if prefer_read_only else [False, True]
-    last_exc = None
-    for read_only in attempts:
-        try:
-            return duckdb.connect(database=database, read_only=read_only)
-        except Exception as exc:
-            if is_duckdb_config_mismatch(exc):
-                last_exc = exc
-                continue
-            raise
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("无法连接DuckDB分析库")
 
 ANALYTICS_TABLE_NAMES = frozenset(
     {

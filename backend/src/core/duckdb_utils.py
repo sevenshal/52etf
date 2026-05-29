@@ -12,7 +12,10 @@ def is_duckdb_config_mismatch(exc: Exception) -> bool:
 def connect_duckdb(database: str = ANALYTICS_DB_PATH, prefer_read_only: bool = True):
     import duckdb
 
-    attempts = [True, False] if prefer_read_only else [False, True]
+    # DuckDB requires every open connection to the same file in a process to use
+    # the same configuration. The backend also writes from scheduler threads, so
+    # read paths open with read-write configuration first to avoid blocking syncs.
+    attempts = [False, True] if prefer_read_only else [False]
     last_exc = None
     for read_only in attempts:
         try:

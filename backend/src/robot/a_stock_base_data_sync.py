@@ -27,6 +27,7 @@ from ..core.analytics_database import (
     AStockOptionDaily,
     AStockRepoDaily,
     AnalyticsSession,
+    connect_duckdb,
 )
 from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
@@ -154,8 +155,6 @@ def _insert_or_replace_analytics_frame(
     if frame.empty:
         return
 
-    import duckdb  # type: ignore
-
     insert_frame = frame.loc[:, columns]
     quoted_table = _quote_duckdb_identifier(table_name)
     quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
@@ -166,7 +165,7 @@ def _insert_or_replace_analytics_frame(
         f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
     )
 
-    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
     try:
         connection.execute("BEGIN TRANSACTION")
         if replace_dates:
@@ -2312,8 +2311,6 @@ def _bulk_replace_index_weight_frame(analytics_db: Session, frame: pd.DataFrame)
     if normalized.empty:
         return 0
 
-    import duckdb  # type: ignore
-
     columns = list(normalized.columns)
     key_frame = normalized.loc[:, ["index_code", "trade_date"]].drop_duplicates()
     temp_frame_name = "analytics_index_weight_insert_frame"
@@ -2321,7 +2318,7 @@ def _bulk_replace_index_weight_frame(analytics_db: Session, frame: pd.DataFrame)
     quoted_table = _quote_duckdb_identifier(AStockIndexWeight.__tablename__)
     quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
     analytics_db.commit()
-    connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
     try:
         connection.execute("BEGIN TRANSACTION")
         connection.register(temp_keys_name, key_frame)
@@ -2989,10 +2986,8 @@ def sync_a_stock_income_data(
 
 def _count_analytics_table_rows(analytics_db: Session, table_name: str) -> int:
     analytics_db.commit()
-    import duckdb  # type: ignore
-
     try:
-        connection = duckdb.connect(database=ANALYTICS_DB_PATH, read_only=False)
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:
             row = connection.execute(
                 f"SELECT COUNT(*) FROM {_quote_duckdb_identifier(table_name)}"

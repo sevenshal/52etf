@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from ...core.database import DB_PATH, DbSqlFavorite, engine, get_db
 from ...core.analytics_database import ANALYTICS_DB_PATH, ANALYTICS_TABLE_NAMES
+from ...core.duckdb_utils import connect_duckdb
 from .account import valid_account
 
 
@@ -23,7 +24,6 @@ router = APIRouter(prefix="/api/db", tags=["DB"])
 MAX_QUERY_LIMIT = 500
 INTERNAL_TABLE_PREFIXES = ("sqlite_",)
 SCHEMA_CACHE_TTL_SECONDS = 60
-DUCKDB_CONFIG_MISMATCH_MESSAGE = "Can't open a connection to same database file with a different configuration than existing connections"
 DUCKDB_FORBIDDEN_IDENTIFIERS = {
     "attach",
     "call",
@@ -148,25 +148,9 @@ def _quote_sql_string(value: str) -> str:
     return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
-def _is_duckdb_config_mismatch(exc: Exception) -> bool:
-    return DUCKDB_CONFIG_MISMATCH_MESSAGE in str(exc)
-
-
 def _connect_duckdb_with_fallback(database: str, prefer_read_only: bool = True):
-    duckdb = _import_duckdb()
-    attempts = [True, False] if prefer_read_only else [False, True]
-    last_exc = None
-    for read_only in attempts:
-        try:
-            return duckdb.connect(database=database, read_only=read_only)
-        except Exception as exc:
-            if _is_duckdb_config_mismatch(exc):
-                last_exc = exc
-                continue
-            raise
-    if last_exc is not None:
-        raise last_exc
-    raise HTTPException(status_code=500, detail="无法连接DuckDB分析库")
+    _import_duckdb()
+    return connect_duckdb(database=database, prefer_read_only=prefer_read_only)
 
 
 def _get_primary_key_columns(inspector, table_name: str) -> Set[str]:
