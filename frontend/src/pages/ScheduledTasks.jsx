@@ -6,6 +6,7 @@ import {
   DatePicker,
   Input,
   Modal,
+  Segmented,
   Space,
   Switch,
   Table,
@@ -27,6 +28,9 @@ import { subscribeBackendEvent } from '../utils/backendEvents';
 
 const { Title, Text } = Typography;
 const RESULT_PREVIEW_LENGTH = 96;
+const RUN_MODE_AUTO = 'auto';
+const RUN_MODE_BACKFILL = 'backfill';
+const getDefaultManualRunStartDate = () => dayjs().subtract(7, 'day');
 const timezoneOptions = [
   { value: 'Asia/Shanghai', label: '上海时间' },
   { value: 'America/New_York', label: '美东时间' },
@@ -34,15 +38,27 @@ const timezoneOptions = [
 const timezoneSortValue = value => (value === 'America/New_York' ? 1 : 0);
 
 const getRunStartDateHint = (taskKey) => {
+  if (taskKey === 'a_stock_base_data_sync') {
+    return {
+      autoLabel: '自动增量',
+      backfillLabel: '历史回刷',
+      autoDetail: '不传开始日期，后端按最新入库日期和重叠窗口补齐数据。',
+      backfillDetail: '传入开始日期后，行情、复权、财务等模块会按各自 warmup 向前扩展回刷。'
+    };
+  }
   if (taskKey === 'etf_historical_holdings_backfill') {
     return {
-      title: '选择持仓抓取开始日期，系统会从该日期往后抓到今天，并按持仓日期写入数据库。',
-      detail: 'iShares 历史持仓和 SEC N-PORT 历史持仓都会覆盖已有的同 ETF 同日期数据。'
+      autoLabel: '默认范围',
+      backfillLabel: '指定日期',
+      autoDetail: '不传开始日期，由后端使用该任务的默认持仓抓取范围。',
+      backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期写入数据库。'
     };
   }
   return {
-    title: '选择回跑开始日期，系统会从该日期起重新计算并写入历史记录。',
-    detail: '计算时会自动向前取足滚动窗口数据，但只保存所选日期之后的结果。'
+    autoLabel: '默认范围',
+    backfillLabel: '指定日期',
+    autoDetail: '不传开始日期，由后端使用该任务的默认同步范围。',
+    backfillDetail: '传入开始日期后，系统会从该日期起重新计算并写入历史记录。'
   };
 };
 
@@ -210,7 +226,8 @@ const ScheduledTasks = () => {
   const [savingTaskKey, setSavingTaskKey] = useState(null);
   const [runningTaskKey, setRunningTaskKey] = useState(null);
   const [runModalTask, setRunModalTask] = useState(null);
-  const [runStartDate, setRunStartDate] = useState(dayjs('2023-12-08'));
+  const [runMode, setRunMode] = useState(RUN_MODE_AUTO);
+  const [runStartDate, setRunStartDate] = useState(getDefaultManualRunStartDate());
 
   const fetchTasks = async (showLoading = true) => {
     if (showLoading) {
@@ -280,7 +297,8 @@ const ScheduledTasks = () => {
   const handleRunButtonClick = (task) => {
     if (task.supports_start_date) {
       setRunModalTask(task);
-      setRunStartDate(dayjs('2023-12-08'));
+      setRunMode(RUN_MODE_AUTO);
+      setRunStartDate(getDefaultManualRunStartDate());
       return;
     }
     handleRunNow(task);
@@ -292,12 +310,13 @@ const ScheduledTasks = () => {
     }
     const currentTask = runModalTask;
     const payload = {};
-    if (currentTask.supports_start_date && runStartDate) {
+    if (currentTask.supports_start_date && runMode === RUN_MODE_BACKFILL && runStartDate) {
       payload.start_date = runStartDate.format('YYYY-MM-DD');
     }
     setRunModalTask(null);
     await handleRunNow(currentTask, payload);
-    setRunStartDate(dayjs('2023-12-08'));
+    setRunMode(RUN_MODE_AUTO);
+    setRunStartDate(getDefaultManualRunStartDate());
   };
 
   const sortedTasks = useMemo(() => {
@@ -518,7 +537,8 @@ const ScheduledTasks = () => {
         open={!!runModalTask}
         onCancel={() => {
           setRunModalTask(null);
-          setRunStartDate(dayjs('2023-12-08'));
+          setRunMode(RUN_MODE_AUTO);
+          setRunStartDate(getDefaultManualRunStartDate());
         }}
         onOk={handleConfirmRun}
         confirmLoading={runModalTask ? runningTaskKey === runModalTask.task_key : false}
@@ -527,19 +547,33 @@ const ScheduledTasks = () => {
       >
         <Space direction="vertical" size={12}>
           {runModalTask?.supports_start_date ? (
-            <>
-              <Text>{getRunStartDateHint(runModalTask.task_key).title}</Text>
-              <DatePicker
-                value={runStartDate}
-                onChange={(value) => setRunStartDate(value)}
-                allowClear={false}
-                format="YYYY-MM-DD"
-                style={{ width: 180 }}
-              />
-              <Text type="secondary">
-                {getRunStartDateHint(runModalTask.task_key).detail}
-              </Text>
-            </>
+            (() => {
+              const hint = getRunStartDateHint(runModalTask.task_key);
+              return (
+                <>
+                  <Segmented
+                    value={runMode}
+                    onChange={setRunMode}
+                    options={[
+                      { label: hint.autoLabel, value: RUN_MODE_AUTO },
+                      { label: hint.backfillLabel, value: RUN_MODE_BACKFILL },
+                    ]}
+                  />
+                  {runMode === RUN_MODE_BACKFILL ? (
+                    <DatePicker
+                      value={runStartDate}
+                      onChange={(value) => setRunStartDate(value)}
+                      allowClear={false}
+                      format="YYYY-MM-DD"
+                      style={{ width: 180 }}
+                    />
+                  ) : null}
+                  <Text type="secondary">
+                    {runMode === RUN_MODE_BACKFILL ? hint.backfillDetail : hint.autoDetail}
+                  </Text>
+                </>
+              );
+            })()
           ) : null}
         </Space>
       </Modal>
