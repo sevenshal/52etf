@@ -502,8 +502,50 @@ class AStockBaseDataSyncService:
         if not mappings:
             return
         table = model.__table__
+        pk_columns = [column.name for column in table.primary_key.columns]
+        if pk_columns:
+            mappings_by_key: Dict[Tuple, Dict] = {}
+            mappings_without_key: List[Dict] = []
+            for mapping in mappings:
+                key = tuple(mapping.get(column) for column in pk_columns)
+                if all(value is not None for value in key):
+                    mappings_by_key[key] = mapping
+                else:
+                    mappings_without_key.append(mapping)
+            mappings = [*mappings_by_key.values(), *mappings_without_key]
+        columns = [
+            column.name
+            for column in table.columns
+            if any(column.name in mapping for mapping in mappings)
+        ]
+        quoted_table = _quote_duckdb_identifier(table.name)
+        quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
+        temp_frame_name = "analytics_mapping_insert_frame"
+        temp_keys_name = "analytics_mapping_replace_keys"
+        connection = self.analytics_db.connection()
         for batch in _chunks(mappings, batch_size):
-            self.analytics_db.execute(table.insert(), batch)
+            frame = pd.DataFrame(batch)
+            if pk_columns:
+                key_frame = frame.loc[:, pk_columns].drop_duplicates()
+                connection.exec_driver_sql("register", (temp_keys_name, key_frame))
+                quoted_keys = _quote_duckdb_identifier(temp_keys_name)
+                key_predicate = " AND ".join(
+                    (
+                        f"{quoted_table}.{_quote_duckdb_identifier(column)} = "
+                        f"{quoted_keys}.{_quote_duckdb_identifier(column)}"
+                    )
+                    for column in pk_columns
+                )
+                connection.exec_driver_sql(
+                    f"DELETE FROM {quoted_table} USING {quoted_keys} WHERE {key_predicate}"
+                )
+            connection.exec_driver_sql("register", (temp_frame_name, frame.loc[:, columns]))
+            connection.exec_driver_sql(
+                (
+                    f"INSERT INTO {quoted_table} ({quoted_columns}) "
+                    f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
+                )
+            )
         self.analytics_db.commit()
 
     def _existing_market_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
