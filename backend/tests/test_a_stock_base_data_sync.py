@@ -129,3 +129,60 @@ class AStockBaseDataSyncTest(TestCase):
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+
+    def test_name_change_range_reinsert_replaces_existing_primary_key(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=object())
+                try:
+                    frame = pd.DataFrame(
+                        [
+                            {
+                                "ts_code": "000001.SZ",
+                                "name": "平安银行",
+                                "start_date": "20250101",
+                                "end_date": "",
+                                "change_reason": "更名",
+                            }
+                        ]
+                    )
+                    service._insert_name_changes(frame)
+                    service._replace_name_changes_range(
+                        frame,
+                        date(2026, 2, 1),
+                        date(2026, 6, 1),
+                    )
+                    rows = session.execute(
+                        text(
+                            "SELECT ts_code, name, start_date, COUNT(*) OVER () AS total "
+                            "FROM a_stock_name_changes"
+                        )
+                    ).fetchall()
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert rows == [("000001.SZ", "平安银行", date(2025, 1, 1), 1)]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass

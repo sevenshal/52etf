@@ -443,7 +443,6 @@ class AStockBaseDataSyncService:
 
     def _replace_name_changes(self, frame: pd.DataFrame):
         self.analytics_db.query(AStockNameChange).delete(synchronize_session=False)
-        self.analytics_db.commit()
         self._insert_name_changes(frame)
 
     def _replace_name_changes_range(self, frame: pd.DataFrame, start_date: date, end_date: date):
@@ -454,7 +453,6 @@ class AStockBaseDataSyncService:
             """),
             {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
         )
-        self.analytics_db.commit()
         self._insert_name_changes(frame)
 
     def _insert_name_changes(self, frame: pd.DataFrame):
@@ -495,7 +493,6 @@ class AStockBaseDataSyncService:
 
     def _replace_analytics_table(self, model, mappings: List[Dict], batch_size: int = 1000):
         self.analytics_db.query(model).delete(synchronize_session=False)
-        self.analytics_db.commit()
         self._insert_analytics_mappings(model, mappings, batch_size=batch_size)
 
     def _insert_analytics_mappings(self, model, mappings: List[Dict], batch_size: int = 1000):
@@ -521,32 +518,55 @@ class AStockBaseDataSyncService:
         quoted_table = _quote_duckdb_identifier(table.name)
         quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
         temp_frame_name = "analytics_mapping_insert_frame"
-        temp_keys_name = "analytics_mapping_replace_keys"
+        quoted_source = _quote_duckdb_identifier(temp_frame_name)
         connection = self.analytics_db.connection()
-        for batch in _chunks(mappings, batch_size):
-            frame = pd.DataFrame(batch)
-            if pk_columns:
-                key_frame = frame.loc[:, pk_columns].drop_duplicates()
-                connection.exec_driver_sql("register", (temp_keys_name, key_frame))
-                quoted_keys = _quote_duckdb_identifier(temp_keys_name)
-                key_predicate = " AND ".join(
-                    (
-                        f"{quoted_table}.{_quote_duckdb_identifier(column)} = "
-                        f"{quoted_keys}.{_quote_duckdb_identifier(column)}"
+        try:
+            for batch in _chunks(mappings, batch_size):
+                frame = pd.DataFrame(batch)
+                connection.exec_driver_sql("register", (temp_frame_name, frame.loc[:, columns]))
+                if pk_columns:
+                    key_predicate = " AND ".join(
+                        (
+                            f"target.{_quote_duckdb_identifier(column)} = "
+                            f"source.{_quote_duckdb_identifier(column)}"
+                        )
+                        for column in pk_columns
                     )
-                    for column in pk_columns
-                )
-                connection.exec_driver_sql(
-                    f"DELETE FROM {quoted_table} USING {quoted_keys} WHERE {key_predicate}"
-                )
-            connection.exec_driver_sql("register", (temp_frame_name, frame.loc[:, columns]))
-            connection.exec_driver_sql(
-                (
-                    f"INSERT INTO {quoted_table} ({quoted_columns}) "
-                    f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
-                )
-            )
-        self.analytics_db.commit()
+                    update_columns = [column for column in columns if column not in pk_columns]
+                    update_clause = ""
+                    if update_columns:
+                        assignments = ", ".join(
+                            (
+                                f"{_quote_duckdb_identifier(column)} = "
+                                f"source.{_quote_duckdb_identifier(column)}"
+                            )
+                            for column in update_columns
+                        )
+                        update_clause = f"WHEN MATCHED THEN UPDATE SET {assignments} "
+                    insert_values = ", ".join(
+                        f"source.{_quote_duckdb_identifier(column)}" for column in columns
+                    )
+                    connection.exec_driver_sql(
+                        (
+                            f"MERGE INTO {quoted_table} AS target "
+                            f"USING {quoted_source} AS source "
+                            f"ON {key_predicate} "
+                            f"{update_clause}"
+                            f"WHEN NOT MATCHED THEN INSERT ({quoted_columns}) "
+                            f"VALUES ({insert_values})"
+                        )
+                    )
+                else:
+                    connection.exec_driver_sql(
+                        (
+                            f"INSERT INTO {quoted_table} ({quoted_columns}) "
+                            f"SELECT {quoted_columns} FROM {quoted_source}"
+                        )
+                    )
+            self.analytics_db.commit()
+        except Exception:
+            self.analytics_db.rollback()
+            raise
 
     def _existing_market_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
         rows = self.analytics_db.execute(
