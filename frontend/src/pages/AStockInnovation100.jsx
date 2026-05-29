@@ -1,16 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Alert,
   Button,
   Card,
-  Col,
   DatePicker,
   Descriptions,
   Empty,
   Progress,
-  Row,
   Space,
-  Statistic,
+  Tabs,
   Table,
   Tag,
   Typography,
@@ -18,17 +17,16 @@ import {
 } from 'antd';
 import {
   BarChartOutlined,
-  HistoryOutlined,
   ReloadOutlined,
-  RocketOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
+import './AStockInnovation100.css';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -72,12 +70,19 @@ const AStockInnovation100 = ({ embedded = false }) => {
   const [job, setJob] = useState(null);
   const [startDate, setStartDate] = useState(dayjs('2020-01-01'));
   const [selectedRebalanceId, setSelectedRebalanceId] = useState(null);
+  const [headerActionHost, setHeaderActionHost] = useState(null);
   const jobTaskIdRef = useRef(null);
   const finishedJobRef = useRef(null);
 
   useEffect(() => {
     fetchDetail();
   }, []);
+
+  useEffect(() => {
+    if (!embedded) return undefined;
+    setHeaderActionHost(document.getElementById('factor-lab-innovation100-actions'));
+    return () => setHeaderActionHost(null);
+  }, [embedded]);
 
   const fetchDetail = async (rebalanceId = selectedRebalanceId) => {
     setLoading(true);
@@ -211,7 +216,9 @@ const AStockInnovation100 = ({ embedded = false }) => {
           type: 'line',
           yAxisIndex: 1,
           showSymbol: false,
-          areaStyle: {},
+          lineStyle: { width: 1.4, color: '#7cc36b' },
+          itemStyle: { color: '#7cc36b' },
+          areaStyle: { color: 'rgba(124, 195, 107, 0.16)' },
           data: levels.map(item => item.drawdown_pct),
         },
       ],
@@ -316,22 +323,41 @@ const AStockInnovation100 = ({ embedded = false }) => {
     { title: '期末点位', dataIndex: 'end_level', key: 'end_level', width: 120, render: value => formatNumber(value, 2) },
   ];
 
-  const renderToolbar = () => (
-    <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
-      <Space direction="vertical" size={0}>
-        <Title level={3} style={{ margin: 0 }}>A股创新100</Title>
-        <Text type="secondary">沪深A股创新行业大市值指数，年度重构、季度再平衡、自由流通市值改良加权</Text>
-      </Space>
-      <Space wrap>
-        <DatePicker value={startDate} onChange={setStartDate} allowClear={false} />
-        <Button icon={<ReloadOutlined />} onClick={() => fetchDetail()} loading={loading}>
-          刷新
-        </Button>
-        <Button type="primary" icon={<SyncOutlined />} onClick={handleRebuild} loading={rebuildLoading}>
-          从所选日期回跑
-        </Button>
-      </Space>
-    </Space>
+  const metricItems = [
+    { label: '最新点位', value: formatNumber(summary.latest_level, 2) },
+    { label: '累计收益', value: formatPercent(summary.total_return_pct, 2), tone: Number(summary.total_return_pct || 0) >= 0 ? 'positive' : 'negative' },
+    { label: '年化收益', value: formatPercent(summary.annualized_return_pct, 2), tone: Number(summary.annualized_return_pct || 0) >= 0 ? 'positive' : 'negative' },
+    { label: '最大回撤', value: formatPercent(summary.max_drawdown_pct, 2), tone: 'negative' },
+    { label: '年化波动', value: formatPercent(summary.annualized_volatility_pct, 2) },
+    { label: 'Sharpe', value: formatNumber(summary.sharpe_ratio, 3) },
+    { label: '成分数', value: summary.constituent_count ?? '-' },
+    { label: '再平衡', value: summary.rebalances_count ?? '-' },
+  ];
+
+  const selectedRebalanceTypeMeta = getRebalanceTypeMeta(selectedRebalance?.rebalance_type);
+  const metaItems = [
+    { label: '指数代码', value: summary.index_code || '-' },
+    { label: '区间', value: `${formatDate(summary.start_date)} ~ ${formatDate(summary.latest_date)}` },
+    { label: '最新再平衡', value: formatDate(summary.latest_rebalance_date) },
+    { label: '最近生效', value: formatDate(summary.latest_effective_date) },
+    {
+      label: '再平衡类型',
+      value: selectedRebalance ? selectedRebalanceTypeMeta.label : '-',
+      tagColor: selectedRebalance ? selectedRebalanceTypeMeta.color : null,
+    },
+    { label: '换手', value: selectedRebalance ? formatPercent(selectedRebalance.turnover_pct) : '-' },
+  ];
+
+  const renderActions = () => (
+    <div className="a100-actions">
+      <DatePicker value={startDate} onChange={setStartDate} allowClear={false} />
+      <Button icon={<ReloadOutlined />} onClick={() => fetchDetail()} loading={loading}>
+        刷新
+      </Button>
+      <Button type="primary" icon={<SyncOutlined />} onClick={handleRebuild} loading={rebuildLoading}>
+        从所选日期回跑
+      </Button>
+    </div>
   );
 
   const renderJob = () => {
@@ -340,7 +366,7 @@ const AStockInnovation100 = ({ embedded = false }) => {
       <Alert
         type={job.status === 'failed' ? 'error' : 'info'}
         showIcon
-        style={{ marginBottom: 16 }}
+        className="a100-job"
         message={job.message || job.status}
         description={
           <Space direction="vertical" style={{ width: '100%' }}>
@@ -354,125 +380,137 @@ const AStockInnovation100 = ({ embedded = false }) => {
     );
   };
 
-  const renderOverview = () => {
+  const renderMetricStrip = () => (
+    <div className="a100-metric-strip">
+      {metricItems.map(item => (
+        <div className={`a100-metric a100-metric--${item.tone || 'neutral'}`} key={item.label}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderMetaStrip = () => (
+    <div className="a100-meta-strip">
+      {metaItems.map(item => (
+        <div className="a100-meta-item" key={item.label}>
+          <span>{item.label}</span>
+          <strong>
+            {item.tagColor ? <Tag color={item.tagColor} className="a100-meta-tag">{item.value}</Tag> : item.value}
+          </strong>
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderRuleCard = () => (
+    <Card title="编制规则" className="a100-side-card">
+      <Descriptions size="small" column={1}>
+        <Descriptions.Item label="样本">{rule.universe || '-'}</Descriptions.Item>
+        <Descriptions.Item label="选样">{rule.reconstitution || '-'}</Descriptions.Item>
+        <Descriptions.Item label="调权">{rule.rebalance || '-'}</Descriptions.Item>
+        <Descriptions.Item label="权重上限">
+          单票 {formatPercent(rule.max_single_weight_pct)} / 前五 {formatPercent(rule.top5_weight_cap_pct)} / 大权重合计 {formatPercent(rule.large_weight_cap_pct)}
+        </Descriptions.Item>
+        <Descriptions.Item label="流动性">
+          近{rule.liquidity_window || 60}日均成交额不低于 {formatMoney(rule.min_avg_amount_60d, 0)} 千元
+        </Descriptions.Item>
+      </Descriptions>
+    </Card>
+  );
+
+  const renderWorkbench = () => {
     if (!summary.has_data) {
       return (
-        <Card loading={loading}>
+        <Card loading={loading} className="a100-empty-card">
           <Empty description="还没有A股创新100历史数据" />
         </Card>
       );
     }
     return (
-      <Space direction="vertical" style={{ width: '100%' }} size={16}>
-        <Row gutter={[16, 16]}>
-          <Col xs={12} md={6}>
-            <Card>
-              <Statistic title="最新点位" value={summary.latest_level || 0} precision={2} />
+      <>
+        {renderMetaStrip()}
+        {renderMetricStrip()}
+        <div className="a100-workbench">
+          <Card title={<span><BarChartOutlined /> 指数走势</span>} loading={loading} className="a100-chart-card">
+            {levelOption ? <ReactECharts option={levelOption} style={{ height: 'var(--a100-chart-height)' }} /> : <Empty />}
+          </Card>
+          <div className="a100-side-rail">
+            <Card title="年度表现" loading={loading} className="a100-side-card">
+              {yearlyOption ? <ReactECharts option={yearlyOption} style={{ height: 220 }} /> : <Empty />}
             </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card>
-              <Statistic title="累计收益" value={summary.total_return_pct || 0} precision={2} suffix="%" />
-            </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card>
-              <Statistic title="年化收益" value={summary.annualized_return_pct || 0} precision={2} suffix="%" />
-            </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card>
-              <Statistic title="最大回撤" value={summary.max_drawdown_pct || 0} precision={2} suffix="%" />
-            </Card>
-          </Col>
-        </Row>
-        <Card title={<span><BarChartOutlined /> 指数走势</span>} loading={loading}>
-          {levelOption ? <ReactECharts option={levelOption} style={{ height: 460 }} /> : <Empty />}
-        </Card>
-        <Row gutter={[16, 16]}>
-          <Col xs={24} lg={12}>
-            <Card title="年度表现" loading={loading}>
-              {yearlyOption ? <ReactECharts option={yearlyOption} style={{ height: 300 }} /> : <Empty />}
-            </Card>
-          </Col>
-          <Col xs={24} lg={12}>
-            <Card title="编制规则">
-              <Descriptions size="small" column={1}>
-                <Descriptions.Item label="样本">{rule.universe || '-'}</Descriptions.Item>
-                <Descriptions.Item label="选样">{rule.reconstitution || '-'}</Descriptions.Item>
-                <Descriptions.Item label="调权">{rule.rebalance || '-'}</Descriptions.Item>
-                <Descriptions.Item label="权重上限">
-                  单票 {formatPercent(rule.max_single_weight_pct)} / 前五 {formatPercent(rule.top5_weight_cap_pct)} / 大权重合计 {formatPercent(rule.large_weight_cap_pct)}
-                </Descriptions.Item>
-                <Descriptions.Item label="流动性">
-                  近{rule.liquidity_window || 60}日均成交额不低于 {formatMoney(rule.min_avg_amount_60d, 0)} 千元
-                </Descriptions.Item>
-              </Descriptions>
-            </Card>
-          </Col>
-        </Row>
-      </Space>
+            {renderRuleCard()}
+          </div>
+        </div>
+      </>
     );
   };
 
+  const tableItems = [
+    {
+      key: 'constituents',
+      label: `成分股 ${selectedConstituents.length || ''}`,
+      children: (
+        <Table
+          rowKey="ts_code"
+          columns={constituentColumns}
+          dataSource={selectedConstituents}
+          pagination={{ defaultPageSize: 25, showSizeChanger: true }}
+          scroll={{ x: 1100, y: 560 }}
+          size="small"
+        />
+      ),
+    },
+    {
+      key: 'rebalances',
+      label: '再平衡记录',
+      children: (
+        <Table
+          rowKey="id"
+          columns={rebalanceColumns}
+          dataSource={detail?.rebalances || []}
+          pagination={{ defaultPageSize: 12, showSizeChanger: true }}
+          scroll={{ x: 1200, y: 560 }}
+          size="small"
+          rowClassName={record => (record.id === selectedRebalanceId ? 'ant-table-row-selected' : '')}
+          onRow={(record) => ({
+            onClick: async () => {
+              setSelectedRebalanceId(record.id);
+              await fetchDetail(record.id);
+            },
+            style: { cursor: 'pointer' },
+          })}
+        />
+      ),
+    },
+    {
+      key: 'yearly',
+      label: '分年收益',
+      children: (
+        <Table
+          rowKey="year"
+          columns={yearlyColumns}
+          dataSource={detail?.yearly_returns || []}
+          pagination={false}
+          scroll={{ x: 760, y: 560 }}
+          size="small"
+        />
+      ),
+    },
+  ];
+
   return (
-    <div style={{ padding: embedded ? 0 : 24 }}>
-      {renderToolbar()}
+    <div className={`a100-page${embedded ? ' is-embedded' : ''}`}>
+      {embedded && headerActionHost ? createPortal(renderActions(), headerActionHost) : null}
+      {!embedded ? <div className="a100-toolbar">{renderActions()}</div> : null}
       {renderJob()}
+      {renderWorkbench()}
       {summary.has_data && (
-        <Descriptions bordered size="small" column={{ xs: 1, md: 4 }} style={{ marginBottom: 16 }}>
-          <Descriptions.Item label="区间">{formatDate(summary.start_date)} ~ {formatDate(summary.latest_date)}</Descriptions.Item>
-          <Descriptions.Item label="成分数">{summary.constituent_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="再平衡次数">{summary.rebalances_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="最新再平衡">{formatDate(summary.latest_rebalance_date)}</Descriptions.Item>
-          <Descriptions.Item label="年化波动">{formatPercent(summary.annualized_volatility_pct)}</Descriptions.Item>
-          <Descriptions.Item label="Sharpe">{formatNumber(summary.sharpe_ratio, 3)}</Descriptions.Item>
-          <Descriptions.Item label="指数代码">{summary.index_code}</Descriptions.Item>
-          <Descriptions.Item label="最近生效">{formatDate(summary.latest_effective_date)}</Descriptions.Item>
-        </Descriptions>
+        <Card className="a100-data-card" loading={loading}>
+          <Tabs items={tableItems} />
+        </Card>
       )}
-      {renderOverview()}
-      <Space direction="vertical" style={{ width: '100%', marginTop: 16 }} size={16}>
-        <Card
-          title={<span><RocketOutlined /> 当前/选中期成分股</span>}
-          extra={selectedRebalance ? `${formatDate(selectedRebalance.rebalance_date)} 调整，${formatDate(selectedRebalance.effective_date)} 生效` : null}
-          loading={loading}
-        >
-          <Table
-            rowKey="ts_code"
-            columns={constituentColumns}
-            dataSource={selectedConstituents}
-            pagination={{ defaultPageSize: 20 }}
-            scroll={{ x: 1100 }}
-          />
-        </Card>
-        <Card title={<span><HistoryOutlined /> 再平衡记录</span>} loading={loading}>
-          <Table
-            rowKey="id"
-            columns={rebalanceColumns}
-            dataSource={detail?.rebalances || []}
-            pagination={{ defaultPageSize: 12 }}
-            scroll={{ x: 1200 }}
-            rowClassName={record => (record.id === selectedRebalanceId ? 'ant-table-row-selected' : '')}
-            onRow={(record) => ({
-              onClick: async () => {
-                setSelectedRebalanceId(record.id);
-                await fetchDetail(record.id);
-              },
-              style: { cursor: 'pointer' },
-            })}
-          />
-        </Card>
-        <Card title="分年收益追溯" loading={loading}>
-          <Table
-            rowKey="year"
-            columns={yearlyColumns}
-            dataSource={detail?.yearly_returns || []}
-            pagination={false}
-            scroll={{ x: 760 }}
-          />
-        </Card>
-      </Space>
     </div>
   );
 };

@@ -9,8 +9,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  max-width: 1440px;
-  margin: 0 auto 10px;
+  margin-bottom: 10px;
 }
 
 .factor-lab-title-block {
@@ -37,9 +36,17 @@
   flex: 0 0 auto;
 }
 
+.factor-lab-innovation-actions {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.factor-lab-innovation-actions .a100-actions {
+  justify-content: flex-end;
+}
+
 .factor-lab-tab-strip {
-  max-width: 1440px;
-  margin: 0 auto 12px;
+  margin-bottom: 12px;
   padding: 0 10px;
   background: #fff;
   border: 1px solid #e7edf5;
@@ -65,10 +72,7 @@
 }
 
 .factor-lab-control-card {
-  max-width: 1440px;
-  margin-right: auto;
   margin-bottom: 12px;
-  margin-left: auto;
 }
 
 .factor-lab-control-card .ant-form-item {
@@ -121,8 +125,7 @@
 }
 
 .factor-lab-empty {
-  max-width: 1440px;
-  margin: 0 auto;
+  margin: 0;
   min-height: 260px;
   display: flex;
   flex-direction: column;
@@ -137,9 +140,6 @@
 }
 
 .factor-lab-metrics {
-  max-width: 1440px;
-  margin-right: auto;
-  margin-left: auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
@@ -175,10 +175,7 @@
 }
 
 .factor-lab-heatmap-card {
-  max-width: 1440px;
-  margin-right: auto;
   margin-top: 12px;
-  margin-left: auto;
 }
 
 .factor-lab-heatmap-title {
@@ -256,10 +253,7 @@
 }
 
 .factor-lab-table-row {
-  max-width: 1440px;
-  margin-right: auto !important;
   margin-top: 12px;
-  margin-left: auto !important;
 }
 
 .factor-lab-table-row-selected > td {
@@ -424,6 +418,10 @@
     display: grid;
     grid-template-columns: 44px minmax(0, 1fr);
     gap: 8px;
+  }
+
+  .factor-lab-innovation-actions {
+    width: 100%;
   }
 
   .factor-lab-actions .ant-space-item,

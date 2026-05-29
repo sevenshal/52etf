@@ -3037,6 +3037,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
             </Button>
           </Space>
         )}
+        {isInnovationTab && <div id="factor-lab-innovation100-actions" className="factor-lab-innovation-actions" />}
       </div>
 
       <div className="factor-lab-tab-strip">
