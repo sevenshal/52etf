@@ -2530,6 +2530,7 @@ async def get_external_trading_executor_status_orders(
     symbol: Optional[str] = Query(None),
     sub_account: Optional[str] = Query(None),
     role: Optional[str] = Query(None),
+    unfilled_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
@@ -2556,6 +2557,13 @@ async def get_external_trading_executor_status_orders(
     roles = _query_filter_values(role)
     if roles:
         query = query.filter(ExternalTradingOrder.allocation_role.in_(roles))
+    if unfilled_only:
+        query = query.filter(
+            or_(
+                func.upper(ExternalTradingOrder.status) != "FILLED",
+                ExternalTradingOrder.filled_quantity != ExternalTradingOrder.quantity,
+            )
+        )
     query = query.order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
     rows, pagination = _paginate_query(query, page=page, page_size=page_size)
     repair_summaries = _load_parent_order_child_repair_summaries(
