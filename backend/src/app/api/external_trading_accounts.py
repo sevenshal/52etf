@@ -19,6 +19,7 @@ from ...core.external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingBrokerPositionSnapshot,
     ExternalTradingDeliverRecord,
+    ExternalTradingEventLog,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
@@ -970,6 +971,63 @@ def _serialize_fill_status(
     }
 
 
+def _serialize_event_log_status(
+    row: ExternalTradingEventLog,
+    matched_order: Optional[ExternalTradingOrder],
+    sub_account_by_id: Dict[int, ExternalTradingSubAccount],
+    strategy_name_by_sub_account_id: Dict[int, Optional[str]],
+    children_by_parent_id: Dict[int, List[ExternalTradingOrder]],
+) -> Dict[str, Any]:
+    matched_role = (matched_order.allocation_role or "DIRECT") if matched_order else None
+    matched_sub_account_id = row.matched_sub_account_id or (
+        matched_order.sub_account_id if matched_order and matched_order.sub_account_id else None
+    )
+    sub_account = sub_account_by_id.get(matched_sub_account_id) if matched_sub_account_id else None
+    related_sub_accounts = []
+    if matched_order and (matched_role or "").upper() == "PARENT":
+        seen_sub_account_ids = set()
+        for child in children_by_parent_id.get(matched_order.id, []):
+            child_sub_account = sub_account_by_id.get(child.sub_account_id)
+            if not child_sub_account or child_sub_account.id in seen_sub_account_ids:
+                continue
+            seen_sub_account_ids.add(child_sub_account.id)
+            related_sub_accounts.append({
+                "id": child_sub_account.id,
+                "name": child_sub_account.name,
+                "strategy_name": strategy_name_by_sub_account_id.get(child_sub_account.id),
+            })
+    return {
+        "id": row.id,
+        "account_id": row.account_id,
+        "account_name": row.account_name,
+        "external_trading_account_id": row.external_trading_account_id,
+        "event_type": row.event_type,
+        "source": row.source,
+        "client_order_id": row.client_order_id,
+        "broker_order_id": row.broker_order_id,
+        "entrust_no": row.entrust_no,
+        "symbol": normalize_symbol(row.symbol),
+        "side": row.side,
+        "ptrade_status": row.ptrade_status,
+        "event_time": _iso(row.event_time),
+        "matched_order_id": row.matched_order_id,
+        "matched_sub_account_id": matched_sub_account_id,
+        "matched_order_role": matched_role,
+        "matched_order_status": matched_order.status if matched_order else None,
+        "sub_account_id": sub_account.id if sub_account else None,
+        "sub_account_name": sub_account.name if sub_account else ("净额父单" if matched_order else "未匹配"),
+        "strategy_name": strategy_name_by_sub_account_id.get(sub_account.id) if sub_account else None,
+        "related_sub_accounts": related_sub_accounts,
+        "process_status": row.process_status,
+        "process_message": row.process_message,
+        "processed_at": _iso(row.processed_at),
+        "replay_count": row.replay_count,
+        "raw_payload": jsonable_encoder(row.raw_payload or {}),
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
 def _dedupe_normalized_symbols(symbols: Iterable[Any]) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -1111,6 +1169,25 @@ def _distinct_symbols(db: OrmSession, model: Any, account_id: str, external_acco
     return _dedupe_normalized_symbols(row[0] for row in rows)
 
 
+def _distinct_event_values(
+    db: OrmSession,
+    column: Any,
+    account_id: str,
+    external_account_id: int,
+) -> List[str]:
+    rows = (
+        db.query(column)
+        .filter(
+            ExternalTradingEventLog.account_id == account_id,
+            ExternalTradingEventLog.external_trading_account_id == external_account_id,
+        )
+        .distinct()
+        .order_by(column.asc())
+        .all()
+    )
+    return [str(row[0]) for row in rows if row[0] not in (None, "")]
+
+
 def _distinct_active_target_symbols(db: OrmSession, account_id: str, external_account_id: int) -> List[str]:
     rows = (
         db.query(ExternalTradingTargetPosition.symbol)
@@ -1174,6 +1251,19 @@ def _attach_symbol_names_to_payloads(*payloads: Any) -> None:
     stock_name_by_symbol = _load_a_stock_name_map(symbols)
     for payload in payloads:
         _attach_symbol_names(payload, stock_name_by_symbol)
+
+
+def _attach_top_level_symbol_names(rows: List[Dict[str, Any]]) -> None:
+    symbols = {
+        normalize_symbol_for_name(row.get("symbol"))
+        for row in rows or []
+        if normalize_symbol_for_name(row.get("symbol"))
+    }
+    stock_name_by_symbol = _load_a_stock_name_map(symbols)
+    for row in rows or []:
+        symbol = normalize_symbol_for_name(row.get("symbol"))
+        if symbol:
+            row["symbol_name"] = stock_name_by_symbol.get(symbol)
 
 
 def _attach_strategy_names(value: Any, strategy_name_by_sub_account_id: Dict[int, Optional[str]]) -> None:
@@ -2149,6 +2239,14 @@ async def get_external_trading_executor_status(
         )
         .count()
     )
+    event_log_count = (
+        db.query(ExternalTradingEventLog)
+        .filter(
+            ExternalTradingEventLog.account_id == account_id,
+            ExternalTradingEventLog.external_trading_account_id == account.id,
+        )
+        .count()
+    )
 
     return {
         "account": _serialize_account(account),
@@ -2157,6 +2255,7 @@ async def get_external_trading_executor_status(
         "ledger_positions": [],
         "orders": [],
         "fills": [],
+        "events": [],
         "plan": {},
         "plan_error": plan_error,
         "price_details": {},
@@ -2171,6 +2270,7 @@ async def get_external_trading_executor_status(
             "active_order_count": active_order_count,
             "order_count": order_count,
             "fill_count": fill_count,
+            "event_log_count": event_log_count,
             "order_status_counts": order_status_counts,
             "external_order_count": len(plan_for_summary.get("external_orders") or []),
             "internal_cross_count": len(plan_for_summary.get("internal_crosses") or []),
@@ -2565,6 +2665,110 @@ async def get_external_trading_executor_status_fills(
             "sub_account": _filter_options(sub_account_options),
             "strategy": _filter_options(strategy_options),
             "role": _role_filter_options(["PARENT", "CHILD"]),
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/events")
+async def get_external_trading_executor_status_events(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+    sub_account: Optional[str] = Query(None),
+    event_type: Optional[str] = Query(None),
+    process_status: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    context = _load_executor_sub_account_context(db, main_db, account, account_id)
+    sub_accounts = context["sub_accounts"]
+    sub_account_by_id = context["sub_account_by_id"]
+    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
+
+    query = (
+        db.query(ExternalTradingEventLog)
+        .filter(
+            ExternalTradingEventLog.account_id == account_id,
+            ExternalTradingEventLog.external_trading_account_id == account.id,
+        )
+    )
+    query = _apply_symbol_filter(query, ExternalTradingEventLog.symbol, _query_filter_symbols(symbol))
+    query = _apply_sub_account_filter(
+        query,
+        ExternalTradingEventLog.matched_sub_account_id,
+        _sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
+    )
+    event_types = _query_filter_values(event_type)
+    if event_types:
+        query = query.filter(ExternalTradingEventLog.event_type.in_(event_types))
+    process_statuses = _query_filter_values(process_status)
+    if process_statuses:
+        query = query.filter(ExternalTradingEventLog.process_status.in_(process_statuses))
+    query = query.order_by(ExternalTradingEventLog.created_at.desc(), ExternalTradingEventLog.id.desc())
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+
+    matched_order_ids = sorted({row.matched_order_id for row in rows if row.matched_order_id})
+    matched_orders = (
+        db.query(ExternalTradingOrder)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == account.id,
+            ExternalTradingOrder.id.in_(matched_order_ids),
+        )
+        .all()
+        if matched_order_ids
+        else []
+    )
+    matched_order_by_id = {row.id: row for row in matched_orders}
+    parent_order_ids = [
+        row.id
+        for row in matched_orders
+        if (row.allocation_role or "").upper() == "PARENT"
+    ]
+    children_by_parent_id: Dict[int, List[ExternalTradingOrder]] = {}
+    if parent_order_ids:
+        child_orders = (
+            db.query(ExternalTradingOrder)
+            .filter(
+                ExternalTradingOrder.account_id == account_id,
+                ExternalTradingOrder.external_trading_account_id == account.id,
+                ExternalTradingOrder.parent_order_id.in_(parent_order_ids),
+            )
+            .order_by(ExternalTradingOrder.parent_order_id.asc(), ExternalTradingOrder.id.asc())
+            .all()
+        )
+        for child in child_orders:
+            children_by_parent_id.setdefault(child.parent_order_id, []).append(child)
+
+    serialized_rows = [
+        _serialize_event_log_status(
+            row,
+            matched_order_by_id.get(row.matched_order_id),
+            sub_account_by_id,
+            strategy_name_by_sub_account_id,
+            children_by_parent_id,
+        )
+        for row in rows
+    ]
+    _attach_top_level_symbol_names(serialized_rows)
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": {},
+        "filter_options": {
+            "symbol": _symbol_filter_options(
+                _distinct_event_values(db, ExternalTradingEventLog.symbol, account_id, account.id)
+            ),
+            "sub_account": _filter_options(row.name for row in sub_accounts),
+            "event_type": _filter_options(
+                _distinct_event_values(db, ExternalTradingEventLog.event_type, account_id, account.id)
+            ),
+            "process_status": _filter_options(
+                _distinct_event_values(db, ExternalTradingEventLog.process_status, account_id, account.id)
+            ),
         },
     }
 

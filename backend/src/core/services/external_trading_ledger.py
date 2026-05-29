@@ -14,6 +14,7 @@ from ..external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingBrokerPositionSnapshot,
     ExternalTradingDeliverRecord,
+    ExternalTradingEventLog,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
@@ -429,6 +430,12 @@ def submission_result_retryable(value: Any) -> Optional[bool]:
 
 def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quantity: int = 0) -> str:
     raw = "" if raw_status is None else str(raw_status)
+    if raw in PTRADE_TRADE_FILL_STATUSES:
+        if quantity > 0 and filled_quantity >= quantity:
+            return "FILLED"
+        if filled_quantity > 0:
+            return "PARTIALLY_FILLED"
+        return "ACKNOWLEDGED"
     mapped = PTRADE_STATUS_MAP.get(raw)
     if mapped in {"SUBMITTED", "ACKNOWLEDGED"}:
         if quantity > 0 and filled_quantity >= quantity:
@@ -2014,6 +2021,7 @@ def record_submission_result(
         row.raw_submit_result = item
         row.updated_at = now
         _propagate_parent_order_state(db, row)
+        replay_unmatched_external_events_for_order(db, external_trading_account_id=external_trading_account_id, order=row)
         if item.get("ok") is False and retryable is False:
             _create_non_retryable_rejection_blocks(
                 db,
@@ -2113,6 +2121,123 @@ def _find_order_for_event(db: Session, external_trading_account_id: int, event: 
     return None
 
 
+def _event_identifier(event: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = event.get(key)
+        if value is not None and value != "":
+            return str(value)
+    return None
+
+
+def _event_time(event: Dict[str, Any]) -> Optional[datetime]:
+    return parse_dt(
+        event.get("event_time")
+        or event.get("traded_at")
+        or event.get("trade_time")
+        or event.get("business_time")
+        or event.get("submitted_at")
+    )
+
+
+def record_external_event_logs(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    account_id: Optional[str] = None,
+    account_name: Optional[str] = None,
+    event_type: str,
+    events: List[Dict[str, Any]],
+    source: Optional[str] = None,
+) -> List[ExternalTradingEventLog]:
+    rows: List[ExternalTradingEventLog] = []
+    now = datetime.now()
+    for event in events or []:
+        row = ExternalTradingEventLog(
+            account_id=account_id,
+            account_name=account_name,
+            external_trading_account_id=external_trading_account_id,
+            event_type=event_type,
+            source=source,
+            client_order_id=_event_identifier(event, "client_order_id"),
+            broker_order_id=_event_identifier(event, "order_id", "broker_order_id"),
+            entrust_no=_event_identifier(event, "entrust_no"),
+            symbol=normalize_symbol(_event_identifier(event, "symbol", "client_symbol")),
+            side=_event_identifier(event, "side"),
+            ptrade_status=_event_identifier(event, "status"),
+            event_time=_event_time(event),
+            raw_payload=event,
+            process_status="RECEIVED",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+        rows.append(row)
+    if rows:
+        db.flush()
+    return rows
+
+
+def _mark_external_event_log(
+    row: Optional[ExternalTradingEventLog],
+    *,
+    process_status: str,
+    order: Optional[ExternalTradingOrder] = None,
+    message: Optional[str] = None,
+) -> None:
+    if not row:
+        return
+    row.process_status = process_status
+    if order:
+        row.matched_order_id = order.id
+        row.matched_sub_account_id = order.sub_account_id if order.sub_account_id else row.matched_sub_account_id
+    row.process_message = message
+    row.processed_at = datetime.now()
+    row.updated_at = row.processed_at
+
+
+def _external_event_summary(event: Dict[str, Any]) -> Dict[str, Any]:
+    fields = (
+        "client_order_id",
+        "order_id",
+        "broker_order_id",
+        "entrust_no",
+        "symbol",
+        "client_symbol",
+        "side",
+        "status",
+        "business_no",
+        "business_id",
+        "business_flag",
+        "business_name",
+        "business_amount",
+        "quantity",
+        "filled_quantity",
+        "business_price",
+        "price",
+        "trade_time",
+        "business_time",
+        "event_time",
+        "submitted_at",
+    )
+    return {key: event.get(key) for key in fields if event.get(key) not in (None, "")}
+
+
+def _same_order_tree(left: ExternalTradingOrder, right: ExternalTradingOrder) -> bool:
+    left_root = left.parent_order_id or left.id
+    right_root = right.parent_order_id or right.id
+    return bool(left_root and right_root and left_root == right_root)
+
+
+def _recorded_fill_quantity_for_order_tree(db: Session, row: ExternalTradingOrder) -> int:
+    quantity, _ = _order_fill_totals(db, row.id)
+    if _role(row) != "PARENT":
+        return quantity
+    for child in _child_orders(db, row.id):
+        child_quantity, _ = _order_fill_totals(db, child.id)
+        quantity += child_quantity
+    return quantity
+
+
 def _apply_order_status_event(db: Session, row: ExternalTradingOrder, event: Dict[str, Any], now: datetime) -> None:
     raw_status = event.get("status")
     previous_filled_quantity = safe_int(row.filled_quantity)
@@ -2121,16 +2246,33 @@ def _apply_order_status_event(db: Session, row: ExternalTradingOrder, event: Dic
         raw_status,
         current=row.filled_quantity,
     )
-    row.ptrade_status = None if raw_status is None else str(raw_status)
-    row.status = merge_lifecycle_status(
-        row.status,
-        ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity),
+    incoming_lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
+    corrective_terminal_without_fills = (
+        str(row.status or "").upper() == "FILLED"
+        and incoming_lifecycle in {"CANCELED", "PARTIALLY_CANCELED", "REJECTED", "FAILED", "EXPIRED"}
+        and _recorded_fill_quantity_for_order_tree(db, row) <= 0
     )
+    row.ptrade_status = None if raw_status is None else str(raw_status)
+    if corrective_terminal_without_fills:
+        row.status = incoming_lifecycle
+    else:
+        row.status = merge_lifecycle_status(row.status, incoming_lifecycle)
     row.broker_order_id = str(event.get("order_id")) if event.get("order_id") else row.broker_order_id
     row.entrust_no = str(event.get("entrust_no")) if event.get("entrust_no") else row.entrust_no
-    row.filled_quantity = max(row.filled_quantity or 0, filled_quantity)
-    row.remaining_quantity = max(row.quantity - row.filled_quantity, 0)
-    if safe_int(row.filled_quantity) > previous_filled_quantity:
+    if corrective_terminal_without_fills:
+        logger.warning(
+            "Corrected external order FILLED state without recorded fills: order_id=%s entrust_no=%s incoming_status=%s",
+            row.broker_order_id,
+            row.entrust_no,
+            incoming_lifecycle,
+        )
+        row.filled_quantity = 0
+        row.remaining_quantity = safe_int(row.quantity)
+        row.avg_fill_price = None
+    else:
+        row.filled_quantity = max(row.filled_quantity or 0, filled_quantity)
+        row.remaining_quantity = max(row.quantity - row.filled_quantity, 0)
+    if not corrective_terminal_without_fills and safe_int(row.filled_quantity) > previous_filled_quantity:
         row.avg_fill_price = safe_float(
             event.get("avg_fill_price", event.get("business_price", event.get("price"))),
             row.avg_fill_price,
@@ -2150,15 +2292,33 @@ def _apply_order_status_event(db: Session, row: ExternalTradingOrder, event: Dic
     _propagate_parent_order_state(db, row)
 
 
-def process_order_events(db: Session, *, external_trading_account_id: int, orders: List[Dict[str, Any]]) -> int:
+def process_order_events(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    orders: List[Dict[str, Any]],
+    event_logs: Optional[List[ExternalTradingEventLog]] = None,
+) -> int:
     updated = 0
     now = datetime.now()
-    for event in orders or []:
+    for index, event in enumerate(orders or []):
+        event_log = event_logs[index] if event_logs and index < len(event_logs) else None
         row = _find_order_for_event(db, external_trading_account_id, event)
         if not row:
-            logger.warning("Unmatched external order event: %s", event)
+            logger.warning(
+                "Unmatched external order event: account=%s event_log_id=%s summary=%s",
+                external_trading_account_id,
+                event_log.id if event_log else None,
+                _external_event_summary(event),
+            )
+            _mark_external_event_log(
+                event_log,
+                process_status="UNMATCHED",
+                message="未匹配本地订单",
+            )
             continue
         _apply_order_status_event(db, row, event, now)
+        _mark_external_event_log(event_log, process_status="PROCESSED", order=row)
         updated += 1
     return updated
 
@@ -2397,17 +2557,36 @@ def _allocate_quantity_to_child_orders(
     return updated_children
 
 
-def process_trade_events(db: Session, *, external_trading_account_id: int, trades: List[Dict[str, Any]]) -> int:
+def process_trade_events(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    trades: List[Dict[str, Any]],
+    event_logs: Optional[List[ExternalTradingEventLog]] = None,
+) -> int:
     inserted = 0
     now = datetime.now()
-    for event in trades or []:
+    for index, event in enumerate(trades or []):
+        event_log = event_logs[index] if event_logs and index < len(event_logs) else None
         order = _find_order_for_event(db, external_trading_account_id, event)
         if not order:
-            logger.warning("Unmatched external trade event: %s", event)
+            logger.warning(
+                "Unmatched external trade event: account=%s event_log_id=%s summary=%s",
+                external_trading_account_id,
+                event_log.id if event_log else None,
+                _external_event_summary(event),
+            )
+            _mark_external_event_log(
+                event_log,
+                process_status="UNMATCHED",
+                message="未匹配本地订单",
+            )
             continue
         if not _is_trade_fill_event(event):
             logger.info(
-                "Processed non-fill external trade event as order status: order_id=%s entrust_no=%s status=%s quantity=%s price=%s",
+                "Processed non-fill external trade event as order status: account=%s event_log_id=%s order_id=%s entrust_no=%s status=%s quantity=%s price=%s",
+                external_trading_account_id,
+                event_log.id if event_log else None,
                 event.get("order_id"),
                 event.get("entrust_no"),
                 event.get("status"),
@@ -2415,15 +2594,23 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
                 event.get("price", event.get("business_price", event.get("avg_fill_price"))),
             )
             _apply_order_status_event(db, order, event, now)
+            _mark_external_event_log(event_log, process_status="PROCESSED", order=order, message="非成交状态事件")
             continue
         fill_key = _trade_fill_key(event)
         existing = db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.fill_key == fill_key).first()
         if existing:
+            _mark_external_event_log(event_log, process_status="PROCESSED", order=order, message="重复成交事件")
             continue
         quantity = safe_int(event.get("quantity", event.get("business_amount", event.get("filled_quantity"))))
         price = safe_float(event.get("price", event.get("business_price", event.get("avg_fill_price"))))
         if quantity <= 0 or price <= 0:
-            logger.warning("Ignored invalid external trade event: %s", event)
+            logger.warning(
+                "Ignored invalid external trade event: account=%s event_log_id=%s summary=%s",
+                external_trading_account_id,
+                event_log.id if event_log else None,
+                _external_event_summary(event),
+            )
+            _mark_external_event_log(event_log, process_status="FAILED", order=order, message="成交数量或价格无效")
             continue
 
         traded_at = parse_dt(event.get("traded_at") or event.get("trade_time") or event.get("business_time")) or now
@@ -2456,8 +2643,74 @@ def process_trade_events(db: Session, *, external_trading_account_id: int, trade
 
         _refresh_order_from_fill_totals(db, order)
         _apply_order_status_event(db, order, event, now)
+        _mark_external_event_log(event_log, process_status="PROCESSED", order=order)
         inserted += 1
     return inserted
+
+
+def replay_unmatched_external_events_for_order(
+    db: Session,
+    *,
+    external_trading_account_id: int,
+    order: ExternalTradingOrder,
+    max_events: int = 100,
+) -> Dict[str, int]:
+    identity_filters = []
+    if order.client_order_id:
+        identity_filters.append(ExternalTradingEventLog.client_order_id == order.client_order_id)
+    if order.broker_order_id:
+        identity_filters.append(ExternalTradingEventLog.broker_order_id == order.broker_order_id)
+    if order.entrust_no:
+        identity_filters.append(ExternalTradingEventLog.entrust_no == order.entrust_no)
+    if not identity_filters:
+        return {"replayed": 0, "order_events": 0, "trade_events": 0}
+    rows = (
+        db.query(ExternalTradingEventLog)
+        .filter(
+            ExternalTradingEventLog.external_trading_account_id == external_trading_account_id,
+            ExternalTradingEventLog.process_status == "UNMATCHED",
+            ExternalTradingEventLog.event_type.in_(["order_event", "trade_event"]),
+            or_(*identity_filters),
+        )
+        .order_by(ExternalTradingEventLog.id.asc())
+        .limit(max_events)
+        .all()
+    )
+    replayed = 0
+    order_events = 0
+    trade_events = 0
+    for event_log in rows:
+        event = event_log.raw_payload or {}
+        matched = _find_order_for_event(db, external_trading_account_id, event)
+        if not matched or not _same_order_tree(order, matched):
+            continue
+        event_log.replay_count = safe_int(event_log.replay_count) + 1
+        event_log.updated_at = datetime.now()
+        if event_log.event_type == "order_event":
+            order_events += process_order_events(
+                db,
+                external_trading_account_id=external_trading_account_id,
+                orders=[event],
+                event_logs=[event_log],
+            )
+        elif event_log.event_type == "trade_event":
+            trade_events += process_trade_events(
+                db,
+                external_trading_account_id=external_trading_account_id,
+                trades=[event],
+                event_logs=[event_log],
+            )
+        replayed += 1
+    if replayed:
+        logger.info(
+            "Replayed unmatched external events for order_id=%s entrust_no=%s: replayed=%s order_events=%s trade_events=%s",
+            order.broker_order_id,
+            order.entrust_no,
+            replayed,
+            order_events,
+            trade_events,
+        )
+    return {"replayed": replayed, "order_events": order_events, "trade_events": trade_events}
 
 
 PTRADE_TRADE_BUSINESS_FLAGS = {"4001", "4002"}

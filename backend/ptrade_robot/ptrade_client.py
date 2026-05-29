@@ -1365,10 +1365,18 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
     log.info("交易指令已提交: %s" % message)
 
     raw_status = None
+    entrust_no = None
+    raw_order_info = None
+    filled_quantity = 0
+    avg_fill_price = None
     if order_sn:
         order_info = get_first_order(order_sn)
         remember_client_order_aliases(order_info, client_order_id)
         raw_status = str(value_of(order_info, "status", ""))
+        entrust_no = value_of(order_info, "entrust_no")
+        raw_order_info = stringify_unknown_fields(order_info) if order_info is not None else None
+        filled_quantity = get_order_filled_quantity(order_info) if order_info is not None else 0
+        avg_fill_price = value_of(order_info, "business_price")
         if raw_status == "9":
             log.error("交易失败: %s失败(被拒绝)" % message)
             return {
@@ -1391,7 +1399,11 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
                 "snapshot_time": protection.get("snapshot_time") if protection else None,
                 "submitted_price": protection_price,
                 "order_id": order_sn,
+                "entrust_no": entrust_no,
                 "raw_status": raw_status,
+                "filled_quantity": filled_quantity,
+                "avg_fill_price": avg_fill_price,
+                "raw_order_info": raw_order_info,
                 "message": "%s失败(被拒绝)" % message,
             }
 
@@ -1413,7 +1425,11 @@ def place_market_order(order_request, client_symbol, api_symbol, side, quantity)
         "snapshot_time": protection.get("snapshot_time") if protection else None,
         "submitted_price": protection_price,
         "order_id": order_sn,
+        "entrust_no": entrust_no,
         "raw_status": raw_status,
+        "filled_quantity": filled_quantity,
+        "avg_fill_price": avg_fill_price,
+        "raw_order_info": raw_order_info,
         "message": message,
     }
 
@@ -1445,10 +1461,18 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
     status = "FAILED"
     message = ""
     raw_status = None
+    entrust_no = None
+    raw_order_info = None
+    filled_quantity = 0
+    avg_fill_price = None
     if order_sn:
         order_info = get_first_order(order_sn)
         remember_client_order_aliases(order_info, client_order_id)
         raw_status = str(value_of(order_info, "status", ""))
+        entrust_no = value_of(order_info, "entrust_no")
+        raw_order_info = stringify_unknown_fields(order_info) if order_info is not None else None
+        filled_quantity = get_order_filled_quantity(order_info) if order_info is not None else 0
+        avg_fill_price = value_of(order_info, "business_price")
         if raw_status == "9":
             message = "%s %s失败(被拒绝)" % (side, client_symbol)
         else:
@@ -1481,7 +1505,11 @@ def place_limit_order(order_request, client_symbol, api_symbol, side, quantity):
         "snapshot_time": calculated.get("snapshot_time"),
         "submitted_price": limit_price,
         "order_id": order_sn,
+        "entrust_no": entrust_no,
         "raw_status": raw_status,
+        "filled_quantity": filled_quantity,
+        "avg_fill_price": avg_fill_price,
+        "raw_order_info": raw_order_info,
         "message": message,
     }
 
@@ -1578,7 +1606,7 @@ def remember_client_order_id(order_sn, client_order_id):
     g.order_client_id_by_order_id[str(order_sn)] = client_order_id
     if not hasattr(g, "order_last_known_status"):
         g.order_last_known_status = {}
-    g.order_last_known_status[str(order_sn)] = "0"
+    g.order_last_known_status.setdefault(str(order_sn), "0")
 
 
 def remember_client_order_aliases(order_item, client_order_id):
@@ -1713,10 +1741,14 @@ def get_order_filled_quantity(order_item):
     if filled_value is not None:
         quantity = filled_value
     else:
-        status = str(value_of(order_item, "status", ""))
-        if status not in ORDER_FILL_STATUSES:
-            return 0
-        quantity = first_value(order_item, ("business_amount", "filled_amount"), 0)
+        filled_amount = value_of(order_item, "filled_amount", None)
+        if filled_amount is not None:
+            quantity = filled_amount
+        else:
+            status = str(value_of(order_item, "status", ""))
+            if status not in ORDER_FILL_STATUSES:
+                return 0
+            quantity = value_of(order_item, "business_amount", 0)
     try:
         quantity = abs(int(quantity or 0))
     except Exception:
@@ -1786,6 +1818,14 @@ def normalize_trade(trade_item, current_dt):
 def on_order_response(context, order_list):
     update_current_context(context)
     current_dt = get_current_dt()
+    for item in (order_list or []):
+        oid = str(first_value(item, ("order_id", "id", "entrust_no"), ""))
+        client_order_id = (
+            value_of(item, "client_order_id")
+            or lookup_client_order_id(oid)
+            or lookup_client_order_id(value_of(item, "entrust_no"))
+        )
+        remember_client_order_aliases(item, client_order_id)
     orders = [normalize_order(item, current_dt) for item in (order_list or [])]
     send_ws_event({
         "type": "order_event",

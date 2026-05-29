@@ -303,6 +303,34 @@ class ExternalTradingOrderFill(ExternalTradingBase):
     created_at = Column(DateTime, default=datetime.now)
 
 
+class ExternalTradingEventLog(ExternalTradingBase):
+    """外部交易入站事件流水，保留 order/trade 回报原文并支持乱序重放。"""
+    __tablename__ = "external_trading_event_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    account_name = Column(String(100))
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    event_type = Column(String(32), index=True, nullable=False)
+    source = Column(String(32), index=True)
+    client_order_id = Column(String(64), index=True)
+    broker_order_id = Column(String(128), index=True)
+    entrust_no = Column(String(128), index=True)
+    symbol = Column(String(32), index=True)
+    side = Column(String(8))
+    ptrade_status = Column(String(16), index=True)
+    event_time = Column(DateTime, index=True)
+    raw_payload = Column(JSON)
+    matched_order_id = Column(Integer, index=True)
+    matched_sub_account_id = Column(Integer, index=True)
+    process_status = Column(String(32), default="RECEIVED", index=True, nullable=False)
+    process_message = Column(String(1000))
+    processed_at = Column(DateTime)
+    replay_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class ExternalTradingDeliverRecord(ExternalTradingBase):
     """PTrade 交割单原始记录与本地订单费用对账结果。"""
     __tablename__ = "external_trading_deliver_records"
@@ -377,6 +405,9 @@ def ensure_external_trading_indexes():
         "CREATE INDEX IF NOT EXISTS idx_external_orders_lifecycle ON external_trading_orders(status, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_broker ON external_trading_orders(external_trading_account_id, broker_order_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_order_fills_order ON external_trading_order_fills(order_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_external_event_logs_status ON external_trading_event_logs(external_trading_account_id, process_status, event_type, id)",
+        "CREATE INDEX IF NOT EXISTS idx_external_event_logs_order ON external_trading_event_logs(external_trading_account_id, broker_order_id, entrust_no, client_order_id)",
+        "CREATE INDEX IF NOT EXISTS idx_external_event_logs_sub_account ON external_trading_event_logs(external_trading_account_id, matched_sub_account_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_parent ON external_trading_orders(parent_order_id, allocation_role)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_deadline ON external_trading_orders(external_trading_account_id, deadline_at, status)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_signal ON external_trading_orders(sub_account_id, symbol, signal_version)",
@@ -427,6 +458,9 @@ def ensure_external_trading_columns():
             "reference_price": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price FLOAT",
             "reference_price_source": "ALTER TABLE external_trading_target_positions ADD COLUMN reference_price_source VARCHAR(64)",
         },
+        "external_trading_event_logs": {
+            "matched_sub_account_id": "ALTER TABLE external_trading_event_logs ADD COLUMN matched_sub_account_id INTEGER",
+        },
     }
     with external_trading_engine.begin() as conn:
         for table_name, columns in table_columns.items():
@@ -437,6 +471,25 @@ def ensure_external_trading_columns():
             for column_name, ddl in columns.items():
                 if column_name not in existing:
                     conn.exec_driver_sql(ddl)
+        conn.execute(text("""
+            UPDATE external_trading_event_logs
+            SET matched_sub_account_id = (
+                SELECT external_trading_orders.sub_account_id
+                FROM external_trading_orders
+                WHERE external_trading_orders.id = external_trading_event_logs.matched_order_id
+                  AND external_trading_orders.external_trading_account_id = external_trading_event_logs.external_trading_account_id
+                LIMIT 1
+            )
+            WHERE matched_sub_account_id IS NULL
+              AND matched_order_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM external_trading_orders
+                WHERE external_trading_orders.id = external_trading_event_logs.matched_order_id
+                  AND external_trading_orders.external_trading_account_id = external_trading_event_logs.external_trading_account_id
+                  AND external_trading_orders.sub_account_id IS NOT NULL
+              )
+        """))
 
 
 def drop_deprecated_external_trading_columns():

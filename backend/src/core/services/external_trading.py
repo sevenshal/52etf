@@ -28,6 +28,7 @@ from .external_trading_ledger import (
     persist_broker_position_snapshot,
     process_order_events,
     process_trade_events,
+    record_external_event_logs,
 )
 from .external_trading_market import (
     EXTERNAL_TRADING_MARKET_A_STOCK,
@@ -58,6 +59,100 @@ PTRADE_MARKET_HOURS_ENFORCED_ACTIONS = {
     "get_deliver",
 }
 _trading_day_cache: Dict[date, bool] = {}
+
+
+def _json_log(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _truncated_json_log(value: Any, max_length: int = 4000) -> str:
+    text = _json_log(value)
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}...<truncated {len(text) - max_length} chars>"
+
+
+def _external_event_summary(item: Any) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"payload_type": type(item).__name__}
+    fields = (
+        "client_order_id",
+        "order_id",
+        "broker_order_id",
+        "entrust_no",
+        "symbol",
+        "client_symbol",
+        "side",
+        "status",
+        "business_flag",
+        "business_name",
+        "business_amount",
+        "quantity",
+        "filled_quantity",
+        "business_price",
+        "price",
+        "trade_time",
+        "business_time",
+        "event_time",
+        "submitted_at",
+    )
+    return {key: item.get(key) for key in fields if item.get(key) not in (None, "")}
+
+
+def _log_external_event_summary(conn: "ExternalTradingConnection", message_type: str, items_key: str, message: Dict[str, Any]) -> None:
+    items = message.get(items_key) or []
+    count = len(items) if isinstance(items, list) else None
+    sample = [_external_event_summary(item) for item in items[:5]] if isinstance(items, list) else []
+    logger.info(
+        "Received external %s from %s: account_pk=%s count=%s ts=%s sample=%s",
+        message_type,
+        conn.name,
+        conn.account_pk,
+        count,
+        message.get("ts"),
+        _json_log(sample),
+    )
+
+
+def _record_external_event_logs_or_raise(
+    db: Any,
+    *,
+    conn: "ExternalTradingConnection",
+    message_type: str,
+    items_key: str,
+    events: List[Dict[str, Any]],
+    message: Dict[str, Any],
+) -> Any:
+    try:
+        return record_external_event_logs(
+            db,
+            external_trading_account_id=conn.account_pk,
+            account_id=conn.account_id,
+            account_name=conn.name,
+            event_type=message_type,
+            events=events,
+            source=message.get("source"),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist external %s logs from %s: account_pk=%s count=%s payload_truncated=%s",
+            message_type,
+            conn.name,
+            conn.account_pk,
+            len(events) if isinstance(events, list) else None,
+            _truncated_json_log(
+                {
+                    "type": message_type,
+                    "ts": message.get("ts"),
+                    "source": message.get("source"),
+                    items_key: events,
+                }
+            ),
+        )
+        raise
 
 PRICE_TICK_001 = Decimal("0.001")
 PRICE_TICK_01 = Decimal("0.01")
@@ -367,21 +462,43 @@ class ExternalTradingHub:
             return
 
         if message_type == "order_event":
+            _log_external_event_summary(conn, message_type, "orders", message)
+            orders = message.get("orders") or []
             with get_external_trading_db_ctx() as db:
+                event_logs = _record_external_event_logs_or_raise(
+                    db,
+                    conn=conn,
+                    message_type=message_type,
+                    items_key="orders",
+                    events=orders,
+                    message=message,
+                )
                 updated = process_order_events(
                     db,
                     external_trading_account_id=conn.account_pk,
-                    orders=message.get("orders") or [],
+                    orders=orders,
+                    event_logs=event_logs,
                 )
             logger.info("Processed external order events from %s: %s", conn.name, updated)
             return
 
         if message_type == "trade_event":
+            _log_external_event_summary(conn, message_type, "trades", message)
+            trades = message.get("trades") or []
             with get_external_trading_db_ctx() as db:
+                event_logs = _record_external_event_logs_or_raise(
+                    db,
+                    conn=conn,
+                    message_type=message_type,
+                    items_key="trades",
+                    events=trades,
+                    message=message,
+                )
                 inserted = process_trade_events(
                     db,
                     external_trading_account_id=conn.account_pk,
-                    trades=message.get("trades") or [],
+                    trades=trades,
+                    event_logs=event_logs,
                 )
             logger.info("Processed external trade events from %s: %s", conn.name, inserted)
             return
