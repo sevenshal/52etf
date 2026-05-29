@@ -3381,26 +3381,6 @@ const FactorLab = ({ initialTab = 'single' }) => {
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
             <Col xs={24}>
-              <Card title={`最近日志：${selectedLiveConfigTitle}`} bordered={false}>
-                <div className="factor-lab-live-log-mobile-list">
-                  {renderLiveLogCards()}
-                </div>
-                <div className="factor-lab-live-table">
-                  <Table
-                    rowKey="id"
-                    size="small"
-                    columns={liveLogColumns}
-                    dataSource={liveLogs}
-                    pagination={false}
-                    scroll={{ x: 640, y: 420 }}
-                  />
-                </div>
-              </Card>
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]} className="factor-lab-table-row">
-            <Col xs={24}>
               <Card title={`最近信号：${selectedLiveConfigTitle}`} bordered={false}>
                 {selectedLiveConfig?.last_signal_payload ? (
                   <Space direction="vertical" size={8} className="factor-lab-full">
@@ -3426,6 +3406,26 @@ const FactorLab = ({ initialTab = 'single' }) => {
                 ) : (
                   <Empty />
                 )}
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[12, 12]} className="factor-lab-table-row">
+            <Col xs={24}>
+              <Card title={`最近日志：${selectedLiveConfigTitle}`} bordered={false}>
+                <div className="factor-lab-live-log-mobile-list">
+                  {renderLiveLogCards()}
+                </div>
+                <div className="factor-lab-live-table">
+                  <Table
+                    rowKey="id"
+                    size="small"
+                    columns={liveLogColumns}
+                    dataSource={liveLogs}
+                    pagination={false}
+                    scroll={{ x: 640, y: 420 }}
+                  />
+                </div>
               </Card>
             </Col>
           </Row>
