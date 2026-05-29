@@ -81,20 +81,23 @@ const executorServerTableEndpoints = {
   target_positions: 'target-positions',
   ledger_positions: 'ledger-positions',
   orders: 'orders',
-  fills: 'fills'
+  fills: 'fills',
+  events: 'events'
 };
 const executorServerTableLabels = {
   target_positions: '目标仓位',
   ledger_positions: '账本持仓',
   orders: '订单生命周期',
-  fills: '成交回报'
+  fills: '成交回报',
+  events: '事件流水'
 };
 const executorServerTableKeys = Object.keys(executorServerTableEndpoints);
 const createDefaultExecutorTableState = () => ({
   target_positions: { page: 1, pageSize: 10, filters: {} },
   ledger_positions: { page: 1, pageSize: 10, filters: {} },
   orders: { page: 1, pageSize: 10, filters: {} },
-  fills: { page: 1, pageSize: 10, filters: {} }
+  fills: { page: 1, pageSize: 10, filters: {} },
+  events: { page: 1, pageSize: 10, filters: {} }
 });
 const createEmptyExecutorTableData = () => ({
   rows: [],
@@ -697,7 +700,9 @@ const ExternalTradingAccountManager = () => {
       symbol: joinFilterValues(filters.symbol),
       sub_account: joinFilterValues(filters.sub_account),
       strategy: joinFilterValues(filters.strategy),
-      role: joinFilterValues(filters.role)
+      role: joinFilterValues(filters.role),
+      event_type: joinFilterValues(filters.event_type),
+      process_status: joinFilterValues(filters.process_status)
     };
   };
 
@@ -794,6 +799,7 @@ const ExternalTradingAccountManager = () => {
     if (tabKey === 'ledger') return 'ledger_positions';
     if (tabKey === 'orders') return 'orders';
     if (tabKey === 'fills') return 'fills';
+    if (tabKey === 'events') return 'events';
     return null;
   };
 
@@ -953,6 +959,46 @@ const ExternalTradingAccountManager = () => {
     return 'processing';
   };
 
+  const eventTypeLabel = value => {
+    if (value === 'order_event') return '订单回报';
+    if (value === 'trade_event') return '成交回报';
+    return value || '-';
+  };
+
+  const eventTypeColor = value => {
+    if (value === 'trade_event') return 'blue';
+    if (value === 'order_event') return 'purple';
+    return 'default';
+  };
+
+  const eventProcessStatusColor = value => {
+    if (value === 'PROCESSED') return 'success';
+    if (value === 'FAILED') return 'error';
+    if (value === 'UNMATCHED') return 'warning';
+    if (value === 'RECEIVED') return 'processing';
+    return 'default';
+  };
+
+  const renderEventSubAccounts = (_, record) => {
+    const related = record?.related_sub_accounts || [];
+    if (!related.length) {
+      return (
+        <Space direction="vertical" size={0}>
+          <Text>{record?.sub_account_name || '-'}</Text>
+          {record?.strategy_name ? <Text type="secondary">策略: {record.strategy_name}</Text> : null}
+        </Space>
+      );
+    }
+    return (
+      <Space direction="vertical" size={0}>
+        <Text>{record?.sub_account_name || '-'}</Text>
+        <Text type="secondary">
+          {related.map(item => item.strategy_name ? `${item.name}(${item.strategy_name})` : item.name).join(' / ')}
+        </Text>
+      </Space>
+    );
+  };
+
   const handleExecutorServerTableChange = tableKey => (pagination, filters) => {
     const previousState = executorStatusTableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
     const nextTableState = {
@@ -997,6 +1043,7 @@ const ExternalTradingAccountManager = () => {
   const ledgerRows = executorStatusTables.ledger_positions?.rows || [];
   const lifecycleRows = executorStatusTables.orders?.rows || [];
   const fillRows = executorStatusTables.fills?.rows || [];
+  const eventRows = executorStatusTables.events?.rows || [];
   const executorSubAccountRows = executorSubAccountStatus?.rows || [];
   const executorSubAccountTotals = {
     cashAllocated: sumNumberField(executorSubAccountRows, 'cash_allocated'),
@@ -1013,7 +1060,8 @@ const ExternalTradingAccountManager = () => {
     ...(executorStatusTables.target_positions?.price_details || {}),
     ...(executorStatusTables.ledger_positions?.price_details || {}),
     ...(executorStatusTables.orders?.price_details || {}),
-    ...(executorStatusTables.fills?.price_details || {})
+    ...(executorStatusTables.fills?.price_details || {}),
+    ...(executorStatusTables.events?.price_details || {})
   };
   const renderMarketPrice = (_, record) => {
     const detail = executorPriceDetails[normalizeSymbolKey(record?.symbol)];
@@ -1250,6 +1298,41 @@ const ExternalTradingAccountManager = () => {
     { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
     { title: '订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
     { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
+  ];
+
+  const eventColumns = [
+    { title: '入库时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
+    { title: '事件时间', dataIndex: 'event_time', key: 'event_time', width: 170, render: formatTime },
+    {
+      title: '事件类型',
+      dataIndex: 'event_type',
+      key: 'event_type',
+      width: 120,
+      ...serverFilterProps('events', 'event_type'),
+      render: value => <Tag color={eventTypeColor(value)}>{eventTypeLabel(value)}</Tag>
+    },
+    {
+      title: '处理状态',
+      dataIndex: 'process_status',
+      key: 'process_status',
+      width: 120,
+      ...serverFilterProps('events', 'process_status'),
+      render: value => <Tag color={eventProcessStatusColor(value)}>{value || '-'}</Tag>
+    },
+    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 280, render: renderEventSubAccounts, ...serverFilterProps('events', 'sub_account') },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
+    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
+    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100, render: value => value || '-' },
+    { title: '匹配角色', dataIndex: 'matched_order_role', key: 'matched_order_role', width: 100, render: value => value ? roleLabel(value) : '-' },
+    { title: '匹配订单状态', dataIndex: 'matched_order_status', key: 'matched_order_status', width: 130, render: value => value ? <Tag color={orderStatusColor(value)}>{value}</Tag> : '-' },
+    { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 180, render: value => value || '-' },
+    { title: '委托号', dataIndex: 'entrust_no', key: 'entrust_no', width: 120, render: value => value || '-' },
+    { title: '客户端订单号', dataIndex: 'client_order_id', key: 'client_order_id', width: 180, render: value => value || '-' },
+    { title: '匹配本地ID', dataIndex: 'matched_order_id', key: 'matched_order_id', width: 110, render: value => value || '-' },
+    { title: '重放', dataIndex: 'replay_count', key: 'replay_count', width: 80, render: value => formatNumber(value) },
+    { title: '处理时间', dataIndex: 'processed_at', key: 'processed_at', width: 170, render: formatTime },
+    { title: '消息', dataIndex: 'process_message', key: 'process_message', width: 220, render: value => value || '-' },
+    { title: '来源', dataIndex: 'source', key: 'source', width: 110, render: value => value || '-' }
   ];
 
   const executorSubAccountColumns = [
@@ -1834,6 +1917,7 @@ const ExternalTradingAccountManager = () => {
             <Text>待执行差额 {executorStatus?.summary?.pending_delta_count ?? 0}</Text>
             <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
             <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
+            <Text>入站事件 {executorStatus?.summary?.event_log_count ?? 0}</Text>
             <Text>总分配资金 {formatNumber(executorSubAccountTotals.cashAllocated, 2)}</Text>
             <Text>总净资产 {formatNumber(executorSubAccountTotals.netAsset, 2)}</Text>
             <Text>总可用资金 {formatNumber(executorSubAccountTotals.cashAvailable, 2)}</Text>
@@ -1923,6 +2007,30 @@ const ExternalTradingAccountManager = () => {
                     onChange={handleExecutorServerTableChange('fills')}
                     size="small"
                     scroll={{ x: 1600 }}
+                  />
+                )
+              },
+              {
+                key: 'events',
+                label: '事件流水',
+                children: (
+                  <Table
+                    rowKey="id"
+                    columns={eventColumns}
+                    dataSource={eventRows}
+                    loading={executorStatusTableLoading.events}
+                    pagination={executorServerPagination('events')}
+                    onChange={handleExecutorServerTableChange('events')}
+                    expandable={{
+                      expandedRowRender: record => (
+                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                          {JSON.stringify(record.raw_payload || {}, null, 2)}
+                        </pre>
+                      ),
+                      rowExpandable: record => !!record.raw_payload
+                    }}
+                    size="small"
+                    scroll={{ x: 2600 }}
                   />
                 )
               },
