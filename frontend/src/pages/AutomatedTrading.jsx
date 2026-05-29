@@ -138,7 +138,7 @@ const AutomatedTrading = () => {
                     tab={<span><SettingOutlined />策略配置</span>}
                     key="1"
                 >
-                    <Card style={{ maxWidth: 600 }}>
+                    <Card>
                         <Form
                             form={form}
                             layout="vertical"

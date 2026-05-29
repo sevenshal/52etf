@@ -88,7 +88,8 @@
 }
 
 .profile-account-form {
-  max-width: 420px;
+  width: 100%;
+  max-width: none;
   padding: 12px;
 }
 

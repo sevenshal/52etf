@@ -7,8 +7,7 @@
 
 .quant-page__inner {
   width: 100%;
-  max-width: 1440px;
-  margin: 0 auto;
+  min-width: 0;
 }
 
 .quant-page__header {
@@ -29,13 +28,6 @@
   font-size: 22px;
   font-weight: 650;
   line-height: 1.25;
-}
-
-.quant-page__heading p {
-  margin: 4px 0 0;
-  color: #667085;
-  font-size: 13px;
-  line-height: 1.45;
 }
 
 .quant-page__actions {

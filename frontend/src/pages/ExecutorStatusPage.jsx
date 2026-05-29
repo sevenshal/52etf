@@ -574,6 +574,7 @@ const ExecutorStatusPage = () => {
   const serverFilterProps = (tableKey, filterKey) => {
     const filteredValue = tableState[tableKey]?.filters?.[filterKey] || [];
     return {
+      key: filterKey,
       filters: tables[tableKey]?.filter_options?.[filterKey] || [],
       filterSearch: true,
       filteredValue: filteredValue.length ? filteredValue : null,

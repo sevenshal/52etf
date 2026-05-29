@@ -96,7 +96,6 @@ const EVCAccountManager = () => {
           form={form}
           layout="vertical"
           onFinish={handleSave}
-          style={{ maxWidth: 520 }}
         >
           <Form.Item
             name="username"

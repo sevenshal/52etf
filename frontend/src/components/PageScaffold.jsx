@@ -2,14 +2,13 @@ import React from 'react';
 import { Drawer, Space } from 'antd';
 import './PageScaffold.css';
 
-export const PageShell = ({ title, subtitle, actions, children, className = '' }) => (
+export const PageShell = ({ title, actions, children, className = '' }) => (
   <main className={`quant-page ${className}`.trim()}>
     <div className="quant-page__inner">
-      {(title || subtitle || actions) && (
+      {(title || actions) && (
         <header className="quant-page__header">
           <div className="quant-page__heading">
             {title && <h1>{title}</h1>}
-            {subtitle && <p>{subtitle}</p>}
           </div>
           {actions && <div className="quant-page__actions">{actions}</div>}
         </header>
