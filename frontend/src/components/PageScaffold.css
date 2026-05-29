@@ -1,0 +1,170 @@
+.quant-page {
+  min-height: 100%;
+  padding: 14px 14px 18px;
+  background: #f5f7fa;
+  color: #172033;
+}
+
+.quant-page__inner {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.quant-page__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.quant-page__heading {
+  min-width: 0;
+}
+
+.quant-page__heading h1 {
+  margin: 0;
+  color: #172033;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.quant-page__heading p {
+  margin: 4px 0 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.quant-page__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quant-section {
+  margin-bottom: 12px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.quant-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+.quant-section__header h2 {
+  margin: 0;
+  color: #1d2939;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.quant-section__extra {
+  flex: 0 0 auto;
+}
+
+.quant-section__body {
+  padding: 12px;
+}
+
+.quant-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.quant-toolbar__main,
+.quant-toolbar__extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quant-toolbar__main {
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.quant-toolbar__extra {
+  flex: 0 0 auto;
+}
+
+.quant-filter-drawer .ant-drawer-content {
+  max-height: 88dvh;
+  border-radius: 8px 8px 0 0;
+}
+
+.quant-filter-drawer .ant-drawer-body {
+  overflow: auto;
+}
+
+.quant-filter-drawer__footer {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .quant-page {
+    padding: 10px;
+  }
+
+  .quant-page__header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .quant-page__heading h1 {
+    font-size: 20px;
+  }
+
+  .quant-page__actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .quant-page__actions .ant-btn,
+  .quant-page__actions .ant-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .quant-section {
+    margin-bottom: 10px;
+  }
+
+  .quant-section__body {
+    padding: 10px;
+  }
+
+  .quant-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .quant-toolbar__main,
+  .quant-toolbar__extra {
+    width: 100%;
+  }
+
+  .quant-toolbar__main .ant-input-search,
+  .quant-toolbar__main .ant-select,
+  .quant-toolbar__extra .ant-btn {
+    width: 100%;
+  }
+}

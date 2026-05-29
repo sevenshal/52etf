@@ -1,0 +1,279 @@
+.external-account-section .quant-section__body {
+  padding: 0;
+}
+
+.external-account-mobile-list {
+  display: none;
+}
+
+.external-mobile-state {
+  padding: 18px 12px;
+  text-align: center;
+}
+
+.external-account-card,
+.external-subaccount-card {
+  min-width: 0;
+  background: #fff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.external-account-card {
+  padding: 12px;
+}
+
+.external-account-card__header,
+.external-subaccount-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.external-account-card__title,
+.external-subaccount-card__title {
+  min-width: 0;
+}
+
+.external-account-card__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.external-account-card__title .ant-typography,
+.external-subaccount-card__title .ant-typography {
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-subaccount-card__title {
+  display: grid;
+  gap: 2px;
+}
+
+.external-subaccount-card__title .ant-typography:first-child {
+  font-size: 14px;
+}
+
+.external-account-card__identifier,
+.external-subaccount-card__binding {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.external-account-card__identifier .ant-tag,
+.external-subaccount-card__binding .ant-tag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.external-account-card__metrics,
+.external-subaccount-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.external-account-card__metrics div,
+.external-subaccount-card__metrics div {
+  min-width: 0;
+  padding: 8px 6px;
+  background: #f7f9fc;
+  border: 1px solid #edf1f7;
+  border-radius: 6px;
+}
+
+.external-account-card__metrics span,
+.external-subaccount-card__metrics span,
+.external-account-card__policy span,
+.external-subaccount-card__policy span {
+  display: block;
+  margin-bottom: 4px;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.external-account-card__metrics strong,
+.external-subaccount-card__metrics strong {
+  display: block;
+  min-width: 0;
+  color: #172033;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.external-account-card__policy,
+.external-subaccount-card__policy {
+  margin-top: 10px;
+  padding: 8px;
+  background: #fbfcfe;
+  border: 1px solid #edf1f7;
+  border-radius: 6px;
+}
+
+.external-account-card__policy strong,
+.external-subaccount-card__policy strong {
+  display: block;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.external-account-card__fee,
+.external-subaccount-card__fee {
+  margin-top: 8px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.external-account-card__actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.external-account-card__actions .ant-btn {
+  width: 100%;
+  min-width: 0;
+}
+
+.external-subaccount-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.external-subaccount-card__actions .ant-btn {
+  flex: 1 1 82px;
+  min-width: 0;
+}
+
+.external-account-card__toggle {
+  margin-top: 8px;
+}
+
+.external-subaccount-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.external-subaccount-card {
+  padding: 10px;
+}
+
+.external-subaccount-card__metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.external-trading-data-modal .ant-table-wrapper {
+  width: 100%;
+}
+
+.external-trading-executor-modal .ant-tabs-nav {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 760px) {
+  .external-account-section {
+    overflow: visible;
+    background: transparent;
+    border: 0;
+  }
+
+  .external-account-section .quant-section__header {
+    min-height: 0;
+    padding: 0 0 8px;
+    border-bottom: 0;
+  }
+
+  .external-account-section .quant-section__body {
+    padding: 0;
+  }
+
+  .external-account-desktop {
+    display: none;
+  }
+
+  .external-account-mobile-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .external-subaccount-card__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .external-trading-form-modal,
+  .external-trading-data-modal {
+    top: 0;
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px);
+    margin: 8px auto;
+  }
+
+  .external-trading-form-modal .ant-modal-content,
+  .external-trading-data-modal .ant-modal-content {
+    max-height: calc(100dvh - 16px);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .external-trading-form-modal .ant-modal-body,
+  .external-trading-data-modal .ant-modal-body {
+    min-height: 0;
+    max-height: calc(100dvh - 156px);
+    padding: 14px;
+    overflow: auto;
+  }
+
+  .external-trading-form-modal .ant-modal-header,
+  .external-trading-data-modal .ant-modal-header {
+    padding: 14px 14px 10px;
+  }
+
+  .external-trading-form-modal .ant-modal-footer,
+  .external-trading-data-modal .ant-modal-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .external-trading-form-modal .ant-modal-footer .ant-btn,
+  .external-trading-data-modal .ant-modal-footer .ant-btn {
+    margin-inline-start: 0 !important;
+  }
+
+  .external-trading-form-modal .ant-modal-footer .ant-btn {
+    flex: 1 1 96px;
+  }
+
+  .external-trading-executor-modal .ant-modal-footer .ant-btn {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .external-trading-data-modal .ant-space {
+    max-width: 100%;
+  }
+}

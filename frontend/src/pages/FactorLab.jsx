@@ -37,10 +37,20 @@ import dayjs from 'dayjs';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
+import AStockInnovation100 from './AStockInnovation100';
 import './FactorLab.css';
 
 const { Text } = Typography;
 const getLastYearStartDate = () => dayjs().subtract(1, 'year').startOf('year');
+const FACTOR_LAB_TAB_ITEMS = [
+  { key: 'single', label: '单因子' },
+  { key: 'composite', label: '组合因子' },
+  { key: 'timing', label: '择时因子' },
+  { key: 'backtest', label: '因子回测' },
+  { key: 'live', label: '线上交易' },
+  { key: 'innovation100', label: 'A创100' },
+  { key: 'db', label: 'DB' },
+];
 
 const DEFAULT_FORM_VALUES = {
   pool: 'QQQ',
@@ -2926,44 +2936,139 @@ const FactorLab = ({ initialTab = 'single' }) => {
   ), [options]);
   const isDatabaseTab = activeTab === 'db';
   const isLiveTab = activeTab === 'live';
+  const isInnovationTab = activeTab === 'innovation100';
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
     : (activeTab === 'backtest' ? runBacktest : (activeTab === 'timing' ? runTimingAnalysis : runAnalysis));
   const activeRunning = activeTab === 'composite'
     ? compositeRunning
     : (activeTab === 'backtest' ? backtestRunning : (activeTab === 'timing' ? timingRunning : running));
+  const activeTabLabel = FACTOR_LAB_TAB_ITEMS.find(item => item.key === activeTab)?.label || '研究';
+  const renderLiveConfigCard = config => {
+    const selected = config.id === selectedLiveConfigId;
+    const requestSummary = config.request_summary || {};
+    return (
+      <div
+        key={config.id}
+        className={`factor-lab-live-card${selected ? ' is-selected' : ''}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => handleLiveConfigSelect(config.id)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleLiveConfigSelect(config.id);
+          }
+        }}
+      >
+        <div className="factor-lab-live-card__header">
+          <Text strong>{config.name}</Text>
+          <Tag color={config.enabled ? 'green' : 'default'}>{config.enabled ? '启用' : '停用'}</Tag>
+        </div>
+        <div className="factor-lab-live-card__meta">
+          <span>{requestSummary.pool_label || requestSummary.pool || '-'}</span>
+          <span>{getRebalanceFrequencyLabel(requestSummary.rebalance_frequency)}</span>
+        </div>
+        <div className="factor-lab-live-card__grid">
+          <div>
+            <span>外部账户</span>
+            <strong>{config.external_trading_account_name || config.external_trading_account_id || '-'}</strong>
+          </div>
+          <div>
+            <span>子账户</span>
+            <strong>{config.live_sub_account_name || config.live_sub_account_id || '-'}</strong>
+          </div>
+          <div>
+            <span>信号</span>
+            <strong>{config.last_signal_status || '-'}</strong>
+          </div>
+          <div>
+            <span>执行</span>
+            <strong>{config.last_execution_status || '-'}</strong>
+          </div>
+        </div>
+        <div className="factor-lab-live-card__dates">
+          <span>信号日 {config.last_signal_date || '-'}</span>
+          <span>执行日 {config.last_execution_signal_date || '-'}</span>
+        </div>
+        <div className="factor-lab-live-card__actions">
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveEdit(config.id); }}>编辑</Button>
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>信号</Button>
+          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveExecute(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>执行</Button>
+          <Button size="small" danger onClick={event => { event.stopPropagation(); handleLiveDelete(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>删除</Button>
+        </div>
+      </div>
+    );
+  };
+  const renderLiveLogCards = () => {
+    if (!liveLogs.length) {
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+    }
+    return liveLogs.map((row, index) => (
+      <div className="factor-lab-live-log-card" key={row.id || `${row.timestamp}-${index}`}>
+        <div className="factor-lab-live-log-card__header">
+          <Text strong>{row.timestamp || '-'}</Text>
+          <Tag color={row.status === 'OK' ? 'green' : row.status === 'SKIPPED' ? 'gold' : 'red'}>
+            {row.status || '-'}
+          </Tag>
+        </div>
+        <div className="factor-lab-live-log-card__meta">
+          <Tag>{row.action || '-'}</Tag>
+          <span>信号日 {row.signal_date || '-'}</span>
+        </div>
+        {row.message ? <p>{row.message}</p> : null}
+      </div>
+    ));
+  };
 
   return (
     <div className="factor-lab-page">
       <div className="factor-lab-header">
-          <Tabs
-            className="factor-lab-tabs"
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            items={[
-              { key: 'single', label: '单因子' },
-              { key: 'composite', label: '组合因子' },
-              { key: 'timing', label: '择时因子' },
-              { key: 'backtest', label: '因子回测' },
-              { key: 'live', label: '线上交易' },
-              { key: 'db', label: 'DB' },
-            ]}
-          />
-          {!isDatabaseTab && !isLiveTab && (
-            <Space>
-              <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
-                运行
-              </Button>
-            </Space>
-          )}
+        <div className="factor-lab-title-block">
+          <Text type="secondary">Factor Lab</Text>
+          <h1>研究</h1>
+          <Tag color="blue">{activeTabLabel}</Tag>
         </div>
+        {!isDatabaseTab && !isLiveTab && !isInnovationTab && (
+          <Space className="factor-lab-actions">
+            <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
+            <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
+              运行
+            </Button>
+          </Space>
+        )}
+      </div>
+
+      <div className="factor-lab-tab-strip">
+        <Tabs
+          className="factor-lab-tabs"
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={FACTOR_LAB_TAB_ITEMS}
+        />
+        <div className="factor-lab-mobile-tabs">
+          {FACTOR_LAB_TAB_ITEMS.map(item => (
+            <button
+              key={item.key}
+              type="button"
+              className={`factor-lab-mobile-tab${activeTab === item.key ? ' is-active' : ''}`}
+              aria-pressed={activeTab === item.key}
+              onClick={() => setActiveTab(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {activeTab === 'db' && <DatabaseManager />}
+
+      {activeTab === 'innovation100' && <AStockInnovation100 embedded />}
 
       {activeTab === 'live' && (
         <>
           <Modal
+            className="factor-lab-live-modal"
             title={editingLiveConfigId ? '编辑线上交易配置' : '添加线上交易配置'}
             open={liveConfigModalOpen}
             onCancel={handleLiveConfigModalCancel}
@@ -3245,20 +3350,31 @@ const FactorLab = ({ initialTab = 'single' }) => {
                   </Space>
                 )}
               >
-                <Table
-                  className="factor-lab-live-config-table"
-                  rowKey="id"
-                  size="small"
-                  loading={liveLoading}
-                  columns={liveConfigColumns}
-                  dataSource={liveConfigs}
-                  pagination={false}
-                  scroll={{ x: 1800 }}
-                  rowClassName={row => (row.id === selectedLiveConfigId ? 'factor-lab-table-row-selected' : '')}
-                  onRow={row => ({
-                    onClick: () => handleLiveConfigSelect(row.id),
-                  })}
-                />
+                <div className="factor-lab-live-mobile-list">
+                  {liveLoading ? (
+                    <div className="factor-lab-mobile-loading"><Spin /></div>
+                  ) : liveConfigs.length ? (
+                    liveConfigs.map(renderLiveConfigCard)
+                  ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  )}
+                </div>
+                <div className="factor-lab-live-table">
+                  <Table
+                    className="factor-lab-live-config-table"
+                    rowKey="id"
+                    size="small"
+                    loading={liveLoading}
+                    columns={liveConfigColumns}
+                    dataSource={liveConfigs}
+                    pagination={false}
+                    scroll={{ x: 1800 }}
+                    rowClassName={row => (row.id === selectedLiveConfigId ? 'factor-lab-table-row-selected' : '')}
+                    onRow={row => ({
+                      onClick: () => handleLiveConfigSelect(row.id),
+                    })}
+                  />
+                </div>
               </Card>
             </Col>
           </Row>
@@ -3266,14 +3382,19 @@ const FactorLab = ({ initialTab = 'single' }) => {
           <Row gutter={[12, 12]} className="factor-lab-table-row">
             <Col xs={24}>
               <Card title={`最近日志：${selectedLiveConfigTitle}`} bordered={false}>
-                <Table
-                  rowKey="id"
-                  size="small"
-                  columns={liveLogColumns}
-                  dataSource={liveLogs}
-                  pagination={false}
-                  scroll={{ x: 640, y: 420 }}
-                />
+                <div className="factor-lab-live-log-mobile-list">
+                  {renderLiveLogCards()}
+                </div>
+                <div className="factor-lab-live-table">
+                  <Table
+                    rowKey="id"
+                    size="small"
+                    columns={liveLogColumns}
+                    dataSource={liveLogs}
+                    pagination={false}
+                    scroll={{ x: 640, y: 420 }}
+                  />
+                </div>
               </Card>
             </Col>
           </Row>

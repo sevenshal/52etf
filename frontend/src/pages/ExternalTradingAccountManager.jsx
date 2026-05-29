@@ -4,7 +4,6 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
   Divider,
   Empty,
   Form,
@@ -24,17 +23,22 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  DownOutlined,
   EditOutlined,
   InfoCircleOutlined,
   LineChartOutlined,
   PlusOutlined,
+  RightOutlined,
   SyncOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
+import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
+import { PageSection, PageShell } from '../components/PageScaffold';
+import './ExternalTradingAccountManager.css';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const MARKET_TYPE_A_STOCK = 'A_STOCK';
 const MARKET_TYPE_US_STOCK = 'US_STOCK';
 const MARKET_TYPE_OPTIONS = [
@@ -320,12 +324,14 @@ const getNetAssetHistoryOption = rows => {
 
 const ExternalTradingAccountManager = () => {
   const { accountId } = useAccount();
+  const navigate = useNavigate();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [editingAccount, setEditingAccount] = useState(null);
   const [subAccounts, setSubAccounts] = useState({});
+  const [expandedMobileAccountIds, setExpandedMobileAccountIds] = useState([]);
   const [subModalVisible, setSubModalVisible] = useState(false);
   const [editingSubAccount, setEditingSubAccount] = useState(null);
   const [activeAccountForSub, setActiveAccountForSub] = useState(null);
@@ -543,6 +549,18 @@ const ExternalTradingAccountManager = () => {
     } catch (error) {
       message.error(error.response?.data?.detail || '获取虚拟子账户失败');
     }
+  };
+
+  const toggleMobileAccount = account => {
+    const willExpand = !expandedMobileAccountIds.includes(account.id);
+    if (willExpand && !subAccounts[account.id]) {
+      fetchSubAccounts(account.id);
+    }
+    setExpandedMobileAccountIds(prev => (
+      prev.includes(account.id)
+        ? prev.filter(id => id !== account.id)
+        : [...prev, account.id]
+    ));
   };
 
   const fetchNetAssetHistory = async (account, subAccount) => {
@@ -926,23 +944,8 @@ const ExternalTradingAccountManager = () => {
   };
 
   const openExecutorStatus = account => {
-    const tableState = createDefaultExecutorTableState();
-    setExecutorStatusAccount(account);
-    setExecutorStatus(null);
-    setExecutorStatusTableState(tableState);
-    setExecutorStatusTables(createEmptyExecutorTables());
-    setExecutorStatusTableLoading({});
-    setExecutorStatusTableLoaded({});
-    setExecutorStatusActiveTab('sub_accounts');
-    setExecutorSubAccountStatus({ rows: [] });
-    setExecutorSubAccountStatusLoaded(false);
-    setExecutorSubAccountStatusLoading(false);
-    setExecutorPlan(null);
-    setExecutorPlanLoaded(false);
-    setExecutorPlanLoading(false);
-    setExecutorStatusVisible(true);
-    fetchExecutorStatus(account, { tableState, includeTables: false });
-    fetchExecutorSubAccountStatus(account);
+    if (!account?.id) return;
+    navigate(`/executor-status?account_id=${account.id}`);
   };
 
   const openBrokerPositions = account => {
@@ -1512,43 +1515,207 @@ const ExternalTradingAccountManager = () => {
     }
   ];
 
-  return (
-    <div style={{ padding: 24 }}>
-      <Card
-        title={
-          <Space>
-            <Title level={4} style={{ margin: 0 }}>外部交易账号</Title>
-            <Text type="secondary">PTrade 与券商侧长连接</Text>
-          </Space>
-        }
-        extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
-            添加账号
+  const renderMobileSubAccountCards = account => {
+    const rows = subAccounts[account.id];
+    if (!rows) {
+      return <Text type="secondary">正在加载虚拟子账户...</Text>;
+    }
+    if (!rows.length) {
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无虚拟子账户" />;
+    }
+    return rows.map(subAccount => {
+      const feeSummary = subAccount?.trade_fee_summary || {};
+      const feeTotal = subAccount?.cumulative_trade_fee_total ?? feeSummary.effective_fee_total;
+      return (
+        <div className="external-subaccount-card" key={subAccount.id}>
+          <div className="external-subaccount-card__header">
+            <div className="external-subaccount-card__title">
+              <Text strong>{subAccount.name}</Text>
+              <Text type="secondary">{subAccount.remark || subAccount.binding_label || '虚拟子账户'}</Text>
+            </div>
+            <Tag color={subAccount.enabled ? 'green' : 'default'}>
+              {subAccount.enabled ? '启用' : '停用'}
+            </Tag>
+          </div>
+          <div className="external-subaccount-card__binding">
+            {subAccount.binding_status === 'BOUND'
+              ? <Tag color="blue">{subAccount.strategy_name || subAccount.binding_label}</Tag>
+              : <Tag>空闲</Tag>}
+          </div>
+          <div className="external-subaccount-card__metrics">
+            <div>
+              <span>分配资金</span>
+              <strong>{formatNumber(subAccount.cash_allocated, 2)}</strong>
+            </div>
+            <div>
+              <span>净资产</span>
+              <strong>{formatNumber(subAccount.net_asset, 2)}</strong>
+            </div>
+            <div>
+              <span>可用资金</span>
+              <strong>{formatNumber(subAccount.cash_available, 2)}</strong>
+            </div>
+            <div>
+              <span>持仓数</span>
+              <strong>{formatNumber(subAccount.position_count)}</strong>
+            </div>
+          </div>
+          <div className="external-subaccount-card__policy">
+            <span>执行策略</span>
+            <strong>{formatPolicy(subAccount.effective_executor_policy)}</strong>
+          </div>
+          <div className="external-subaccount-card__fee">
+            累计交易费 {formatNumber(feeTotal, 2)}
+          </div>
+          <div className="external-subaccount-card__actions">
+            <Button size="small" icon={<LineChartOutlined />} onClick={() => openNetAssetHistory(account, subAccount)}>
+              曲线
+            </Button>
+            <Button size="small" icon={<EditOutlined />} onClick={() => openSubEditModal(account, subAccount)}>
+              编辑
+            </Button>
+            <Popconfirm title="确定删除这个虚拟子账户吗？" onConfirm={() => handleDeleteSubAccount(account, subAccount)}>
+              <Button size="small" icon={<DeleteOutlined />} danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </div>
+        </div>
+      );
+    });
+  };
+
+  const renderMobileAccountCard = account => {
+    const expanded = expandedMobileAccountIds.includes(account.id);
+    const rows = subAccounts[account.id] || [];
+    return (
+      <div className="external-account-card" key={account.id}>
+        <div className="external-account-card__header">
+          <div className="external-account-card__title">
+            <Text strong>{account.name}</Text>
+            <Tag color={marketTypeColor(account.market_type)}>{marketTypeLabel(account.market_type)}</Tag>
+          </div>
+          {account.connected ? (
+            <Badge status="success" text="在线" />
+          ) : (
+            <Tooltip title={account.last_disconnect_reason || ''}>
+              <Badge status="default" text="离线" />
+            </Tooltip>
+          )}
+        </div>
+        <div className="external-account-card__identifier">
+          <Tag>{account.identifier}</Tag>
+          <Tag color={account.enabled ? 'green' : 'default'}>{account.enabled ? '启用' : '停用'}</Tag>
+        </div>
+        <div className="external-account-card__metrics">
+          <div>
+            <span>最近心跳</span>
+            <strong>{formatTime(account.runtime_last_seen_at || account.last_seen_at)}</strong>
+          </div>
+          <div>
+            <span>最近连接</span>
+            <strong>{formatTime(account.last_connected_at)}</strong>
+          </div>
+        </div>
+        <div className="external-account-card__policy">
+          <span>执行策略</span>
+          <strong>{formatPolicy(account)}</strong>
+        </div>
+        <div className="external-account-card__fee">
+          佣金 {formatNumber(account.commission_rate_pct, 5)}% / 最低 {formatNumber(account.min_commission, 2)} / 印花税 {formatNumber(account.stamp_tax_rate_pct, 4)}%
+        </div>
+        <div className="external-account-card__actions">
+          <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => openSubCreateModal(account)}>
+            子账户
           </Button>
-        }
+          <Button size="small" onClick={() => openBrokerPositions(account)}>
+            券商持仓
+          </Button>
+          <Button size="small" onClick={() => openExecutorStatus(account)}>
+            执行器
+          </Button>
+          <Tooltip title="刷新">
+            <Button icon={<SyncOutlined />} size="small" onClick={() => fetchAccounts()} />
+          </Tooltip>
+          <Tooltip title="编辑">
+            <Button icon={<EditOutlined />} size="small" onClick={() => openEditModal(account)} />
+          </Tooltip>
+          <Popconfirm title="确定删除这个外部交易账号吗？" onConfirm={() => handleDelete(account.id)}>
+            <Button icon={<DeleteOutlined />} size="small" danger />
+          </Popconfirm>
+        </div>
+        <Button
+          className="external-account-card__toggle"
+          block
+          size="small"
+          icon={expanded ? <DownOutlined /> : <RightOutlined />}
+          onClick={() => toggleMobileAccount(account)}
+        >
+          {expanded ? '收起虚拟子账户' : `查看虚拟子账户${rows.length ? ` (${rows.length})` : ''}`}
+        </Button>
+        {expanded ? (
+          <div className="external-subaccount-list">
+            {renderMobileSubAccountCards(account)}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  return (
+    <PageShell
+      className="external-trading-page"
+      title="外部交易账号"
+      subtitle="PTrade 与券商侧长连接、子账户账本和执行器入口"
+      actions={
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
+          添加账号
+        </Button>
+      }
+    >
+      <PageSection
+        className="external-account-section"
+        title="账号列表"
+        extra={<Text type="secondary">共 {accounts.length} 个</Text>}
       >
-        <Table
-          rowKey="id"
-          columns={columns}
-          dataSource={accounts}
-          loading={loading}
-          pagination={false}
-          scroll={{ x: 1500 }}
-          expandable={{
-            expandedRowRender,
-            onExpand: (expanded, record) => {
-              if (expanded && !subAccounts[record.id]) fetchSubAccounts(record.id);
-            }
-          }}
-        />
-      </Card>
+        <div className="external-account-desktop">
+          <Table
+            rowKey="id"
+            columns={columns}
+            dataSource={accounts}
+            loading={loading}
+            pagination={false}
+            scroll={{ x: 1500 }}
+            expandable={{
+              expandedRowRender,
+              onExpand: (expanded, record) => {
+                if (expanded && !subAccounts[record.id]) fetchSubAccounts(record.id);
+              }
+            }}
+          />
+        </div>
+        <div className="external-account-mobile-list">
+          {loading ? (
+            <div className="external-mobile-state">
+              <Text type="secondary">正在加载外部交易账号...</Text>
+            </div>
+          ) : accounts.length ? (
+            accounts.map(renderMobileAccountCard)
+          ) : (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无外部交易账号" />
+          )}
+        </div>
+      </PageSection>
 
       <Modal
+        className="external-trading-form-modal"
         title={editingAccount ? '编辑外部交易账号' : '添加外部交易账号'}
         visible={modalVisible}
         onCancel={() => setModalVisible(false)}
         onOk={() => form.submit()}
         confirmLoading={saving}
+        okText="保存"
+        cancelText="取消"
         width={720}
       >
         <Form
@@ -1613,11 +1780,14 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-form-modal"
         title={editingSubAccount ? '编辑虚拟子账户' : '添加虚拟子账户'}
         visible={subModalVisible}
         onCancel={() => setSubModalVisible(false)}
         onOk={() => subForm.submit()}
         confirmLoading={saving}
+        okText="保存"
+        cancelText="取消"
         width={640}
       >
         <Form
@@ -1669,6 +1839,7 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-data-modal"
         title={`净资产曲线 - ${netAssetHistorySubAccount?.name || ''}`}
         visible={netAssetHistoryVisible}
         onCancel={() => setNetAssetHistoryVisible(false)}
@@ -1712,6 +1883,7 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-data-modal external-trading-wide-modal"
         title={`券商持仓 - ${brokerPositionsAccount?.name || ''}`}
         visible={brokerPositionsVisible}
         onCancel={() => setBrokerPositionsVisible(false)}
@@ -1774,6 +1946,7 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-form-modal"
         title="标记阻断单成功"
         visible={markBlockSuccessModalVisible}
         onCancel={closeMarkBlockSuccessModal}
@@ -1817,6 +1990,7 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-form-modal"
         title="补父单成交"
         visible={repairParentFillModalVisible}
         onCancel={closeRepairParentFillModal}
@@ -1860,6 +2034,7 @@ const ExternalTradingAccountManager = () => {
       </Modal>
 
       <Modal
+        className="external-trading-data-modal external-trading-executor-modal"
         title={`执行器状态 - ${executorStatusAccount?.name || ''}`}
         visible={executorStatusVisible}
         onCancel={() => setExecutorStatusVisible(false)}
@@ -2076,7 +2251,7 @@ const ExternalTradingAccountManager = () => {
           />
         </Space>
       </Modal>
-    </div>
+    </PageShell>
   );
 };
 

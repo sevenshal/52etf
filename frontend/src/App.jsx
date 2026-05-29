@@ -21,12 +21,12 @@ import AllWeatherBacktest from './pages/AllWeatherBacktest';
 import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 import LongPortAccountManager from './pages/LongPortAccountManager';
 import ExternalTradingAccountManager from './pages/ExternalTradingAccountManager';
+import ExecutorStatusPage from './pages/ExecutorStatusPage';
 import SZDTAutoTrading from './pages/SZDTAutoTrading';
 import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import SoxlFearStrategy from './pages/SoxlFearStrategy';
-import AStockInnovation100 from './pages/AStockInnovation100';
 import FactorLab from './pages/FactorLab';
 
 function App() {
@@ -39,7 +39,7 @@ function App() {
           <Route path="/fear/stocks" element={<FearStockList />} />
           <Route path="/evc" element={<EVCValuation />} />
           <Route path="/options" element={<OptionsPositions />} />
-          <Route path="/a-stock-innovation100" element={<AStockInnovation100 />} />
+          <Route path="/executor-status" element={<ExecutorStatusPage />} />
           <Route path="/db" element={<FactorLab initialTab="db" />} />
           <Route path="/factor-lab" element={<FactorLab />} />
           <Route path="/factor-lab/live" element={<FactorLab initialTab="live" />} />

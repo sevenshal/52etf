@@ -1,32 +1,54 @@
 import React, { useState, useEffect } from 'react';
-import { Form, InputNumber, Input, Button, Table, message, Layout, Tabs, Select } from 'antd';
+import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Tag } from 'antd';
+import { FilterOutlined, SearchOutlined, StarFilled, StarOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import request from '../utils/request';
+import { MobileFilterDrawer, PageSection, PageShell, ResponsiveToolbar } from '../components/PageScaffold';
+import './EVCValuation.css';
+
+const DEFAULT_VALUES = {
+    undervalue_threshold: 0.9,
+    next_fy_growth_threshold: 1.1,
+    symbol: '',
+    tag_ids: [],
+    min_market_cap_100m: 100,
+    max_market_cap_100m: null
+};
 
 const EVCValuation = () => {
     const [form] = Form.useForm();
+    const screens = Grid.useBreakpoint();
+    const isMobile = !screens.md;
     const [stocks, setStocks] = useState([]);
     const [favoriteStocks, setFavoriteStocks] = useState([]);
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
     const [tagOptions, setTagOptions] = useState([]);
-
-    // 默认值
-    const defaultValues = {
-        undervalue_threshold: 0.9,
-        next_fy_growth_threshold: 1.1,
-        symbol: '',
-        tag_ids: [],
-        min_market_cap_100m: 100,
-        max_market_cap_100m: null
-    };
+    const [searching, setSearching] = useState(false);
+    const [filterOpen, setFilterOpen] = useState(false);
 
     const calculateChange = (value, marketPrice) => {
         if (!value || !marketPrice) return '';
         return ((value - marketPrice) / marketPrice * 100).toFixed(2) + '%';
     };
 
+    const formatFixed = (value, precision = 2) => {
+        if (value === null || value === undefined || value === '') return '-';
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toFixed(precision) : '-';
+    };
+
+    const getEmotionColor = (score) => {
+        if (!score && score !== 0) return 'default';
+        if (score >= 80) return 'red';
+        if (score >= 60) return 'orange';
+        if (score <= -80) return 'green';
+        if (score <= -60) return 'lime';
+        return 'default';
+    };
+
     const handleSearch = async (values) => {
+        setSearching(true);
         try {
             const payload = { ...values };
             if (payload.min_market_cap_100m !== null && payload.min_market_cap_100m !== undefined &&
@@ -47,8 +69,11 @@ const EVCValuation = () => {
 
             const { data } = await request.post('/api/evc/valuation-search', payload);
             setStocks(data);
+            setFilterOpen(false);
         } catch (error) {
-            message.error('查询失败');
+            message.error({ content: '查询失败', key: 'evc-search' });
+        } finally {
+            setSearching(false);
         }
     };
 
@@ -60,7 +85,7 @@ const EVCValuation = () => {
                 value: tag.id
             })));
         } catch (error) {
-            message.error('获取标签列表失败');
+            message.error({ content: '获取标签列表失败', key: 'evc-tags' });
         }
     };
 
@@ -71,7 +96,7 @@ const EVCValuation = () => {
             setFavoriteStocks(data);
             setFavorites(data.map(stock => stock.symbol));
         } catch (error) {
-            message.error('获取收藏列表失败');
+            message.error({ content: '获取收藏列表失败', key: 'evc-favorites' });
         }
     };
 
@@ -100,12 +125,17 @@ const EVCValuation = () => {
         }
     };
 
+    const handleResetFilters = () => {
+        form.setFieldsValue(DEFAULT_VALUES);
+        handleSearch(DEFAULT_VALUES);
+    };
+
     useEffect(() => {
-        form.setFieldsValue(defaultValues);
+        form.setFieldsValue(DEFAULT_VALUES);
         fetchTags();
-        handleSearch(defaultValues);
+        handleSearch(DEFAULT_VALUES);
         fetchFavorites();
-    }, []);
+    }, [form]);
 
     const columns = [
         {
@@ -141,7 +171,7 @@ const EVCValuation = () => {
             title: '最新价格',
             dataIndex: 'last_price',
             key: 'last_price',
-            render: (text) => text.toFixed(2),
+            render: (text) => formatFixed(text),
             width: 80
         },
         {
@@ -211,14 +241,14 @@ const EVCValuation = () => {
             title: 'PE',
             key: 'pe_ratio',
             dataIndex: 'pe_ratio',
-            render: (text) => text,
+            render: (text) => text ?? '-',
             width: 60
         },
         {
             title: '前瞻PE',
             key: 'forward_pe_ratio',
             dataIndex: 'forward_pe_ratio',
-            render: (text) => text,
+            render: (text) => text ?? '-',
             width: 60
         },
         {
@@ -269,89 +299,199 @@ const EVCValuation = () => {
         (col.key !== 'market_cap_100m' || stocks.some(stock => stock.market_cap_100m !== null && stock.market_cap_100m !== undefined))
     ));
 
+    const renderFilterForm = (compact = false) => (
+        <Form
+            form={form}
+            onFinish={handleSearch}
+            layout="vertical"
+            className={compact ? 'evc-filter-form evc-filter-form--mobile' : 'evc-filter-form'}
+        >
+            <Form.Item label="股票代码" name="symbol">
+                <Input
+                    placeholder="输入股票代码"
+                    maxLength={5}
+                    prefix={<SearchOutlined />}
+                    onChange={(e) => {
+                        const value = e.target.value.replace(/[^A-Za-z]/g, '').toUpperCase();
+                        form.setFieldValue('symbol', value);
+                    }}
+                />
+            </Form.Item>
+            <Form.Item label="低估阈值" name="undervalue_threshold">
+                <InputNumber min={0} max={1} step={0.01} />
+            </Form.Item>
+            <Form.Item label="下财年增长阈值" name="next_fy_growth_threshold">
+                <InputNumber min={1} step={0.01} />
+            </Form.Item>
+            <Form.Item label="市值下限(亿美元)" name="min_market_cap_100m">
+                <InputNumber min={0} step={10} />
+            </Form.Item>
+            <Form.Item label="市值上限(亿美元)" name="max_market_cap_100m">
+                <InputNumber min={0} step={10} />
+            </Form.Item>
+            <Form.Item label="标签" name="tag_ids" className="evc-filter-form__tags">
+                <Select
+                    mode="multiple"
+                    allowClear
+                    showSearch
+                    placeholder="选择标签"
+                    options={tagOptions}
+                    maxTagCount="responsive"
+                    optionFilterProp="label"
+                />
+            </Form.Item>
+            {!compact && (
+                <Form.Item className="evc-filter-form__submit">
+                    <Button type="primary" htmlType="submit" loading={searching}>
+                        查询
+                    </Button>
+                </Form.Item>
+            )}
+        </Form>
+    );
+
+    const renderMetric = (label, value, tone) => (
+        <div className="evc-stock-card__metric">
+            <span>{label}</span>
+            <strong className={tone ? `evc-tone-${tone}` : ''}>{value || '-'}</strong>
+        </div>
+    );
+
+    const renderMobileStockList = (data, includeEmotion = false) => {
+        if (!data.length) {
+            return (
+                <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description={includeEmotion ? '暂无收藏股票' : '暂无符合条件的股票'}
+                />
+            );
+        }
+
+        return (
+            <div className="evc-mobile-list">
+                {data.map(record => {
+                    const isFavorited = favorites.includes(record.symbol);
+                    const undervalueRate = calculateChange(record.fair_value_lo, record.last_price);
+                    const nextGrowth = `${calculateChange(record.forward_next_fy_lo, record.fair_value_lo)} ~ ${calculateChange(record.forward_next_fy_hi, record.fair_value_hi)}`;
+                    const emotionScore = record.emotion_info?.score;
+
+                    return (
+                        <article className="evc-stock-card" key={record.symbol}>
+                            <div className="evc-stock-card__header">
+                                <div className="evc-stock-card__title">
+                                    <Link to={`/stock/${record.symbol}`} state={{ mainTabKey: '/evc' }}>
+                                        {record.symbol}
+                                    </Link>
+                                    <span>{record.company || '-'}</span>
+                                </div>
+                                <Button
+                                    type={isFavorited ? 'primary' : 'default'}
+                                    shape="circle"
+                                    icon={isFavorited ? <StarFilled /> : <StarOutlined />}
+                                    aria-label={isFavorited ? '取消收藏' : '收藏'}
+                                    onClick={() => handleToggleFavorite(record.symbol)}
+                                />
+                            </div>
+
+                            <div className="evc-stock-card__metrics">
+                                {renderMetric('最新', formatFixed(record.last_price))}
+                                {renderMetric('下限', formatFixed(record.fair_value_lo))}
+                                {renderMetric('上限', formatFixed(record.fair_value_hi))}
+                                {renderMetric('低估率', undervalueRate, undervalueRate?.startsWith('-') ? 'buy' : 'sell')}
+                            </div>
+
+                            <div className="evc-stock-card__details">
+                                {includeEmotion && (
+                                    <span>
+                                        贪恐
+                                        <Tag color={getEmotionColor(emotionScore)}>{emotionScore ?? '-'}</Tag>
+                                    </span>
+                                )}
+                                <span>Beta {formatFixed(record.beta)}</span>
+                                <span>市值 {formatFixed(record.market_cap_100m)} 亿美元</span>
+                                <span>下财年 {nextGrowth}</span>
+                                <span>估值日 {record.fair_value_date || '-'}</span>
+                            </div>
+                        </article>
+                    );
+                })}
+            </div>
+        );
+    };
+
+    const renderValuationContent = (data, tableColumns, includeEmotion = false, pagination = true) => (
+        isMobile ? (
+            renderMobileStockList(data, includeEmotion)
+        ) : (
+            <Table
+                dataSource={data}
+                columns={tableColumns}
+                rowKey="symbol"
+                scroll={{ x: 'max-content' }}
+                size="small"
+                loading={searching && activeTab === 'all'}
+                pagination={pagination}
+            />
+        )
+    );
+
     return (
-        <Layout>
-            <Layout.Content style={{ background: '#fff', overflow: 'auto' }}>
+        <PageShell
+            className="evc-page"
+            title="估值"
+            subtitle="按估值区间、增长阈值和标签筛选股票"
+            actions={
+                isMobile && activeTab === 'all' ? (
+                    <Button type="primary" icon={<FilterOutlined />} onClick={() => setFilterOpen(true)}>
+                        筛选
+                    </Button>
+                ) : null
+            }
+        >
+            <PageSection className="evc-page__section">
                 <Tabs
                     activeKey={activeTab}
                     onChange={handleTabChange}
+                    className="evc-tabs"
                     items={[
                         {
                             key: 'all',
-                            label: '所有股票',
+                            label: `所有股票 ${stocks.length}`,
                             children: (
                                 <>
-                                    <Form form={form} onFinish={handleSearch} layout="inline">
-                                        <Form.Item label="股票代码" name="symbol">
-                                            <Input
-                                                placeholder="输入股票代码"
-                                                style={{ width: 120 }}
-                                                maxLength={5}
-                                                onChange={(e) => {
-                                                    // 只允许输入英文字母
-                                                    const value = e.target.value.replace(/[^A-Za-z]/g, '').toUpperCase();
-                                                    form.setFieldValue('symbol', value);
-                                                }}
-                                            />
-                                        </Form.Item>
-                                        <Form.Item label="低估阈值" name="undervalue_threshold">
-                                            <InputNumber min={0} max={1} step={0.01} />
-                                        </Form.Item>
-                                        <Form.Item label="下财年增长阈值" name="next_fy_growth_threshold">
-                                            <InputNumber min={1} step={0.01} />
-                                        </Form.Item>
-                                        <Form.Item label="市值下限(亿美元)" name="min_market_cap_100m">
-                                            <InputNumber min={0} step={10} />
-                                        </Form.Item>
-                                        <Form.Item label="市值上限(亿美元)" name="max_market_cap_100m">
-                                            <InputNumber min={0} step={10} />
-                                        </Form.Item>
-                                        <Form.Item label="标签" name="tag_ids">
-                                            <Select
-                                                mode="multiple"
-                                                allowClear
-                                                showSearch
-                                                placeholder="选择标签"
-                                                options={tagOptions}
-                                                maxTagCount="responsive"
-                                                optionFilterProp="label"
-                                                style={{ minWidth: 240 }}
-                                            />
-                                        </Form.Item>
-                                        <Form.Item>
-                                            <Button type="primary" htmlType="submit">
-                                                查询
-                                            </Button>
-                                        </Form.Item>
-                                    </Form>
-                                    <Table
-                                        dataSource={stocks}
-                                        columns={allStockColumns}
-                                        rowKey="symbol"
-                                        scroll={{ x: 'max-content' }}
-                                        size="small"
-                                    />
+                                    {!isMobile && (
+                                        <ResponsiveToolbar>
+                                            {renderFilterForm(false)}
+                                        </ResponsiveToolbar>
+                                    )}
+                                    {renderValuationContent(stocks, allStockColumns)}
                                 </>
                             )
                         },
                         {
                             key: 'favorites',
-                            label: '我的收藏',
-                            children: (
-                                <Table
-                                    dataSource={favoriteStocks}
-                                    columns={columns}
-                                    rowKey="symbol"
-                                    scroll={{ x: 'max-content' }}
-                                    size="small"
-                                    pagination={false}
-                                />
-                            )
+                            label: `我的收藏 ${favoriteStocks.length}`,
+                            children: renderValuationContent(favoriteStocks, columns, true, false)
                         }
                     ]}
                 />
-            </Layout.Content>
-        </Layout>
+            </PageSection>
+
+            <MobileFilterDrawer
+                open={filterOpen}
+                onClose={() => setFilterOpen(false)}
+                footer={[
+                    <Button key="reset" onClick={handleResetFilters}>
+                        重置
+                    </Button>,
+                    <Button key="submit" type="primary" loading={searching} onClick={() => form.submit()}>
+                        查询
+                    </Button>
+                ]}
+            >
+                {renderFilterForm(true)}
+            </MobileFilterDrawer>
+        </PageShell>
     );
 };
 

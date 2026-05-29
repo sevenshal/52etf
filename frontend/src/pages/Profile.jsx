@@ -1,9 +1,20 @@
 import React, { useState } from 'react';
-import { Card, Input, Button, Form, message, List, Space } from 'antd';
-import { RightOutlined } from '@ant-design/icons';
+import { Input, Button, Form, message } from 'antd';
+import {
+  HistoryOutlined,
+  KeyOutlined,
+  LogoutOutlined,
+  MonitorOutlined,
+  RightOutlined,
+  RocketOutlined,
+  SettingOutlined,
+  WalletOutlined,
+} from '@ant-design/icons';
 import { useAccount } from '../contexts/AccountContext';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
+import { PageSection, PageShell } from '../components/PageScaffold';
+import './Profile.css';
 
 const Profile = () => {
   const { accountId, login, logout } = useAccount();
@@ -53,6 +64,7 @@ const Profile = () => {
   const sections = [
     {
       title: '交易与执行',
+      icon: <RocketOutlined />,
       items: [
         {
           title: '杠杆ETF策略自动化交易',
@@ -78,10 +90,16 @@ const Profile = () => {
           onClick: () => navigate('/factor-lab/live'),
           arrow: true
         },
+        {
+          title: '订单执行器状态',
+          onClick: () => navigate('/executor-status'),
+          arrow: true
+        },
       ]
     },
     {
       title: '账户管理',
+      icon: <WalletOutlined />,
       items: [
         {
           title: '持仓',
@@ -112,6 +130,7 @@ const Profile = () => {
     },
     {
       title: '策略与回测',
+      icon: <HistoryOutlined />,
       items: [
         {
           title: '杠杆ETF均线穿越策略回测',
@@ -137,6 +156,7 @@ const Profile = () => {
     },
     {
       title: '分析与监控',
+      icon: <MonitorOutlined />,
       items: [
         {
           title: '历史每月分析',
@@ -147,6 +167,7 @@ const Profile = () => {
     },
     {
       title: '系统管理',
+      icon: <SettingOutlined />,
       items: [
         {
           title: '定时任务',
@@ -162,55 +183,63 @@ const Profile = () => {
     }
   ];
 
-  const renderList = (items) => (
-    <List
-      style={{
-        backgroundColor: '#fff'
-      }}
-    >
+  const renderMenu = (items) => (
+    <div className="profile-menu">
       {items.map((item, index) => (
-        <List.Item
+        <button
+          type="button"
           key={index}
           onClick={item.onClick}
-          style={{
-            cursor: item.onClick ? 'pointer' : 'default',
-            borderBottom: '1px solid #f0f0f0'
-          }}
+          className="profile-menu__item"
         >
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            width: '100%'
-          }}>
-            <span>{item.title}</span>
-            <Space>
-              {item.arrow && <RightOutlined style={{ color: '#bfbfbf' }} />}
-            </Space>
-          </div>
-        </List.Item>
+          <span>{item.title}</span>
+          <RightOutlined />
+        </button>
       ))}
-    </List>
+    </div>
   );
 
   return (
-    <div>
-      {sections.map((section, index) => (
-        <Card key={index} title={section.title} style={{ marginBottom: '6px' }}>
-          {renderList(section.items)}
-        </Card>
-      ))}
+    <PageShell
+      className="profile-page"
+      title="我的"
+    >
+      <div className="profile-sections">
+        {sections.map((section, index) => (
+          <PageSection
+            key={index}
+            title={
+              <span className="profile-section-title">
+                {section.icon}
+                <span>{section.title}</span>
+              </span>
+            }
+          >
+            {renderMenu(section.items)}
+          </PageSection>
+        ))}
+      </div>
 
-      <Card title="账户设置">
+      <PageSection
+        title={
+          <span className="profile-section-title">
+            <KeyOutlined />
+            <span>账户设置</span>
+          </span>
+        }
+      >
         {accountId ? (
-          <div>
-            <p>账户ID: {accountId}</p>
-            <Button type="primary" danger onClick={handleLogout} style={{ marginBottom: '6px' }}>
+          <div className="profile-account">
+            <div>
+              <span className="profile-account__label">账户ID</span>
+              <strong>{accountId}</strong>
+            </div>
+            <Button danger icon={<LogoutOutlined />} onClick={handleLogout}>
               退出账户
             </Button>
           </div>
         ) : (
-          <Form form={form} onFinish={handleSubmit}>
+          <Form form={form} onFinish={handleSubmit} layout="vertical" className="profile-account-form">
             <Form.Item
               name="accountId"
               label="账户ID"
@@ -219,15 +248,14 @@ const Profile = () => {
               <Input placeholder="请输入账户ID" />
             </Form.Item>
             <Form.Item>
-              <Button type="primary" htmlType="submit" loading={loading}>
+              <Button type="primary" htmlType="submit" loading={loading} block>
                 保存
               </Button>
             </Form.Item>
           </Form>
         )}
-      </Card>
-
-    </div>
+      </PageSection>
+    </PageShell>
   );
 };
 

@@ -65,7 +65,7 @@ const rebalanceTypeMeta = {
 };
 const getRebalanceTypeMeta = (value) => rebalanceTypeMeta[value] || { label: value || '-', color: 'default' };
 
-const AStockInnovation100 = () => {
+const AStockInnovation100 = ({ embedded = false }) => {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [rebuildLoading, setRebuildLoading] = useState(false);
@@ -416,7 +416,7 @@ const AStockInnovation100 = () => {
   };
 
   return (
-    <div style={{ padding: 24 }}>
+    <div style={{ padding: embedded ? 0 : 24 }}>
       {renderToolbar()}
       {renderJob()}
       {summary.has_data && (

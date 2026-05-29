@@ -1,11 +1,20 @@
 import React from 'react';
 import { Layout, Tabs } from 'antd';
+import {
+  DollarOutlined,
+  ExperimentOutlined,
+  FireOutlined,
+  HomeOutlined,
+  ThunderboltOutlined,
+  UserOutlined,
+} from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useAccount } from '../contexts/AccountContext';
+import './Layout.css';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/a-stock-innovation100', '/factor-lab', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/executor-status', '/factor-lab', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -49,8 +58,8 @@ const getActiveTabKey = (pathname, state) => {
     return '/fear';
   }
 
-  if (isRouteOrChild(pathname, '/a-stock-innovation100')) {
-    return '/a-stock-innovation100';
+  if (isRouteOrChild(pathname, '/executor-status')) {
+    return '/executor-status';
   }
 
   if (isRouteOrChild(pathname, '/db')) {
@@ -69,35 +78,42 @@ const AppLayout = () => {
   const location = useLocation();
   const { accountId } = useAccount();
 
+  const renderTabLabel = (icon, text) => (
+    <span className="app-shell__tab-label">
+      {icon}
+      <span>{text}</span>
+    </span>
+  );
+
   const items = [
     {
       key: '/',
-      label: 'ETF',
+      label: renderTabLabel(<HomeOutlined />, 'ETF'),
       disabled: !accountId
     },
     {
       key: '/fear',
-      label: '贪恐',
+      label: renderTabLabel(<FireOutlined />, '贪恐'),
       disabled: !accountId
     },
     {
       key: '/evc',
-      label: '估值',
+      label: renderTabLabel(<DollarOutlined />, '估值'),
       disabled: !accountId
     },
     {
-      key: '/a-stock-innovation100',
-      label: 'A创100',
+      key: '/executor-status',
+      label: renderTabLabel(<ThunderboltOutlined />, '执行器'),
       disabled: !accountId
     },
     {
       key: '/factor-lab',
-      label: '研究',
+      label: renderTabLabel(<ExperimentOutlined />, '研究'),
       disabled: !accountId
     },
     {
       key: '/profile',
-      label: '我的'
+      label: renderTabLabel(<UserOutlined />, '我的')
     }
   ];
   const activeKey = getActiveTabKey(location.pathname, location.state);
@@ -117,26 +133,19 @@ const AppLayout = () => {
   };
 
   return (
-    <Layout style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <Content style={{ 
-        overflow: 'auto',
-        flexDirection: 'column'
-      }}>
-        <div style={{ flex: 1, overflow: 'auto' }}>
+    <Layout className="app-shell">
+      <Content className="app-shell__content">
+        <div className="app-shell__scroll">
           <Outlet />
         </div>
       </Content>
       <Tabs
+        className="app-shell__tabs"
         items={items}
         activeKey={activeKey}
         onChange={handleTabChange}
         onTabClick={handleTabClick}
-        centered
-        size="large"
-        style={{
-          backgroundColor: '#fff',
-          borderTop: '1px solid #f0f0f0'
-        }}
+        tabBarGutter={0}
       />
     </Layout>
   );
