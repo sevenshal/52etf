@@ -76,6 +76,17 @@ const roleLabel = value => {
   if (value === 'BLOCK') return '阻断';
   return value || '-';
 };
+const roleColor = value => {
+  if (value === 'PARENT') return 'blue';
+  if (value === 'CHILD') return 'green';
+  if (value === 'BLOCK') return 'orange';
+  return 'default';
+};
+const renderRoleTag = value => (
+  <Tag className="executor-role-tag" color={roleColor(value)}>
+    {roleLabel(value)}
+  </Tag>
+);
 const successfulOrderStatuses = new Set(['FILLED', 'SUCCESS', 'SUCCEEDED', 'DONE', 'COMPLETED']);
 const isOrderSuccessful = status => successfulOrderStatuses.has(String(status || '').trim().toUpperCase());
 const getOrderMessage = record => String(record?.message || '').trim();
@@ -709,7 +720,7 @@ const ExecutorStatusPage = () => {
   ];
   const orderColumns = [
     { title: '创建时间', dataIndex: 'created_at', width: 170, render: formatTime },
-    { title: '角色', dataIndex: 'allocation_role', width: 90, ...serverFilterProps('orders', 'role'), render: value => <Tag>{roleLabel(value)}</Tag> },
+    { title: '角色', dataIndex: 'allocation_role', width: 90, ...serverFilterProps('orders', 'role'), render: renderRoleTag },
     { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('orders', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('orders', 'symbol') },
     { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value || '-'}</Tag> },
@@ -735,7 +746,7 @@ const ExecutorStatusPage = () => {
   ];
   const fillColumns = [
     { title: '成交时间', dataIndex: 'traded_at', width: 170, render: formatTime },
-    { title: '角色', dataIndex: 'allocation_role', width: 90, ...serverFilterProps('fills', 'role'), render: value => <Tag>{roleLabel(value)}</Tag> },
+    { title: '角色', dataIndex: 'allocation_role', width: 90, ...serverFilterProps('fills', 'role'), render: renderRoleTag },
     { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('fills', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('fills', 'symbol') },
     { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value || '-'}</Tag> },
@@ -867,7 +878,7 @@ const ExecutorStatusPage = () => {
         </div>
         {kind === 'order' ? (
           <div className="executor-row-card__details">
-            <span>{roleLabel(record.allocation_role)}</span>
+            {renderRoleTag(record.allocation_role)}
             <span>档位 {priceLevelLabel(record.price_level)}</span>
             <span>提交价 {record.submitted_price ? formatNumber(record.submitted_price, 4) : '-'}</span>
             <span>超时 {formatTime(record.deadline_at)}</span>

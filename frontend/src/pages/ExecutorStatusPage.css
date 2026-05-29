@@ -221,6 +221,11 @@
   line-height: 1.5;
 }
 
+.executor-role-tag {
+  margin-inline-end: 0;
+  font-weight: 600;
+}
+
 .executor-row-card__actions {
   margin-top: 8px;
 }
