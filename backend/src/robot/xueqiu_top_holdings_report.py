@@ -50,6 +50,11 @@ REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
+BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT = 1.0
+BUFFER_EXECUTION_WEIGHT_RULE = (
+    f"最小换手：保留成分偏离等权不超过{BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT:g}个百分点时沿用当前权重，"
+    "卖出释放权重分配给补位成分"
+)
 ACTIVE_REBALANCE_LOOKBACK_DAYS = 90
 ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
 
@@ -711,16 +716,31 @@ def add_top_normalized_weights(ranking: List[Dict[str, Any]], top_n: int) -> Lis
     return selected
 
 
+def _rebalance_source_weight(item: Dict[str, Any]) -> float:
+    rebalance_weight = safe_float(item.get("rebalance_weight_pct"))
+    if rebalance_weight is not None:
+        return rebalance_weight
+    return safe_float(item.get("top_normalized_weight_pct")) or 0.0
+
+
 def rounded_rebalance_weights(top_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     selected = [dict(item) for item in top_items]
     if not selected:
         return selected
     rounded_weights = [
-        round(safe_float(item.get("top_normalized_weight_pct")) or 0.0, 2)
+        round(_rebalance_source_weight(item), 2)
         for item in selected
     ]
     delta = round(100.0 - sum(rounded_weights), 2)
-    rounded_weights[0] = round(rounded_weights[0] + delta, 2)
+    adjust_index = next(
+        (
+            index
+            for index, item in enumerate(selected)
+            if item.get("strategy_action") in {"buy", "trim", "adjust"}
+        ),
+        0,
+    )
+    rounded_weights[adjust_index] = round(rounded_weights[adjust_index] + delta, 2)
     for item, weight in zip(selected, rounded_weights):
         item["rebalance_weight_pct"] = weight
     return selected
@@ -763,6 +783,82 @@ def _symbol_label(symbol: str, item_by_symbol: Dict[str, Dict[str, Any]], curren
     item = item_by_symbol.get(symbol) or {}
     current = current_by_symbol.get(symbol) or {}
     return f"{symbol}({item.get('stock_name') or current.get('stock_name') or ''})"
+
+
+def build_min_turnover_execution_weights(
+    *,
+    final_symbols: List[str],
+    added_symbols: List[str],
+    current_by_symbol: Dict[str, Dict[str, Any]],
+) -> Dict[str, float]:
+    """Build submission weights that avoid touching retained holdings unnecessarily."""
+    if not final_symbols:
+        return {}
+
+    added_set = set(added_symbols)
+    retained_symbols = [symbol for symbol in final_symbols if symbol not in added_set]
+    equal_weight = 100.0 / len(final_symbols)
+
+    weights: Dict[str, float] = {}
+    retained_sum = 0.0
+    for symbol in retained_symbols:
+        current_weight = safe_float((current_by_symbol.get(symbol) or {}).get("weight_pct"))
+        if current_weight is None or current_weight <= 0:
+            weight = equal_weight
+        elif abs(current_weight - equal_weight) > BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT:
+            weight = equal_weight
+        else:
+            weight = current_weight
+        weights[symbol] = weight
+        retained_sum += weight
+
+    remaining_weight = 100.0 - retained_sum
+    if added_symbols:
+        if remaining_weight <= 0:
+            retained_target_sum = max(0.0, 100.0 - equal_weight * len(added_symbols))
+            scale = retained_target_sum / retained_sum if retained_sum > 0 else 0.0
+            for symbol in retained_symbols:
+                weights[symbol] = weights[symbol] * scale
+            remaining_weight = 100.0 - retained_target_sum
+        per_added_weight = remaining_weight / len(added_symbols)
+        for symbol in added_symbols:
+            weights[symbol] = max(0.0, per_added_weight)
+        return weights
+
+    if abs(remaining_weight) <= 1e-9:
+        return weights
+
+    underweight_symbols = [
+        symbol
+        for symbol in retained_symbols
+        if weights.get(symbol, 0.0) < equal_weight
+    ]
+    recipients = underweight_symbols or retained_symbols
+    if not recipients:
+        return weights
+
+    if remaining_weight > 0 and underweight_symbols:
+        capacity = sum(equal_weight - weights[symbol] for symbol in underweight_symbols)
+        if capacity > 0:
+            allocated = 0.0
+            for symbol in underweight_symbols:
+                share = (equal_weight - weights[symbol]) / capacity
+                add_weight = min(equal_weight - weights[symbol], remaining_weight * share)
+                weights[symbol] += add_weight
+                allocated += add_weight
+            remaining_weight -= allocated
+            recipients = retained_symbols
+
+    if abs(remaining_weight) > 1e-9 and recipients:
+        per_symbol_delta = remaining_weight / len(recipients)
+        for symbol in recipients:
+            weights[symbol] = max(0.0, weights.get(symbol, 0.0) + per_symbol_delta)
+
+    total = sum(weights.values())
+    if total > 0 and abs(total - 100.0) > 1e-9:
+        scale = 100.0 / total
+        weights = {symbol: weight * scale for symbol, weight in weights.items()}
+    return weights
 
 
 def build_equal_top10_top12_buffer_plan(
@@ -830,16 +926,28 @@ def build_equal_top10_top12_buffer_plan(
     current_symbol_set = set(current_symbols)
     component_changed = final_symbol_set != current_symbol_set
     equal_weight = 100.0 / len(final_symbols) if final_symbols else 0.0
+    execution_weights = build_min_turnover_execution_weights(
+        final_symbols=final_symbols,
+        added_symbols=added_symbols,
+        current_by_symbol=current_by_symbol,
+    )
 
     target_items: List[Dict[str, Any]] = []
     for symbol in final_symbols:
         item = dict(item_by_symbol.get(symbol) or {})
+        current_weight = (current_by_symbol.get(symbol) or {}).get("weight_pct")
+        execution_weight = execution_weights.get(symbol, equal_weight)
+        strategy_action = "buy" if symbol in added_symbols else "keep"
+        if strategy_action == "keep":
+            current_number = safe_float(current_weight)
+            if current_number is None or abs(execution_weight - current_number) > 0.005:
+                strategy_action = "adjust"
         item["stock_symbol"] = symbol
         item["stock_name"] = item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or ""
         item["top_normalized_weight_pct"] = equal_weight
-        item["rebalance_weight_pct"] = equal_weight
-        item["strategy_action"] = "buy" if symbol in added_symbols else "keep"
-        item["current_weight_pct"] = (current_by_symbol.get(symbol) or {}).get("weight_pct")
+        item["rebalance_weight_pct"] = execution_weight
+        item["strategy_action"] = strategy_action
+        item["current_weight_pct"] = current_weight
         target_items.append(item)
 
     removed_items: List[Dict[str, Any]] = []
@@ -864,6 +972,7 @@ def build_equal_top10_top12_buffer_plan(
         "added_symbols": added_symbols,
         "final_symbols": final_symbols,
         "component_changed": component_changed,
+        "execution_weight_rule": BUFFER_EXECUTION_WEIGHT_RULE,
         "target_items": target_items,
         "removed_items": removed_items,
         "current_items": current_items,
@@ -1302,7 +1411,7 @@ def build_report(
             [
                 f"买入/补位: 从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只。",
                 f"卖出: 已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖。",
-                "权重: 成分发生变化时，最终持仓等权；成分无变化不提交调仓。",
+                f"权重: {strategy_plan.get('execution_weight_rule') or BUFFER_EXECUTION_WEIGHT_RULE}；成分无变化不提交调仓。",
                 f"当前持仓: {'、'.join(plan_summary.get('current') or []) or '-'}",
                 f"保留: {'、'.join(plan_summary.get('retained') or []) or '-'}",
                 f"卖出: {'、'.join(plan_summary.get('removed') or []) or '-'}",
@@ -1451,7 +1560,7 @@ def build_report_html(
             [
                 ("买入/补位", f"从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只"),
                 ("卖出规则", f"已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖"),
-                ("权重规则", "成分发生变化时等权；成分无变化不提交调仓"),
+                ("权重规则", f"{strategy_plan.get('execution_weight_rule') or BUFFER_EXECUTION_WEIGHT_RULE}；成分无变化不提交调仓"),
                 ("当前持仓", "、".join(plan_summary.get("current") or []) or "-"),
                 ("保留", "、".join(plan_summary.get("retained") or []) or "-"),
                 ("卖出", "、".join(plan_summary.get("removed") or []) or "-"),
@@ -1520,6 +1629,11 @@ def build_report_html(
     if rebalance_action_lines:
         action_items = "".join(f"<li>{esc(line)}</li>" for line in rebalance_action_lines)
         rebalance_action_html = f"<h2>雪球返回调仓动作</h2><ul>{action_items}</ul>"
+    final_weight_text = (
+        strategy_plan.get("execution_weight_rule") or BUFFER_EXECUTION_WEIGHT_RULE
+        if strategy_plan
+        else f"选取综合权重最高的 Top{top_n} 后归一化"
+    )
 
     return f"""<!doctype html>
 <html>
@@ -1542,7 +1656,7 @@ def build_report_html(
   <table class="summary">{rows_html}</table>
   {rebalance_action_html}
   <p>统计口径: {esc(scope_text)}；个股综合权重 = 该股票在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。</p>
-  <p>最终权重: {BUFFER_STRATEGY_NAME if strategy_plan else f"选取综合权重最高的 Top{top_n} 后归一化"}。</p>
+  <p>最终权重: {esc(final_weight_text)}。</p>
   <table>
     <thead>
       <tr>
