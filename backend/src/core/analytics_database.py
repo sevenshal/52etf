@@ -11,6 +11,7 @@ from .duckdb_utils import (
     ANALYTICS_DB_PATH,
     DUCKDB_CONFIG_MISMATCH_MESSAGE,
     connect_duckdb,
+    connect_duckdb_engine,
     is_duckdb_config_mismatch,
 )
 
@@ -41,7 +42,11 @@ ANALYTICS_TABLE_NAMES = frozenset(
     }
 )
 
-analytics_engine = create_engine(f"duckdb:///{ANALYTICS_DB_PATH}", poolclass=NullPool)
+analytics_engine = create_engine(
+    "duckdb:///:memory:",
+    creator=lambda: connect_duckdb_engine(ANALYTICS_DB_PATH, prefer_read_only=False),
+    poolclass=NullPool,
+)
 AnalyticsBase = declarative_base()
 AnalyticsSession = scoped_session(sessionmaker(bind=analytics_engine))
 

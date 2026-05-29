@@ -28,3 +28,11 @@ def connect_duckdb(database: str = ANALYTICS_DB_PATH, prefer_read_only: bool = T
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("无法连接DuckDB分析库")
+
+
+def connect_duckdb_engine(database: str = ANALYTICS_DB_PATH, prefer_read_only: bool = False):
+    import duckdb_engine
+
+    return duckdb_engine.ConnectionWrapper(
+        connect_duckdb(database=database, prefer_read_only=prefer_read_only)
+    )
