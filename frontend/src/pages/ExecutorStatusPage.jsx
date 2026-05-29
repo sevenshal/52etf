@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import {
   Alert,
@@ -9,6 +9,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Segmented,
   Space,
   Spin,
   Table,
@@ -75,8 +76,12 @@ const roleLabel = value => {
   if (value === 'BLOCK') return '阻断';
   return value || '-';
 };
+const successfulOrderStatuses = new Set(['FILLED', 'SUCCESS', 'SUCCEEDED', 'DONE', 'COMPLETED']);
+const isOrderSuccessful = status => successfulOrderStatuses.has(String(status || '').trim().toUpperCase());
+const getOrderMessage = record => String(record?.message || '').trim();
+const shouldShowOrderMessage = record => !isOrderSuccessful(record?.status) && Boolean(getOrderMessage(record));
 const orderStatusColor = status => {
-  if (status === 'FILLED') return 'success';
+  if (isOrderSuccessful(status)) return 'success';
   if (['REJECTED', 'FAILED', 'EXPIRED'].includes(status)) return 'error';
   if (['CANCELED', 'PARTIALLY_CANCELED'].includes(status)) return 'default';
   if (['PARTIALLY_FILLED', 'CANCEL_PENDING', 'BLOCKED_INSUFFICIENT_SELLABLE', 'BLOCKED_INSUFFICIENT_POSITION', 'BLOCKED_NON_RETRYABLE_REJECTION'].includes(status)) return 'warning';
@@ -153,8 +158,27 @@ const createEmptyTable = () => ({ rows: [], pagination: { page: 1, page_size: 10
 const createEmptyTables = () => Object.keys(tableEndpoints).reduce((result, key) => ({ ...result, [key]: createEmptyTable() }), {});
 const createDefaultTableState = () => Object.keys(tableEndpoints).reduce((result, key) => ({
   ...result,
-  [key]: { page: 1, pageSize: 10, filters: {} },
+  [key]: { page: 1, pageSize: 10, filters: {}, unfilledOnly: false },
 }), {});
+const tableRowKey = (tableKey, row, index) => {
+  if (row?.id !== undefined && row?.id !== null) return `${tableKey}:${row.id}`;
+  if (['target_positions', 'ledger_positions'].includes(tableKey)) {
+    return `${tableKey}:${row?.sub_account_id || ''}:${normalizeSymbolKey(row?.symbol)}`;
+  }
+  return `${tableKey}:${row?.sub_account_id || ''}:${normalizeSymbolKey(row?.symbol)}:${row?.created_at || row?.updated_at || index}`;
+};
+const mergeTableRows = (tableKey, currentRows = [], nextRows = []) => {
+  const seen = new Set(currentRows.map((row, index) => tableRowKey(tableKey, row, index)));
+  const merged = [...currentRows];
+  nextRows.forEach((row, index) => {
+    const key = tableRowKey(tableKey, row, currentRows.length + index);
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(row);
+    }
+  });
+  return merged;
+};
 const EXECUTOR_TABS = [
   { key: 'sub_accounts', label: '子账户' },
   { key: 'targets', label: '目标仓位' },
@@ -188,6 +212,8 @@ const ExecutorStatusPage = () => {
   const [markBlockRecord, setMarkBlockRecord] = useState(null);
   const [repairParentRecord, setRepairParentRecord] = useState(null);
   const [orderActionId, setOrderActionId] = useState(null);
+  const infiniteLoadingRef = useRef({});
+  const orderToolbarRef = useRef(null);
 
   const selectedAccount = useMemo(() => (
     accounts.find(item => String(item.id) === String(selectedAccountId)) || null
@@ -253,6 +279,7 @@ const ExecutorStatusPage = () => {
     role: joinFilterValues(state?.filters?.role),
     event_type: joinFilterValues(state?.filters?.event_type),
     process_status: joinFilterValues(state?.filters?.process_status),
+    unfilled_only: state?.unfilledOnly ? 'true' : undefined,
   });
 
   const fetchBaseStatus = useCallback(async account => {
@@ -283,20 +310,22 @@ const ExecutorStatusPage = () => {
     }
   }, []);
 
-  const fetchTable = useCallback(async (account, tableKey, nextState) => {
+  const fetchTable = useCallback(async (account, tableKey, nextState, options = {}) => {
     if (!account?.id || !tableEndpoints[tableKey]) return;
+    const append = options.append === true;
     setTableLoading(prev => ({ ...prev, [tableKey]: true }));
     try {
       const { data } = await request.get(
         `/api/external-trading-accounts/${account.id}/executor/status/${tableEndpoints[tableKey]}`,
         { params: buildTableParams(nextState) }
       );
+      const nextRows = data?.rows || [];
       setTables(prev => ({
         ...prev,
         [tableKey]: {
           ...createEmptyTable(),
           ...(data || {}),
-          rows: data?.rows || [],
+          rows: append ? mergeTableRows(tableKey, prev[tableKey]?.rows || [], nextRows) : nextRows,
           price_details: data?.price_details || {},
           filter_options: data?.filter_options || {},
         },
@@ -304,8 +333,10 @@ const ExecutorStatusPage = () => {
       setTableLoaded(prev => ({ ...prev, [tableKey]: true }));
     } catch (error) {
       message.error(error.response?.data?.detail || `获取${tableLabels[tableKey]}失败`);
-      setTables(prev => ({ ...prev, [tableKey]: createEmptyTable() }));
-      setTableLoaded(prev => ({ ...prev, [tableKey]: false }));
+      if (!append) {
+        setTables(prev => ({ ...prev, [tableKey]: createEmptyTable() }));
+        setTableLoaded(prev => ({ ...prev, [tableKey]: false }));
+      }
     } finally {
       setTableLoading(prev => ({ ...prev, [tableKey]: false }));
     }
@@ -348,7 +379,13 @@ const ExecutorStatusPage = () => {
     }
     const tableKey = tableKeyFromTab(tabKey);
     if (tableKey && (force || !tableLoaded[tableKey])) {
-      fetchTable(account, tableKey, tableState[tableKey]);
+      const nextState = force
+        ? { ...(tableState[tableKey] || { pageSize: 10, filters: {} }), page: 1 }
+        : tableState[tableKey];
+      if (force) {
+        setTableState(prev => ({ ...prev, [tableKey]: nextState }));
+      }
+      fetchTable(account, tableKey, nextState);
     }
   }, [fetchPlan, fetchSubAccounts, fetchTable, planLoaded, tableLoaded, tableState]);
 
@@ -420,10 +457,44 @@ const ExecutorStatusPage = () => {
       page: pagination?.current || 1,
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
       filters: normalizeServerTableFilters(filters),
+      unfilledOnly: previousState.unfilledOnly || false,
     };
     const nextState = { ...tableState, [tableKey]: next };
     setTableState(nextState);
     fetchTable(selectedAccount, tableKey, next);
+  };
+
+  const keepOrderToolbarInPlace = beforeTop => {
+    const scroller = document.querySelector('.app-shell__scroll');
+    if (!scroller || beforeTop === null || beforeTop === undefined) return;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const afterTop = orderToolbarRef.current?.getBoundingClientRect().top;
+        if (afterTop === null || afterTop === undefined) return;
+        scroller.scrollTop += afterTop - beforeTop;
+      });
+    });
+  };
+
+  const handleOrderUnfilledFilterChange = value => {
+    const unfilledOnly = value === 'unfilled';
+    const previousState = tableState.orders || { pageSize: 10, filters: {} };
+    if ((previousState.unfilledOnly || false) === unfilledOnly) return;
+    const toolbarTop = orderToolbarRef.current?.getBoundingClientRect().top;
+    const nextStateForOrders = {
+      ...previousState,
+      page: 1,
+      unfilledOnly,
+    };
+    setTableState(prev => ({ ...prev, orders: nextStateForOrders }));
+    setTableLoaded(prev => ({ ...prev, orders: false }));
+    if (selectedAccount?.id) {
+      fetchTable(selectedAccount, 'orders', nextStateForOrders).finally(() => {
+        keepOrderToolbarInPlace(toolbarTop);
+      });
+    } else {
+      keepOrderToolbarInPlace(toolbarTop);
+    }
   };
 
   const paginationFor = tableKey => {
@@ -438,6 +509,56 @@ const ExecutorStatusPage = () => {
       showTotal: total => `共 ${total} 条`,
     };
   };
+
+  const hasMoreTableRows = useCallback(tableKey => {
+    const table = tables[tableKey] || createEmptyTable();
+    const total = Number(table.pagination?.total || 0);
+    const loaded = (table.rows || []).length;
+    return total > loaded;
+  }, [tables]);
+
+  const loadMoreTable = useCallback(tableKey => {
+    if (!selectedAccount?.id || !tableEndpoints[tableKey]) return;
+    if (tableLoading[tableKey] || infiniteLoadingRef.current[tableKey] || !hasMoreTableRows(tableKey)) return;
+    const currentState = tableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
+    const currentPagination = tables[tableKey]?.pagination || {};
+    const nextState = {
+      ...currentState,
+      page: Number(currentPagination.page || currentState.page || 1) + 1,
+      pageSize: Number(currentPagination.page_size || currentState.pageSize || 10),
+    };
+    infiniteLoadingRef.current[tableKey] = true;
+    setTableState(prev => ({ ...prev, [tableKey]: nextState }));
+    fetchTable(selectedAccount, tableKey, nextState, { append: true }).finally(() => {
+      infiniteLoadingRef.current[tableKey] = false;
+    });
+  }, [fetchTable, hasMoreTableRows, selectedAccount, tableLoading, tables, tableState]);
+
+  useEffect(() => {
+    const tableKey = tableKeyFromTab(activeTab);
+    if (!tableKey || !selectedAccount?.id) return undefined;
+    const mediaQuery = window.matchMedia('(max-width: 760px)');
+    if (!mediaQuery.matches) return undefined;
+    const scroller = document.querySelector('.app-shell__scroll');
+    if (!scroller) return undefined;
+    let ticking = false;
+    const checkScrollPosition = () => {
+      ticking = false;
+      if (!mediaQuery.matches) return;
+      const distanceToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      if (distanceToBottom < 320) {
+        loadMoreTable(tableKey);
+      }
+    };
+    const handleScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      window.requestAnimationFrame(checkScrollPosition);
+    };
+    scroller.addEventListener('scroll', handleScroll, { passive: true });
+    checkScrollPosition();
+    return () => scroller.removeEventListener('scroll', handleScroll);
+  }, [activeTab, loadMoreTable, selectedAccount?.id]);
 
   const serverFilterProps = (tableKey, filterKey) => {
     const filteredValue = tableState[tableKey]?.filters?.[filterKey] || [];
@@ -600,7 +721,16 @@ const ExecutorStatusPage = () => {
     { title: '均价', dataIndex: 'avg_fill_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
     { title: '档位', dataIndex: 'price_level', width: 100, render: priceLevelLabel },
     { title: '超时点', dataIndex: 'deadline_at', width: 170, render: formatTime },
-    { title: '消息', dataIndex: 'message', width: 220, render: value => value || '-' },
+    {
+      title: '消息',
+      dataIndex: 'message',
+      width: 260,
+      render: (_, record) => (
+        shouldShowOrderMessage(record)
+          ? <span className="executor-order-message">{getOrderMessage(record)}</span>
+          : '-'
+      ),
+    },
     { title: '操作', width: 120, fixed: 'right', render: (_, record) => renderOrderActions(record) },
   ];
   const fillColumns = [
@@ -743,6 +873,9 @@ const ExecutorStatusPage = () => {
             <span>超时 {formatTime(record.deadline_at)}</span>
           </div>
         ) : null}
+        {kind === 'order' && shouldShowOrderMessage(record) ? (
+          <p className="executor-order-message">{getOrderMessage(record)}</p>
+        ) : null}
         {kind === 'order' && renderOrderActions(record) !== '-' ? (
           <div className="executor-row-card__actions">{renderOrderActions(record)}</div>
         ) : null}
@@ -750,7 +883,29 @@ const ExecutorStatusPage = () => {
     );
   };
 
-  const renderEventCards = () => (
+  const renderMobileLoadState = tableKey => {
+    if (!tableKey) return null;
+    const table = tables[tableKey] || createEmptyTable();
+    const loaded = (table.rows || []).length;
+    const total = Number(table.pagination?.total || 0);
+    if (tableLoading[tableKey]) {
+      return (
+        <div className="executor-mobile-load-state">
+          <Spin size="small" />
+          <span>{loaded ? '加载下一页' : '加载中'}</span>
+        </div>
+      );
+    }
+    if (loaded && total && loaded >= total) {
+      return <div className="executor-mobile-load-state">已加载全部 {loaded} 条</div>;
+    }
+    if (loaded && total && hasMoreTableRows(tableKey)) {
+      return <div className="executor-mobile-load-state">已加载 {loaded}/{total}</div>;
+    }
+    return null;
+  };
+
+  const renderEventCards = tableKey => (
     <div className="executor-mobile-list">
       {eventRows.length ? eventRows.map(row => (
         <div className="executor-row-card" key={row.id}>
@@ -768,15 +923,46 @@ const ExecutorStatusPage = () => {
           </div>
           {row.process_message ? <p>{row.process_message}</p> : null}
         </div>
-      )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+      )) : (
+        tableLoading[tableKey]
+          ? <div className="executor-mobile-load-state"><Spin size="small" /><span>加载中</span></div>
+          : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
+      {eventRows.length ? renderMobileLoadState(tableKey) : null}
     </div>
   );
 
-  const renderMobileCards = (rows, kind) => (
+  const renderMobileCards = (rows, kind, tableKey) => (
     <div className="executor-mobile-list">
-      {rows.length ? rows.map(row => renderSimpleCard(row, kind)) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+      {rows.length ? rows.map(row => renderSimpleCard(row, kind)) : (
+        tableKey && tableLoading[tableKey]
+          ? <div className="executor-mobile-load-state"><Spin size="small" /><span>加载中</span></div>
+          : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
+      {rows.length ? renderMobileLoadState(tableKey) : null}
     </div>
   );
+
+  const renderOrderToolbar = () => {
+    const unfilledOnly = tableState.orders?.unfilledOnly || false;
+    const pagination = tables.orders?.pagination || {};
+    const loaded = orderRows.length;
+    const total = Number(pagination.total || 0);
+    return (
+      <div className="executor-list-toolbar" ref={orderToolbarRef}>
+        <Segmented
+          size="small"
+          value={unfilledOnly ? 'unfilled' : 'all'}
+          options={[
+            { label: '全部', value: 'all' },
+            { label: '只看未成交', value: 'unfilled' },
+          ]}
+          onChange={handleOrderUnfilledFilterChange}
+        />
+        <span>{tableLoading.orders ? '更新中' : (total ? `已显示 ${loaded}/${total}` : `已显示 ${loaded}`)}</span>
+      </div>
+    );
+  };
 
   const renderCurrentTab = () => {
     if (activeTab === 'sub_accounts') {
@@ -792,7 +978,7 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'targets') {
       return (
         <>
-          {renderMobileCards(targetRows, 'target')}
+          {renderMobileCards(targetRows, 'target', 'target_positions')}
           <div className="executor-desktop-table">
             <Table rowKey={record => `${record.sub_account_id}-${record.symbol}`} columns={targetColumns} dataSource={targetRows} loading={tableLoading.target_positions} pagination={paginationFor('target_positions')} onChange={handleTableChange('target_positions')} size="small" scroll={{ x: 1280 }} />
           </div>
@@ -802,7 +988,7 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'ledger') {
       return (
         <>
-          {renderMobileCards(ledgerRows, 'ledger')}
+          {renderMobileCards(ledgerRows, 'ledger', 'ledger_positions')}
           <div className="executor-desktop-table">
             <Table rowKey={record => `${record.sub_account_id}-${record.symbol}`} columns={ledgerColumns} dataSource={ledgerRows} loading={tableLoading.ledger_positions} pagination={paginationFor('ledger_positions')} onChange={handleTableChange('ledger_positions')} size="small" scroll={{ x: 1280 }} />
           </div>
@@ -812,7 +998,8 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'orders') {
       return (
         <>
-          {renderMobileCards(orderRows, 'order')}
+          {renderOrderToolbar()}
+          {renderMobileCards(orderRows, 'order', 'orders')}
           <div className="executor-desktop-table">
             <Table rowKey="id" columns={orderColumns} dataSource={orderRows} loading={tableLoading.orders} pagination={paginationFor('orders')} onChange={handleTableChange('orders')} size="small" scroll={{ x: 2100 }} />
           </div>
@@ -822,7 +1009,7 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'fills') {
       return (
         <>
-          {renderMobileCards(fillRows, 'fill')}
+          {renderMobileCards(fillRows, 'fill', 'fills')}
           <div className="executor-desktop-table">
             <Table rowKey="id" columns={fillColumns} dataSource={fillRows} loading={tableLoading.fills} pagination={paginationFor('fills')} onChange={handleTableChange('fills')} size="small" scroll={{ x: 1200 }} />
           </div>
@@ -832,7 +1019,7 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'events') {
       return (
         <>
-          {renderEventCards()}
+          {renderEventCards('events')}
           <div className="executor-desktop-table">
             <Table rowKey="id" columns={eventColumns} dataSource={eventRows} loading={tableLoading.events} pagination={paginationFor('events')} onChange={handleTableChange('events')} size="small" scroll={{ x: 1600 }} />
           </div>
