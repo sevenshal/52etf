@@ -301,3 +301,160 @@ class AStockBaseDataSyncTest(TestCase):
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+
+    def test_incremental_adj_factor_skips_when_no_new_trading_days(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                from src.core.analytics_database import AStockAdjFactor, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        assert start_date == date(2026, 5, 30)
+                        assert end_date == date(2026, 5, 30)
+                        return pd.DataFrame([{"cal_date": date(2026, 5, 30), "is_open": 0}])
+
+                    def get_a_stock_adj_factor_range_frame(self, *args, **kwargs):
+                        raise AssertionError("adj factor fetch should be skipped without new trading days")
+
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=FakeTushare())
+                try:
+                    service._insert_analytics_mappings(
+                        AStockAdjFactor,
+                        [
+                            {
+                                "ts_code": "000001.SZ",
+                                "trade_date": date(2018, 7, 1),
+                                "adj_factor": 1.0,
+                                "created_at": datetime(2026, 5, 29, 20, 0, 0),
+                                "updated_at": datetime(2026, 5, 29, 20, 0, 0),
+                            },
+                            {
+                                "ts_code": "000001.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "adj_factor": 1.0,
+                                "created_at": datetime(2026, 5, 29, 20, 0, 0),
+                                "updated_at": datetime(2026, 5, 29, 20, 0, 0),
+                            }
+                        ],
+                    )
+                    result = service.sync_market_adj_factor(
+                        date(2018, 7, 1),
+                        date(2026, 5, 30),
+                        incremental=True,
+                    )
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert result["start_date"] == "2026-05-30"
+                assert result["trading_days"] == 0
+                assert result["chunks"] == 0
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_incremental_fund_daily_skips_when_no_new_trading_days(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                from src.core.analytics_database import AStockFundBasic, AStockFundDaily, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def get_a_stock_etf_basic_frame(self, list_status="L"):
+                        return pd.DataFrame(
+                            [
+                                {
+                                    "ts_code": "159001.SZ",
+                                    "extname": "ETF",
+                                    "csname": None,
+                                    "name": None,
+                                    "exchange": "SZ",
+                                    "list_date": "20200101",
+                                    "list_status": "L",
+                                }
+                            ]
+                        )
+
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        assert start_date == date(2026, 5, 30)
+                        assert end_date == date(2026, 5, 30)
+                        return pd.DataFrame([{"cal_date": date(2026, 5, 30), "is_open": 0}])
+
+                    def get_a_stock_fund_daily_range_frame(self, *args, **kwargs):
+                        raise AssertionError("fund daily fetch should be skipped without new trading days")
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=FakeTushare())
+                try:
+                    service._insert_analytics_mappings(
+                        AStockFundBasic,
+                        [{"ts_code": "159001.SZ", "name": "ETF", "market": "SZ", "list_date": None, "updated_at": now}],
+                    )
+                    service._insert_analytics_mappings(
+                        AStockFundDaily,
+                        [
+                            {
+                                "ts_code": "159001.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "open": 1.0,
+                                "high": 1.0,
+                                "low": 1.0,
+                                "close": 1.0,
+                                "pre_close": 1.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            }
+                        ],
+                    )
+                    result = service.sync_fund_daily(
+                        date(2019, 5, 26),
+                        date(2026, 5, 30),
+                        incremental=True,
+                    )
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert result["start_date"] is None
+                assert result["trading_days"] == 0
+                assert result["jobs"] == 0
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass

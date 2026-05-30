@@ -51,6 +51,7 @@ ProgressCallback = Callable[[Dict], None]
 
 SYNC_WORKERS = 3
 SYNC_REFRESH_OVERLAP_DAYS = 45
+SYNC_INCREMENTAL_OVERLAP_DAYS = 0
 A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
 A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220
 A_STOCK_FUND_DAILY_WARMUP_DAYS = 220
@@ -220,6 +221,14 @@ def _warmup_start(anchor_date: date, warmup_days: int) -> date:
     return anchor_date - timedelta(days=warmup_days)
 
 
+def _incremental_start(default_start: date, latest_date: Optional[date]) -> date:
+    if not latest_date:
+        return default_start
+    if SYNC_INCREMENTAL_OVERLAP_DAYS > 0:
+        return max(default_start, latest_date - timedelta(days=SYNC_INCREMENTAL_OVERLAP_DAYS))
+    return max(default_start, latest_date + timedelta(days=1))
+
+
 def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     if not day_stats:
         return True
@@ -307,6 +316,41 @@ class AStockBaseDataSyncService:
         self.logger.info("%s (%s%%)", message, payload["progress"])
         if self.progress_callback:
             self.progress_callback(payload)
+
+    def _trading_dates(self, start_date: date, end_date: date) -> List[date]:
+        start_value = _parse_date(start_date)
+        end_value = _parse_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return []
+        calendar = self.tushare.get_trade_calendar_frame(start_value, end_value)
+        if calendar.empty:
+            return []
+        return [
+            item
+            for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
+            if start_value <= item <= end_value
+        ]
+
+    def _filter_jobs_to_trading_days(
+        self,
+        jobs: List[Tuple],
+        *,
+        start_index: int = 1,
+        end_index: int = 2,
+    ) -> Tuple[List[Tuple], int]:
+        if not jobs:
+            return jobs, 0
+        range_start = min(job[start_index] for job in jobs)
+        range_end = max(job[end_index] for job in jobs)
+        trading_dates = self._trading_dates(range_start, range_end)
+        if not trading_dates:
+            return [], 0
+        filtered = [
+            job
+            for job in jobs
+            if any(job[start_index] <= trading_date <= job[end_index] for trading_date in trading_dates)
+        ]
+        return filtered, len(trading_dates)
 
     def _load_listed_etf_basic_frame(self) -> pd.DataFrame:
         if self._listed_etf_basic_frame is None:
@@ -822,10 +866,7 @@ class AStockBaseDataSyncService:
         if explicit_start:
             factor_start = _warmup_start(explicit_start, max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS))
         elif incremental:
-            if not min_date or min_date > default_start:
-                factor_start = default_start
-            else:
-                factor_start = _overlap_start(default_start, max_date)
+            factor_start = _incremental_start(default_start, max_date)
         else:
             factor_start = default_start
         if factor_start > end_value:
@@ -974,14 +1015,13 @@ class AStockBaseDataSyncService:
             if explicit_start:
                 index_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS)
             elif incremental:
-                if not min_date or min_date > default_start:
-                    index_start = default_start
-                else:
-                    index_start = _overlap_start(default_start, max_date)
+                index_start = _incremental_start(default_start, max_date)
             else:
                 index_start = default_start
             if index_start <= end_value:
                 jobs.append((index_code, index_start, end_value))
+
+        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
 
         if not jobs:
             return {
@@ -991,6 +1031,7 @@ class AStockBaseDataSyncService:
                 "errors": [],
                 "start_date": None,
                 "end_date": end_value.isoformat(),
+                "trading_days": trading_days,
             }
 
         saved_rows = 0
@@ -1050,6 +1091,7 @@ class AStockBaseDataSyncService:
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
             "end_date": end_value.isoformat(),
+            "trading_days": trading_days,
         }
 
     def _latest_fund_daily_dates(self, symbols: List[str]) -> Dict[str, Optional[date]]:
@@ -1093,11 +1135,13 @@ class AStockBaseDataSyncService:
             if explicit_start:
                 symbol_start = _warmup_start(explicit_start, A_STOCK_FUND_DAILY_WARMUP_DAYS)
             elif incremental:
-                symbol_start = _overlap_start(default_start, latest_by_symbol.get(symbol))
+                symbol_start = _incremental_start(default_start, latest_by_symbol.get(symbol))
             else:
                 symbol_start = default_start
             if symbol_start <= end_value:
                 jobs.append((symbol, symbol_start, end_value))
+
+        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
 
         if not jobs:
             return {
@@ -1107,6 +1151,7 @@ class AStockBaseDataSyncService:
                 "errors": [],
                 "start_date": None,
                 "end_date": end_value.isoformat(),
+                "trading_days": trading_days,
             }
 
         def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
@@ -1171,6 +1216,7 @@ class AStockBaseDataSyncService:
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
             "end_date": end_value.isoformat(),
+            "trading_days": trading_days,
         }
 
     def sync_fund_adj_factor(
@@ -1193,14 +1239,13 @@ class AStockBaseDataSyncService:
             if explicit_start:
                 symbol_start = _warmup_start(explicit_start, A_STOCK_FUND_DAILY_WARMUP_DAYS)
             elif incremental:
-                if not min_date or min_date > default_start:
-                    symbol_start = default_start
-                else:
-                    symbol_start = _overlap_start(default_start, max_date)
+                symbol_start = _incremental_start(default_start, max_date)
             else:
                 symbol_start = default_start
             if symbol_start <= end_value:
                 jobs.append((symbol, symbol_start, end_value))
+
+        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
 
         if not jobs:
             return {
@@ -1210,6 +1255,7 @@ class AStockBaseDataSyncService:
                 "errors": [],
                 "start_date": None,
                 "end_date": end_value.isoformat(),
+                "trading_days": trading_days,
             }
 
         def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
@@ -1274,6 +1320,7 @@ class AStockBaseDataSyncService:
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
             "end_date": end_value.isoformat(),
+            "trading_days": trading_days,
         }
 
     def _latest_index_weight_dates(self, index_codes: List[str]) -> Dict[str, Optional[date]]:
@@ -1331,13 +1378,15 @@ class AStockBaseDataSyncService:
             if explicit_start:
                 index_start = _warmup_start(explicit_start, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
             elif incremental:
-                index_start = _overlap_start(default_start, latest_by_index.get(index_code))
+                index_start = _incremental_start(default_start, latest_by_index.get(index_code))
             else:
                 index_start = default_start
             if index_start > end_value:
                 continue
             for chunk_start, chunk_end in _year_chunks(index_start, end_value):
                 jobs.append((index_code, chunk_start, chunk_end))
+
+        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
 
         if not jobs:
             return {
@@ -1347,6 +1396,7 @@ class AStockBaseDataSyncService:
                 "errors": [],
                 "start_date": None,
                 "end_date": end_value.isoformat(),
+                "trading_days": trading_days,
             }
 
         saved_rows = 0
@@ -1411,6 +1461,7 @@ class AStockBaseDataSyncService:
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
             "end_date": end_value.isoformat(),
+            "trading_days": trading_days,
         }
 
     def sync_option_basic(self) -> int:
@@ -1892,17 +1943,12 @@ class AStockBaseDataSyncService:
         if explicit_start:
             market_start = _warmup_start(explicit_start, market_warmup_days)
         elif incremental:
-            market_start = _overlap_start(market_default_start, latest_market_date)
+            market_start = _incremental_start(market_default_start, latest_market_date)
         else:
             market_start = market_default_start
 
         self._progress("同步A股全市场日行情缓存", 28, start_date=market_start.isoformat(), end_date=end_value.isoformat())
-        trade_calendar = self.tushare.get_trade_calendar_frame(market_start, end_value)
-        trading_dates = [
-            item
-            for item in trade_calendar[trade_calendar["is_open"] == 1]["cal_date"].tolist()
-            if item <= end_value
-        ] if not trade_calendar.empty else []
+        trading_dates = self._trading_dates(market_start, end_value)
         if trading_dates:
             self._ensure_market_days(trading_dates)
 
@@ -1978,8 +2024,8 @@ class AStockBaseDataSyncService:
             option_start = _warmup_start(explicit_start, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
             repo_start = _warmup_start(explicit_start, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         elif incremental:
-            option_start = _overlap_start(option_default_start, latest_option_date)
-            repo_start = _overlap_start(repo_default_start, latest_repo_date)
+            option_start = _incremental_start(option_default_start, latest_option_date)
+            repo_start = _incremental_start(repo_default_start, latest_repo_date)
         else:
             option_start = option_default_start
             repo_start = repo_default_start
@@ -2004,7 +2050,7 @@ class AStockBaseDataSyncService:
         if explicit_start:
             chinabond_start = _warmup_start(explicit_start, A_STOCK_CHINABOND_WARMUP_DAYS)
         elif incremental:
-            chinabond_start = _overlap_start(chinabond_default_start, latest_chinabond_date)
+            chinabond_start = _incremental_start(chinabond_default_start, latest_chinabond_date)
         else:
             chinabond_start = chinabond_default_start
 
@@ -2063,23 +2109,48 @@ class AStockBaseDataSyncService:
         repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
         chinabond_curve_def_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDef.__tablename__)
         chinabond_curve_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDaily.__tablename__)
-        market_qfq_coverage = _adj_factor_coverage_stats(
-            self.analytics_db,
-            raw_table=AStockMarketDaily.__tablename__,
-            factor_table=AStockAdjFactor.__tablename__,
-            qfq_view="a_stock_market_daily_qfq",
-            start_date=market_start,
-            end_date=end_value,
+        if trading_dates:
+            market_qfq_coverage = _adj_factor_coverage_stats(
+                self.analytics_db,
+                raw_table=AStockMarketDaily.__tablename__,
+                factor_table=AStockAdjFactor.__tablename__,
+                qfq_view="a_stock_market_daily_qfq",
+                start_date=market_start,
+                end_date=end_value,
+            )
+        else:
+            market_qfq_coverage = _adj_factor_coverage_stats(
+                self.analytics_db,
+                raw_table=AStockMarketDaily.__tablename__,
+                factor_table=AStockAdjFactor.__tablename__,
+                qfq_view="a_stock_market_daily_qfq",
+                start_date=end_value + timedelta(days=1),
+                end_date=end_value,
+            )
+        fund_coverage_start = (
+            _parse_date(fund_daily_result.get("start_date"))
+            or _parse_date(fund_adj_factor_result.get("start_date"))
         )
-        fund_qfq_coverage = _adj_factor_coverage_stats(
-            self.analytics_db,
-            raw_table=AStockFundDaily.__tablename__,
-            factor_table=AStockFundAdjFactor.__tablename__,
-            qfq_view="a_stock_fund_daily_qfq",
-            start_date=_parse_date(fund_daily_result.get("start_date")) or fund_display_start,
-            end_date=end_value,
-            symbols=self._load_listed_etf_symbols(),
-        )
+        if fund_coverage_start:
+            fund_qfq_coverage = _adj_factor_coverage_stats(
+                self.analytics_db,
+                raw_table=AStockFundDaily.__tablename__,
+                factor_table=AStockFundAdjFactor.__tablename__,
+                qfq_view="a_stock_fund_daily_qfq",
+                start_date=fund_coverage_start,
+                end_date=end_value,
+                symbols=self._load_listed_etf_symbols(),
+            )
+        else:
+            fund_qfq_coverage = _adj_factor_coverage_stats(
+                self.analytics_db,
+                raw_table=AStockFundDaily.__tablename__,
+                factor_table=AStockFundAdjFactor.__tablename__,
+                qfq_view="a_stock_fund_daily_qfq",
+                start_date=end_value + timedelta(days=1),
+                end_date=end_value,
+                symbols=self._load_listed_etf_symbols(),
+            )
         self.analytics_db.commit()
 
         self._progress("A股基础数据同步完成", 100)
