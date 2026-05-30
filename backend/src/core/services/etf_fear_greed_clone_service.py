@@ -704,6 +704,26 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         finally:
             Session.remove()
 
+    def load_summaries_from_db(self, symbols: List[str]) -> Dict[str, Any]:
+        normalized_symbols = [
+            self._normalize_etf_symbol(symbol)
+            for symbol in dict.fromkeys(symbols or [])
+            if str(symbol or "").strip()
+        ]
+        db = Session()
+        try:
+            summaries = [
+                self._db_summary_payload(db, symbol)
+                for symbol in normalized_symbols
+            ]
+            return {
+                "symbols": normalized_symbols,
+                "count": len(summaries),
+                "data": summaries,
+            }
+        finally:
+            Session.remove()
+
     def _build_raw_signals(
         self,
         etf_symbol: str,
@@ -1873,6 +1893,76 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "junk_bond_demand": row.junk_bond_demand_score,
             }
         return payload
+
+    @classmethod
+    def _db_summary_payload(cls, db, symbol: str) -> Dict[str, Any]:
+        latest_row = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(ETFFearGreedCloneHistory.symbol == symbol)
+            .order_by(ETFFearGreedCloneHistory.date.desc())
+            .first()
+        )
+        if not latest_row:
+            return {
+                "symbol": symbol,
+                "latest": None,
+                "seven_day_ago": None,
+                "one_month_ago": None,
+                "score_change_7d": None,
+                "score_change_1m": None,
+                "price_change_7d_pct": None,
+                "price_change_1m_pct": None,
+                "history_points": 0,
+                "is_stale": True,
+                "stale_days": None,
+            }
+
+        seven_day_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=7))
+        one_month_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=30))
+        history_points = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(ETFFearGreedCloneHistory.symbol == symbol)
+            .count()
+        )
+        stale_days = max((datetime.now().date() - latest_row.date).days, 0)
+
+        return {
+            "symbol": symbol,
+            "latest": cls._db_history_row_payload(latest_row, include_components=False),
+            "seven_day_ago": cls._db_history_row_payload(seven_day_row, include_components=False) if seven_day_row else None,
+            "one_month_ago": cls._db_history_row_payload(one_month_row, include_components=False) if one_month_row else None,
+            "score_change_7d": cls._score_change(latest_row, seven_day_row),
+            "score_change_1m": cls._score_change(latest_row, one_month_row),
+            "price_change_7d_pct": cls._price_change_pct(latest_row, seven_day_row),
+            "price_change_1m_pct": cls._price_change_pct(latest_row, one_month_row),
+            "history_points": history_points,
+            "is_stale": stale_days > 5,
+            "stale_days": stale_days,
+        }
+
+    @staticmethod
+    def _db_history_row_on_or_before(db, symbol: str, target_date: date):
+        return (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(
+                ETFFearGreedCloneHistory.symbol == symbol,
+                ETFFearGreedCloneHistory.date <= target_date,
+            )
+            .order_by(ETFFearGreedCloneHistory.date.desc())
+            .first()
+        )
+
+    @staticmethod
+    def _score_change(latest_row, previous_row) -> Optional[float]:
+        if not latest_row or not previous_row or latest_row.score is None or previous_row.score is None:
+            return None
+        return round(float(latest_row.score) - float(previous_row.score), 4)
+
+    @staticmethod
+    def _price_change_pct(latest_row, previous_row) -> Optional[float]:
+        if not latest_row or not previous_row or latest_row.etf_close is None or previous_row.etf_close in (None, 0):
+            return None
+        return round((float(latest_row.etf_close) / float(previous_row.etf_close) - 1.0) * 100.0, 4)
 
     @staticmethod
     def _db_holding_payload(row: ETFFearGreedCloneHolding) -> Dict[str, Any]:

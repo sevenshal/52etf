@@ -141,6 +141,25 @@ async def get_etf_fear_greed_clone_history(
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪历史失败: {str(e)}")
 
 
+@router.get("/etf-fear-greed-clone/summaries")
+async def get_etf_fear_greed_clone_summaries(
+    symbols: str,
+):
+    """批量读取 ETF/指数恐贪复刻值摘要。"""
+    try:
+        symbol_list = [
+            item.strip()
+            for item in str(symbols or "").split(",")
+            if item.strip()
+        ]
+        calculator = ETFFearGreedCloneCalculator()
+        return await run_in_threadpool(
+            lambda: calculator.load_summaries_from_db(symbol_list)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪摘要失败: {str(e)}")
+
+
 @router.post("/etf-fear-greed-clone/backfill")
 async def backfill_etf_fear_greed_clone(
     symbol: str = "SOXX.US",
