@@ -1,0 +1,170 @@
+.soxx-fear-card {
+  margin-bottom: 16px;
+}
+
+.soxx-fear-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.soxx-fear-summary-card {
+  display: block;
+  width: 100%;
+  min-height: 172px;
+  padding: 14px;
+  font: inherit;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.soxx-fear-summary-card:hover,
+.soxx-fear-summary-card.is-active {
+  border-color: #1677ff;
+  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.08);
+}
+
+.soxx-fear-summary-card:active {
+  transform: translateY(1px);
+}
+
+.soxx-fear-summary-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 42px;
+}
+
+.soxx-fear-summary-name {
+  color: #1f1f1f;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.soxx-fear-summary-meta {
+  margin-top: 2px;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.soxx-fear-summary-score {
+  margin-top: 10px;
+  font-size: 34px;
+  font-weight: 720;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.soxx-fear-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.soxx-fear-metric-cell {
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.soxx-fear-metric-cell span {
+  display: block;
+  color: #8c8c8c;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.soxx-fear-metric-cell strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #1f1f1f;
+  font-size: 14px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.soxx-fear-summary-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.soxx-fear-summary-footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.soxx-fear-detail {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.soxx-fear-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.soxx-fear-detail-stats {
+  margin-bottom: 12px;
+}
+
+.soxx-fear-holdings {
+  margin-bottom: 12px;
+}
+
+.soxx-fear-chart-toolbar {
+  margin-bottom: 12px;
+  text-align: right;
+}
+
+.soxx-fear-chart {
+  height: 420px;
+}
+
+@media (max-width: 720px) {
+  .soxx-fear-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .soxx-fear-summary-card {
+    min-height: 148px;
+    padding: 12px;
+  }
+
+  .soxx-fear-summary-score {
+    font-size: 30px;
+  }
+
+  .soxx-fear-detail-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .soxx-fear-chart-toolbar {
+    text-align: left;
+  }
+
+  .soxx-fear-chart {
+    height: 340px;
+  }
+}
