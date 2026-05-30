@@ -85,7 +85,7 @@ def run_scheduled_task_now(
         if task_key in {
             "evc_static_info_sync",
             "a_stock_base_data_sync",
-            "etf_historical_holdings_backfill",
+            "etf_holdings_backfill",
             "soxx_fear_greed_backfill",
             "a_stock_etf_fear_greed_backfill",
         } and payload and payload.start_date:

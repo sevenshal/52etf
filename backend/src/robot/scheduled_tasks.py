@@ -217,6 +217,12 @@ def _run_etf_historical_holdings_backfill(start_date: Optional[str] = None):
     )
 
 
+def _run_etf_holdings_sync(start_date: Optional[str] = None):
+    if start_date:
+        return _run_etf_historical_holdings_backfill(start_date=start_date)
+    return _run_etf_holdings_ingest()
+
+
 def _run_etf_put_call_ratio_sync(full: bool = False):
     from .etf_putcallratio_sync import BarchartETFPutCallRatioSync
 
@@ -648,12 +654,12 @@ class ScheduledTaskManager:
             ),
             "etf_holdings_backfill": TaskDefinition(
                 task_key="etf_holdings_backfill",
-                name="美股ETF持仓抓取入库",
-                description="抓取全部 ETF 最新持仓，并按发行商返回的持仓日期覆盖入库。",
+                name="美股ETF持仓同步",
+                description="不传开始日期时抓取全部 ETF 最新持仓增量入库；手动传入开始日期时从该日期起回刷历史持仓。",
                 default_time="05:30",
                 default_enabled=True,
                 sort_order=15,
-                runner=_run_etf_holdings_ingest,
+                runner=_run_etf_holdings_sync,
             ),
             "etf_put_call_ratio_sync": TaskDefinition(
                 task_key="etf_put_call_ratio_sync",
@@ -663,15 +669,6 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=55,
                 runner=_run_etf_put_call_ratio_sync,
-            ),
-            "etf_historical_holdings_backfill": TaskDefinition(
-                task_key="etf_historical_holdings_backfill",
-                name="美股ETF历史持仓回刷",
-                description="手动回刷 iShares 历史 asOfDate 持仓和非 iShares 的 SEC N-PORT 历史持仓。",
-                default_time="05:00",
-                default_enabled=False,
-                sort_order=12,
-                runner=_run_etf_historical_holdings_backfill,
             ),
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
@@ -776,6 +773,7 @@ class ScheduledTaskManager:
             db.query(ScheduledTaskConfig).filter(
                 ScheduledTaskConfig.task_key.in_([
                     "a_stock_income_sync",
+                    "etf_historical_holdings_backfill",
                     "etf_nport_holdings_import",
                     "external_trading_fee_reconcile_retry",
                 ])
@@ -1379,7 +1377,7 @@ class ScheduledTaskManager:
             "supports_start_date": config["task_key"] in {
                 "evc_static_info_sync",
                 "a_stock_base_data_sync",
-                "etf_historical_holdings_backfill",
+                "etf_holdings_backfill",
                 "soxx_fear_greed_backfill",
                 "a_stock_etf_fear_greed_backfill",
             },
