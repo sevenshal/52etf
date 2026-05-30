@@ -12,7 +12,7 @@ from bisect import bisect_left
 from datetime import date, datetime, timedelta
 from itertools import combinations, product
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -4191,9 +4191,22 @@ def _next_trading_day_after(check_date: date, is_trading_day: Callable[[date], b
     return None
 
 
-def _factor_live_next_trading_day_resolver(config: FactorLiveTradingConfig) -> Callable[[date], Optional[date]]:
+def _previous_or_same_trading_day(check_date: date, is_trading_day: Callable[[date], bool]) -> Optional[date]:
+    candidate = check_date
+    for _ in range(370):
+        if is_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    return None
+
+
+def _factor_live_trading_day_checker(config: FactorLiveTradingConfig) -> Callable[[date], bool]:
     market_kind = _factor_live_market_kind(config)
-    is_trading_day = _is_us_trading_day if market_kind == "us" else _is_china_trading_day
+    return _is_us_trading_day if market_kind == "us" else _is_china_trading_day
+
+
+def _factor_live_next_trading_day_resolver(config: FactorLiveTradingConfig) -> Callable[[date], Optional[date]]:
+    is_trading_day = _factor_live_trading_day_checker(config)
     return lambda check_date: _next_trading_day_after(check_date, is_trading_day)
 
 
@@ -4214,8 +4227,7 @@ def _factor_live_next_execution_date(
 
 
 def _factor_live_is_calendar_signal_day(config: FactorLiveTradingConfig, check_date: date) -> bool:
-    market_kind = _factor_live_market_kind(config)
-    is_trading_day = _is_us_trading_day if market_kind == "us" else _is_china_trading_day
+    is_trading_day = _factor_live_trading_day_checker(config)
     if not is_trading_day(check_date):
         return False
     request = _request_payload_from_live_config(config)
@@ -4226,10 +4238,29 @@ def _factor_live_is_calendar_signal_day(config: FactorLiveTradingConfig, check_d
     return _is_rebalance_day([check_date, next_trading_day], 0, rebalance_frequency)
 
 
-def _factor_live_not_signal_day_message(config: FactorLiveTradingConfig, check_date: date) -> str:
+def _factor_live_resolve_requested_signal_date(
+    config: FactorLiveTradingConfig,
+    requested_date: date,
+) -> Tuple[Optional[date], Optional[date]]:
+    is_trading_day = _factor_live_trading_day_checker(config)
+    latest_trading_day = _previous_or_same_trading_day(requested_date, is_trading_day)
+    if not latest_trading_day:
+        return None, None
+    if not _factor_live_is_calendar_signal_day(config, latest_trading_day):
+        return None, latest_trading_day
+    return latest_trading_day, latest_trading_day
+
+
+def _factor_live_not_signal_day_message(
+    config: FactorLiveTradingConfig,
+    check_date: date,
+    resolved_trading_date: Optional[date] = None,
+) -> str:
     request = _request_payload_from_live_config(config)
     rebalance_frequency = _normalize_rebalance_frequency(request.rebalance_frequency)
     label = FACTOR_LIVE_REBALANCE_FREQUENCY_LABELS.get(rebalance_frequency, rebalance_frequency)
+    if resolved_trading_date and resolved_trading_date != check_date:
+        return f"{check_date.isoformat()} 及之前最近交易日 {resolved_trading_date.isoformat()} 不是{label}信号日"
     return f"{check_date.isoformat()} 不是{label}信号日"
 
 
@@ -6100,14 +6131,18 @@ async def generate_factor_live_trading_signal(
             requested_signal_date = datetime.now(ZoneInfo(config.signal_timezone or "Asia/Shanghai")).date()
         except ZoneInfoNotFoundError:
             requested_signal_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    if not _factor_live_is_calendar_signal_day(config, requested_signal_date):
-        raise HTTPException(status_code=400, detail=_factor_live_not_signal_day_message(config, requested_signal_date))
+    signal_date, latest_trading_date = _factor_live_resolve_requested_signal_date(config, requested_signal_date)
+    if not signal_date:
+        raise HTTPException(
+            status_code=400,
+            detail=_factor_live_not_signal_day_message(config, requested_signal_date, latest_trading_date),
+        )
     try:
         plan = _build_factor_live_signal_plan(
             db,
             external_db,
             config,
-            signal_date=requested_signal_date,
+            signal_date=signal_date,
             rank_limit=payload.rank_limit,
         )
     except ValueError as exc:
