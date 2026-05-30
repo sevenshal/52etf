@@ -54,12 +54,12 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '传入开始日期后，行情、复权、财务等模块会按各自 warmup 向前扩展回刷。'
     };
   }
-  if (taskKey === 'etf_historical_holdings_backfill') {
+  if (taskKey === 'etf_holdings_backfill') {
     return {
-      autoLabel: '默认范围',
-      backfillLabel: '指定日期',
-      autoDetail: '不传开始日期，由后端使用该任务的默认持仓抓取范围。',
-      backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期写入数据库。'
+      autoLabel: '增量同步',
+      backfillLabel: '按日期全量回刷',
+      autoDetail: '不传开始日期，只抓取各 ETF 发行商当前最新持仓快照，并按返回的持仓日期覆盖入库。',
+      backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期覆盖写入数据库。'
     };
   }
   if (taskKey === 'soxx_fear_greed_backfill' || taskKey === 'a_stock_etf_fear_greed_backfill') {
