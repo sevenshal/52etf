@@ -130,6 +130,121 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_basic_reference_upserts_preserve_existing_rows(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import datetime
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AStockBasic, AStockFundBasic, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=object())
+                try:
+                    service._insert_analytics_mappings(
+                        AStockBasic,
+                        [
+                            {
+                                "ts_code": "000001.SZ",
+                                "symbol": "000001",
+                                "name": "old",
+                                "area": "深圳",
+                                "industry": "银行",
+                                "market": "主板",
+                                "exchange": "SZSE",
+                                "list_date": None,
+                                "delist_date": None,
+                                "list_status": "L",
+                                "updated_at": now,
+                            },
+                            {
+                                "ts_code": "999999.SZ",
+                                "symbol": "999999",
+                                "name": "keep",
+                                "area": None,
+                                "industry": None,
+                                "market": None,
+                                "exchange": None,
+                                "list_date": None,
+                                "delist_date": None,
+                                "list_status": "D",
+                                "updated_at": now,
+                            },
+                        ],
+                    )
+                    service._upsert_stock_basic(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "ts_code": "000001.SZ",
+                                    "symbol": "000001",
+                                    "name": "new",
+                                    "area": "深圳",
+                                    "industry": "银行",
+                                    "market": "主板",
+                                    "exchange": "SZSE",
+                                    "list_date": "",
+                                    "delist_date": "",
+                                    "list_status": "L",
+                                }
+                            ]
+                        )
+                    )
+
+                    service._insert_analytics_mappings(
+                        AStockFundBasic,
+                        [
+                            {"ts_code": "159001.SZ", "name": "old fund", "market": "SZ", "list_date": None, "updated_at": now},
+                            {"ts_code": "159999.SZ", "name": "keep fund", "market": "SZ", "list_date": None, "updated_at": now},
+                        ],
+                    )
+                    service._upsert_fund_basic(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "ts_code": "159001.SZ",
+                                    "extname": "new fund",
+                                    "csname": None,
+                                    "name": None,
+                                    "exchange": "SZ",
+                                    "list_date": "",
+                                }
+                            ]
+                        ),
+                        ["159001.SZ"],
+                    )
+
+                    stock_rows = session.execute(
+                        text("SELECT ts_code, name FROM a_stock_basic ORDER BY ts_code")
+                    ).fetchall()
+                    fund_rows = session.execute(
+                        text("SELECT ts_code, name FROM a_stock_fund_basic ORDER BY ts_code")
+                    ).fetchall()
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert stock_rows == [("000001.SZ", "new"), ("999999.SZ", "keep")]
+                assert fund_rows == [("159001.SZ", "new fund"), ("159999.SZ", "keep fund")]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def test_name_change_range_reinsert_replaces_existing_primary_key(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)

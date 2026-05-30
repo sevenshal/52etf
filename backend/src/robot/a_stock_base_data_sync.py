@@ -398,7 +398,7 @@ class AStockBaseDataSyncService:
                     "updated_at": now,
                 }
             )
-        self._replace_analytics_table(AStockBasic, mappings)
+        self._insert_analytics_mappings(AStockBasic, mappings)
 
     def sync_fund_basic(self) -> int:
         frame = self._load_listed_etf_basic_frame()
@@ -438,7 +438,7 @@ class AStockBaseDataSyncService:
             }
 
         mappings = [item for item in mappings_by_symbol.values() if item.get("ts_code")]
-        self._replace_analytics_table(AStockFundBasic, mappings)
+        self._insert_analytics_mappings(AStockFundBasic, mappings)
         return len(mappings)
 
     def _replace_name_changes(self, frame: pd.DataFrame):
@@ -490,10 +490,6 @@ class AStockBaseDataSyncService:
             )
         mappings = list({item["id"]: item for item in mappings}.values())
         self._insert_analytics_mappings(AStockNameChange, mappings)
-
-    def _replace_analytics_table(self, model, mappings: List[Dict], batch_size: int = 1000):
-        self.analytics_db.query(model).delete(synchronize_session=False)
-        self._insert_analytics_mappings(model, mappings, batch_size=batch_size)
 
     def _insert_analytics_mappings(self, model, mappings: List[Dict], batch_size: int = 1000):
         if not mappings:
