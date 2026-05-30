@@ -269,6 +269,7 @@ DEFAULT_TIMING_TARGET_OPTIONS = [
     {"label": "A创100", "value": A_STOCK_INNO100_SYMBOL},
     {"label": "A500ETF 563360.SH", "value": "563360.SH"},
     {"label": "中证500ETF 510500.SH", "value": "510500.SH"},
+    {"label": "中证全指 000985.SH", "value": "000985.SH"},
     {"label": "科创200ETF 588230.SH", "value": "588230.SH"},
     {"label": "创业板ETF 159915.SZ", "value": "159915.SZ"},
     {"label": "煤炭ETF 515220.SH", "value": "515220.SH"},

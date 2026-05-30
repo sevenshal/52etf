@@ -9,6 +9,7 @@ BENCHMARK_INDEXES = [
 A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000510.SH", "name": "中证A500"},
     {"index_code": "000905.SH", "name": "中证500"},
+    {"index_code": "000985.SH", "name": "中证全指"},
     {"index_code": "000699.SH", "name": "科创200"},
     {"index_code": "399006.SZ", "name": "创业板指"},
     {"index_code": "399998.SZ", "name": "中证煤炭"},
@@ -28,6 +29,13 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证500",
         "index_name": "中证500",
         "option_underlyings": ["OP510500.SH", "OP159922.SZ"],
+    },
+    {
+        "symbol": "000985.SH",
+        "ticker": "中证全指",
+        "label": "中证全指",
+        "index_name": "中证全指",
+        "option_underlyings": ["OP510300.SH", "OP159919.SZ", "OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
     },
     {
         "symbol": "000699.SH",
@@ -61,6 +69,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
 A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "563360.SH",
     "510500.SH",
+    "510300.SH",
     "588230.SH",
     "159915.SZ",
     "515220.SH",

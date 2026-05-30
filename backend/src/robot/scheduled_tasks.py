@@ -712,7 +712,7 @@ class ScheduledTaskManager:
             "a_stock_etf_fear_greed_backfill": TaskDefinition(
                 task_key="a_stock_etf_fear_greed_backfill",
                 name="A股指数贪恐回跑入库",
-                description="增量或回跑计算 A创100、中证A500、中证500、科创200、创业板指、中证煤炭、上证红利的指数贪恐复刻值，并保存到 etf_fear_greed_clone_history。",
+                description="增量或回跑计算 A创100、中证A500、中证500、中证全指、科创200、创业板指、中证煤炭、上证红利的指数贪恐复刻值，并保存到 etf_fear_greed_clone_history。",
                 default_time="18:40",
                 default_enabled=True,
                 sort_order=76,
