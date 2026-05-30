@@ -38,10 +38,18 @@ const timezoneOptions = [
 const timezoneSortValue = value => (value === 'America/New_York' ? 1 : 0);
 
 const getRunStartDateHint = (taskKey) => {
+  if (taskKey === 'evc_static_info_sync') {
+    return {
+      autoLabel: '增量同步',
+      backfillLabel: '按日期全量同步',
+      autoDetail: '不传开始日期，日K按每只标的最新日期向前重叠 7 天补齐；如检测到复权变化，会自动重刷该标的历史日K。',
+      backfillDetail: '传入开始日期后，所有美股日K标的都会从所选日期同步到今天；static_info 快照也会正常刷新。'
+    };
+  }
   if (taskKey === 'a_stock_base_data_sync') {
     return {
-      autoLabel: '自动增量',
-      backfillLabel: '历史回刷',
+      autoLabel: '增量同步',
+      backfillLabel: '按日期回刷',
       autoDetail: '不传开始日期，后端按最新入库日期和重叠窗口补齐数据。',
       backfillDetail: '传入开始日期后，行情、复权、财务等模块会按各自 warmup 向前扩展回刷。'
     };
@@ -54,9 +62,17 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期写入数据库。'
     };
   }
+  if (taskKey === 'soxx_fear_greed_backfill' || taskKey === 'a_stock_etf_fear_greed_backfill') {
+    return {
+      autoLabel: '增量同步',
+      backfillLabel: '按日期回跑',
+      autoDetail: '不传开始日期，只刷新最近尾部结果，并自动向前取足计算窗口。',
+      backfillDetail: '传入开始日期后，从所选日期起重新计算并覆盖历史结果；计算会自动向前取足窗口。'
+    };
+  }
   return {
-    autoLabel: '默认范围',
-    backfillLabel: '指定日期',
+    autoLabel: '增量同步',
+    backfillLabel: '按日期回刷',
     autoDetail: '不传开始日期，由后端使用该任务的默认同步范围。',
     backfillDetail: '传入开始日期后，系统会从该日期起重新计算并写入历史记录。'
   };
