@@ -1,12 +1,47 @@
+from datetime import datetime
+from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from src.core.database import Base, XueqiuCubeRankCache
 from src.robot.xueqiu_top_holdings_report import (
+    CubeInfo,
     build_equal_top10_top12_buffer_plan,
+    load_cached_year_top_cubes,
     rounded_rebalance_weights,
+    save_year_top_cubes,
 )
 
 
 class XueqiuTopHoldingsReportTest(TestCase):
+    def test_save_year_top_cubes_deduplicates_symbols_and_reassigns_ranks(self):
+        with TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{tmpdir}/rank_cache.db")
+            Base.metadata.create_all(engine, tables=[XueqiuCubeRankCache.__table__])
+            session_factory = sessionmaker(bind=engine)
+            fetched_at = datetime(2026, 5, 30, 15, 0, 0)
+
+            cubes = [
+                CubeInfo(year_rank=1, symbol="ZH000001", cube_name="best-symbol"),
+                CubeInfo(year_rank=2, symbol="ZH000002", cube_name="second"),
+                CubeInfo(year_rank=4, symbol="ZH000001", cube_name="duplicate-symbol"),
+                CubeInfo(year_rank=0, symbol="ZH000003", cube_name="missing-rank"),
+                CubeInfo(year_rank=2, symbol="ZH000004", cube_name="duplicate-rank"),
+            ]
+
+            with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
+                save_year_top_cubes(cubes, fetched_at)
+                loaded, cached_at = load_cached_year_top_cubes(limit=10, max_age_days=30)
+
+            self.assertEqual(fetched_at, cached_at)
+            self.assertEqual(["ZH000001", "ZH000002", "ZH000004", "ZH000003"], [cube.symbol for cube in loaded])
+            self.assertEqual([1, 2, 3, 4], [cube.year_rank for cube in loaded])
+            self.assertEqual("best-symbol", loaded[0].cube_name)
+            self.assertEqual("duplicate-rank", loaded[2].cube_name)
+
     def test_buffer_plan_keeps_retained_weights_and_allocates_sold_weight_to_new_buy(self):
         ranking_symbols = [
             ("SZ.300757", "罗博特科"),

@@ -12,7 +12,7 @@ import re
 import sys
 import traceback
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -246,6 +246,62 @@ def cube_from_cache_row(row: XueqiuCubeRankCache) -> CubeInfo:
     )
 
 
+def normalize_ranked_cubes(cubes: Iterable[CubeInfo]) -> List[CubeInfo]:
+    best_by_symbol: Dict[str, Tuple[int, int, CubeInfo]] = {}
+    duplicate_symbols: Dict[str, int] = defaultdict(int)
+    invalid_rank_count = 0
+    dropped_symbol_count = 0
+
+    for index, cube in enumerate(cubes, start=1):
+        symbol = (cube.symbol or "").strip()
+        if not symbol:
+            dropped_symbol_count += 1
+            continue
+        rank = safe_int(cube.year_rank)
+        if rank is None or rank <= 0:
+            rank = index
+            invalid_rank_count += 1
+        normalized_cube = replace(cube, symbol=symbol, year_rank=rank)
+        existing = best_by_symbol.get(symbol)
+        if existing is not None:
+            duplicate_symbols[symbol] += 1
+            if rank >= existing[0]:
+                continue
+        best_by_symbol[symbol] = (rank, index, normalized_cube)
+
+    ordered_cubes = [
+        cube
+        for _, _, cube in sorted(
+            best_by_symbol.values(),
+            key=lambda item: (item[0], item[1]),
+        )
+    ]
+    renumbered_count = 0
+    result: List[CubeInfo] = []
+    for normalized_rank, cube in enumerate(ordered_cubes, start=1):
+        if cube.year_rank != normalized_rank:
+            renumbered_count += 1
+        result.append(replace(cube, year_rank=normalized_rank))
+
+    if duplicate_symbols:
+        sample_symbols = ", ".join(sorted(duplicate_symbols)[:5])
+        logger.warning(
+            "Collapsed duplicate Xueqiu year-rank cubes before persistence: duplicates=%s symbols=%s sample=%s",
+            sum(duplicate_symbols.values()),
+            len(duplicate_symbols),
+            sample_symbols or "-",
+        )
+    if dropped_symbol_count or invalid_rank_count or renumbered_count:
+        logger.warning(
+            "Normalized Xueqiu year-rank cubes before persistence: dropped_blank_symbols=%s invalid_ranks=%s renumbered=%s final_count=%s",
+            dropped_symbol_count,
+            invalid_rank_count,
+            renumbered_count,
+            len(result),
+        )
+    return result
+
+
 def load_cubes_from_file(path: Path, limit: Optional[int] = None) -> List[CubeInfo]:
     items = json.loads(path.read_text(encoding="utf-8"))
     cubes: List[CubeInfo] = []
@@ -257,7 +313,7 @@ def load_cubes_from_file(path: Path, limit: Optional[int] = None) -> List[CubeIn
         cubes.append(cube)
         if limit and len(cubes) >= limit:
             break
-    return cubes
+    return normalize_ranked_cubes(cubes)
 
 
 async def fetch_year_top_cubes(
@@ -269,6 +325,8 @@ async def fetch_year_top_cubes(
 ) -> List[CubeInfo]:
     headers = build_headers(cookie)
     cubes: List[CubeInfo] = []
+    duplicate_symbols: Dict[str, int] = defaultdict(int)
+    seen_symbols: Set[str] = set()
     async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
         page = 1
         while len(cubes) < target_count:
@@ -288,15 +346,38 @@ async def fetch_year_top_cubes(
                 break
             for item in batch:
                 cube = cube_from_rank_item(item, len(cubes) + 1)
-                if cube.symbol:
-                    cubes.append(cube)
+                symbol = (cube.symbol or "").strip()
+                if not symbol:
+                    continue
+                if symbol in seen_symbols:
+                    duplicate_symbols[symbol] += 1
+                    continue
+                cube.symbol = symbol
+                cube.year_rank = len(cubes) + 1
+                cubes.append(cube)
+                seen_symbols.add(symbol)
                 if len(cubes) >= target_count:
                     break
             if len(batch) < page_size:
                 break
             page += 1
             await asyncio.sleep(0.08)
+    if duplicate_symbols:
+        sample_symbols = ", ".join(sorted(duplicate_symbols)[:5])
+        logger.warning(
+            "Skipped duplicate Xueqiu year-rank symbols while fetching: duplicates=%s symbols=%s sample=%s",
+            sum(duplicate_symbols.values()),
+            len(duplicate_symbols),
+            sample_symbols or "-",
+        )
     if len(cubes) < target_count:
+        if duplicate_symbols and cubes:
+            logger.warning(
+                "Using shortened Xueqiu year-rank list after de-duplication: unique_count=%s expected=%s",
+                len(cubes),
+                target_count,
+            )
+            return cubes
         raise RuntimeError(f"Xueqiu year rank returned only {len(cubes)} cubes, expected {target_count}.")
     return cubes[:target_count]
 
@@ -328,20 +409,28 @@ def load_cached_year_top_cubes(
             .limit(limit)
             .all()
         )
-        if len(rows) < limit:
+        if not rows:
             return [], latest.fetched_at
+        if len(rows) < limit:
+            logger.warning(
+                "Using shortened Xueqiu year-rank cache: cached_count=%s requested_limit=%s fetched_at=%s",
+                len(rows),
+                limit,
+                latest.fetched_at.strftime("%Y-%m-%d %H:%M:%S"),
+            )
         return [cube_from_cache_row(row) for row in rows], latest.fetched_at
     finally:
         db.close()
 
 
 def save_year_top_cubes(cubes: List[CubeInfo], fetched_at: datetime) -> None:
+    normalized_cubes = normalize_ranked_cubes(cubes)
     db = SessionLocal()
     try:
         db.query(XueqiuCubeRankCache).filter(
             XueqiuCubeRankCache.rank_type == RANK_CACHE_TYPE
         ).delete(synchronize_session=False)
-        for cube in cubes:
+        for cube in normalized_cubes:
             db.add(
                 XueqiuCubeRankCache(
                     rank_type=RANK_CACHE_TYPE,
