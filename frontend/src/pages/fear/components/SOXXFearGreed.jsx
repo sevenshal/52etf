@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Radio, Row, Space, Statistic, Tabs, Tag } from 'antd';
+import { Alert, Card, Col, Radio, Row, Select, Space, Statistic, Tag } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
 import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
@@ -35,6 +35,12 @@ const SOXXFearGreed = () => {
     () => ETF_OPTIONS.find(item => item.symbol === activeSymbol) || ETF_OPTIONS[0],
     [activeSymbol]
   );
+  const etfSelectOptions = useMemo(() => (
+    ETF_OPTIONS.map(item => ({
+      label: `${item.ticker} ${item.label} ${item.symbol}`,
+      value: item.symbol,
+    }))
+  ), []);
 
   useEffect(() => {
     const fetchHistory = async () => {
@@ -192,11 +198,14 @@ const SOXXFearGreed = () => {
 
   return (
     <Card title="自算贪恐" style={{ marginBottom: 16 }} loading={loading}>
-      <Tabs activeKey={activeSymbol} onChange={setActiveSymbol} style={{ marginBottom: 16 }}>
-        {ETF_OPTIONS.map(item => (
-          <Tabs.TabPane tab={`${item.ticker} ${item.label}`} key={item.symbol} />
-        ))}
-      </Tabs>
+      <Select
+        showSearch
+        value={activeSymbol}
+        onChange={setActiveSymbol}
+        optionFilterProp="label"
+        options={etfSelectOptions}
+        style={{ width: '100%', maxWidth: 360, marginBottom: 16 }}
+      />
 
       {error && (
         <Alert
