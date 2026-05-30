@@ -59,7 +59,6 @@ class StockModel(BaseModel):
                 "emo_area": "a"
             }
         }
-        orm_mode = True
         from_attributes = True
 
 class StockCandidate(BaseModel):
