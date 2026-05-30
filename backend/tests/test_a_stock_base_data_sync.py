@@ -302,7 +302,7 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
-    def test_incremental_adj_factor_skips_when_no_new_trading_days(self):
+    def test_incremental_adj_factor_uses_repair_window_not_default_start(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)
         os.unlink(path)
@@ -316,16 +316,21 @@ class AStockBaseDataSyncTest(TestCase):
                 from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
 
                 class FakeTushare:
+                    def __init__(self):
+                        self.fetch_calls = []
+
                     def get_trade_calendar_frame(self, start_date, end_date):
-                        assert start_date == date(2026, 5, 30)
+                        assert start_date == date(2026, 5, 22)
                         assert end_date == date(2026, 5, 30)
-                        return pd.DataFrame([{"cal_date": date(2026, 5, 30), "is_open": 0}])
+                        return pd.DataFrame([{"cal_date": date(2026, 5, 29), "is_open": 1}])
 
                     def get_a_stock_adj_factor_range_frame(self, *args, **kwargs):
-                        raise AssertionError("adj factor fetch should be skipped without new trading days")
+                        self.fetch_calls.append(args)
+                        return pd.DataFrame()
 
+                fake_tushare = FakeTushare()
                 session = AnalyticsSession()
-                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=FakeTushare())
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
                 try:
                     service._insert_analytics_mappings(
                         AStockAdjFactor,
@@ -355,9 +360,85 @@ class AStockBaseDataSyncTest(TestCase):
                     service.close()
                     AnalyticsSession.remove()
 
-                assert result["start_date"] == "2026-05-30"
-                assert result["trading_days"] == 0
-                assert result["chunks"] == 0
+                assert result["start_date"] == "2026-05-22"
+                assert result["trading_days"] == 1
+                assert result["chunks"] == 1
+                assert fake_tushare.fetch_calls == [(date(2026, 5, 29), date(2026, 5, 29))]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_market_repair_window_force_refreshes_existing_dates(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                import src.robot.a_stock_base_data_sync as sync_module
+                from src.core.analytics_database import AStockMarketDaily, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                sync_module.MIN_MARKET_DAILY_ROWS = 1
+
+                class FakeTushare:
+                    def __init__(self):
+                        self.fetch_calls = []
+
+                    def get_a_stock_market_daily_range_frame(self, start_date, end_date):
+                        self.fetch_calls.append((start_date, end_date))
+                        return pd.DataFrame()
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                fake_tushare = FakeTushare()
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
+                try:
+                    service._insert_analytics_mappings(
+                        AStockMarketDaily,
+                        [
+                            {
+                                "trade_date": date(2026, 5, 29),
+                                "ts_code": "000001.SZ",
+                                "open": 1.0,
+                                "high": 1.0,
+                                "low": 1.0,
+                                "close": 1.0,
+                                "pre_close": 1.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "total_mv": 1.0,
+                                "circ_mv": 1.0,
+                                "float_share": 1.0,
+                                "total_share": 1.0,
+                                "turnover_rate": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            }
+                        ],
+                    )
+                    service._ensure_market_days([date(2026, 5, 29)], force_refresh=False)
+                    skipped_calls = list(fake_tushare.fetch_calls)
+                    service._ensure_market_days([date(2026, 5, 29)], force_refresh=True)
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert skipped_calls == []
+                assert fake_tushare.fetch_calls == [(date(2026, 5, 29), date(2026, 5, 29))]
                 """
             )
             env = os.environ.copy()

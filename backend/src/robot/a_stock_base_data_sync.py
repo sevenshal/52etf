@@ -51,7 +51,7 @@ ProgressCallback = Callable[[Dict], None]
 
 SYNC_WORKERS = 3
 SYNC_REFRESH_OVERLAP_DAYS = 45
-SYNC_INCREMENTAL_OVERLAP_DAYS = 0
+SYNC_INCREMENTAL_REPAIR_WINDOW_DAYS = 7
 A_STOCK_MARKET_DAILY_WARMUP_DAYS = 550
 A_STOCK_INDEX_DAILY_WARMUP_DAYS = 220
 A_STOCK_FUND_DAILY_WARMUP_DAYS = 220
@@ -224,9 +224,13 @@ def _warmup_start(anchor_date: date, warmup_days: int) -> date:
 def _incremental_start(default_start: date, latest_date: Optional[date]) -> date:
     if not latest_date:
         return default_start
-    if SYNC_INCREMENTAL_OVERLAP_DAYS > 0:
-        return max(default_start, latest_date - timedelta(days=SYNC_INCREMENTAL_OVERLAP_DAYS))
     return max(default_start, latest_date + timedelta(days=1))
+
+
+def _repair_window_start(default_start: date, latest_date: Optional[date]) -> date:
+    if not latest_date:
+        return default_start
+    return max(default_start, latest_date - timedelta(days=SYNC_INCREMENTAL_REPAIR_WINDOW_DAYS))
 
 
 def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
@@ -635,11 +639,14 @@ class AStockBaseDataSyncService:
             if _parse_date(row[0])
         }
 
-    def _ensure_market_days(self, trading_dates: List[date]):
+    def _ensure_market_days(self, trading_dates: List[date], force_refresh: bool = False):
         if not trading_dates:
             return
-        stats_by_date = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
-        missing_dates = [item for item in trading_dates if _market_day_needs_refresh(stats_by_date.get(item))]
+        if force_refresh:
+            missing_dates = trading_dates
+        else:
+            stats_by_date = self._existing_market_day_stats(min(trading_dates), max(trading_dates))
+            missing_dates = [item for item in trading_dates if _market_day_needs_refresh(stats_by_date.get(item))]
         if not missing_dates:
             self._progress("全市场日行情缓存已就绪", 50, processed_dates=len(trading_dates), total_dates=len(trading_dates))
             return
@@ -866,7 +873,7 @@ class AStockBaseDataSyncService:
         if explicit_start:
             factor_start = _warmup_start(explicit_start, max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS))
         elif incremental:
-            factor_start = _incremental_start(default_start, max_date)
+            factor_start = _repair_window_start(default_start, max_date)
         else:
             factor_start = default_start
         if factor_start > end_value:
@@ -1480,6 +1487,8 @@ class AStockBaseDataSyncService:
         start_date: date,
         end_date: date,
         repo_start_date: Optional[date] = None,
+        force_option_refresh: bool = False,
+        force_repo_refresh: bool = False,
     ) -> Dict:
         option_start_value = _parse_date(start_date)
         repo_start_value = _parse_date(repo_start_date) or option_start_value
@@ -1522,8 +1531,16 @@ class AStockBaseDataSyncService:
         option_trading_dates = [item for item in trading_dates if option_start_value <= item <= end_value]
         repo_trading_dates = [item for item in trading_dates if repo_start_value <= item <= end_value]
 
-        option_refresh_dates = self._option_daily_dates_needing_refresh(option_trading_dates)
-        repo_refresh_dates = self._repo_daily_dates_needing_refresh(repo_trading_dates)
+        option_refresh_dates = (
+            option_trading_dates
+            if force_option_refresh
+            else self._option_daily_dates_needing_refresh(option_trading_dates)
+        )
+        repo_refresh_dates = (
+            repo_trading_dates
+            if force_repo_refresh
+            else self._repo_daily_dates_needing_refresh(repo_trading_dates)
+        )
 
         if option_refresh_dates:
             self._progress(
@@ -1776,7 +1793,7 @@ class AStockBaseDataSyncService:
         )
         return len(frame)
 
-    def sync_chinabond_yield_curves(self, start_date: date, end_date: date) -> Dict:
+    def sync_chinabond_yield_curves(self, start_date: date, end_date: date, force_refresh: bool = False) -> Dict:
         start_value = _parse_date(start_date)
         end_value = _parse_date(end_date)
         curve_ids = [item["curve_id"] for item in CHINABOND_CREDIT_CURVES]
@@ -1795,7 +1812,11 @@ class AStockBaseDataSyncService:
             for item in calendar[calendar["is_open"] == 1]["cal_date"].tolist()
             if item <= end_value
         ] if not calendar.empty else []
-        refresh_dates = self._chinabond_yield_curve_dates_needing_refresh(trading_dates)
+        refresh_dates = (
+            trading_dates
+            if force_refresh
+            else self._chinabond_yield_curve_dates_needing_refresh(trading_dates)
+        )
         if refresh_dates:
             self._progress(
                 (
@@ -1943,14 +1964,14 @@ class AStockBaseDataSyncService:
         if explicit_start:
             market_start = _warmup_start(explicit_start, market_warmup_days)
         elif incremental:
-            market_start = _incremental_start(market_default_start, latest_market_date)
+            market_start = _repair_window_start(market_default_start, latest_market_date)
         else:
             market_start = market_default_start
 
         self._progress("同步A股全市场日行情缓存", 28, start_date=market_start.isoformat(), end_date=end_value.isoformat())
         trading_dates = self._trading_dates(market_start, end_value)
         if trading_dates:
-            self._ensure_market_days(trading_dates)
+            self._ensure_market_days(trading_dates, force_refresh=incremental and latest_market_date is not None)
 
         self._progress("同步A股股票复权因子", 54, start_date=market_start.isoformat(), end_date=end_value.isoformat())
         market_adj_factor_result = self.sync_market_adj_factor(
@@ -2024,8 +2045,8 @@ class AStockBaseDataSyncService:
             option_start = _warmup_start(explicit_start, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
             repo_start = _warmup_start(explicit_start, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         elif incremental:
-            option_start = _incremental_start(option_default_start, latest_option_date)
-            repo_start = _incremental_start(repo_default_start, latest_repo_date)
+            option_start = _repair_window_start(option_default_start, latest_option_date)
+            repo_start = _repair_window_start(repo_default_start, latest_repo_date)
         else:
             option_start = option_default_start
             repo_start = repo_default_start
@@ -2044,13 +2065,15 @@ class AStockBaseDataSyncService:
             option_start,
             end_value,
             repo_start_date=repo_start,
+            force_option_refresh=incremental and latest_option_date is not None,
+            force_repo_refresh=incremental and latest_repo_date is not None,
         )
 
         chinabond_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_CHINABOND_WARMUP_DAYS)
         if explicit_start:
             chinabond_start = _warmup_start(explicit_start, A_STOCK_CHINABOND_WARMUP_DAYS)
         elif incremental:
-            chinabond_start = _incremental_start(chinabond_default_start, latest_chinabond_date)
+            chinabond_start = _repair_window_start(chinabond_default_start, latest_chinabond_date)
         else:
             chinabond_start = chinabond_default_start
 
@@ -2063,7 +2086,11 @@ class AStockBaseDataSyncService:
             start_date=chinabond_start.isoformat(),
             end_date=end_value.isoformat(),
         )
-        chinabond_result = self.sync_chinabond_yield_curves(chinabond_start, end_value)
+        chinabond_result = self.sync_chinabond_yield_curves(
+            chinabond_start,
+            end_value,
+            force_refresh=incremental and latest_chinabond_date is not None,
+        )
 
         requested_income_start = explicit_start - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS) if explicit_start else None
         income_start = requested_income_start
