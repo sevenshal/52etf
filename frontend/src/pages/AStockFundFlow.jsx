@@ -543,7 +543,7 @@ const AStockFundFlow = ({ embedded = false }) => {
         </div>
 
         <Row gutter={[12, 12]}>
-          <Col xs={24} xl={stock ? 12 : 24}>
+          <Col span={24}>
             <Card
               className="fund-flow-chart-card"
               title={<Space><LineChartOutlined />北向资金</Space>}
@@ -556,22 +556,58 @@ const AStockFundFlow = ({ embedded = false }) => {
               )}
             </Card>
           </Col>
-          {stock && (
-            <Col xs={24} xl={12}>
-              <Card
-                className="fund-flow-chart-card"
-                title={`${stock.name || stock.code} 分钟资金`}
-                extra={<Tag>{stock.code}</Tag>}
-              >
-                {stockMinuteOption ? (
-                  <ReactECharts option={stockMinuteOption} style={{ height: 300 }} notMerge lazyUpdate />
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                )}
-              </Card>
-            </Col>
-          )}
         </Row>
+
+        {stock && (
+          <>
+            <Row gutter={[12, 12]} className="fund-flow-table-row">
+              <Col xs={24} xl={12}>
+                <Card
+                  className="fund-flow-chart-card"
+                  title={`${stock.name || stock.code} 分钟资金`}
+                  extra={<Tag>{stock.code}</Tag>}
+                >
+                  {stockMinuteOption ? (
+                    <ReactECharts option={stockMinuteOption} style={{ height: 300 }} notMerge lazyUpdate />
+                  ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  )}
+                </Card>
+              </Col>
+              <Col xs={24} xl={12}>
+                <Card
+                  className="fund-flow-chart-card"
+                  title={`${stock.name || stock.code} 近30日`}
+                  extra={<Tag>亿元</Tag>}
+                >
+                  {stockDailyOption ? (
+                    <ReactECharts option={stockDailyOption} style={{ height: 300 }} notMerge lazyUpdate />
+                  ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  )}
+                </Card>
+              </Col>
+            </Row>
+            <Row gutter={[12, 12]} className="fund-flow-table-row">
+              <Col span={24}>
+                <Card
+                  className="fund-flow-data-card"
+                  title={`${stock.name || stock.code} 日级资金`}
+                  extra={<Text type="secondary">{stock.summary?.latest_date || '-'}</Text>}
+                >
+                  <Table
+                    size="small"
+                    columns={dailyColumns}
+                    dataSource={stockDaily.slice().reverse()}
+                    rowKey={record => record.date}
+                    pagination={{ pageSize: 10, size: 'small' }}
+                    scroll={{ x: 760 }}
+                  />
+                </Card>
+              </Col>
+            </Row>
+          </>
+        )}
 
         <Row gutter={[12, 12]} className="fund-flow-table-row">
           <Col xs={24} xl={14}>
@@ -585,40 +621,6 @@ const AStockFundFlow = ({ embedded = false }) => {
             </Card>
           </Col>
         </Row>
-
-        {stock && (
-          <Row gutter={[12, 12]} className="fund-flow-table-row">
-            <Col xs={24} xl={10}>
-              <Card
-                className="fund-flow-chart-card"
-                title={`${stock.name || stock.code} 近30日`}
-                extra={<Tag>亿元</Tag>}
-              >
-                {stockDailyOption ? (
-                  <ReactECharts option={stockDailyOption} style={{ height: 300 }} notMerge lazyUpdate />
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                )}
-              </Card>
-            </Col>
-            <Col xs={24} xl={14}>
-              <Card
-                className="fund-flow-data-card"
-                title={`${stock.name || stock.code} 日级资金`}
-                extra={<Text type="secondary">{stock.summary?.latest_date || '-'}</Text>}
-              >
-                <Table
-                  size="small"
-                  columns={dailyColumns}
-                  dataSource={stockDaily.slice().reverse()}
-                  rowKey={record => record.date}
-                  pagination={{ pageSize: 10, size: 'small' }}
-                  scroll={{ x: 760 }}
-                />
-              </Card>
-            </Col>
-          </Row>
-        )}
 
         <div className="fund-flow-footer">
           <Text type="secondary">
