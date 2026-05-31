@@ -18,6 +18,7 @@ from ..core.analytics_database import (
     AStockFundAdjFactor,
     AStockFundBasic,
     AStockFundDaily,
+    AStockFundFlowDaily,
     AStockIncome,
     AStockIndexDaily,
     AStockIndexWeight,
@@ -2121,12 +2122,39 @@ class AStockBaseDataSyncService:
             progress_callback=self.progress_callback,
         )
 
+        if explicit_start:
+            fund_flow_start = explicit_start
+        else:
+            fund_flow_start = None
+        self._progress(
+            "同步A股主力资金流缓存",
+            95,
+            start_date=fund_flow_start.isoformat() if fund_flow_start else None,
+            end_date=end_value.isoformat(),
+        )
+        self.analytics_db.commit()
+        self.analytics_db.close()
+        from .a_stock_fund_flow_sync import sync_a_stock_fund_flow
+
+        fund_flow_result = sync_a_stock_fund_flow(
+            start_date=fund_flow_start,
+            tushare_service=self.tushare,
+        )
+        fund_flow_errors = fund_flow_result.get("errors") or []
+        if fund_flow_errors and not fund_flow_result.get("saved_rows"):
+            raise RuntimeError(
+                "A stock fund flow sync failed: "
+                f"errors={len(fund_flow_errors)} "
+                f"first_error={fund_flow_errors[0] if fund_flow_errors else None}"
+            )
+
         basic_rows = _count_analytics_table_rows(self.analytics_db, AStockBasic.__tablename__)
         fund_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockFundBasic.__tablename__)
         name_change_rows = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         market_rows = _count_analytics_table_rows(self.analytics_db, AStockMarketDaily.__tablename__)
         market_adj_factor_rows = _count_analytics_table_rows(self.analytics_db, AStockAdjFactor.__tablename__)
         fund_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockFundDaily.__tablename__)
+        fund_flow_rows = _count_analytics_table_rows(self.analytics_db, AStockFundFlowDaily.__tablename__)
         fund_adj_factor_rows = _count_analytics_table_rows(self.analytics_db, AStockFundAdjFactor.__tablename__)
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
@@ -2278,9 +2306,22 @@ class AStockBaseDataSyncService:
             "income_total_seconds": income_result.get("total_seconds"),
             "income_avg_fetch_ms": income_result.get("avg_fetch_ms"),
             "income_insert_batches": income_result.get("insert_batches"),
+            "fund_flow_mode": fund_flow_result.get("mode"),
+            "fund_flow_source": fund_flow_result.get("source"),
+            "fund_flow_symbols": fund_flow_result.get("symbols") or fund_flow_result.get("fetched_symbols"),
+            "fund_flow_fetched_rows": fund_flow_result.get("fetched_rows"),
+            "fund_flow_saved_rows": fund_flow_result.get("saved_rows"),
+            "fund_flow_trade_dates": fund_flow_result.get("trade_dates"),
+            "fund_flow_start_date": fund_flow_result.get("start_date"),
+            "fund_flow_end_date": fund_flow_result.get("end_date") or fund_flow_result.get("latest_trade_date"),
+            "fund_flow_source_counts": fund_flow_result.get("source_counts"),
+            "fund_flow_errors": len(fund_flow_result.get("errors") or []),
+            "fund_flow_existing_rows_before": fund_flow_result.get("existing_rows_before"),
+            "fund_flow_previous_latest_trade_date": fund_flow_result.get("previous_latest_trade_date"),
             "tables": {
                 AStockBasic.__tablename__: basic_rows,
                 AStockFundBasic.__tablename__: fund_basic_rows,
+                AStockFundFlowDaily.__tablename__: fund_flow_rows,
                 AStockAdjFactor.__tablename__: market_adj_factor_rows,
                 AStockIncome.__tablename__: income_rows,
                 AStockFundDaily.__tablename__: fund_daily_rows,
