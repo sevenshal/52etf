@@ -13,6 +13,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -27,7 +28,6 @@ import request from '../utils/request';
 import './AStockFundFlow.css';
 
 const { Text } = Typography;
-const DEFAULT_STOCK_CODE = '600519';
 
 const formatErrorMessage = (error, fallback) => {
   const detail = error?.response?.data?.detail || error?.response?.data?.message || error?.message;
@@ -81,61 +81,6 @@ const toYi = value => (
 );
 
 const getTopItem = rank => rank?.items?.[0] || null;
-
-const stockColumns = [
-  { title: '#', dataIndex: 'rank', key: 'rank', width: 56 },
-  {
-    title: '股票',
-    key: 'stock',
-    width: 150,
-    render: (_, record) => (
-      <Space direction="vertical" size={0}>
-        <Text strong>{record.name || record.code}</Text>
-        <Text type="secondary">{record.code}</Text>
-      </Space>
-    ),
-  },
-  {
-    title: '主力净额',
-    dataIndex: 'main_net',
-    key: 'main_net',
-    width: 116,
-    align: 'right',
-    render: value => <SignedMoney value={value} />,
-  },
-  {
-    title: '主力占比',
-    dataIndex: 'main_net_pct',
-    key: 'main_net_pct',
-    width: 96,
-    align: 'right',
-    render: value => <SignedPercent value={value} />,
-  },
-  {
-    title: '超大单',
-    dataIndex: 'super_net',
-    key: 'super_net',
-    width: 110,
-    align: 'right',
-    render: value => <SignedMoney value={value} />,
-  },
-  {
-    title: '大单',
-    dataIndex: 'large_net',
-    key: 'large_net',
-    width: 100,
-    align: 'right',
-    render: value => <SignedMoney value={value} />,
-  },
-  {
-    title: '涨跌',
-    dataIndex: 'change_pct',
-    key: 'change_pct',
-    width: 84,
-    align: 'right',
-    render: value => <SignedPercent value={value} />,
-  },
-];
 
 const industryColumns = [
   { title: '#', dataIndex: 'rank', key: 'rank', width: 56 },
@@ -246,10 +191,10 @@ const rankTableProps = {
 const AStockFundFlow = ({ embedded = false }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [stockCode, setStockCode] = useState(DEFAULT_STOCK_CODE);
+  const [stockCode, setStockCode] = useState('');
   const [rankLimit, setRankLimit] = useState(30);
 
-  const fetchDashboard = useCallback(async (code = DEFAULT_STOCK_CODE, limit = 30) => {
+  const fetchDashboard = useCallback(async (code = '', limit = 30) => {
     setLoading(true);
     try {
       const params = { limit };
@@ -264,7 +209,7 @@ const AStockFundFlow = ({ embedded = false }) => {
   }, []);
 
   useEffect(() => {
-    fetchDashboard(DEFAULT_STOCK_CODE, 30);
+    fetchDashboard('', 30);
   }, [fetchDashboard]);
 
   const northboundPoints = useMemo(() => data?.northbound?.points || [], [data]);
@@ -275,6 +220,82 @@ const AStockFundFlow = ({ embedded = false }) => {
   const marketOutflowTop = getTopItem(data?.market_rank?.outflow);
   const industryInflowTop = getTopItem(data?.industry_rank?.inflow);
   const latestNorthbound = data?.northbound?.latest;
+  const selectedStockCode = stock?.code || '';
+
+  const handleStockSelect = useCallback((record) => {
+    const nextCode = String(record?.code || '').trim();
+    if (!nextCode) return;
+    setStockCode(nextCode);
+    fetchDashboard(nextCode, rankLimit);
+  }, [fetchDashboard, rankLimit]);
+
+  const stockColumns = useMemo(() => [
+    { title: '#', dataIndex: 'rank', key: 'rank', width: 56 },
+    {
+      title: '股票',
+      key: 'stock',
+      width: 170,
+      render: (_, record) => (
+        <Space className="fund-flow-stock-cell" size={6}>
+          <Space direction="vertical" size={0}>
+            <Text strong>{record.name || record.code}</Text>
+            <Text type="secondary">{record.code}</Text>
+          </Space>
+          <Tooltip title="查询资金流向">
+            <Button
+              type="text"
+              size="small"
+              icon={<SearchOutlined />}
+              onClick={event => {
+                event.stopPropagation();
+                handleStockSelect(record);
+              }}
+            />
+          </Tooltip>
+        </Space>
+      ),
+    },
+    {
+      title: '主力净额',
+      dataIndex: 'main_net',
+      key: 'main_net',
+      width: 116,
+      align: 'right',
+      render: value => <SignedMoney value={value} />,
+    },
+    {
+      title: '主力占比',
+      dataIndex: 'main_net_pct',
+      key: 'main_net_pct',
+      width: 96,
+      align: 'right',
+      render: value => <SignedPercent value={value} />,
+    },
+    {
+      title: '超大单',
+      dataIndex: 'super_net',
+      key: 'super_net',
+      width: 110,
+      align: 'right',
+      render: value => <SignedMoney value={value} />,
+    },
+    {
+      title: '大单',
+      dataIndex: 'large_net',
+      key: 'large_net',
+      width: 100,
+      align: 'right',
+      render: value => <SignedMoney value={value} />,
+    },
+    {
+      title: '涨跌',
+      dataIndex: 'change_pct',
+      key: 'change_pct',
+      width: 84,
+      align: 'right',
+      render: value => <SignedPercent value={value} />,
+    },
+  ], [handleStockSelect]);
 
   const northboundOption = useMemo(() => {
     const points = northboundPoints.filter(item => item.total_yi !== null && item.total_yi !== undefined);
@@ -388,6 +409,8 @@ const AStockFundFlow = ({ embedded = false }) => {
           columns={stockColumns}
           dataSource={data?.market_rank?.inflow?.items || []}
           rowKey={record => `in-${record.code}`}
+          rowClassName={record => (record.code === selectedStockCode ? 'fund-flow-stock-row is-selected' : 'fund-flow-stock-row')}
+          onRow={record => ({ onClick: () => handleStockSelect(record) })}
         />
       ),
     },
@@ -400,10 +423,12 @@ const AStockFundFlow = ({ embedded = false }) => {
           columns={stockColumns}
           dataSource={data?.market_rank?.outflow?.items || []}
           rowKey={record => `out-${record.code}`}
+          rowClassName={record => (record.code === selectedStockCode ? 'fund-flow-stock-row is-selected' : 'fund-flow-stock-row')}
+          onRow={record => ({ onClick: () => handleStockSelect(record) })}
         />
       ),
     },
-  ], [data]);
+  ], [data, handleStockSelect, selectedStockCode, stockColumns]);
 
   const industryRankTabs = useMemo(() => [
     {
@@ -518,7 +543,7 @@ const AStockFundFlow = ({ embedded = false }) => {
         </div>
 
         <Row gutter={[12, 12]}>
-          <Col xs={24} xl={12}>
+          <Col xs={24} xl={stock ? 12 : 24}>
             <Card
               className="fund-flow-chart-card"
               title={<Space><LineChartOutlined />北向资金</Space>}
@@ -531,19 +556,21 @@ const AStockFundFlow = ({ embedded = false }) => {
               )}
             </Card>
           </Col>
-          <Col xs={24} xl={12}>
-            <Card
-              className="fund-flow-chart-card"
-              title={`${stock?.name || stockCode || '-'} 分钟资金`}
-              extra={<Tag>{stock?.code || '-'}</Tag>}
-            >
-              {stockMinuteOption ? (
-                <ReactECharts option={stockMinuteOption} style={{ height: 300 }} notMerge lazyUpdate />
-              ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              )}
-            </Card>
-          </Col>
+          {stock && (
+            <Col xs={24} xl={12}>
+              <Card
+                className="fund-flow-chart-card"
+                title={`${stock.name || stock.code} 分钟资金`}
+                extra={<Tag>{stock.code}</Tag>}
+              >
+                {stockMinuteOption ? (
+                  <ReactECharts option={stockMinuteOption} style={{ height: 300 }} notMerge lazyUpdate />
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )}
+              </Card>
+            </Col>
+          )}
         </Row>
 
         <Row gutter={[12, 12]} className="fund-flow-table-row">
@@ -559,37 +586,39 @@ const AStockFundFlow = ({ embedded = false }) => {
           </Col>
         </Row>
 
-        <Row gutter={[12, 12]} className="fund-flow-table-row">
-          <Col xs={24} xl={10}>
-            <Card
-              className="fund-flow-chart-card"
-              title={`${stock?.name || stockCode || '-'} 近30日`}
-              extra={<Tag>亿元</Tag>}
-            >
-              {stockDailyOption ? (
-                <ReactECharts option={stockDailyOption} style={{ height: 300 }} notMerge lazyUpdate />
-              ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              )}
-            </Card>
-          </Col>
-          <Col xs={24} xl={14}>
-            <Card
-              className="fund-flow-data-card"
-              title={`${stock?.name || stockCode || '-'} 日级资金`}
-              extra={<Text type="secondary">{stock?.summary?.latest_date || '-'}</Text>}
-            >
-              <Table
-                size="small"
-                columns={dailyColumns}
-                dataSource={stockDaily.slice().reverse()}
-                rowKey={record => record.date}
-                pagination={{ pageSize: 10, size: 'small' }}
-                scroll={{ x: 760 }}
-              />
-            </Card>
-          </Col>
-        </Row>
+        {stock && (
+          <Row gutter={[12, 12]} className="fund-flow-table-row">
+            <Col xs={24} xl={10}>
+              <Card
+                className="fund-flow-chart-card"
+                title={`${stock.name || stock.code} 近30日`}
+                extra={<Tag>亿元</Tag>}
+              >
+                {stockDailyOption ? (
+                  <ReactECharts option={stockDailyOption} style={{ height: 300 }} notMerge lazyUpdate />
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )}
+              </Card>
+            </Col>
+            <Col xs={24} xl={14}>
+              <Card
+                className="fund-flow-data-card"
+                title={`${stock.name || stock.code} 日级资金`}
+                extra={<Text type="secondary">{stock.summary?.latest_date || '-'}</Text>}
+              >
+                <Table
+                  size="small"
+                  columns={dailyColumns}
+                  dataSource={stockDaily.slice().reverse()}
+                  rowKey={record => record.date}
+                  pagination={{ pageSize: 10, size: 'small' }}
+                  scroll={{ x: 760 }}
+                />
+              </Card>
+            </Col>
+          </Row>
+        )}
 
         <div className="fund-flow-footer">
           <Text type="secondary">

@@ -93,6 +93,19 @@
   margin-bottom: 10px;
 }
 
+.fund-flow-stock-row {
+  cursor: pointer;
+}
+
+.fund-flow-stock-row.is-selected > td {
+  background: #eef6ff !important;
+}
+
+.fund-flow-stock-cell {
+  width: 100%;
+  justify-content: space-between;
+}
+
 .fund-flow-table-row {
   margin-top: 0;
 }
