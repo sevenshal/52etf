@@ -403,6 +403,48 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     )
 
 
+def _run_a_stock_fund_flow_sync(start_date: Optional[str] = None):
+    from .a_stock_fund_flow_sync import sync_a_stock_fund_flow
+
+    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
+    result = sync_a_stock_fund_flow(start_date=parsed_start_date)
+    logging.getLogger("ScheduledTaskManager").info(
+        "A stock fund flow synced: mode=%s existing_rows_before=%s symbols=%s fetched_rows=%s saved_rows=%s "
+        "trade_dates=%s range=%s~%s errors=%s",
+        result.get("mode"),
+        result.get("existing_rows_before"),
+        result.get("symbols") or result.get("fetched_symbols"),
+        result.get("fetched_rows"),
+        result.get("saved_rows"),
+        result.get("trade_dates"),
+        result.get("start_date"),
+        result.get("end_date") or result.get("latest_trade_date"),
+        len(result.get("errors") or []),
+    )
+    errors = result.get("errors") or []
+    if errors and not result.get("saved_rows"):
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('code')}: {item.get('error')}",
+        )
+        raise RuntimeError(
+            "A stock fund flow sync "
+            f"mode={result.get('mode')} saved={result.get('saved_rows')} "
+            f"finished with {len(errors)} errors: {preview}"
+        )
+    return (
+        "A stock fund flow sync "
+        f"mode={result.get('mode')} "
+        f"existing_rows_before={result.get('existing_rows_before')} "
+        f"symbols={result.get('symbols') or result.get('fetched_symbols')} "
+        f"fetched_rows={result.get('fetched_rows')} "
+        f"saved_rows={result.get('saved_rows')} "
+        f"trade_dates={result.get('trade_dates')} "
+        f"range={result.get('start_date')}~{result.get('end_date') or result.get('latest_trade_date')} "
+        f"errors={len(errors)}"
+    )
+
+
 def _run_a_stock_innovation100_rebuild():
     from ..app.api.a_stock_innovation100 import rebuild_a_stock_innovation100_for_scheduler
 
@@ -696,6 +738,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=74,
                 runner=_run_a_stock_base_data_sync,
+            ),
+            "a_stock_fund_flow_sync": TaskDefinition(
+                task_key="a_stock_fund_flow_sync",
+                name="A股主力资金流沉淀",
+                description="首次运行回填全市场个股最近120个交易日主力资金流；后续每日盘后增量保存全市场主力/超大单/大单/中单/小单资金流。",
+                default_time="18:10",
+                default_enabled=True,
+                sort_order=73,
+                runner=_run_a_stock_fund_flow_sync,
             ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",
@@ -1377,6 +1428,7 @@ class ScheduledTaskManager:
             "supports_start_date": config["task_key"] in {
                 "evc_static_info_sync",
                 "a_stock_base_data_sync",
+                "a_stock_fund_flow_sync",
                 "etf_holdings_backfill",
                 "soxx_fear_greed_backfill",
                 "a_stock_etf_fear_greed_backfill",

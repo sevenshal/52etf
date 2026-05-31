@@ -138,10 +138,30 @@ def _parse_rank_item(row: Dict[str, Any], rank: int, *, include_leader: bool = F
 
 def _fetch_rank(fs: str, limit: int, direction: str, *, fields: str,
                 include_leader: bool = False) -> Dict[str, Any]:
+    page_size = min(max(int(limit), 1), 100)
+    return _fetch_rank_page(
+        fs,
+        page_number=1,
+        page_size=page_size,
+        direction=direction,
+        fields=fields,
+        include_leader=include_leader,
+    )
+
+
+def _fetch_rank_page(
+    fs: str,
+    *,
+    page_number: int,
+    page_size: int,
+    direction: str,
+    fields: str,
+    include_leader: bool = False,
+) -> Dict[str, Any]:
     po = "0" if direction == "outflow" else "1"
     params = {
-        "pn": "1",
-        "pz": str(limit),
+        "pn": str(page_number),
+        "pz": str(page_size),
         "po": po,
         "np": "1",
         "fltt": "2",
@@ -156,7 +176,7 @@ def _fetch_rank(fs: str, limit: int, direction: str, *, fields: str,
     return {
         "total": _safe_int(data.get("total")) or len(rows),
         "items": [
-            _parse_rank_item(row, index + 1, include_leader=include_leader)
+            _parse_rank_item(row, (page_number - 1) * page_size + index + 1, include_leader=include_leader)
             for index, row in enumerate(rows)
         ],
     }
@@ -169,6 +189,34 @@ def fetch_market_rank(limit: int = 30, direction: str = "inflow") -> Dict[str, A
         direction,
         fields=RANK_FIELDS,
     )
+
+
+def fetch_market_rank_all(direction: str = "inflow", page_size: int = 100) -> Dict[str, Any]:
+    fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+    safe_page_size = min(max(int(page_size), 1), 100)
+    first_page = _fetch_rank_page(
+        fs,
+        page_number=1,
+        page_size=safe_page_size,
+        direction=direction,
+        fields=RANK_FIELDS,
+    )
+    items = list(first_page["items"])
+    total = int(first_page.get("total") or len(items))
+    page_count = (total + safe_page_size - 1) // safe_page_size
+    for page_number in range(2, page_count + 1):
+        page = _fetch_rank_page(
+            fs,
+            page_number=page_number,
+            page_size=safe_page_size,
+            direction=direction,
+            fields=RANK_FIELDS,
+        )
+        page_items = page.get("items") or []
+        if not page_items:
+            break
+        items.extend(page_items)
+    return {"total": total, "items": items}
 
 
 def fetch_industry_rank(limit: int = 30, direction: str = "inflow") -> Dict[str, Any]:
@@ -294,6 +342,27 @@ def fetch_stock_fund_flow(code: str, daily_limit: int = 60) -> Dict[str, Any]:
             "recent_5_main_net": sum(row.get("main_net") or 0 for row in recent_5),
             "recent_20_main_net": sum(row.get("main_net") or 0 for row in recent_20),
         },
+    }
+
+
+def fetch_stock_fund_flow_daily(code: str, daily_limit: int = 120) -> Dict[str, Any]:
+    stock_code = normalize_stock_code(code)
+    secid = _secid_for_code(stock_code)
+    payload = _request_json(
+        EASTMONEY_STOCK_FLOW_DAILY_URL,
+        params={
+            "secid": secid,
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+            "lmt": str(min(max(int(daily_limit), 1), 120)),
+        },
+        timeout=15,
+    )
+    data = payload.get("data") or {}
+    return {
+        "code": stock_code,
+        "name": data.get("name") or "",
+        "daily": _parse_stock_flow_lines(data.get("klines") or [], daily=True),
     }
 
 

@@ -32,6 +32,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_index_weight",
         "a_stock_market_daily",
         "a_stock_market_daily_qfq",
+        "a_stock_fund_flow_daily",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
         "a_stock_chinabond_yield_curve_defs",
@@ -116,6 +117,32 @@ class AStockMarketDaily(AnalyticsBase):
     float_share = Column(Float)
     total_share = Column(Float)
     turnover_rate = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFundFlowDaily(AnalyticsBase):
+    """东财 A股个股日级主力资金流快照，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_fund_flow_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    symbol = Column(String(16), index=True)
+    name = Column(String(64))
+    close = Column(Float)
+    pct_chg = Column(Float)
+    main_net = Column(Float)
+    main_net_pct = Column(Float)
+    super_net = Column(Float)
+    super_net_pct = Column(Float)
+    large_net = Column(Float)
+    large_net_pct = Column(Float)
+    mid_net = Column(Float)
+    mid_net_pct = Column(Float)
+    small_net = Column(Float)
+    small_net_pct = Column(Float)
+    source = Column(String(32), default="eastmoney_push2", nullable=False)
+    source_updated_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -322,6 +349,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_symbol_date ON a_stock_fund_flow_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_date_main ON a_stock_fund_flow_daily(trade_date, main_net)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_symbol_date ON a_stock_adj_factor(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_date_symbol ON a_stock_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_basic_name ON a_stock_fund_basic(name)",
