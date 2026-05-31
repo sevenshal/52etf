@@ -1,0 +1,177 @@
+.fund-flow-page {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.fund-flow-page > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fund-flow-page.is-embedded {
+  padding: 0;
+}
+
+.fund-flow-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fund-flow-search {
+  width: 260px;
+}
+
+.fund-flow-alert {
+  border-radius: 8px;
+}
+
+.fund-flow-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.fund-flow-metric {
+  min-width: 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.fund-flow-metric span,
+.fund-flow-metric small {
+  display: block;
+  overflow: hidden;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fund-flow-metric strong {
+  display: block;
+  margin: 5px 0 3px;
+  overflow: hidden;
+  color: #172033;
+  font-size: 20px;
+  font-weight: 720;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fund-flow-page .is-positive {
+  color: #1677ff;
+}
+
+.fund-flow-page .is-negative {
+  color: #cf1322;
+}
+
+.fund-flow-chart-card,
+.fund-flow-data-card {
+  min-width: 0;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(23, 36, 58, 0.06);
+}
+
+.fund-flow-chart-card .ant-card-body {
+  padding: 10px 12px 12px;
+}
+
+.fund-flow-data-card .ant-card-body {
+  padding: 0 12px 12px;
+}
+
+.fund-flow-data-card .ant-tabs-nav {
+  margin-bottom: 10px;
+}
+
+.fund-flow-table-row {
+  margin-top: 0;
+}
+
+.fund-flow-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+@media (max-width: 1400px) {
+  .fund-flow-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .fund-flow-page {
+    padding: 12px 0 0;
+  }
+
+  .fund-flow-toolbar {
+    width: 100%;
+  }
+
+  .fund-flow-toolbar .ant-space {
+    display: grid;
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .fund-flow-toolbar .ant-space-item {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .fund-flow-search {
+    width: 100%;
+  }
+
+  .fund-flow-toolbar .ant-segmented {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .fund-flow-toolbar .ant-segmented-group {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    min-width: 0;
+  }
+
+  .fund-flow-toolbar .ant-segmented-item {
+    min-width: 0;
+  }
+
+  .fund-flow-toolbar .ant-segmented-item-label {
+    padding-inline: 6px;
+  }
+
+  .fund-flow-toolbar .ant-space-item > .ant-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .fund-flow-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fund-flow-metric {
+    padding: 9px 10px;
+  }
+
+  .fund-flow-metric strong {
+    font-size: 17px;
+  }
+
+  .fund-flow-footer {
+    flex-direction: column;
+  }
+}

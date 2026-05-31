@@ -43,6 +43,7 @@ function App() {
           <Route path="/db" element={<FactorLab initialTab="db" />} />
           <Route path="/factor-lab" element={<FactorLab />} />
           <Route path="/factor-lab/live" element={<FactorLab initialTab="live" />} />
+          <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
