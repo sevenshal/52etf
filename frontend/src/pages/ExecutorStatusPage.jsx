@@ -39,6 +39,9 @@ const formatNumber = (value, digits = 0) => {
   if (!Number.isFinite(num)) return '-';
   return num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
+const formatOptionalNumber = (value, digits = 0) => (
+  value === null || value === undefined || value === '' ? '-' : formatNumber(value, digits)
+);
 const sumNumberField = (rows, field) => (rows || []).reduce((total, row) => {
   const value = Number(row?.[field] || 0);
   return Number.isFinite(value) ? total + value : total;
@@ -791,13 +794,16 @@ const ExecutorStatusPage = () => {
     { title: '真实费用', dataIndex: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
   ];
   const eventColumns = [
-    { title: '入库时间', dataIndex: 'created_at', width: 170, render: formatTime },
     { title: '事件时间', dataIndex: 'event_time', width: 170, render: formatTime },
     { title: '事件类型', dataIndex: 'event_type', width: 120, ...serverFilterProps('events', 'event_type'), render: value => <Tag color={eventTypeColor(value)}>{eventTypeLabel(value)}</Tag> },
-    { title: '处理状态', dataIndex: 'process_status', width: 120, ...serverFilterProps('events', 'process_status'), render: value => <Tag color={processStatusColor(value)}>{value || '-'}</Tag> },
+    { title: '处理状态', dataIndex: 'process_status', width: 110, ...serverFilterProps('events', 'process_status'), render: value => <Tag color={processStatusColor(value)}>{value || '-'}</Tag> },
     { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('events', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
     { title: '方向', dataIndex: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
+    { title: '数量', dataIndex: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '已成', dataIndex: 'filled_quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '价格', dataIndex: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
+    { title: '金额', dataIndex: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
     { title: 'PTrade状态', dataIndex: 'ptrade_status', width: 120, render: renderPTradeStatus },
     { title: '消息', dataIndex: 'process_message', width: 220, render: value => value || '-' },
   ];
@@ -965,6 +971,8 @@ const ExecutorStatusPage = () => {
           <div className="executor-row-card__details">
             <span>{row.sub_account_name || '-'}</span>
             <span>{renderSymbolText(row)}</span>
+            <span>数量 {formatOptionalNumber(row.quantity)}</span>
+            <span>已成 {formatOptionalNumber(row.filled_quantity)}</span>
             <span>{renderPTradeStatus(row.ptrade_status)}</span>
           </div>
           {row.process_message ? <p>{row.process_message}</p> : null}

@@ -66,6 +66,9 @@ const formatNumber = (value, digits = 0) => {
   if (!Number.isFinite(num)) return '-';
   return num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
+const formatOptionalNumber = (value, digits = 0) => (
+  value === null || value === undefined || value === '' ? '-' : formatNumber(value, digits)
+);
 const sumNumberField = (rows, field) => (rows || []).reduce((total, row) => {
   const value = Number(row?.[field] || 0);
   return Number.isFinite(value) ? total + value : total;
@@ -1338,7 +1341,6 @@ const ExternalTradingAccountManager = () => {
   ];
 
   const eventColumns = [
-    { title: '入库时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
     { title: '事件时间', dataIndex: 'event_time', key: 'event_time', width: 170, render: formatTime },
     {
       title: '事件类型',
@@ -1352,13 +1354,17 @@ const ExternalTradingAccountManager = () => {
       title: '处理状态',
       dataIndex: 'process_status',
       key: 'process_status',
-      width: 120,
+      width: 110,
       ...serverFilterProps('events', 'process_status'),
       render: value => <Tag color={eventProcessStatusColor(value)}>{value || '-'}</Tag>
     },
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 280, render: renderEventSubAccounts, ...serverFilterProps('events', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
+    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
+    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
     { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 120, render: renderPTradeStatus },
     { title: '匹配角色', dataIndex: 'matched_order_role', key: 'matched_order_role', width: 100, render: value => value ? roleLabel(value) : '-' },
     { title: '匹配订单状态', dataIndex: 'matched_order_status', key: 'matched_order_status', width: 130, render: value => value ? <Tag color={orderStatusColor(value)}>{value}</Tag> : '-' },
