@@ -264,6 +264,14 @@
   cursor: pointer;
 }
 
+.valuation-sim-table .ant-table-row {
+  cursor: pointer;
+}
+
+.valuation-sim-metrics {
+  margin-top: 12px;
+}
+
 .factor-lab-live-mobile-list,
 .factor-lab-live-log-mobile-list {
   display: none;

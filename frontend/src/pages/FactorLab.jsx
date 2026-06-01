@@ -39,6 +39,7 @@ import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
 import AStockInnovation100 from './AStockInnovation100';
 import AStockFundFlow from './AStockFundFlow';
+import ValuationSimulation from './ValuationSimulation';
 import './FactorLab.css';
 
 const { Text } = Typography;
@@ -49,6 +50,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'timing', label: '择时因子' },
   { key: 'backtest', label: '因子回测' },
   { key: 'live', label: '线上交易' },
+  { key: 'valuation-sim', label: '估值模拟盘' },
   { key: 'innovation100', label: 'A创100' },
   { key: 'fund-flow', label: '资金流向' },
   { key: 'db', label: 'DB' },
@@ -2938,6 +2940,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   ), [options]);
   const isDatabaseTab = activeTab === 'db';
   const isLiveTab = activeTab === 'live';
+  const isValuationSimTab = activeTab === 'valuation-sim';
   const isInnovationTab = activeTab === 'innovation100';
   const isFundFlowTab = activeTab === 'fund-flow';
   const handleRun = activeTab === 'composite'
@@ -3032,7 +3035,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
           <h1>研究</h1>
           <Tag color="blue">{activeTabLabel}</Tag>
         </div>
-        {!isDatabaseTab && !isLiveTab && !isInnovationTab && !isFundFlowTab && (
+        {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && (
           <Space className="factor-lab-actions">
             <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3070,6 +3073,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
       {activeTab === 'innovation100' && <AStockInnovation100 embedded />}
 
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
+
+      {activeTab === 'valuation-sim' && <ValuationSimulation embedded />}
 
       {activeTab === 'live' && (
         <>
