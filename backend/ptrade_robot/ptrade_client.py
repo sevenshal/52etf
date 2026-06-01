@@ -1663,20 +1663,35 @@ def sync_tracked_order_statuses():
         current_dt = get_current_dt()
         changed_orders = []
         finished_keys = []
+        tracked_orders = {}
 
         for order_sn in list(tracked.keys()):
-            item = order_map.get(str(order_sn))
+            order_key = str(order_sn)
+            item = order_map.get(order_key)
             if item is None:
                 continue
+            canonical_key = str(first_value(item, ("order_id", "id", "entrust_no"), order_key))
+            bucket = tracked_orders.setdefault(canonical_key, {"item": item, "aliases": set()})
+            bucket["aliases"].add(order_key)
+            for alias in order_aliases(item):
+                bucket["aliases"].add(str(alias))
+
+        for bucket in tracked_orders.values():
+            item = bucket["item"]
             status = str(value_of(item, "status", ""))
-            prev = last_status.get(str(order_sn))
-            if status == prev:
-                continue
-            # Status changed
-            last_status[str(order_sn)] = status
-            changed_orders.append(normalize_order(item, current_dt))
+            aliases = bucket["aliases"]
+            observed_aliases = [
+                str(alias)
+                for alias in aliases
+                if str(alias) in tracked or str(alias) in last_status
+            ]
+            changed = any(last_status.get(alias) != status for alias in observed_aliases)
+            for alias in aliases:
+                last_status[str(alias)] = status
+            if changed:
+                changed_orders.append(normalize_order(item, current_dt))
             if status in TERMINAL_ORDER_STATUSES:
-                finished_keys.extend(order_aliases(item) or [order_sn])
+                finished_keys.extend(aliases)
 
         if changed_orders:
             log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))

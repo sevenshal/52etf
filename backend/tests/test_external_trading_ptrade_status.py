@@ -140,6 +140,128 @@ class PTradeOrderStatusTest(TestCase):
             else:
                 ptrade_client.g = old_g
 
+    def test_status_sync_deduplicates_order_aliases(self):
+        old_g = getattr(ptrade_client, "g", None)
+        old_get_orders = getattr(ptrade_client, "get_orders", None)
+        old_get_all_orders = getattr(ptrade_client, "get_all_orders", None)
+        old_send_ws_event = ptrade_client.send_ws_event
+        old_get_current_dt = ptrade_client.get_current_dt
+        old_log = getattr(ptrade_client, "log", None)
+        events = []
+        ptrade_client.g = SimpleNamespace(
+            order_client_id_by_order_id={
+                "broker-order-id": "client-order-id",
+                "43486": "client-order-id",
+            },
+            order_last_known_status={
+                "broker-order-id": "0",
+                "43486": "0",
+            },
+        )
+        ptrade_client.get_orders = lambda: [
+            {
+                "order_id": "broker-order-id",
+                "entrust_no": "43486",
+                "status": "2",
+                "stock_code": "301086.SZ",
+                "amount": -100,
+                "price": 163.87,
+            }
+        ]
+        ptrade_client.get_all_orders = lambda: []
+        ptrade_client.send_ws_event = lambda payload: events.append(payload)
+        ptrade_client.get_current_dt = lambda: datetime(2026, 5, 29, 10, 3, 44)
+        ptrade_client.log = SimpleNamespace(info=lambda *_args, **_kwargs: None, warning=lambda *_args, **_kwargs: None)
+        try:
+            ptrade_client.sync_tracked_order_statuses()
+
+            self.assertEqual(1, len(events))
+            self.assertEqual(1, len(events[0]["orders"]))
+            self.assertEqual("client-order-id", events[0]["orders"][0]["client_order_id"])
+            self.assertEqual("2", ptrade_client.g.order_last_known_status["broker-order-id"])
+            self.assertEqual("2", ptrade_client.g.order_last_known_status["43486"])
+            self.assertEqual("client-order-id", ptrade_client.g.order_client_id_by_order_id["broker-order-id"])
+            self.assertEqual("client-order-id", ptrade_client.g.order_client_id_by_order_id["43486"])
+        finally:
+            if old_get_orders is None:
+                delattr(ptrade_client, "get_orders")
+            else:
+                ptrade_client.get_orders = old_get_orders
+            if old_get_all_orders is None:
+                delattr(ptrade_client, "get_all_orders")
+            else:
+                ptrade_client.get_all_orders = old_get_all_orders
+            ptrade_client.send_ws_event = old_send_ws_event
+            ptrade_client.get_current_dt = old_get_current_dt
+            if old_log is None:
+                delattr(ptrade_client, "log")
+            else:
+                ptrade_client.log = old_log
+            if old_g is None:
+                delattr(ptrade_client, "g")
+            else:
+                ptrade_client.g = old_g
+
+    def test_status_sync_clears_all_aliases_for_terminal_order(self):
+        old_g = getattr(ptrade_client, "g", None)
+        old_get_orders = getattr(ptrade_client, "get_orders", None)
+        old_get_all_orders = getattr(ptrade_client, "get_all_orders", None)
+        old_send_ws_event = ptrade_client.send_ws_event
+        old_get_current_dt = ptrade_client.get_current_dt
+        old_log = getattr(ptrade_client, "log", None)
+        events = []
+        ptrade_client.g = SimpleNamespace(
+            order_client_id_by_order_id={
+                "broker-order-id": "client-order-id",
+                "43486": "client-order-id",
+            },
+            order_last_known_status={
+                "broker-order-id": "2",
+                "43486": "2",
+            },
+        )
+        ptrade_client.get_orders = lambda: [
+            {
+                "order_id": "broker-order-id",
+                "entrust_no": "43486",
+                "status": "8",
+                "stock_code": "301086.SZ",
+                "amount": -100,
+                "business_amount": 100,
+                "price": 163.87,
+            }
+        ]
+        ptrade_client.get_all_orders = lambda: []
+        ptrade_client.send_ws_event = lambda payload: events.append(payload)
+        ptrade_client.get_current_dt = lambda: datetime(2026, 5, 29, 10, 3, 44)
+        ptrade_client.log = SimpleNamespace(info=lambda *_args, **_kwargs: None, warning=lambda *_args, **_kwargs: None)
+        try:
+            ptrade_client.sync_tracked_order_statuses()
+
+            self.assertEqual(1, len(events))
+            self.assertEqual(1, len(events[0]["orders"]))
+            self.assertEqual({}, ptrade_client.g.order_client_id_by_order_id)
+            self.assertEqual({}, ptrade_client.g.order_last_known_status)
+        finally:
+            if old_get_orders is None:
+                delattr(ptrade_client, "get_orders")
+            else:
+                ptrade_client.get_orders = old_get_orders
+            if old_get_all_orders is None:
+                delattr(ptrade_client, "get_all_orders")
+            else:
+                ptrade_client.get_all_orders = old_get_all_orders
+            ptrade_client.send_ws_event = old_send_ws_event
+            ptrade_client.get_current_dt = old_get_current_dt
+            if old_log is None:
+                delattr(ptrade_client, "log")
+            else:
+                ptrade_client.log = old_log
+            if old_g is None:
+                delattr(ptrade_client, "g")
+            else:
+                ptrade_client.g = old_g
+
     def test_ptrade_trade_response_uses_business_amount(self):
         trade = normalize_trade(
             {
