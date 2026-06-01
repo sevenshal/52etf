@@ -12,6 +12,7 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 10000)
 
 _last_factor_live_trading_automation_check = 0.0
+_last_valuation_sim_automation_check = 0.0
 _last_external_trading_monitor_check = 0.0
 _last_external_trading_executor_check = 0.0
 _last_snowball_external_trading_sync_check = 0.0
@@ -41,6 +42,26 @@ def _process_factor_live_trading_automation():
 
   except Exception:
     logging.exception("Factor live trading automation check failed")
+
+
+def _process_valuation_sim_automation():
+  global _last_valuation_sim_automation_check
+  now = time.time()
+  if now - _last_valuation_sim_automation_check < 30:
+    return
+  _last_valuation_sim_automation_check = now
+
+  try:
+    from ..app.api.valuation_sim import (
+      process_valuation_sim_automation_for_robot,
+    )
+
+    automation_result = process_valuation_sim_automation_for_robot()
+    if automation_result.get("processed") or automation_result.get("errors"):
+      logging.info("Valuation simulation automation result: %s", automation_result)
+
+  except Exception:
+    logging.exception("Valuation simulation automation check failed")
 
 
 def _process_external_trading_connection_monitor():
@@ -117,6 +138,7 @@ def robot():
     try:
       scheduled_task_manager.run_pending()
       _process_factor_live_trading_automation()
+      _process_valuation_sim_automation()
       _process_snowball_external_trading_sync()
       _process_external_trading_executor()
       _process_external_trading_connection_monitor()
