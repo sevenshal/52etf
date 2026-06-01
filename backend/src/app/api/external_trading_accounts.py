@@ -971,6 +971,34 @@ def _serialize_fill_status(
     }
 
 
+def _event_payload_value(payload: Dict[str, Any], keys: Iterable[str]) -> Any:
+    raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+    for key in keys:
+        value = raw.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _event_payload_int(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[int]:
+    value = _event_payload_value(payload, keys)
+    if value is None:
+        return None
+    parsed = safe_int(value, None)
+    return abs(parsed) if parsed is not None else None
+
+
+def _event_payload_float(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[float]:
+    value = _event_payload_value(payload, keys)
+    if value is None:
+        return None
+    return _safe_float(value, None)
+
+
 def _serialize_event_log_status(
     row: ExternalTradingEventLog,
     matched_order: Optional[ExternalTradingOrder],
@@ -983,6 +1011,7 @@ def _serialize_event_log_status(
         matched_order.sub_account_id if matched_order and matched_order.sub_account_id else None
     )
     sub_account = sub_account_by_id.get(matched_sub_account_id) if matched_sub_account_id else None
+    raw_payload = row.raw_payload or {}
     related_sub_accounts = []
     if matched_order and (matched_role or "").upper() == "PARENT":
         seen_sub_account_ids = set()
@@ -1010,6 +1039,10 @@ def _serialize_event_log_status(
         "side": row.side,
         "ptrade_status": row.ptrade_status,
         "event_time": _iso(row.event_time),
+        "quantity": _event_payload_int(raw_payload, ("quantity", "business_amount")),
+        "filled_quantity": _event_payload_int(raw_payload, ("filled_quantity", "filled", "filled_amount")),
+        "price": _event_payload_float(raw_payload, ("price", "business_price", "avg_fill_price")),
+        "amount": _event_payload_float(raw_payload, ("amount", "business_balance")),
         "matched_order_id": row.matched_order_id,
         "matched_sub_account_id": matched_sub_account_id,
         "matched_order_role": matched_role,
@@ -1022,7 +1055,7 @@ def _serialize_event_log_status(
         "process_message": row.process_message,
         "processed_at": _iso(row.processed_at),
         "replay_count": row.replay_count,
-        "raw_payload": jsonable_encoder(row.raw_payload or {}),
+        "raw_payload": jsonable_encoder(raw_payload),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
