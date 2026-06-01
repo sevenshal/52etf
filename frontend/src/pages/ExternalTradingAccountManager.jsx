@@ -70,6 +70,40 @@ const sumNumberField = (rows, field) => (rows || []).reduce((total, row) => {
   const value = Number(row?.[field] || 0);
   return Number.isFinite(value) ? total + value : total;
 }, 0);
+const pTradeStatusLabels = {
+  '0': '未报',
+  '1': '待报',
+  '2': '已报',
+  '3': '已报待撤',
+  '4': '部成待撤',
+  '5': '部撤',
+  '6': '已撤',
+  '7': '部成',
+  '8': '已成',
+  '9': '废单',
+  '+': '已报',
+  '-': '废单',
+  V: '已确认',
+};
+const pTradeStatusColor = value => {
+  const key = String(value || '').trim().toUpperCase();
+  if (key === '8') return 'success';
+  if (['5', '6'].includes(key)) return 'default';
+  if (key === '7' || key === '4') return 'warning';
+  if (key === '9' || key === '-') return 'error';
+  if (['2', '+', 'V'].includes(key)) return 'processing';
+  return 'default';
+};
+const renderPTradeStatus = value => {
+  const key = String(value || '').trim().toUpperCase();
+  if (!key) return '-';
+  const label = pTradeStatusLabels[key] || '未知';
+  return (
+    <Tooltip title={`PTrade原始状态: ${key}`}>
+      <Tag color={pTradeStatusColor(key)}>{label}</Tag>
+    </Tooltip>
+  );
+};
 const roleLabel = value => {
   if (value === 'PARENT') return '父单';
   if (value === 'CHILD') return '子单';
@@ -1260,7 +1294,7 @@ const ExternalTradingAccountManager = () => {
     { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
     { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
     { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
-    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100, render: value => value || '-' },
+    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 120, render: renderPTradeStatus },
     { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
     { title: '档位', dataIndex: 'price_level', key: 'price_level', width: 90, render: value => value === null || value === undefined ? '-' : priceLevelLabel(value) },
     { title: '重定价', dataIndex: 'replace_count', key: 'replace_count', width: 90, render: value => formatNumber(value) },
@@ -1325,7 +1359,7 @@ const ExternalTradingAccountManager = () => {
     { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 280, render: renderEventSubAccounts, ...serverFilterProps('events', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
     { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
-    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 100, render: value => value || '-' },
+    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 120, render: renderPTradeStatus },
     { title: '匹配角色', dataIndex: 'matched_order_role', key: 'matched_order_role', width: 100, render: value => value ? roleLabel(value) : '-' },
     { title: '匹配订单状态', dataIndex: 'matched_order_status', key: 'matched_order_status', width: 130, render: value => value ? <Tag color={orderStatusColor(value)}>{value}</Tag> : '-' },
     { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 180, render: value => value || '-' },

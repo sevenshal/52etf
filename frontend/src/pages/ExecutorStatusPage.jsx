@@ -98,6 +98,40 @@ const orderStatusColor = status => {
   if (['PARTIALLY_FILLED', 'CANCEL_PENDING', 'BLOCKED_INSUFFICIENT_SELLABLE', 'BLOCKED_INSUFFICIENT_POSITION', 'BLOCKED_NON_RETRYABLE_REJECTION'].includes(status)) return 'warning';
   return 'processing';
 };
+const pTradeStatusLabels = {
+  '0': '未报',
+  '1': '待报',
+  '2': '已报',
+  '3': '已报待撤',
+  '4': '部成待撤',
+  '5': '部撤',
+  '6': '已撤',
+  '7': '部成',
+  '8': '已成',
+  '9': '废单',
+  '+': '已报',
+  '-': '废单',
+  V: '已确认',
+};
+const pTradeStatusColor = value => {
+  const key = String(value || '').trim().toUpperCase();
+  if (key === '8') return 'success';
+  if (['5', '6'].includes(key)) return 'default';
+  if (key === '7' || key === '4') return 'warning';
+  if (key === '9' || key === '-') return 'error';
+  if (['2', '+', 'V'].includes(key)) return 'processing';
+  return 'default';
+};
+const renderPTradeStatus = value => {
+  const key = String(value || '').trim().toUpperCase();
+  if (!key) return '-';
+  const label = pTradeStatusLabels[key] || '未知';
+  return (
+    <Tooltip title={`PTrade原始状态: ${key}`}>
+      <Tag color={pTradeStatusColor(key)}>{label}</Tag>
+    </Tooltip>
+  );
+};
 const eventTypeLabel = value => {
   if (value === 'order_event') return '订单回报';
   if (value === 'trade_event') return '成交回报';
@@ -764,7 +798,7 @@ const ExecutorStatusPage = () => {
     { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('events', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
     { title: '方向', dataIndex: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
-    { title: 'PTrade状态', dataIndex: 'ptrade_status', width: 110, render: value => value || '-' },
+    { title: 'PTrade状态', dataIndex: 'ptrade_status', width: 120, render: renderPTradeStatus },
     { title: '消息', dataIndex: 'process_message', width: 220, render: value => value || '-' },
   ];
   const demandColumns = [
@@ -931,7 +965,7 @@ const ExecutorStatusPage = () => {
           <div className="executor-row-card__details">
             <span>{row.sub_account_name || '-'}</span>
             <span>{renderSymbolText(row)}</span>
-            <span>{row.ptrade_status || '-'}</span>
+            <span>{renderPTradeStatus(row.ptrade_status)}</span>
           </div>
           {row.process_message ? <p>{row.process_message}</p> : null}
         </div>
