@@ -539,3 +539,102 @@ class AStockBaseDataSyncTest(TestCase):
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+
+    def test_incremental_fund_adj_factor_batches_recent_trade_dates(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                from src.core.analytics_database import AStockFundAdjFactor, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def __init__(self):
+                        self.date_calls = []
+
+                    def get_a_stock_etf_basic_frame(self, list_status="L"):
+                        return pd.DataFrame(
+                            [
+                                {"ts_code": "159001.SZ", "name": "ETF1", "exchange": "SZ", "list_status": "L"},
+                                {"ts_code": "159002.SZ", "name": "ETF2", "exchange": "SZ", "list_status": "L"},
+                            ]
+                        )
+
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        assert start_date == date(2026, 5, 30)
+                        assert end_date == date(2026, 6, 1)
+                        return pd.DataFrame(
+                            [
+                                {"cal_date": date(2026, 5, 30), "is_open": 0},
+                                {"cal_date": date(2026, 5, 31), "is_open": 0},
+                                {"cal_date": date(2026, 6, 1), "is_open": 1},
+                            ]
+                        )
+
+                    def get_a_stock_fund_adj_factor_trade_date_frame(self, trade_date, **kwargs):
+                        self.date_calls.append(trade_date)
+                        return pd.DataFrame(
+                            [
+                                {"ts_code": "159001.SZ", "trade_date": "20260601", "adj_factor": 1.1},
+                                {"ts_code": "159002.SZ", "trade_date": "20260601", "adj_factor": 1.2},
+                            ]
+                        )
+
+                    def get_a_stock_fund_adj_factor_range_frame(self, *args, **kwargs):
+                        raise AssertionError("fund_adj incremental should batch by trade_date")
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                fake_tushare = FakeTushare()
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
+                try:
+                    service._insert_analytics_mappings(
+                        AStockFundAdjFactor,
+                        [
+                            {
+                                "ts_code": "159001.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "adj_factor": 1.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                            {
+                                "ts_code": "159002.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "adj_factor": 1.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        ],
+                    )
+                    result = service.sync_fund_adj_factor(
+                        date(2019, 5, 26),
+                        date(2026, 6, 1),
+                        incremental=True,
+                    )
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert fake_tushare.date_calls == [date(2026, 6, 1)]
+                assert result["jobs"] == 2
+                assert result["date_batches"] == 1
+                assert result["symbol_jobs"] == 0
+                assert result["trading_days"] == 1
+                assert result["saved_rows"] == 2
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass

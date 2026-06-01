@@ -717,6 +717,60 @@ class TushareService(QuoteProvider):
             result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
         return result.dropna(subset=["ts_code", "trade_date", "adj_factor"]).sort_values(["ts_code", "trade_date"])
 
+    def get_a_stock_fund_adj_factor_trade_date_frame(
+        self,
+        trade_date: date,
+        limit: int = 2000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """按交易日批量获取A股ETF/场内基金复权因子。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 2000))
+        first_error = None
+        fields = "ts_code,trade_date,adj_factor"
+        while True:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = self.pro.fund_adj(
+                    trade_date=trade_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare fund_adj fetch failed for trade_date=%s offset=%s: %s",
+                    trade_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            if raise_on_error:
+                if first_error is not None:
+                    raise first_error
+                raise RuntimeError(f"Tushare fund_adj returned no rows for trade_date={trade_value}")
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        if "adj_factor" in result.columns:
+            result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
+        return result.dropna(subset=["ts_code", "trade_date", "adj_factor"]).sort_values(["ts_code", "trade_date"])
+
     def get_a_stock_fund_daily_range_frame(
         self,
         ts_code: str,

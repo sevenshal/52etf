@@ -70,6 +70,7 @@ A_STOCK_REPO_DAILY_CHUNK_CALENDAR_DAYS = 70
 A_STOCK_CHINABOND_CHUNK_TRADING_DAYS = 10
 A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS = 30
 A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
+A_STOCK_FUND_ADJ_FACTOR_BATCH_BY_DATE_MAX_DAYS = 10
 
 
 def _clean_text(value) -> Optional[str]:
@@ -1253,7 +1254,16 @@ class AStockBaseDataSyncService:
             if symbol_start <= end_value:
                 jobs.append((symbol, symbol_start, end_value))
 
-        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
+        trading_dates = self._trading_dates(
+            min(job[1] for job in jobs),
+            max(job[2] for job in jobs),
+        ) if jobs else []
+        jobs = [
+            job
+            for job in jobs
+            if any(job[1] <= trading_date <= job[2] for trading_date in trading_dates)
+        ]
+        trading_days = len(trading_dates)
 
         if not jobs:
             return {
@@ -1266,6 +1276,23 @@ class AStockBaseDataSyncService:
                 "trading_days": trading_days,
             }
 
+        date_to_symbols: Dict[date, set] = {}
+        symbol_jobs: List[Tuple[str, date, date]] = []
+        if incremental and not explicit_start:
+            for symbol, symbol_start, symbol_end in jobs:
+                job_trading_dates = [
+                    trading_date
+                    for trading_date in trading_dates
+                    if symbol_start <= trading_date <= symbol_end
+                ]
+                if 0 < len(job_trading_dates) <= A_STOCK_FUND_ADJ_FACTOR_BATCH_BY_DATE_MAX_DAYS:
+                    for trading_date in job_trading_dates:
+                        date_to_symbols.setdefault(trading_date, set()).add(symbol)
+                else:
+                    symbol_jobs.append((symbol, symbol_start, symbol_end))
+        else:
+            symbol_jobs = list(jobs)
+
         def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
             frame = self.tushare.get_a_stock_fund_adj_factor_range_frame(
                 symbol,
@@ -1275,40 +1302,78 @@ class AStockBaseDataSyncService:
             )
             return symbol, symbol_start, symbol_end, frame
 
+        def fetch_trade_date(trading_date: date) -> Tuple[date, pd.DataFrame]:
+            frame = self.tushare.get_a_stock_fund_adj_factor_trade_date_frame(
+                trading_date,
+                raise_on_error=True,
+            )
+            return trading_date, frame
+
         saved_rows = 0
         errors: List[Dict[str, str]] = []
-        completed = 0
+        completed_work = 0
         total_jobs = len(jobs)
-        workers = min(SYNC_WORKERS, total_jobs)
+        date_batches = sorted(date_to_symbols.items(), key=lambda item: item[0])
+        total_work = len(date_batches) + len(symbol_jobs)
 
-        def report_progress(symbol: str, symbol_start: date, symbol_end: date):
+        def report_progress(message: str):
             self._progress(
-                (
-                    f"批量同步A股ETF复权因子 {completed}/{total_jobs}，"
-                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
-                ),
+                message,
                 65,
-                processed_jobs=completed,
-                total_jobs=total_jobs,
+                processed_jobs=completed_work,
+                total_jobs=total_work,
+                fund_adj_factor_symbol_jobs_total=total_jobs,
+                fund_adj_factor_date_batches=len(date_batches),
+                fund_adj_factor_symbol_jobs=len(symbol_jobs),
                 fund_adj_factor_saved_rows=saved_rows,
                 fund_adj_factor_errors=len(errors),
             )
 
+        for trading_date, batch_symbols in date_batches:
+            symbol_values = sorted(batch_symbols)
+            try:
+                _, frame = fetch_trade_date(trading_date)
+                if not frame.empty:
+                    frame = frame[frame["ts_code"].astype("string").str.upper().isin(symbol_values)]
+                saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockFundAdjFactor.__tablename__, frame)
+            except Exception as exc:
+                fallback_jobs = [
+                    (symbol, trading_date, trading_date)
+                    for symbol in sorted(batch_symbols)
+                ]
+                symbol_jobs.extend(fallback_jobs)
+                total_work += len(fallback_jobs)
+                self.logger.warning(
+                    "A stock ETF fund_adj date batch sync failed for %s, fallback to %s symbol jobs: %s",
+                    trading_date,
+                    len(fallback_jobs),
+                    exc,
+                )
+            completed_work += 1
+            report_progress(
+                f"按日期批量同步A股ETF复权因子 {completed_work}/{total_work}，"
+                f"最近完成 {trading_date.isoformat()} ({len(symbol_values)}只)"
+            )
+
+        workers = min(SYNC_WORKERS, len(symbol_jobs))
         if workers <= 1:
-            for symbol, symbol_start, symbol_end in jobs:
+            for symbol, symbol_start, symbol_end in symbol_jobs:
                 try:
                     _, _, _, frame = fetch_job(symbol, symbol_start, symbol_end)
                     saved_rows += _bulk_upsert_adj_factor_frame(self.analytics_db, AStockFundAdjFactor.__tablename__, frame)
                 except Exception as exc:
                     self.logger.warning("A stock ETF fund_adj sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
                     errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
-                completed += 1
-                report_progress(symbol, symbol_start, symbol_end)
+                completed_work += 1
+                report_progress(
+                    f"批量同步A股ETF复权因子 {completed_work}/{total_work}，"
+                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                )
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(fetch_job, symbol, symbol_start, symbol_end): (symbol, symbol_start, symbol_end)
-                    for symbol, symbol_start, symbol_end in jobs
+                    for symbol, symbol_start, symbol_end in symbol_jobs
                 }
                 for future in as_completed(futures):
                     symbol, symbol_start, symbol_end = futures[future]
@@ -1318,12 +1383,17 @@ class AStockBaseDataSyncService:
                     except Exception as exc:
                         self.logger.warning("A stock ETF fund_adj sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
                         errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
-                    completed += 1
-                    report_progress(symbol, symbol_start, symbol_end)
+                    completed_work += 1
+                    report_progress(
+                        f"批量同步A股ETF复权因子 {completed_work}/{total_work}，"
+                        f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                    )
 
         return {
             "symbol_count": len(symbols),
             "jobs": total_jobs,
+            "date_batches": len(date_batches),
+            "symbol_jobs": len(symbol_jobs),
             "saved_rows": saved_rows,
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
@@ -2253,6 +2323,8 @@ class AStockBaseDataSyncService:
             "fund_adj_factor_end_date": fund_adj_factor_result.get("end_date"),
             "fund_adj_factor_symbol_count": fund_adj_factor_result.get("symbol_count"),
             "fund_adj_factor_jobs": fund_adj_factor_result.get("jobs"),
+            "fund_adj_factor_date_batches": fund_adj_factor_result.get("date_batches"),
+            "fund_adj_factor_symbol_jobs": fund_adj_factor_result.get("symbol_jobs"),
             "fund_adj_factor_saved_rows": fund_adj_factor_result.get("saved_rows"),
             "fund_adj_factor_errors": len(fund_adj_factor_result.get("errors") or []),
             "fund_qfq_coverage": fund_qfq_coverage,
