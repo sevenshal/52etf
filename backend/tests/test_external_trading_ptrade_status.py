@@ -11,6 +11,7 @@ from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trad
 from src.core.external_trading_database import (
     ExternalTradingBase,
     ExternalTradingEventLog,
+    ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
 )
@@ -156,6 +157,93 @@ class PTradeOrderStatusTest(TestCase):
         self.assertEqual(100, trade["quantity"])
         self.assertEqual(163.87, trade["price"])
         self.assertTrue(_is_trade_fill_event(trade))
+
+    def test_partial_cancel_trade_status_is_not_fill(self):
+        for status in ("5", "6"):
+            trade = {
+                "status": status,
+                "symbol": "588230.SH",
+                "side": "SELL",
+                "business_no": "0",
+                "business_amount": 16500,
+                "quantity": 16500,
+                "business_price": 1.995,
+                "price": 1.995,
+            }
+
+            self.assertFalse(_is_trade_fill_event(trade))
+
+    def test_partial_cancel_trade_event_only_updates_order_status(self):
+        db = self._db_session()
+        order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=88,
+            allocation_role="DIRECT",
+            client_order_id="client-order-id",
+            broker_order_id="broker-order-id",
+            entrust_no="10565",
+            symbol="588230.SH",
+            side="SELL",
+            order_type="LIMIT",
+            quantity=42000,
+            filled_quantity=25500,
+            remaining_quantity=16500,
+            status="PARTIALLY_FILLED",
+        )
+        position = ExternalTradingLedgerPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=88,
+            symbol="588230.SH",
+            quantity=16500,
+            available_quantity=16500,
+            avg_cost=2.131,
+        )
+        db.add(order)
+        db.add(position)
+        db.flush()
+        trade = {
+            "client_order_id": "client-order-id",
+            "order_id": "broker-order-id",
+            "entrust_no": "10565",
+            "symbol": "588230.SH",
+            "side": "SELL",
+            "status": "5",
+            "business_no": "0",
+            "business_amount": 16500,
+            "quantity": 16500,
+            "business_price": 1.995,
+            "price": 1.995,
+            "business_balance": 32917.5,
+            "amount": 32917.5,
+            "traded_at": "2026-06-01 09:45:37",
+        }
+        event_logs = record_external_event_logs(
+            db,
+            external_trading_account_id=2,
+            account_id="acct",
+            account_name="PTrade-国盛实盘",
+            event_type="trade_event",
+            events=[trade],
+        )
+
+        inserted = process_trade_events(
+            db,
+            external_trading_account_id=2,
+            trades=[trade],
+            event_logs=event_logs,
+        )
+
+        self.assertEqual(0, inserted)
+        self.assertEqual(0, db.query(ExternalTradingOrderFill).count())
+        self.assertEqual("PARTIALLY_CANCELED", order.status)
+        self.assertEqual(25500, order.filled_quantity)
+        self.assertEqual(16500, order.remaining_quantity)
+        self.assertEqual(16500, position.quantity)
+        self.assertEqual(16500, position.available_quantity)
+        self.assertEqual("PROCESSED", event_logs[0].process_status)
+        self.assertEqual("非成交状态事件", event_logs[0].process_message)
 
     def test_terminal_cancel_can_correct_false_filled_order_without_fill_rows(self):
         db = self._db_session()

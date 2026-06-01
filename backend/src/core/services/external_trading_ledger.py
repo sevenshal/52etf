@@ -2238,14 +2238,23 @@ def _recorded_fill_quantity_for_order_tree(db: Session, row: ExternalTradingOrde
     return quantity
 
 
-def _apply_order_status_event(db: Session, row: ExternalTradingOrder, event: Dict[str, Any], now: datetime) -> None:
+def _apply_order_status_event(
+    db: Session,
+    row: ExternalTradingOrder,
+    event: Dict[str, Any],
+    now: datetime,
+    *,
+    allow_reported_fill: bool = True,
+) -> None:
     raw_status = event.get("status")
     previous_filled_quantity = safe_int(row.filled_quantity)
-    filled_quantity = order_event_filled_quantity(
-        event,
-        raw_status,
-        current=row.filled_quantity,
-    )
+    filled_quantity = previous_filled_quantity
+    if allow_reported_fill:
+        filled_quantity = order_event_filled_quantity(
+            event,
+            raw_status,
+            current=row.filled_quantity,
+        )
     incoming_lifecycle = ptrade_status_to_lifecycle(raw_status, filled_quantity, row.quantity)
     corrective_terminal_without_fills = (
         str(row.status or "").upper() == "FILLED"
@@ -2333,13 +2342,9 @@ def _trade_fill_key(event: Dict[str, Any]) -> str:
 
 def _is_trade_fill_event(event: Dict[str, Any]) -> bool:
     raw_status = event.get("status")
-    business_no = event.get("business_no") or event.get("business_id")
     if raw_status is not None:
         status = str(raw_status)
         if status not in PTRADE_TRADE_FILL_STATUSES:
-            if not (status == PTRADE_TRADE_PARTIAL_CANCEL_STATUS and business_no):
-                return False
-        if status == PTRADE_TRADE_PARTIAL_CANCEL_STATUS and not business_no:
             return False
     quantity = safe_int(event.get("quantity", event.get("business_amount", event.get("filled_quantity"))))
     price = safe_float(event.get("price", event.get("business_price", event.get("avg_fill_price"))))
@@ -2593,7 +2598,7 @@ def process_trade_events(
                 event.get("quantity", event.get("business_amount", event.get("filled_quantity"))),
                 event.get("price", event.get("business_price", event.get("avg_fill_price"))),
             )
-            _apply_order_status_event(db, order, event, now)
+            _apply_order_status_event(db, order, event, now, allow_reported_fill=False)
             _mark_external_event_log(event_log, process_status="PROCESSED", order=order, message="非成交状态事件")
             continue
         fill_key = _trade_fill_key(event)
