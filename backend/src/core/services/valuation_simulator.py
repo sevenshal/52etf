@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session as ORMSession
 from ..database import (
     SessionLocal,
     StockEVC,
+    StockTag,
     ValuationSimConfig,
     ValuationSimEquity,
     ValuationSimLog,
     ValuationSimPendingOrder,
     ValuationSimPosition,
     ValuationSimTrade,
+    stock_tags,
 )
 from ..static_info import get_static_info_snapshot_map
 from .factor_backtest_engine import get_max_trade_date, load_price_frame, load_universe_history
@@ -27,6 +29,7 @@ from .market import MarketService
 logger = logging.getLogger(__name__)
 
 QQQ_ETF_SYMBOL = "QQQ.US"
+DEFAULT_UNIVERSE_TAG_NAMES = ("Nasdaq 100+", "Nasdaq 100", "纳斯达克100", "纳指100")
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_TRIGGER_TIME = "18:00"
 LONGPORT_MARKET_DATA_ACCOUNT_ID = os.getenv(
@@ -34,6 +37,7 @@ LONGPORT_MARKET_DATA_ACCOUNT_ID = os.getenv(
     os.getenv("EXTERNAL_TRADING_VALUATION_LONGPORT_ACCOUNT_ID", "LBPT10001248"),
 )
 US_MARKET_OPEN_TIME = time(hour=9, minute=30)
+ONE_HUNDRED_MILLION = 100_000_000
 
 
 @dataclass
@@ -61,6 +65,19 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _positive_float(value: Any) -> Optional[float]:
     number = _safe_float(value, 0.0)
     return number if number > 0 else None
+
+
+def _market_cap_threshold_to_usd(value: Any) -> Optional[float]:
+    number = _safe_float(value, 0.0)
+    return number * ONE_HUNDRED_MILLION if number > 0 else None
+
+
+def _calculate_market_cap(price: Any, static_info: Dict[str, Any]) -> Optional[float]:
+    last_price = _positive_float(price)
+    shares = _positive_float((static_info or {}).get("total_shares"))
+    if last_price is None or shares is None:
+        return None
+    return last_price * shares
 
 
 def _parse_clock_time(value: Optional[str]) -> time:
@@ -144,7 +161,56 @@ def _compute_atr(rows: Sequence[Dict[str, Any]], window: int) -> Optional[float]
     return atr if atr > 0 else None
 
 
-def _load_latest_universe(db: ORMSession, as_of_date: date) -> List[str]:
+def _normalize_tag_ids(value: Optional[Iterable[Any]]) -> List[str]:
+    result: List[str] = []
+    for item in value or []:
+        tag_id = str(item or "").strip()
+        if tag_id and tag_id not in result:
+            result.append(tag_id)
+    return result
+
+
+def _default_universe_tag_ids(db: ORMSession) -> List[str]:
+    rows = (
+        db.query(StockTag)
+        .filter(StockTag.name.in_(list(DEFAULT_UNIVERSE_TAG_NAMES)))
+        .all()
+    )
+    rows = sorted(rows, key=lambda row: (row.sort_group if row.sort_group is not None else 999999, row.name or ""))
+    return [str(row.id) for row in rows if row.id]
+
+
+def _load_tag_universe(db: ORMSession, tag_ids: Sequence[str]) -> List[str]:
+    safe_tag_ids = _normalize_tag_ids(tag_ids)
+    if not safe_tag_ids:
+        return []
+    latest_tag_date = db.query(func.max(stock_tags.c.date)).scalar()
+    if not latest_tag_date:
+        return []
+    rows = (
+        db.query(stock_tags.c.stock_symbol)
+        .filter(stock_tags.c.date == latest_tag_date, stock_tags.c.tag_id.in_(safe_tag_ids))
+        .distinct()
+        .order_by(stock_tags.c.stock_symbol.asc())
+        .all()
+    )
+    return [str(row[0]).strip().upper() for row in rows if row[0]]
+
+
+def _load_latest_universe(
+    db: ORMSession,
+    as_of_date: date,
+    tag_ids: Optional[Iterable[Any]] = None,
+) -> List[str]:
+    selected_tag_ids = _normalize_tag_ids(tag_ids)
+    explicit_tags = bool(selected_tag_ids)
+    if not selected_tag_ids:
+        selected_tag_ids = _default_universe_tag_ids(db)
+    if selected_tag_ids:
+        tag_symbols = _load_tag_universe(db, selected_tag_ids)
+        if tag_symbols or explicit_tags:
+            return tag_symbols
+
     start_date = as_of_date - timedelta(days=14)
     universe_history = load_universe_history(db, [QQQ_ETF_SYMBOL], start_date, as_of_date)
     return universe_history.symbols_for_date(as_of_date)
@@ -330,7 +396,8 @@ def _build_candidate_payload(
     as_of_date: date,
     exclude_symbols: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    universe_symbols = _load_latest_universe(db, as_of_date)
+    universe_tag_ids = _normalize_tag_ids(getattr(config, "universe_tag_ids", None))
+    universe_symbols = _load_latest_universe(db, as_of_date, universe_tag_ids)
     signals, latest_prices = _load_price_context(
         universe_symbols,
         as_of_date,
@@ -342,6 +409,9 @@ def _build_candidate_payload(
     valuation_date, valuation_rows = _latest_valuation_rows(db, universe_symbols)
     static_info_map = get_static_info_snapshot_map(db, list(valuation_rows))
     excluded = {str(symbol or "").strip().upper() for symbol in (exclude_symbols or []) if symbol}
+    min_market_cap = _market_cap_threshold_to_usd(getattr(config, "min_market_cap_100m", None))
+    max_market_cap = _market_cap_threshold_to_usd(getattr(config, "max_market_cap_100m", None))
+    has_market_cap_filter = min_market_cap is not None or max_market_cap is not None
 
     candidates: List[Dict[str, Any]] = []
     for symbol in universe_symbols:
@@ -372,6 +442,14 @@ def _build_candidate_payload(
             continue
 
         static_info = static_info_map.get(symbol, {})
+        market_cap = _calculate_market_cap(_positive_float(getattr(valuation, "last_price", None)) or market_price, static_info)
+        if has_market_cap_filter:
+            if market_cap is None:
+                continue
+            if min_market_cap is not None and market_cap < min_market_cap:
+                continue
+            if max_market_cap is not None and market_cap > max_market_cap:
+                continue
         candidates.append({
             "symbol": symbol,
             "company": static_info.get("name_cn") or static_info.get("name_en") or valuation.company,
@@ -387,6 +465,8 @@ def _build_candidate_payload(
             "recent_volumes": signal.recent_volumes,
             "fair_value_lo": fair_value_lo,
             "fair_value_hi": fair_value_hi,
+            "market_cap": market_cap,
+            "market_cap_100m": market_cap / ONE_HUNDRED_MILLION if market_cap else None,
             "forward_next_fy_lo": next_fy_lo,
             "forward_next_fy_hi": next_fy_hi,
             "undervalue_pct": (fair_value_lo / market_price - 1.0) * 100.0,
@@ -398,6 +478,7 @@ def _build_candidate_payload(
     return {
         "trade_date": as_of_date,
         "valuation_date": valuation_date,
+        "universe_tag_ids": universe_tag_ids,
         "universe_count": len(universe_symbols),
         "price_signal_count": len(signals),
         "valuation_count": len(valuation_rows),

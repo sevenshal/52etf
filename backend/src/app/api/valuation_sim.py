@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 
 from ...core.database import (
@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 class ValuationSimConfigPayload(BaseModel):
     name: str = "纳指100估值成长模拟盘"
     enabled: bool = False
+    universe_tag_ids: List[str] = Field(default_factory=list)
+    min_market_cap_100m: Optional[float] = 100.0
+    max_market_cap_100m: Optional[float] = None
     initial_cash: float = 100000.0
     max_positions: int = 5
     trigger_time: str = "18:00"
@@ -67,6 +70,28 @@ class ValuationSimConfigPayload(BaseModel):
     def validate_timezone(cls, value):
         text = str(value or "").strip()
         return text or "America/New_York"
+
+    @validator("universe_tag_ids", pre=True, always=True)
+    def validate_universe_tag_ids(cls, value):
+        if not value:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("候选池标签必须是列表")
+        result = []
+        for item in value:
+            tag_id = str(item or "").strip()
+            if tag_id and tag_id not in result:
+                result.append(tag_id)
+        return result
+
+    @validator("min_market_cap_100m", "max_market_cap_100m", pre=True)
+    def validate_market_cap_filter(cls, value):
+        if value is None or value == "":
+            return None
+        number = float(value)
+        if number < 0:
+            raise ValueError("市值范围不能小于 0")
+        return number
 
     @validator("initial_cash")
     def validate_initial_cash(cls, value):
@@ -211,6 +236,9 @@ class ValuationSimLogSchema(BaseModel):
 CONFIG_FIELDS = [
     "name",
     "enabled",
+    "universe_tag_ids",
+    "min_market_cap_100m",
+    "max_market_cap_100m",
     "initial_cash",
     "max_positions",
     "trigger_time",
@@ -242,6 +270,10 @@ def _get_config_or_404(db: Session, account_id: str, config_id: int) -> Valuatio
 
 def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayload, reset_cash_if_new: bool = False):
     payload_data = payload.dict()
+    min_market_cap = payload_data.get("min_market_cap_100m")
+    max_market_cap = payload_data.get("max_market_cap_100m")
+    if min_market_cap is not None and max_market_cap is not None and min_market_cap > max_market_cap:
+        raise HTTPException(status_code=400, detail="市值下限不能大于上限")
     for field in CONFIG_FIELDS:
         setattr(config, field, payload_data[field])
     if reset_cash_if_new:

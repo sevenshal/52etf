@@ -566,6 +566,9 @@ class ValuationSimConfig(Base):
     account_id = Column(String, index=True)
     name = Column(String(120), nullable=False, default="纳指100估值成长模拟盘")
     enabled = Column(Boolean, default=False)
+    universe_tag_ids = Column(JSON)
+    min_market_cap_100m = Column(Float, nullable=True, default=100.0)
+    max_market_cap_100m = Column(Float, nullable=True)
     initial_cash = Column(Float, nullable=False, default=100000.0)
     current_cash = Column(Float, nullable=False, default=100000.0)
     max_positions = Column(Integer, nullable=False, default=5)
@@ -1230,6 +1233,9 @@ def ensure_table_columns():
             "allow_queue": "ALTER TABLE scheduled_task_configs ADD COLUMN allow_queue BOOLEAN NOT NULL DEFAULT 1",
         },
         "valuation_sim_configs": {
+            "universe_tag_ids": "ALTER TABLE valuation_sim_configs ADD COLUMN universe_tag_ids JSON",
+            "min_market_cap_100m": "ALTER TABLE valuation_sim_configs ADD COLUMN min_market_cap_100m FLOAT DEFAULT 100.0",
+            "max_market_cap_100m": "ALTER TABLE valuation_sim_configs ADD COLUMN max_market_cap_100m FLOAT",
             "trailing_stop_atr_window": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_window INTEGER NOT NULL DEFAULT 20",
             "trailing_stop_atr_multiple": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_multiple FLOAT NOT NULL DEFAULT 2.5",
         },
