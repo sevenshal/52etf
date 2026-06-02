@@ -626,6 +626,12 @@ const ExecutorStatusPage = () => {
     return detail?.source ? <Tooltip title={`来源: ${detail.source}`}>{text}</Tooltip> : text;
   };
 
+  const renderLifecyclePrice = (value, source, digits = 4) => {
+    const text = formatOptionalNumber(value, digits);
+    if (text === '-' || !source) return text;
+    return <Tooltip title={`来源: ${source}`}>{text}</Tooltip>;
+  };
+
   const openMarkBlockSuccess = record => {
     const defaultPrice = Number(record?.submitted_price || record?.avg_fill_price || 0);
     setMarkBlockRecord(record);
@@ -737,6 +743,7 @@ const ExecutorStatusPage = () => {
     { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('target_positions', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('target_positions', 'symbol') },
     { title: '市价', width: 100, render: renderMarketPrice },
+    { title: '参考价', dataIndex: 'reference_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.reference_price_source, 3) },
     { title: '目标', dataIndex: 'target_quantity', width: 100, render: value => formatNumber(value) },
     { title: '账本', dataIndex: 'current_quantity', width: 100, render: value => formatNumber(value) },
     { title: '可卖', dataIndex: 'available_quantity', width: 110, render: value => formatNumber(value) },
@@ -768,6 +775,8 @@ const ExecutorStatusPage = () => {
     { title: '未成', dataIndex: 'remaining_quantity', width: 100, render: value => formatNumber(value) },
     { title: '提交价', dataIndex: 'submitted_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
     { title: '均价', dataIndex: 'avg_fill_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
+    { title: '参考价', dataIndex: 'reference_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.reference_price_source) },
+    { title: '保护价', dataIndex: 'protection_limit_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.protection_limit_source) },
     { title: '档位', dataIndex: 'price_level', width: 100, render: priceLevelLabel },
     { title: '超时点', dataIndex: 'deadline_at', width: 170, render: formatTime },
     {
