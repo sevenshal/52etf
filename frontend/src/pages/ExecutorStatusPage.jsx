@@ -206,7 +206,7 @@ const createEmptyTable = () => ({ rows: [], pagination: { page: 1, page_size: 10
 const createEmptyTables = () => Object.keys(tableEndpoints).reduce((result, key) => ({ ...result, [key]: createEmptyTable() }), {});
 const createDefaultTableState = () => Object.keys(tableEndpoints).reduce((result, key) => ({
   ...result,
-  [key]: { page: 1, pageSize: 10, filters: {}, unfilledOnly: false },
+  [key]: { page: 1, pageSize: 10, filters: {}, unfilledOnly: false, nonEmptyOnly: false },
 }), {});
 const tableRowKey = (tableKey, row, index) => {
   if (row?.id !== undefined && row?.id !== null) return `${tableKey}:${row.id}`;
@@ -261,6 +261,7 @@ const ExecutorStatusPage = () => {
   const [repairParentRecord, setRepairParentRecord] = useState(null);
   const [orderActionId, setOrderActionId] = useState(null);
   const infiniteLoadingRef = useRef({});
+  const targetToolbarRef = useRef(null);
   const orderToolbarRef = useRef(null);
 
   const selectedAccount = useMemo(() => (
@@ -318,7 +319,7 @@ const ExecutorStatusPage = () => {
     loadAccounts();
   }, [loadAccounts]);
 
-  const buildTableParams = state => ({
+  const buildTableParams = (state, tableKey) => ({
     page: state?.page || 1,
     page_size: state?.pageSize || 10,
     symbol: joinFilterValues(state?.filters?.symbol),
@@ -328,6 +329,7 @@ const ExecutorStatusPage = () => {
     event_type: joinFilterValues(state?.filters?.event_type),
     process_status: joinFilterValues(state?.filters?.process_status),
     unfilled_only: state?.unfilledOnly ? 'true' : undefined,
+    non_empty_only: tableKey === 'target_positions' && state?.nonEmptyOnly ? 'true' : undefined,
   });
 
   const fetchBaseStatus = useCallback(async account => {
@@ -365,7 +367,7 @@ const ExecutorStatusPage = () => {
     try {
       const { data } = await request.get(
         `/api/external-trading-accounts/${account.id}/executor/status/${tableEndpoints[tableKey]}`,
-        { params: buildTableParams(nextState) }
+        { params: buildTableParams(nextState, tableKey) }
       );
       const nextRows = data?.rows || [];
       setTables(prev => ({
@@ -506,22 +508,52 @@ const ExecutorStatusPage = () => {
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
       filters: normalizeServerTableFilters(filters),
       unfilledOnly: previousState.unfilledOnly || false,
+      nonEmptyOnly: previousState.nonEmptyOnly || false,
     };
     const nextState = { ...tableState, [tableKey]: next };
     setTableState(nextState);
     fetchTable(selectedAccount, tableKey, next);
   };
 
-  const keepOrderToolbarInPlace = beforeTop => {
+  const keepToolbarInPlace = (toolbarRef, beforeTop) => {
     const scroller = document.querySelector('.app-shell__scroll');
     if (!scroller || beforeTop === null || beforeTop === undefined) return;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        const afterTop = orderToolbarRef.current?.getBoundingClientRect().top;
+        const afterTop = toolbarRef.current?.getBoundingClientRect().top;
         if (afterTop === null || afterTop === undefined) return;
         scroller.scrollTop += afterTop - beforeTop;
       });
     });
+  };
+
+  const keepOrderToolbarInPlace = beforeTop => {
+    keepToolbarInPlace(orderToolbarRef, beforeTop);
+  };
+
+  const keepTargetToolbarInPlace = beforeTop => {
+    keepToolbarInPlace(targetToolbarRef, beforeTop);
+  };
+
+  const handleTargetNonEmptyFilterChange = value => {
+    const nonEmptyOnly = value === 'non_empty';
+    const previousState = tableState.target_positions || { pageSize: 10, filters: {} };
+    if ((previousState.nonEmptyOnly || false) === nonEmptyOnly) return;
+    const toolbarTop = targetToolbarRef.current?.getBoundingClientRect().top;
+    const nextStateForTargets = {
+      ...previousState,
+      page: 1,
+      nonEmptyOnly,
+    };
+    setTableState(prev => ({ ...prev, target_positions: nextStateForTargets }));
+    setTableLoaded(prev => ({ ...prev, target_positions: false }));
+    if (selectedAccount?.id) {
+      fetchTable(selectedAccount, 'target_positions', nextStateForTargets).finally(() => {
+        keepTargetToolbarInPlace(toolbarTop);
+      });
+    } else {
+      keepTargetToolbarInPlace(toolbarTop);
+    }
   };
 
   const handleOrderUnfilledFilterChange = value => {
@@ -1006,6 +1038,27 @@ const ExecutorStatusPage = () => {
     </div>
   );
 
+  const renderTargetToolbar = () => {
+    const nonEmptyOnly = tableState.target_positions?.nonEmptyOnly || false;
+    const pagination = tables.target_positions?.pagination || {};
+    const loaded = targetRows.length;
+    const total = Number(pagination.total || 0);
+    return (
+      <div className="executor-list-toolbar" ref={targetToolbarRef}>
+        <Segmented
+          size="small"
+          value={nonEmptyOnly ? 'non_empty' : 'all'}
+          options={[
+            { label: '全部', value: 'all' },
+            { label: '只看非空', value: 'non_empty' },
+          ]}
+          onChange={handleTargetNonEmptyFilterChange}
+        />
+        <span>{tableLoading.target_positions ? '更新中' : (total ? `已显示 ${loaded}/${total}` : `已显示 ${loaded}`)}</span>
+      </div>
+    );
+  };
+
   const renderOrderToolbar = () => {
     const unfilledOnly = tableState.orders?.unfilledOnly || false;
     const pagination = tables.orders?.pagination || {};
@@ -1041,6 +1094,7 @@ const ExecutorStatusPage = () => {
     if (activeTab === 'targets') {
       return (
         <>
+          {renderTargetToolbar()}
           {renderMobileCards(targetRows, 'target', 'target_positions')}
           <div className="executor-desktop-table">
             <Table rowKey={record => `${record.sub_account_id}-${record.symbol}`} columns={targetColumns} dataSource={targetRows} loading={tableLoading.target_positions} pagination={paginationFor('target_positions')} onChange={handleTableChange('target_positions')} size="small" scroll={{ x: 1280 }} />
