@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, root_validator, validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as OrmSession
+from uvicorn.protocols.utils import ClientDisconnected
 
 from ...core.database import (
     FactorLiveTradingConfig,
@@ -3231,7 +3232,15 @@ async def external_trading_websocket(websocket: WebSocket):
             await websocket.close(code=1008, reason="external trading account disabled")
             return
 
-        conn = await external_trading_hub.connect(websocket, account)
+        try:
+            conn = await external_trading_hub.connect(websocket, account)
+        except (WebSocketDisconnect, ClientDisconnected):
+            logger.info(
+                "External trading WebSocket disconnected during initial connect: account_id=%r identifier=%r",
+                account_id,
+                identifier,
+            )
+            return
     finally:
         db.close()
 

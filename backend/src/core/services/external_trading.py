@@ -17,7 +17,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
+from uvicorn.protocols.utils import ClientDisconnected
 
 from ..external_trading_database import (
     EXTERNAL_TRADING_DB_PATH,
@@ -389,15 +390,23 @@ class ExternalTradingHub:
                 close_code=4000,
             )
 
+        try:
+            await websocket.send_text(encrypt_message({
+                "type": "connected",
+                "account_id": account_id,
+                "name": account_name,
+                "identifier": account_identifier,
+                "market_type": market_type,
+                "connected_at": conn.connected_at.isoformat(),
+            }))
+        except (WebSocketDisconnect, ClientDisconnected):
+            await self._rollback_connect(conn, reason="client disconnected during initial connect")
+            raise
+        except Exception as exc:
+            await self._rollback_connect(conn, reason=f"initial connect send failed: {exc}")
+            raise
+
         self._mark_connected(account_pk)
-        await websocket.send_text(encrypt_message({
-            "type": "connected",
-            "account_id": account_id,
-            "name": account_name,
-            "identifier": account_identifier,
-            "market_type": market_type,
-            "connected_at": conn.connected_at.isoformat(),
-        }))
         logger.info("External trading account connected: %s/%s", account_id, account_name)
         return conn
 
@@ -419,11 +428,32 @@ class ExternalTradingHub:
         await self._finish_connection(conn, reason=reason, close_code=4001)
         logger.info("External trading account disconnected by server: %s/%s (%s)", conn.account_id, conn.name, reason)
 
+    async def _rollback_connect(self, conn: ExternalTradingConnection, reason: str):
+        async with self._lock:
+            current = self._connections.get(conn.account_pk)
+            should_mark_disconnected = bool(current and current.connection_id == conn.connection_id)
+            if should_mark_disconnected:
+                self._connections.pop(conn.account_pk, None)
+
+        await self._finish_connection(
+            conn,
+            reason=reason,
+            close_code=None,
+            mark_disconnected=should_mark_disconnected,
+        )
+        logger.info(
+            "External trading account disconnected during initial connect: %s/%s (%s)",
+            conn.account_id,
+            conn.name,
+            reason,
+        )
+
     async def _finish_connection(
         self,
         conn: ExternalTradingConnection,
         reason: str,
         close_code: Optional[int],
+        mark_disconnected: bool = True,
     ):
         for future in list(conn.pending.values()):
             if not future.done():
@@ -436,7 +466,8 @@ class ExternalTradingHub:
             except Exception:
                 pass
 
-        self._mark_disconnected(conn.account_pk, reason)
+        if mark_disconnected:
+            self._mark_disconnected(conn.account_pk, reason)
 
     async def handle_client_message(self, account_pk: int, connection_id: str, raw_message: str):
         conn = self._connections.get(account_pk)
