@@ -35,6 +35,9 @@ const { Text } = Typography;
 const DEFAULT_VALUES = {
   name: '纳指100估值成长模拟盘',
   enabled: false,
+  universe_tag_ids: [],
+  min_market_cap_100m: 100,
+  max_market_cap_100m: null,
   initial_cash: 100000,
   max_positions: 5,
   trigger_time: '18:00',
@@ -97,6 +100,7 @@ const ValuationSimulation = () => {
   const [equity, setEquity] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [candidateMeta, setCandidateMeta] = useState({});
+  const [tagOptions, setTagOptions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [candidateLoading, setCandidateLoading] = useState(false);
@@ -115,6 +119,18 @@ const ValuationSimulation = () => {
   const totalEquity = latestEquity?.total_equity ?? ((Number(selectedConfig?.current_cash) || 0) + positionValue);
   const initialCash = Number(selectedConfig?.initial_cash) || 0;
   const totalReturnPct = initialCash > 0 ? ((totalEquity / initialCash) - 1) * 100 : null;
+  const tagNameMap = useMemo(() => {
+    const map = {};
+    tagOptions.forEach(item => {
+      map[item.value] = item.rawName || item.label;
+    });
+    return map;
+  }, [tagOptions]);
+  const renderUniverseTags = record => {
+    const ids = Array.isArray(record?.universe_tag_ids) ? record.universe_tag_ids : [];
+    if (!ids.length) return '默认Nasdaq 100+';
+    return ids.map(id => tagNameMap[id] || id).join(' / ');
+  };
 
   const loadConfigs = useCallback(async (preferredId) => {
     setLoading(true);
@@ -130,6 +146,19 @@ const ValuationSimulation = () => {
       message.error('加载估值模拟盘配置失败');
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const { data } = await request.get('/api/evc/tags');
+      setTagOptions((data || []).map(tag => ({
+        label: tag.stock_count ? `${tag.name} (${tag.stock_count})` : tag.name,
+        rawName: tag.name,
+        value: tag.id,
+      })));
+    } catch (error) {
+      message.error('加载估值标签失败');
     }
   }, []);
 
@@ -172,7 +201,8 @@ const ValuationSimulation = () => {
 
   useEffect(() => {
     loadConfigs();
-  }, [loadConfigs]);
+    loadTags();
+  }, [loadConfigs, loadTags]);
 
   useEffect(() => {
     loadDetails(selectedConfigId);
@@ -199,6 +229,14 @@ const ValuationSimulation = () => {
   const handleSave = async () => {
     try {
       const values = await form.validateFields();
+      if (
+        values.min_market_cap_100m !== null && values.min_market_cap_100m !== undefined &&
+        values.max_market_cap_100m !== null && values.max_market_cap_100m !== undefined &&
+        Number(values.min_market_cap_100m) > Number(values.max_market_cap_100m)
+      ) {
+        message.error('市值下限不能大于上限');
+        return;
+      }
       setSaving(true);
       const payload = { ...DEFAULT_VALUES, ...values };
       const response = editingConfigId
@@ -296,6 +334,8 @@ const ValuationSimulation = () => {
           <Tag>增长x{formatNumber(record.next_fy_growth_threshold, 2)}</Tag>
           <Tag>量比x{formatNumber(record.volume_ratio_threshold, 2)}</Tag>
           <Tag>ATR{record.trailing_stop_atr_window || 20} x{formatNumber(record.trailing_stop_atr_multiple || 2.5, 2)}</Tag>
+          <Tag>市值{record.min_market_cap_100m || 0}-{record.max_market_cap_100m || '∞'}亿</Tag>
+          <Tag>{renderUniverseTags(record)}</Tag>
         </Space>
       ),
     },
@@ -331,6 +371,7 @@ const ValuationSimulation = () => {
     { title: '股票', dataIndex: 'symbol', key: 'symbol', fixed: 'left', width: 100 },
     { title: '公司', dataIndex: 'company', key: 'company', width: 160, ellipsis: true },
     { title: '价格', dataIndex: 'price', key: 'price', width: 90, render: formatMoney },
+    { title: '市值(亿美元)', dataIndex: 'market_cap_100m', key: 'market_cap_100m', width: 110, render: value => formatNumber(value, 1) },
     { title: '估值下限', dataIndex: 'fair_value_lo', key: 'fair_value_lo', width: 100, render: formatMoney },
     { title: '低估率', dataIndex: 'undervalue_pct', key: 'undervalue_pct', width: 100, render: formatPct },
     { title: '增长下限', dataIndex: 'next_fy_growth_lo_pct', key: 'next_fy_growth_lo_pct', width: 100, render: formatPct },
@@ -430,6 +471,29 @@ const ValuationSimulation = () => {
             <Col xs={12} md={5}>
               <Form.Item name="max_positions" label="最大持仓" rules={[{ required: true }]}>
                 <InputNumber min={1} max={50} className="factor-lab-full" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item name="universe_tag_ids" label="候选池标签">
+                <Select
+                  mode="multiple"
+                  allowClear
+                  showSearch
+                  placeholder="不选则默认 Nasdaq 100+"
+                  options={tagOptions}
+                  maxTagCount="responsive"
+                  optionFilterProp="label"
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={5}>
+              <Form.Item name="min_market_cap_100m" label="市值下限(亿美元)">
+                <InputNumber min={0} step={10} precision={2} className="factor-lab-full" />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={5}>
+              <Form.Item name="max_market_cap_100m" label="市值上限(亿美元)">
+                <InputNumber min={0} step={10} precision={2} className="factor-lab-full" />
               </Form.Item>
             </Col>
             <Col xs={12} md={5}>
@@ -563,7 +627,7 @@ const ValuationSimulation = () => {
               <Card
                 title={`当前候选 ${candidateMeta.trade_date || ''}`}
                 bordered={false}
-                extra={<Text type="secondary">QQQ {candidateMeta.universe_count || 0} / 估值 {candidateMeta.valuation_count || 0}</Text>}
+                extra={<Text type="secondary">候选池 {candidateMeta.universe_count || 0} / 估值 {candidateMeta.valuation_count || 0}</Text>}
               >
                 <Table
                   rowKey="symbol"
