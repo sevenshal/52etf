@@ -489,6 +489,8 @@ def execute_command(action, payload):
         return get_assets_payload()
     if action in ("get_today_orders", "today_orders", "orders.today"):
         return get_today_orders_payload()
+    if action in ("get_deliver", "deliver"):
+        return get_deliver_payload(payload.get("start_date"), payload.get("end_date"))
     raise Exception("Unsupported command action: %s" % action)
 
 def convert_to_api_code(symbol):
@@ -1632,6 +1634,29 @@ def order_aliases(order_item):
 
 TERMINAL_ORDER_STATUSES = {"5", "6", "8", "9"}
 ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
+PTRADE_RAW_FIELD_NAMES = (
+    "order_id",
+    "id",
+    "entrust_no",
+    "status",
+    "stock_code",
+    "symbol",
+    "amount",
+    "price",
+    "limit",
+    "filled",
+    "filled_amount",
+    "business_amount",
+    "business_price",
+    "business_balance",
+    "entrust_bs",
+    "entrust_type",
+    "entrust_prop",
+    "order_time",
+    "entrust_time",
+    "business_time",
+    "error_info",
+)
 
 
 def sync_tracked_order_statuses():
@@ -1689,11 +1714,28 @@ def sync_tracked_order_statuses():
             for alias in aliases:
                 last_status[str(alias)] = status
             if changed:
-                changed_orders.append(normalize_order(item, current_dt))
+                normalized_order = normalize_order(item, current_dt)
+                order_key = json.dumps(
+                    {
+                        "order_id": normalized_order.get("order_id"),
+                        "entrust_no": normalized_order.get("entrust_no"),
+                        "status": normalized_order.get("status"),
+                        "filled_quantity": normalized_order.get("filled_quantity"),
+                        "event_time": normalized_order.get("event_time"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                if not any(existing.get("_dedupe_key") == order_key for existing in changed_orders):
+                    normalized_order["_dedupe_key"] = order_key
+                    changed_orders.append(normalized_order)
             if status in TERMINAL_ORDER_STATUSES:
                 finished_keys.extend(aliases)
 
         if changed_orders:
+            for item in changed_orders:
+                item.pop("_dedupe_key", None)
             log.info("sync_tracked_order_statuses: pushing %d order updates" % len(changed_orders))
             send_ws_event({
                 "type": "order_event",
@@ -1730,7 +1772,19 @@ def stringify_unknown_fields(obj):
             except Exception:
                 result[key] = str(value)
         return result
-    return {}
+    if obj is None:
+        return {}
+    result = {"__class__": obj.__class__.__name__}
+    for key in PTRADE_RAW_FIELD_NAMES:
+        value = value_of(obj, key, None)
+        if value is None:
+            continue
+        try:
+            json.dumps(value)
+            result[key] = value
+        except Exception:
+            result[key] = str(value)
+    return result
 
 
 def get_order_side(order_item):
@@ -1760,10 +1814,7 @@ def get_order_filled_quantity(order_item):
         if filled_amount is not None:
             quantity = filled_amount
         else:
-            status = str(value_of(order_item, "status", ""))
-            if status not in ORDER_FILL_STATUSES:
-                return 0
-            quantity = value_of(order_item, "business_amount", 0)
+            return 0
     try:
         quantity = abs(int(quantity or 0))
     except Exception:
@@ -1830,6 +1881,18 @@ def normalize_trade(trade_item, current_dt):
     }
 
 
+def clear_tracked_order_aliases(order_item):
+    tracked = getattr(g, "order_client_id_by_order_id", {})
+    last_status = getattr(g, "order_last_known_status", {})
+    aliases = order_aliases(order_item)
+    order_id = value_of(order_item, "order_id", value_of(order_item, "entrust_no"))
+    if order_id:
+        aliases.append(str(order_id))
+    for alias in list(dict.fromkeys(str(alias) for alias in aliases if alias)):
+        tracked.pop(alias, None)
+        last_status.pop(alias, None)
+
+
 def on_order_response(context, order_list):
     update_current_context(context)
     current_dt = get_current_dt()
@@ -1876,6 +1939,10 @@ def on_trade_response(context, trade_list):
         "trades": trades,
         "ts": datetime.now().isoformat(),
     })
+    for item in (trade_list or []):
+        status = str(value_of(item, "status", ""))
+        if status in TERMINAL_ORDER_STATUSES:
+            clear_tracked_order_aliases(item)
     process_pending_commands()
 
 

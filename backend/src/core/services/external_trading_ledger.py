@@ -455,16 +455,11 @@ def ptrade_status_to_lifecycle(raw_status: Any, filled_quantity: int = 0, quanti
 def order_event_filled_quantity(payload: Dict[str, Any], raw_status: Any, current: int = 0) -> int:
     raw = "" if raw_status is None else str(raw_status)
     current_quantity = safe_int(current)
-    reported_value = payload.get("filled", None)
-    if reported_value is not None:
-        reported = abs(safe_int(reported_value, current_quantity))
-        return max(current_quantity, reported)
     if raw not in PTRADE_ORDER_FILL_STATUSES:
         return current_quantity
-    reported_value = payload.get(
-        "filled_quantity",
-        payload.get("business_amount", payload.get("filled_amount")),
-    )
+    reported_value = _first_present_value(payload, ("filled", "filled_quantity", "filled_amount"))
+    if reported_value is None:
+        return current_quantity
     reported = abs(safe_int(reported_value, current_quantity))
     return max(current_quantity, reported)
 
@@ -2238,6 +2233,47 @@ def _recorded_fill_quantity_for_order_tree(db: Session, row: ExternalTradingOrde
     return quantity
 
 
+def _is_conflicting_order_fill_status_without_fills(
+    db: Session,
+    row: ExternalTradingOrder,
+    event: Dict[str, Any],
+) -> bool:
+    raw_status = event.get("status")
+    if raw_status is None or str(raw_status) not in PTRADE_TRADE_FILL_STATUSES:
+        return False
+    if str(row.status or "").upper() not in {"CANCELED", "PARTIALLY_CANCELED", "REJECTED", "FAILED", "EXPIRED"}:
+        return False
+    return _recorded_fill_quantity_for_order_tree(db, row) <= 0
+
+
+def _same_nullable(value: Any) -> Any:
+    return None if value in (None, "") else value
+
+
+def _has_processed_duplicate_order_event(db: Session, event_log: Optional[ExternalTradingEventLog]) -> bool:
+    if not event_log:
+        return False
+    filters = [
+        ExternalTradingEventLog.id != event_log.id,
+        ExternalTradingEventLog.external_trading_account_id == event_log.external_trading_account_id,
+        ExternalTradingEventLog.event_type == event_log.event_type,
+        ExternalTradingEventLog.process_status == "PROCESSED",
+    ]
+    for column, value in (
+        (ExternalTradingEventLog.source, event_log.source),
+        (ExternalTradingEventLog.client_order_id, event_log.client_order_id),
+        (ExternalTradingEventLog.broker_order_id, event_log.broker_order_id),
+        (ExternalTradingEventLog.entrust_no, event_log.entrust_no),
+        (ExternalTradingEventLog.symbol, event_log.symbol),
+        (ExternalTradingEventLog.side, event_log.side),
+        (ExternalTradingEventLog.ptrade_status, event_log.ptrade_status),
+        (ExternalTradingEventLog.event_time, event_log.event_time),
+    ):
+        value = _same_nullable(value)
+        filters.append(column.is_(None) if value is None else column == value)
+    return db.query(ExternalTradingEventLog.id).filter(*filters).first() is not None
+
+
 def _apply_order_status_event(
     db: Session,
     row: ExternalTradingOrder,
@@ -2326,7 +2362,22 @@ def process_order_events(
                 message="未匹配本地订单",
             )
             continue
-        _apply_order_status_event(db, row, event, now)
+        if _has_processed_duplicate_order_event(db, event_log):
+            _mark_external_event_log(event_log, process_status="PROCESSED", order=row, message="重复订单事件")
+            continue
+        if _is_conflicting_order_fill_status_without_fills(db, row, event):
+            logger.warning(
+                "Ignored conflicting external order fill status without recorded fills: account=%s event_log_id=%s order_id=%s entrust_no=%s current_status=%s incoming_status=%s",
+                external_trading_account_id,
+                event_log.id if event_log else None,
+                event.get("order_id"),
+                event.get("entrust_no"),
+                row.status,
+                event.get("status"),
+            )
+            _mark_external_event_log(event_log, process_status="PROCESSED", order=row, message="冲突订单状态已忽略")
+            continue
+        _apply_order_status_event(db, row, event, now, allow_reported_fill=False)
         _mark_external_event_log(event_log, process_status="PROCESSED", order=row)
         updated += 1
     return updated
