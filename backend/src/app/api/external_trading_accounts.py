@@ -856,6 +856,19 @@ def _serialize_target_position_status(
     }
 
 
+def _is_non_empty_target_position(row: Dict[str, Any]) -> bool:
+    quantity_fields = (
+        "target_quantity",
+        "current_quantity",
+        "available_quantity",
+        "effective_quantity",
+        "delta_quantity",
+        "pending_buy_quantity",
+        "pending_sell_quantity",
+    )
+    return any(safe_int(row.get(field)) != 0 for field in quantity_fields)
+
+
 def _serialize_ledger_position_status(
     row: ExternalTradingLedgerPosition,
     sub_account: Optional[ExternalTradingSubAccount],
@@ -2422,6 +2435,7 @@ async def get_external_trading_executor_status_target_positions(
     symbol: Optional[str] = Query(None),
     sub_account: Optional[str] = Query(None),
     strategy: Optional[str] = Query(None),
+    non_empty_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
@@ -2455,16 +2469,20 @@ async def get_external_trading_executor_status_target_positions(
         ExternalTradingTargetPosition.sub_account_id.asc(),
         ExternalTradingTargetPosition.symbol.asc(),
     )
-    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
-    page_sub_account_ids = sorted({row.sub_account_id for row in rows if row.sub_account_id})
+    if non_empty_only:
+        rows = query.all()
+        pagination = None
+    else:
+        rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    row_sub_account_ids = sorted({row.sub_account_id for row in rows if row.sub_account_id})
     ledger_by_sub_account = {
         sub_account_id: get_ledger_positions(db, sub_account_id)
-        for sub_account_id in page_sub_account_ids
+        for sub_account_id in row_sub_account_ids
     }
-    today_buy_by_key = get_today_buy_quantities(db, page_sub_account_ids)
+    today_buy_by_key = get_today_buy_quantities(db, row_sub_account_ids)
     open_by_sub_account = {
         sub_account_id: get_open_order_quantities(db, sub_account_id)
-        for sub_account_id in page_sub_account_ids
+        for sub_account_id in row_sub_account_ids
     }
     serialized_rows = []
     for row in rows:
@@ -2477,6 +2495,14 @@ async def get_external_trading_executor_status_target_positions(
             strategy_name_by_sub_account_id.get(row.sub_account_id),
             today_buy_by_key.get((row.sub_account_id, symbol_key), 0),
         ))
+    if non_empty_only:
+        page = _normalize_page(page)
+        page_size = _normalize_page_size(page_size)
+        serialized_rows = [row for row in serialized_rows if _is_non_empty_target_position(row)]
+        total = len(serialized_rows)
+        offset = (page - 1) * page_size
+        serialized_rows = serialized_rows[offset:offset + page_size]
+        pagination = _pagination_meta(page, page_size, total)
     _attach_symbol_names_to_payloads(serialized_rows)
     return {
         "rows": serialized_rows,
