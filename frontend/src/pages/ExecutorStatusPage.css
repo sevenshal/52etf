@@ -157,6 +157,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
   padding: 8px;
@@ -169,6 +170,12 @@
 
 .executor-list-toolbar .ant-segmented {
   flex: 0 0 auto;
+  max-width: 100%;
+}
+
+.executor-list-toolbar > span {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .executor-row-card {

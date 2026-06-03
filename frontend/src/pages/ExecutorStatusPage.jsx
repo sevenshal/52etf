@@ -206,7 +206,7 @@ const createEmptyTable = () => ({ rows: [], pagination: { page: 1, page_size: 10
 const createEmptyTables = () => Object.keys(tableEndpoints).reduce((result, key) => ({ ...result, [key]: createEmptyTable() }), {});
 const createDefaultTableState = () => Object.keys(tableEndpoints).reduce((result, key) => ({
   ...result,
-  [key]: { page: 1, pageSize: 10, filters: {}, unfilledOnly: false, nonEmptyOnly: false },
+  [key]: { page: 1, pageSize: 10, filters: {}, unfilledOnly: false, activeOnly: false, nonEmptyOnly: false, deltaOnly: false },
 }), {});
 const tableRowKey = (tableKey, row, index) => {
   if (row?.id !== undefined && row?.id !== null) return `${tableKey}:${row.id}`;
@@ -328,8 +328,10 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     role: joinFilterValues(state?.filters?.role),
     event_type: joinFilterValues(state?.filters?.event_type),
     process_status: joinFilterValues(state?.filters?.process_status),
-    unfilled_only: state?.unfilledOnly ? 'true' : undefined,
+    active_only: tableKey === 'orders' && state?.activeOnly ? 'true' : undefined,
+    unfilled_only: tableKey === 'orders' && state?.unfilledOnly ? 'true' : undefined,
     non_empty_only: tableKey === 'target_positions' && state?.nonEmptyOnly ? 'true' : undefined,
+    delta_only: tableKey === 'target_positions' && state?.deltaOnly ? 'true' : undefined,
   });
 
   const fetchBaseStatus = useCallback(async account => {
@@ -508,7 +510,9 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
       filters: normalizeServerTableFilters(filters),
       unfilledOnly: previousState.unfilledOnly || false,
+      activeOnly: previousState.activeOnly || false,
       nonEmptyOnly: previousState.nonEmptyOnly || false,
+      deltaOnly: previousState.deltaOnly || false,
     };
     const nextState = { ...tableState, [tableKey]: next };
     setTableState(nextState);
@@ -535,15 +539,20 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     keepToolbarInPlace(targetToolbarRef, beforeTop);
   };
 
-  const handleTargetNonEmptyFilterChange = value => {
+  const handleTargetPositionFilterChange = value => {
     const nonEmptyOnly = value === 'non_empty';
+    const deltaOnly = value === 'delta';
     const previousState = tableState.target_positions || { pageSize: 10, filters: {} };
-    if ((previousState.nonEmptyOnly || false) === nonEmptyOnly) return;
+    if (
+      (previousState.nonEmptyOnly || false) === nonEmptyOnly
+      && (previousState.deltaOnly || false) === deltaOnly
+    ) return;
     const toolbarTop = targetToolbarRef.current?.getBoundingClientRect().top;
     const nextStateForTargets = {
       ...previousState,
       page: 1,
       nonEmptyOnly,
+      deltaOnly,
     };
     setTableState(prev => ({ ...prev, target_positions: nextStateForTargets }));
     setTableLoaded(prev => ({ ...prev, target_positions: false }));
@@ -556,14 +565,19 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     }
   };
 
-  const handleOrderUnfilledFilterChange = value => {
+  const handleOrderLifecycleFilterChange = value => {
+    const activeOnly = value === 'active';
     const unfilledOnly = value === 'unfilled';
     const previousState = tableState.orders || { pageSize: 10, filters: {} };
-    if ((previousState.unfilledOnly || false) === unfilledOnly) return;
+    if (
+      (previousState.activeOnly || false) === activeOnly
+      && (previousState.unfilledOnly || false) === unfilledOnly
+    ) return;
     const toolbarTop = orderToolbarRef.current?.getBoundingClientRect().top;
     const nextStateForOrders = {
       ...previousState,
       page: 1,
+      activeOnly,
       unfilledOnly,
     };
     setTableState(prev => ({ ...prev, orders: nextStateForOrders }));
@@ -1075,6 +1089,10 @@ const ExecutorStatusPage = ({ embedded = false }) => {
 
   const renderTargetToolbar = () => {
     const nonEmptyOnly = tableState.target_positions?.nonEmptyOnly || false;
+    const deltaOnly = tableState.target_positions?.deltaOnly || false;
+    let filterValue = 'all';
+    if (nonEmptyOnly) filterValue = 'non_empty';
+    if (deltaOnly) filterValue = 'delta';
     const pagination = tables.target_positions?.pagination || {};
     const loaded = targetRows.length;
     const total = Number(pagination.total || 0);
@@ -1082,12 +1100,13 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       <div className="executor-list-toolbar" ref={targetToolbarRef}>
         <Segmented
           size="small"
-          value={nonEmptyOnly ? 'non_empty' : 'all'}
+          value={filterValue}
           options={[
             { label: '全部', value: 'all' },
             { label: '只看非空', value: 'non_empty' },
+            { label: '只看差额', value: 'delta' },
           ]}
-          onChange={handleTargetNonEmptyFilterChange}
+          onChange={handleTargetPositionFilterChange}
         />
         <span>{tableLoading.target_positions ? '更新中' : (total ? `已显示 ${loaded}/${total}` : `已显示 ${loaded}`)}</span>
       </div>
@@ -1095,7 +1114,11 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   };
 
   const renderOrderToolbar = () => {
+    const activeOnly = tableState.orders?.activeOnly || false;
     const unfilledOnly = tableState.orders?.unfilledOnly || false;
+    let filterValue = 'all';
+    if (activeOnly) filterValue = 'active';
+    if (unfilledOnly) filterValue = 'unfilled';
     const pagination = tables.orders?.pagination || {};
     const loaded = orderRows.length;
     const total = Number(pagination.total || 0);
@@ -1103,12 +1126,13 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       <div className="executor-list-toolbar" ref={orderToolbarRef}>
         <Segmented
           size="small"
-          value={unfilledOnly ? 'unfilled' : 'all'}
+          value={filterValue}
           options={[
             { label: '全部', value: 'all' },
+            { label: '只看活跃', value: 'active' },
             { label: '只看未成交', value: 'unfilled' },
           ]}
-          onChange={handleOrderUnfilledFilterChange}
+          onChange={handleOrderLifecycleFilterChange}
         />
         <span>{tableLoading.orders ? '更新中' : (total ? `已显示 ${loaded}/${total}` : `已显示 ${loaded}`)}</span>
       </div>
