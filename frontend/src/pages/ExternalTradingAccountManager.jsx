@@ -123,6 +123,7 @@ const executorServerTableEndpoints = {
   ledger_positions: 'ledger-positions',
   orders: 'orders',
   fills: 'fills',
+  deliver_records: 'deliver-records',
   events: 'events'
 };
 const executorServerTableLabels = {
@@ -130,6 +131,7 @@ const executorServerTableLabels = {
   ledger_positions: '账本持仓',
   orders: '订单生命周期',
   fills: '成交回报',
+  deliver_records: '交割单',
   events: '事件流水'
 };
 const executorServerTableKeys = Object.keys(executorServerTableEndpoints);
@@ -138,6 +140,7 @@ const createDefaultExecutorTableState = () => ({
   ledger_positions: { page: 1, pageSize: 10, filters: {} },
   orders: { page: 1, pageSize: 10, filters: {} },
   fills: { page: 1, pageSize: 10, filters: {} },
+  deliver_records: { page: 1, pageSize: 10, filters: {} },
   events: { page: 1, pageSize: 10, filters: {} }
 });
 const createEmptyExecutorTableData = () => ({
@@ -753,8 +756,11 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       page: tableState?.page || 1,
       page_size: tableState?.pageSize || 10,
       symbol: joinFilterValues(filters.symbol),
+      trade_date: joinFilterValues(filters.trade_date),
       sub_account: joinFilterValues(filters.sub_account),
       strategy: joinFilterValues(filters.strategy),
+      side: joinFilterValues(filters.side),
+      status: joinFilterValues(filters.status),
       role: joinFilterValues(filters.role),
       event_type: joinFilterValues(filters.event_type),
       process_status: joinFilterValues(filters.process_status)
@@ -854,6 +860,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     if (tabKey === 'ledger') return 'ledger_positions';
     if (tabKey === 'orders') return 'orders';
     if (tabKey === 'fills') return 'fills';
+    if (tabKey === 'deliver_records') return 'deliver_records';
     if (tabKey === 'events') return 'events';
     return null;
   };
@@ -1018,6 +1025,13 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     if (value === 'RECEIVED') return 'processing';
     return 'default';
   };
+  const deliverStatusColor = value => {
+    if (value === 'MATCHED') return 'success';
+    if (value === 'POSITION_ADJUSTED') return 'blue';
+    if (value === 'UNMATCHED') return 'warning';
+    if (value === 'IGNORED') return 'default';
+    return 'default';
+  };
 
   const renderEventSubAccounts = (_, record) => {
     const related = record?.related_sub_accounts || [];
@@ -1083,6 +1097,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   const ledgerRows = executorStatusTables.ledger_positions?.rows || [];
   const lifecycleRows = executorStatusTables.orders?.rows || [];
   const fillRows = executorStatusTables.fills?.rows || [];
+  const deliverRows = executorStatusTables.deliver_records?.rows || [];
   const eventRows = executorStatusTables.events?.rows || [];
   const executorSubAccountRows = executorSubAccountStatus?.rows || [];
   const executorSubAccountTotals = {
@@ -1101,6 +1116,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     ...(executorStatusTables.ledger_positions?.price_details || {}),
     ...(executorStatusTables.orders?.price_details || {}),
     ...(executorStatusTables.fills?.price_details || {}),
+    ...(executorStatusTables.deliver_records?.price_details || {}),
     ...(executorStatusTables.events?.price_details || {})
   };
   const renderMarketPrice = (_, record) => {
@@ -1338,6 +1354,32 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
     { title: '订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
     { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
+  ];
+
+  const deliverColumns = [
+    { title: '交割日期', dataIndex: 'trade_date', key: 'trade_date', width: 120, ...serverFilterProps('deliver_records', 'trade_date') },
+    { title: '业务', dataIndex: 'business_name', key: 'business_name', width: 130, render: value => value || '-' },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 150,
+      ...serverFilterProps('deliver_records', 'status'),
+      render: value => <Tag color={deliverStatusColor(value)}>{value || '-'}</Tag>
+    },
+    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('deliver_records', 'symbol') },
+    { title: '方向', dataIndex: 'side', key: 'side', width: 80, ...serverFilterProps('deliver_records', 'side'), render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
+    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '余额', dataIndex: 'post_amount', key: 'post_amount', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
+    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
+    { title: '费用', dataIndex: 'total_fee', key: 'total_fee', width: 100, render: value => formatOptionalNumber(value, 2) },
+    { title: '业务代码', dataIndex: 'business_flag', key: 'business_flag', width: 100, render: value => value || '-' },
+    { title: '业务编号', dataIndex: 'business_no', key: 'business_no', width: 120, render: value => value || '-' },
+    { title: '流水号', dataIndex: 'serial_no', key: 'serial_no', width: 120, render: value => value || '-' },
+    { title: '匹配订单', dataIndex: 'matched_order_id', key: 'matched_order_id', width: 100, render: value => value || '-' },
+    { title: '处理时间', dataIndex: 'reconciled_at', key: 'reconciled_at', width: 170, render: formatTime },
+    { title: '消息', dataIndex: 'message', key: 'message', width: 260, render: value => value || '-' }
   ];
 
   const eventColumns = [
@@ -2134,6 +2176,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             <Text>待执行差额 {executorStatus?.summary?.pending_delta_count ?? 0}</Text>
             <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
             <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
+            <Text>交割单 {executorStatus?.summary?.deliver_record_count ?? 0}</Text>
             <Text>入站事件 {executorStatus?.summary?.event_log_count ?? 0}</Text>
             <Text>总分配资金 {formatNumber(executorSubAccountTotals.cashAllocated, 2)}</Text>
             <Text>总净资产 {formatNumber(executorSubAccountTotals.netAsset, 2)}</Text>
@@ -2224,6 +2267,30 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
                     onChange={handleExecutorServerTableChange('fills')}
                     size="small"
                     scroll={{ x: 1600 }}
+                  />
+                )
+              },
+              {
+                key: 'deliver_records',
+                label: '交割单',
+                children: (
+                  <Table
+                    rowKey="id"
+                    columns={deliverColumns}
+                    dataSource={deliverRows}
+                    loading={executorStatusTableLoading.deliver_records}
+                    pagination={executorServerPagination('deliver_records')}
+                    onChange={handleExecutorServerTableChange('deliver_records')}
+                    expandable={{
+                      expandedRowRender: record => (
+                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                          {JSON.stringify(record.raw_record || {}, null, 2)}
+                        </pre>
+                      ),
+                      rowExpandable: record => !!record.raw_record
+                    }}
+                    size="small"
+                    scroll={{ x: 2300 }}
                   />
                 )
               },

@@ -152,6 +152,13 @@ const processStatusColor = value => {
   if (value === 'RECEIVED') return 'processing';
   return 'default';
 };
+const deliverStatusColor = value => {
+  if (value === 'MATCHED') return 'success';
+  if (value === 'POSITION_ADJUSTED') return 'blue';
+  if (value === 'UNMATCHED') return 'warning';
+  if (value === 'IGNORED') return 'default';
+  return 'default';
+};
 const diffTextColor = value => {
   const num = Number(value || 0);
   if (!Number.isFinite(num) || num === 0) return undefined;
@@ -193,6 +200,7 @@ const tableEndpoints = {
   ledger_positions: 'ledger-positions',
   orders: 'orders',
   fills: 'fills',
+  deliver_records: 'deliver-records',
   events: 'events',
 };
 const tableLabels = {
@@ -200,6 +208,7 @@ const tableLabels = {
   ledger_positions: '账本持仓',
   orders: '订单生命周期',
   fills: '成交回报',
+  deliver_records: '交割单',
   events: '事件流水',
 };
 const createEmptyTable = () => ({ rows: [], pagination: { page: 1, page_size: 10, total: 0 }, price_details: {}, filter_options: {} });
@@ -233,6 +242,7 @@ const EXECUTOR_TABS = [
   { key: 'ledger', label: '账本持仓' },
   { key: 'orders', label: '订单' },
   { key: 'fills', label: '成交' },
+  { key: 'deliver_records', label: '交割单' },
   { key: 'events', label: '事件' },
   { key: 'plan', label: '净额预览' },
 ];
@@ -272,6 +282,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const ledgerRows = tables.ledger_positions?.rows || [];
   const orderRows = tables.orders?.rows || [];
   const fillRows = tables.fills?.rows || [];
+  const deliverRows = tables.deliver_records?.rows || [];
   const eventRows = tables.events?.rows || [];
   const demandRows = plan?.plan?.demands || [];
   const internalCrossRows = plan?.plan?.internal_crosses || [];
@@ -289,6 +300,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     ...(tables.ledger_positions?.price_details || {}),
     ...(tables.orders?.price_details || {}),
     ...(tables.fills?.price_details || {}),
+    ...(tables.deliver_records?.price_details || {}),
     ...(tables.events?.price_details || {}),
   };
 
@@ -323,8 +335,11 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     page: state?.page || 1,
     page_size: state?.pageSize || 10,
     symbol: joinFilterValues(state?.filters?.symbol),
+    trade_date: joinFilterValues(state?.filters?.trade_date),
     sub_account: joinFilterValues(state?.filters?.sub_account),
     strategy: joinFilterValues(state?.filters?.strategy),
+    side: joinFilterValues(state?.filters?.side),
+    status: joinFilterValues(state?.filters?.status),
     role: joinFilterValues(state?.filters?.role),
     event_type: joinFilterValues(state?.filters?.event_type),
     process_status: joinFilterValues(state?.filters?.process_status),
@@ -415,6 +430,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     if (tabKey === 'ledger') return 'ledger_positions';
     if (tabKey === 'orders') return 'orders';
     if (tabKey === 'fills') return 'fills';
+    if (tabKey === 'deliver_records') return 'deliver_records';
     if (tabKey === 'events') return 'events';
     return null;
   };
@@ -879,6 +895,24 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '金额', dataIndex: 'amount', width: 120, render: value => formatNumber(value, 2) },
     { title: '真实费用', dataIndex: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
   ];
+  const deliverColumns = [
+    { title: '交割日期', dataIndex: 'trade_date', width: 120, ...serverFilterProps('deliver_records', 'trade_date') },
+    { title: '业务', dataIndex: 'business_name', width: 130, render: value => value || '-' },
+    { title: '状态', dataIndex: 'status', width: 150, ...serverFilterProps('deliver_records', 'status'), render: value => <Tag color={deliverStatusColor(value)}>{value || '-'}</Tag> },
+    { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('deliver_records', 'symbol') },
+    { title: '方向', dataIndex: 'side', width: 80, ...serverFilterProps('deliver_records', 'side'), render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
+    { title: '数量', dataIndex: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '余额', dataIndex: 'post_amount', width: 100, render: value => formatOptionalNumber(value) },
+    { title: '价格', dataIndex: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
+    { title: '金额', dataIndex: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
+    { title: '费用', dataIndex: 'total_fee', width: 100, render: value => formatOptionalNumber(value, 2) },
+    { title: '业务代码', dataIndex: 'business_flag', width: 100, render: value => value || '-' },
+    { title: '业务编号', dataIndex: 'business_no', width: 120, render: value => value || '-' },
+    { title: '流水号', dataIndex: 'serial_no', width: 120, render: value => value || '-' },
+    { title: '匹配订单', dataIndex: 'matched_order_id', width: 100, render: value => value || '-' },
+    { title: '处理时间', dataIndex: 'reconciled_at', width: 170, render: formatTime },
+    { title: '消息', dataIndex: 'message', width: 260, render: value => value || '-' },
+  ];
   const eventColumns = [
     { title: '事件时间', dataIndex: 'event_time', width: 170, render: formatTime },
     { title: '事件类型', dataIndex: 'event_type', width: 120, ...serverFilterProps('events', 'event_type'), render: value => <Tag color={eventTypeColor(value)}>{eventTypeLabel(value)}</Tag> },
@@ -928,6 +962,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       { label: '待执行差额', value: status?.summary?.pending_delta_count ?? 0, tone: 'warning' },
       { label: '活跃订单', value: status?.summary?.active_order_count ?? 0, tone: 'danger' },
       { label: '成交回报', value: status?.summary?.fill_count ?? 0 },
+      { label: '交割单', value: status?.summary?.deliver_record_count ?? 0 },
       { label: '总净资产', value: formatNumber(totals.netAsset, 2) },
       { label: '可用资金', value: formatNumber(totals.cashAvailable, 2) },
       { label: '交易费', value: formatNumber(summary.trade_fee_total, 2) },
@@ -950,9 +985,13 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const renderSimpleCard = (record, kind) => {
     const title = kind === 'sub'
       ? record.name
+      : kind === 'deliver'
+        ? (record.business_name || renderSymbolText(record))
       : renderSymbolText(record);
     const subtitle = kind === 'sub'
       ? (record.strategy_name || record.binding_label || '虚拟子账户')
+      : kind === 'deliver'
+        ? `${record.trade_date || '-'} / ${renderSymbolText(record)}`
       : (record.sub_account_name || record.name || '-');
     return (
       <div className="executor-row-card" key={record.id || `${record.sub_account_id}-${record.symbol}-${record.created_at || record.updated_at}`}>
@@ -964,6 +1003,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
           {kind === 'order' ? <Tag color={orderStatusColor(record.status)}>{record.status || '-'}</Tag> : null}
           {kind === 'sub' ? <Tag color={record.enabled ? 'green' : 'default'}>{record.enabled ? '启用' : '停用'}</Tag> : null}
           {kind === 'target' && record.side ? <Tag color={record.side === 'BUY' ? 'red' : 'green'}>{record.side}</Tag> : null}
+          {kind === 'deliver' ? <Tag color={deliverStatusColor(record.status)}>{record.status || '-'}</Tag> : null}
         </div>
         <div className="executor-row-card__metrics">
           {kind === 'sub' && (
@@ -1006,6 +1046,14 @@ const ExecutorStatusPage = ({ embedded = false }) => {
               <div><span>金额</span><strong>{formatNumber(record.amount, 2)}</strong></div>
             </>
           )}
+          {kind === 'deliver' && (
+            <>
+              <div><span>业务</span><strong>{record.business_name || '-'}</strong></div>
+              <div><span>数量</span><strong>{formatOptionalNumber(record.quantity)}</strong></div>
+              <div><span>余额</span><strong>{formatOptionalNumber(record.post_amount)}</strong></div>
+              <div><span>金额</span><strong>{formatOptionalNumber(record.amount, 2)}</strong></div>
+            </>
+          )}
         </div>
         {kind === 'order' ? (
           <div className="executor-row-card__details">
@@ -1017,6 +1065,9 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         ) : null}
         {kind === 'order' && shouldShowOrderMessage(record) ? (
           <p className="executor-order-message">{getOrderMessage(record)}</p>
+        ) : null}
+        {kind === 'deliver' && record.message ? (
+          <p className="executor-order-message">{record.message}</p>
         ) : null}
         {kind === 'order' && renderOrderActions(record) !== '-' ? (
           <div className="executor-row-card__actions">{renderOrderActions(record)}</div>
@@ -1188,6 +1239,33 @@ const ExecutorStatusPage = ({ embedded = false }) => {
           {renderMobileCards(fillRows, 'fill', 'fills')}
           <div className="executor-desktop-table">
             <Table rowKey="id" columns={fillColumns} dataSource={fillRows} loading={tableLoading.fills} pagination={paginationFor('fills')} onChange={handleTableChange('fills')} size="small" scroll={{ x: 1200 }} />
+          </div>
+        </>
+      );
+    }
+    if (activeTab === 'deliver_records') {
+      return (
+        <>
+          {renderMobileCards(deliverRows, 'deliver', 'deliver_records')}
+          <div className="executor-desktop-table">
+            <Table
+              rowKey="id"
+              columns={deliverColumns}
+              dataSource={deliverRows}
+              loading={tableLoading.deliver_records}
+              pagination={paginationFor('deliver_records')}
+              onChange={handleTableChange('deliver_records')}
+              expandable={{
+                expandedRowRender: record => (
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {JSON.stringify(record.raw_record || {}, null, 2)}
+                  </pre>
+                ),
+                rowExpandable: record => !!record.raw_record,
+              }}
+              size="small"
+              scroll={{ x: 2300 }}
+            />
           </div>
         </>
       );
