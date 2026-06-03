@@ -257,7 +257,11 @@ class SZDTUSTrader:
         except Exception as e:
             logger.error(f"SZDTUSTrader的处理 {account_id} 失败: {e}")
             self._log(account_id, 'ERROR', f"处理异常: {e}")
-            send_alert_email(f"自动化交易策略报错: SZDTUSTrader 账号 {account_id}", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
+            send_alert_email(
+                f"自动化交易策略报错: SZDTUSTrader 账号 {account_id}",
+                f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
+                scenario_key="szdt_us_trading_error",
+            )
 
     async def worker_loop(self):
         logger.info("SZDT US Trader Worker Loop Started")
@@ -290,14 +294,22 @@ class SZDTUSTrader:
                         await self.run_once(config, ib_port)
                     except Exception as e:
                         logger.error(f"Failed to run SZDT US trader for account {config.account_id}: {e}")
-                        send_alert_email(f"自动化交易策略报错: SZDTUSTrader account {config.account_id}", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
+                        send_alert_email(
+                            f"自动化交易策略报错: SZDTUSTrader account {config.account_id}",
+                            f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
+                            scenario_key="szdt_us_trading_error",
+                        )
                 
                 # 4. Wait for next minute
                 await asyncio.sleep(60)
 
             except Exception as e:
                 logger.error(f"SZDT US Trader check loop error: {e}")
-                send_alert_email("自动化交易策略报错: SZDTUSTrader 主循环", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
+                send_alert_email(
+                    "自动化交易策略报错: SZDTUSTrader 主循环",
+                    f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
+                    scenario_key="szdt_us_trading_error",
+                )
                 await asyncio.sleep(60)
 
 def start_szdt_us_trader():

@@ -1331,6 +1331,7 @@ class ScheduledTaskManager:
             send_alert_email(
                 f"定时任务执行失败: {task.name}",
                 f"task_key={task.task_key}\nsource={trigger_source}\nerror={exc}\n\n{traceback.format_exc()}",
+                scenario_key="scheduled_task_failure",
             )
         finally:
             finished_at = datetime.now()

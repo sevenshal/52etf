@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_fund_flow, db_manager, factor_lab, events
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_fund_flow, db_manager, factor_lab, events, email_settings
 from ..robot.main import robot
 from ..core.utils import send_alert_email
 import traceback
@@ -35,7 +35,11 @@ app = FastAPI(lifespan=lifespan)
 async def global_exception_handler(request: Request, exc: Exception):
     error_msg = f"API Interface Error:\nURL: {request.url}\nMethod: {request.method}\nException: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
     logging.error(f"Global Exeption Handler: {error_msg}")
-    send_alert_email(f"API服务报错告警: {request.url.path}", error_msg)
+    send_alert_email(
+        f"API服务报错告警: {request.url.path}",
+        error_msg,
+        scenario_key="api_service_error",
+    )
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 # 根据环境配置 CORS
@@ -90,6 +94,7 @@ app.include_router(a_stock_fund_flow.router)
 app.include_router(db_manager.router)
 app.include_router(factor_lab.router)
 app.include_router(events.router)
+app.include_router(email_settings.router)
 
 def start_robot():
     global _robot_started

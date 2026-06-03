@@ -983,6 +983,16 @@ class ScheduledTaskConfig(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class EmailRecipientConfig(Base):
+    """邮件收件人配置：默认邮箱与场景覆盖。"""
+    __tablename__ = "email_recipient_configs"
+
+    scenario_key = Column(String(100), primary_key=True)
+    recipient_email = Column(String(1000))
+    updated_by = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class FactorLiveTradingConfig(Base):
     """因子线上交易配置：复用因子回测参数生成信号，并同步到外部交易执行器。"""
     __tablename__ = "factor_live_trading_configs"

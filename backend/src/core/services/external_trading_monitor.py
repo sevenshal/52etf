@@ -145,7 +145,11 @@ def _send_external_trading_connection_alert(
         f"数据库最后心跳: {_format_dt(account.get('last_seen_at'))}",
         f"最后断开原因: {account.get('last_disconnect_reason') or '-'}",
     ])
-    send_alert_email(subject, body)
+    send_alert_email(
+        subject,
+        body,
+        scenario_key="external_trading_connection_alert",
+    )
 
 
 def process_external_trading_connection_monitor_for_robot() -> Dict:

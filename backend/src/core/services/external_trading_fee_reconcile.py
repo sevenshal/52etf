@@ -191,7 +191,11 @@ def check_and_alert_missing_deliver_records(today: Optional[date] = None) -> Dic
             f"请检查 PTrade 策略 before_trading_start 是否正常执行，以及 WebSocket 连接是否正常。"
         )
         try:
-            send_alert_email(subject, body)
+            send_alert_email(
+                subject,
+                body,
+                scenario_key="external_trading_fee_reconcile_alert",
+            )
             result["alert_sent"] = True
         except Exception as exc:
             logger.error("Failed to send fee reconcile alert email: %s", exc)

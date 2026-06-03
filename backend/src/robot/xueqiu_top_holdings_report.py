@@ -26,7 +26,7 @@ from ..core.database import (
     XueqiuCubeRankCache,
     XueqiuTopHoldingsRun,
 )
-from ..core.utils import send_alert_email, sendmail
+from ..core.utils import send_alert_email, send_configured_email
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +41,6 @@ RANK_TARGET_COUNT = 1000
 DEFAULT_TARGET_CUBE_SYMBOL = "ZH3630096"
 DEFAULT_TARGET_CUBE_ID = 3664154
 DEFAULT_OUTPUT_DIR = ROOT / "lab" / "output" / "xueqiu_top_holdings"
-DEFAULT_RECEIVER_EMAIL = "405290618@qq.com"
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
@@ -2155,7 +2154,6 @@ async def run_top_holdings_job(
         rebalance_response=rebalance_response,
     )
     if not no_email:
-        receiver = receiver_email or os.getenv("XUEQIU_TOP_HOLDINGS_EMAIL") or DEFAULT_RECEIVER_EMAIL
         subject_filter = (
             f"活跃{active_filter_summary.get('lookback_days')}天"
             if active_filter_summary
@@ -2166,7 +2164,13 @@ async def run_top_holdings_job(
             if execute_rebalance
             else f"雪球年榜1000{subject_filter}组合综合持仓权重 Top{top_n} - {run_at.strftime('%Y-%m-%d')}"
         )
-        sendmail(receiver, subject, report_html, mimeType="html")
+        send_configured_email(
+            "xueqiu_top_holdings_report",
+            subject,
+            report_html,
+            mimeType="html",
+            receiver_email=receiver_email,
+        )
     return {
         "skipped": False,
         "record_id": record_id,
@@ -2258,7 +2262,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Xueqiu top1000 cube holding popularity and rebalance.")
     parser.add_argument("--list-path", default=None, help="Optional local top1000_list.json; bypasses DB ranking cache.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for daily file outputs.")
-    parser.add_argument("--receiver-email", default=None, help="Receiver email. Defaults to XUEQIU_TOP_HOLDINGS_EMAIL or alert email.")
+    parser.add_argument("--receiver-email", default=None, help="Receiver email. Defaults to configured report/default email.")
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--limit", type=int, default=RANK_TARGET_COUNT)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
@@ -2316,6 +2320,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             send_alert_email(
                 "雪球年榜1000组合综合持仓任务失败",
                 f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
+                scenario_key="xueqiu_top_holdings_failure",
             )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to send failure alert")

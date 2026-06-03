@@ -145,5 +145,9 @@ def robot():
     except Exception as e:
       import traceback
       from ..core.utils import send_alert_email
-      send_alert_email("自动化业务报错: Schedule 主循序异常", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
+      send_alert_email(
+        "自动化业务报错: Schedule 主循序异常",
+        f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
+        scenario_key="robot_main_loop_error",
+      )
     time.sleep(5)

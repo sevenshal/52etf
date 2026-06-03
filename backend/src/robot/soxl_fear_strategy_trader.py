@@ -971,6 +971,7 @@ class SoxlFearStrategyTrader:
             send_alert_email(
                 f"SOXL情绪量能自动交易报错: {masked_account_id}#{config_id}",
                 f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
+                scenario_key="soxl_fear_strategy_error",
             )
         finally:
             publish_event(config.account_id, "soxl_fear_strategy_run", {"config_id": config_id})
@@ -1046,6 +1047,7 @@ class SoxlFearStrategyTrader:
                 send_alert_email(
                     "SOXL情绪量能自动交易主循环异常",
                     f"Error: {exc}\n\nTraceback:\n{traceback.format_exc()}",
+                    scenario_key="soxl_fear_strategy_error",
                 )
                 await asyncio.sleep(60)
 

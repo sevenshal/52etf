@@ -80,7 +80,11 @@ class LevETFTrader:
                     
             except Exception as e:
                 logger.error(f"Error in LevETFTrader loop: {e}", exc_info=True)
-                send_alert_email("自动化跟单策略报错: LevETFTrader 主循环异常", f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}")
+                send_alert_email(
+                    "自动化跟单策略报错: LevETFTrader 主循环异常",
+                    f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
+                    scenario_key="lev_etf_trading_error",
+                )
                 await asyncio.sleep(60)
 
 def start_lev_etf_trader():

@@ -3790,7 +3790,11 @@ def _send_factor_live_automation_alert(
         body_parts.extend(["", "Payload:", payload_text])
     if exc is not None:
         body_parts.extend(["", "Traceback:", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))])
-    send_alert_email(subject, "\n".join(body_parts))
+    send_alert_email(
+        subject,
+        "\n".join(body_parts),
+        scenario_key="factor_live_trading_error",
+    )
 
 
 def _factor_live_executor_failure_payload(execution_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
