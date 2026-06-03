@@ -58,6 +58,12 @@ EMAIL_SCENARIOS = [
         "description": "SOXL 情绪量能自动交易执行或主循环异常。",
     },
     {
+        "key": "soxl_fear_strategy_rebalance_signal",
+        "name": "SOXL 情绪量能策略调仓提醒",
+        "category": "交易",
+        "description": "SOXL 情绪量能策略产生买入或卖出调仓动作。",
+    },
+    {
         "key": "factor_live_trading_error",
         "name": "因子线上交易异常",
         "category": "交易",

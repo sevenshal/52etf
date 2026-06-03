@@ -51,7 +51,7 @@ from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
 from ..core.services.quote import QuoteService
 from ..core.services.trade import OrderSide, OrderType, OutsideRTH, TimeInForceType
-from ..core.utils import mask_account_id, send_alert_email
+from ..core.utils import mask_account_id, send_alert_email, send_configured_email
 from .cnn_fear_index import CNNFearGreedIndexScraper, CNN_HISTORY_SYMBOL
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,58 @@ class SoxlFearStrategyTrader:
                 config.last_run_at = datetime.now()
                 config.last_run_status = status
                 config.last_run_message = message[:500]
+
+    def _send_rebalance_notification(
+        self,
+        *,
+        config_id: int,
+        masked_account_id: str,
+        account_type: str,
+        symbol: str,
+        trigger_source: str,
+        action: str,
+        quantity: int,
+        price: float,
+        position_ratio_before: float,
+        position_ratio_after: float,
+        cnn_score: float,
+        cnn_timestamp,
+        volume_ratio: float,
+        raw_volume_ratio: float,
+        market_snapshot: Dict,
+        trade_message: str,
+    ):
+        action_label = "买入" if action == "BUY" else "卖出"
+        amount = float(quantity or 0) * float(price or 0)
+        quote_timestamp = market_snapshot.get("quote_timestamp")
+        body = "\n".join([
+            "SOXL 情绪量能策略已产生调仓动作。",
+            "",
+            f"配置ID: {config_id}",
+            f"账号: {masked_account_id}",
+            f"账户类型: {account_type or '-'}",
+            f"标的: {symbol}",
+            f"动作: {action_label} ({action})",
+            f"数量: {quantity}",
+            f"参考价格: {price:.4f}",
+            f"估算金额: {amount:.2f}",
+            f"仓位变化: {position_ratio_before:.2f}% -> {position_ratio_after:.2f}%",
+            f"CNN 情绪分数: {cnn_score:.2f}",
+            f"CNN 更新时间: {cnn_timestamp or '-'}",
+            f"量能倍数: {volume_ratio:.4f}",
+            f"原始量能倍数: {raw_volume_ratio:.4f}",
+            f"量能来源: {market_snapshot.get('volume_projection_source') or '-'}",
+            f"行情时间: {quote_timestamp or '-'}",
+            f"触发来源: {trigger_source}",
+            "",
+            f"执行信息: {trade_message}",
+            f"通知时间: {datetime.now().isoformat()}",
+        ])
+        send_configured_email(
+            "soxl_fear_strategy_rebalance_signal",
+            f"SOXL情绪量能策略调仓提醒: {action_label} {symbol} {masked_account_id}#{config_id}",
+            body,
+        )
 
     def _fetch_latest_cnn_score(self) -> Tuple[float, datetime]:
         scraper = CNNFearGreedIndexScraper()
@@ -771,6 +823,7 @@ class SoxlFearStrategyTrader:
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
+            rebalance_notification = None
 
             with get_db_ctx() as db:
                 persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
@@ -955,6 +1008,27 @@ class SoxlFearStrategyTrader:
                 )
                 self._update_run_status(config_id, status, trade_message)
                 logger.info("SOXL fear strategy %s config=%s result=%s msg=%s", masked_account_id, config_id, trade_action or "CHECK", trade_message)
+                if trade_action:
+                    rebalance_notification = {
+                        "config_id": config_id,
+                        "masked_account_id": masked_account_id,
+                        "account_type": config.account_type or "-",
+                        "symbol": symbol,
+                        "trigger_source": trigger_source,
+                        "action": trade_action,
+                        "quantity": trade_quantity,
+                        "price": current_price,
+                        "position_ratio_before": position_ratio_before,
+                        "position_ratio_after": position_ratio_after,
+                        "cnn_score": cnn_score,
+                        "cnn_timestamp": cnn_timestamp,
+                        "volume_ratio": volume_ratio,
+                        "raw_volume_ratio": raw_volume_ratio,
+                        "market_snapshot": dict(market_snapshot),
+                        "trade_message": trade_message,
+                    }
+            if rebalance_notification:
+                self._send_rebalance_notification(**rebalance_notification)
         except Exception as exc:
             logger.error("SOXL fear strategy failed for %s config=%s: %s", masked_account_id, config_id, exc, exc_info=True)
             error_message = f"执行失败: {exc}"
