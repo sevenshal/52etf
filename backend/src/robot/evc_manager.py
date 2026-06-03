@@ -146,7 +146,7 @@ class EVCManager:
 
                 except Exception as e:
                     self.logger.error(f"Error fetching page {page}: {str(e)}")
-                    break
+                    raise RuntimeError(f"EVC stock fetch aborted on page {page}: {e}") from e
 
             total_stocks_fetched = total_processed
             self.logger.info(f"Completed processing {total_stocks_fetched} stocks")
@@ -162,5 +162,6 @@ class EVCManager:
 
         except Exception as e:
             self.logger.error(f"Error in fetch_and_store_stocks: {str(e)}")
+            raise
         finally:
             self.db_session.close() 

@@ -414,7 +414,9 @@ class EVCService:
             return list(map(EVCData.from_dict, data['data'])), data['page'], data['count']
         except Exception as e:
             logging.error(f"搜索股票失败: {str(e)}")
-            return [], 0, 0
+            raise RuntimeError(
+                f"EVC search_stock failed on page={page} size={size}: {e}"
+            ) from e
     
     def stock_evc_info(self, symbol) -> EVCData:
         symbol = self._normalize_evc_symbol(symbol)
