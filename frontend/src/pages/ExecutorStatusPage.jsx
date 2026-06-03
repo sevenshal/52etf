@@ -876,6 +876,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   ];
 
   const renderMetricCards = () => {
+    const summary = status?.summary || {};
     const metrics = [
       { label: '子账户', value: status?.summary?.sub_account_count ?? subRows.length },
       { label: '目标仓位', value: status?.summary?.target_position_count ?? 0 },
@@ -884,7 +885,10 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       { label: '成交回报', value: status?.summary?.fill_count ?? 0 },
       { label: '总净资产', value: formatNumber(totals.netAsset, 2) },
       { label: '可用资金', value: formatNumber(totals.cashAvailable, 2) },
-      { label: '总费用', value: formatNumber(status?.summary?.total_fee, 2) },
+      { label: '交易费', value: formatNumber(summary.trade_fee_total, 2) },
+      { label: '归因', value: formatNumber(summary.attributed_trade_fee_total, 2) },
+      { label: '非交易费', value: formatNumber(summary.non_trade_fee_total, 2) },
+      { label: '总费用', value: formatNumber(summary.total_fee, 2) },
     ];
     return (
       <div className="executor-metrics">
