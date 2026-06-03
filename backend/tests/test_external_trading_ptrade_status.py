@@ -14,12 +14,15 @@ from src.app.api.external_trading_accounts import (
     _serialize_event_log_status,
 )
 from src.core.external_trading_database import (
+    ExternalTradingAccount,
     ExternalTradingBase,
+    ExternalTradingDeliverRecord,
     ExternalTradingEventLog,
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
     ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
 )
 from src.core.services.external_trading_ledger import (
     _apply_order_status_event,
@@ -30,6 +33,7 @@ from src.core.services.external_trading_ledger import (
     process_order_events,
     process_trade_events,
     ptrade_status_to_lifecycle,
+    reconcile_deliver_records,
     record_external_event_logs,
     record_submission_result,
 )
@@ -46,6 +50,39 @@ class PTradeOrderStatusTest(TestCase):
         engine = create_engine("sqlite:///:memory:")
         ExternalTradingBase.metadata.create_all(engine)
         return sessionmaker(bind=engine)()
+
+    def _external_account(self):
+        return ExternalTradingAccount(
+            id=2,
+            account_id="acct",
+            name="PTrade",
+            identifier="ptrade",
+            market_type="A_STOCK",
+        )
+
+    def _red_stock_deliver_record(self):
+        return {
+            "init_date": 20260528,
+            "entrust_date": 20260528,
+            "date_back": 20260528,
+            "stock_code": "301086",
+            "stock_name": "鸿富瀚",
+            "business_name": "红股入账",
+            "remark": "红股入账",
+            "business_flag": 4015,
+            "business_type": "3",
+            "business_amount": 40.0,
+            "occur_amount": 40.0,
+            "post_amount": 140.0,
+            "business_price": 234.76,
+            "business_balance": 0.0,
+            "occur_balance": 0.0,
+            "business_no": 9339,
+            "serial_no": 69011,
+            "position_str": "020260528003010000069011",
+            "entrust_way": "4",
+            "entrust_bs": "1",
+        }
 
     def _filled_parent_order(self):
         return ExternalTradingOrder(
@@ -64,6 +101,133 @@ class PTradeOrderStatusTest(TestCase):
             status="FILLED",
             ptrade_status="8",
         )
+
+    def test_red_stock_deliver_adjusts_position_once(self):
+        db = self._db_session()
+        account = self._external_account()
+        sub_account = ExternalTradingSubAccount(
+            id=19,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="2026滚雪球",
+            strategy_type="snowball_copy_live",
+            strategy_config_id=18,
+        )
+        position = ExternalTradingLedgerPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            symbol="301086.SZ",
+            quantity=100,
+            available_quantity=100,
+            avg_cost=233.3999,
+            market_price=234.76,
+            market_value=23476.0,
+        )
+        target = ExternalTradingTargetPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            strategy_type="snowball_copy_live",
+            strategy_config_id=18,
+            symbol="301086.SZ",
+            target_quantity=0,
+            status="ACTIVE",
+        )
+        db.add_all([account, sub_account, position, target])
+        db.flush()
+
+        result = reconcile_deliver_records(db, account=account, records=[self._red_stock_deliver_record()])
+
+        self.assertEqual(1, result["position_adjusted"])
+        self.assertEqual(0, result["ignored"])
+        self.assertEqual("POSITION_ADJUSTED", result["records"][0]["status"])
+        self.assertEqual(140, position.quantity)
+        self.assertEqual(140, position.available_quantity)
+        self.assertAlmostEqual(166.714214, position.avg_cost, places=5)
+        self.assertAlmostEqual(167.685714, position.market_price, places=5)
+        self.assertEqual(23476.0, position.market_value)
+        self.assertEqual(0, target.target_quantity)
+
+        deliver_row = db.query(ExternalTradingDeliverRecord).one()
+        self.assertEqual("POSITION_ADJUSTED", deliver_row.status)
+        self.assertIsNotNone(deliver_row.reconciled_at)
+
+        duplicate_result = reconcile_deliver_records(db, account=account, records=[self._red_stock_deliver_record()])
+
+        self.assertEqual(0, duplicate_result["position_adjusted"])
+        self.assertEqual(1, duplicate_result["position_adjustment_deduped"])
+        self.assertEqual(0, duplicate_result["ignored"])
+        self.assertEqual(140, position.quantity)
+        self.assertEqual(140, position.available_quantity)
+        self.assertEqual(1, db.query(ExternalTradingDeliverRecord).count())
+
+    def test_red_stock_deliver_marks_aligned_position_without_reapplying(self):
+        db = self._db_session()
+        account = self._external_account()
+        sub_account = ExternalTradingSubAccount(
+            id=19,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="2026滚雪球",
+        )
+        position = ExternalTradingLedgerPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            symbol="301086.SZ",
+            quantity=140,
+            available_quantity=140,
+            avg_cost=166.714214,
+        )
+        db.add_all([account, sub_account, position])
+        db.flush()
+
+        result = reconcile_deliver_records(db, account=account, records=[self._red_stock_deliver_record()])
+
+        self.assertEqual(0, result["position_adjusted"])
+        self.assertEqual(1, result["position_adjustment_aligned"])
+        self.assertEqual(0, result["ignored"])
+        self.assertEqual("POSITION_ADJUSTED", result["records"][0]["status"])
+        self.assertEqual(140, position.quantity)
+        self.assertEqual(140, position.available_quantity)
+        deliver_row = db.query(ExternalTradingDeliverRecord).one()
+        self.assertEqual("POSITION_ADJUSTED", deliver_row.status)
+        self.assertIn("未重复调整", deliver_row.message)
+
+    def test_red_stock_deliver_scales_active_hold_target_quantity(self):
+        db = self._db_session()
+        account = self._external_account()
+        sub_account = ExternalTradingSubAccount(
+            id=19,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="2026滚雪球",
+        )
+        position = ExternalTradingLedgerPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            symbol="301086.SZ",
+            quantity=100,
+            available_quantity=100,
+            avg_cost=233.3999,
+        )
+        target = ExternalTradingTargetPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            symbol="301086.SZ",
+            target_quantity=100,
+            status="ACTIVE",
+        )
+        db.add_all([account, sub_account, position, target])
+        db.flush()
+
+        reconcile_deliver_records(db, account=account, records=[self._red_stock_deliver_record()])
+
+        self.assertEqual(140, position.quantity)
+        self.assertEqual(140, target.target_quantity)
 
     def test_order_event_does_not_use_business_amount_as_fill_quantity(self):
         payload = {"status": "8", "business_amount": 100, "quantity": 100}

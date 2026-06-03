@@ -2928,7 +2928,9 @@ def replay_unmatched_external_events_for_order(
 
 
 PTRADE_TRADE_BUSINESS_FLAGS = {"4001", "4002"}
+PTRADE_SHARE_BONUS_BUSINESS_FLAGS = {"4015"}
 PTRADE_NON_TRADE_BUSINESS_FLAGS = {"2434", "4018", "4081", "4082", "4420"}
+PTRADE_SHARE_BONUS_KEYWORDS = ("红股入账", "送股", "转增", "股票股利")
 NON_TRADE_DELIVER_KEYWORDS = (
     "组合费",
     "红利税",
@@ -2937,6 +2939,7 @@ NON_TRADE_DELIVER_KEYWORDS = (
     "资金下账",
     "资金上账",
 )
+DELIVER_STATUS_POSITION_ADJUSTED = "POSITION_ADJUSTED"
 
 
 def _is_blank_deliver_value(value: Any) -> bool:
@@ -3119,6 +3122,30 @@ def _deliver_record_identity(normalized: Dict[str, Any]) -> Optional[Tuple[str, 
         if value:
             return key, value
     return None
+
+
+def _is_share_bonus_deliver_record(normalized: Dict[str, Any]) -> bool:
+    raw_record = normalized.get("raw_record")
+    record = raw_record if isinstance(raw_record, dict) else {}
+    if not normalized.get("symbol") or safe_int(normalized.get("quantity")) <= 0:
+        return False
+    business_flag = _deliver_business_flag(record)
+    if business_flag in PTRADE_SHARE_BONUS_BUSINESS_FLAGS:
+        return True
+    business_text = _deliver_business_text(record)
+    return any(keyword in business_text for keyword in PTRADE_SHARE_BONUS_KEYWORDS)
+
+
+def _deliver_post_quantity(normalized: Dict[str, Any]) -> int:
+    raw_record = normalized.get("raw_record")
+    record = raw_record if isinstance(raw_record, dict) else {}
+    return safe_int(_deliver_value(record, (
+        "post_amount",
+        "post_quantity",
+        "current_amount",
+        "股份余额",
+        "证券余额",
+    )))
 
 
 def normalize_deliver_record(raw_record: Dict[str, Any], default_trade_date: Optional[date] = None) -> Dict[str, Any]:
@@ -3471,15 +3498,12 @@ def _find_order_for_deliver(
     return _pick_event_order(rows)
 
 
-def _upsert_deliver_record(
+def _find_existing_deliver_record(
     db: Session,
     *,
     account: ExternalTradingAccount,
     normalized: Dict[str, Any],
-    matched_order: Optional[ExternalTradingOrder],
-    status: str,
-    message: Optional[str] = None,
-) -> ExternalTradingDeliverRecord:
+) -> Optional[ExternalTradingDeliverRecord]:
     row = (
         db.query(ExternalTradingDeliverRecord)
         .filter(
@@ -3489,30 +3513,48 @@ def _upsert_deliver_record(
         )
         .first()
     )
-    now = datetime.now()
-    if not row:
-        normalized_identity = _deliver_record_identity(normalized)
-        if normalized_identity:
-            same_day_rows = (
-                db.query(ExternalTradingDeliverRecord)
-                .filter(
-                    ExternalTradingDeliverRecord.external_trading_account_id == account.id,
-                    ExternalTradingDeliverRecord.trade_date == normalized["trade_date"],
-                )
-                .all()
-            )
-            for candidate in same_day_rows:
-                if not isinstance(candidate.raw_record, dict):
-                    continue
-                candidate_normalized = normalize_deliver_record(
-                    candidate.raw_record,
-                    default_trade_date=candidate.trade_date,
-                )
-                if _deliver_record_identity(candidate_normalized) == normalized_identity:
-                    row = candidate
-                    row.deliver_key = normalized["deliver_key"]
-                    break
+    if row:
+        return row
 
+    normalized_identity = _deliver_record_identity(normalized)
+    if not normalized_identity:
+        return None
+    same_day_rows = (
+        db.query(ExternalTradingDeliverRecord)
+        .filter(
+            ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+            ExternalTradingDeliverRecord.trade_date == normalized["trade_date"],
+        )
+        .all()
+    )
+    for candidate in same_day_rows:
+        if not isinstance(candidate.raw_record, dict):
+            continue
+        candidate_normalized = normalize_deliver_record(
+            candidate.raw_record,
+            default_trade_date=candidate.trade_date,
+        )
+        if _deliver_record_identity(candidate_normalized) == normalized_identity:
+            return candidate
+    return None
+
+
+def _upsert_deliver_record(
+    db: Session,
+    *,
+    account: ExternalTradingAccount,
+    normalized: Dict[str, Any],
+    matched_order: Optional[ExternalTradingOrder],
+    status: str,
+    message: Optional[str] = None,
+) -> ExternalTradingDeliverRecord:
+    row = _find_existing_deliver_record(db, account=account, normalized=normalized)
+    now = datetime.now()
+    preserve_position_adjustment = (
+        bool(row)
+        and row.status == DELIVER_STATUS_POSITION_ADJUSTED
+        and status == "IGNORED"
+    )
     if not row:
         row = ExternalTradingDeliverRecord(
             account_id=account.account_id,
@@ -3522,6 +3564,7 @@ def _upsert_deliver_record(
             created_at=now,
         )
         db.add(row)
+    row.deliver_key = normalized["deliver_key"]
     row.matched_order_id = matched_order.id if matched_order else None
     row.broker_order_id = normalized.get("broker_order_id")
     row.entrust_no = normalized.get("entrust_no")
@@ -3535,12 +3578,214 @@ def _upsert_deliver_record(
     row.transfer_fee = round_money(normalized.get("transfer_fee"))
     row.other_fee = round_money(normalized.get("other_fee"))
     row.total_fee = round_money(normalized.get("total_fee"))
-    row.status = status
-    row.message = message
+    if not preserve_position_adjustment:
+        row.status = status
+        row.message = message
     row.raw_record = normalized.get("raw_record")
-    row.reconciled_at = now if status == "MATCHED" else None
+    if not preserve_position_adjustment:
+        row.reconciled_at = now if status in {"MATCHED", DELIVER_STATUS_POSITION_ADJUSTED} else None
     db.flush()
     return row
+
+
+def _allocate_quantity_by_position_weight(
+    quantity: int,
+    positions: List[ExternalTradingLedgerPosition],
+) -> List[Tuple[ExternalTradingLedgerPosition, int]]:
+    quantity = safe_int(quantity)
+    weighted_positions = [
+        (position, max(safe_int(position.quantity), 0))
+        for position in positions
+        if max(safe_int(position.quantity), 0) > 0
+    ]
+    total_quantity = sum(position_quantity for _position, position_quantity in weighted_positions)
+    if quantity <= 0 or total_quantity <= 0:
+        return []
+
+    allocations: List[List[Any]] = []
+    remaining = quantity
+    for position, position_quantity in weighted_positions:
+        raw_share = quantity * position_quantity / total_quantity
+        allocated = min(int(raw_share), remaining)
+        allocations.append([position, allocated, raw_share - int(raw_share), position_quantity])
+        remaining -= allocated
+
+    allocations.sort(key=lambda item: (item[2], item[3]), reverse=True)
+    index = 0
+    while remaining > 0 and allocations:
+        allocations[index % len(allocations)][1] += 1
+        remaining -= 1
+        index += 1
+
+    return [
+        (position, safe_int(allocated))
+        for position, allocated, _fraction, _position_quantity in allocations
+        if safe_int(allocated) > 0
+    ]
+
+
+def _adjust_target_quantity_for_position_split(
+    db: Session,
+    *,
+    position: ExternalTradingLedgerPosition,
+    old_quantity: int,
+    new_quantity: int,
+    now: datetime,
+) -> None:
+    old_quantity = safe_int(old_quantity)
+    new_quantity = safe_int(new_quantity)
+    if old_quantity <= 0 or new_quantity <= 0:
+        return
+    target = (
+        db.query(ExternalTradingTargetPosition)
+        .filter(
+            ExternalTradingTargetPosition.sub_account_id == position.sub_account_id,
+            ExternalTradingTargetPosition.symbol == position.symbol,
+            ExternalTradingTargetPosition.status == "ACTIVE",
+        )
+        .first()
+    )
+    if not target:
+        return
+    old_target_quantity = safe_int(target.target_quantity)
+    if old_target_quantity <= 0:
+        return
+    new_target_quantity = max(int(round(old_target_quantity * new_quantity / old_quantity)), 1)
+    if new_target_quantity == old_target_quantity:
+        return
+    target.target_quantity = new_target_quantity
+    target.updated_at = now
+
+
+def _mark_deliver_position_adjustment(
+    deliver_row: ExternalTradingDeliverRecord,
+    *,
+    status: str,
+    message: str,
+    now: datetime,
+) -> None:
+    deliver_row.status = status
+    deliver_row.message = message
+    deliver_row.reconciled_at = now if status == DELIVER_STATUS_POSITION_ADJUSTED else None
+
+
+def _apply_share_bonus_deliver_record(
+    db: Session,
+    *,
+    account: ExternalTradingAccount,
+    deliver_row: ExternalTradingDeliverRecord,
+    normalized: Dict[str, Any],
+) -> Dict[str, Any]:
+    now = datetime.now()
+    if deliver_row.status == DELIVER_STATUS_POSITION_ADJUSTED:
+        return {
+            "status": DELIVER_STATUS_POSITION_ADJUSTED,
+            "applied": False,
+            "already_processed": True,
+            "message": deliver_row.message,
+        }
+
+    symbol = normalize_symbol(normalized.get("symbol"))
+    reported_quantity = safe_int(normalized.get("quantity"))
+    post_quantity = _deliver_post_quantity(normalized)
+    if not symbol or reported_quantity <= 0:
+        message = f"红股入账缺少有效证券或数量，暂不调整: symbol={symbol} quantity={reported_quantity}"
+        _mark_deliver_position_adjustment(deliver_row, status="IGNORED", message=message, now=now)
+        db.flush()
+        return {"status": "IGNORED", "applied": False, "message": message}
+
+    positions = (
+        db.query(ExternalTradingLedgerPosition)
+        .filter(
+            ExternalTradingLedgerPosition.account_id == account.account_id,
+            ExternalTradingLedgerPosition.external_trading_account_id == account.id,
+            ExternalTradingLedgerPosition.symbol == symbol,
+            ExternalTradingLedgerPosition.quantity > 0,
+        )
+        .order_by(ExternalTradingLedgerPosition.sub_account_id.asc())
+        .all()
+    )
+    current_quantity = sum(max(safe_int(position.quantity), 0) for position in positions)
+    if post_quantity > 0 and current_quantity >= post_quantity:
+        message = f"红股入账已与账本持仓对齐，未重复调整: {symbol} 账本{current_quantity} 券商余额{post_quantity}"
+        _mark_deliver_position_adjustment(
+            deliver_row,
+            status=DELIVER_STATUS_POSITION_ADJUSTED,
+            message=message,
+            now=now,
+        )
+        db.flush()
+        return {
+            "status": DELIVER_STATUS_POSITION_ADJUSTED,
+            "applied": False,
+            "already_aligned": True,
+            "message": message,
+        }
+    if not positions or current_quantity <= 0:
+        message = f"红股入账未找到可归属的账本持仓，暂不调整: {symbol} +{reported_quantity}"
+        _mark_deliver_position_adjustment(deliver_row, status="IGNORED", message=message, now=now)
+        db.flush()
+        return {"status": "IGNORED", "applied": False, "message": message}
+
+    if post_quantity > 0 and current_quantity + reported_quantity != post_quantity:
+        message = (
+            f"红股入账账本数量与券商余额不匹配，暂不调整: "
+            f"{symbol} 账本{current_quantity} + 红股{reported_quantity} != 券商余额{post_quantity}"
+        )
+        _mark_deliver_position_adjustment(deliver_row, status="IGNORED", message=message, now=now)
+        db.flush()
+        return {"status": "IGNORED", "applied": False, "message": message}
+
+    allocations = _allocate_quantity_by_position_weight(reported_quantity, positions)
+    applied_quantity = sum(quantity for _position, quantity in allocations)
+    if applied_quantity <= 0:
+        message = f"红股入账无法分摊到有效账本持仓，暂不调整: {symbol} +{reported_quantity}"
+        _mark_deliver_position_adjustment(deliver_row, status="IGNORED", message=message, now=now)
+        db.flush()
+        return {"status": "IGNORED", "applied": False, "message": message}
+
+    for position, add_quantity in allocations:
+        old_quantity = max(safe_int(position.quantity), 0)
+        old_available_quantity = max(safe_int(position.available_quantity), 0)
+        old_avg_cost = safe_float(position.avg_cost)
+        old_market_price = safe_float(position.market_price)
+        old_market_value = safe_float(position.market_value)
+        new_quantity = old_quantity + add_quantity
+        if new_quantity <= 0:
+            continue
+
+        position.quantity = new_quantity
+        position.available_quantity = old_available_quantity + add_quantity
+        position.avg_cost = round(old_quantity * old_avg_cost / new_quantity, 6)
+        if old_market_price > 0:
+            position.market_price = round(old_market_price * old_quantity / new_quantity, 6)
+            position.market_value = round_money(position.market_price * new_quantity)
+        elif old_market_value > 0:
+            position.market_price = round(old_market_value / new_quantity, 6)
+            position.market_value = round_money(old_market_value)
+        position.updated_at = now
+        _adjust_target_quantity_for_position_split(
+            db,
+            position=position,
+            old_quantity=old_quantity,
+            new_quantity=new_quantity,
+            now=now,
+        )
+
+    message = f"红股入账已调整账本持仓: {symbol} +{applied_quantity}，券商余额{post_quantity or '-'}"
+    _mark_deliver_position_adjustment(
+        deliver_row,
+        status=DELIVER_STATUS_POSITION_ADJUSTED,
+        message=message,
+        now=now,
+    )
+    db.flush()
+    return {
+        "status": DELIVER_STATUS_POSITION_ADJUSTED,
+        "applied": True,
+        "quantity": applied_quantity,
+        "message": message,
+    }
 
 
 def _apply_fee_delta_to_ledger(db: Session, fill: ExternalTradingOrderFill, delta_fee: float) -> None:
@@ -3728,9 +3973,45 @@ def reconcile_deliver_records(
     matched = 0
     unmatched = 0
     ignored = 0
+    position_adjusted = 0
+    position_adjustment_deduped = 0
+    position_adjustment_aligned = 0
+    position_adjustment_skipped = 0
     for raw_record in records or []:
         normalized = normalize_deliver_record(raw_record, default_trade_date=default_trade_date)
         if not normalized.get("is_trade", True):
+            if _is_share_bonus_deliver_record(normalized):
+                deliver_row = _upsert_deliver_record(
+                    db,
+                    account=account,
+                    normalized=normalized,
+                    matched_order=None,
+                    status="IGNORED",
+                    message=normalized.get("ignore_reason") or "红股入账待持仓调整",
+                )
+                adjustment = _apply_share_bonus_deliver_record(
+                    db,
+                    account=account,
+                    deliver_row=deliver_row,
+                    normalized=normalized,
+                )
+                record_status = adjustment.get("status") or deliver_row.status
+                if adjustment.get("applied"):
+                    position_adjusted += 1
+                elif adjustment.get("already_processed"):
+                    position_adjustment_deduped += 1
+                elif adjustment.get("already_aligned"):
+                    position_adjustment_aligned += 1
+                elif record_status == "IGNORED":
+                    ignored += 1
+                    position_adjustment_skipped += 1
+                normalized_records.append({
+                    "status": record_status,
+                    "order_id": None,
+                    "position_adjustment": adjustment,
+                    **normalized,
+                })
+                continue
             ignored += 1
             _upsert_deliver_record(
                 db,
@@ -3796,6 +4077,10 @@ def reconcile_deliver_records(
         "matched": matched,
         "unmatched": unmatched,
         "ignored": ignored,
+        "position_adjusted": position_adjusted,
+        "position_adjustment_deduped": position_adjustment_deduped,
+        "position_adjustment_aligned": position_adjustment_aligned,
+        "position_adjustment_skipped": position_adjustment_skipped,
         "applied_order_count": len(applied),
         "applied": applied,
         "records": normalized_records,
