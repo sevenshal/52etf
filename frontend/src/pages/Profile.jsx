@@ -155,6 +155,11 @@ const Profile = () => {
           arrow: true
         },
         {
+          title: '邮箱管理',
+          onClick: () => navigate('/email-settings'),
+          arrow: true
+        },
+        {
           title: '系统日志',
           onClick: () => navigate('/system-log'),
           arrow: true

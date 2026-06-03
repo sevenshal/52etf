@@ -26,6 +26,7 @@ import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import FactorLab from './pages/FactorLab';
 import LiveTrading from './pages/LiveTrading';
+import EmailSettings from './pages/EmailSettings';
 
 const LiveTabRedirect = ({ tab }) => {
   const location = useLocation();
@@ -68,6 +69,7 @@ function App() {
           <Route path="/external-trading-accounts" element={<LiveTabRedirect tab="accounts" />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
+          <Route path="/email-settings" element={<EmailSettings />} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
         </Route>
