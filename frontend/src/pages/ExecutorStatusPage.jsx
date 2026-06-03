@@ -1197,27 +1197,25 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       className="executor-page"
       title={embedded ? null : '订单执行器'}
       subtitle="净额撮合、订单生命周期、成交回报和事件流水"
-      actions={(
-        <Select
-          className="executor-account-select"
-          value={selectedAccountId}
-          options={accountOptions}
-          loading={accountsLoading}
-          placeholder="选择外部交易账户"
-          onChange={handleAccountChange}
-        />
-      )}
     >
       <PageSection className="executor-control-section">
         <div className="executor-account-banner">
-          <div>
-            <Space wrap size={6}>
-              <Tag color={selectedAccount?.connected ? 'green' : 'default'}>{selectedAccount?.connected ? '在线' : '离线'}</Tag>
-              {selectedAccount ? <Tag color={marketTypeColor(selectedAccount.market_type)}>{marketTypeLabel(selectedAccount.market_type)}</Tag> : null}
-              {selectedAccount?.enabled === false ? <Tag>停用</Tag> : <Tag color="green">启用</Tag>}
-            </Space>
-            <h2>{selectedAccount?.name || '未选择执行账户'}</h2>
-            <p>{selectedAccount?.identifier || '请选择外部交易账户后查看执行器状态'}</p>
+          <div className="executor-account-main">
+            <div className="executor-account-heading">
+              <Select
+                className="executor-account-title-select"
+                value={selectedAccountId}
+                options={accountOptions}
+                loading={accountsLoading}
+                placeholder="选择外部交易账户"
+                onChange={handleAccountChange}
+              />
+              <Space className="executor-account-tags" wrap size={6}>
+                <Tag color={selectedAccount?.connected ? 'green' : 'default'}>{selectedAccount?.connected ? '在线' : '离线'}</Tag>
+                {selectedAccount ? <Tag color={marketTypeColor(selectedAccount.market_type)}>{marketTypeLabel(selectedAccount.market_type)}</Tag> : null}
+                {selectedAccount?.enabled === false ? <Tag>停用</Tag> : <Tag color="green">启用</Tag>}
+              </Space>
+            </div>
           </div>
           <div className="executor-actions">
             <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={statusLoading || subAccountLoading || planLoading} disabled={!selectedAccount}>

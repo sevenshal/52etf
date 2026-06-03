@@ -16,6 +16,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -413,6 +414,38 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     eventHandler();
   };
 
+  const renderActionTitle = () => (
+    <div className="soxl-fear-action-title">
+      <span>操作</span>
+      <Space size={4}>
+        <Tooltip title="刷新">
+          <Button
+            aria-label="刷新"
+            icon={<ReloadOutlined />}
+            loading={listLoading}
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              fetchConfigs();
+            }}
+          />
+        </Tooltip>
+        <Tooltip title="新增配置">
+          <Button
+            aria-label="新增配置"
+            icon={<PlusOutlined />}
+            size="small"
+            type="primary"
+            onClick={(event) => {
+              event.stopPropagation();
+              openCreate();
+            }}
+          />
+        </Tooltip>
+      </Space>
+    </div>
+  );
+
   const configColumns = [
     {
       title: '交易标的',
@@ -484,7 +517,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       },
     },
     {
-      title: '操作',
+      title: renderActionTitle,
       key: 'action',
       fixed: 'right',
       width: 110,
@@ -806,17 +839,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
 
   const renderList = () => (
     <Card>
-      <Space style={{ width: '100%', justifyContent: embedded ? 'flex-end' : 'space-between', marginBottom: 16 }} wrap>
-        {!embedded && <Title level={4} style={{ margin: 0 }}>情绪量能策略</Title>}
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={fetchConfigs} loading={listLoading}>
-            刷新
-          </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            新增配置
-          </Button>
-        </Space>
-      </Space>
+      {!embedded && <Title level={4} style={{ margin: '0 0 16px' }}>情绪量能策略</Title>}
       <Table
         columns={configColumns}
         dataSource={configs}
@@ -834,7 +857,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
 
   const renderDetail = () => (
     <>
-      <Space className="soxl-fear-detail-header" style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
+      <Space className="soxl-fear-detail-header" style={{ width: '100%', justifyContent: 'space-between', marginBottom: embedded ? 12 : 16 }} wrap>
         <Space>
           <Button icon={<ArrowLeftOutlined />} onClick={returnToList}>
             返回列表
@@ -878,7 +901,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   );
 
   return (
-    <div className="soxl-fear-page">
+    <div className={`soxl-fear-page${embedded ? ' is-embedded' : ''}`}>
       {viewMode === 'list' ? renderList() : renderDetail()}
     </div>
   );

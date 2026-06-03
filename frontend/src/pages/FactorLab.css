@@ -256,6 +256,10 @@
   margin-top: 12px;
 }
 
+.factor-lab-page--live-only .factor-lab-live-config-row {
+  margin-top: 0;
+}
+
 .factor-lab-table-row-selected > td {
   background: #eef6ff !important;
 }

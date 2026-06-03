@@ -1538,7 +1538,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     {
       title: '操作',
       key: 'action',
-      width: 150,
+      width: 120,
       render: (_, record) => (
         <Space>
           <Tooltip title="刷新">
@@ -1707,16 +1707,18 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       className="external-trading-page"
       title={embedded ? null : '交易账户'}
       subtitle="PTrade 与券商侧长连接、子账户账本和执行器入口"
-      actions={
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
-          添加账号
-        </Button>
-      }
     >
       <PageSection
         className="external-account-section"
         title="账号列表"
-        extra={<Text type="secondary">共 {accounts.length} 个</Text>}
+        extra={(
+          <Space size={8}>
+            <Tooltip title="添加账户">
+              <Button aria-label="添加账户" icon={<PlusOutlined />} size="small" type="primary" onClick={openCreateModal} />
+            </Tooltip>
+            <Text type="secondary">共 {accounts.length} 个</Text>
+          </Space>
+        )}
       >
         <div className="external-account-desktop">
           <Table

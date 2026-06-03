@@ -3447,7 +3447,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
                 </Spin>
           </Modal>
 
-          <Row gutter={[12, 12]} className="factor-lab-table-row">
+          <Row gutter={[12, 12]} className="factor-lab-table-row factor-lab-live-config-row">
             <Col xs={24}>
               <Card
                 title="配置列表"

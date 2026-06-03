@@ -2,10 +2,6 @@
   padding: 0;
 }
 
-.executor-account-select {
-  width: 320px;
-}
-
 .executor-control-section .quant-section__body,
 .executor-status-section .quant-section__body {
   padding: 12px;
@@ -19,19 +15,46 @@
   margin-bottom: 12px;
 }
 
-.executor-account-banner h2 {
-  margin: 8px 0 2px;
-  color: #172033;
-  font-size: 18px;
-  font-weight: 650;
-  line-height: 1.25;
+.executor-account-main {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.executor-account-banner p {
+.executor-account-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.executor-account-title-select {
+  flex: 0 1 360px;
+  width: min(360px, 100%);
+  max-width: 360px;
+  min-width: 220px;
   margin: 0;
-  color: #667085;
-  font-size: 12px;
-  line-height: 1.45;
+}
+
+.executor-account-tags {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.executor-account-title-select .ant-select-selector {
+  min-height: 32px;
+  padding: 0 10px !important;
+  background: #f7f9fc !important;
+  border-color: #e7edf5 !important;
+  border-radius: 7px !important;
+}
+
+.executor-account-title-select .ant-select-selection-item,
+.executor-account-title-select .ant-select-selection-placeholder {
+  color: #172033;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 30px !important;
 }
 
 .executor-actions {
@@ -268,10 +291,6 @@
 }
 
 @media (max-width: 760px) {
-  .executor-account-select {
-    width: 100%;
-  }
-
   .executor-control-section,
   .executor-status-section {
     overflow: visible;
@@ -293,8 +312,18 @@
     border-radius: 8px;
   }
 
-  .executor-account-banner h2 {
-    font-size: 17px;
+  .executor-account-heading {
+    flex-wrap: wrap;
+  }
+
+  .executor-account-title-select {
+    flex: 1 1 240px;
+    min-width: 0;
+  }
+
+  .executor-account-title-select .ant-select-selection-item,
+  .executor-account-title-select .ant-select-selection-placeholder {
+    font-size: 16px;
   }
 
   .executor-actions {
