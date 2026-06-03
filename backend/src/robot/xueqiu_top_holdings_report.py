@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
+import pandas as pd
 
 from ..core.database import (
     SessionLocal,
@@ -26,6 +27,7 @@ from ..core.database import (
     XueqiuCubeRankCache,
     XueqiuTopHoldingsRun,
 )
+from ..core.duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 from ..core.utils import send_alert_email, send_configured_email
 
 
@@ -56,6 +58,32 @@ BUFFER_EXECUTION_WEIGHT_RULE = (
 )
 ACTIVE_REBALANCE_LOOKBACK_DAYS = 90
 ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
+XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
+XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
+    "snapshot_date",
+    "snapshot_at",
+    "rank_type",
+    "year_rank",
+    "cube_symbol",
+    "cube_id",
+    "cube_name",
+    "screen_name",
+    "latest_rebalance_at",
+    "latest_rebalance_id",
+    "latest_rebalance_status",
+    "holdings_source",
+    "active_rebalance_days",
+    "is_active",
+    "stock_symbol",
+    "raw_stock_symbol",
+    "stock_name",
+    "stock_id",
+    "segment_name",
+    "weight_pct",
+    "raw_holding_json",
+    "created_at",
+    "updated_at",
+]
 
 
 logger = logging.getLogger("xueqiu_top_holdings_report")
@@ -641,6 +669,199 @@ def build_active_filter_summary(
             for result in failed_results[:10]
         ],
     }
+
+
+def _quote_duckdb_identifier(identifier: str) -> str:
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _to_naive_china_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(CHINA_TZ).replace(tzinfo=None)
+    return value.replace(tzinfo=None)
+
+
+def _holding_stock_id(holding: Dict[str, Any]) -> Optional[int]:
+    for key in ("stock_id", "stockId", "stockID"):
+        value = safe_int(holding.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _holding_segment_name(holding: Dict[str, Any]) -> str:
+    for key in ("segment_name", "segmentName", "ind_name", "industry"):
+        value = holding.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
+    table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            snapshot_date DATE NOT NULL,
+            snapshot_at TIMESTAMP NOT NULL,
+            rank_type VARCHAR NOT NULL,
+            year_rank INTEGER,
+            cube_symbol VARCHAR NOT NULL,
+            cube_id BIGINT,
+            cube_name VARCHAR,
+            screen_name VARCHAR,
+            latest_rebalance_at TIMESTAMP,
+            latest_rebalance_id BIGINT,
+            latest_rebalance_status VARCHAR,
+            holdings_source VARCHAR,
+            active_rebalance_days INTEGER,
+            is_active BOOLEAN,
+            stock_symbol VARCHAR NOT NULL,
+            raw_stock_symbol VARCHAR,
+            stock_name VARCHAR,
+            stock_id BIGINT,
+            segment_name VARCHAR,
+            weight_pct DOUBLE,
+            raw_holding_json VARCHAR,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (snapshot_date, cube_symbol, stock_symbol)
+        )
+        """
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_holdings_snapshot_stock "
+        f"ON {table}(snapshot_date, stock_symbol)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_holdings_snapshot_cube "
+        f"ON {table}(cube_symbol, snapshot_date)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_holdings_snapshot_active_stock "
+        f"ON {table}(is_active, snapshot_date, stock_symbol)"
+    )
+
+
+def build_xueqiu_cube_holdings_snapshot_rows(
+    *,
+    run_at: datetime,
+    current_results: List[CubeCurrentResult],
+    active_rebalance_days: Optional[int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    snapshot_at = _to_naive_china_datetime(run_at) or datetime.now()
+    snapshot_date = snapshot_at.date()
+    saved_at = datetime.now(CHINA_TZ).replace(tzinfo=None)
+    rows: List[Dict[str, Any]] = []
+    replace_cube_symbols: Set[str] = set()
+    for result in current_results:
+        if result.error:
+            continue
+        cube = result.cube
+        replace_cube_symbols.add(cube.symbol)
+        latest_rebalance_at = _to_naive_china_datetime(result.latest_rebalance_at)
+        for holding in result.holdings:
+            symbol = normalize_xueqiu_symbol(
+                holding.get("symbol")
+                or holding.get("stock_symbol")
+                or holding.get("stockSymbol")
+            )
+            weight = get_holding_weight(holding)
+            if not symbol or weight is None or weight <= 0:
+                continue
+            raw_symbol = to_raw_xueqiu_symbol(symbol)
+            rows.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "snapshot_at": snapshot_at,
+                    "rank_type": RANK_CACHE_TYPE,
+                    "year_rank": cube.year_rank,
+                    "cube_symbol": cube.symbol,
+                    "cube_id": cube.cube_id,
+                    "cube_name": cube.cube_name,
+                    "screen_name": cube.screen_name,
+                    "latest_rebalance_at": latest_rebalance_at,
+                    "latest_rebalance_id": result.latest_rebalance_id,
+                    "latest_rebalance_status": result.latest_rebalance_status,
+                    "holdings_source": result.holdings_source,
+                    "active_rebalance_days": active_rebalance_days,
+                    "is_active": bool(result.active),
+                    "stock_symbol": symbol,
+                    "raw_stock_symbol": raw_symbol,
+                    "stock_name": get_holding_name(holding),
+                    "stock_id": _holding_stock_id(holding),
+                    "segment_name": _holding_segment_name(holding),
+                    "weight_pct": float(weight),
+                    "raw_holding_json": json.dumps(
+                        holding,
+                        ensure_ascii=False,
+                        default=str,
+                        separators=(",", ":"),
+                    ),
+                    "created_at": saved_at,
+                    "updated_at": saved_at,
+                }
+            )
+    return rows, sorted(replace_cube_symbols)
+
+
+def save_xueqiu_cube_holdings_snapshots_to_duckdb(
+    *,
+    run_at: datetime,
+    current_results: List[CubeCurrentResult],
+    active_rebalance_days: Optional[int],
+) -> Dict[str, Any]:
+    rows, replace_cube_symbols = build_xueqiu_cube_holdings_snapshot_rows(
+        run_at=run_at,
+        current_results=current_results,
+        active_rebalance_days=active_rebalance_days,
+    )
+    snapshot_at = _to_naive_china_datetime(run_at) or datetime.now()
+    snapshot_date = snapshot_at.date()
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
+    temp_rows_name = "xueqiu_cube_holdings_snapshot_rows"
+    temp_cubes_name = "xueqiu_cube_holdings_snapshot_cubes"
+    try:
+        ensure_xueqiu_cube_holdings_snapshot_schema(connection)
+        if replace_cube_symbols:
+            cube_frame = pd.DataFrame({"cube_symbol": replace_cube_symbols})
+            connection.register(temp_cubes_name, cube_frame)
+            connection.execute(
+                (
+                    f"DELETE FROM {table} "
+                    f"USING {_quote_duckdb_identifier(temp_cubes_name)} AS source "
+                    f"WHERE {table}.snapshot_date = ? "
+                    f"AND {table}.cube_symbol = source.cube_symbol"
+                ),
+                [snapshot_date],
+            )
+        if rows:
+            frame = pd.DataFrame(rows).loc[:, XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS]
+            connection.register(temp_rows_name, frame)
+            quoted_columns = ", ".join(
+                _quote_duckdb_identifier(column)
+                for column in XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS
+            )
+            connection.execute(
+                (
+                    f"INSERT OR REPLACE INTO {table} ({quoted_columns}) "
+                    f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_rows_name)}"
+                )
+            )
+        return {
+            "table": XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
+            "snapshot_date": snapshot_date.isoformat(),
+            "snapshot_at": snapshot_at.isoformat(),
+            "saved_rows": len(rows),
+            "replaced_cube_count": len(replace_cube_symbols),
+            "failed_cube_count": len([result for result in current_results if result.error]),
+            "database": ANALYTICS_DB_PATH,
+        }
+    finally:
+        connection.close()
 
 
 async def fetch_target_cube_current_payload(
@@ -1439,6 +1660,7 @@ def build_report(
     rebalance_response: Optional[Dict[str, Any]] = None,
     strategy_plan: Optional[Dict[str, Any]] = None,
     active_filter_summary: Optional[Dict[str, Any]] = None,
+    holdings_snapshot_result: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
@@ -1476,6 +1698,17 @@ def build_report(
                 f"持仓回退到last_rb: {active_filter_summary.get('holdings_fallback_count')}",
             ]
         )
+    if holdings_snapshot_result:
+        if holdings_snapshot_result.get("error"):
+            lines.append(f"DuckDB持仓快照: 写入失败 - {holdings_snapshot_result.get('error')}")
+        else:
+            lines.append(
+                "DuckDB持仓快照: "
+                f"{holdings_snapshot_result.get('table')} "
+                f"date={holdings_snapshot_result.get('snapshot_date')} "
+                f"rows={holdings_snapshot_result.get('saved_rows')} "
+                f"cubes={holdings_snapshot_result.get('replaced_cube_count')}"
+            )
     scope_text = (
         f"先筛选最近 {active_filter_summary.get('lookback_days')} 天有调仓的组合；"
         "再把成功拉取的活跃组合等权合成一个组合"
@@ -1588,6 +1821,7 @@ def build_report_html(
     rebalance_response: Optional[Dict[str, Any]] = None,
     strategy_plan: Optional[Dict[str, Any]] = None,
     active_filter_summary: Optional[Dict[str, Any]] = None,
+    holdings_snapshot_result: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> str:
     ranking = aggregate["ranking"]
@@ -1633,6 +1867,21 @@ def build_report_html(
                 ("持仓回退到last_rb", active_filter_summary.get("holdings_fallback_count")),
             ]
         )
+    if holdings_snapshot_result:
+        if holdings_snapshot_result.get("error"):
+            summary_rows.append(("DuckDB持仓快照", f"写入失败 - {holdings_snapshot_result.get('error')}"))
+        else:
+            summary_rows.append(
+                (
+                    "DuckDB持仓快照",
+                    (
+                        f"{holdings_snapshot_result.get('table')} "
+                        f"date={holdings_snapshot_result.get('snapshot_date')} "
+                        f"rows={holdings_snapshot_result.get('saved_rows')} "
+                        f"cubes={holdings_snapshot_result.get('replaced_cube_count')}"
+                    ),
+                )
+            )
     summary_rows.extend(
         [
             ("拉取成功", success_count),
@@ -1792,6 +2041,7 @@ def write_outputs(
     rank_cache_refreshed: bool,
     strategy_plan: Optional[Dict[str, Any]] = None,
     active_filter_summary: Optional[Dict[str, Any]] = None,
+    holdings_snapshot_result: Optional[Dict[str, Any]] = None,
 ) -> Path:
     run_dir = output_dir / run_at.strftime("%Y-%m-%d")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1816,6 +2066,7 @@ def write_outputs(
         "rank_cache_refreshed": rank_cache_refreshed,
         "cube_count": len(cubes),
         "active_filter": active_filter_summary,
+        "holdings_snapshot": holdings_snapshot_result,
         "success_count": aggregate["success_count"],
         "failed_count": len(failed_results),
         "stock_count": len(ranking),
@@ -1983,6 +2234,28 @@ async def run_top_holdings_job(
         retries=retries,
         active_since=active_since,
     )
+    holdings_snapshot_result: Optional[Dict[str, Any]] = None
+    try:
+        holdings_snapshot_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+            run_at=run_at,
+            current_results=current_results,
+            active_rebalance_days=active_rebalance_days,
+        )
+        logger.info(
+            "Saved Xueqiu cube holdings snapshots to DuckDB: table=%s date=%s rows=%s cubes=%s failed=%s",
+            holdings_snapshot_result.get("table"),
+            holdings_snapshot_result.get("snapshot_date"),
+            holdings_snapshot_result.get("saved_rows"),
+            holdings_snapshot_result.get("replaced_cube_count"),
+            holdings_snapshot_result.get("failed_cube_count"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        holdings_snapshot_result = {
+            "table": XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
+            "database": ANALYTICS_DB_PATH,
+            "error": str(exc),
+        }
+        logger.warning("Failed to save Xueqiu cube holdings snapshots to DuckDB: %s", exc)
     if active_rebalance_days and active_rebalance_days > 0:
         active_filter_summary = build_active_filter_summary(
             source_cubes=cubes,
@@ -2093,6 +2366,7 @@ async def run_top_holdings_job(
         rebalance_response=rebalance_response,
         strategy_plan=strategy_plan,
         active_filter_summary=active_filter_summary,
+        holdings_snapshot_result=holdings_snapshot_result,
         dry_run=dry_run,
     )
     report_html = build_report_html(
@@ -2108,6 +2382,7 @@ async def run_top_holdings_job(
         rebalance_response=rebalance_response,
         strategy_plan=strategy_plan,
         active_filter_summary=active_filter_summary,
+        holdings_snapshot_result=holdings_snapshot_result,
         dry_run=dry_run,
     )
     output_path = write_outputs(
@@ -2124,6 +2399,7 @@ async def run_top_holdings_job(
         rank_cache_refreshed=rank_cache_refreshed,
         strategy_plan=strategy_plan,
         active_filter_summary=active_filter_summary,
+        holdings_snapshot_result=holdings_snapshot_result,
     )
     status = "DRY_RUN" if dry_run and execute_rebalance else "SUCCESS"
     if isinstance(rebalance_response, dict) and rebalance_response.get("skipped"):
@@ -2134,9 +2410,15 @@ async def run_top_holdings_job(
             f" active={active_filter_summary.get('active_cube_count')}/"
             f"{active_filter_summary.get('source_cube_count')}"
         )
+    snapshot_message = ""
+    if holdings_snapshot_result:
+        if holdings_snapshot_result.get("error"):
+            snapshot_message = " snapshot_error=1"
+        else:
+            snapshot_message = f" snapshot_rows={holdings_snapshot_result.get('saved_rows')}"
     message = (
         f"success={aggregate['success_count']} failed={len(aggregate['failed_results'])} "
-        f"stocks={len(aggregate['ranking'])}{active_message} output={output_path}"
+        f"stocks={len(aggregate['ranking'])}{active_message}{snapshot_message} output={output_path}"
     )
     record_id = save_run_record(
         run_at=run_at,
@@ -2186,6 +2468,7 @@ async def run_top_holdings_job(
         "rebalance_response": rebalance_response,
         "rebalance_skipped": rebalance_skipped_items,
         "active_filter": active_filter_summary,
+        "holdings_snapshot": holdings_snapshot_result,
         "top": top_items,
     }
 
@@ -2214,6 +2497,12 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         if active_filter
         else ""
     )
+    holdings_snapshot = result.get("holdings_snapshot") or {}
+    snapshot_message = (
+        "snapshot_error=1 "
+        if holdings_snapshot.get("error")
+        else f"snapshot_rows={holdings_snapshot.get('saved_rows')} "
+    )
     return (
         "雪球Top1000活跃90天综合持仓自动调仓 "
         f"record_id={result.get('record_id')} "
@@ -2223,6 +2512,7 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         f"failed={result.get('failed_count')} "
         f"stocks={result.get('stock_count')} "
         f"{active_message}"
+        f"{snapshot_message}"
         f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
         f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"

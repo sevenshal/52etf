@@ -40,6 +40,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_option_daily",
         "a_stock_repo_daily",
         "us_stock_daily",
+        "xueqiu_cube_holdings_snapshots",
     }
 )
 

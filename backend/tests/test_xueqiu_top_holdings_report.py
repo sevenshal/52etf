@@ -1,4 +1,6 @@
 from datetime import datetime
+import os
+import tempfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
@@ -7,11 +9,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.core.database import Base, XueqiuCubeRankCache
+from src.core.duckdb_utils import connect_duckdb
 from src.robot.xueqiu_top_holdings_report import (
     CubeInfo,
+    CubeCurrentResult,
+    XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
     build_equal_top10_top12_buffer_plan,
     load_cached_year_top_cubes,
     rounded_rebalance_weights,
+    save_xueqiu_cube_holdings_snapshots_to_duckdb,
     save_year_top_cubes,
 )
 
@@ -150,3 +156,108 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(10.0, by_symbol["SZ.300394"]["rebalance_weight_pct"])
         self.assertEqual("keep", by_symbol["SZ.300757"]["strategy_action"])
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
+
+    def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        run_at = datetime(2026, 6, 3, 14, 40, 0)
+        cube = CubeInfo(
+            year_rank=1,
+            symbol="ZH000001",
+            cube_id=123,
+            cube_name="星澜样例",
+            screen_name="炼金小铁匠",
+        )
+        try:
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                first_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                    run_at=run_at,
+                    active_rebalance_days=90,
+                    current_results=[
+                        CubeCurrentResult(
+                            cube=cube,
+                            holdings=[
+                                {
+                                    "stock_symbol": "SZ300308",
+                                    "stock_name": "中际旭创",
+                                    "weight": 10.5,
+                                    "stock_id": 1003439,
+                                    "segment_name": "通信",
+                                },
+                                {
+                                    "stock_symbol": "SZ300502",
+                                    "stock_name": "新易盛",
+                                    "weight": 8.0,
+                                },
+                            ],
+                            latest_rebalance_at=datetime(2026, 6, 2, 15, 0, 0),
+                            latest_rebalance_id=456,
+                            latest_rebalance_status="success",
+                            holdings_source="last_success_rb",
+                            active=True,
+                        )
+                    ],
+                )
+                second_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                    run_at=run_at,
+                    active_rebalance_days=90,
+                    current_results=[
+                        CubeCurrentResult(
+                            cube=cube,
+                            holdings=[
+                                {
+                                    "stock_symbol": "SZ300308",
+                                    "stock_name": "中际旭创",
+                                    "weight": 12.0,
+                                },
+                            ],
+                            latest_rebalance_at=datetime(2026, 6, 3, 14, 30, 0),
+                            latest_rebalance_id=789,
+                            latest_rebalance_status="success",
+                            holdings_source="last_success_rb",
+                            active=True,
+                        )
+                    ],
+                )
+
+                connection = connect_duckdb(path, prefer_read_only=False)
+                try:
+                    rows = connection.execute(
+                        f"""
+                        SELECT
+                            CAST(snapshot_date AS VARCHAR),
+                            cube_symbol,
+                            stock_symbol,
+                            stock_name,
+                            weight_pct,
+                            latest_rebalance_id,
+                            is_active
+                        FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+                        ORDER BY cube_symbol, stock_symbol
+                        """
+                    ).fetchall()
+                finally:
+                    connection.close()
+
+            self.assertEqual(2, first_result["saved_rows"])
+            self.assertEqual(1, second_result["saved_rows"])
+            self.assertEqual(
+                [
+                    (
+                        "2026-06-03",
+                        "ZH000001",
+                        "SZ.300308",
+                        "中际旭创",
+                        12.0,
+                        789,
+                        True,
+                    )
+                ],
+                rows,
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
