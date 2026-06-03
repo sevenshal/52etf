@@ -80,6 +80,8 @@ PTRADE_STATUS_MAP = {
 PTRADE_ORDER_FILL_STATUSES = {"4", "5", "7", "8"}
 PTRADE_TRADE_FILL_STATUSES = {"7", "8"}
 PTRADE_TRADE_PARTIAL_CANCEL_STATUS = "5"
+STALE_INTRADAY_ORDER_CLEANUP_SOURCE = "stale_intraday_order_cleanup"
+STALE_INTRADAY_ORDER_CLEANUP_MESSAGE = "日内委托跨交易日未收到终态回报，系统按过期处理"
 A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
 A_SHARE_T0_ETF_PREFIXES = ("511", "513", "518", "520")
 A_SHARE_T0_ETF_NAME_KEYWORDS = (
@@ -958,7 +960,46 @@ def sync_target_positions(
             row.updated_at = now
 
 
-def get_open_order_quantities(db: Session, sub_account_id: Optional[int]) -> Dict[str, Dict[str, int]]:
+def _china_market_date(value: Optional[datetime] = None) -> date:
+    current = value or datetime.now(CHINA_TZ)
+    if current.tzinfo:
+        return current.astimezone(CHINA_TZ).date()
+    return current.date()
+
+
+def _is_a_stock_order_symbol(symbol: Optional[str]) -> bool:
+    normalized = normalize_symbol(symbol)
+    if not normalized or "." not in normalized:
+        return False
+    return normalized.upper().split(".")[-1] in {"SH", "SZ", "BJ"}
+
+
+def _order_intraday_date(row: ExternalTradingOrder) -> Optional[date]:
+    timestamp = row.submitted_at or row.created_at
+    if not timestamp:
+        return None
+    if timestamp.tzinfo:
+        return timestamp.astimezone(CHINA_TZ).date()
+    return timestamp.date()
+
+
+def is_stale_intraday_order(row: ExternalTradingOrder, now: Optional[datetime] = None) -> bool:
+    if str(row.status or "").upper() not in ACTIVE_ORDER_STATUSES:
+        return False
+    if not _is_a_stock_order_symbol(row.symbol):
+        return False
+    order_date = _order_intraday_date(row)
+    if not order_date:
+        return False
+    return order_date < _china_market_date(now)
+
+
+def get_open_order_quantities(
+    db: Session,
+    sub_account_id: Optional[int],
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Dict[str, int]]:
     if not sub_account_id:
         return {}
     rows = (
@@ -971,6 +1012,8 @@ def get_open_order_quantities(db: Session, sub_account_id: Optional[int]) -> Dic
     )
     result: Dict[str, Dict[str, int]] = {}
     for row in rows:
+        if is_stale_intraday_order(row, now=now):
+            continue
         symbol = normalize_symbol(row.symbol)
         if not symbol:
             continue
@@ -2231,6 +2274,120 @@ def _recorded_fill_quantity_for_order_tree(db: Session, row: ExternalTradingOrde
         child_quantity, _ = _order_fill_totals(db, child.id)
         quantity += child_quantity
     return quantity
+
+
+def _stale_intraday_terminal_status(db: Session, row: ExternalTradingOrder) -> str:
+    filled_quantity = min(_recorded_fill_quantity_for_order_tree(db, row), safe_int(row.quantity))
+    if safe_int(row.quantity) > 0 and filled_quantity >= safe_int(row.quantity):
+        return "FILLED"
+    if filled_quantity > 0:
+        return "PARTIALLY_CANCELED"
+    return "EXPIRED"
+
+
+def _stale_intraday_cleanup_event(row: ExternalTradingOrder, now: datetime, status: str) -> Dict[str, Any]:
+    return {
+        "source": STALE_INTRADAY_ORDER_CLEANUP_SOURCE,
+        "client_order_id": row.client_order_id,
+        "order_id": row.broker_order_id,
+        "entrust_no": row.entrust_no,
+        "symbol": row.symbol,
+        "side": row.side,
+        "status": status,
+        "previous_status": row.status,
+        "ptrade_status": row.ptrade_status,
+        "quantity": safe_int(row.quantity),
+        "filled_quantity": safe_int(row.filled_quantity),
+        "remaining_quantity": safe_int(row.remaining_quantity),
+        "order_date": _order_intraday_date(row).isoformat() if _order_intraday_date(row) else None,
+        "event_time": now.isoformat(),
+        "message": STALE_INTRADAY_ORDER_CLEANUP_MESSAGE,
+        "previous_raw_order_event": row.raw_order_event,
+    }
+
+
+def _record_stale_intraday_cleanup_log(
+    db: Session,
+    row: ExternalTradingOrder,
+    event: Dict[str, Any],
+    now: datetime,
+) -> None:
+    db.add(
+        ExternalTradingEventLog(
+            account_id=row.account_id,
+            external_trading_account_id=row.external_trading_account_id,
+            event_type="order_event",
+            source=STALE_INTRADAY_ORDER_CLEANUP_SOURCE,
+            client_order_id=row.client_order_id,
+            broker_order_id=row.broker_order_id,
+            entrust_no=row.entrust_no,
+            symbol=normalize_symbol(row.symbol),
+            side=row.side,
+            ptrade_status=row.ptrade_status,
+            event_time=now,
+            raw_payload=event,
+            process_status="PROCESSED",
+            process_message=STALE_INTRADAY_ORDER_CLEANUP_MESSAGE,
+            matched_order_id=row.id,
+            matched_sub_account_id=row.sub_account_id,
+            processed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+def _expire_stale_intraday_order_tree(db: Session, row: ExternalTradingOrder, now: datetime) -> int:
+    status = _stale_intraday_terminal_status(db, row)
+    filled_quantity = min(_recorded_fill_quantity_for_order_tree(db, row), safe_int(row.quantity))
+    event = _stale_intraday_cleanup_event(row, now, status)
+    row.status = status
+    if filled_quantity > safe_int(row.filled_quantity):
+        row.filled_quantity = filled_quantity
+    row.remaining_quantity = max(safe_int(row.quantity) - safe_int(row.filled_quantity), 0)
+    row.cancel_reason = row.cancel_reason or "stale_intraday_order"
+    row.message = STALE_INTRADAY_ORDER_CLEANUP_MESSAGE
+    row.raw_order_event = event
+    row.last_event_at = now
+    row.updated_at = now
+    _record_stale_intraday_cleanup_log(db, row, event, now)
+    child_count = len(_child_orders(db, row.id)) if _role(row) == "PARENT" else 0
+    _propagate_parent_order_state(db, row)
+    return 1 + child_count
+
+
+def expire_stale_intraday_orders(
+    db: Session,
+    *,
+    external_trading_account_id: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    current = now or datetime.now()
+    query = db.query(ExternalTradingOrder).filter(
+        ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
+    )
+    if external_trading_account_id:
+        query = query.filter(ExternalTradingOrder.external_trading_account_id == external_trading_account_id)
+    rows = [
+        row
+        for row in query.order_by(ExternalTradingOrder.created_at.asc(), ExternalTradingOrder.id.asc()).all()
+        if is_stale_intraday_order(row, now=current)
+    ]
+    stale_ids = {row.id for row in rows if row.id}
+    processed_ids = set()
+    updated = 0
+    for row in rows:
+        if row.id in processed_ids:
+            continue
+        if row.parent_order_id and row.parent_order_id in stale_ids:
+            continue
+        updated += _expire_stale_intraday_order_tree(db, row, current)
+        processed_ids.add(row.id)
+        if _role(row) == "PARENT":
+            for child in _child_orders(db, row.id):
+                if child.id:
+                    processed_ids.add(child.id)
+    return updated
 
 
 def _is_conflicting_order_fill_status_without_fills(

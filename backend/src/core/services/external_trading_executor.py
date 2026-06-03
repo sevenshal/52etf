@@ -46,6 +46,7 @@ from .external_trading_ledger import (
     collect_internal_cross_reference_symbols,
     create_netted_execution_orders,
     expire_insufficient_sellable_blocks,
+    expire_stale_intraday_orders,
     normalize_symbol,
     record_cancel_result,
     record_submission_result,
@@ -591,16 +592,19 @@ async def _run_account_executor(
     order_timeout_seconds: int,
 ) -> Dict[str, Any]:
     account_pk = int(account["id"])
+    with get_external_trading_db_ctx() as db:
+        stale_order_count = expire_stale_intraday_orders(db, external_trading_account_id=account_pk, now=_naive_now())
+        expired_block_count = expire_insufficient_sellable_blocks(db, external_trading_account_id=account_pk, now=_naive_now())
+
     if not external_trading_hub.get_status(account_pk).get("connected"):
         return {
             "account_id": account_pk,
             "account_name": account.get("name"),
             "status": "SKIPPED",
             "reason": "external_account_disconnected",
+            "stale_intraday_orders_expired": stale_order_count,
+            "insufficient_sellable_blocks_expired": expired_block_count,
         }
-
-    with get_external_trading_db_ctx() as db:
-        expire_insufficient_sellable_blocks(db, external_trading_account_id=account_pk, now=_naive_now())
 
     cancel_result = await _cancel_stale_or_timed_out_orders(account)
     if cancel_result.get("requested"):
@@ -609,6 +613,8 @@ async def _run_account_executor(
             "account_name": account.get("name"),
             "status": "CANCEL_REQUESTED",
             "cancel": cancel_result,
+            "stale_intraday_orders_expired": stale_order_count,
+            "insufficient_sellable_blocks_expired": expired_block_count,
             "message": "已提交撤单，等待 PTrade 回报后再重新撮合下单",
         }
 
@@ -627,6 +633,8 @@ async def _run_account_executor(
         "status": "SUBMITTED" if external_order_count else "IDLE",
         "external_order_count": external_order_count,
         "internal_order_count": internal_order_count,
+        "stale_intraday_orders_expired": stale_order_count,
+        "insufficient_sellable_blocks_expired": expired_block_count,
         **submission,
     }
 

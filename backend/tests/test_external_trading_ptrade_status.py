@@ -14,10 +14,13 @@ from src.core.external_trading_database import (
     ExternalTradingLedgerPosition,
     ExternalTradingOrder,
     ExternalTradingOrderFill,
+    ExternalTradingSubAccount,
 )
 from src.core.services.external_trading_ledger import (
     _apply_order_status_event,
     _is_trade_fill_event,
+    expire_stale_intraday_orders,
+    get_open_order_quantities,
     order_event_filled_quantity,
     process_order_events,
     process_trade_events,
@@ -408,6 +411,176 @@ class PTradeOrderStatusTest(TestCase):
             }
 
             self.assertFalse(_is_trade_fill_event(trade))
+
+    def test_stale_a_share_active_order_is_excluded_from_open_quantities(self):
+        db = self._db_session()
+        db.add(
+            ExternalTradingOrder(
+                account_id="acct",
+                external_trading_account_id=2,
+                sub_account_id=19,
+                allocation_role="CHILD",
+                client_order_id="stale-child-client-id",
+                broker_order_id="broker-order-id",
+                entrust_no="83931",
+                symbol="301217.SZ",
+                side="BUY",
+                order_type="LIMIT",
+                quantity=600,
+                filled_quantity=0,
+                remaining_quantity=600,
+                status="CANCEL_PENDING",
+                ptrade_status="2",
+                created_at=datetime(2026, 5, 26, 13, 57, 21),
+                submitted_at=datetime(2026, 5, 26, 13, 58, 21),
+            )
+        )
+        db.add(
+            ExternalTradingOrder(
+                account_id="acct",
+                external_trading_account_id=2,
+                sub_account_id=19,
+                allocation_role="CHILD",
+                client_order_id="same-day-child-client-id",
+                broker_order_id="same-day-broker-order-id",
+                entrust_no="90001",
+                symbol="301217.SZ",
+                side="SELL",
+                order_type="LIMIT",
+                quantity=100,
+                filled_quantity=0,
+                remaining_quantity=100,
+                status="SUBMITTED",
+                ptrade_status="2",
+                created_at=datetime(2026, 6, 2, 10, 1, 0),
+                submitted_at=datetime(2026, 6, 2, 10, 1, 0),
+            )
+        )
+        db.flush()
+
+        quantities = get_open_order_quantities(db, 19, now=datetime(2026, 6, 2, 14, 59, 55))
+
+        self.assertEqual({"301217.SZ": {"BUY": 0, "SELL": 100}}, quantities)
+
+    def test_expire_stale_intraday_orders_marks_parent_and_child_expired(self):
+        db = self._db_session()
+        sub_account = ExternalTradingSubAccount(
+            id=19,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="2026滚雪球",
+            strategy_type="snowball_copy_live",
+            strategy_config_id=18,
+        )
+        db.add(sub_account)
+        parent = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            client_order_id="parent-client-id",
+            broker_order_id="broker-order-id",
+            entrust_no="83931",
+            symbol="301217.SZ",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=600,
+            filled_quantity=0,
+            remaining_quantity=600,
+            status="CANCEL_PENDING",
+            ptrade_status="2",
+            submitted_price=98.57,
+            cancel_reason="timeout_reprice",
+            created_at=datetime(2026, 5, 26, 13, 57, 21),
+            submitted_at=datetime(2026, 5, 26, 13, 58, 21),
+        )
+        db.add(parent)
+        db.flush()
+        child = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            parent_order_id=parent.id,
+            sub_account_id=19,
+            allocation_role="CHILD",
+            client_order_id="child-client-id",
+            broker_order_id="broker-order-id",
+            entrust_no="83931",
+            symbol="301217.SZ",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=600,
+            filled_quantity=0,
+            remaining_quantity=600,
+            status="CANCEL_PENDING",
+            ptrade_status="2",
+            submitted_price=98.57,
+            created_at=datetime(2026, 5, 26, 13, 57, 21),
+            submitted_at=datetime(2026, 5, 26, 13, 58, 21),
+        )
+        db.add(child)
+        db.flush()
+
+        expired = expire_stale_intraday_orders(db, external_trading_account_id=2, now=datetime(2026, 6, 2, 9, 20, 0))
+
+        self.assertEqual(2, expired)
+        self.assertEqual("EXPIRED", parent.status)
+        self.assertEqual("EXPIRED", child.status)
+        self.assertEqual(600, parent.remaining_quantity)
+        self.assertEqual(600, child.remaining_quantity)
+        self.assertEqual("日内委托跨交易日未收到终态回报，系统按过期处理", parent.message)
+        self.assertEqual("stale_intraday_order_cleanup", parent.raw_order_event.get("source"))
+        logs = db.query(ExternalTradingEventLog).filter(ExternalTradingEventLog.source == "stale_intraday_order_cleanup").all()
+        self.assertEqual(1, len(logs))
+        self.assertEqual(parent.id, logs[0].matched_order_id)
+        self.assertEqual("PROCESSED", logs[0].process_status)
+
+    def test_expire_stale_intraday_orders_preserves_recorded_partial_fill(self):
+        db = self._db_session()
+        order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=19,
+            allocation_role="DIRECT",
+            client_order_id="direct-client-id",
+            broker_order_id="broker-order-id",
+            entrust_no="83931",
+            symbol="301217.SZ",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=600,
+            filled_quantity=200,
+            remaining_quantity=400,
+            status="PARTIALLY_FILLED",
+            ptrade_status="7",
+            submitted_price=98.57,
+            created_at=datetime(2026, 5, 26, 13, 57, 21),
+            submitted_at=datetime(2026, 5, 26, 13, 58, 21),
+        )
+        db.add(order)
+        db.flush()
+        db.add(
+            ExternalTradingOrderFill(
+                account_id="acct",
+                external_trading_account_id=2,
+                sub_account_id=19,
+                order_id=order.id,
+                client_order_id=order.client_order_id,
+                broker_order_id=order.broker_order_id,
+                fill_key="fill-key",
+                symbol="301217.SZ",
+                side="BUY",
+                quantity=200,
+                price=98.57,
+                amount=19714.0,
+            )
+        )
+        db.flush()
+
+        expired = expire_stale_intraday_orders(db, external_trading_account_id=2, now=datetime(2026, 6, 2, 9, 20, 0))
+
+        self.assertEqual(1, expired)
+        self.assertEqual("PARTIALLY_CANCELED", order.status)
+        self.assertEqual(200, order.filled_quantity)
+        self.assertEqual(400, order.remaining_quantity)
 
     def test_partial_cancel_trade_event_only_updates_order_status(self):
         db = self._db_session()
