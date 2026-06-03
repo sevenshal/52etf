@@ -880,6 +880,10 @@ def _is_non_empty_target_position(row: Dict[str, Any]) -> bool:
     return any(safe_int(row.get(field)) != 0 for field in quantity_fields)
 
 
+def _has_target_position_delta(row: Dict[str, Any]) -> bool:
+    return safe_int(row.get("delta_quantity")) != 0
+
+
 def _serialize_ledger_position_status(
     row: ExternalTradingLedgerPosition,
     sub_account: Optional[ExternalTradingSubAccount],
@@ -1154,6 +1158,19 @@ def _paginate_query(query: Any, *, page: int, page_size: int) -> tuple:
     total = query.count()
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
     return rows, _pagination_meta(page, page_size, total)
+
+
+def _apply_order_lifecycle_filters(query: Any, *, active_only: bool = False, unfilled_only: bool = False) -> Any:
+    if active_only:
+        query = query.filter(ExternalTradingOrder.status.in_(ACTIVE_ORDER_STATUSES))
+    if unfilled_only:
+        query = query.filter(
+            or_(
+                func.upper(ExternalTradingOrder.status) != "FILLED",
+                ExternalTradingOrder.filled_quantity != ExternalTradingOrder.quantity,
+            )
+        )
+    return query
 
 
 def _filter_options(values: Iterable[Any]) -> List[Dict[str, str]]:
@@ -2511,6 +2528,7 @@ async def get_external_trading_executor_status_target_positions(
     sub_account: Optional[str] = Query(None),
     strategy: Optional[str] = Query(None),
     non_empty_only: bool = Query(False),
+    delta_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
@@ -2544,7 +2562,7 @@ async def get_external_trading_executor_status_target_positions(
         ExternalTradingTargetPosition.sub_account_id.asc(),
         ExternalTradingTargetPosition.symbol.asc(),
     )
-    if non_empty_only:
+    if non_empty_only or delta_only:
         rows = query.all()
         pagination = None
     else:
@@ -2570,10 +2588,13 @@ async def get_external_trading_executor_status_target_positions(
             strategy_name_by_sub_account_id.get(row.sub_account_id),
             today_buy_by_key.get((row.sub_account_id, symbol_key), 0),
         ))
-    if non_empty_only:
+    if non_empty_only or delta_only:
         page = _normalize_page(page)
         page_size = _normalize_page_size(page_size)
-        serialized_rows = [row for row in serialized_rows if _is_non_empty_target_position(row)]
+        if non_empty_only:
+            serialized_rows = [row for row in serialized_rows if _is_non_empty_target_position(row)]
+        if delta_only:
+            serialized_rows = [row for row in serialized_rows if _has_target_position_delta(row)]
         total = len(serialized_rows)
         offset = (page - 1) * page_size
         serialized_rows = serialized_rows[offset:offset + page_size]
@@ -2664,6 +2685,7 @@ async def get_external_trading_executor_status_orders(
     symbol: Optional[str] = Query(None),
     sub_account: Optional[str] = Query(None),
     role: Optional[str] = Query(None),
+    active_only: bool = Query(False),
     unfilled_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
@@ -2691,13 +2713,7 @@ async def get_external_trading_executor_status_orders(
     roles = _query_filter_values(role)
     if roles:
         query = query.filter(ExternalTradingOrder.allocation_role.in_(roles))
-    if unfilled_only:
-        query = query.filter(
-            or_(
-                func.upper(ExternalTradingOrder.status) != "FILLED",
-                ExternalTradingOrder.filled_quantity != ExternalTradingOrder.quantity,
-            )
-        )
+    query = _apply_order_lifecycle_filters(query, active_only=active_only, unfilled_only=unfilled_only)
     query = query.order_by(ExternalTradingOrder.created_at.desc(), ExternalTradingOrder.id.desc())
     rows, pagination = _paginate_query(query, page=page, page_size=page_size)
     repair_summaries = _load_parent_order_child_repair_summaries(
