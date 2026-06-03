@@ -500,6 +500,8 @@ class SoxlFearStrategyConfig(Base):
     account_type = Column(String, default="ib")
     ib_account_id = Column(Integer, nullable=True)
     longport_account_id = Column(String, nullable=True)
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_sub_account_id = Column(Integer, nullable=True)
     trading_account_id = Column(String, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=60.0)
     greed_threshold = Column(Float, nullable=False, default=60.0)
@@ -1292,6 +1294,8 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                     account_type VARCHAR,
                     ib_account_id INTEGER,
                     longport_account_id VARCHAR,
+                    external_trading_account_id INTEGER,
+                    live_sub_account_id INTEGER,
                     trading_account_id VARCHAR,
                     buy_threshold FLOAT NOT NULL DEFAULT 60.0,
                     greed_threshold FLOAT NOT NULL DEFAULT 60.0,
@@ -1332,7 +1336,8 @@ def ensure_soxl_fear_strategy_multi_config_schema():
             conn.execute(text(f"""
                 INSERT OR IGNORE INTO soxl_fear_strategy_configs (
                     id, account_id, enabled, symbol, account_type, ib_account_id, longport_account_id,
-                    trading_account_id, buy_threshold, greed_threshold, volume_ratio_threshold,
+                    external_trading_account_id, live_sub_account_id, trading_account_id,
+                    buy_threshold, greed_threshold, volume_ratio_threshold,
                     buy_position_pct, cooldown_days, trailing_stop_pct, sell_position_pct,
                     sell_reduction_basis, max_take_profit_sells_per_cycle,
                     min_position_pct_after_take_profit, rebalance_threshold_pct,
@@ -1346,6 +1351,8 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                     COALESCE({old_column("account_type", "'ib'")}, 'ib'),
                     {old_column("ib_account_id", "NULL")},
                     {old_column("longport_account_id", "NULL")},
+                    {old_column("external_trading_account_id", "NULL")},
+                    {old_column("live_sub_account_id", "NULL")},
                     {trading_account_expr},
                     COALESCE({old_column("buy_threshold", "60.0")}, 60.0),
                     COALESCE({old_column("greed_threshold", "60.0")}, 60.0),
@@ -1367,9 +1374,22 @@ def ensure_soxl_fear_strategy_multi_config_schema():
             """))
             conn.execute(text("DROP TABLE soxl_fear_strategy_configs_old"))
 
+        config_columns = get_columns(conn, "soxl_fear_strategy_configs")
+        soxl_config_column_ddls = {
+            "external_trading_account_id": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_sub_account_id": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN live_sub_account_id INTEGER",
+        }
+        for column_name, ddl in soxl_config_column_ddls.items():
+            if column_name not in config_columns:
+                conn.execute(text(ddl))
+
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_configs_account_id "
             "ON soxl_fear_strategy_configs(account_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_configs_external_account "
+            "ON soxl_fear_strategy_configs(external_trading_account_id, live_sub_account_id)"
         ))
         conn.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_soxl_fear_strategy_unique_target_account "

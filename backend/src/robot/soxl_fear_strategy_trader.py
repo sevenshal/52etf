@@ -22,6 +22,30 @@ from ..core.database import (
     get_db_ctx,
 )
 from ..core.event_stream import publish_event
+from ..core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingOrder,
+    ExternalTradingSubAccount,
+    get_external_trading_db_ctx,
+)
+from ..core.services.external_trading_executor import trigger_external_trading_executor
+from ..core.services.external_trading_ledger import (
+    ACTIVE_ORDER_STATUSES,
+    STRATEGY_SOXL_FEAR,
+    get_ledger_positions,
+    normalize_symbol as normalize_external_symbol,
+    safe_float as external_safe_float,
+    safe_int as external_safe_int,
+    sync_target_positions,
+)
+from ..core.services.external_trading_market import (
+    EXTERNAL_TRADING_MARKET_US_STOCK,
+    normalize_external_trading_market_type,
+)
+from ..core.services.external_trading_valuation import (
+    ExternalTradingValuationError,
+    calculate_sub_account_net_asset,
+)
 from ..core.services.ib_service import IBKRService
 from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
@@ -43,6 +67,8 @@ class BrokerSnapshot:
     portfolio_value: float
     has_today_order: bool
     order_service: object
+    external_trading_account_id: Optional[int] = None
+    live_sub_account_id: Optional[int] = None
 
 
 class SoxlFearStrategyTrader:
@@ -529,14 +555,176 @@ class SoxlFearStrategyTrader:
             order_service=service,
         )
 
+    async def _build_external_snapshot(self, config: SoxlFearStrategyConfig, current_price: float) -> BrokerSnapshot:
+        if not config.external_trading_account_id or not config.live_sub_account_id:
+            raise ValueError("未选择外部交易账户或虚拟子账户")
+
+        symbol = normalize_external_symbol(config.symbol)
+        if not symbol:
+            raise ValueError("交易标的格式不正确")
+
+        with get_external_trading_db_ctx() as db:
+            account = db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == config.external_trading_account_id,
+                ExternalTradingAccount.account_id == config.account_id,
+                ExternalTradingAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not account:
+                raise ValueError("外部交易账户不存在或未启用")
+            if normalize_external_trading_market_type(account.market_type) != EXTERNAL_TRADING_MARKET_US_STOCK:
+                raise ValueError("SOXL 策略只能绑定美股外部交易账户")
+
+            sub_account = db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+                ExternalTradingSubAccount.external_trading_account_id == account.id,
+                ExternalTradingSubAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not sub_account:
+                raise ValueError("外部交易虚拟子账户不存在或未启用")
+            if sub_account.strategy_type != STRATEGY_SOXL_FEAR or sub_account.strategy_config_id != config.id:
+                raise ValueError("外部交易虚拟子账户归属不匹配")
+
+            positions = get_ledger_positions(db, sub_account.id)
+            position = positions.get(symbol)
+            shares = external_safe_int(getattr(position, "quantity", 0))
+            available_shares = external_safe_int(getattr(position, "available_quantity", shares), shares)
+            avg_cost = external_safe_float(getattr(position, "avg_cost", 0.0))
+
+            try:
+                valuation = await calculate_sub_account_net_asset(db, sub_account)
+                available_cash = external_safe_float(valuation.get("cash_available"))
+                portfolio_value = external_safe_float(valuation.get("net_asset"))
+            except ExternalTradingValuationError as exc:
+                logger.warning("Failed to value SOXL external sub-account, fallback to ledger values: %s", exc)
+                available_cash = external_safe_float(sub_account.cash_available)
+                holdings_value = 0.0
+                for row in positions.values():
+                    quantity = external_safe_int(getattr(row, "quantity", 0))
+                    if quantity <= 0:
+                        continue
+                    row_symbol = normalize_external_symbol(getattr(row, "symbol", None))
+                    row_price = external_safe_float(getattr(row, "market_price", 0.0))
+                    row_market_value = external_safe_float(getattr(row, "market_value", 0.0))
+                    if row_price <= 0 and row_market_value > 0:
+                        row_price = row_market_value / quantity
+                    if row_symbol == symbol and row_price <= 0:
+                        row_price = current_price
+                    holdings_value += quantity * max(row_price, 0.0)
+                portfolio_value = available_cash + holdings_value
+
+            has_open_order = db.query(ExternalTradingOrder).filter(
+                ExternalTradingOrder.account_id == config.account_id,
+                ExternalTradingOrder.external_trading_account_id == account.id,
+                ExternalTradingOrder.sub_account_id == sub_account.id,
+                ExternalTradingOrder.symbol == symbol,
+                ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
+            ).first() is not None
+
+            return BrokerSnapshot(
+                shares=max(0, shares),
+                available_shares=max(0, available_shares),
+                avg_cost=avg_cost,
+                current_price=current_price,
+                available_cash=available_cash,
+                portfolio_value=max(portfolio_value, available_cash + max(0, shares) * current_price, 1.0),
+                has_today_order=has_open_order,
+                order_service=None,
+                external_trading_account_id=account.id,
+                live_sub_account_id=sub_account.id,
+            )
+
     async def _build_broker_snapshot(self, config: SoxlFearStrategyConfig, current_price: float) -> BrokerSnapshot:
+        if config.account_type == "external":
+            return await self._build_external_snapshot(config, current_price)
         if config.account_type == "longport":
             return self._build_longport_snapshot(config, current_price)
         return await self._build_ib_snapshot(config, current_price)
 
-    async def _place_order(self, config: SoxlFearStrategyConfig, snapshot: BrokerSnapshot, action: str, quantity: int, price: float) -> str:
+    async def _sync_external_target_order(
+        self,
+        config: SoxlFearStrategyConfig,
+        snapshot: BrokerSnapshot,
+        action: str,
+        quantity: int,
+        price: float,
+        trigger_source: str,
+    ) -> str:
+        symbol = normalize_external_symbol(config.symbol)
+        if not symbol:
+            raise ValueError("交易标的格式不正确")
+        if not snapshot.external_trading_account_id or not snapshot.live_sub_account_id:
+            raise ValueError("外部交易快照缺少账户信息")
+
+        if action == "BUY":
+            target_quantity = int(snapshot.shares) + int(quantity)
+        elif action == "SELL":
+            target_quantity = max(0, int(snapshot.shares) - int(quantity))
+        else:
+            raise ValueError("外部交易仅支持 BUY 或 SELL")
+
+        signal_version = datetime.now().strftime(f"soxl_fear:{config.id}:%Y%m%d%H%M%S")
+        target = {
+            "symbol": symbol,
+            "target_quantity": target_quantity,
+            "target_weight_pct": (
+                target_quantity * price / snapshot.portfolio_value * 100
+                if snapshot.portfolio_value > 0 and price > 0
+                else None
+            ),
+            "target_value": round(target_quantity * price, 2),
+            "reference_price": round(price, 4),
+            "reference_price_source": "soxl_fear_strategy",
+        }
+
+        with get_external_trading_db_ctx() as db:
+            sub_account = db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == snapshot.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == config.account_id,
+                ExternalTradingSubAccount.external_trading_account_id == snapshot.external_trading_account_id,
+                ExternalTradingSubAccount.strategy_type == STRATEGY_SOXL_FEAR,
+                ExternalTradingSubAccount.strategy_config_id == config.id,
+            ).first()
+            if not sub_account:
+                raise ValueError("外部交易虚拟子账户归属不匹配")
+            sync_target_positions(
+                db,
+                sub_account=sub_account,
+                targets=[target],
+                signal_id=f"soxl_fear:{config.id}:{action.lower()}",
+                signal_version=signal_version,
+                source_execution_id=None,
+            )
+
+        executor_result = await trigger_external_trading_executor(
+            account_id=config.account_id,
+            external_account_id=snapshot.external_trading_account_id,
+            trigger_source=f"soxl_fear_{trigger_source}",
+        )
+        external_order_count = sum(
+            int(item.get("external_order_count") or 0)
+            for item in (executor_result.get("accounts") or [])
+            if isinstance(item, dict)
+        )
+        return (
+            f"外部目标仓位已同步 target={target_quantity}, signal={signal_version}, "
+            f"executor={executor_result.get('status')}, orders={external_order_count}"
+        )
+
+    async def _place_order(
+        self,
+        config: SoxlFearStrategyConfig,
+        snapshot: BrokerSnapshot,
+        action: str,
+        quantity: int,
+        price: float,
+        trigger_source: str = "auto",
+    ) -> str:
         if quantity < 1:
             raise ValueError("下单数量必须大于 0")
+
+        if config.account_type == "external":
+            return await self._sync_external_target_order(config, snapshot, action, quantity, price, trigger_source)
 
         if config.account_type == "longport":
             side = OrderSide.Buy if action == "BUY" else OrderSide.Sell
@@ -676,7 +864,14 @@ class SoxlFearStrategyTrader:
 
                     if drawdown_from_peak >= float(config.trailing_stop_pct) and avg_cost > 0 and current_price > avg_cost and current_position_ratio > float(config.min_position_pct_after_take_profit):
                         if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
-                            order_id = await self._place_order(config, broker_snapshot, "SELL", trade_quantity, current_price)
+                            order_id = await self._place_order(
+                                config,
+                                broker_snapshot,
+                                "SELL",
+                                trade_quantity,
+                                current_price,
+                                trigger_source=trigger_source,
+                            )
                             trade_action = "SELL"
                             state.cooldown_remaining_days = int(config.cooldown_days)
                             state.take_profit_cycle_sell_count += 1
@@ -698,7 +893,14 @@ class SoxlFearStrategyTrader:
                     trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
                     if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
-                        order_id = await self._place_order(config, broker_snapshot, "BUY", trade_quantity, current_price)
+                        order_id = await self._place_order(
+                            config,
+                            broker_snapshot,
+                            "BUY",
+                            trade_quantity,
+                            current_price,
+                            trigger_source=trigger_source,
+                        )
                         trade_action = "BUY"
                         state.cooldown_remaining_days = int(config.cooldown_days)
                         state.greed_peak_price = None

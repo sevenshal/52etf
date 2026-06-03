@@ -14,6 +14,7 @@ from ...core.database import (
     FactorLiveTradingConfig,
     PortfolioCopyConfig,
     SnowballCopyConfig,
+    SoxlFearStrategyConfig,
     get_db,
 )
 from ...core.external_trading_database import (
@@ -68,6 +69,7 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_SNOWBALL,
     STRATEGY_PORTFOLIO_COPY,
     STRATEGY_FACTOR_LIVE,
+    STRATEGY_SOXL_FEAR,
     STRATEGY_W20,
     build_netted_target_execution_plan,
     build_broker_position_diff,
@@ -533,6 +535,14 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
             FactorLiveTradingConfig.account_id == sub_account.account_id,
         ).first()
         return config.name if config else "因子线上交易（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_SOXL_FEAR:
+        config = main_db.query(SoxlFearStrategyConfig).filter(
+            SoxlFearStrategyConfig.id == sub_account.strategy_config_id,
+            SoxlFearStrategyConfig.account_id == sub_account.account_id,
+        ).first()
+        if config:
+            return f"SOXL情绪量能自动交易 {config.symbol or ''}".strip()
+        return "SOXL情绪量能自动交易（配置已删除）"
     return sub_account.strategy_type
 
 
@@ -1791,6 +1801,16 @@ async def delete_external_trading_account(
         config.live_sub_account_id = None
         config.enabled = False
         config.updated_at = now
+    for config in main_db.query(SoxlFearStrategyConfig).filter(
+        SoxlFearStrategyConfig.account_id == account_id,
+        SoxlFearStrategyConfig.external_trading_account_id == account_pk,
+    ).all():
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        if config.account_type == "external":
+            config.account_type = "ib"
+            config.trading_account_id = None
+        config.updated_at = now
     db.query(ExternalTradingOrderFill).filter(
         ExternalTradingOrderFill.external_trading_account_id == account_pk
     ).delete(synchronize_session=False)
@@ -2101,6 +2121,18 @@ async def delete_external_trading_sub_account(
     ).all()
     for config in bound_factor_live_configs:
         config.live_sub_account_id = None
+        config.updated_at = now
+
+    bound_soxl_fear_configs = main_db.query(SoxlFearStrategyConfig).filter(
+        SoxlFearStrategyConfig.account_id == account_id,
+        SoxlFearStrategyConfig.live_sub_account_id == sub_account.id,
+    ).all()
+    for config in bound_soxl_fear_configs:
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        if config.account_type == "external":
+            config.account_type = "ib"
+            config.trading_account_id = None
         config.updated_at = now
 
     db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.sub_account_id == sub_account.id).delete(synchronize_session=False)
