@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -11,6 +11,7 @@ from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trad
 from src.app.api.external_trading_accounts import (
     _apply_event_sub_account_filter,
     _event_display_amount,
+    _serialize_deliver_record_status,
     _serialize_event_log_status,
 )
 from src.core.external_trading_database import (
@@ -228,6 +229,35 @@ class PTradeOrderStatusTest(TestCase):
 
         self.assertEqual(140, position.quantity)
         self.assertEqual(140, target.target_quantity)
+
+    def test_red_stock_deliver_record_status_serializes_business_fields(self):
+        deliver_row = ExternalTradingDeliverRecord(
+            id=1796,
+            account_id="acct",
+            external_trading_account_id=2,
+            trade_date=date(2026, 5, 28),
+            deliver_key="deliver-key",
+            symbol="301086.SZ",
+            side="BUY",
+            quantity=40,
+            price=234.76,
+            amount=9390.4,
+            total_fee=0.0,
+            status="POSITION_ADJUSTED",
+            message="红股入账已调整账本持仓",
+            raw_record=self._red_stock_deliver_record(),
+            reconciled_at=datetime(2026, 6, 3, 10, 0, 0),
+        )
+
+        item = _serialize_deliver_record_status(deliver_row)
+
+        self.assertEqual("2026-05-28", item["trade_date"])
+        self.assertEqual("红股入账", item["business_name"])
+        self.assertEqual(4015, item["business_flag"])
+        self.assertEqual(9339, item["business_no"])
+        self.assertEqual(140.0, item["post_amount"])
+        self.assertEqual("POSITION_ADJUSTED", item["status"])
+        self.assertEqual("301086.SZ", item["symbol"])
 
     def test_order_event_does_not_use_business_amount_as_fill_quantity(self):
         payload = {"status": "8", "business_amount": 100, "quantity": 100}

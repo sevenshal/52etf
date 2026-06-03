@@ -999,6 +999,57 @@ def _serialize_fill_status(
     }
 
 
+def _deliver_raw_value(raw_record: Any, keys: Iterable[str]) -> Any:
+    if not isinstance(raw_record, dict):
+        return None
+    lowered = {str(key).lower(): value for key, value in raw_record.items()}
+    for key in keys:
+        value = raw_record.get(key)
+        if value not in (None, ""):
+            return value
+        value = lowered.get(str(key).lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _serialize_deliver_record_status(row: ExternalTradingDeliverRecord) -> Dict[str, Any]:
+    raw_record = row.raw_record if isinstance(row.raw_record, dict) else {}
+    return {
+        "id": row.id,
+        "account_id": row.account_id,
+        "external_trading_account_id": row.external_trading_account_id,
+        "trade_date": row.trade_date.isoformat() if row.trade_date else None,
+        "deliver_key": row.deliver_key,
+        "matched_order_id": row.matched_order_id,
+        "broker_order_id": row.broker_order_id,
+        "entrust_no": row.entrust_no,
+        "business_name": _deliver_raw_value(raw_record, ("business_name", "业务名称", "remark", "备注")),
+        "business_flag": _deliver_raw_value(raw_record, ("business_flag", "业务代码")),
+        "business_type": _deliver_raw_value(raw_record, ("business_type", "业务类型")),
+        "business_no": _deliver_raw_value(raw_record, ("business_no", "deal_no", "match_no", "成交编号")),
+        "serial_no": _deliver_raw_value(raw_record, ("serial_no", "business_id", "流水号")),
+        "position_str": _deliver_raw_value(raw_record, ("position_str",)),
+        "post_amount": _deliver_raw_value(raw_record, ("post_amount", "post_quantity", "股份余额", "证券余额")),
+        "occur_amount": _deliver_raw_value(raw_record, ("occur_amount", "发生数量")),
+        "symbol": normalize_symbol(row.symbol),
+        "side": row.side,
+        "quantity": row.quantity,
+        "price": row.price,
+        "amount": row.amount,
+        "commission": row.commission,
+        "stamp_tax": row.stamp_tax,
+        "transfer_fee": row.transfer_fee,
+        "other_fee": row.other_fee,
+        "total_fee": row.total_fee,
+        "status": row.status,
+        "message": row.message,
+        "raw_record": jsonable_encoder(raw_record),
+        "reconciled_at": _iso(row.reconciled_at),
+        "created_at": _iso(row.created_at),
+    }
+
+
 def _event_payload_value(payload: Dict[str, Any], keys: Iterable[str]) -> Any:
     raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
     for key in keys:
@@ -1134,6 +1185,20 @@ def _query_filter_values(value: Optional[str]) -> List[str]:
 
 def _query_filter_symbols(value: Optional[str]) -> List[str]:
     return _dedupe_normalized_symbols(_query_filter_values(value))
+
+
+def _query_filter_dates(value: Optional[str]) -> List[date]:
+    result: List[date] = []
+    seen = set()
+    for item in _query_filter_values(value):
+        try:
+            parsed = datetime.fromisoformat(item[:10]).date()
+        except Exception:
+            continue
+        if parsed not in seen:
+            seen.add(parsed)
+            result.append(parsed)
+    return result
 
 
 def _normalize_page(value: int) -> int:
@@ -1302,6 +1367,34 @@ def _distinct_event_values(
         .all()
     )
     return [str(row[0]) for row in rows if row[0] not in (None, "")]
+
+
+def _distinct_deliver_values(
+    db: OrmSession,
+    column: Any,
+    account_id: str,
+    external_account_id: int,
+) -> List[str]:
+    rows = (
+        db.query(column)
+        .filter(
+            ExternalTradingDeliverRecord.account_id == account_id,
+            ExternalTradingDeliverRecord.external_trading_account_id == external_account_id,
+        )
+        .distinct()
+        .order_by(column.asc())
+        .all()
+    )
+    result = []
+    for row in rows:
+        value = row[0]
+        if value in (None, ""):
+            continue
+        if hasattr(value, "isoformat"):
+            result.append(value.isoformat())
+        else:
+            result.append(str(value))
+    return result
 
 
 def _distinct_active_target_symbols(db: OrmSession, account_id: str, external_account_id: int) -> List[str]:
@@ -2385,6 +2478,23 @@ async def get_external_trading_executor_status(
         )
         .count()
     )
+    deliver_record_count = (
+        db.query(ExternalTradingDeliverRecord)
+        .filter(
+            ExternalTradingDeliverRecord.account_id == account_id,
+            ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+        )
+        .count()
+    )
+    position_adjusted_deliver_count = (
+        db.query(ExternalTradingDeliverRecord)
+        .filter(
+            ExternalTradingDeliverRecord.account_id == account_id,
+            ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+            ExternalTradingDeliverRecord.status == "POSITION_ADJUSTED",
+        )
+        .count()
+    )
 
     return {
         "account": _serialize_account(account),
@@ -2394,6 +2504,7 @@ async def get_external_trading_executor_status(
         "orders": [],
         "fills": [],
         "events": [],
+        "deliver_records": [],
         "plan": {},
         "plan_error": plan_error,
         "price_details": {},
@@ -2409,6 +2520,8 @@ async def get_external_trading_executor_status(
             "order_count": order_count,
             "fill_count": fill_count,
             "event_log_count": event_log_count,
+            "deliver_record_count": deliver_record_count,
+            "position_adjusted_deliver_count": position_adjusted_deliver_count,
             "order_status_counts": order_status_counts,
             "external_order_count": len(plan_for_summary.get("external_orders") or []),
             "internal_cross_count": len(plan_for_summary.get("internal_crosses") or []),
@@ -2823,6 +2936,64 @@ async def get_external_trading_executor_status_fills(
             "sub_account": _filter_options(sub_account_options),
             "strategy": _filter_options(strategy_options),
             "role": _role_filter_options(["PARENT", "CHILD"]),
+        },
+    }
+
+
+@router.get("/{external_account_id}/executor/status/deliver-records")
+async def get_external_trading_executor_status_deliver_records(
+    external_account_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    trade_date: Optional[str] = Query(None),
+    symbol: Optional[str] = Query(None),
+    side: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    db: OrmSession = Depends(get_external_trading_db),
+    account_id: str = Depends(valid_account),
+):
+    account = _get_account_or_404(db, account_id, external_account_id)
+    query = (
+        db.query(ExternalTradingDeliverRecord)
+        .filter(
+            ExternalTradingDeliverRecord.account_id == account_id,
+            ExternalTradingDeliverRecord.external_trading_account_id == account.id,
+        )
+    )
+    date_values = _query_filter_dates(trade_date)
+    if date_values:
+        query = query.filter(ExternalTradingDeliverRecord.trade_date.in_(date_values))
+    query = _apply_symbol_filter(query, ExternalTradingDeliverRecord.symbol, _query_filter_symbols(symbol))
+    sides = _query_filter_values(side)
+    if sides:
+        query = query.filter(ExternalTradingDeliverRecord.side.in_(sides))
+    statuses = _query_filter_values(status)
+    if statuses:
+        query = query.filter(ExternalTradingDeliverRecord.status.in_(statuses))
+    query = query.order_by(
+        ExternalTradingDeliverRecord.trade_date.desc(),
+        ExternalTradingDeliverRecord.id.desc(),
+    )
+    rows, pagination = _paginate_query(query, page=page, page_size=page_size)
+    serialized_rows = [_serialize_deliver_record_status(row) for row in rows]
+    _attach_top_level_symbol_names(serialized_rows)
+    return {
+        "rows": serialized_rows,
+        "pagination": pagination,
+        "price_details": {},
+        "filter_options": {
+            "trade_date": _filter_options(
+                _distinct_deliver_values(db, ExternalTradingDeliverRecord.trade_date, account_id, account.id)
+            ),
+            "symbol": _symbol_filter_options(
+                _distinct_symbols(db, ExternalTradingDeliverRecord, account_id, account.id)
+            ),
+            "side": _filter_options(
+                _distinct_deliver_values(db, ExternalTradingDeliverRecord.side, account_id, account.id)
+            ),
+            "status": _filter_options(
+                _distinct_deliver_values(db, ExternalTradingDeliverRecord.status, account_id, account.id)
+            ),
         },
     }
 
