@@ -750,6 +750,37 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     </Space>
   );
 
+  const eventRelatedSubAccounts = record => (
+    Array.isArray(record?.related_sub_accounts)
+      ? record.related_sub_accounts.filter(item => item && (item.name || item.sub_account_name))
+      : []
+  );
+
+  const eventRelatedNames = record => (
+    eventRelatedSubAccounts(record)
+      .map(item => item.name || item.sub_account_name)
+      .filter(Boolean)
+      .join(' / ')
+  );
+
+  const eventSubAccountSummary = record => {
+    const relatedNames = eventRelatedNames(record);
+    if (relatedNames) return relatedNames;
+    return record.sub_account_name || record.name || '-';
+  };
+
+  const renderEventSubStrategy = (_, record) => {
+    const relatedRows = eventRelatedSubAccounts(record);
+    if (!relatedRows.length) return <Text>{record.sub_account_name || record.name || '-'}</Text>;
+
+    const relatedNames = eventRelatedNames(record);
+    return (
+      <Tooltip title={relatedNames}>
+        <Text className="executor-event-sub-account-line">{relatedNames}</Text>
+      </Tooltip>
+    );
+  };
+
   const renderTradeFee = (_, record) => {
     const summary = record?.trade_fee_summary || {};
     const total = record?.cumulative_trade_fee_total ?? summary.effective_fee_total;
@@ -838,7 +869,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '事件时间', dataIndex: 'event_time', width: 170, render: formatTime },
     { title: '事件类型', dataIndex: 'event_type', width: 120, ...serverFilterProps('events', 'event_type'), render: value => <Tag color={eventTypeColor(value)}>{eventTypeLabel(value)}</Tag> },
     { title: '处理状态', dataIndex: 'process_status', width: 110, ...serverFilterProps('events', 'process_status'), render: value => <Tag color={processStatusColor(value)}>{value || '-'}</Tag> },
-    { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('events', 'sub_account') },
+    { title: '子账户', dataIndex: 'sub_account_name', width: 260, render: renderEventSubStrategy, ...serverFilterProps('events', 'sub_account') },
     { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
     { title: '方向', dataIndex: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
     { title: '数量', dataIndex: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
@@ -1014,7 +1045,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
             <Tag color={processStatusColor(row.process_status)}>{row.process_status || '-'}</Tag>
           </div>
           <div className="executor-row-card__details">
-            <span>{row.sub_account_name || '-'}</span>
+            <span>{eventSubAccountSummary(row)}</span>
             <span>{renderSymbolText(row)}</span>
             <span>数量 {formatOptionalNumber(row.quantity)}</span>
             <span>已成 {formatOptionalNumber(row.filled_quantity)}</span>
