@@ -8,7 +8,11 @@ from sqlalchemy.orm import sessionmaker
 
 from ptrade_robot import ptrade_client
 from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trade
-from src.app.api.external_trading_accounts import _event_display_amount
+from src.app.api.external_trading_accounts import (
+    _apply_event_sub_account_filter,
+    _event_display_amount,
+    _serialize_event_log_status,
+)
 from src.core.external_trading_database import (
     ExternalTradingBase,
     ExternalTradingEventLog,
@@ -80,6 +84,155 @@ class PTradeOrderStatusTest(TestCase):
         event_log = ExternalTradingEventLog(event_type="trade_event")
 
         self.assertEqual(-47180.0, _event_display_amount(event_log, {"amount": -47180.0}))
+
+    def test_parent_event_status_exposes_related_sub_accounts(self):
+        db = self._db_session()
+        sub_account = ExternalTradingSubAccount(
+            account_id="acct",
+            external_trading_account_id=2,
+            name="SOXL",
+            strategy_type="soxl_fear",
+            strategy_config_id=1,
+        )
+        parent_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            client_order_id="parent-client-id",
+            symbol="301086.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        db.add_all([sub_account, parent_order])
+        db.flush()
+        child_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=sub_account.id,
+            allocation_role="CHILD",
+            parent_order_id=parent_order.id,
+            client_order_id="child-client-id",
+            symbol="301086.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        event_log = ExternalTradingEventLog(
+            account_id="acct",
+            external_trading_account_id=2,
+            event_type="order_event",
+            matched_order_id=parent_order.id,
+            raw_payload={"quantity": 100},
+            process_status="PROCESSED",
+        )
+        db.add_all([child_order, event_log])
+        db.flush()
+
+        item = _serialize_event_log_status(
+            event_log,
+            parent_order,
+            {sub_account.id: sub_account},
+            {parent_order.id: [child_order]},
+        )
+
+        self.assertEqual("净额父单", item["sub_account_name"])
+        self.assertEqual(
+            [{"id": sub_account.id, "name": "SOXL"}],
+            item["related_sub_accounts"],
+        )
+
+    def test_event_sub_account_filter_includes_parent_orders_by_children(self):
+        db = self._db_session()
+        sub_account = ExternalTradingSubAccount(
+            account_id="acct",
+            external_trading_account_id=2,
+            name="SOXL",
+        )
+        other_sub_account = ExternalTradingSubAccount(
+            account_id="acct",
+            external_trading_account_id=2,
+            name="OTHER",
+        )
+        parent_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            client_order_id="parent-client-id",
+            symbol="301086.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        other_parent_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            client_order_id="other-parent-client-id",
+            symbol="001286.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        db.add_all([sub_account, other_sub_account, parent_order, other_parent_order])
+        db.flush()
+        child_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=sub_account.id,
+            allocation_role="CHILD",
+            parent_order_id=parent_order.id,
+            client_order_id="child-client-id",
+            symbol="301086.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        other_child_order = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=other_sub_account.id,
+            allocation_role="CHILD",
+            parent_order_id=other_parent_order.id,
+            client_order_id="other-child-client-id",
+            symbol="001286.SZ",
+            side="SELL",
+            quantity=100,
+        )
+        db.add_all([child_order, other_child_order])
+        db.flush()
+        parent_event = ExternalTradingEventLog(
+            account_id="acct",
+            external_trading_account_id=2,
+            event_type="order_event",
+            matched_order_id=parent_order.id,
+            process_status="PROCESSED",
+        )
+        direct_child_event = ExternalTradingEventLog(
+            account_id="acct",
+            external_trading_account_id=2,
+            event_type="order_event",
+            matched_order_id=child_order.id,
+            process_status="PROCESSED",
+        )
+        other_parent_event = ExternalTradingEventLog(
+            account_id="acct",
+            external_trading_account_id=2,
+            event_type="order_event",
+            matched_order_id=other_parent_order.id,
+            process_status="PROCESSED",
+        )
+        db.add_all([parent_event, direct_child_event, other_parent_event])
+        db.flush()
+
+        query = db.query(ExternalTradingEventLog).filter(
+            ExternalTradingEventLog.account_id == "acct",
+            ExternalTradingEventLog.external_trading_account_id == 2,
+        )
+        rows = _apply_event_sub_account_filter(
+            query,
+            db,
+            account_id="acct",
+            external_account_id=2,
+            sub_account_ids=[sub_account.id],
+        ).all()
+
+        self.assertEqual({parent_event.id, direct_child_event.id}, {row.id for row in rows})
 
     def test_order_event_uses_explicit_filled_amount(self):
         payload = {"status": "8", "filled_amount": 100, "quantity": 100}

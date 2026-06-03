@@ -1033,7 +1033,6 @@ def _serialize_event_log_status(
     row: ExternalTradingEventLog,
     matched_order: Optional[ExternalTradingOrder],
     sub_account_by_id: Dict[int, ExternalTradingSubAccount],
-    strategy_name_by_sub_account_id: Dict[int, Optional[str]],
     children_by_parent_id: Dict[int, List[ExternalTradingOrder]],
 ) -> Dict[str, Any]:
     matched_role = (matched_order.allocation_role or "DIRECT") if matched_order else None
@@ -1053,7 +1052,6 @@ def _serialize_event_log_status(
             related_sub_accounts.append({
                 "id": child_sub_account.id,
                 "name": child_sub_account.name,
-                "strategy_name": strategy_name_by_sub_account_id.get(child_sub_account.id),
             })
     return {
         "id": row.id,
@@ -1079,7 +1077,6 @@ def _serialize_event_log_status(
         "matched_order_status": matched_order.status if matched_order else None,
         "sub_account_id": sub_account.id if sub_account else None,
         "sub_account_name": sub_account.name if sub_account else ("净额父单" if matched_order else "未匹配"),
-        "strategy_name": strategy_name_by_sub_account_id.get(sub_account.id) if sub_account else None,
         "related_sub_accounts": related_sub_accounts,
         "process_status": row.process_status,
         "process_message": row.process_message,
@@ -1210,6 +1207,45 @@ def _apply_sub_account_filter(query: Any, column: Any, sub_account_ids: Optional
     if not sub_account_ids:
         return query.filter(False)
     return query.filter(column.in_(sub_account_ids))
+
+
+def _apply_event_sub_account_filter(
+    query: Any,
+    db: OrmSession,
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_ids: Optional[List[int]],
+) -> Any:
+    if sub_account_ids is None:
+        return query
+    if not sub_account_ids:
+        return query.filter(False)
+
+    matching_order_ids = (
+        db.query(ExternalTradingOrder.id)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == external_account_id,
+            ExternalTradingOrder.sub_account_id.in_(sub_account_ids),
+        )
+    )
+    matching_parent_order_ids = (
+        db.query(ExternalTradingOrder.parent_order_id)
+        .filter(
+            ExternalTradingOrder.account_id == account_id,
+            ExternalTradingOrder.external_trading_account_id == external_account_id,
+            ExternalTradingOrder.sub_account_id.in_(sub_account_ids),
+            ExternalTradingOrder.parent_order_id.isnot(None),
+        )
+    )
+    return query.filter(
+        or_(
+            ExternalTradingEventLog.matched_sub_account_id.in_(sub_account_ids),
+            ExternalTradingEventLog.matched_order_id.in_(matching_order_ids),
+            ExternalTradingEventLog.matched_order_id.in_(matching_parent_order_ids),
+        )
+    )
 
 
 def _apply_symbol_filter(query: Any, column: Any, symbols: List[str]) -> Any:
@@ -2792,7 +2828,6 @@ async def get_external_trading_executor_status_events(
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
     sub_accounts = context["sub_accounts"]
     sub_account_by_id = context["sub_account_by_id"]
-    strategy_name_by_sub_account_id = context["strategy_name_by_sub_account_id"]
 
     query = (
         db.query(ExternalTradingEventLog)
@@ -2802,10 +2837,12 @@ async def get_external_trading_executor_status_events(
         )
     )
     query = _apply_symbol_filter(query, ExternalTradingEventLog.symbol, _query_filter_symbols(symbol))
-    query = _apply_sub_account_filter(
+    query = _apply_event_sub_account_filter(
         query,
-        ExternalTradingEventLog.matched_sub_account_id,
-        _sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
+        db,
+        account_id=account_id,
+        external_account_id=account.id,
+        sub_account_ids=_sub_account_ids_by_name(sub_accounts, _query_filter_values(sub_account)),
     )
     event_types = _query_filter_values(event_type)
     if event_types:
@@ -2854,7 +2891,6 @@ async def get_external_trading_executor_status_events(
             row,
             matched_order_by_id.get(row.matched_order_id),
             sub_account_by_id,
-            strategy_name_by_sub_account_id,
             children_by_parent_id,
         )
         for row in rows
