@@ -1013,6 +1013,12 @@ def _event_payload_float(payload: Dict[str, Any], keys: Iterable[str]) -> Option
     return _safe_float(value, None)
 
 
+def _event_display_amount(row: ExternalTradingEventLog, payload: Dict[str, Any]) -> Optional[float]:
+    if row.event_type == "order_event":
+        return _event_payload_float(payload, ("business_balance",))
+    return _event_payload_float(payload, ("amount", "business_balance"))
+
+
 def _serialize_event_log_status(
     row: ExternalTradingEventLog,
     matched_order: Optional[ExternalTradingOrder],
@@ -1056,7 +1062,7 @@ def _serialize_event_log_status(
         "quantity": _event_payload_int(raw_payload, ("quantity", "business_amount")),
         "filled_quantity": _event_payload_int(raw_payload, ("filled_quantity", "filled", "filled_amount")),
         "price": _event_payload_float(raw_payload, ("price", "business_price", "avg_fill_price")),
-        "amount": _event_payload_float(raw_payload, ("amount", "business_balance")),
+        "amount": _event_display_amount(row, raw_payload),
         "matched_order_id": row.matched_order_id,
         "matched_sub_account_id": matched_sub_account_id,
         "matched_order_role": matched_role,

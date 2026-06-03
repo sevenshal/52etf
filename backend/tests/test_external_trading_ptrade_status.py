@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from ptrade_robot import ptrade_client
 from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trade
+from src.app.api.external_trading_accounts import _event_display_amount
 from src.core.external_trading_database import (
     ExternalTradingBase,
     ExternalTradingEventLog,
@@ -64,6 +65,21 @@ class PTradeOrderStatusTest(TestCase):
         payload = {"status": "8", "business_amount": 100, "quantity": 100}
 
         self.assertEqual(0, order_event_filled_quantity(payload, "8", current=0))
+
+    def test_order_event_display_amount_does_not_use_raw_amount(self):
+        event_log = ExternalTradingEventLog(event_type="order_event")
+
+        self.assertIsNone(_event_display_amount(event_log, {"raw": {"amount": -200}}))
+
+    def test_order_event_display_amount_can_use_business_balance(self):
+        event_log = ExternalTradingEventLog(event_type="order_event")
+
+        self.assertEqual(22121.0, _event_display_amount(event_log, {"raw": {"business_balance": 22121.0}}))
+
+    def test_trade_event_display_amount_uses_trade_amount(self):
+        event_log = ExternalTradingEventLog(event_type="trade_event")
+
+        self.assertEqual(-47180.0, _event_display_amount(event_log, {"amount": -47180.0}))
 
     def test_order_event_uses_explicit_filled_amount(self):
         payload = {"status": "8", "filled_amount": 100, "quantity": 100}
