@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Navigate, Routes, Route, useLocation } from 'react-router-dom';
 import { AccountProvider } from './contexts/AccountContext';
 import AppLayout from './pages/Layout';
 import FearDashboard from './pages/fear/FearDashboard';
@@ -20,14 +20,19 @@ import IBKRAccountManager from './pages/IBKRAccountManager';
 import AllWeatherBacktest from './pages/AllWeatherBacktest';
 import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
 import LongPortAccountManager from './pages/LongPortAccountManager';
-import ExternalTradingAccountManager from './pages/ExternalTradingAccountManager';
-import ExecutorStatusPage from './pages/ExecutorStatusPage';
 import SZDTAutoTrading from './pages/SZDTAutoTrading';
 import ScheduledTasks from './pages/ScheduledTasks';
 import EVCAccountManager from './pages/EVCAccountManager';
 import SoxlFearBacktest from './pages/SoxlFearBacktest';
-import SoxlFearStrategy from './pages/SoxlFearStrategy';
 import FactorLab from './pages/FactorLab';
+import LiveTrading from './pages/LiveTrading';
+
+const LiveTabRedirect = ({ tab }) => {
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  searchParams.set('tab', tab);
+  return <Navigate to={`/live?${searchParams.toString()}`} replace />;
+};
 
 function App() {
   return (
@@ -39,10 +44,11 @@ function App() {
           <Route path="/fear/stocks" element={<FearStockList />} />
           <Route path="/evc" element={<EVCValuation />} />
           <Route path="/options" element={<OptionsPositions />} />
-          <Route path="/executor-status" element={<ExecutorStatusPage />} />
+          <Route path="/executor-status" element={<LiveTabRedirect tab="executor" />} />
+          <Route path="/live" element={<LiveTrading />} />
           <Route path="/db" element={<FactorLab initialTab="db" />} />
           <Route path="/factor-lab" element={<FactorLab />} />
-          <Route path="/factor-lab/live" element={<FactorLab initialTab="live" />} />
+          <Route path="/factor-lab/live" element={<LiveTabRedirect tab="factor" />} />
           <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
@@ -59,11 +65,11 @@ function App() {
           <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
           <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
-          <Route path="/external-trading-accounts" element={<ExternalTradingAccountManager />} />
+          <Route path="/external-trading-accounts" element={<LiveTabRedirect tab="accounts" />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
-          <Route path="/soxl-fear-strategy" element={<SoxlFearStrategy />} />
+          <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
         </Route>
       </Routes>
     </AccountProvider>

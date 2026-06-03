@@ -80,21 +80,6 @@ const Profile = () => {
           onClick: () => navigate('/portfolio-copy-trading'),
           arrow: true
         },
-        {
-          title: 'SOXL情绪量能自动交易',
-          onClick: () => navigate('/soxl-fear-strategy'),
-          arrow: true
-        },
-        {
-          title: '因子线上交易',
-          onClick: () => navigate('/factor-lab/live'),
-          arrow: true
-        },
-        {
-          title: '订单执行器状态',
-          onClick: () => navigate('/executor-status'),
-          arrow: true
-        },
       ]
     },
     {
@@ -114,11 +99,6 @@ const Profile = () => {
         {
           title: '长桥账户管理',
           onClick: () => navigate('/longport-account-manager'),
-          arrow: true
-        },
-        {
-          title: '外部交易账号',
-          onClick: () => navigate('/external-trading-accounts'),
           arrow: true
         },
         {

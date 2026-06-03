@@ -237,7 +237,7 @@ const EXECUTOR_TABS = [
   { key: 'plan', label: '净额预览' },
 ];
 
-const ExecutorStatusPage = () => {
+const ExecutorStatusPage = ({ embedded = false }) => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [accounts, setAccounts] = useState([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
@@ -1160,7 +1160,7 @@ const ExecutorStatusPage = () => {
   return (
     <PageShell
       className="executor-page"
-      title="订单执行器"
+      title={embedded ? null : '订单执行器'}
       subtitle="净额撮合、订单生命周期、成交回报和事件流水"
       actions={(
         <Select

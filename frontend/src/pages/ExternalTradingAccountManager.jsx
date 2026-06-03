@@ -359,7 +359,7 @@ const getNetAssetHistoryOption = rows => {
   };
 };
 
-const ExternalTradingAccountManager = () => {
+const ExternalTradingAccountManager = ({ embedded = false }) => {
   const { accountId } = useAccount();
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState([]);
@@ -425,7 +425,7 @@ const ExternalTradingAccountManager = () => {
       setAccounts(data || []);
     } catch (error) {
       if (!silent) {
-        message.error('获取外部交易账号失败');
+        message.error('获取交易账户失败');
       }
     } finally {
       if (!silent) {
@@ -458,7 +458,7 @@ const ExternalTradingAccountManager = () => {
             setAccounts(payload.accounts);
           }
         } catch (error) {
-          console.warn('解析外部交易账号状态推送失败', error);
+          console.warn('解析交易账户状态推送失败', error);
         }
       };
 
@@ -982,7 +982,7 @@ const ExternalTradingAccountManager = () => {
 
   const openExecutorStatus = account => {
     if (!account?.id) return;
-    navigate(`/executor-status?account_id=${account.id}`);
+    navigate(`/live?tab=executor&account_id=${account.id}`);
   };
 
   const openBrokerPositions = account => {
@@ -1547,7 +1547,7 @@ const ExternalTradingAccountManager = () => {
           <Tooltip title="编辑">
             <Button icon={<EditOutlined />} size="small" onClick={() => openEditModal(record)} />
           </Tooltip>
-          <Popconfirm title="确定删除这个外部交易账号吗？" onConfirm={() => handleDelete(record.id)}>
+          <Popconfirm title="确定删除这个交易账户吗？" onConfirm={() => handleDelete(record.id)}>
             <Button icon={<DeleteOutlined />} size="small" danger />
           </Popconfirm>
         </Space>
@@ -1680,7 +1680,7 @@ const ExternalTradingAccountManager = () => {
           <Tooltip title="编辑">
             <Button icon={<EditOutlined />} size="small" onClick={() => openEditModal(account)} />
           </Tooltip>
-          <Popconfirm title="确定删除这个外部交易账号吗？" onConfirm={() => handleDelete(account.id)}>
+          <Popconfirm title="确定删除这个交易账户吗？" onConfirm={() => handleDelete(account.id)}>
             <Button icon={<DeleteOutlined />} size="small" danger />
           </Popconfirm>
         </div>
@@ -1705,7 +1705,7 @@ const ExternalTradingAccountManager = () => {
   return (
     <PageShell
       className="external-trading-page"
-      title="外部交易账号"
+      title={embedded ? null : '交易账户'}
       subtitle="PTrade 与券商侧长连接、子账户账本和执行器入口"
       actions={
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
@@ -1737,19 +1737,19 @@ const ExternalTradingAccountManager = () => {
         <div className="external-account-mobile-list">
           {loading ? (
             <div className="external-mobile-state">
-              <Text type="secondary">正在加载外部交易账号...</Text>
+              <Text type="secondary">正在加载交易账户...</Text>
             </div>
           ) : accounts.length ? (
             accounts.map(renderMobileAccountCard)
           ) : (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无外部交易账号" />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无交易账户" />
           )}
         </div>
       </PageSection>
 
       <Modal
         className="external-trading-form-modal"
-        title={editingAccount ? '编辑外部交易账号' : '添加外部交易账号'}
+        title={editingAccount ? '编辑交易账户' : '添加交易账户'}
         visible={modalVisible}
         onCancel={() => setModalVisible(false)}
         onOk={() => form.submit()}
@@ -1853,7 +1853,7 @@ const ExternalTradingAccountManager = () => {
             </Space>
           ) : null}
           <Divider orientation="left">执行策略覆盖</Divider>
-          <Text type="secondary">留空则继承外部交易账户默认策略；绑定策略保存时会同步它的档位序列、订单超时序列和最小交易单位。</Text>
+          <Text type="secondary">留空则继承交易账户默认策略；绑定策略保存时会同步它的档位序列、订单超时序列和最小交易单位。</Text>
           <Form.Item name="executor_price_level_sequence" label="重定价档位序列">
             <Input placeholder="留空继承，例如：1,2,3,5,-1" />
           </Form.Item>

@@ -35,6 +35,7 @@ import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
+import './SoxlFearStrategy.css';
 
 const { Title, Text } = Typography;
 
@@ -46,11 +47,13 @@ const sellReductionBasisOptions = [
 const accountTypeOptions = [
   { label: 'Interactive Brokers (IB)', value: 'ib' },
   { label: '长桥证券 (Longport)', value: 'longport' },
+  { label: '外部交易账户', value: 'external' },
 ];
 
 const accountTypeLabels = {
   ib: 'IB',
   longport: '长桥',
+  external: '外部',
 };
 
 const defaultValues = {
@@ -59,6 +62,8 @@ const defaultValues = {
   account_type: 'ib',
   ib_account_id: undefined,
   longport_account_id: undefined,
+  external_trading_account_id: undefined,
+  live_sub_account_id: undefined,
   buy_threshold: 40,
   greed_threshold: 41,
   volume_ratio_threshold: 1.38,
@@ -77,10 +82,13 @@ const normalizeConfig = (config) => ({
   ...config,
   ib_account_id: config?.ib_account_id ?? undefined,
   longport_account_id: config?.longport_account_id ?? undefined,
+  external_trading_account_id: config?.external_trading_account_id ?? undefined,
+  live_sub_account_id: config?.live_sub_account_id ?? undefined,
 });
 
-const SoxlFearStrategy = () => {
+const SoxlFearStrategy = ({ embedded = false }) => {
   const [form] = Form.useForm();
+  const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
   const navigate = useNavigate();
   const [viewMode, setViewMode] = useState('list');
   const [activeTab, setActiveTab] = useState('config');
@@ -92,6 +100,8 @@ const SoxlFearStrategy = () => {
   const [manualLoadingId, setManualLoadingId] = useState(null);
   const [ibAccounts, setIbAccounts] = useState([]);
   const [longportAccounts, setLongportAccounts] = useState([]);
+  const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
+  const [liveSubAccounts, setLiveSubAccounts] = useState([]);
   const [logs, setLogs] = useState([]);
 
   useEffect(() => {
@@ -110,14 +120,48 @@ const SoxlFearStrategy = () => {
     });
   }, [selectedConfig?.id, activeTab]);
 
+  useEffect(() => {
+    fetchLiveSubAccounts(selectedExternalTradingAccountId);
+  }, [selectedExternalTradingAccountId]);
+
   const accountMaps = useMemo(() => {
     const ibMap = new Map(ibAccounts.map((account) => [account.id, account]));
     const longportMap = new Map(longportAccounts.map((account) => [account.lp_account_id, account]));
-    return { ibMap, longportMap };
-  }, [ibAccounts, longportAccounts]);
+    const externalMap = new Map(externalTradingAccounts.map((account) => [account.id, account]));
+    return { ibMap, longportMap, externalMap };
+  }, [ibAccounts, longportAccounts, externalTradingAccounts]);
+
+  const externalTradingAccountOptions = useMemo(() => externalTradingAccounts
+    .filter((account) => account.market_type === 'US_STOCK')
+    .map((account) => ({
+      label: `${account.name} (${account.identifier})${account.connected ? ' 在线' : ' 离线'}`,
+      value: account.id,
+      disabled: !account.enabled,
+    })), [externalTradingAccounts]);
+
+  const liveSubAccountOptions = useMemo(() => {
+    const currentConfigId = Number(selectedConfig?.id || 0);
+    return (liveSubAccounts || [])
+      .filter((item) => item.enabled)
+      .map((item) => {
+        const isFree = !item.strategy_type && !item.strategy_config_id;
+        const isCurrentBinding = (
+          item.strategy_type === 'soxl_fear_strategy'
+          && currentConfigId > 0
+          && Number(item.strategy_config_id) === currentConfigId
+        );
+        const disabled = !(isFree || isCurrentBinding);
+        const statusText = isFree ? '空闲' : `已绑定：${item.strategy_name || item.binding_label || item.strategy_type || '其他策略'}`;
+        return {
+          label: `${item.name} / ${Number(item.cash_allocated || 0).toFixed(2)} / ${statusText}`,
+          value: item.id,
+          disabled,
+        };
+      });
+  }, [liveSubAccounts, selectedConfig?.id]);
 
   const fetchInitialData = async () => {
-    await Promise.all([fetchConfigs(), fetchIbAccounts(), fetchLongportAccounts()]);
+    await Promise.all([fetchConfigs(), fetchIbAccounts(), fetchLongportAccounts(), fetchExternalTradingAccounts()]);
   };
 
   const fetchConfigs = async () => {
@@ -139,6 +183,9 @@ const SoxlFearStrategy = () => {
       const merged = normalizeConfig(data);
       setSelectedConfig(merged);
       form.setFieldsValue(merged);
+      if (merged.account_type === 'external' && merged.external_trading_account_id) {
+        await fetchLiveSubAccounts(merged.external_trading_account_id);
+      }
       return merged;
     } catch (error) {
       message.error(error.response?.data?.detail || '加载策略配置失败');
@@ -182,8 +229,40 @@ const SoxlFearStrategy = () => {
     }
   };
 
+  const fetchExternalTradingAccounts = async () => {
+    try {
+      const { data } = await request.get('/api/external-trading-accounts');
+      setExternalTradingAccounts(data || []);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '获取外部交易账户失败');
+    }
+  };
+
+  const fetchLiveSubAccounts = async (externalAccountId) => {
+    if (!externalAccountId) {
+      setLiveSubAccounts([]);
+      return [];
+    }
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+      setLiveSubAccounts(data || []);
+      return data || [];
+    } catch (error) {
+      message.error(error.response?.data?.detail || '获取虚拟子账户失败');
+      setLiveSubAccounts([]);
+      return [];
+    }
+  };
+
   const getAccountLabel = (record) => {
     if (!record) return '-';
+    if (record.account_type === 'external') {
+      const account = accountMaps.externalMap.get(record.external_trading_account_id);
+      const accountLabel = record.external_trading_account_name
+        || (account ? `${account.name} (${account.identifier})` : record.external_trading_account_id || '-');
+      const subAccountLabel = record.live_sub_account_name || record.live_sub_account_id || '-';
+      return `${accountLabel} / 子账户: ${subAccountLabel}`;
+    }
     if (record.account_type === 'longport') {
       const account = accountMaps.longportMap.get(record.longport_account_id || record.trading_account_id);
       return account ? `${account.name} (ID: ${account.lp_account_id})` : (record.longport_account_id || record.trading_account_id || '-');
@@ -197,6 +276,7 @@ const SoxlFearStrategy = () => {
   const openCreate = () => {
     setSelectedConfig(null);
     setLogs([]);
+    setLiveSubAccounts([]);
     form.resetFields();
     form.setFieldsValue(defaultValues);
     setActiveTab('config');
@@ -221,10 +301,25 @@ const SoxlFearStrategy = () => {
     await fetchConfigs();
   };
 
-  const buildPayload = (values) => ({
-    ...values,
-    symbol: (values.symbol || 'SOXL.US').trim().toUpperCase(),
-  });
+  const buildPayload = (values) => {
+    const payload = {
+      ...values,
+      symbol: (values.symbol || 'SOXL.US').trim().toUpperCase(),
+    };
+    if (payload.account_type === 'external') {
+      payload.ib_account_id = undefined;
+      payload.longport_account_id = undefined;
+    } else if (payload.account_type === 'longport') {
+      payload.ib_account_id = undefined;
+      payload.external_trading_account_id = undefined;
+      payload.live_sub_account_id = undefined;
+    } else {
+      payload.longport_account_id = undefined;
+      payload.external_trading_account_id = undefined;
+      payload.live_sub_account_id = undefined;
+    }
+    return payload;
+  };
 
   const handleSave = async (values) => {
     setConfigLoading(true);
@@ -331,7 +426,10 @@ const SoxlFearStrategy = () => {
       dataIndex: 'account_type',
       key: 'account_type',
       width: 110,
-      render: (value) => <Tag color={value === 'longport' ? 'purple' : 'blue'}>{accountTypeLabels[value] || value}</Tag>,
+      render: (value) => {
+        const color = value === 'external' ? 'green' : value === 'longport' ? 'purple' : 'blue';
+        return <Tag color={color}>{accountTypeLabels[value] || value}</Tag>;
+      },
     },
     {
       title: '账户ID',
@@ -509,7 +607,15 @@ const SoxlFearStrategy = () => {
           <Form.Item name="account_type" label="账户类型" rules={[{ required: true, message: '请选择账户类型' }]}>
             <Select
               options={accountTypeOptions}
-              onChange={() => form.setFieldsValue({ ib_account_id: undefined, longport_account_id: undefined })}
+              onChange={() => {
+                form.setFieldsValue({
+                  ib_account_id: undefined,
+                  longport_account_id: undefined,
+                  external_trading_account_id: undefined,
+                  live_sub_account_id: undefined,
+                });
+                setLiveSubAccounts([]);
+              }}
             />
           </Form.Item>
         </Col>
@@ -517,6 +623,32 @@ const SoxlFearStrategy = () => {
           <Form.Item noStyle shouldUpdate={(prev, curr) => prev.account_type !== curr.account_type}>
             {() => {
               const accountType = form.getFieldValue('account_type');
+              if (accountType === 'external') {
+                return (
+                  <>
+                    <Form.Item name="external_trading_account_id" label="外部交易账户" rules={[{ required: true, message: '请选择外部交易账户' }]}>
+                      <Select
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        options={externalTradingAccountOptions}
+                        placeholder="选择美股外部交易账户"
+                        onChange={() => form.setFieldsValue({ live_sub_account_id: undefined })}
+                      />
+                    </Form.Item>
+                    <Form.Item name="live_sub_account_id" label="虚拟子账户" rules={[{ required: true, message: '请选择虚拟子账户' }]}>
+                      <Select
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        options={liveSubAccountOptions}
+                        placeholder={selectedExternalTradingAccountId ? '选择虚拟子账户' : '先选择外部账户'}
+                        disabled={!selectedExternalTradingAccountId}
+                      />
+                    </Form.Item>
+                  </>
+                );
+              }
               if (accountType === 'longport') {
                 return (
                   <Form.Item name="longport_account_id" label="长桥账户" rules={[{ required: true, message: '请选择长桥账户' }]}>
@@ -674,8 +806,8 @@ const SoxlFearStrategy = () => {
 
   const renderList = () => (
     <Card>
-      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
-        <Title level={4} style={{ margin: 0 }}>SOXL 情绪量能自动交易</Title>
+      <Space style={{ width: '100%', justifyContent: embedded ? 'flex-end' : 'space-between', marginBottom: 16 }} wrap>
+        {!embedded && <Title level={4} style={{ margin: 0 }}>情绪量能策略</Title>}
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchConfigs} loading={listLoading}>
             刷新
@@ -702,7 +834,7 @@ const SoxlFearStrategy = () => {
 
   const renderDetail = () => (
     <>
-      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
+      <Space className="soxl-fear-detail-header" style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
         <Space>
           <Button icon={<ArrowLeftOutlined />} onClick={returnToList}>
             返回列表
@@ -717,8 +849,9 @@ const SoxlFearStrategy = () => {
           </Text>
         )}
       </Space>
-      <Card loading={configLoading && activeTab === 'config'}>
+      <Card className="soxl-fear-detail-card" loading={configLoading && activeTab === 'config'}>
         <Tabs
+          className="soxl-fear-detail-tabs"
           activeKey={activeTab}
           onChange={(key) => {
             setActiveTab(key);
@@ -729,12 +862,12 @@ const SoxlFearStrategy = () => {
           items={[
             {
               key: 'config',
-              label: <span><SettingOutlined />策略配置</span>,
+              label: <span className="soxl-fear-detail-tab-label"><SettingOutlined />策略配置</span>,
               children: renderConfigForm(),
             },
             {
               key: 'logs',
-              label: <span><HistoryOutlined />运行日志</span>,
+              label: <span className="soxl-fear-detail-tab-label"><HistoryOutlined />运行日志</span>,
               disabled: !selectedConfig?.id,
               children: renderLogs(),
             },
@@ -745,7 +878,7 @@ const SoxlFearStrategy = () => {
   );
 
   return (
-    <div style={{ padding: 24 }}>
+    <div className="soxl-fear-page">
       {viewMode === 'list' ? renderList() : renderDetail()}
     </div>
   );

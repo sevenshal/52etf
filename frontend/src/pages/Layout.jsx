@@ -14,17 +14,15 @@ import './Layout.css';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/executor-status', '/factor-lab', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/live', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
   '/fear/stocks',
   '/portfolio-copy-trading',
-  '/soxl-fear-strategy',
   '/options',
   '/ib-account-manager',
   '/longport-account-manager',
-  '/external-trading-accounts',
   '/evc-account-manager',
   '/lev-etf-backtest',
   '/all-weather-backtest',
@@ -58,8 +56,14 @@ const getActiveTabKey = (pathname, state) => {
     return '/fear';
   }
 
-  if (isRouteOrChild(pathname, '/executor-status')) {
-    return '/executor-status';
+  if (
+    isRouteOrChild(pathname, '/live') ||
+    isRouteOrChild(pathname, '/executor-status') ||
+    isRouteOrChild(pathname, '/soxl-fear-strategy') ||
+    isRouteOrChild(pathname, '/external-trading-accounts') ||
+    isRouteOrChild(pathname, '/factor-lab/live')
+  ) {
+    return '/live';
   }
 
   if (isRouteOrChild(pathname, '/db')) {
@@ -102,13 +106,13 @@ const AppLayout = () => {
       disabled: !accountId
     },
     {
-      key: '/executor-status',
-      label: renderTabLabel(<ThunderboltOutlined />, '执行器'),
+      key: '/factor-lab',
+      label: renderTabLabel(<ExperimentOutlined />, '研究'),
       disabled: !accountId
     },
     {
-      key: '/factor-lab',
-      label: renderTabLabel(<ExperimentOutlined />, '研究'),
+      key: '/live',
+      label: renderTabLabel(<ThunderboltOutlined />, '实盘'),
       disabled: !accountId
     },
     {

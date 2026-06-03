@@ -34,6 +34,7 @@ import {
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
+import { useLocation, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
@@ -49,7 +50,6 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'composite', label: '组合因子' },
   { key: 'timing', label: '择时因子' },
   { key: 'backtest', label: '因子回测' },
-  { key: 'live', label: '线上交易' },
   { key: 'valuation-sim', label: '估值模拟盘' },
   { key: 'innovation100', label: 'A创100' },
   { key: 'fund-flow', label: '资金流向' },
@@ -228,12 +228,18 @@ const CUSTOM_BACKTEST_POOL_OPTIONS = [
   { label: '自定义A股股票池', value: CUSTOM_A_STOCK_POOL },
   { label: '自定义美股股票池', value: CUSTOM_US_STOCK_POOL },
 ];
+const normalizeBacktestPoolValue = value => {
+  const pool = String(value || DEFAULT_BACKTEST_VALUES.pool).trim().toUpperCase();
+  if (pool === CUSTOM_A_STOCK_POOL) return CUSTOM_A_STOCK_POOL;
+  if (pool === CUSTOM_US_STOCK_POOL) return CUSTOM_US_STOCK_POOL;
+  return pool || DEFAULT_BACKTEST_VALUES.pool;
+};
 const isCustomBacktestPool = value => (
-  String(value || '').toUpperCase() === CUSTOM_A_STOCK_POOL
-  || String(value || '').toUpperCase() === CUSTOM_US_STOCK_POOL
+  normalizeBacktestPoolValue(value) === CUSTOM_A_STOCK_POOL
+  || normalizeBacktestPoolValue(value) === CUSTOM_US_STOCK_POOL
 );
 const getCustomBacktestMarket = value => {
-  const pool = String(value || '').toUpperCase();
+  const pool = normalizeBacktestPoolValue(value);
   if (pool === CUSTOM_A_STOCK_POOL) return 'a_stock';
   if (pool === CUSTOM_US_STOCK_POOL) return 'us_stock';
   return null;
@@ -242,8 +248,8 @@ const isBacktestFactorAllowedForPool = (factorKey, pool) => (
   !isCustomBacktestPool(pool) || !CUSTOM_POOL_UNSUPPORTED_FACTOR_KEYS.has(String(factorKey || ''))
 );
 const isAStockPoolValue = value => (
-  String(value || '').toUpperCase() === A_STOCK_INNO100_POOL
-  || String(value || '').toUpperCase() === CUSTOM_A_STOCK_POOL
+  normalizeBacktestPoolValue(value) === A_STOCK_INNO100_POOL
+  || normalizeBacktestPoolValue(value) === CUSTOM_A_STOCK_POOL
   || /\.(SH|SZ|BJ)$/.test(String(value || '').toUpperCase())
 );
 
@@ -398,7 +404,7 @@ const normalizeAStockSymbol = value => {
 };
 
 const normalizeCustomStockSymbols = (symbols, pool) => {
-  const poolKey = String(pool || '').toUpperCase();
+  const poolKey = normalizeBacktestPoolValue(pool);
   const items = Array.isArray(symbols) ? symbols : [];
   const normalized = [];
   items.forEach(item => {
@@ -445,28 +451,33 @@ const normalizeCompositeDefaultRequest = (payload = {}) => ({
   })),
 });
 
-const normalizeBacktestDefaultRequest = (payload = {}) => ({
-  ...DEFAULT_BACKTEST_VALUES,
-  ...payload,
-  pool: payload.pool || DEFAULT_BACKTEST_VALUES.pool,
-  custom_symbols: normalizeCustomStockSymbols(payload.custom_symbols, payload.pool),
-  position_weights: normalizePositionWeights(payload.position_weights, payload.max_positions || DEFAULT_BACKTEST_VALUES.max_positions),
-  position_weights_text: payload.position_weights?.length
-    ? formatPositionWeightsText(normalizePositionWeights(payload.position_weights, payload.max_positions || DEFAULT_BACKTEST_VALUES.max_positions))
-    : (payload.position_weights_text || ''),
-  rotation_mode: payload.rotation_mode || DEFAULT_BACKTEST_VALUES.rotation_mode,
-  start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_BACKTEST_VALUES.start_date,
-  end_date: payload.end_date ? dayjs(payload.end_date) : null,
-  oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
-    ? (payload.oos_start_date ? dayjs(payload.oos_start_date) : null)
-    : DEFAULT_BACKTEST_VALUES.oos_start_date,
-  legs: (payload.legs?.length ? payload.legs : DEFAULT_BACKTEST_VALUES.legs).map(leg => ({
-    ...leg,
-    neutralization: leg.neutralization || 'none',
-    standardization: leg.standardization || 'rank_percentile',
-    momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
-  })),
-});
+const normalizeBacktestDefaultRequest = (payload = {}) => {
+  const pool = normalizeBacktestPoolValue(payload.pool || DEFAULT_BACKTEST_VALUES.pool);
+  const maxPositions = payload.max_positions || DEFAULT_BACKTEST_VALUES.max_positions;
+  const positionWeights = normalizePositionWeights(payload.position_weights, maxPositions);
+  return {
+    ...DEFAULT_BACKTEST_VALUES,
+    ...payload,
+    pool,
+    custom_symbols: normalizeCustomStockSymbols(payload.custom_symbols, pool),
+    position_weights: positionWeights,
+    position_weights_text: payload.position_weights?.length
+      ? formatPositionWeightsText(positionWeights)
+      : (payload.position_weights_text || ''),
+    rotation_mode: payload.rotation_mode || DEFAULT_BACKTEST_VALUES.rotation_mode,
+    start_date: payload.start_date ? dayjs(payload.start_date) : DEFAULT_BACKTEST_VALUES.start_date,
+    end_date: payload.end_date ? dayjs(payload.end_date) : null,
+    oos_start_date: Object.prototype.hasOwnProperty.call(payload, 'oos_start_date')
+      ? (payload.oos_start_date ? dayjs(payload.oos_start_date) : null)
+      : DEFAULT_BACKTEST_VALUES.oos_start_date,
+    legs: (payload.legs?.length ? payload.legs : DEFAULT_BACKTEST_VALUES.legs).map(leg => ({
+      ...leg,
+      neutralization: leg.neutralization || 'none',
+      standardization: leg.standardization || 'rank_percentile',
+      momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
+    })),
+  };
+};
 
 const normalizeLiveConfigFormValues = (config = {}) => {
   const timezone = config.signal_timezone || config.execution_timezone || DEFAULT_LIVE_TRADING_VALUES.signal_timezone;
@@ -706,11 +717,12 @@ const buildCompositePayload = values => {
 };
 
 const buildBacktestPayload = values => {
+  const pool = normalizeBacktestPoolValue(values.pool);
   const fallbackMaxPositions = Number(values.max_positions || DEFAULT_BACKTEST_VALUES.max_positions);
   const positionWeights = parsePositionWeightsText(values.position_weights_text, fallbackMaxPositions);
   const payload = {
-    pool: values.pool,
-    custom_symbols: normalizeCustomStockSymbols(values.custom_symbols, values.pool),
+    pool,
+    custom_symbols: normalizeCustomStockSymbols(values.custom_symbols, pool),
     position_weights: positionWeights,
     start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
     end_date: values.end_date ? values.end_date.format('YYYY-MM-DD') : null,
@@ -735,7 +747,7 @@ const buildBacktestPayload = values => {
         momentum_weights: normalizeMomentumWeights(leg.momentum_weights),
       })),
   };
-  validateBacktestLegsForPool(payload.legs, payload.pool);
+  validateBacktestLegsForPool(payload.legs, pool);
   return payload;
 };
 
@@ -760,8 +772,8 @@ const buildLiveConfigPayload = values => {
 };
 
 const buildBacktestRequestFromMetadata = (metadata = {}) => ({
-  pool: metadata.pool || DEFAULT_BACKTEST_VALUES.pool,
-  custom_symbols: metadata.custom_symbols || [],
+  pool: normalizeBacktestPoolValue(metadata.pool || DEFAULT_BACKTEST_VALUES.pool),
+  custom_symbols: normalizeCustomStockSymbols(metadata.custom_symbols || [], metadata.pool || DEFAULT_BACKTEST_VALUES.pool),
   position_weights: metadata.position_weights || [],
   start_date: metadata.start_date || DEFAULT_BACKTEST_VALUES.start_date.format('YYYY-MM-DD'),
   end_date: metadata.end_date || null,
@@ -1635,13 +1647,15 @@ const formatLiveSubAccountOptionLabel = (subAccount, configId = null) => {
   return `${name}（已占用：${subAccount?.binding_label || subAccount?.strategy_name || subAccount?.strategy_type || '其他策略'}）`;
 };
 
-const FactorLab = ({ initialTab = 'single' }) => {
+const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [form] = Form.useForm();
   const [compositeForm] = Form.useForm();
   const [backtestForm] = Form.useForm();
   const [timingForm] = Form.useForm();
   const [liveForm] = Form.useForm();
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [activeTab, setActiveTab] = useState(liveOnly ? 'live' : initialTab);
   const [options, setOptions] = useState(null);
   const [result, setResult] = useState(null);
   const [compositeResult, setCompositeResult] = useState(null);
@@ -1685,6 +1699,8 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const liveCustomSymbolSearchTimerRef = useRef(null);
   const liveCustomSymbolSearchSeqRef = useRef(0);
   const selectedLiveConfigIdRef = useRef(null);
+  const pendingBacktestStateKeyRef = useRef(null);
+  const pendingLiveDraftStateKeyRef = useRef(null);
   const [selectedCombo, setSelectedCombo] = useState(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1736,6 +1752,18 @@ const FactorLab = ({ initialTab = 'single' }) => {
   useEffect(() => {
     selectedLiveConfigIdRef.current = selectedLiveConfigId;
   }, [selectedLiveConfigId]);
+
+  const clearLocationStateKeys = useCallback((keys) => {
+    const currentState = location.state || {};
+    const nextState = { ...currentState };
+    keys.forEach(key => {
+      delete nextState[key];
+    });
+    navigate(`${location.pathname}${location.search}`, {
+      replace: true,
+      state: Object.keys(nextState).length ? nextState : null,
+    });
+  }, [location.pathname, location.search, location.state, navigate]);
 
   const loadOptions = useCallback(async () => {
     setLoadingOptions(true);
@@ -2262,6 +2290,24 @@ const FactorLab = ({ initialTab = 'single' }) => {
           : values.initial_capital,
         lot_size: selectedLiveSubAccountLotSize || values.lot_size,
       });
+      if (liveOnly) {
+        setLiveConfigModalOpen(false);
+        navigate('/factor-lab', {
+          state: {
+            mainTabKey: '/factor-lab',
+            factorLabBacktest: {
+              key: `live-backtest-${Date.now()}`,
+              request: payload,
+              symbolNames: {
+                ...(selectedLiveConfig?.request_summary?.custom_symbol_names || {}),
+                ...(selectedLiveConfig?.last_signal_payload?.symbol_names || {}),
+              },
+              successMessage: '已带入多因子策略参数并完成回测',
+            },
+          },
+        });
+        return;
+      }
       backtestForm.setFieldsValue(normalizeBacktestDefaultRequest(payload));
       setLiveConfigModalOpen(false);
       setActiveTab('backtest');
@@ -2274,16 +2320,17 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const handleAddBacktestToLive = () => {
     if (!backtestResult) return;
     const payload = buildBacktestRequestFromMetadata(backtestMetadata);
-    const formValues = normalizeLiveConfigFormValues({
-      name: `${backtestMetadata.pool_label || '因子回测'}线上交易`,
-      enabled: false,
-      request: payload,
+    navigate('/live?tab=factor', {
+      state: {
+        mainTabKey: '/live',
+        factorLabLiveConfigDraft: {
+          key: `backtest-live-${Date.now()}`,
+          name: `${backtestMetadata.pool_label || '因子回测'}线上交易`,
+          request: payload,
+          symbolNames: backtestMetadata.symbol_names,
+        },
+      },
     });
-    setEditingLiveConfigId(null);
-    liveForm.setFieldsValue(formValues);
-    setLiveCustomSymbolOptions(mergeSymbolOptions([], payload.custom_symbols, backtestMetadata.symbol_names));
-    setLiveConfigModalOpen(true);
-    setActiveTab('live');
   };
 
   const handleLiveSave = async () => {
@@ -2402,7 +2449,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
     }
   };
 
-  const executeBacktestPayload = async (payload, successMessage = '因子回测完成') => {
+  const executeBacktestPayload = useCallback(async (payload, successMessage = '因子回测完成') => {
     setBacktestRunning(true);
     try {
       const { data } = await request.post('/api/factor-lab/backtest', payload, { timeout: 300000 });
@@ -2413,7 +2460,53 @@ const FactorLab = ({ initialTab = 'single' }) => {
     } finally {
       setBacktestRunning(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (liveOnly || !options) return;
+    const pendingBacktest = location.state?.factorLabBacktest;
+    if (!pendingBacktest?.request) return;
+    const stateKey = pendingBacktest.key || JSON.stringify(pendingBacktest.request);
+    if (pendingBacktestStateKeyRef.current === stateKey) return;
+    pendingBacktestStateKeyRef.current = stateKey;
+    const pendingRequest = normalizeBacktestDefaultRequest(pendingBacktest.request);
+    setActiveTab('backtest');
+    setBacktestResult(null);
+    backtestForm.setFieldsValue(pendingRequest);
+    setCustomSymbolOptions(previous => mergeSymbolOptions(
+      previous,
+      pendingRequest.custom_symbols,
+      pendingBacktest.symbolNames || pendingBacktest.request?.custom_symbol_names || {},
+    ));
+    clearLocationStateKeys(['factorLabBacktest']);
+    executeBacktestPayload(
+      {
+        ...pendingBacktest.request,
+        pool: pendingRequest.pool,
+        custom_symbols: pendingRequest.custom_symbols,
+      },
+      pendingBacktest.successMessage || '已带入多因子策略参数并完成回测',
+    );
+  }, [liveOnly, options, location.state, backtestForm, clearLocationStateKeys, executeBacktestPayload]);
+
+  useEffect(() => {
+    if (!liveOnly || !options) return;
+    const pendingDraft = location.state?.factorLabLiveConfigDraft;
+    if (!pendingDraft?.request) return;
+    const stateKey = pendingDraft.key || JSON.stringify(pendingDraft.request);
+    if (pendingLiveDraftStateKeyRef.current === stateKey) return;
+    pendingLiveDraftStateKeyRef.current = stateKey;
+    const formValues = normalizeLiveConfigFormValues({
+      name: pendingDraft.name || `${pendingDraft.request.pool || '因子回测'}线上交易`,
+      enabled: false,
+      request: pendingDraft.request,
+    });
+    setEditingLiveConfigId(null);
+    liveForm.setFieldsValue(formValues);
+    setLiveCustomSymbolOptions(mergeSymbolOptions([], formValues.custom_symbols, pendingDraft.symbolNames));
+    setLiveConfigModalOpen(true);
+    clearLocationStateKeys(['factorLabLiveConfigDraft']);
+  }, [liveOnly, options, location.state, liveForm, clearLocationStateKeys]);
 
   const runBacktest = async () => {
     const values = await backtestForm.validateFields();
@@ -2680,7 +2773,10 @@ const FactorLab = ({ initialTab = 'single' }) => {
     ]).map(item => ({ label: item.label, value: item.key }))
   ), [options]);
   const backtestPoolOptions = useMemo(() => {
-    const presetOptions = (options?.pools || []).map(item => ({ label: item.label, value: item.key }));
+    const presetOptions = (options?.pools || []).map(item => ({
+      label: item.label,
+      value: normalizeBacktestPoolValue(item.key),
+    }));
     const existing = new Set(presetOptions.map(item => item.value));
     return [
       ...presetOptions,
@@ -2949,7 +3045,7 @@ const FactorLab = ({ initialTab = 'single' }) => {
   const activeRunning = activeTab === 'composite'
     ? compositeRunning
     : (activeTab === 'backtest' ? backtestRunning : (activeTab === 'timing' ? timingRunning : running));
-  const activeTabLabel = FACTOR_LAB_TAB_ITEMS.find(item => item.key === activeTab)?.label || '研究';
+  const activeTabLabel = liveOnly ? '多因子策略' : (FACTOR_LAB_TAB_ITEMS.find(item => item.key === activeTab)?.label || '研究');
   const renderLiveConfigCard = config => {
     const selected = config.id === selectedLiveConfigId;
     const requestSummary = config.request_summary || {};
@@ -3028,45 +3124,49 @@ const FactorLab = ({ initialTab = 'single' }) => {
   };
 
   return (
-    <div className="factor-lab-page">
-      <div className="factor-lab-header">
-        <div className="factor-lab-title-block">
-          <Text type="secondary">Factor Lab</Text>
-          <h1>研究</h1>
-          <Tag color="blue">{activeTabLabel}</Tag>
-        </div>
-        {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && (
-          <Space className="factor-lab-actions">
-            <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
-            <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
-              运行
-            </Button>
-          </Space>
-        )}
-        {isInnovationTab && <div id="factor-lab-innovation100-actions" className="factor-lab-innovation-actions" />}
-      </div>
+    <div className={`factor-lab-page${liveOnly ? ' factor-lab-page--live-only' : ''}`}>
+      {!liveOnly && (
+        <>
+          <div className="factor-lab-header">
+            <div className="factor-lab-title-block">
+              <Text type="secondary">Factor Lab</Text>
+              <h1>研究</h1>
+              <Tag color="blue">{activeTabLabel}</Tag>
+            </div>
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && (
+              <Space className="factor-lab-actions">
+                <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
+                <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
+                  运行
+                </Button>
+              </Space>
+            )}
+            {isInnovationTab && <div id="factor-lab-innovation100-actions" className="factor-lab-innovation-actions" />}
+          </div>
 
-      <div className="factor-lab-tab-strip">
-        <Tabs
-          className="factor-lab-tabs"
-          activeKey={activeTab}
-          onChange={setActiveTab}
-          items={FACTOR_LAB_TAB_ITEMS}
-        />
-        <div className="factor-lab-mobile-tabs">
-          {FACTOR_LAB_TAB_ITEMS.map(item => (
-            <button
-              key={item.key}
-              type="button"
-              className={`factor-lab-mobile-tab${activeTab === item.key ? ' is-active' : ''}`}
-              aria-pressed={activeTab === item.key}
-              onClick={() => setActiveTab(item.key)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
+          <div className="factor-lab-tab-strip">
+            <Tabs
+              className="factor-lab-tabs"
+              activeKey={activeTab}
+              onChange={setActiveTab}
+              items={FACTOR_LAB_TAB_ITEMS}
+            />
+            <div className="factor-lab-mobile-tabs">
+              {FACTOR_LAB_TAB_ITEMS.map(item => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`factor-lab-mobile-tab${activeTab === item.key ? ' is-active' : ''}`}
+                  aria-pressed={activeTab === item.key}
+                  onClick={() => setActiveTab(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {activeTab === 'db' && <DatabaseManager />}
 
