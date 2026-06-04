@@ -13,35 +13,15 @@ import FactorLab from './FactorLab';
 import SoxlFearStrategy from './SoxlFearStrategy';
 import './LiveTrading.css';
 
-const LIVE_TAB_KEYS = ['factor', 'sentiment', 'executor', 'accounts'];
+const LIVE_TAB_KEYS = ['executor', 'accounts', 'factor', 'sentiment'];
 
 const LiveTrading = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = LIVE_TAB_KEYS.includes(searchParams.get('tab'))
     ? searchParams.get('tab')
-    : 'factor';
+    : 'executor';
 
   const items = useMemo(() => [
-    {
-      key: 'factor',
-      label: (
-        <span className="live-trading-tab-label">
-          <BarChartOutlined />
-          <span>多因子策略</span>
-        </span>
-      ),
-      children: <FactorLab initialTab="live" liveOnly />,
-    },
-    {
-      key: 'sentiment',
-      label: (
-        <span className="live-trading-tab-label">
-          <FireOutlined />
-          <span>情绪量能策略</span>
-        </span>
-      ),
-      children: <SoxlFearStrategy embedded />,
-    },
     {
       key: 'executor',
       label: (
@@ -61,6 +41,26 @@ const LiveTrading = () => {
         </span>
       ),
       children: <ExternalTradingAccountManager embedded />,
+    },
+    {
+      key: 'factor',
+      label: (
+        <span className="live-trading-tab-label">
+          <BarChartOutlined />
+          <span>多因子策略</span>
+        </span>
+      ),
+      children: <FactorLab initialTab="live" liveOnly />,
+    },
+    {
+      key: 'sentiment',
+      label: (
+        <span className="live-trading-tab-label">
+          <FireOutlined />
+          <span>情绪量能策略</span>
+        </span>
+      ),
+      children: <SoxlFearStrategy embedded />,
     },
   ], []);
 

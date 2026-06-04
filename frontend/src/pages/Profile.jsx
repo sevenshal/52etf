@@ -4,7 +4,6 @@ import {
   HistoryOutlined,
   KeyOutlined,
   LogoutOutlined,
-  MonitorOutlined,
   RightOutlined,
   RocketOutlined,
   SettingOutlined,
@@ -65,6 +64,7 @@ const Profile = () => {
     {
       title: '交易与执行',
       icon: <RocketOutlined />,
+      className: 'profile-section--trade',
       items: [
         {
           title: '杠杆ETF策略自动化交易',
@@ -85,6 +85,7 @@ const Profile = () => {
     {
       title: '账户管理',
       icon: <WalletOutlined />,
+      className: 'profile-section--accounts',
       items: [
         {
           title: '持仓',
@@ -111,6 +112,8 @@ const Profile = () => {
     {
       title: '策略与回测',
       icon: <HistoryOutlined />,
+      className: 'profile-section--strategy',
+      menuClassName: 'profile-menu--grid',
       items: [
         {
           title: '杠杆ETF均线穿越策略回测',
@@ -132,12 +135,6 @@ const Profile = () => {
           onClick: () => navigate('/soxl-fear-backtest'),
           arrow: true
         },
-      ]
-    },
-    {
-      title: '分析与监控',
-      icon: <MonitorOutlined />,
-      items: [
         {
           title: '历史每月分析',
           onClick: () => navigate('/monthly-analysis'),
@@ -148,6 +145,7 @@ const Profile = () => {
     {
       title: '系统管理',
       icon: <SettingOutlined />,
+      className: 'profile-section--system',
       items: [
         {
           title: '定时任务',
@@ -168,8 +166,8 @@ const Profile = () => {
     }
   ];
 
-  const renderMenu = (items) => (
-    <div className="profile-menu">
+  const renderMenu = (items, menuClassName = '') => (
+    <div className={`profile-menu ${menuClassName}`.trim()}>
       {items.map((item, index) => (
         <button
           type="button"
@@ -193,19 +191,22 @@ const Profile = () => {
         {sections.map((section, index) => (
           <PageSection
             key={index}
+            className={`profile-section ${section.className || ''}`.trim()}
             title={
               <span className="profile-section-title">
                 {section.icon}
                 <span>{section.title}</span>
               </span>
             }
+            extra={<span className="profile-section-count">共 {section.items.length} 项</span>}
           >
-            {renderMenu(section.items)}
+            {renderMenu(section.items, section.menuClassName)}
           </PageSection>
         ))}
       </div>
 
       <PageSection
+        className="profile-section profile-section--account"
         title={
           <span className="profile-section-title">
             <KeyOutlined />

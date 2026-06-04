@@ -7,7 +7,6 @@ import {
   Form,
   InputNumber,
   Modal,
-  Popconfirm,
   Select,
   Segmented,
   Space,
@@ -21,7 +20,6 @@ import {
 import {
   ReloadOutlined,
   ThunderboltOutlined,
-  ToolOutlined,
 } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import request from '../utils/request';
@@ -1196,7 +1194,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         <>
           {renderMobileCards(subRows, 'sub')}
           <div className="executor-desktop-table">
-            <Table rowKey="id" columns={subColumns} dataSource={subRows} loading={subAccountLoading} pagination={{ pageSize: 10 }} size="small" scroll={{ x: 1500 }} />
+            <Table rowKey="id" columns={subColumns} dataSource={subRows} loading={subAccountLoading} pagination={false} size="small" scroll={{ x: 1500 }} />
           </div>
         </>
       );
@@ -1326,17 +1324,6 @@ const ExecutorStatusPage = ({ embedded = false }) => {
             <Button type="primary" danger icon={<ThunderboltOutlined />} onClick={() => executeNetted()} loading={executeLoading} disabled={!selectedAccount || statusLoading}>
               执行净额限价单
             </Button>
-            <Popconfirm
-              title="盘后强制执行会绕过 A 股交易时段限制"
-              description="只建议连接 PTrade 模拟器时使用，确认继续？"
-              okText="强制执行"
-              cancelText="取消"
-              onConfirm={() => executeNetted({ force: true })}
-            >
-              <Button danger icon={<ToolOutlined />} loading={executeLoading} disabled={!selectedAccount || statusLoading}>
-                盘后强制执行
-              </Button>
-            </Popconfirm>
           </div>
         </div>
         {status?.plan_error || plan?.plan_error ? (

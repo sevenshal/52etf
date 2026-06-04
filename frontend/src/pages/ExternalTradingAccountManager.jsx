@@ -2134,22 +2134,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           >
             执行净额限价单
           </Button>,
-          <Popconfirm
-            key="force-execute"
-            title="盘后强制执行会绕过 A 股交易时段限制"
-            description="只建议连接 PTrade 模拟器时使用，确认继续？"
-            okText="强制执行"
-            cancelText="取消"
-            onConfirm={() => executeNettedExecutor({ force: true })}
-          >
-            <Button
-              danger
-              loading={executorExecuteLoading}
-              disabled={!executorStatusAccount?.id || executorStatusLoading}
-            >
-              盘后强制执行
-            </Button>
-          </Popconfirm>,
           <Button
             key="refresh"
             icon={<SyncOutlined />}
@@ -2200,7 +2184,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
                     columns={executorSubAccountColumns}
                     dataSource={executorSubAccountRows}
                     loading={executorSubAccountStatusLoading}
-                    pagination={{ pageSize: 10 }}
+                    pagination={false}
                     size="small"
                     scroll={{ x: 1500 }}
                   />
