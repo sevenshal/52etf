@@ -819,16 +819,28 @@ class PortfolioCopyTrader:
                 logger.info(f"[{masked_account_id}] Attempting {action} {qty} for {symbol}...")
                 try:
                     # 改用市价单确保立即成交 (幂等性由 get_effective_position 保证)
-                    await ib.place_market_order(symbol, action, qty)
+                    trade = await ib.place_market_order(symbol, action, qty)
+                    ib_status = str(getattr(trade.orderStatus, "status", "") or "")
+                    log_status = "SUCCESS" if ib_status == "Filled" else "SUBMITTED"
                     
                     # Log with specific Action and Ratio change
-                    msg = f"{action} {qty * price} USD (Market Order). Ratio: {current_ratio:.2f}% -> {target_ratio:.2f}%"
+                    msg = (
+                        f"{action} {qty * price} USD (Market Order). "
+                        f"Ratio: {current_ratio:.2f}% -> {target_ratio:.2f}%. "
+                        f"IB status: {ib_status or 'UNKNOWN'}"
+                    )
                     
-                    self._log(config.account_id, config.portfolio_id, action, "SUCCESS", 
+                    self._log(config.account_id, config.portfolio_id, action, log_status, 
                                 msg, 
                                 symbol=symbol, quantity=qty, price=price, config_id=config.id)
-                                
-                    logger.info(f"[{masked_account_id}] Successfully placed MARKET {action} order for {qty} {symbol}")
+
+                    if log_status == "SUCCESS":
+                        logger.info(f"[{masked_account_id}] Filled MARKET {action} order for {qty} {symbol}")
+                    else:
+                        logger.info(
+                            f"[{masked_account_id}] Submitted MARKET {action} order for {qty} {symbol} "
+                            f"(IB status: {ib_status or 'UNKNOWN'})"
+                        )
                 except Exception as e:
                     logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
                     self._log(config.account_id, config.portfolio_id, action, "FAILED", str(e), symbol=symbol, config_id=config.id)
