@@ -15,19 +15,11 @@
     "react-scripts": "5.0.1"
   },
   "devDependencies": {
-    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
-    "@types/react": "^18.2.43",
-    "@types/react-dom": "^18.2.17",
-    "ajv": "^8.12.0",
-    "ajv-keywords": "^5.1.0",
     "cross-env": "^7.0.3",
+    "depcheck": "^1.4.7",
     "eslint": "^7.32.0",
     "eslint-config-react-app": "^7.0.1",
-    "eslint-plugin-flowtype": "^5.10.0",
-    "eslint-plugin-import": "^2.29.1",
-    "eslint-plugin-jsx-a11y": "^6.8.0",
-    "eslint-plugin-react": "^7.33.2",
-    "eslint-plugin-react-hooks": "^4.6.0"
+    "knip": "^6.16.0"
   },
   "scripts": {
     "start": "react-scripts start",

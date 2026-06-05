@@ -74,7 +74,7 @@ const scheduleReconnect = () => {
   }, delay);
 };
 
-export const ensureBackendEventsConnection = () => {
+const ensureBackendEventsConnection = () => {
   const accountId = getAccountId();
   if (!accountId || !hasListeners()) {
     closeSocket();
