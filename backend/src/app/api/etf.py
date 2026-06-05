@@ -128,7 +128,7 @@ async def get_etf_report(
     )
     
     if not latest_report:
-        raise HTTPException(status_code=404, message="未找到ETF报告")
+        raise HTTPException(status_code=404, detail="未找到ETF报告")
     
     # 获取最新市场价格
     quote_service: QuoteProvider = LongPortService.get_instance()
