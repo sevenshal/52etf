@@ -45,7 +45,7 @@ const renderMetricTitle = (title, content) => (
 
 const formatDateKey = (value) => dayjs(value).format('YYYY-MM-DD');
 
-const buildValuationContext = (dates, valuationHistory, fillMode) => {
+const buildValuationContext = (dates, valuationHistory, fillMode, dateOffsetDays = 0) => {
   const fairValueHi = [];
   const fairValueLo = [];
   const forwardNextFyHi = [];
@@ -56,7 +56,7 @@ const buildValuationContext = (dates, valuationHistory, fillMode) => {
     .filter(item => item?.date)
     .map(item => ({
       ...item,
-      dateKey: formatDateKey(item.date),
+      dateKey: dayjs(item.date).add(dateOffsetDays, 'day').format('YYYY-MM-DD'),
     }))
     .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
 
@@ -108,6 +108,7 @@ const StockKlineChart = ({
   symbol,
   valuationHistory = [],
   valuationFillMode = 'exact',
+  valuationDateOffsetDays = -1,
   onKlinesChange,
   height = 600,
 }) => {
@@ -174,6 +175,7 @@ const StockKlineChart = ({
     volumeStdDevMultiplier,
     valuationHistory,
     valuationFillMode,
+    valuationDateOffsetDays,
     showSupportResistance,
   ]);
 
@@ -288,7 +290,7 @@ const StockKlineChart = ({
       forwardNextFyHi,
       forwardNextFyLo,
       valuationByDate,
-    } = buildValuationContext(dates, valuationHistory, valuationFillMode);
+    } = buildValuationContext(dates, valuationHistory, valuationFillMode, valuationDateOffsetDays);
 
     const hasFairValueHi = hasSeriesData(fairValueHi);
     const hasFairValueLo = hasSeriesData(fairValueLo);
@@ -812,7 +814,7 @@ const StockKlineChart = ({
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}`}
+          key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}-${valuationDateOffsetDays}`}
           option={chartOption}
           notMerge={true}
           style={{ height }}
