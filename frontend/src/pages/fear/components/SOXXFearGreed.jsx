@@ -13,6 +13,7 @@ const ETF_OPTIONS = [
   { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100' },
   { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯' },
   { symbol: '000985.SH', ticker: '中证全指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '899050.BJ', ticker: '北证50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000510.SH', ticker: '中证A500', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000905.SH', ticker: '中证500', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
