@@ -178,15 +178,6 @@ const normalizeServerTableFilters = filters => Object.entries(filters || {}).red
   }
   return result;
 }, {});
-const normalizeLedgerSorter = sorter => {
-  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
-  const sortField = activeSorter?.field || activeSorter?.columnKey;
-  const sortOrder = activeSorter?.order;
-  if (sortField !== 'realized_pnl' || !sortOrder) {
-    return { sortField: null, sortOrder: null };
-  }
-  return { sortField, sortOrder };
-};
 const renderSymbolText = record => {
   const symbol = normalizeText(record?.symbol);
   const name = record?.symbol_name;
@@ -278,6 +269,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const [markBlockRecord, setMarkBlockRecord] = useState(null);
   const [repairParentRecord, setRepairParentRecord] = useState(null);
   const [orderActionId, setOrderActionId] = useState(null);
+  const [ledgerReloadToken, setLedgerReloadToken] = useState(0);
   const infiniteLoadingRef = useRef({});
   const targetToolbarRef = useRef(null);
   const orderToolbarRef = useRef(null);
@@ -355,8 +347,6 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     unfilled_only: tableKey === 'orders' && state?.unfilledOnly ? 'true' : undefined,
     non_empty_only: tableKey === 'target_positions' && state?.nonEmptyOnly ? 'true' : undefined,
     delta_only: tableKey === 'target_positions' && state?.deltaOnly ? 'true' : undefined,
-    sort_field: tableKey === 'ledger_positions' ? state?.sortField || undefined : undefined,
-    sort_order: tableKey === 'ledger_positions' ? state?.sortOrder || undefined : undefined,
   });
 
   const fetchBaseStatus = useCallback(async account => {
@@ -456,6 +446,9 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       return;
     }
     const tableKey = tableKeyFromTab(tabKey);
+    if (tableKey === 'ledger_positions') {
+      return;
+    }
     if (tableKey && (force || !tableLoaded[tableKey])) {
       const nextState = force
         ? { ...(tableState[tableKey] || { pageSize: 10, filters: {} }), page: 1 }
@@ -497,6 +490,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
 
   const refreshAll = () => {
     if (!selectedAccount) return;
+    setLedgerReloadToken(prev => prev + 1);
     fetchBaseStatus(selectedAccount);
     fetchActiveTab(selectedAccount, activeTab, true);
   };
@@ -530,16 +524,14 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   };
 
   const handleTableChange = tableKey => (pagination, filters, sorter) => {
+    if (tableKey === 'ledger_positions') return;
     const previousState = tableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
-    const sortState = tableKey === 'ledger_positions'
-      ? normalizeLedgerSorter(sorter)
-      : { sortField: previousState.sortField || null, sortOrder: previousState.sortOrder || null };
     const next = {
       page: pagination?.current || 1,
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
       filters: normalizeServerTableFilters(filters),
-      sortField: sortState.sortField,
-      sortOrder: sortState.sortOrder,
+      sortField: previousState.sortField || null,
+      sortOrder: previousState.sortOrder || null,
       unfilledOnly: previousState.unfilledOnly || false,
       activeOnly: previousState.activeOnly || false,
       nonEmptyOnly: previousState.nonEmptyOnly || false,
@@ -643,6 +635,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   }, [tables]);
 
   const loadMoreTable = useCallback(tableKey => {
+    if (tableKey === 'ledger_positions') return;
     if (!selectedAccount?.id || !tableEndpoints[tableKey]) return;
     if (tableLoading[tableKey] || infiniteLoadingRef.current[tableKey] || !hasMoreTableRows(tableKey)) return;
     const currentState = tableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
@@ -658,6 +651,47 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       infiniteLoadingRef.current[tableKey] = false;
     });
   }, [fetchTable, hasMoreTableRows, selectedAccount, tableLoading, tables, tableState]);
+
+  const handleLedgerPositionsDataChange = useCallback(({
+    rows = [],
+    pagination: ledgerPagination,
+    priceDetails: nextPriceDetails = {},
+    filterOptions = {},
+    sortField,
+    sortOrder,
+    filters = {},
+  }) => {
+    setTables(prev => ({
+      ...prev,
+      ledger_positions: {
+        ...createEmptyTable(),
+        rows,
+        pagination: ledgerPagination || { page: 1, page_size: 10, total: 0 },
+        price_details: nextPriceDetails,
+        filter_options: filterOptions,
+      },
+    }));
+    setTableState(prev => {
+      const nextPagination = ledgerPagination || {};
+      const current = prev.ledger_positions || { page: 1, pageSize: 10, filters: {} };
+      return {
+        ...prev,
+        ledger_positions: {
+          ...current,
+          page: nextPagination.page || current.page || 1,
+          pageSize: nextPagination.page_size || current.pageSize || 10,
+          sortField: sortField || null,
+          sortOrder: sortOrder || null,
+          filters,
+        },
+      };
+    });
+    setTableLoaded(prev => ({ ...prev, ledger_positions: true }));
+  }, []);
+
+  const handleLedgerPositionsLoadingChange = useCallback(loading => {
+    setTableLoading(prev => ({ ...prev, ledger_positions: loading }));
+  }, []);
 
   useEffect(() => {
     const tableKey = tableKeyFromTab(activeTab);
@@ -1222,15 +1256,15 @@ const ExecutorStatusPage = ({ embedded = false }) => {
           {renderMobileCards(ledgerRows, 'ledger', 'ledger_positions')}
           <div className="executor-desktop-table">
             <ExternalLedgerPositionsTable
-              rows={ledgerRows}
-              loading={tableLoading.ledger_positions}
               pagination={paginationFor('ledger_positions')}
-              onChange={handleTableChange('ledger_positions')}
-              priceDetails={priceDetails}
-              getColumnFilterProps={filterKey => serverFilterProps('ledger_positions', filterKey)}
+              accountId={selectedAccount?.id}
+              subAccountId={null}
+              enabled={Boolean(selectedAccount?.id)}
+              reloadToken={ledgerReloadToken}
+              onDataChange={handleLedgerPositionsDataChange}
+              onLoadingChange={handleLedgerPositionsLoadingChange}
               showSubAccount
               marketType={selectedAccount?.market_type}
-              realizedPnlSortOrder={tableState.ledger_positions?.sortField === 'realized_pnl' ? tableState.ledger_positions?.sortOrder : null}
               scroll={{}}
             />
           </div>

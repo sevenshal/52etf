@@ -91,15 +91,6 @@ const statusColor = status => (status === 'OK' ? 'green' : status === 'SKIPPED' 
 const VALUATION_SIM_STRATEGY_TYPE = 'valuation_sim';
 const MARKET_TYPE_US_STOCK = 'US_STOCK';
 const isUsStockExternalAccount = account => String(account?.market_type || '').toUpperCase() === MARKET_TYPE_US_STOCK;
-const normalizeLedgerSorter = sorter => {
-  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
-  const sortField = activeSorter?.field || activeSorter?.columnKey;
-  const sortOrder = activeSorter?.order;
-  if (sortField !== 'realized_pnl' || !sortOrder) {
-    return { sortField: null, sortOrder: null };
-  }
-  return { sortField, sortOrder };
-};
 
 const isCurrentValuationSimSubAccount = (subAccount, configId) => (
   Boolean(
@@ -133,8 +124,7 @@ const ValuationSimulation = () => {
   const [configs, setConfigs] = useState([]);
   const [selectedConfigId, setSelectedConfigId] = useState(null);
   const [positions, setPositions] = useState([]);
-  const [positionPriceDetails, setPositionPriceDetails] = useState({});
-  const [positionTableSort, setPositionTableSort] = useState({ sortField: null, sortOrder: null });
+  const [positionRefreshToken, setPositionRefreshToken] = useState(0);
   const [logs, setLogs] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [candidateMeta, setCandidateMeta] = useState({});
@@ -244,36 +234,20 @@ const ValuationSimulation = () => {
     const configId = config?.id;
     if (!configId) {
       setPositions([]);
-      setPositionPriceDetails({});
       setLogs([]);
       setCandidates([]);
       setCandidateMeta({});
+      setPositionRefreshToken(v => v + 1);
       return;
     }
     setDetailLoading(true);
     setCandidateLoading(true);
     try {
-      const ledgerRequest = config.external_trading_account_id && config.live_sub_account_id
-        ? request.get(
-          `/api/external-trading-accounts/${config.external_trading_account_id}/executor/status/ledger-positions`,
-          {
-            params: {
-              page: 1,
-              page_size: 200,
-              sub_account_id: Number(config.live_sub_account_id),
-              sort_field: positionTableSort.sortField || undefined,
-              sort_order: positionTableSort.sortOrder || undefined,
-            },
-          },
-        )
-        : Promise.resolve({ data: { rows: [], price_details: {} } });
-      const [positionResp, logResp, candidateResp] = await Promise.all([
-        ledgerRequest,
+      setPositionRefreshToken(v => v + 1);
+      const [logResp, candidateResp] = await Promise.all([
         request.get(`/api/valuation-sim/configs/${configId}/logs`),
         request.get(`/api/valuation-sim/configs/${configId}/candidates?limit=50`),
       ]);
-      setPositions(positionResp.data?.rows || []);
-      setPositionPriceDetails(positionResp.data?.price_details || {});
       setLogs(logResp.data || []);
       setCandidates(candidateResp.data?.candidates || []);
       setCandidateMeta(candidateResp.data || {});
@@ -283,7 +257,7 @@ const ValuationSimulation = () => {
       setDetailLoading(false);
       setCandidateLoading(false);
     }
-  }, [positionTableSort.sortField, positionTableSort.sortOrder]);
+  }, []);
 
   useEffect(() => {
     loadConfigs();
@@ -307,9 +281,9 @@ const ValuationSimulation = () => {
     await loadConfigs(preferredId);
   };
 
-  const handlePositionTableChange = (_pagination, _filters, sorter) => {
-    setPositionTableSort(normalizeLedgerSorter(sorter));
-  };
+  const handlePositionDataChange = useCallback(({ rows: nextRows = [] }) => {
+    setPositions(nextRows);
+  }, []);
 
   const openCreateModal = () => {
     setEditingConfigId(null);
@@ -743,13 +717,14 @@ const ValuationSimulation = () => {
             <Col xs={24}>
               <Card title="当前持仓" bordered={false}>
                 <ExternalLedgerPositionsTable
-                  loading={detailLoading}
-                  rows={positions}
-                  priceDetails={positionPriceDetails}
                   showSubAccount={false}
                   marketType={selectedConfigMarketType}
-                  realizedPnlSortOrder={positionTableSort.sortField === 'realized_pnl' ? positionTableSort.sortOrder : null}
-                  onChange={handlePositionTableChange}
+                  accountId={selectedConfig?.external_trading_account_id}
+                  subAccountId={selectedConfig?.live_sub_account_id}
+                  reloadToken={positionRefreshToken}
+                  enabled={Boolean(selectedConfig?.external_trading_account_id && selectedConfig?.live_sub_account_id)}
+                  onDataChange={handlePositionDataChange}
+                  defaultPageSize={200}
                   pagination={false}
                   scroll={{ y: 320 }}
                 />

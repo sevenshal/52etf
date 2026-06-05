@@ -15,7 +15,6 @@ import {
   Space,
   Switch,
   Table,
-  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -32,10 +31,8 @@ import {
   SyncOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
-import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
-import ExternalLedgerPositionsTable from '../components/ExternalLedgerPositionsTable';
 import { PageSection, PageShell } from '../components/PageScaffold';
 import './ExternalTradingAccountManager.css';
 
@@ -67,93 +64,6 @@ const formatNumber = (value, digits = 0) => {
   if (!Number.isFinite(num)) return '-';
   return num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
-const formatOptionalNumber = (value, digits = 0) => (
-  value === null || value === undefined || value === '' ? '-' : formatNumber(value, digits)
-);
-const sumNumberField = (rows, field) => (rows || []).reduce((total, row) => {
-  const value = Number(row?.[field] || 0);
-  return Number.isFinite(value) ? total + value : total;
-}, 0);
-const pTradeStatusLabels = {
-  '0': '未报',
-  '1': '待报',
-  '2': '已报',
-  '3': '已报待撤',
-  '4': '部成待撤',
-  '5': '部撤',
-  '6': '已撤',
-  '7': '部成',
-  '8': '已成',
-  '9': '废单',
-  '+': '已报',
-  '-': '废单',
-  V: '已确认',
-};
-const pTradeStatusColor = value => {
-  const key = String(value || '').trim().toUpperCase();
-  if (key === '8') return 'success';
-  if (['5', '6'].includes(key)) return 'default';
-  if (key === '7' || key === '4') return 'warning';
-  if (key === '9' || key === '-') return 'error';
-  if (['2', '+', 'V'].includes(key)) return 'processing';
-  return 'default';
-};
-const renderPTradeStatus = value => {
-  const key = String(value || '').trim().toUpperCase();
-  if (!key) return '-';
-  const label = pTradeStatusLabels[key] || '未知';
-  return (
-    <Tooltip title={`PTrade原始状态: ${key}`}>
-      <Tag color={pTradeStatusColor(key)}>{label}</Tag>
-    </Tooltip>
-  );
-};
-const roleLabel = value => {
-  if (value === 'PARENT') return '父单';
-  if (value === 'CHILD') return '子单';
-  if (value === 'BLOCK') return '阻断';
-  return value || '-';
-};
-const roleFilterOptions = [
-  { text: '父单', value: 'PARENT' },
-  { text: '子单', value: 'CHILD' },
-  { text: '阻断', value: 'BLOCK' }
-];
-const executorServerTableEndpoints = {
-  target_positions: 'target-positions',
-  ledger_positions: 'ledger-positions',
-  orders: 'orders',
-  fills: 'fills',
-  deliver_records: 'deliver-records',
-  events: 'events'
-};
-const executorServerTableLabels = {
-  target_positions: '目标仓位',
-  ledger_positions: '账本持仓',
-  orders: '订单生命周期',
-  fills: '成交回报',
-  deliver_records: '交割单',
-  events: '事件流水'
-};
-const executorServerTableKeys = Object.keys(executorServerTableEndpoints);
-const createDefaultExecutorTableState = () => ({
-  target_positions: { page: 1, pageSize: 10, filters: {} },
-  ledger_positions: { page: 1, pageSize: 10, filters: {} },
-  orders: { page: 1, pageSize: 10, filters: {} },
-  fills: { page: 1, pageSize: 10, filters: {} },
-  deliver_records: { page: 1, pageSize: 10, filters: {} },
-  events: { page: 1, pageSize: 10, filters: {} }
-});
-const createEmptyExecutorTableData = () => ({
-  rows: [],
-  pagination: { page: 1, page_size: 10, total: 0 },
-  price_details: {},
-  filter_options: {}
-});
-const createEmptyExecutorTables = () => executorServerTableKeys.reduce(
-  (result, key) => ({ ...result, [key]: createEmptyExecutorTableData() }),
-  {}
-);
 const DEFAULT_EXECUTOR_SEQUENCE = [1, 2, 3, 5, -1];
 const DEFAULT_TIMEOUT_SEQUENCE = [120, 120, 120, 120, 120];
 const MAX_TIMEOUT_SECONDS = 86400;
@@ -167,11 +77,6 @@ const priceLevelTooltip = (
     <span style={{ color: 'rgba(255,255,255,0.72)' }}>序列第一个档位用于首次提交，后续重定价按序列向后推进。最终仍可能触发 PTrade 的涨跌停价兜底。</span>
   </Space>
 );
-const priceLevelLabel = value => {
-  if (value === -1) return '本方最优价';
-  if (value === 0) return '参考价限价';
-  return `${value}档`;
-};
 const sequenceToText = value => (Array.isArray(value) && value.length ? value : DEFAULT_EXECUTOR_SEQUENCE).join(',');
 const timeoutSequenceToText = value => (Array.isArray(value) && value.length ? value : DEFAULT_TIMEOUT_SEQUENCE).join(',');
 const parseSequence = (value, fallback = DEFAULT_EXECUTOR_SEQUENCE) => {
@@ -204,13 +109,6 @@ const validateSequenceLengths = (priceSequence, timeoutSequence, maxReplaceCount
   }
   return null;
 };
-const getBlockLabel = record => {
-  if (record?.blocked_status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
-  if (record?.status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
-  if (record?.blocked_status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
-  if (record?.status === 'BLOCKED_INSUFFICIENT_POSITION') return '持仓不足';
-  return '可卖阻断';
-};
 const normalizeFilterText = value => {
   if (value === undefined || value === null || value === '') return '-';
   return String(value);
@@ -224,29 +122,11 @@ const textColumnFilter = (rows, getter) => ({
   filterSearch: true,
   onFilter: (value, record) => normalizeFilterText(getter(record)) === String(value)
 });
-const normalizeServerTableFilters = filters => Object.entries(filters || {}).reduce((result, [key, value]) => {
-  const list = Array.isArray(value) ? value.filter(item => item !== null && item !== undefined && item !== '') : [];
-  if (list.length) {
-    result[key] = list.map(item => String(item));
-  }
-  return result;
-}, {});
-const normalizeLedgerSorter = sorter => {
-  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
-  const sortField = activeSorter?.field || activeSorter?.columnKey;
-  const sortOrder = activeSorter?.order;
-  if (sortField !== 'realized_pnl' || !sortOrder) {
-    return { sortField: null, sortOrder: null };
-  }
-  return { sortField, sortOrder };
-};
-const joinFilterValues = values => (Array.isArray(values) && values.length ? values.join(',') : undefined);
 const symbolText = record => {
   const symbol = normalizeFilterText(record?.symbol);
   const name = record?.symbol_name ? String(record.symbol_name) : '';
   return name ? `${name} ${symbol}` : symbol;
 };
-const normalizeSymbolKey = value => String(value || '').trim().toUpperCase();
 const renderSymbol = (_, record) => {
   const symbol = normalizeFilterText(record?.symbol);
   const name = record?.symbol_name;
@@ -293,14 +173,6 @@ const renderDiffValue = value => (
   <Text style={{ color: diffTextColor(value) }}>
     {formatNumber(value)}
   </Text>
-);
-const renderTargetSellability = (_, record) => (
-  <Space direction="vertical" size={0}>
-    <Text>{formatNumber(record?.available_quantity)}</Text>
-    <Text type="secondary">
-      原始 {formatNumber(record?.raw_available_quantity)} / T+1锁定 {formatNumber(record?.t1_locked_quantity)} / 当日买入 {formatNumber(record?.today_buy_quantity)}
-    </Text>
-  </Space>
 );
 const getNetAssetHistoryOption = rows => {
   const dates = (rows || []).map(item => item.trading_date);
@@ -366,7 +238,6 @@ const getNetAssetHistoryOption = rows => {
 
 const ExternalTradingAccountManager = ({ embedded = false }) => {
   const { accountId } = useAccount();
-  const navigate = useNavigate();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -377,32 +248,10 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   const [subModalVisible, setSubModalVisible] = useState(false);
   const [editingSubAccount, setEditingSubAccount] = useState(null);
   const [activeAccountForSub, setActiveAccountForSub] = useState(null);
-  const [executorStatusVisible, setExecutorStatusVisible] = useState(false);
-  const [executorStatusAccount] = useState(null);
-  const [executorStatus, setExecutorStatus] = useState(null);
-  const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
-  const [executorStatusTables, setExecutorStatusTables] = useState(createEmptyExecutorTables);
-  const [executorStatusTableState, setExecutorStatusTableState] = useState(createDefaultExecutorTableState);
-  const [executorStatusTableLoading, setExecutorStatusTableLoading] = useState({});
-  const [executorStatusTableLoaded, setExecutorStatusTableLoaded] = useState({});
-  const [executorStatusActiveTab, setExecutorStatusActiveTab] = useState('sub_accounts');
-  const [executorSubAccountStatus, setExecutorSubAccountStatus] = useState({ rows: [] });
-  const [executorSubAccountStatusLoading, setExecutorSubAccountStatusLoading] = useState(false);
-  const [executorSubAccountStatusLoaded, setExecutorSubAccountStatusLoaded] = useState(false);
-  const [executorPlan, setExecutorPlan] = useState(null);
-  const [executorPlanLoading, setExecutorPlanLoading] = useState(false);
-  const [executorPlanLoaded, setExecutorPlanLoaded] = useState(false);
-  const [executorExecuteLoading, setExecutorExecuteLoading] = useState(false);
   const [brokerPositionsVisible, setBrokerPositionsVisible] = useState(false);
   const [brokerPositionsAccount, setBrokerPositionsAccount] = useState(null);
   const [brokerPositions, setBrokerPositions] = useState(null);
   const [brokerPositionsLoading, setBrokerPositionsLoading] = useState(false);
-  const [markBlockSuccessOrderId, setMarkBlockSuccessOrderId] = useState(null);
-  const [markBlockSuccessModalVisible, setMarkBlockSuccessModalVisible] = useState(false);
-  const [markBlockSuccessRecord, setMarkBlockSuccessRecord] = useState(null);
-  const [repairParentFillOrderId, setRepairParentFillOrderId] = useState(null);
-  const [repairParentFillModalVisible, setRepairParentFillModalVisible] = useState(false);
-  const [repairParentFillRecord, setRepairParentFillRecord] = useState(null);
   const [netAssetHistoryVisible, setNetAssetHistoryVisible] = useState(false);
   const [netAssetHistoryLoading, setNetAssetHistoryLoading] = useState(false);
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
@@ -410,8 +259,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   const [netAssetHistory, setNetAssetHistory] = useState(null);
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
-  const [markBlockSuccessForm] = Form.useForm();
-  const [repairParentFillForm] = Form.useForm();
   const statusWsRef = useRef(null);
   const statusWsReconnectTimerRef = useRef(null);
 
@@ -726,179 +573,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     }
   };
 
-  const executeNettedExecutor = async ({ force = false } = {}) => {
-    if (!executorStatusAccount?.id) return;
-    setExecutorExecuteLoading(true);
-    try {
-      const { data } = await request.post(`/api/external-trading-accounts/${executorStatusAccount.id}/executor/execute`, { force });
-      const accountResult = data?.accounts?.[0] || {};
-      const marketClosedResult = accountResult?.reason === 'market_closed' ? accountResult : data;
-      if (marketClosedResult?.status === 'SKIPPED' && marketClosedResult?.reason === 'market_closed') {
-        const marketLabel = marketClosedResult.market_label || marketTypeLabel(executorStatusAccount?.market_type);
-        message.warning(`当前不在 ${marketLabel}交易时段，执行器将在 ${formatTime(marketClosedResult.next_run_at)} 后继续处理`);
-      } else if (accountResult?.status === 'CANCEL_REQUESTED') {
-        message.success('已提交撤单，等待回报后执行器会继续撮合');
-      } else {
-        message.success(accountResult?.result?.message || (force ? '已强制触发净额撮合执行器' : '已触发净额撮合执行器'));
-      }
-      fetchSubAccounts(executorStatusAccount.id);
-      refreshExecutorStatus(executorStatusAccount);
-    } catch (error) {
-      message.error(error.response?.data?.detail || '执行净额撮合失败');
-    } finally {
-      setExecutorExecuteLoading(false);
-    }
-  };
-
-
-
-  const buildExecutorTableParams = (tableState, tableKey) => {
-    const filters = tableState?.filters || {};
-    return {
-      page: tableState?.page || 1,
-      page_size: tableState?.pageSize || 10,
-      symbol: joinFilterValues(filters.symbol),
-      trade_date: joinFilterValues(filters.trade_date),
-      sub_account: joinFilterValues(filters.sub_account),
-      strategy: joinFilterValues(filters.strategy),
-      side: joinFilterValues(filters.side),
-      status: joinFilterValues(filters.status),
-      role: joinFilterValues(filters.role),
-      event_type: joinFilterValues(filters.event_type),
-      process_status: joinFilterValues(filters.process_status),
-      sort_field: tableKey === 'ledger_positions' ? tableState?.sortField || undefined : undefined,
-      sort_order: tableKey === 'ledger_positions' ? tableState?.sortOrder || undefined : undefined
-    };
-  };
-
-  const fetchExecutorStatusTable = async (account, tableKey, tableState) => {
-    if (!account?.id || !executorServerTableEndpoints[tableKey]) return;
-    setExecutorStatusTableLoading(prev => ({ ...prev, [tableKey]: true }));
-    try {
-      const { data } = await request.get(
-        `/api/external-trading-accounts/${account.id}/executor/status/${executorServerTableEndpoints[tableKey]}`,
-        { params: buildExecutorTableParams(tableState, tableKey) }
-      );
-      setExecutorStatusTables(prev => ({
-        ...prev,
-        [tableKey]: {
-          ...createEmptyExecutorTableData(),
-          ...(data || {}),
-          rows: data?.rows || [],
-          price_details: data?.price_details || {},
-          filter_options: data?.filter_options || {}
-        }
-      }));
-      setExecutorStatusTableLoaded(prev => ({ ...prev, [tableKey]: true }));
-    } catch (error) {
-      message.error(error.response?.data?.detail || `获取${executorServerTableLabels[tableKey]}失败`);
-      setExecutorStatusTables(prev => ({
-        ...prev,
-        [tableKey]: createEmptyExecutorTableData()
-      }));
-      setExecutorStatusTableLoaded(prev => ({ ...prev, [tableKey]: false }));
-    } finally {
-      setExecutorStatusTableLoading(prev => ({ ...prev, [tableKey]: false }));
-    }
-  };
-
-  const fetchExecutorStatusTables = async (account, tableState = executorStatusTableState) => {
-    if (!account?.id) return;
-    await Promise.all(executorServerTableKeys.map(key => fetchExecutorStatusTable(account, key, tableState[key])));
-  };
-
-  const fetchExecutorSubAccountStatus = async account => {
-    if (!account?.id) return;
-    setExecutorSubAccountStatusLoading(true);
-    try {
-      const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status/sub-accounts`);
-      setExecutorSubAccountStatus({
-        rows: data?.rows || [],
-        price_details: data?.price_details || {}
-      });
-      setExecutorSubAccountStatusLoaded(true);
-    } catch (error) {
-      message.error(error.response?.data?.detail || '获取子账户状态失败');
-      setExecutorSubAccountStatus({ rows: [] });
-      setExecutorSubAccountStatusLoaded(false);
-    } finally {
-      setExecutorSubAccountStatusLoading(false);
-    }
-  };
-
-  const fetchExecutorPlan = async account => {
-    if (!account?.id) return;
-    setExecutorPlanLoading(true);
-    try {
-      const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status/plan`);
-      setExecutorPlan(data || null);
-      setExecutorPlanLoaded(true);
-    } catch (error) {
-      message.error(error.response?.data?.detail || '获取净额预览失败');
-      setExecutorPlan(null);
-      setExecutorPlanLoaded(false);
-    } finally {
-      setExecutorPlanLoading(false);
-    }
-  };
-
-  const fetchExecutorStatus = async (account, { tableState = executorStatusTableState, includeTables = false } = {}) => {
-    if (!account?.id) return;
-    setExecutorStatusLoading(true);
-    if (includeTables) {
-      fetchExecutorStatusTables(account, tableState);
-    }
-    try {
-      const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status`);
-      setExecutorStatus(data || null);
-    } catch (error) {
-      message.error(error.response?.data?.detail || '获取执行器状态失败');
-      setExecutorStatus(null);
-    } finally {
-      setExecutorStatusLoading(false);
-    }
-  };
-
-  const executorTabTableKey = tabKey => {
-    if (tabKey === 'targets') return 'target_positions';
-    if (tabKey === 'ledger') return 'ledger_positions';
-    if (tabKey === 'orders') return 'orders';
-    if (tabKey === 'fills') return 'fills';
-    if (tabKey === 'deliver_records') return 'deliver_records';
-    if (tabKey === 'events') return 'events';
-    return null;
-  };
-
-  const refreshExecutorStatusTab = (account, tabKey, { force = false } = {}) => {
-    if (!account?.id) return;
-    if (tabKey === 'sub_accounts') {
-      if (force || !executorSubAccountStatusLoaded) {
-        fetchExecutorSubAccountStatus(account);
-      }
-      return;
-    }
-    const tableKey = executorTabTableKey(tabKey);
-    if (tableKey) {
-      if (force || !executorStatusTableLoaded[tableKey]) {
-        fetchExecutorStatusTable(account, tableKey, executorStatusTableState[tableKey]);
-      }
-      return;
-    }
-    if (tabKey === 'plan' && (force || !executorPlanLoaded)) {
-      fetchExecutorPlan(account);
-    }
-  };
-
-  const handleExecutorStatusTabChange = tabKey => {
-    setExecutorStatusActiveTab(tabKey);
-    refreshExecutorStatusTab(executorStatusAccount, tabKey);
-  };
-
-  const refreshExecutorStatus = account => {
-    fetchExecutorStatus(account);
-    refreshExecutorStatusTab(account, executorStatusActiveTab, { force: true });
-  };
-
   const fetchBrokerPositions = async account => {
     if (!account?.id) return;
     setBrokerPositionsLoading(true);
@@ -913,306 +587,15 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     }
   };
 
-  const handleMarkBlockSuccess = async record => {
-    if (!executorStatusAccount?.id || !record?.id) return;
-    setMarkBlockSuccessOrderId(record.id);
-    try {
-      const values = await markBlockSuccessForm.validateFields();
-      const { data } = await request.post(
-        `/api/external-trading-accounts/${executorStatusAccount.id}/orders/${record.id}/mark-success`,
-        { price: values.price }
-      );
-      message.success(data?.message || '阻断单已标记成功');
-      setMarkBlockSuccessModalVisible(false);
-      setMarkBlockSuccessRecord(null);
-      markBlockSuccessForm.resetFields();
-      refreshExecutorStatus(executorStatusAccount);
-    } catch (error) {
-      if (!error?.errorFields) {
-        message.error(error.response?.data?.detail || '阻断单标记成功失败');
-      }
-    } finally {
-      setMarkBlockSuccessOrderId(null);
-    }
-  };
-
-  const openMarkBlockSuccessModal = record => {
-    const defaultPrice = Number(record?.submitted_price || record?.avg_fill_price || 0);
-    setMarkBlockSuccessRecord(record);
-    setMarkBlockSuccessModalVisible(true);
-    markBlockSuccessForm.setFieldsValue({
-      price: Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice : undefined
-    });
-  };
-
-  const closeMarkBlockSuccessModal = () => {
-    if (markBlockSuccessOrderId) return;
-    setMarkBlockSuccessModalVisible(false);
-    setMarkBlockSuccessRecord(null);
-    markBlockSuccessForm.resetFields();
-  };
-
-  const handleRepairParentFill = async record => {
-    if (!executorStatusAccount?.id || !record?.id) return;
-    setRepairParentFillOrderId(record.id);
-    try {
-      const values = await repairParentFillForm.validateFields();
-      const { data } = await request.post(
-        `/api/external-trading-accounts/${executorStatusAccount.id}/orders/${record.id}/repair-parent-fill`,
-        { price: values.price }
-      );
-      message.success(data?.message || '父单补成交完成');
-      setRepairParentFillModalVisible(false);
-      setRepairParentFillRecord(null);
-      repairParentFillForm.resetFields();
-      refreshExecutorStatus(executorStatusAccount);
-    } catch (error) {
-      if (!error?.errorFields) {
-        message.error(error.response?.data?.detail || '父单补成交失败');
-      }
-    } finally {
-      setRepairParentFillOrderId(null);
-    }
-  };
-
-  const openRepairParentFillModal = record => {
-    const defaultPrice = Number(record?.avg_fill_price || record?.submitted_price || 0);
-    setRepairParentFillRecord(record);
-    setRepairParentFillModalVisible(true);
-    repairParentFillForm.setFieldsValue({
-      price: Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice : undefined
-    });
-  };
-
-  const closeRepairParentFillModal = () => {
-    if (repairParentFillOrderId) return;
-    setRepairParentFillModalVisible(false);
-    setRepairParentFillRecord(null);
-    repairParentFillForm.resetFields();
-  };
-
-  const openExecutorStatus = account => {
-    if (!account?.id) return;
-    navigate(`/live?tab=executor&account_id=${account.id}`);
-  };
-
   const openBrokerPositions = account => {
     setBrokerPositionsAccount(account);
     setBrokerPositionsVisible(true);
     fetchBrokerPositions(account);
   };
 
-  const orderStatusColor = status => {
-    if (status === 'FILLED') return 'success';
-    if (['REJECTED', 'FAILED', 'EXPIRED'].includes(status)) return 'error';
-    if (['CANCELED', 'PARTIALLY_CANCELED'].includes(status)) return 'default';
-    if (['PARTIALLY_FILLED', 'CANCEL_PENDING', 'BLOCKED_INSUFFICIENT_SELLABLE', 'BLOCKED_INSUFFICIENT_POSITION', 'BLOCKED_NON_RETRYABLE_REJECTION'].includes(status)) return 'warning';
-    return 'processing';
-  };
-
-  const eventTypeLabel = value => {
-    if (value === 'order_event') return '订单回报';
-    if (value === 'trade_event') return '成交回报';
-    return value || '-';
-  };
-
-  const eventTypeColor = value => {
-    if (value === 'trade_event') return 'blue';
-    if (value === 'order_event') return 'purple';
-    return 'default';
-  };
-
-  const eventProcessStatusColor = value => {
-    if (value === 'PROCESSED') return 'success';
-    if (value === 'FAILED') return 'error';
-    if (value === 'UNMATCHED') return 'warning';
-    if (value === 'RECEIVED') return 'processing';
-    return 'default';
-  };
-  const deliverStatusColor = value => {
-    if (value === 'MATCHED') return 'success';
-    if (value === 'POSITION_ADJUSTED') return 'blue';
-    if (value === 'UNMATCHED') return 'warning';
-    if (value === 'IGNORED') return 'default';
-    return 'default';
-  };
-
-  const renderEventSubAccounts = (_, record) => {
-    const related = record?.related_sub_accounts || [];
-    if (!related.length) {
-      return (
-        <Space direction="vertical" size={0}>
-          <Text>{record?.sub_account_name || '-'}</Text>
-          {record?.strategy_name ? <Text type="secondary">策略: {record.strategy_name}</Text> : null}
-        </Space>
-      );
-    }
-    return (
-      <Space direction="vertical" size={0}>
-        <Text>{record?.sub_account_name || '-'}</Text>
-        <Text type="secondary">
-          {related.map(item => item.strategy_name ? `${item.name}(${item.strategy_name})` : item.name).join(' / ')}
-        </Text>
-      </Space>
-    );
-  };
-
-  const handleExecutorServerTableChange = tableKey => (pagination, filters, sorter) => {
-    const previousState = executorStatusTableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
-    const sortState = tableKey === 'ledger_positions'
-      ? normalizeLedgerSorter(sorter)
-      : { sortField: previousState.sortField || null, sortOrder: previousState.sortOrder || null };
-    const nextTableState = {
-      page: pagination?.current || 1,
-      pageSize: pagination?.pageSize || previousState.pageSize || 10,
-      filters: normalizeServerTableFilters(filters),
-      sortField: sortState.sortField,
-      sortOrder: sortState.sortOrder
-    };
-    const nextState = {
-      ...executorStatusTableState,
-      [tableKey]: nextTableState
-    };
-    setExecutorStatusTableState(nextState);
-    fetchExecutorStatusTable(executorStatusAccount, tableKey, nextTableState);
-  };
-
-  const executorServerPagination = tableKey => {
-    const tableState = executorStatusTableState[tableKey] || { page: 1, pageSize: 10 };
-    const pagination = executorStatusTables[tableKey]?.pagination || {};
-    return {
-      current: pagination.page || tableState.page,
-      pageSize: pagination.page_size || tableState.pageSize,
-      total: pagination.total || 0,
-      showSizeChanger: true,
-      pageSizeOptions: ['10', '20', '50', '100', '200'],
-      showTotal: total => `共 ${total} 条`
-    };
-  };
-
-  const serverFilterProps = (tableKey, filterKey, fallbackOptions = []) => {
-    const filteredValue = executorStatusTableState[tableKey]?.filters?.[filterKey] || [];
-    return {
-      filters: executorStatusTables[tableKey]?.filter_options?.[filterKey] || fallbackOptions,
-      filterSearch: true,
-      filteredValue: filteredValue.length ? filteredValue : null
-    };
-  };
-
-  const demandRows = executorPlan?.plan?.demands || [];
-  const internalCrossRows = executorPlan?.plan?.internal_crosses || [];
-  const externalOrderRows = executorPlan?.plan?.external_orders || [];
-  const targetRows = executorStatusTables.target_positions?.rows || [];
-  const ledgerRows = executorStatusTables.ledger_positions?.rows || [];
-  const lifecycleRows = executorStatusTables.orders?.rows || [];
-  const fillRows = executorStatusTables.fills?.rows || [];
-  const deliverRows = executorStatusTables.deliver_records?.rows || [];
-  const eventRows = executorStatusTables.events?.rows || [];
-  const executorSubAccountRows = executorSubAccountStatus?.rows || [];
-  const executorSubAccountTotals = {
-    cashAllocated: sumNumberField(executorSubAccountRows, 'cash_allocated'),
-    netAsset: sumNumberField(executorSubAccountRows, 'net_asset'),
-    cashAvailable: sumNumberField(executorSubAccountRows, 'cash_available')
-  };
   const brokerPositionRows = brokerPositions?.positions || [];
   const brokerPositionSummary = brokerPositions?.summary || {};
   const brokerSnapshot = brokerPositions?.snapshot || null;
-  const executorPriceDetails = {
-    ...(executorStatus?.price_details || {}),
-    ...(executorSubAccountStatus?.price_details || {}),
-    ...(executorPlan?.price_details || {}),
-    ...(executorStatusTables.target_positions?.price_details || {}),
-    ...(executorStatusTables.ledger_positions?.price_details || {}),
-    ...(executorStatusTables.orders?.price_details || {}),
-    ...(executorStatusTables.fills?.price_details || {}),
-    ...(executorStatusTables.deliver_records?.price_details || {}),
-    ...(executorStatusTables.events?.price_details || {})
-  };
-  const renderMarketPrice = (_, record) => {
-    const detail = executorPriceDetails[normalizeSymbolKey(record?.symbol)];
-    const price = Number(detail?.price);
-    if (!Number.isFinite(price) || price <= 0) return '-';
-    const text = formatNumber(price, 3);
-    return detail?.source ? <Tooltip title={`来源: ${detail.source}`}>{text}</Tooltip> : text;
-  };
-  const renderLifecyclePrice = (value, source) => {
-    const price = Number(value || 0);
-    if (!Number.isFinite(price) || price <= 0) return '-';
-    const text = formatNumber(price, 4);
-    return source ? <Tooltip title={`来源: ${source}`}>{text}</Tooltip> : text;
-  };
-  const marketPriceColumn = { title: '市价', key: 'market_price', width: 100, render: renderMarketPrice };
-  const renderSubAccountStrategy = (_, record) => (
-    <Space direction="vertical" size={0}>
-      <Text>{record.sub_account_name || record.name || '-'}</Text>
-      <Text type="secondary">策略: {record.strategy_name || record.strategy_type || record.binding_label || '-'}</Text>
-    </Space>
-  );
-
-  const demandColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account_name', width: 240, render: renderSubAccountStrategy, ...textColumnFilter(demandRows, record => record.sub_account_name) },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(demandRows, symbolText) },
-    marketPriceColumn,
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    {
-      title: '状态',
-      dataIndex: 'blocked',
-      key: 'blocked',
-      width: 110,
-      render: (_, record) => record.blocked ? <Tag color="orange">{getBlockLabel(record)}</Tag> : <Tag color="green">可执行</Tag>
-    },
-    { title: '阻断到', dataIndex: 'blocked_until', key: 'blocked_until', width: 170, render: formatTime },
-    { title: '当前', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '目标', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '执行策略', dataIndex: 'execution_policy', key: 'execution_policy', width: 300, render: formatPolicy }
-  ];
-
-  const internalCrossColumns = [
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(internalCrossRows, symbolText) },
-    marketPriceColumn,
-    { title: '撮合数量', dataIndex: 'quantity', key: 'quantity', width: 110, render: value => formatNumber(value) },
-    { title: '参考价', dataIndex: 'price', key: 'price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
-    { title: '买方分配', dataIndex: 'buy_allocations', key: 'buy_allocations', render: value => (value || []).map(item => `${item.sub_account_name}:${formatNumber(item.quantity)}`).join(' / ') || '-' },
-    { title: '卖方分配', dataIndex: 'sell_allocations', key: 'sell_allocations', render: value => (value || []).map(item => `${item.sub_account_name}:${formatNumber(item.quantity)}`).join(' / ') || '-' },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 120, render: value => <Tag color={value === 'READY' ? 'green' : 'orange'}>{value}</Tag> }
-  ];
-
-  const externalOrderColumns = [
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(externalOrderRows, symbolText) },
-    marketPriceColumn,
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '类型', dataIndex: 'order_type', key: 'order_type', width: 90 },
-    { title: '限价规则', dataIndex: 'price_level', key: 'price_level', width: 100, render: priceLevelLabel },
-    { title: '执行策略', dataIndex: 'execution_policy', key: 'execution_policy', width: 310, render: formatPolicy },
-    { title: '分配', dataIndex: 'allocations', key: 'allocations', render: value => (value || []).map(item => `${item.sub_account_name}:${formatNumber(item.quantity)}`).join(' / ') || '-' }
-  ];
-
-  const targetPositionColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('target_positions', 'sub_account') },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('target_positions', 'symbol') },
-    marketPriceColumn,
-    { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: value => value ? formatNumber(value, 3) : '-' },
-    { title: '目标', dataIndex: 'target_quantity', key: 'target_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '账本', dataIndex: 'current_quantity', key: 'current_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '可卖', dataIndex: 'available_quantity', key: 'available_quantity', width: 150, render: renderTargetSellability },
-    { title: '未成买', dataIndex: 'pending_buy_quantity', key: 'pending_buy_quantity', width: 90, render: value => formatNumber(value) },
-    { title: '未成卖', dataIndex: 'pending_sell_quantity', key: 'pending_sell_quantity', width: 90, render: value => formatNumber(value) },
-    { title: '有效', dataIndex: 'effective_quantity', key: 'effective_quantity', width: 100, render: value => formatNumber(value) },
-    {
-      title: '差额',
-      dataIndex: 'delta_quantity',
-      key: 'delta_quantity',
-      width: 100,
-      render: value => <Text type={Number(value || 0) === 0 ? 'secondary' : Number(value || 0) > 0 ? 'danger' : 'success'}>{formatNumber(value)}</Text>
-    },
-    { title: '动作', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : <Tag>HOLD</Tag> },
-    { title: '需执行', dataIndex: 'demand_quantity', key: 'demand_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '信号版本', dataIndex: 'signal_version', key: 'signal_version', width: 170, render: value => value || '-' },
-    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime }
-  ];
-
   const brokerPositionColumns = [
     { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...textColumnFilter(brokerPositionRows, symbolText) },
     { title: '券商数量', dataIndex: 'broker_quantity', key: 'broker_quantity', width: 110, render: value => formatNumber(value) },
@@ -1237,193 +620,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         return <Tag color="red">不一致</Tag>;
       }
     }
-  ];
-
-  const renderOrderActions = record => {
-    const actions = [];
-    if (record?.allocation_role === 'BLOCK' && record?.status === 'BLOCKED_INSUFFICIENT_POSITION') {
-      actions.push(
-        <Button
-          key="mark-success"
-          size="small"
-          type="link"
-          loading={markBlockSuccessOrderId === record.id}
-          onClick={() => openMarkBlockSuccessModal(record)}
-        >
-          标记成功
-        </Button>
-      );
-    }
-    if (record?.allocation_role === 'PARENT' && record?.needs_fill_repair) {
-      actions.push(
-        <Button
-          key="repair-parent-fill"
-          size="small"
-          type="link"
-          loading={repairParentFillOrderId === record.id}
-          onClick={() => openRepairParentFillModal(record)}
-        >
-          补成交
-        </Button>
-      );
-    }
-    return actions.length ? <Space size={4}>{actions}</Space> : '-';
-  };
-
-  const orderLifecycleColumns = [
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: formatTime },
-    {
-      title: '角色',
-      dataIndex: 'allocation_role',
-      key: 'role',
-      width: 90,
-      ...serverFilterProps('orders', 'role', roleFilterOptions),
-      render: value => {
-        if (value === 'PARENT') return <Tag color="purple">父单</Tag>;
-        if (value === 'CHILD') return <Tag color="blue">子单</Tag>;
-        if (value === 'BLOCK') return <Tag color="orange">阻断</Tag>;
-        return <Tag>{value || '-'}</Tag>;
-      }
-    },
-    {
-      title: '子账户',
-      dataIndex: 'sub_account_name',
-      key: 'sub_account',
-      width: 240,
-      render: renderSubAccountStrategy,
-      ...serverFilterProps('orders', 'sub_account')
-    },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('orders', 'symbol') },
-    marketPriceColumn,
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 130, render: value => <Tag color={orderStatusColor(value)}>{value || '-'}</Tag> },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '未成', dataIndex: 'remaining_quantity', key: 'remaining_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '提交价', dataIndex: 'submitted_price', key: 'submitted_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
-    { title: '均价', dataIndex: 'avg_fill_price', key: 'avg_fill_price', width: 100, render: value => value ? formatNumber(value, 4) : '-' },
-    { title: '参考价', dataIndex: 'reference_price', key: 'reference_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.reference_price_source) },
-    { title: '保护价', dataIndex: 'protection_limit_price', key: 'protection_limit_price', width: 100, render: (value, record) => renderLifecyclePrice(value, record.protection_limit_source) },
-    { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
-    { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
-    { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
-    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 120, render: renderPTradeStatus },
-    { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
-    { title: '档位', dataIndex: 'price_level', key: 'price_level', width: 90, render: value => value === null || value === undefined ? '-' : priceLevelLabel(value) },
-    { title: '重定价', dataIndex: 'replace_count', key: 'replace_count', width: 90, render: value => formatNumber(value) },
-    { title: '超时点', dataIndex: 'deadline_at', key: 'deadline_at', width: 170, render: formatTime },
-    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime },
-    { title: '消息', dataIndex: 'message', key: 'message', width: 220, render: value => value || '-' },
-    {
-      title: '操作',
-      key: 'action',
-      width: 120,
-      fixed: 'right',
-      render: (_, record) => renderOrderActions(record)
-    }
-  ];
-
-  const fillColumns = [
-    {
-      title: '角色',
-      dataIndex: 'allocation_role',
-      key: 'role',
-      width: 130,
-      ...serverFilterProps('fills', 'role', roleFilterOptions.filter(item => item.value !== 'BLOCK')),
-      render: (_, record) => (
-        <Tag color={record.allocation_role === 'PARENT' ? 'purple' : record.allocation_role === 'BLOCK' ? 'orange' : 'blue'}>
-          {roleLabel(record.allocation_role)}
-        </Tag>
-      )
-    },
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('fills', 'sub_account') },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('fills', 'symbol') },
-    marketPriceColumn,
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatNumber(value, 4) },
-    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatNumber(value, 2) },
-    { title: '估算费用', dataIndex: 'estimated_fee_total', key: 'estimated_fee_total', width: 110, render: value => formatNumber(value, 2) },
-    { title: '真实费用', dataIndex: 'actual_fee_total', key: 'actual_fee_total', width: 110, render: value => value === null || value === undefined ? '-' : formatNumber(value, 2) },
-    { title: '费用来源', dataIndex: 'fee_source', key: 'fee_source', width: 110, render: value => value || '-' },
-    { title: '订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 170, render: value => value || '-' },
-    { title: '成交时间', dataIndex: 'traded_at', key: 'traded_at', width: 170, render: formatTime }
-  ];
-
-  const deliverColumns = [
-    { title: '交割日期', dataIndex: 'trade_date', key: 'trade_date', width: 120, ...serverFilterProps('deliver_records', 'trade_date') },
-    { title: '业务', dataIndex: 'business_name', key: 'business_name', width: 130, render: value => value || '-' },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 150,
-      ...serverFilterProps('deliver_records', 'status'),
-      render: value => <Tag color={deliverStatusColor(value)}>{value || '-'}</Tag>
-    },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('deliver_records', 'symbol') },
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, ...serverFilterProps('deliver_records', 'side'), render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
-    { title: '余额', dataIndex: 'post_amount', key: 'post_amount', width: 100, render: value => formatOptionalNumber(value) },
-    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
-    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
-    { title: '费用', dataIndex: 'total_fee', key: 'total_fee', width: 100, render: value => formatOptionalNumber(value, 2) },
-    { title: '业务代码', dataIndex: 'business_flag', key: 'business_flag', width: 100, render: value => value || '-' },
-    { title: '业务编号', dataIndex: 'business_no', key: 'business_no', width: 120, render: value => value || '-' },
-    { title: '流水号', dataIndex: 'serial_no', key: 'serial_no', width: 120, render: value => value || '-' },
-    { title: '匹配订单', dataIndex: 'matched_order_id', key: 'matched_order_id', width: 100, render: value => value || '-' },
-    { title: '处理时间', dataIndex: 'reconciled_at', key: 'reconciled_at', width: 170, render: formatTime },
-    { title: '消息', dataIndex: 'message', key: 'message', width: 260, render: value => value || '-' }
-  ];
-
-  const eventColumns = [
-    { title: '事件时间', dataIndex: 'event_time', key: 'event_time', width: 170, render: formatTime },
-    {
-      title: '事件类型',
-      dataIndex: 'event_type',
-      key: 'event_type',
-      width: 120,
-      ...serverFilterProps('events', 'event_type'),
-      render: value => <Tag color={eventTypeColor(value)}>{eventTypeLabel(value)}</Tag>
-    },
-    {
-      title: '处理状态',
-      dataIndex: 'process_status',
-      key: 'process_status',
-      width: 110,
-      ...serverFilterProps('events', 'process_status'),
-      render: value => <Tag color={eventProcessStatusColor(value)}>{value || '-'}</Tag>
-    },
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 280, render: renderEventSubAccounts, ...serverFilterProps('events', 'sub_account') },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('events', 'symbol') },
-    { title: '方向', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : '-' },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatOptionalNumber(value) },
-    { title: '已成', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 100, render: value => formatOptionalNumber(value) },
-    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: value => formatOptionalNumber(value, 4) },
-    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: value => formatOptionalNumber(value, 2) },
-    { title: 'PTrade状态', dataIndex: 'ptrade_status', key: 'ptrade_status', width: 120, render: renderPTradeStatus },
-    { title: '匹配角色', dataIndex: 'matched_order_role', key: 'matched_order_role', width: 100, render: value => value ? roleLabel(value) : '-' },
-    { title: '匹配订单状态', dataIndex: 'matched_order_status', key: 'matched_order_status', width: 130, render: value => value ? <Tag color={orderStatusColor(value)}>{value}</Tag> : '-' },
-    { title: '券商订单号', dataIndex: 'broker_order_id', key: 'broker_order_id', width: 180, render: value => value || '-' },
-    { title: '委托号', dataIndex: 'entrust_no', key: 'entrust_no', width: 120, render: value => value || '-' },
-    { title: '客户端订单号', dataIndex: 'client_order_id', key: 'client_order_id', width: 180, render: value => value || '-' },
-    { title: '匹配本地ID', dataIndex: 'matched_order_id', key: 'matched_order_id', width: 110, render: value => value || '-' },
-    { title: '重放', dataIndex: 'replay_count', key: 'replay_count', width: 80, render: value => formatNumber(value) },
-    { title: '处理时间', dataIndex: 'processed_at', key: 'processed_at', width: 170, render: formatTime },
-    { title: '消息', dataIndex: 'process_message', key: 'process_message', width: 220, render: value => value || '-' },
-    { title: '来源', dataIndex: 'source', key: 'source', width: 110, render: value => value || '-' }
-  ];
-
-  const executorSubAccountColumns = [
-    { title: '子账户', dataIndex: 'name', key: 'name', width: 240, render: renderSubAccountStrategy, ...textColumnFilter(executorSubAccountRows, record => record.name) },
-    { title: '分配资金', dataIndex: 'cash_allocated', key: 'cash_allocated', width: 120, render: value => formatNumber(value, 2) },
-    { title: '净资产', dataIndex: 'net_asset', key: 'net_asset', width: 120, render: value => formatNumber(value, 2) },
-    { title: '可用资金', dataIndex: 'cash_available', key: 'cash_available', width: 120, render: value => formatNumber(value, 2) },
-    { title: '累计交易费', dataIndex: 'cumulative_trade_fee_total', key: 'cumulative_trade_fee_total', width: 170, render: renderTradeFeeSummary },
-    { title: '成交数', dataIndex: ['trade_fee_summary', 'fill_count'], key: 'fee_fill_count', width: 90, render: value => formatNumber(value) },
-    { title: '未对账成交', dataIndex: ['trade_fee_summary', 'unreconciled_fill_count'], key: 'unreconciled_fill_count', width: 110, render: value => formatNumber(value) },
-    { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
-    { title: '启用', dataIndex: 'enabled', key: 'enabled', width: 90, render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> }
   ];
 
   const netAssetHistoryRows = netAssetHistory?.history || [];
@@ -1487,9 +683,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           </Button>
           <Button size="small" onClick={() => openBrokerPositions(account)}>
             券商持仓
-          </Button>
-          <Button size="small" onClick={() => openExecutorStatus(account)}>
-            执行器状态
           </Button>
         </Space>
         <Table rowKey="id" columns={subColumns} dataSource={rows} pagination={false} size="small" scroll={{ x: 1480 }} />
@@ -1707,9 +900,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           <Button size="small" onClick={() => openBrokerPositions(account)}>
             券商持仓
           </Button>
-          <Button size="small" onClick={() => openExecutorStatus(account)}>
-            执行器
-          </Button>
           <Tooltip title="刷新">
             <Button icon={<SyncOutlined />} size="small" onClick={() => fetchAccounts()} />
           </Tooltip>
@@ -1739,11 +929,11 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   };
 
   return (
-    <PageShell
-      className="external-trading-page"
-      title={embedded ? null : '交易账户'}
-      subtitle="PTrade 与券商侧长连接、子账户账本和执行器入口"
-    >
+      <PageShell
+        className="external-trading-page"
+        title={embedded ? null : '交易账户'}
+        subtitle="PTrade 与券商侧长连接、外部子账户管理"
+      >
       <PageSection
         className="external-account-section"
         title="账号列表"
@@ -2023,323 +1213,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         </Space>
       </Modal>
 
-      <Modal
-        className="external-trading-form-modal"
-        title="标记阻断单成功"
-        visible={markBlockSuccessModalVisible}
-        onCancel={closeMarkBlockSuccessModal}
-        onOk={() => handleMarkBlockSuccess(markBlockSuccessRecord)}
-        confirmLoading={markBlockSuccessOrderId === markBlockSuccessRecord?.id}
-        okText="标记成功"
-        cancelText="取消"
-        destroyOnClose
-      >
-        <Space direction="vertical" style={{ width: '100%' }} size={12}>
-          <Text>
-            系统会按你输入的成交价写入一笔人工成交，并按成功成交回写账本；此操作当前不支持自动撤销。
-          </Text>
-          <Space wrap>
-            <Tag>{markBlockSuccessRecord?.sub_account_name || '-'}</Tag>
-            <Tag>{markBlockSuccessRecord?.symbol_name || markBlockSuccessRecord?.symbol || '-'}</Tag>
-            <Tag color={markBlockSuccessRecord?.side === 'SELL' ? 'green' : 'red'}>
-              {markBlockSuccessRecord?.side || '-'}
-            </Tag>
-            <Tag>数量 {formatNumber(markBlockSuccessRecord?.remaining_quantity || markBlockSuccessRecord?.quantity)}</Tag>
-          </Space>
-          <Form form={markBlockSuccessForm} layout="vertical">
-            <Form.Item
-              name="price"
-              label="成交价"
-              rules={[
-                { required: true, message: '请输入成交价' },
-                { type: 'number', min: 0.0001, message: '成交价必须大于 0' }
-              ]}
-            >
-              <InputNumber
-                min={0.0001}
-                precision={4}
-                step={0.01}
-                style={{ width: '100%' }}
-                placeholder="请输入人工成交价"
-              />
-            </Form.Item>
-          </Form>
-        </Space>
-      </Modal>
-
-      <Modal
-        className="external-trading-form-modal"
-        title="补父单成交"
-        visible={repairParentFillModalVisible}
-        onCancel={closeRepairParentFillModal}
-        onOk={() => handleRepairParentFill(repairParentFillRecord)}
-        confirmLoading={repairParentFillOrderId === repairParentFillRecord?.id}
-        okText="补成交"
-        cancelText="取消"
-        destroyOnClose
-      >
-        <Space direction="vertical" style={{ width: '100%' }} size={12}>
-          <Text>
-            系统会按你输入的成交价补写父单成交，并把成交数量分配到子单和子账户账本；此操作当前不支持自动撤销。
-          </Text>
-          <Space wrap>
-            <Tag>{repairParentFillRecord?.symbol_name || repairParentFillRecord?.symbol || '-'}</Tag>
-            <Tag color={repairParentFillRecord?.side === 'SELL' ? 'green' : 'red'}>
-              {repairParentFillRecord?.side || '-'}
-            </Tag>
-            <Tag>父单数量 {formatNumber(repairParentFillRecord?.quantity)}</Tag>
-            <Tag>待分配 {formatNumber(repairParentFillRecord?.child_remaining_quantity)}</Tag>
-          </Space>
-          <Form form={repairParentFillForm} layout="vertical">
-            <Form.Item
-              name="price"
-              label="成交价"
-              rules={[
-                { required: true, message: '请输入成交价' },
-                { type: 'number', min: 0.0001, message: '成交价必须大于 0' }
-              ]}
-            >
-              <InputNumber
-                min={0.0001}
-                precision={4}
-                step={0.01}
-                style={{ width: '100%' }}
-                placeholder="请输入实际成交价"
-              />
-            </Form.Item>
-          </Form>
-        </Space>
-      </Modal>
-
-      <Modal
-        className="external-trading-data-modal external-trading-executor-modal"
-        title={`执行器状态 - ${executorStatusAccount?.name || ''}`}
-        visible={executorStatusVisible}
-        onCancel={() => setExecutorStatusVisible(false)}
-        width={1320}
-        footer={[
-          <Button
-            key="execute"
-            type="primary"
-            danger
-            loading={executorExecuteLoading}
-            onClick={() => executeNettedExecutor()}
-            disabled={!executorStatusAccount?.id || executorStatusLoading}
-          >
-            执行净额限价单
-          </Button>,
-          <Button
-            key="refresh"
-            icon={<SyncOutlined />}
-            onClick={() => refreshExecutorStatus(executorStatusAccount)}
-            loading={executorStatusLoading || executorPlanLoading || executorSubAccountStatusLoading}
-          >
-            刷新
-          </Button>,
-          <Button key="close" onClick={() => setExecutorStatusVisible(false)}>
-            关闭
-          </Button>
-        ]}
-      >
-        <Space direction="vertical" style={{ width: '100%' }} size={16}>
-          {executorPlan?.plan_error || executorStatus?.plan_error ? (
-            <Alert type="warning" showIcon message="净额预览生成失败" description={executorPlan?.plan_error || executorStatus?.plan_error} />
-          ) : null}
-          <Space wrap>
-            <Tag color={executorStatus?.account?.connected ? 'green' : 'default'}>
-              {executorStatus?.account?.connected ? '在线' : '离线'}
-            </Tag>
-            <Text>子账户 {executorStatus?.summary?.sub_account_count ?? 0}</Text>
-            <Text>目标仓位 {executorStatus?.summary?.target_position_count ?? 0}</Text>
-            <Text>待执行差额 {executorStatus?.summary?.pending_delta_count ?? 0}</Text>
-            <Text>活跃订单 {executorStatus?.summary?.active_order_count ?? 0}</Text>
-            <Text>成交回报 {executorStatus?.summary?.fill_count ?? 0}</Text>
-            <Text>交割单 {executorStatus?.summary?.deliver_record_count ?? 0}</Text>
-            <Text>入站事件 {executorStatus?.summary?.event_log_count ?? 0}</Text>
-            <Text>总分配资金 {formatNumber(executorSubAccountTotals.cashAllocated, 2)}</Text>
-            <Text>总净资产 {formatNumber(executorSubAccountTotals.netAsset, 2)}</Text>
-            <Text>总可用资金 {formatNumber(executorSubAccountTotals.cashAvailable, 2)}</Text>
-            <Text>交易费 {formatNumber(executorStatus?.summary?.trade_fee_total, 2)}</Text>
-            <Text>归因交易费 {formatNumber(executorStatus?.summary?.attributed_trade_fee_total, 2)}</Text>
-            <Text>非交易费 {formatNumber(executorStatus?.summary?.non_trade_fee_total, 2)}</Text>
-            <Text>非交易收益 {formatNumber(executorStatus?.summary?.non_trade_income_total, 2)}</Text>
-            <Text>总费用 {formatNumber(executorStatus?.summary?.total_fee, 2)}</Text>
-          </Space>
-          <Tabs
-            activeKey={executorStatusActiveTab}
-            onChange={handleExecutorStatusTabChange}
-            items={[
-              {
-                key: 'sub_accounts',
-                label: '子账户',
-                children: (
-                  <Table
-                    rowKey="id"
-                    columns={executorSubAccountColumns}
-                    dataSource={executorSubAccountRows}
-                    loading={executorSubAccountStatusLoading}
-                    pagination={false}
-                    size="small"
-                    scroll={{ x: 1500 }}
-                  />
-                )
-              },
-              {
-                key: 'targets',
-                label: '目标仓位',
-                children: (
-                  <Table
-                    rowKey={record => `${record.sub_account_id}-${record.symbol}`}
-                    columns={targetPositionColumns}
-                    dataSource={targetRows}
-                    loading={executorStatusTableLoading.target_positions}
-                    pagination={executorServerPagination('target_positions')}
-                    onChange={handleExecutorServerTableChange('target_positions')}
-                    size="small"
-                    scroll={{ x: 1980 }}
-                  />
-                )
-              },
-              {
-                key: 'ledger',
-                label: '账本持仓',
-                children: (
-                  <ExternalLedgerPositionsTable
-                    rows={ledgerRows}
-                    loading={executorStatusTableLoading.ledger_positions}
-                    pagination={executorServerPagination('ledger_positions')}
-                    onChange={handleExecutorServerTableChange('ledger_positions')}
-                    priceDetails={executorPriceDetails}
-                    getColumnFilterProps={filterKey => serverFilterProps('ledger_positions', filterKey)}
-                    showSubAccount
-                    marketType={executorStatusAccount?.market_type || executorStatus?.account?.market_type}
-                    realizedPnlSortOrder={executorStatusTableState.ledger_positions?.sortField === 'realized_pnl' ? executorStatusTableState.ledger_positions?.sortOrder : null}
-                    scroll={{}}
-                  />
-                )
-              },
-              {
-                key: 'orders',
-                label: '订单生命周期',
-                children: (
-                  <Table
-                    rowKey="id"
-                    columns={orderLifecycleColumns}
-                    dataSource={lifecycleRows}
-                    loading={executorStatusTableLoading.orders}
-                    pagination={executorServerPagination('orders')}
-                    onChange={handleExecutorServerTableChange('orders')}
-                    size="small"
-                    scroll={{ x: 2600 }}
-                  />
-                )
-              },
-              {
-                key: 'fills',
-                label: '成交回报',
-                children: (
-                  <Table
-                    rowKey="id"
-                    columns={fillColumns}
-                    dataSource={fillRows}
-                    loading={executorStatusTableLoading.fills}
-                    pagination={executorServerPagination('fills')}
-                    onChange={handleExecutorServerTableChange('fills')}
-                    size="small"
-                    scroll={{ x: 1600 }}
-                  />
-                )
-              },
-              {
-                key: 'deliver_records',
-                label: '交割单',
-                children: (
-                  <Table
-                    rowKey="id"
-                    columns={deliverColumns}
-                    dataSource={deliverRows}
-                    loading={executorStatusTableLoading.deliver_records}
-                    pagination={executorServerPagination('deliver_records')}
-                    onChange={handleExecutorServerTableChange('deliver_records')}
-                    expandable={{
-                      expandedRowRender: record => (
-                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                          {JSON.stringify(record.raw_record || {}, null, 2)}
-                        </pre>
-                      ),
-                      rowExpandable: record => !!record.raw_record
-                    }}
-                    size="small"
-                    scroll={{ x: 2300 }}
-                  />
-                )
-              },
-              {
-                key: 'events',
-                label: '事件流水',
-                children: (
-                  <Table
-                    rowKey="id"
-                    columns={eventColumns}
-                    dataSource={eventRows}
-                    loading={executorStatusTableLoading.events}
-                    pagination={executorServerPagination('events')}
-                    onChange={handleExecutorServerTableChange('events')}
-                    expandable={{
-                      expandedRowRender: record => (
-                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                          {JSON.stringify(record.raw_payload || {}, null, 2)}
-                        </pre>
-                      ),
-                      rowExpandable: record => !!record.raw_payload
-                    }}
-                    size="small"
-                    scroll={{ x: 2600 }}
-                  />
-                )
-              },
-              {
-                key: 'plan',
-                label: '净额预览',
-                children: (
-                  <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                    <Table
-                      title={() => '子账户目标差额'}
-                      rowKey={(record, index) => `${record.sub_account_id}-${record.symbol}-${record.side}-${index}`}
-                      columns={demandColumns}
-                      dataSource={demandRows}
-                      loading={executorPlanLoading}
-                      pagination={false}
-                      size="small"
-                      scroll={{ x: 1500 }}
-                    />
-                    <Table
-                      title={() => '内部撮合'}
-                      rowKey={(record, index) => `${record.symbol}-${index}`}
-                      columns={internalCrossColumns}
-                      dataSource={internalCrossRows}
-                      loading={executorPlanLoading}
-                      pagination={false}
-                      size="small"
-                      scroll={{ x: 1100 }}
-                    />
-                    <Table
-                      title={() => '提交到 PTrade 的净额限价单'}
-                      rowKey={(record, index) => `${record.symbol}-${record.side}-${index}`}
-                      columns={externalOrderColumns}
-                      dataSource={externalOrderRows}
-                      loading={executorPlanLoading}
-                      pagination={false}
-                      size="small"
-                      scroll={{ x: 1280 }}
-                    />
-                  </Space>
-                )
-              }
-            ]}
-          />
-        </Space>
-      </Modal>
     </PageShell>
   );
 };

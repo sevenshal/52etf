@@ -187,10 +187,6 @@
   width: 100%;
 }
 
-.external-trading-executor-modal .ant-tabs-nav {
-  margin-bottom: 8px;
-}
-
 @media (max-width: 760px) {
   .external-account-section {
     overflow: visible;
@@ -267,10 +263,6 @@
 
   .external-trading-form-modal .ant-modal-footer .ant-btn {
     flex: 1 1 96px;
-  }
-
-  .external-trading-executor-modal .ant-modal-footer .ant-btn {
-    flex: 1 1 calc(50% - 8px);
   }
 
   .external-trading-data-modal .ant-space {
