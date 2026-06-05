@@ -2115,7 +2115,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   useEffect(() => {
     if (!backtestSearchJob || backtestSearchJob.status === 'idle') return;
     loadBacktestSearchResults();
-  }, [backtestSearchJob?.completed_cases, backtestSearchJob?.status, loadBacktestSearchResults]);
+  }, [backtestSearchJob, loadBacktestSearchResults]);
 
   const handleFactorChange = value => {
     const factor = (options?.factors || []).find(item => item.key === value);
@@ -2221,7 +2221,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     setSelectedLiveConfigId(configId || null);
   };
 
-  const openLiveConfigModal = (config = null) => {
+  const openLiveConfigModal = useCallback((config = null) => {
     const formValues = normalizeLiveConfigFormValues(config || {
       request: options?.default_backtest_request,
       ...DEFAULT_LIVE_TRADING_VALUES,
@@ -2237,18 +2237,18 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       },
     ));
     setLiveConfigModalOpen(true);
-  };
+  }, [options?.default_backtest_request, liveForm]);
 
   const handleLiveCreate = () => {
     openLiveConfigModal();
   };
 
-  const handleLiveEdit = configId => {
+  const handleLiveEdit = useCallback(configId => {
     const nextConfig = liveConfigs.find(item => item.id === configId) || null;
     if (!nextConfig) return;
     setSelectedLiveConfigId(nextConfig.id);
     openLiveConfigModal(nextConfig);
-  };
+  }, [liveConfigs, openLiveConfigModal]);
 
   const handleLiveConfigModalCancel = () => {
     setLiveConfigModalOpen(false);
@@ -2349,12 +2349,12 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     }
   };
 
-  const resolveLiveActionConfigId = configId => {
+  const resolveLiveActionConfigId = useCallback(configId => {
     const numericId = Number(configId);
     return Number.isFinite(numericId) && numericId > 0 ? numericId : selectedLiveConfigId;
-  };
+  }, [selectedLiveConfigId]);
 
-  const handleLiveDelete = async (configId = selectedLiveConfigId) => {
+  const handleLiveDelete = useCallback(async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
@@ -2372,9 +2372,9 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } finally {
       setLiveActionLoading(false);
     }
-  };
+  }, [editingLiveConfigId, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
-  const handleLiveGenerateSignal = async (configId = selectedLiveConfigId) => {
+  const handleLiveGenerateSignal = useCallback(async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
@@ -2391,9 +2391,9 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } finally {
       setLiveActionLoading(false);
     }
-  };
+  }, [loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
-  const handleLiveExecute = async (configId = selectedLiveConfigId) => {
+  const handleLiveExecute = useCallback(async (configId = selectedLiveConfigId) => {
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
@@ -2410,7 +2410,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } finally {
       setLiveActionLoading(false);
     }
-  };
+  }, [loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
   const handleLiveRefresh = async () => {
     await loadLiveConfigs(selectedLiveConfigId);
@@ -2634,7 +2634,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     }
   };
 
-  const applyBacktestSearchRow = async row => {
+  const applyBacktestSearchRow = useCallback(async row => {
     if (!row?.request) {
       message.warning('该搜索结果缺少可回填参数');
       return;
@@ -2647,9 +2647,9 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } finally {
       setApplyingSearchCaseIndex(null);
     }
-  };
+  }, [backtestForm, executeBacktestPayload]);
 
-  const analyzeBacktestSearchRow = async row => {
+  const analyzeBacktestSearchRow = useCallback(async row => {
     if (!row?.request) {
       message.warning('该搜索结果缺少可分析参数');
       return;
@@ -2705,7 +2705,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       setCompositeRunning(false);
       setAnalyzingSearchCaseIndex(null);
     }
-  };
+  }, [form, compositeForm, setActiveTab, setCompositeResult, setResult, setRunning, setCompositeRunning, setAnalyzingSearchCaseIndex]);
 
   const singleFactorSelectOptions = useMemo(() => (
     buildFactorSelectOptions(
@@ -2890,7 +2890,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const bucketRows = result?.bucket_returns || [];
   const factorDistributionRows = result?.factor_distribution || [];
   const icRows = result?.rank_ic_series || [];
-  const heatmapRows = result?.parameter_heatmap || [];
+  const heatmapRows = useMemo(() => result?.parameter_heatmap || [], [result?.parameter_heatmap]);
   const nonOverlapSummary = result?.non_overlapping_summary || {};
   const nonOverlapRows = result?.non_overlapping_offsets || [];
   const yearlyRows = result?.yearly_stability || [];
@@ -2934,7 +2934,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const backtestBenchmarkRows = backtestResult?.benchmark_curve || [];
   const backtestYearlyRows = backtestResult?.yearly_stats || [];
   const backtestHoldingRows = backtestResult?.current_holdings || [];
-  const backtestTradeRows = backtestResult?.trades || [];
+  const backtestTradeRows = useMemo(() => backtestResult?.trades || [], [backtestResult?.trades]);
   const backtestSymbolPnlRows = backtestResult?.symbol_pnl || [];
   const backtestComponents = backtestMetadata.components || [];
   const backtestTradeColumnsWithFilters = useMemo(() => {
@@ -2982,7 +2982,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const timingBucketRows = timingResult?.bucket_returns || [];
   const timingFactorDistributionRows = timingResult?.factor_distribution || [];
   const timingIcRows = timingResult?.rank_ic_series || [];
-  const timingHeatmapRows = timingResult?.parameter_heatmap || [];
+  const timingHeatmapRows = useMemo(() => timingResult?.parameter_heatmap || [], [timingResult?.parameter_heatmap]);
   const timingHeatmapMetrics = options?.timing_heatmap_metrics || DEFAULT_TIMING_HEATMAP_METRICS;
   const timingHeatmapMetric = selectedTimingHeatmapMetric
     || timingMetadata.heatmap_metric
@@ -3023,7 +3023,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       applyingSearchCaseIndex,
       analyzingSearchCaseIndex,
     ),
-    [effectiveBacktestSearchObjective, applyingSearchCaseIndex, analyzingSearchCaseIndex],
+    [applyBacktestSearchRow, analyzeBacktestSearchRow, effectiveBacktestSearchObjective, applyingSearchCaseIndex, analyzingSearchCaseIndex],
   );
   const backtestSearchObjectiveOptions = useMemo(() => (
     (options?.backtest_search_objectives || DEFAULT_BACKTEST_SEARCH_OBJECTIVES)
