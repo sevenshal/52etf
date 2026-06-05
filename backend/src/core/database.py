@@ -571,9 +571,9 @@ class ValuationSimConfig(Base):
     universe_tag_ids = Column(JSON)
     min_market_cap_100m = Column(Float, nullable=True, default=100.0)
     max_market_cap_100m = Column(Float, nullable=True)
-    initial_cash = Column(Float, nullable=False, default=100000.0)
-    current_cash = Column(Float, nullable=False, default=100000.0)
     max_positions = Column(Integer, nullable=False, default=5)
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_sub_account_id = Column(Integer, nullable=True)
     trigger_time = Column(String(8), nullable=False, default="18:00")
     trigger_timezone = Column(String(64), nullable=False, default="America/New_York")
     undervalue_threshold = Column(Float, nullable=False, default=0.9)
@@ -593,97 +593,6 @@ class ValuationSimConfig(Base):
     last_run_message = Column(String(500))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-
-class ValuationSimPosition(Base):
-    """EVC 估值成长策略模拟盘当前持仓。"""
-    __tablename__ = "valuation_sim_positions"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("valuation_sim_configs.id"), index=True, nullable=False)
-    account_id = Column(String, index=True)
-    symbol = Column(String, nullable=False, index=True)
-    quantity = Column(Float, nullable=False, default=0.0)
-    avg_cost = Column(Float, nullable=False, default=0.0)
-    cost_basis = Column(Float, nullable=False, default=0.0)
-    highest_price = Column(Float)
-    highest_price_date = Column(Date)
-    days_without_high = Column(Integer, nullable=False, default=0)
-    opened_at = Column(DateTime, default=datetime.now)
-    opened_trade_date = Column(Date)
-    last_price = Column(Float)
-    last_market_value = Column(Float)
-    last_trade_date = Column(Date)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    __table_args__ = (
-        UniqueConstraint("config_id", "symbol", name="uniq_valuation_sim_position_config_symbol"),
-    )
-
-
-class ValuationSimTrade(Base):
-    """EVC 估值成长策略模拟盘成交记录。"""
-    __tablename__ = "valuation_sim_trades"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("valuation_sim_configs.id"), index=True, nullable=False)
-    account_id = Column(String, index=True)
-    timestamp = Column(DateTime, default=datetime.now, index=True)
-    trade_date = Column(Date, index=True)
-    symbol = Column(String, nullable=False, index=True)
-    action = Column(String(16), nullable=False)
-    price = Column(Float)
-    quantity = Column(Float)
-    amount = Column(Float)
-    cash_after = Column(Float)
-    realized_pnl = Column(Float)
-    reason = Column(String(64))
-    metrics = Column(JSON)
-    message = Column(String(1000))
-
-
-class ValuationSimPendingOrder(Base):
-    """EVC 估值成长策略模拟盘待执行信号。"""
-    __tablename__ = "valuation_sim_pending_orders"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("valuation_sim_configs.id"), index=True, nullable=False)
-    account_id = Column(String, index=True)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    signal_date = Column(Date, index=True)
-    execution_date = Column(Date, index=True)
-    symbol = Column(String, nullable=False, index=True)
-    action = Column(String(16), nullable=False)
-    status = Column(String(16), nullable=False, default="PENDING")
-    reason = Column(String(64))
-    signal_price = Column(Float)
-    execution_price = Column(Float)
-    quantity = Column(Float)
-    amount = Column(Float)
-    realized_pnl = Column(Float)
-    priority = Column(Integer, default=0)
-    metrics = Column(JSON)
-    message = Column(String(1000))
-
-
-class ValuationSimEquity(Base):
-    """EVC 估值成长策略模拟盘权益曲线。"""
-    __tablename__ = "valuation_sim_equity"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("valuation_sim_configs.id"), index=True, nullable=False)
-    account_id = Column(String, index=True)
-    trade_date = Column(Date, index=True)
-    cash = Column(Float)
-    position_value = Column(Float)
-    total_equity = Column(Float)
-    realized_pnl = Column(Float)
-    unrealized_pnl = Column(Float)
-    position_count = Column(Integer)
-    created_at = Column(DateTime, default=datetime.now)
-    __table_args__ = (
-        UniqueConstraint("config_id", "trade_date", name="uniq_valuation_sim_equity_config_date"),
-    )
 
 
 class ValuationSimLog(Base):
@@ -1135,6 +1044,10 @@ def drop_deprecated_tables():
         "a_stock_innovation_momentum_holdings",
         "a_stock_innovation_momentum_logs",
         "a_stock_innovation_momentum_configs",
+        "valuation_sim_positions",
+        "valuation_sim_pending_orders",
+        "valuation_sim_trades",
+        "valuation_sim_equity",
     ]
     with engine.begin() as conn:
         for table_name in deprecated_tables:
@@ -1155,6 +1068,10 @@ def drop_deprecated_columns():
         "snowball_copy_configs": [
             "max_slippage_pct",
             "xueqiu_cookie",
+        ],
+        "valuation_sim_configs": [
+            "initial_cash",
+            "current_cash",
         ],
     }
 
@@ -1195,11 +1112,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_factor_live_trading_logs_config_time ON factor_live_trading_logs(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_valuation_sim_configs_account ON valuation_sim_configs(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_valuation_sim_configs_enabled ON valuation_sim_configs(enabled)",
-        "CREATE INDEX IF NOT EXISTS idx_valuation_sim_positions_config ON valuation_sim_positions(config_id)",
-        "CREATE INDEX IF NOT EXISTS idx_valuation_sim_pending_config_status ON valuation_sim_pending_orders(config_id, status, signal_date)",
-        "CREATE INDEX IF NOT EXISTS idx_valuation_sim_trades_config_time ON valuation_sim_trades(config_id, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_valuation_sim_logs_config_time ON valuation_sim_logs(config_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS idx_valuation_sim_equity_config_date ON valuation_sim_equity(config_id, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_account_config ON snowball_backtest_runs(account_id, config_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_status ON snowball_backtest_runs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_curve_run_date ON snowball_backtest_curve_points(run_id, date)",
@@ -1248,6 +1161,8 @@ def ensure_table_columns():
             "universe_tag_ids": "ALTER TABLE valuation_sim_configs ADD COLUMN universe_tag_ids JSON",
             "min_market_cap_100m": "ALTER TABLE valuation_sim_configs ADD COLUMN min_market_cap_100m FLOAT DEFAULT 100.0",
             "max_market_cap_100m": "ALTER TABLE valuation_sim_configs ADD COLUMN max_market_cap_100m FLOAT",
+            "external_trading_account_id": "ALTER TABLE valuation_sim_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_sub_account_id": "ALTER TABLE valuation_sim_configs ADD COLUMN live_sub_account_id INTEGER",
             "trailing_stop_atr_window": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_window INTEGER NOT NULL DEFAULT 20",
             "trailing_stop_atr_multiple": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_multiple FLOAT NOT NULL DEFAULT 2.5",
         },

@@ -8,12 +8,24 @@ from sqlalchemy.orm import Session
 
 from ...core.database import (
     ValuationSimConfig,
-    ValuationSimEquity,
     ValuationSimLog,
-    ValuationSimPendingOrder,
-    ValuationSimPosition,
-    ValuationSimTrade,
     get_db,
+)
+from ...core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+    get_external_trading_db,
+)
+from ...core.services.external_trading_ledger import (
+    STRATEGY_VALUATION_SIM,
+    safe_float as external_safe_float,
+    safe_int as external_safe_int,
+)
+from ...core.services.external_trading_market import (
+    EXTERNAL_TRADING_MARKET_US_STOCK,
+    normalize_external_trading_market_type,
 )
 from ...core.services.valuation_simulator import (
     ValuationSimulationService,
@@ -25,13 +37,12 @@ router = APIRouter(prefix="/api/valuation-sim", tags=["valuation-sim"])
 logger = logging.getLogger(__name__)
 
 
-class ValuationSimConfigPayload(BaseModel):
+class ValuationSimConfigBase(BaseModel):
     name: str = "纳指100估值成长模拟盘"
     enabled: bool = False
     universe_tag_ids: List[str] = Field(default_factory=list)
     min_market_cap_100m: Optional[float] = 100.0
     max_market_cap_100m: Optional[float] = None
-    initial_cash: float = 100000.0
     max_positions: int = 5
     trigger_time: str = "18:00"
     trigger_timezone: str = "America/New_York"
@@ -93,12 +104,6 @@ class ValuationSimConfigPayload(BaseModel):
             raise ValueError("市值范围不能小于 0")
         return number
 
-    @validator("initial_cash")
-    def validate_initial_cash(cls, value):
-        if value <= 0:
-            raise ValueError("初始资金必须大于 0")
-        return value
-
     @validator("max_positions")
     def validate_max_positions(cls, value):
         if value < 1 or value > 50:
@@ -125,92 +130,37 @@ class ValuationSimConfigPayload(BaseModel):
         return value
 
 
-class ValuationSimConfigSchema(ValuationSimConfigPayload):
+class ValuationSimConfigPayload(ValuationSimConfigBase):
+    external_trading_account_id: int
+    live_sub_account_id: int
+
+    @validator("external_trading_account_id", "live_sub_account_id")
+    def validate_required_external_id(cls, value):
+        if not value:
+            raise ValueError("估值模拟盘必须绑定外部交易账户和子账户")
+        return int(value)
+
+
+class ValuationSimConfigSchema(ValuationSimConfigBase):
     id: int
     account_id: Optional[str] = None
-    current_cash: float = 0.0
+    account_source: str = "external"
+    external_trading_account_id: Optional[int] = None
+    live_sub_account_id: Optional[int] = None
+    external_trading_account_name: Optional[str] = None
+    external_trading_account_identifier: Optional[str] = None
+    external_trading_account_label: Optional[str] = None
+    live_sub_account_name: Optional[str] = None
+    external_cash_allocated: Optional[float] = None
+    external_cash_available: Optional[float] = None
+    external_position_value: Optional[float] = None
+    external_net_asset: Optional[float] = None
     last_run_at: Optional[datetime] = None
     last_run_date: Optional[date] = None
     last_run_status: Optional[str] = None
     last_run_message: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ValuationSimPositionSchema(BaseModel):
-    id: int
-    symbol: str
-    quantity: float
-    avg_cost: float
-    cost_basis: float
-    highest_price: Optional[float] = None
-    highest_price_date: Optional[date] = None
-    days_without_high: int
-    opened_trade_date: Optional[date] = None
-    last_price: Optional[float] = None
-    last_market_value: Optional[float] = None
-    last_trade_date: Optional[date] = None
-    updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ValuationSimTradeSchema(BaseModel):
-    id: int
-    timestamp: datetime
-    trade_date: Optional[date] = None
-    symbol: str
-    action: str
-    price: Optional[float] = None
-    quantity: Optional[float] = None
-    amount: Optional[float] = None
-    cash_after: Optional[float] = None
-    realized_pnl: Optional[float] = None
-    reason: Optional[str] = None
-    metrics: Optional[Dict[str, Any]] = None
-    message: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ValuationSimPendingOrderSchema(BaseModel):
-    id: int
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    signal_date: Optional[date] = None
-    execution_date: Optional[date] = None
-    symbol: str
-    action: str
-    status: str
-    reason: Optional[str] = None
-    signal_price: Optional[float] = None
-    execution_price: Optional[float] = None
-    quantity: Optional[float] = None
-    amount: Optional[float] = None
-    realized_pnl: Optional[float] = None
-    priority: Optional[int] = None
-    metrics: Optional[Dict[str, Any]] = None
-    message: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ValuationSimEquitySchema(BaseModel):
-    id: int
-    trade_date: Optional[date] = None
-    cash: Optional[float] = None
-    position_value: Optional[float] = None
-    total_equity: Optional[float] = None
-    realized_pnl: Optional[float] = None
-    unrealized_pnl: Optional[float] = None
-    position_count: Optional[int] = None
-    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -239,8 +189,9 @@ CONFIG_FIELDS = [
     "universe_tag_ids",
     "min_market_cap_100m",
     "max_market_cap_100m",
-    "initial_cash",
     "max_positions",
+    "external_trading_account_id",
+    "live_sub_account_id",
     "trigger_time",
     "trigger_timezone",
     "undervalue_threshold",
@@ -268,7 +219,182 @@ def _get_config_or_404(db: Session, account_id: str, config_id: int) -> Valuatio
     return config
 
 
-def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayload, reset_cash_if_new: bool = False):
+def _get_bound_external_sub_account(
+    external_db: Session,
+    config: ValuationSimConfig,
+) -> Optional[ExternalTradingSubAccount]:
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        return None
+    return external_db.query(ExternalTradingSubAccount).filter(
+        ExternalTradingSubAccount.id == config.live_sub_account_id,
+        ExternalTradingSubAccount.account_id == config.account_id,
+        ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+    ).first()
+
+
+def _position_market_value(position: ExternalTradingLedgerPosition) -> float:
+    quantity = external_safe_int(position.quantity)
+    if quantity <= 0:
+        return 0.0
+    market_value = external_safe_float(position.market_value)
+    if market_value > 0:
+        return market_value
+    market_price = external_safe_float(position.market_price)
+    if market_price <= 0:
+        market_price = external_safe_float(position.avg_cost)
+    return quantity * market_price if market_price > 0 else 0.0
+
+
+def _external_config_cash_view(
+    external_db: Session,
+    sub_account: ExternalTradingSubAccount,
+) -> Dict[str, float]:
+    positions = (
+        external_db.query(ExternalTradingLedgerPosition)
+        .filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id)
+        .all()
+    )
+    position_value = round(sum(_position_market_value(position) for position in positions), 2)
+    cash_allocated = round(external_safe_float(sub_account.cash_allocated), 2)
+    cash_available = round(external_safe_float(sub_account.cash_available), 2)
+    return {
+        "cash_allocated": cash_allocated,
+        "cash_available": cash_available,
+        "position_value": position_value,
+        "net_asset": round(cash_available + position_value, 2),
+    }
+
+
+def _serialize_config(
+    config: ValuationSimConfig,
+    external_db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    data = {field: getattr(config, field, None) for field in CONFIG_FIELDS}
+    data.update({
+        "id": config.id,
+        "account_id": config.account_id,
+        "account_source": "external",
+        "last_run_at": config.last_run_at,
+        "last_run_date": config.last_run_date,
+        "last_run_status": config.last_run_status,
+        "last_run_message": config.last_run_message,
+        "created_at": config.created_at,
+        "updated_at": config.updated_at,
+    })
+    if external_db is None or not config.external_trading_account_id:
+        return data
+
+    external_account = external_db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == config.external_trading_account_id,
+        ExternalTradingAccount.account_id == config.account_id,
+    ).first()
+    sub_account = _get_bound_external_sub_account(external_db, config)
+    if external_account:
+        data["external_trading_account_name"] = external_account.name
+        data["external_trading_account_identifier"] = external_account.identifier
+        data["external_trading_account_label"] = (
+            f"{external_account.name}（{external_account.identifier}）"
+            if external_account.name and external_account.identifier
+            else external_account.name or external_account.identifier
+        )
+    if sub_account:
+        cash_view = _external_config_cash_view(external_db, sub_account)
+        data["live_sub_account_name"] = sub_account.name
+        data["external_cash_allocated"] = cash_view["cash_allocated"]
+        data["external_cash_available"] = cash_view["cash_available"]
+        data["external_position_value"] = cash_view["position_value"]
+        data["external_net_asset"] = cash_view["net_asset"]
+    return data
+
+
+def _clear_target_positions(
+    external_db: Session,
+    config: ValuationSimConfig,
+    *,
+    sub_account_id: Optional[int] = None,
+) -> None:
+    target_sub_account_id = sub_account_id or config.live_sub_account_id
+    query = external_db.query(ExternalTradingTargetPosition).filter(
+        ExternalTradingTargetPosition.account_id == config.account_id,
+        ExternalTradingTargetPosition.strategy_type == STRATEGY_VALUATION_SIM,
+        ExternalTradingTargetPosition.strategy_config_id == config.id,
+    )
+    if target_sub_account_id:
+        query = query.filter(ExternalTradingTargetPosition.sub_account_id == target_sub_account_id)
+    query.delete(synchronize_session=False)
+
+
+def _bind_valuation_sim_sub_account(
+    external_db: Session,
+    config: ValuationSimConfig,
+    *,
+    previous_sub_account_id: Optional[int] = None,
+) -> None:
+    if previous_sub_account_id and previous_sub_account_id != config.live_sub_account_id:
+        previous = external_db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == previous_sub_account_id,
+            ExternalTradingSubAccount.account_id == config.account_id,
+        ).first()
+        if (
+            previous
+            and previous.strategy_type == STRATEGY_VALUATION_SIM
+            and previous.strategy_config_id == config.id
+        ):
+            _clear_target_positions(external_db, config, sub_account_id=previous_sub_account_id)
+            previous.strategy_type = None
+            previous.strategy_config_id = None
+            previous.updated_at = datetime.now()
+
+    if not config.external_trading_account_id or not config.live_sub_account_id:
+        raise HTTPException(status_code=400, detail="估值模拟盘必须选择外部交易账户和子账户")
+
+    account = external_db.query(ExternalTradingAccount).filter(
+        ExternalTradingAccount.id == config.external_trading_account_id,
+        ExternalTradingAccount.account_id == config.account_id,
+    ).first()
+    if not account:
+        raise HTTPException(status_code=400, detail="所选外部交易账户不存在")
+    if not account.enabled:
+        raise HTTPException(status_code=400, detail="所选外部交易账户未启用")
+    market_type = normalize_external_trading_market_type(getattr(account, "market_type", None))
+    if market_type != EXTERNAL_TRADING_MARKET_US_STOCK:
+        raise HTTPException(status_code=400, detail="估值模拟盘只能绑定美股外部交易账户")
+
+    sub_account = _get_bound_external_sub_account(external_db, config)
+    if not sub_account:
+        raise HTTPException(status_code=400, detail="所选外部交易子账户不存在")
+    if not sub_account.enabled:
+        raise HTTPException(status_code=400, detail="所选外部交易子账户未启用")
+    if (
+        sub_account.strategy_type
+        and not (
+            sub_account.strategy_type == STRATEGY_VALUATION_SIM
+            and sub_account.strategy_config_id == config.id
+        )
+    ):
+        raise HTTPException(status_code=400, detail="该外部交易子账户已绑定其他策略")
+
+    sub_account.strategy_type = STRATEGY_VALUATION_SIM
+    sub_account.strategy_config_id = config.id
+    sub_account.updated_at = datetime.now()
+
+
+def _unbind_valuation_sim_sub_account(
+    external_db: Session,
+    config: ValuationSimConfig,
+) -> None:
+    sub_account = _get_bound_external_sub_account(external_db, config)
+    if (
+        sub_account
+        and sub_account.strategy_type == STRATEGY_VALUATION_SIM
+        and sub_account.strategy_config_id == config.id
+    ):
+        sub_account.strategy_type = None
+        sub_account.strategy_config_id = None
+        sub_account.updated_at = datetime.now()
+
+
+def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayload):
     payload_data = payload.dict()
     min_market_cap = payload_data.get("min_market_cap_100m")
     max_market_cap = payload_data.get("max_market_cap_100m")
@@ -276,8 +402,6 @@ def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayloa
         raise HTTPException(status_code=400, detail="市值下限不能大于上限")
     for field in CONFIG_FIELDS:
         setattr(config, field, payload_data[field])
-    if reset_cash_if_new:
-        config.current_cash = payload.initial_cash
     config.updated_at = datetime.now()
 
 
@@ -285,13 +409,15 @@ def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayloa
 def list_valuation_sim_configs(
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
-    return (
+    rows = (
         db.query(ValuationSimConfig)
         .filter(ValuationSimConfig.account_id == account_id)
         .order_by(ValuationSimConfig.updated_at.desc(), ValuationSimConfig.id.desc())
         .all()
     )
+    return [_serialize_config(row, external_db) for row in rows]
 
 
 @router.post("/configs", response_model=ValuationSimConfigSchema)
@@ -299,13 +425,17 @@ def create_valuation_sim_config(
     payload: ValuationSimConfigPayload,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
     config = ValuationSimConfig(account_id=account_id, created_at=datetime.now())
-    _apply_payload(config, payload, reset_cash_if_new=True)
+    _apply_payload(config, payload)
     db.add(config)
+    db.flush()
+    _bind_valuation_sim_sub_account(external_db, config)
+    external_db.commit()
     db.commit()
     db.refresh(config)
-    return config
+    return _serialize_config(config, external_db)
 
 
 @router.get("/configs/{config_id}", response_model=ValuationSimConfigSchema)
@@ -313,8 +443,9 @@ def get_valuation_sim_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
-    return _get_config_or_404(db, account_id, config_id)
+    return _serialize_config(_get_config_or_404(db, account_id, config_id), external_db)
 
 
 @router.put("/configs/{config_id}", response_model=ValuationSimConfigSchema)
@@ -323,12 +454,20 @@ def update_valuation_sim_config(
     payload: ValuationSimConfigPayload,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
+    previous_sub_account_id = config.live_sub_account_id
     _apply_payload(config, payload)
+    _bind_valuation_sim_sub_account(
+        external_db,
+        config,
+        previous_sub_account_id=previous_sub_account_id,
+    )
+    external_db.commit()
     db.commit()
     db.refresh(config)
-    return config
+    return _serialize_config(config, external_db)
 
 
 @router.delete("/configs/{config_id}")
@@ -336,14 +475,14 @@ def delete_valuation_sim_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
-    db.query(ValuationSimPosition).filter(ValuationSimPosition.config_id == config.id).delete()
-    db.query(ValuationSimPendingOrder).filter(ValuationSimPendingOrder.config_id == config.id).delete()
-    db.query(ValuationSimTrade).filter(ValuationSimTrade.config_id == config.id).delete()
-    db.query(ValuationSimEquity).filter(ValuationSimEquity.config_id == config.id).delete()
+    _clear_target_positions(external_db, config)
+    _unbind_valuation_sim_sub_account(external_db, config)
     db.query(ValuationSimLog).filter(ValuationSimLog.config_id == config.id).delete()
     db.delete(config)
+    external_db.commit()
     db.commit()
     return {"message": "配置已删除"}
 
@@ -353,22 +492,20 @@ def reset_valuation_sim_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
-    db.query(ValuationSimPosition).filter(ValuationSimPosition.config_id == config.id).delete()
-    db.query(ValuationSimPendingOrder).filter(ValuationSimPendingOrder.config_id == config.id).delete()
-    db.query(ValuationSimTrade).filter(ValuationSimTrade.config_id == config.id).delete()
-    db.query(ValuationSimEquity).filter(ValuationSimEquity.config_id == config.id).delete()
+    _clear_target_positions(external_db, config)
     db.query(ValuationSimLog).filter(ValuationSimLog.config_id == config.id).delete()
-    config.current_cash = config.initial_cash
     config.last_run_at = None
     config.last_run_date = None
     config.last_run_status = None
     config.last_run_message = None
     config.updated_at = datetime.now()
+    external_db.commit()
     db.commit()
     db.refresh(config)
-    return config
+    return _serialize_config(config, external_db)
 
 
 @router.post("/configs/{config_id}/run")
@@ -376,73 +513,19 @@ def run_valuation_sim_config(
     config_id: int,
     account_id: str = Depends(valid_account),
     db: Session = Depends(get_db),
+    external_db: Session = Depends(get_external_trading_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
     try:
-        result = ValuationSimulationService(db).run_config(config, trigger_source="manual")
+        result = ValuationSimulationService(db, external_db=external_db).run_config(config, trigger_source="manual")
+        external_db.commit()
         db.commit()
         return result
     except Exception as exc:
+        external_db.rollback()
         db.rollback()
         logger.exception("Manual valuation simulation run failed, config_id=%s", config_id)
         raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/configs/{config_id}/positions", response_model=List[ValuationSimPositionSchema])
-def list_valuation_sim_positions(
-    config_id: int,
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db),
-):
-    config = _get_config_or_404(db, account_id, config_id)
-    return (
-        db.query(ValuationSimPosition)
-        .filter(ValuationSimPosition.config_id == config.id)
-        .order_by(ValuationSimPosition.last_market_value.desc(), ValuationSimPosition.id.asc())
-        .all()
-    )
-
-
-@router.get("/configs/{config_id}/pending-orders", response_model=List[ValuationSimPendingOrderSchema])
-def list_valuation_sim_pending_orders(
-    config_id: int,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=1, le=300),
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db),
-):
-    config = _get_config_or_404(db, account_id, config_id)
-    return (
-        db.query(ValuationSimPendingOrder)
-        .filter(ValuationSimPendingOrder.config_id == config.id)
-        .order_by(
-            ValuationSimPendingOrder.status.asc(),
-            ValuationSimPendingOrder.signal_date.desc(),
-            ValuationSimPendingOrder.id.desc(),
-        )
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
-
-
-@router.get("/configs/{config_id}/trades", response_model=List[ValuationSimTradeSchema])
-def list_valuation_sim_trades(
-    config_id: int,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db),
-):
-    config = _get_config_or_404(db, account_id, config_id)
-    return (
-        db.query(ValuationSimTrade)
-        .filter(ValuationSimTrade.config_id == config.id)
-        .order_by(ValuationSimTrade.timestamp.desc(), ValuationSimTrade.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
 
 
 @router.get("/configs/{config_id}/logs", response_model=List[ValuationSimLogSchema])
@@ -462,24 +545,6 @@ def list_valuation_sim_logs(
         .limit(page_size)
         .all()
     )
-
-
-@router.get("/configs/{config_id}/equity", response_model=List[ValuationSimEquitySchema])
-def list_valuation_sim_equity(
-    config_id: int,
-    limit: int = Query(120, ge=1, le=1000),
-    account_id: str = Depends(valid_account),
-    db: Session = Depends(get_db),
-):
-    config = _get_config_or_404(db, account_id, config_id)
-    rows = (
-        db.query(ValuationSimEquity)
-        .filter(ValuationSimEquity.config_id == config.id)
-        .order_by(ValuationSimEquity.trade_date.desc())
-        .limit(limit)
-        .all()
-    )
-    return list(reversed(rows))
 
 
 @router.get("/configs/{config_id}/candidates")

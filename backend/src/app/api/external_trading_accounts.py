@@ -15,6 +15,7 @@ from ...core.database import (
     PortfolioCopyConfig,
     SnowballCopyConfig,
     SoxlFearStrategyConfig,
+    ValuationSimConfig,
     get_db,
 )
 from ...core.external_trading_database import (
@@ -70,6 +71,7 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_PORTFOLIO_COPY,
     STRATEGY_FACTOR_LIVE,
     STRATEGY_SOXL_FEAR,
+    STRATEGY_VALUATION_SIM,
     STRATEGY_W20,
     build_netted_target_execution_plan,
     build_broker_position_diff,
@@ -543,6 +545,12 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
         if config:
             return f"SOXL情绪量能自动交易 {config.symbol or ''}".strip()
         return "SOXL情绪量能自动交易（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_VALUATION_SIM:
+        config = main_db.query(ValuationSimConfig).filter(
+            ValuationSimConfig.id == sub_account.strategy_config_id,
+            ValuationSimConfig.account_id == sub_account.account_id,
+        ).first()
+        return config.name if config else "估值模拟盘（配置已删除）"
     return sub_account.strategy_type
 
 
@@ -1185,6 +1193,15 @@ def _query_filter_values(value: Optional[str]) -> List[str]:
 
 def _query_filter_symbols(value: Optional[str]) -> List[str]:
     return _dedupe_normalized_symbols(_query_filter_values(value))
+
+
+def _query_sort_order(value: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip().lower()
+    if text in {"asc", "ascend", "ascending"}:
+        return "asc"
+    if text in {"desc", "descend", "descending"}:
+        return "desc"
+    return None
 
 
 def _query_filter_dates(value: Optional[str]) -> List[date]:
@@ -2281,6 +2298,15 @@ async def delete_external_trading_sub_account(
             config.trading_account_id = None
         config.updated_at = now
 
+    bound_valuation_sim_configs = main_db.query(ValuationSimConfig).filter(
+        ValuationSimConfig.account_id == account_id,
+        ValuationSimConfig.live_sub_account_id == sub_account.id,
+    ).all()
+    for config in bound_valuation_sim_configs:
+        config.external_trading_account_id = None
+        config.live_sub_account_id = None
+        config.updated_at = now
+
     db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingOrder).filter(ExternalTradingOrder.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingTargetPosition).filter(ExternalTradingTargetPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
@@ -2731,8 +2757,11 @@ async def get_external_trading_executor_status_ledger_positions(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=200),
     symbol: Optional[str] = Query(None),
+    sub_account_id: Optional[int] = Query(None),
     sub_account: Optional[str] = Query(None),
     strategy: Optional[str] = Query(None),
+    sort_field: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query(None),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
     account_id: str = Depends(valid_account),
@@ -2750,6 +2779,8 @@ async def get_external_trading_executor_status_ledger_positions(
             ExternalTradingLedgerPosition.external_trading_account_id == account.id,
         )
     )
+    if sub_account_id is not None:
+        query = query.filter(ExternalTradingLedgerPosition.sub_account_id == sub_account_id)
     query = _apply_symbol_filter(query, ExternalTradingLedgerPosition.symbol, _query_filter_symbols(symbol))
     query = _apply_sub_account_filter(
         query,
@@ -2761,11 +2792,20 @@ async def get_external_trading_executor_status_ledger_positions(
         ExternalTradingLedgerPosition.sub_account_id,
         _sub_account_ids_by_strategy_name(strategy_name_by_sub_account_id, _query_filter_values(strategy)),
     )
-    query = query.order_by(
-        ExternalTradingLedgerPosition.sub_account_id.asc(),
-        ExternalTradingLedgerPosition.market_value.desc(),
-        ExternalTradingLedgerPosition.symbol.asc(),
-    )
+    normalized_sort_order = _query_sort_order(sort_order)
+    if sort_field == "realized_pnl" and normalized_sort_order:
+        sort_column = ExternalTradingLedgerPosition.realized_pnl
+        query = query.order_by(
+            sort_column.asc() if normalized_sort_order == "asc" else sort_column.desc(),
+            ExternalTradingLedgerPosition.sub_account_id.asc(),
+            ExternalTradingLedgerPosition.symbol.asc(),
+        )
+    else:
+        query = query.order_by(
+            ExternalTradingLedgerPosition.sub_account_id.asc(),
+            ExternalTradingLedgerPosition.market_value.desc(),
+            ExternalTradingLedgerPosition.symbol.asc(),
+        )
     rows, pagination = _paginate_query(query, page=page, page_size=page_size)
     today_buy_by_key = get_today_buy_quantities(db, sorted({row.sub_account_id for row in rows if row.sub_account_id}))
     serialized_rows = [
