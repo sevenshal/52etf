@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
@@ -27,35 +27,35 @@ const IBKRAccountManager = () => {
     const [currentLogAccount, setCurrentLogAccount] = useState(null);
     const [logs, setLogs] = useState([]);
 
-    useEffect(() => {
-        fetchAccounts();
-    }, []);
+  const checkStatus = useCallback(async (id) => {
+    setStatusLoading(prev => ({ ...prev, [id]: true }));
+    try {
+      const response = await request.get(`/api/ib-accounts/${id}/status`);
+      setStatuses(prev => ({ ...prev, [id]: response.data }));
+    } catch (error) {
+      setStatuses(prev => ({ ...prev, [id]: { connected: false, message: '连接失败' } }));
+    } finally {
+      setStatusLoading(prev => ({ ...prev, [id]: false }));
+    }
+  }, []);
 
-    const fetchAccounts = async () => {
-        setLoading(true);
-        try {
-            const response = await request.get('/api/ib-accounts');
-            setAccounts(response.data);
+  const fetchAccounts = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await request.get('/api/ib-accounts');
+      setAccounts(response.data);
             // 自动检查所有账户状态
             response.data.forEach(acc => checkStatus(acc.id));
         } catch (error) {
             message.error('获取账户列表失败');
-        } finally {
-            setLoading(false);
-        }
-    };
+    } finally {
+      setLoading(false);
+    }
+  }, [checkStatus]);
 
-    const checkStatus = async (id) => {
-        setStatusLoading(prev => ({ ...prev, [id]: true }));
-        try {
-            const response = await request.get(`/api/ib-accounts/${id}/status`);
-            setStatuses(prev => ({ ...prev, [id]: response.data }));
-        } catch (error) {
-            setStatuses(prev => ({ ...prev, [id]: { connected: false, message: '连接失败' } }));
-        } finally {
-            setStatusLoading(prev => ({ ...prev, [id]: false }));
-        }
-    };
+  useEffect(() => {
+    fetchAccounts();
+  }, [fetchAccounts]);
 
     const handleRestart = async (id) => {
         try {
@@ -444,7 +444,7 @@ const LogViewer = ({ accountId, visible, logs, setLogs }) => {
         };
 
         return () => ws.close();
-    }, [accountId, visible]);
+    }, [accountId, setLogs, visible]);
 
     useEffect(() => {
         if (scrollRef.current) {

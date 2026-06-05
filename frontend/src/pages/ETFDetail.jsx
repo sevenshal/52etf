@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, Button, Statistic, Row, Col, Typography, Table, Tag } from 'antd';
 import { LeftOutlined } from '@ant-design/icons';
@@ -15,38 +15,38 @@ const ETFDetail = () => {
   const [reportHistory, setReportHistory] = useState([]);
   const [components, setComponents] = useState([]);
 
-  useEffect(() => {
-    fetchReport();
-    fetchReportHistory();
-    fetchComponents();
-  }, [symbol]);
-
-  const fetchReport = async () => {
+  const fetchReport = useCallback(async () => {
     try {
       const { data } = await request.get(`/api/etf/reports/${symbol}`);
       setReport(data);
     } catch (error) {
       console.error('获取ETF报告失败:', error);
     }
-  };
+  }, [symbol]);
 
-  const fetchReportHistory = async () => {
+  const fetchReportHistory = useCallback(async () => {
     try {
       const { data } = await request.get(`/api/etf/reports/${symbol}/history?days=2000`);
       setReportHistory(data || []);
     } catch (error) {
       console.error('获取ETF历史估值失败:', error);
     }
-  };
+  }, [symbol]);
 
-  const fetchComponents = async () => {
+  const fetchComponents = useCallback(async () => {
     try {
       const { data } = await request.get(`/api/etf/components/${symbol}`);
       setComponents(data);
     } catch (error) {
       console.error('获取成分股信息失败:', error);
     }
-  };
+  }, [symbol]);
+
+  useEffect(() => {
+    fetchReport();
+    fetchReportHistory();
+    fetchComponents();
+  }, [fetchReport, fetchReportHistory, fetchComponents]);
 
   // 格式化数字显示
   const formatNumber = (num) => {

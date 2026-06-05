@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import dayjs from 'dayjs';
 import { Badge, Button, Card, Form, Input, Space, Typography, message } from 'antd';
 import { KeyOutlined, MailOutlined, LoginOutlined, SaveOutlined } from '@ant-design/icons';
@@ -12,7 +12,7 @@ const EVCAccountManager = () => {
   const [loginLoading, setLoginLoading] = useState(false);
   const [accountInfo, setAccountInfo] = useState(null);
 
-  const fetchAccount = async () => {
+  const fetchAccount = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await request.get('/api/evc-accounts');
@@ -26,11 +26,11 @@ const EVCAccountManager = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [form]);
 
   useEffect(() => {
     fetchAccount();
-  }, []);
+  }, [fetchAccount]);
 
   const handleSave = async (values) => {
     setLoading(true);

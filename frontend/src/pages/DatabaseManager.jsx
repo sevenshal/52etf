@@ -620,7 +620,7 @@ const DatabaseManager = () => {
     };
   }, [chartType, dimensionColumn, heatmapYColumn, resultRows, valueColumn]);
 
-  const fetchTables = async () => {
+  const fetchTables = useCallback(async () => {
     setSchemaLoading(true);
     try {
       const { data } = await request.get('/api/db/tables');
@@ -637,9 +637,9 @@ const DatabaseManager = () => {
     } finally {
       setSchemaLoading(false);
     }
-  };
+  }, [selectedTableName]);
 
-  const fetchFavorites = async () => {
+  const fetchFavorites = useCallback(async () => {
     setFavoritesLoading(true);
     try {
       const { data } = await request.get('/api/db/favorites');
@@ -649,12 +649,12 @@ const DatabaseManager = () => {
     } finally {
       setFavoritesLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchTables();
     fetchFavorites();
-  }, []);
+  }, [fetchTables, fetchFavorites]);
 
   useEffect(() => {
     if (!resultColumns.length) {
