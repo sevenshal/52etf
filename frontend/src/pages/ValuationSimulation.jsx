@@ -420,13 +420,6 @@ const ValuationSimulation = () => {
       render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>,
     },
     {
-      title: '账户',
-      dataIndex: 'account_source',
-      key: 'account_source',
-      width: 90,
-      render: () => <Tag color="blue">外部</Tag>,
-    },
-    {
       title: '外部账户',
       dataIndex: 'external_trading_account_id',
       key: 'external_trading_account_id',
