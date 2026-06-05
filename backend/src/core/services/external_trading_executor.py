@@ -12,7 +12,11 @@ from ..external_trading_database import (
     ExternalTradingTargetPosition,
     get_external_trading_db_ctx,
 )
-from .external_trading import ExternalTradingConnectionError, external_trading_hub
+from .external_trading import (
+    ExternalTradingConnectionError,
+    external_trading_hub,
+    normalize_order_price_for_tick,
+)
 from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
@@ -32,6 +36,7 @@ from .external_trading_execution_policy import (
 )
 from .external_trading_market import (
     EXTERNAL_TRADING_MARKET_A_STOCK,
+    external_trading_market_close_time,
     external_trading_market_label,
     is_external_trading_market_open,
     next_external_trading_day_open,
@@ -112,6 +117,10 @@ def next_a_share_trading_day_open(now: Optional[datetime] = None) -> datetime:
 
 def _market_deadline_as_naive_china(market_type: Optional[str]) -> datetime:
     return next_external_trading_day_open(market_type).astimezone(CHINA_TZ).replace(tzinfo=None)
+
+
+def _market_close_as_naive_china(market_type: Optional[str]) -> datetime:
+    return external_trading_market_close_time(market_type).astimezone(CHINA_TZ).replace(tzinfo=None)
 
 
 def _try_mark_running(account_pk: int) -> bool:
@@ -336,7 +345,11 @@ def _order_signal_version(order: Dict[str, Any]) -> Optional[str]:
     return order.get("signal_version")
 
 
-def _reference_protection_limit_price(order: Dict[str, Any], side: str) -> Optional[float]:
+def _reference_protection_limit_price(
+    order: Dict[str, Any],
+    side: str,
+    market_type: Optional[str],
+) -> Optional[float]:
     reference_prices = []
     for item in order.get("allocations") or []:
         reference_price = safe_float(item.get("reference_price"))
@@ -354,11 +367,20 @@ def _reference_protection_limit_price(order: Dict[str, Any], side: str) -> Optio
     slippage_rate = max(slippage_pct, 0.0) / 100.0
     if side == "BUY":
         prices = [price * (1.0 + slippage_rate) for price in reference_prices]
-        return round(min(prices), 4)
-    if side == "SELL":
+        raw_price = min(prices)
+    elif side == "SELL":
         prices = [price * (1.0 - slippage_rate) for price in reference_prices]
-        return round(max(prices), 4)
-    return None
+        raw_price = max(prices)
+    else:
+        return None
+    tick_price = normalize_order_price_for_tick(
+        raw_price,
+        side=side,
+        market_type=market_type,
+        symbol=order.get("symbol"),
+    )
+    parsed = safe_float(tick_price, None)
+    return round(parsed, 4) if parsed is not None and parsed > 0 else None
 
 
 def _max_replace_count_today(
@@ -392,6 +414,7 @@ def _apply_execution_metadata(
     account_pk: int,
     plan: Dict[str, Any],
     price_level: int,
+    market_type: Optional[str],
 ) -> List[Dict[str, Any]]:
     executable_orders = []
     skipped = plan.setdefault("skipped", [])
@@ -453,7 +476,7 @@ def _apply_execution_metadata(
                 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
             ),
         }
-        protection_limit_price = _reference_protection_limit_price(enriched, side)
+        protection_limit_price = _reference_protection_limit_price(enriched, side, market_type)
         if protection_limit_price:
             enriched["protection_limit_price"] = protection_limit_price
             enriched["protection_limit_source"] = (
@@ -542,6 +565,7 @@ async def _submit_current_targets(
             account_pk=account_pk,
             plan=plan,
             price_level=account_policy.get("price_level"),
+            market_type=market_type,
         )
         internal_orders = apply_internal_crosses(db, plan)
         execution_orders, parent_rows = create_netted_execution_orders(
@@ -569,6 +593,7 @@ async def _submit_current_targets(
                     external_trading_account_id=account_pk,
                     response_orders=result.get("orders") or [],
                     insufficient_sellable_block_until=_market_deadline_as_naive_china(market_type),
+                    protection_limit_deadline_at=_market_close_as_naive_china(market_type),
                 )
         except ExternalTradingConnectionError as exc:
             _mark_submission_error(parent_client_order_ids, str(exc))

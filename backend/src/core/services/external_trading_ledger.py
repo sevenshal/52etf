@@ -1111,6 +1111,7 @@ def _propagate_parent_order_state(db: Session, parent: ExternalTradingOrder) -> 
         child.ptrade_status = parent.ptrade_status or child.ptrade_status
         child.submitted_price = parent.submitted_price or child.submitted_price
         child.submitted_at = parent.submitted_at or child.submitted_at
+        child.deadline_at = parent.deadline_at or child.deadline_at
         child.last_event_at = parent.last_event_at or child.last_event_at
         child.raw_submit_result = parent.raw_submit_result or child.raw_submit_result
         child.raw_order_event = parent.raw_order_event or child.raw_order_event
@@ -1998,12 +1999,39 @@ def _apply_submission_quantity_clip(
         )
 
 
+def _submission_result_uses_protection_limit(item: Dict[str, Any]) -> bool:
+    order_type = str(item.get("order_type") or "").upper()
+    if order_type and order_type != "LIMIT":
+        return False
+
+    submitted_price = _positive_float(item.get("submitted_price"))
+    if submitted_price is None:
+        submitted_price = _positive_float(item.get("calculated_price"))
+    protection_price = _positive_float(
+        item.get("protection_limit_price")
+        or item.get("market_limit_price")
+        or item.get("max_buy_price")
+        or item.get("min_sell_price")
+    )
+    if submitted_price is None or protection_price is None:
+        return False
+    if abs(submitted_price - protection_price) <= 1e-8:
+        return True
+
+    price_source = str(item.get("price_source") or "").lower()
+    return (
+        "capped_by_protection_limit" in price_source
+        or "floored_by_protection_limit" in price_source
+    )
+
+
 def record_submission_result(
     db: Session,
     *,
     external_trading_account_id: int,
     response_orders: List[Dict[str, Any]],
     insufficient_sellable_block_until: Optional[datetime] = None,
+    protection_limit_deadline_at: Optional[datetime] = None,
 ) -> None:
     now = datetime.now()
     for item in response_orders or []:
@@ -2058,6 +2086,12 @@ def record_submission_result(
         row.submitted_at = now if row.status not in {"FAILED", "REJECTED", "NOT_SUPPORTED"} else row.submitted_at
         row.last_event_at = now
         row.raw_submit_result = item
+        if (
+            protection_limit_deadline_at
+            and lifecycle in ACTIVE_ORDER_STATUSES
+            and _submission_result_uses_protection_limit(item)
+        ):
+            row.deadline_at = protection_limit_deadline_at
         row.updated_at = now
         _propagate_parent_order_state(db, row)
         replay_unmatched_external_events_for_order(db, external_trading_account_id=external_trading_account_id, order=row)

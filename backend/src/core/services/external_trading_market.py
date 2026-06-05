@@ -103,6 +103,15 @@ def is_external_trading_market_open(market_type: Optional[str], now: Optional[da
     )
 
 
+def external_trading_market_close_time(market_type: Optional[str], now: Optional[datetime] = None) -> datetime:
+    normalized = normalize_external_trading_market_type(market_type)
+    current = _market_now(normalized, now)
+    if normalized == EXTERNAL_TRADING_MARKET_US_STOCK:
+        close_time = MarketService.get_us_market_close_time(current.date())
+        return datetime.combine(current.date(), close_time, tzinfo=US_TZ)
+    return current.replace(hour=A_SHARE_CLOSE.hour, minute=A_SHARE_CLOSE.minute, second=0, microsecond=0)
+
+
 def next_external_trading_time(market_type: Optional[str], now: Optional[datetime] = None) -> datetime:
     normalized = normalize_external_trading_market_type(market_type)
     current = _market_now(normalized, now)

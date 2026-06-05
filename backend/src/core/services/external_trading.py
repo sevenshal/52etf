@@ -246,6 +246,19 @@ def _round_order_price(value: Any, side: str, tick: Decimal) -> Any:
     return float(adjusted)
 
 
+def normalize_order_price_for_tick(
+    value: Any,
+    *,
+    side: str,
+    market_type: Optional[str],
+    symbol: Any,
+) -> Any:
+    tick = _order_price_tick(market_type, symbol)
+    if tick is None:
+        return value
+    return _round_order_price(value, side, tick)
+
+
 def _normalize_order_prices(
     payload: Optional[Dict[str, Any]],
     market_type: Optional[str],
@@ -269,10 +282,11 @@ def _normalize_order_prices(
             continue
         for field in ORDER_PRICE_FIELDS:
             if field in normalized_order:
-                normalized_order[field] = _round_order_price(
+                normalized_order[field] = normalize_order_price_for_tick(
                     normalized_order.get(field),
-                    side,
-                    tick,
+                    side=side,
+                    market_type=market_type,
+                    symbol=normalized_order.get("symbol"),
                 )
         normalized_orders.append(normalized_order)
 
