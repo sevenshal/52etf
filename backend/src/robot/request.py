@@ -2,12 +2,10 @@ import requests
 import json
 import os
 import logging
-import uuid
 from ratelimit import limits, sleep_and_retry
 from dataclasses import dataclass
 from typing import Optional, List
-from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime
 from longport.openapi import Config, QuoteContext, TradeContext, TopicType, OrderSide, OrderType, TimeInForceType, OutsideRTH, Period, AdjustType
 
 current_directory = os.path.dirname(os.path.realpath(__file__))

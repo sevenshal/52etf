@@ -25,7 +25,6 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
-    normalize_lot_size,
     normalize_max_replace_count,
     normalize_max_slippage_pct,
     normalize_price_level,

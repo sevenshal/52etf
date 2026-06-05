@@ -3,7 +3,7 @@ import asyncio
 import subprocess
 import os
 from ib_insync import IB
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class IBAccountService:
             docker_bin = os.getenv('DOCKER_BINARY_PATH', 'docker')
             
             # 执行重启命令
-            result = subprocess.run(
+            subprocess.run(
                 [docker_bin, "restart", container_name],
                 capture_output=True,
                 text=True,

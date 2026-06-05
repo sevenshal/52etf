@@ -3,12 +3,11 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import numpy as np
 from scipy.stats import norm
-from ...core.services.trade import TradeService, OrderSide
+from ...core.services.trade import OrderSide
 from ...core.services.longport import LongPortService
 from ...core.services.fed_rate_monitor import FedRateMonitorService
 from .account import valid_account
 from itertools import groupby
-from operator import itemgetter
 from pydantic import BaseModel
 from decimal import Decimal
 from sqlalchemy.orm import Session
@@ -57,7 +56,7 @@ def parse_option_info(symbol: str) -> Dict:
             "strike_price": strike_price,
             "stock_symbol": stock_symbol
         }
-    except Exception as e:
+    except Exception:
         return None
 
 # 删除原来的 parse_stock_symbol 函数
@@ -103,7 +102,7 @@ def calculate_exercise_probability(
             probability = norm.cdf(-d2)
             
         return round(probability * 100, 2)  # 转换为百分比并保留两位小数
-    except Exception as e:
+    except Exception:
         return 0.0
 
 # 添加响应模型定义

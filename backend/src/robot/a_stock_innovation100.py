@@ -1251,7 +1251,6 @@ def load_a_stock_innovation100_summary(db: Session) -> Dict:
     level_rows = db.query(AStockInnovation100Level).filter(
         AStockInnovation100Level.index_code == INDEX_CODE
     ).order_by(AStockInnovation100Level.date.asc()).all()
-    values = [float(row.level) for row in level_rows if row.level]
     returns = [
         float(row.daily_return_pct) / 100.0
         for row in level_rows

@@ -1,12 +1,10 @@
 import logging
 import math
-from typing import List, Optional, Dict
-from ..core.database import Session, PortfolioCopyConfig, LongPortAccount
+from typing import List
+from ..core.database import PortfolioCopyConfig
 from ..core.services.longport import LongPortService
-from ..core.services.trade import OrderSide, OrderType, TimeInForceType
+from ..core.services.trade import OrderSide, OrderType
 from ..core.utils import mask_account_id
-import requests
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +100,8 @@ class LongportCopyTrader:
         # Looking at service.py, `account_balance` returns dict with `available_balance`.
         # We need a way to get Total Net Assets.
         # Let's check `service.stock_positions()` it might return cost/market value.
-        
+
         positions = service.stock_positions()
-        market_value = 0.0
         lp_positions = {} # symbol -> qty
         
         # Extract Longport positions
@@ -165,7 +162,6 @@ class LongportCopyTrader:
             # `today_orders` or `history_orders` with status open.
             # For simplicity, we might ignore pending for now or implement `get_pending`.
             # Let's try to get pending.
-            pending_qty = 0
             # TODO: Add get_pending to service if needed.
             
             price = market_prices.get(symbol)

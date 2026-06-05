@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Header, Query, Path
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Optional
-from ...core.database import get_db, SzdtTradeStock, SZDTTradingConfig
+from ...core.database import get_db, SzdtTradeStock
 from ...core.services.szdt import SZDTService
 from sqlalchemy.orm import Session
 

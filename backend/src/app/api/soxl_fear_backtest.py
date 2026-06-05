@@ -1180,7 +1180,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
     strategy_metrics, drawdowns = _compute_equity_metrics(dates, equity_values)
     benchmark_metrics, benchmark_drawdowns = _compute_equity_metrics(dates, benchmark_values)
-    end_value = float(strategy_metrics["ending_value"])
     trade_win_rate = (winning_trade_count / closed_trade_count * 100) if closed_trade_count > 0 else 0.0
     closed_profits = [float(item.get("profit") or 0.0) for item in trades if item.get("action") == "SELL"]
     winning_profits = [item for item in closed_profits if item > 0]

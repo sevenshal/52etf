@@ -1,7 +1,4 @@
 import requests
-import pandas as pd
-from datetime import datetime
-from typing import Dict
 from dateutil.parser import parse
 from .base import ETFDataFetcher
 from ...core.models.etf import ETFHolding, ETFHoldingsData

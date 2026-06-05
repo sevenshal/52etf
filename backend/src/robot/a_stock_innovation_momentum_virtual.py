@@ -19,8 +19,6 @@ from .a_stock_innovation100 import INDEX_CODE as BENCHMARK_INDEX_CODE
 from .us_stock_signal_virtual import (
     DAILY_PRICE_SOURCE,
     NEXT_OPEN_PRICE_SOURCE,
-    SUPPORTED_MOMENTUM_WINDOWS,
-    SUPPORTED_REBALANCE_FREQUENCIES,
     _apply_index_weight_blend,
     _build_yearly_stats,
     _compute_mixed_risk_adjusted_momentum_snapshot,

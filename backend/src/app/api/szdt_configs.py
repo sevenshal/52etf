@@ -2,7 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from ...core.database import get_db, SZDTTradingConfig, IBKRAccountConfig
+from ...core.database import get_db, SZDTTradingConfig
 from .account import valid_account
 
 router = APIRouter(

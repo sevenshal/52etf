@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 import time as time_module
 from dataclasses import dataclass
@@ -8,7 +7,6 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import duckdb
 import pandas as pd
 import requests
 

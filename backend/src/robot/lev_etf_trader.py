@@ -1,11 +1,10 @@
 import asyncio
 import threading
-import time
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from ..core.database import AutomatedTradingConfig, get_db_ctx
-from ..core.services.trading_strategy import is_market_closing_soon, execute_trading_strategy
+from ..core.services.trading_strategy import execute_trading_strategy
 from ..core.services.market import MarketService
 from ..core.utils import send_alert_email
 import traceback

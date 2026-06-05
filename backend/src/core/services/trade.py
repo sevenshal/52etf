@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional
+from typing import List, Dict
 from enum import Enum
 
 class OrderSide(Enum):

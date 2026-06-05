@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from starlette.concurrency import run_in_threadpool
+from fastapi.concurrency import run_in_threadpool
 
 from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator

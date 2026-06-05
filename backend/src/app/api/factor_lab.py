@@ -59,8 +59,6 @@ from ...core.services.factor_backtest_engine import (
     load_universe_history,
     load_universe_weight_history,
     ROTATION_MODE_LABELS,
-    ROTATION_MODE_RANK_EXIT_REBALANCE,
-    ROTATION_MODE_SCHEDULED_REBALANCE,
     SUPPORTED_ROTATION_MODES,
     normalize_a_stock_symbol,
     normalize_custom_pool_symbols,
@@ -91,7 +89,6 @@ from ...core.services.factor_engine import (
     _normalize_momentum_weights_payload,
     _prepare_factor_frame,
     _prepare_momentum_factor_frame_from_source,
-    register_factor,
 )
 from ...core.services.external_trading_executor import trigger_external_trading_executor
 from ...core.services.external_trading_ledger import (

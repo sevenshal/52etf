@@ -9,10 +9,7 @@ from sqlalchemy.pool import NullPool
 
 from .duckdb_utils import (
     ANALYTICS_DB_PATH,
-    DUCKDB_CONFIG_MISMATCH_MESSAGE,
-    connect_duckdb,
     connect_duckdb_engine,
-    is_duckdb_config_mismatch,
 )
 
 ANALYTICS_DB_DIR = os.path.dirname(ANALYTICS_DB_PATH)

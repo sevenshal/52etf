@@ -1019,7 +1019,6 @@ class AStockBaseDataSyncService:
         jobs: List[Tuple[str, date, date]] = []
         for index_code in index_codes:
             stats = stats_by_index.get(index_code) or {}
-            min_date = stats.get("min_date")
             max_date = stats.get("max_date")
             if explicit_start:
                 index_start = _warmup_start(explicit_start, A_STOCK_INDEX_DAILY_WARMUP_DAYS)

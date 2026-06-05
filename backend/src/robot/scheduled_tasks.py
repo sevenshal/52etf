@@ -4,13 +4,13 @@ import threading
 import traceback
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date, timedelta
 from typing import Any, Callable, Deque, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 
-from ..core.database import ScheduledTaskConfig, SnowballCopyConfig, get_db_ctx
+from ..core.database import ScheduledTaskConfig, get_db_ctx
 from ..core.event_stream import publish_event
 from ..core.utils import send_alert_email
 

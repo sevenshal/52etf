@@ -10,7 +10,6 @@ from .account import valid_account
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-import json
 
 
 router = APIRouter(prefix="/api/backtest")

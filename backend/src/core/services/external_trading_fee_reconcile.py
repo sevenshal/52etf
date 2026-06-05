@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -10,7 +9,6 @@ from ..external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingSessionLocal,
 )
-from .external_trading import external_trading_hub
 from .external_trading_ledger import reconcile_deliver_records
 from .external_trading_market import (
     EXTERNAL_TRADING_MARKET_A_STOCK,

@@ -90,7 +90,6 @@ def _load_a_stock_names(normalized_symbols: Iterable[str], name_by_key: Dict[str
         return
 
     try:
-        import duckdb
 
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:

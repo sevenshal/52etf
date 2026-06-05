@@ -196,7 +196,6 @@ def _insert_or_replace_frame(
 
 
 def _daily_date_bounds() -> Dict[str, Tuple[date, date]]:
-    import duckdb  # type: ignore
 
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
@@ -220,7 +219,6 @@ def _daily_date_bounds() -> Dict[str, Tuple[date, date]]:
 
 
 def _existing_daily_prices(symbol: str, start_date: date, end_date: date) -> Dict[date, Dict]:
-    import duckdb  # type: ignore
 
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
@@ -252,7 +250,6 @@ def _existing_daily_prices(symbol: str, start_date: date, end_date: date) -> Dic
 
 
 def _count_table_rows(table_name: str) -> int:
-    import duckdb  # type: ignore
 
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:

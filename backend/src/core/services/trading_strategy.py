@@ -5,7 +5,7 @@ from .longport import LongPortService
 from .quote import QuoteService
 from .market import MarketService
 from .ib_service import IBKRService
-from ..database import get_db, get_db_ctx, AutomatedTradingConfig, AutomatedTradeLog
+from ..database import get_db_ctx, AutomatedTradingConfig, AutomatedTradeLog
 from ..utils import mask_account_id
 
 logger = logging.getLogger(__name__)

@@ -3,7 +3,6 @@ import csv
 import io
 import logging
 import os
-import shutil
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import numpy as np
 import polars as pl
@@ -24,13 +24,11 @@ from ..database import (
 from ..duckdb_utils import connect_duckdb
 from .factor_engine import (
     DEFAULT_MOMENTUM_WEIGHTS,
-    FACTOR_DIRECTION_OPTIONS,
     FACTOR_REGISTRY,
     MIXED_WINDOW_KEY,
     MOMENTUM_FACTOR_SCORE_PREFIX,
     NEUTRALIZATION_OPTIONS,
     STANDARDIZATION_OPTIONS,
-    SUPPORTED_MOMENTUM_WINDOWS,
     SUPPORTED_WINDOWS,
     FactorContext,
     FactorDefinition,

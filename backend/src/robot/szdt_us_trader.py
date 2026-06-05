@@ -1,10 +1,9 @@
 import logging
 import threading
-import time
 from datetime import datetime, timedelta
 import asyncio
 from math import pow
-from typing import Dict, List, Optional
+from typing import Dict
 
 from ..core.database import get_db_ctx, SzdtTradeStock, TradingLog, TradingState, StockCooldown, SZDTTradingConfig, IBKRAccountConfig
 from ..core.services.szdt import SZDTService
@@ -83,7 +82,6 @@ class SZDTUSTrader:
 
             selected = None
             # Do not loop infinitely if all on cooldown
-            start_index = state.current_index
             loop_count = 0
             
             while loop_count < len(stocks):

@@ -9,7 +9,6 @@ from .etf.base import ETFDataFetcher
 from .etf.ishares import ISharesETFFetcher
 from .etf.qqq import QQQDataFetcher
 from .etf.spdr import SPDRDataFetcher
-from .etf.vanguard import VanguardETFFetcher
 import logging
 from ..core.services.quote import QuoteService, QuoteProvider
 from ..core.services.szdt import SZDTService
@@ -78,7 +77,6 @@ class ETFManager:
         self.szdt_service = SZDTService()
         ishares_fetcher = ISharesETFFetcher()
         spdr_fetcher = SPDRDataFetcher()
-        vanguard_fetcher = VanguardETFFetcher()  # 需要新增 Vanguard ETF 抓取器
         self.fetchers: Dict[str, ETFDataFetcher] = {
             # 现有的 ETF
             'SOXX.US': ishares_fetcher,
@@ -181,7 +179,7 @@ class ETFManager:
             self.db_session.commit()
             return holdings_data
             
-        except Exception as e:
+        except Exception:
             self.db_session.rollback()
             raise
 

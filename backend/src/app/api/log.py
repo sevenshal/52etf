@@ -3,7 +3,7 @@ import os
 from typing import Optional, Tuple
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
+from fastapi.websockets import WebSocketState
 
 router = APIRouter()
 

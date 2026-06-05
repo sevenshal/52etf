@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Optional
 import pandas as pd
 import numpy as np
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
@@ -65,8 +65,7 @@ async def run_all_weather_backtest(params: AllWeatherParams, account_id: str = D
 
     # 3. Simulation
     initial_capital = params.initial_capital
-    current_value = initial_capital
-    
+
     # Initialize target weights and holdings
     target_weights = { (a.symbol if a.symbol.endswith('.US') else a.symbol + '.US'): a.weight for a in params.assets }
     # Normalize weights just in case

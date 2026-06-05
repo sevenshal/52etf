@@ -7,9 +7,9 @@ import requests
 import math
 import hashlib
 import json
-import pytz
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+from zoneinfo import ZoneInfo
 from croniter import croniter
 from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog, IBKRAccountConfig
 from ..core.utils import mask_account_id, send_alert_email
@@ -240,12 +240,10 @@ class PortfolioCopyTrader:
             # 优先从 marketHolding 中获取 stockUs 的持仓
             # Calculate holdings from marketHearing (specifically stockUs as requested)
             market_holdings = detail.get("marketHolding", [])
-            found_us_market = False
             
             for mh in market_holdings:
                 # 只取 stockUs，或者如果有 stockHk 也可以考虑，但用户明确指出了 stockUs
                 if mh.get("marketType") == "stockUs":
-                    found_us_market = True
                     for stock in mh.get("holding", []):
                         try:
                             ratio_val = float(stock.get("ratio", 0))
@@ -858,7 +856,7 @@ class PortfolioCopyTrader:
         """使用 croniter 检查当前时间是否符合 cron 规则"""
         try:
             # 1. 获取目标时区的当前时间
-            tz = pytz.timezone(timezone_str)
+            tz = ZoneInfo(timezone_str)
             now = datetime.now(tz).replace(second=0, microsecond=0)
             
             # 2. 检查当前分钟是否在 cron 规则触发点

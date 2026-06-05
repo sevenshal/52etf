@@ -22,10 +22,8 @@ from ..external_trading_database import (
     ExternalTradingTargetPosition,
 )
 from .external_trading_execution_policy import (
-    DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
-    DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
     aggregate_execution_policy,
     resolve_execution_policy,
@@ -1382,8 +1380,6 @@ def _create_non_retryable_rejection_blocks(
 
 
 def _block_type_for_quantity_clip(item: Dict[str, Any], requested_quantity: int) -> Tuple[str, str, str]:
-    explicit_reason = str(item.get("block_reason") or "").strip()
-    explicit_message = str(item.get("block_message") or item.get("message") or "").strip()
     position_quantity = safe_int(item.get("position_quantity"), -1)
     if position_quantity < 0:
         position_quantity = safe_int(item.get("sellable_quantity"), 0)
@@ -2864,7 +2860,7 @@ def process_trade_events(
 
         traded_at = parse_dt(event.get("traded_at") or event.get("trade_time") or event.get("business_time")) or now
         estimated_fee_increment = _estimated_fee_increment_for_order(db, order, quantity * price)
-        fill = _insert_fill_row(
+        _insert_fill_row(
             db,
             order=order,
             fill_key=fill_key,
@@ -2877,7 +2873,7 @@ def process_trade_events(
             estimated_fee_total=estimated_fee_increment.get("fee_total", 0.0),
         )
         if _role(order) == "PARENT":
-            updated_children = _allocate_quantity_to_child_orders(
+            _allocate_quantity_to_child_orders(
                 db,
                 order,
                 fill_key,

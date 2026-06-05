@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict
 from datetime import datetime
 from futu import (
     OpenSecTradeContext,
@@ -8,7 +8,6 @@ from futu import (
     OrderType,
     TimeInForce,
     TrdMarket,
-    KLType,
     RET_OK
 )
 from .trade import TradeService as CoreTradeService, OrderSide, OrderType as CoreOrderType, TimeInForceType, OutsideRTH

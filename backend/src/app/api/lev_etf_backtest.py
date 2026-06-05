@@ -1,10 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import uuid
 import hashlib
 import json
 from ...core.event_stream import publish_event

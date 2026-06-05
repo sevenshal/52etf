@@ -178,7 +178,7 @@ class BarchartService:
 
     def refresh_session(self, symbol: str, page_name: str = "put-call-ratios") -> str:
         page_url = QUOTE_PAGE_URL.format(symbol=symbol, page_name=page_name)
-        response = self._request_with_retries(
+        self._request_with_retries(
             "GET",
             page_url,
             symbol=symbol,

@@ -4,7 +4,9 @@ import math
 import logging
 import os
 import re
-from typing import Dict, Optional, List
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -279,10 +281,9 @@ class IBKRService:
             liquid_hours_str = details.liquidHours
             time_zone_id = details.timeZoneId # e.g. "EST5EDT"
             
-            import datetime
-            import pytz
+            # 使用标准库 zoneinfo 进行时区转换，避免额外依赖。
             
-            # 映射 IB 时区 ID 到 pytz
+            # 映射 IB 时区 ID 到 IANA 时区
             tz_map = {
                 "EST5EDT": "US/Eastern",
                 "CST6CDT": "US/Central",
@@ -291,11 +292,11 @@ class IBKRService:
                 "GMT": "Europe/London"
             }
             tz_name = tz_map.get(time_zone_id, "US/Eastern")
-            target_tz = pytz.timezone(tz_name)
+            target_tz = ZoneInfo(tz_name)
             
             # 核心修改：使用 UTC 时间作为基准，然后转换到交易所时区
             # 这能确保无论服务器是 UTC、UTC+8 还是其他时区，只要系统 UTC 时间准确，结果的一致性。
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_utc = datetime.now(timezone.utc)
             now_exchange = now_utc.astimezone(target_tz)
             
             today_str = now_exchange.strftime("%Y%m%d")
