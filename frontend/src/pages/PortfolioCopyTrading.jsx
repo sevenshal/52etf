@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
-    Space, Tag, message, Typography, Switch, Row, Col, List,
+    Space, Tag, message, Typography, Switch, Row, Col,
     Tabs, Select, Empty
 } from 'antd';
 import {
@@ -15,7 +15,6 @@ import { subscribeBackendEvent } from '../utils/backendEvents';
 import { useAccount } from '../contexts/AccountContext';
 
 const { Title, Text, Link } = Typography;
-const { TextArea } = Input;
 
 const PORTFOLIO_COPY_PLATFORMS = {
     futu: { label: '富途牛牛', color: 'cyan' },

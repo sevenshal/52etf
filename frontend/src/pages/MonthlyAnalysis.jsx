@@ -1,11 +1,9 @@
 import React, { useState } from 'react';
 import { Card, Input, DatePicker, Select, Button, Table, Statistic, Row, Col, message } from 'antd';
-import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import dayjs from 'dayjs';
 
 const MonthlyAnalysis = () => {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState(null);
   const [summary, setSummary] = useState(null);

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Form, InputNumber, Button, message, Space, Table, Progress, Modal, DatePicker, Input, Select } from 'antd';
-import { useNavigate } from 'react-router-dom';
+import { Card, Form, InputNumber, Button, message, Space, Table, Progress, Modal, DatePicker, Select } from 'antd';
 import request from '../../utils/request';
 import { subscribeBackendEvent } from '../../utils/backendEvents';
 import dayjs from 'dayjs';
@@ -8,7 +7,6 @@ import dayjs from 'dayjs';
 const { RangePicker } = DatePicker;
 
 const FearBacktest = () => {
-  const navigate = useNavigate();
   const [form] = Form.useForm();
   const [verifyForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -370,7 +368,7 @@ const FearBacktest = () => {
               min={100000}
               step={100000}
               formatter={value => `¥ ${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-              parser={value => value.replace(/\¥\s?|(,*)/g, '')}
+              parser={value => value.replace(/¥\s?|,/g, '')}
             />
           </Form.Item>
 

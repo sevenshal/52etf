@@ -3,17 +3,13 @@ import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input,
     Space, message, Typography, Popconfirm,
-    Row, Col, Tag as AntTag, Badge, Tooltip
+    Row, Col, Badge, Tooltip
 } from 'antd';
 import {
     PlusOutlined, DeleteOutlined, KeyOutlined,
     UserOutlined, IdcardOutlined, EditOutlined, SyncOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
-
-// Rename imported Tag to avoid conflict with our helper if needed, though we shadow it anyway. 
-// Actually we can just avoid importing Tag from antd if we don't use it directly or use AntTag.
-// But we use <Tag> as a custom component below. So let's keep AntTag alias in case.
 
 const { Title, Text } = Typography;
 

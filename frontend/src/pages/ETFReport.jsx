@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Row, Col, Statistic, Table, Spin, Empty, Tag, Typography } from 'antd';
+import { Card, Row, Col, Statistic, Spin, Empty, Typography } from 'antd';
 import request from '../utils/request';
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom';

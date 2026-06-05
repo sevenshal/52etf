@@ -2,14 +2,14 @@ import React, { useState, useEffect } from 'react';
 import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
-    Space, Tag, message, Typography, Descriptions, Popconfirm,
+    Space, Tag, message, Typography, Popconfirm,
     Badge, Row, Col, Tooltip, Select, TimePicker, Radio
 } from 'antd';
 import {
     PlusOutlined, ReloadOutlined, SyncOutlined,
     ThunderboltOutlined, DeleteOutlined, EditOutlined,
     GlobalOutlined, ContainerOutlined, LockOutlined,
-    ClockCircleOutlined, SettingOutlined, FileTextOutlined, StopOutlined
+    FileTextOutlined, StopOutlined
 } from '@ant-design/icons';
 import request from '../utils/request';
 

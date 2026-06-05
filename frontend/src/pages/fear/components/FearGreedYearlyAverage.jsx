@@ -27,7 +27,6 @@ const FearGreedYearlyAverage = () => {
 
       // 填充缺失的日期数据
       const filledData = [];
-      let currentIndex = 0;
       let currentDate = new Date(sortedData[0].date);
       const endDate = new Date(sortedData[sortedData.length - 1].date);
 

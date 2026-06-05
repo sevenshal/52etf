@@ -1,17 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Card, Typography, Tag, Row, Col, Statistic, Tabs, Tooltip, Select, message } from 'antd';
+import { Table, Card, Tag, Row, Col, Statistic, Tabs, Tooltip, Select, message } from 'antd';
 import { formatNumber, formatDate } from '../utils/format';
 import request from '../utils/request';
 import { InfoCircleOutlined, RocketFilled } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 
-const { Title } = Typography;
 const { TabPane } = Tabs;
 
 
 const OptionsPositions = () => {
-  const navigate = useNavigate();  // 添加这行
-
   const { Option } = Select;
 
   const [loading, setLoading] = useState(false);
@@ -299,7 +296,7 @@ const OptionsPositions = () => {
                       </Tooltip>
                     }
                     value={record.below_market_value}
-                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#f5222d' : '#52c41a', fontWeight: 'bold' }}
+                    valueStyle={{ fontSize: '14px', color: optionType === 'Call' ? '#f5222d' : '#52c41a', fontWeight: 'bold' }}
                     formatter={value => (
                       <>
                         $ {formatNumber(value, 2)}
@@ -337,7 +334,7 @@ const OptionsPositions = () => {
                       </Tooltip>
                     }
                     value={record.above_market_value}
-                    valueStyle={{ fontSize: '14px', color: optionType == 'Call' ? '#52c41a' : '#f5222d', fontWeight: 'bold' }}
+                    valueStyle={{ fontSize: '14px', color: optionType === 'Call' ? '#52c41a' : '#f5222d', fontWeight: 'bold' }}
                     formatter={value => (
                       <>
                         $ {formatNumber(value, 2)}
@@ -406,7 +403,6 @@ const OptionsPositions = () => {
           display: 'flex',
           flexDirection: 'row',
           gap: '4px',
-          display: 'flex',
           alignItems: 'center',
         }}>
           <div style={{
@@ -529,12 +525,13 @@ const OptionsPositions = () => {
       dataIndex: 'stock_symbol',
       width: 80,
       render: (symbol) => (
-        <a
-          onClick={() => navigate(`/stock/${symbol}`, { state: { mainTabKey: '/options' } })}
+        <Link
+          to={`/stock/${symbol}`}
+          state={{ mainTabKey: '/options' }}
           style={{ color: '#1890ff' }}
         >
           {symbol}
-        </a>
+        </Link>
       ),
     },
     {
@@ -882,12 +879,13 @@ const OptionsPositions = () => {
       dataIndex: 'symbol',
       width: 100,
       render: (symbol) => (
-        <a
-          onClick={() => navigate(`/stock/${symbol}`, { state: { mainTabKey: '/options' } })}
+        <Link
+          to={`/stock/${symbol}`}
+          state={{ mainTabKey: '/options' }}
           style={{ color: '#1890ff' }}
         >
           {symbol}
-        </a>
+        </Link>
       ),
     },
     {

@@ -1461,11 +1461,6 @@ const parsePositionWeightCandidates = (value, fallbackWeights, fallbackMaxPositi
   return normalized;
 };
 
-const getNumericValue = (record, key) => {
-  const value = Number(record?.[key]);
-  return Number.isFinite(value) ? value : null;
-};
-
 const setNumericFilterValue = (setSelectedKeys, current, key, value) => {
   const next = { ...(current || {}), [key]: value };
   const hasMin = next.min !== null && next.min !== undefined && next.min !== '';
