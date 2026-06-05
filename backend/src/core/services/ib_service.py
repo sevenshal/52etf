@@ -3,6 +3,7 @@ import asyncio
 import math
 import logging
 import os
+import re
 from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,72 @@ class IBKRService:
             self.ib.disconnect()
             logger.info("Disconnected from IB Gateway")
 
+    @staticmethod
+    def _normalize_ib_equity_symbol(symbol: str) -> str:
+        text = str(symbol or "").strip().upper().replace("/", ".")
+        if text.startswith("US."):
+            text = text[3:]
+        if text.endswith(".US"):
+            text = text[:-3]
+        text = " ".join(text.split())
+        if re.fullmatch(r"[A-Z0-9]+ [A-Z0-9]+", text):
+            text = text.replace(" ", ".")
+        return text
+
+    @classmethod
+    def _build_stock_symbol_candidates(cls, symbol: str) -> List[str]:
+        normalized = cls._normalize_ib_equity_symbol(symbol)
+        candidates = [normalized]
+        if "." in normalized:
+            candidates.append(normalized.replace(".", " "))
+        unique = []
+        for item in candidates:
+            if item and item not in unique:
+                unique.append(item)
+        return unique
+
+    async def _qualify_stock_contract(self, symbol: str, timeout: float = 15.0):
+        normalized = self._normalize_ib_equity_symbol(symbol)
+        last_error = None
+        for candidate in self._build_stock_symbol_candidates(symbol):
+            contract = Stock(candidate, 'SMART', 'USD')
+            logger.debug(f"[{self.port}] Qualifying contract for {candidate} (requested {normalized})...")
+            try:
+                qualified = await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error(f"[{self.port}] Contract qualification timed out for {candidate}")
+                raise Exception(f"Contract qualification timed out for {normalized}")
+            except Exception as exc:
+                last_error = exc
+                logger.error(f"[{self.port}] Contract qualification failed for {candidate}: {exc}")
+                continue
+
+            if qualified and getattr(contract, "conId", 0):
+                if candidate != normalized:
+                    logger.info(f"[{self.port}] Resolved {normalized} to IB contract symbol {candidate}")
+                return contract
+
+            logger.warning(f"[{self.port}] Contract candidate not found for {candidate}")
+
+        if last_error is not None:
+            raise last_error
+        raise ValueError(f"Unknown IB contract for {normalized}")
+
+    async def _await_order_submission(self, trade, symbol: str, timeout: float = 2.0):
+        accepted_statuses = {"SUBMITTED", "PRESUBMITTED", "FILLED"}
+        rejected_statuses = {"CANCELLED", "APICANCELLED", "INACTIVE"}
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        while True:
+            status = str(getattr(trade.orderStatus, "status", "") or "").upper()
+            if status in accepted_statuses:
+                return trade
+            if status in rejected_statuses:
+                raise RuntimeError(f"Order for {symbol} was rejected by IBKR with status {status}")
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(f"Timed out waiting for IBKR order submission acknowledgement for {symbol}")
+            await asyncio.sleep(0.1)
+
     def get_net_liquidation(self) -> float:
         """从 IB 账户实时同步的数据中获取净资产"""
         if not self.ib or not self.ib.isConnected(): return 0.0
@@ -70,7 +137,7 @@ class IBKRService:
             return {}
         pos_map = {}
         for p in self.ib.positions():
-            symbol = p.contract.symbol
+            symbol = self._normalize_ib_equity_symbol(p.contract.symbol)
             qty = float(p.position)
             price = float(p.marketPrice) if hasattr(p, 'marketPrice') and p.marketPrice and not math.isnan(p.marketPrice) else None
             avg_cost = float(p.avgCost) if hasattr(p, 'avgCost') and p.avgCost and not math.isnan(p.avgCost) else None
@@ -85,7 +152,7 @@ class IBKRService:
 
     def get_position(self, symbol: str) -> dict:
         """获取指定代码的实时持仓数据 {qty, price, avg_cost}"""
-        pos_data = self.get_positions_dict().get(symbol.replace('US.', ''))
+        pos_data = self.get_positions_dict().get(self._normalize_ib_equity_symbol(symbol))
         return pos_data if pos_data else {'qty': 0, 'price': None, 'avg_cost': None}
 
     def get_all_pending_qtys(self) -> Dict[str, float]:
@@ -95,7 +162,7 @@ class IBKRService:
         
         pending_map = {}
         for trade in self.ib.trades():
-            symbol = trade.contract.symbol
+            symbol = self._normalize_ib_equity_symbol(trade.contract.symbol)
             status = trade.orderStatus.status
             if status in ('Submitted', 'PreSubmitted', 'PendingSubmit', 'PendingCancel'):
                 qty = trade.order.totalQuantity
@@ -110,7 +177,7 @@ class IBKRService:
 
     def get_pending_qty(self, symbol: str) -> float:
         """获取单个代码的待成交数量 (内部调用批量方法以保证逻辑统一)"""
-        return self.get_all_pending_qtys().get(symbol.replace('US.', ''), 0)
+        return self.get_all_pending_qtys().get(self._normalize_ib_equity_symbol(symbol), 0)
 
     def get_effective_position(self, symbol: str) -> float:
         """获取有效持仓 (当前持仓 + 待成交数量)"""
@@ -120,36 +187,18 @@ class IBKRService:
     async def place_market_order(self, symbol: str, action: str, quantity: int):
         """下市价单"""
         await self.connect()
-        clean_symbol = symbol.replace('US.', '')
-        logger.debug(f"[{self.port}] Qualifying contract for {clean_symbol}...")
-        contract = Stock(clean_symbol, 'SMART', 'USD')
-        try:
-            # 增加 10 秒超时防止卡在合约校验上
-            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=15.0)
-        except asyncio.TimeoutError:
-            logger.error(f"[{self.port}] Contract qualification timed out for {clean_symbol}")
-            raise Exception(f"Contract qualification timed out for {clean_symbol}")
-        except Exception as e:
-            logger.error(f"[{self.port}] Contract qualification failed for {clean_symbol}: {e}")
-            raise
-        
+        clean_symbol = self._normalize_ib_equity_symbol(symbol)
+        contract = await self._qualify_stock_contract(symbol, timeout=15.0)
         logger.info(f"[{self.port}] Placing {action} market order for {quantity} {clean_symbol}")
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
-        
-        return trade
+        return await self._await_order_submission(trade, clean_symbol)
 
     async def place_limit_order(self, symbol: str, action: str, quantity: int, price: float, outside_rth: bool = False):
         """下限价单 (支持盘前盘后)"""
         await self.connect()
-        clean_symbol = symbol.replace('US.', '')
-        logger.debug(f"[{self.port}] Qualifying contract for {clean_symbol}...")
-        contract = Stock(clean_symbol, 'SMART', 'USD')
-        try:
-            await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=10.0)
-        except Exception as e:
-            logger.error(f"[{self.port}] Limit order qualification failed for {clean_symbol}: {e}")
-            raise
+        clean_symbol = self._normalize_ib_equity_symbol(symbol)
+        contract = await self._qualify_stock_contract(symbol, timeout=10.0)
         
         order = LimitOrder(action, quantity, price)
         if outside_rth:
@@ -167,9 +216,7 @@ class IBKRService:
     async def get_market_price(self, symbol: str):
         """获取当前市场价格"""
         await self.connect()
-        clean_symbol = symbol.replace('US.', '')
-        contract = Stock(clean_symbol, 'SMART', 'USD')
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._qualify_stock_contract(symbol, timeout=10.0)
         
         [ticker] = await self.ib.reqTickersAsync(contract)
         return ticker.marketPrice()
@@ -177,33 +224,33 @@ class IBKRService:
     async def get_market_prices(self, symbols: List[str]) -> Dict[str, float]:
         """批量获取当前市场价格"""
         await self.connect()
+        normalized_symbols = []
         contracts = []
         for symbol in symbols:
-            clean_symbol = symbol.replace('US.', '')
-            contracts.append(Stock(clean_symbol, 'SMART', 'USD'))
+            contracts.append(await self._qualify_stock_contract(symbol, timeout=10.0))
+            normalized_symbols.append(self._normalize_ib_equity_symbol(symbol))
             
         if not contracts:
             return {}
             
-        await self.ib.qualifyContractsAsync(*contracts)
         tickers = await self.ib.reqTickersAsync(*contracts)
         
         prices = {}
-        for ticker in tickers:
-            prices[ticker.contract.symbol] = ticker.marketPrice()
+        for normalized_symbol, ticker in zip(normalized_symbols, tickers):
+            prices[normalized_symbol] = ticker.marketPrice()
             
         return prices
 
     async def has_today_orders(self, symbol: str) -> bool:
         """检查今天是否有针对该代码的非取消订单 (包括待成交和已成交)"""
         await self.connect()
-        clean_symbol = symbol.replace('US.', '')
+        clean_symbol = self._normalize_ib_equity_symbol(symbol)
         
         # 获取当前所有的 trades (包括活动的和最近完成的)
         trades = self.ib.trades()
         
         for trade in trades:
-            if trade.contract.symbol == clean_symbol:
+            if self._normalize_ib_equity_symbol(trade.contract.symbol) == clean_symbol:
                 status = trade.orderStatus.status
                 # 只要不是取消状态，都认为今天已经有操作了
                 if status not in ('Cancelled', 'ApiCancelled', 'Inactive'):
