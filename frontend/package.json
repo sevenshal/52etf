@@ -33,7 +33,12 @@
     "start": "react-scripts start",
     "build": "cross-env DISABLE_ESLINT_PLUGIN=true GENERATE_SOURCEMAP=false react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "lint:all": "eslint src --ext .js,.jsx",
+    "deadcode:eslint": "eslint src --ext .js,.jsx",
+    "deadcode:knip": "npx knip",
+    "deadcode:depcheck": "npx depcheck",
+    "deadcode": "npm run deadcode:eslint && npm run deadcode:knip && npm run deadcode:depcheck"
   },
   "eslintConfig": {
     "extends": [
