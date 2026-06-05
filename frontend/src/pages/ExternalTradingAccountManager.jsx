@@ -771,13 +771,19 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       render: (_, record) => (
         <Space>
           <Tooltip title="刷新">
-            <Button icon={<SyncOutlined />} size="small" onClick={() => fetchAccounts()} />
+            <Button
+              icon={<SyncOutlined />}
+              size="small"
+              loading={loading}
+              disabled={loading}
+              onClick={() => fetchAccounts()}
+            />
           </Tooltip>
           <Tooltip title="编辑">
-            <Button icon={<EditOutlined />} size="small" onClick={() => openEditModal(record)} />
+            <Button icon={<EditOutlined />} size="small" disabled={loading} onClick={() => openEditModal(record)} />
           </Tooltip>
           <Popconfirm title="确定删除这个交易账户吗？" onConfirm={() => handleDelete(record.id)}>
-            <Button icon={<DeleteOutlined />} size="small" danger />
+            <Button icon={<DeleteOutlined />} size="small" danger disabled={loading} />
           </Popconfirm>
         </Space>
       )
@@ -837,14 +843,24 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             累计交易费 {formatNumber(feeTotal, 2)}
           </div>
           <div className="external-subaccount-card__actions">
-            <Button size="small" icon={<LineChartOutlined />} onClick={() => openNetAssetHistory(account, subAccount)}>
+            <Button
+              size="small"
+              icon={<LineChartOutlined />}
+              disabled={loading}
+              onClick={() => openNetAssetHistory(account, subAccount)}
+            >
               曲线
             </Button>
-            <Button size="small" icon={<EditOutlined />} onClick={() => openSubEditModal(account, subAccount)}>
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              disabled={loading}
+              onClick={() => openSubEditModal(account, subAccount)}
+            >
               编辑
             </Button>
             <Popconfirm title="确定删除这个虚拟子账户吗？" onConfirm={() => handleDeleteSubAccount(account, subAccount)}>
-              <Button size="small" icon={<DeleteOutlined />} danger>
+              <Button size="small" icon={<DeleteOutlined />} danger disabled={loading}>
                 删除
               </Button>
             </Popconfirm>
@@ -894,20 +910,26 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           佣金 {formatNumber(account.commission_rate_pct, 5)}% / 最低 {formatNumber(account.min_commission, 2)} / 印花税 {formatNumber(account.stamp_tax_rate_pct, 4)}%
         </div>
         <div className="external-account-card__actions">
-          <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => openSubCreateModal(account)}>
+          <Button size="small" type="primary" icon={<PlusOutlined />} disabled={loading} onClick={() => openSubCreateModal(account)}>
             子账户
           </Button>
-          <Button size="small" onClick={() => openBrokerPositions(account)}>
+          <Button size="small" disabled={loading} onClick={() => openBrokerPositions(account)}>
             券商持仓
           </Button>
           <Tooltip title="刷新">
-            <Button icon={<SyncOutlined />} size="small" onClick={() => fetchAccounts()} />
+            <Button
+              icon={<SyncOutlined />}
+              size="small"
+              loading={loading}
+              disabled={loading}
+              onClick={() => fetchAccounts()}
+            />
           </Tooltip>
           <Tooltip title="编辑">
-            <Button icon={<EditOutlined />} size="small" onClick={() => openEditModal(account)} />
+            <Button icon={<EditOutlined />} size="small" disabled={loading} onClick={() => openEditModal(account)} />
           </Tooltip>
           <Popconfirm title="确定删除这个交易账户吗？" onConfirm={() => handleDelete(account.id)}>
-            <Button icon={<DeleteOutlined />} size="small" danger />
+            <Button icon={<DeleteOutlined />} size="small" danger disabled={loading} />
           </Popconfirm>
         </div>
         <Button

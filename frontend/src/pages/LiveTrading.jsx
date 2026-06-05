@@ -76,6 +76,7 @@ const LiveTrading = () => {
         className="live-trading-tabs"
         activeKey={activeTab}
         items={items}
+        destroyInactiveTabPane
         onChange={handleTabChange}
       />
     </div>

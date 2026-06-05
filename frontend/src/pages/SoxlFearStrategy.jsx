@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -99,6 +99,8 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   const [configLoading, setConfigLoading] = useState(false);
   const [logLoading, setLogLoading] = useState(false);
   const [manualLoadingId, setManualLoadingId] = useState(null);
+  const logRequestSeqRef = useRef(0);
+  const isManualRunBusy = manualLoadingId !== null;
   const [ibAccounts, setIbAccounts] = useState([]);
   const [longportAccounts, setLongportAccounts] = useState([]);
   const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
@@ -193,14 +195,22 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       setLogs([]);
       return;
     }
+    const requestSeq = logRequestSeqRef.current + 1;
+    logRequestSeqRef.current = requestSeq;
     setLogLoading(true);
     try {
       const { data } = await request.get(`/api/soxl-fear-strategy/configs/${configId}/logs`);
-      setLogs(data);
+      if (requestSeq === logRequestSeqRef.current) {
+        setLogs(data);
+      }
     } catch (error) {
-      message.error(error.response?.data?.detail || '加载运行日志失败');
+      if (requestSeq === logRequestSeqRef.current) {
+        message.error(error.response?.data?.detail || '加载运行日志失败');
+      }
     } finally {
-      setLogLoading(false);
+      if (requestSeq === logRequestSeqRef.current) {
+        setLogLoading(false);
+      }
     }
   }, [selectedConfig?.id]);
 
@@ -343,6 +353,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   };
 
   const handleManualRun = async (record = selectedConfig) => {
+    if (isManualRunBusy) return;
     if (!record?.id) {
       message.warning('请先保存配置');
       return;
@@ -423,6 +434,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
             aria-label="刷新"
             icon={<ReloadOutlined />}
             loading={listLoading}
+            disabled={listLoading}
             size="small"
             onClick={(event) => {
               event.stopPropagation();
@@ -523,12 +535,23 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       width: 110,
       render: (_, record) => (
         <Space size={8}>
-          <Button icon={<EditOutlined />} size="small" onClick={renderActionButton(() => openConfig(record))}/>
-          <Button icon={<HistoryOutlined />} size="small" onClick={renderActionButton(() => openConfig(record, 'logs'))}/> 
+          <Button
+            icon={<EditOutlined />}
+            size="small"
+            disabled={isManualRunBusy}
+            onClick={renderActionButton(() => openConfig(record))}
+          />
+          <Button
+            icon={<HistoryOutlined />}
+            size="small"
+            disabled={isManualRunBusy}
+            onClick={renderActionButton(() => openConfig(record, 'logs'))}
+          />
           <Button
             icon={<PlayCircleOutlined />}
             size="small"
             loading={manualLoadingId === record.id}
+            disabled={isManualRunBusy && manualLoadingId !== record.id}
             onClick={renderActionButton(() => handleManualRun(record))}
           />
           <Popconfirm
@@ -541,7 +564,13 @@ const SoxlFearStrategy = ({ embedded = false }) => {
               handleDelete(record);
             }}
           >
-            <Button icon={<DeleteOutlined />} size="small" danger onClick={(event) => event.stopPropagation()} />
+            <Button
+              icon={<DeleteOutlined />}
+              size="small"
+              danger
+              disabled={isManualRunBusy}
+              onClick={(event) => event.stopPropagation()}
+            />
           </Popconfirm>
         </Space>
       ),
@@ -806,7 +835,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
             icon={<PlayCircleOutlined />}
             onClick={() => handleManualRun(selectedConfig)}
             loading={manualLoadingId === selectedConfig?.id}
-            disabled={!selectedConfig?.id}
+            disabled={!selectedConfig?.id || isManualRunBusy}
           >
             立即执行一次
           </Button>
@@ -830,7 +859,13 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           pagination={{ defaultPageSize: 10 }}
           scroll={{ x: 1400 }}
         />
-        <Button style={{ marginTop: 16 }} icon={<ReloadOutlined />} onClick={() => fetchLogs()} loading={logLoading}>
+        <Button
+          style={{ marginTop: 16 }}
+          icon={<ReloadOutlined />}
+          onClick={() => fetchLogs()}
+          loading={logLoading}
+          disabled={isManualRunBusy}
+        >
           刷新日志
         </Button>
       </>

@@ -273,6 +273,11 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const infiniteLoadingRef = useRef({});
   const targetToolbarRef = useRef(null);
   const orderToolbarRef = useRef(null);
+  const requestScopeRef = useRef(0);
+  const baseStatusRequestSeqRef = useRef(0);
+  const subAccountRequestSeqRef = useRef(0);
+  const planRequestSeqRef = useRef(0);
+  const tableRequestSeqRef = useRef({});
 
   const selectedAccount = useMemo(() => (
     accounts.find(item => String(item.id) === String(selectedAccountId)) || null
@@ -349,36 +354,55 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     delta_only: tableKey === 'target_positions' && state?.deltaOnly ? 'true' : undefined,
   });
 
-  const fetchBaseStatus = useCallback(async account => {
+  const getCurrentRequestScope = () => requestScopeRef.current;
+
+  const fetchBaseStatus = useCallback(async (account, scope = getCurrentRequestScope()) => {
     if (!account?.id) return;
+    const requestScope = scope;
+    const requestSeq = baseStatusRequestSeqRef.current + 1;
+    baseStatusRequestSeqRef.current = requestSeq;
     setStatusLoading(true);
     try {
       const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status`);
+      if (requestScope !== requestScopeRef.current || requestSeq !== baseStatusRequestSeqRef.current) return;
       setStatus(data || null);
     } catch (error) {
+      if (requestScope !== requestScopeRef.current || requestSeq !== baseStatusRequestSeqRef.current) return;
       message.error(error.response?.data?.detail || '获取执行器状态失败');
       setStatus(null);
     } finally {
-      setStatusLoading(false);
+      if (requestScope === requestScopeRef.current && requestSeq === baseStatusRequestSeqRef.current) {
+        setStatusLoading(false);
+      }
     }
   }, []);
 
-  const fetchSubAccounts = useCallback(async account => {
+  const fetchSubAccounts = useCallback(async (account, scope = getCurrentRequestScope()) => {
     if (!account?.id) return;
+    const requestScope = scope;
+    const requestSeq = subAccountRequestSeqRef.current + 1;
+    subAccountRequestSeqRef.current = requestSeq;
     setSubAccountLoading(true);
     try {
       const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status/sub-accounts`);
+      if (requestScope !== requestScopeRef.current || requestSeq !== subAccountRequestSeqRef.current) return;
       setSubAccountStatus({ rows: data?.rows || [], price_details: data?.price_details || {} });
     } catch (error) {
+      if (requestScope !== requestScopeRef.current || requestSeq !== subAccountRequestSeqRef.current) return;
       message.error(error.response?.data?.detail || '获取子账户状态失败');
       setSubAccountStatus({ rows: [], price_details: {} });
     } finally {
-      setSubAccountLoading(false);
+      if (requestScope === requestScopeRef.current && requestSeq === subAccountRequestSeqRef.current) {
+        setSubAccountLoading(false);
+      }
     }
   }, []);
 
   const fetchTable = useCallback(async (account, tableKey, nextState, options = {}) => {
     if (!account?.id || !tableEndpoints[tableKey]) return;
+    const requestScope = getCurrentRequestScope();
+    const requestSeq = (tableRequestSeqRef.current[tableKey] || 0) + 1;
+    tableRequestSeqRef.current[tableKey] = requestSeq;
     const append = options.append === true;
     setTableLoading(prev => ({ ...prev, [tableKey]: true }));
     try {
@@ -386,6 +410,12 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         `/api/external-trading-accounts/${account.id}/executor/status/${tableEndpoints[tableKey]}`,
         { params: buildTableParams(nextState, tableKey) }
       );
+      if (
+        requestScope !== requestScopeRef.current
+        || tableRequestSeqRef.current[tableKey] !== requestSeq
+      ) {
+        return;
+      }
       const nextRows = data?.rows || [];
       setTables(prev => ({
         ...prev,
@@ -399,29 +429,43 @@ const ExecutorStatusPage = ({ embedded = false }) => {
       }));
       setTableLoaded(prev => ({ ...prev, [tableKey]: true }));
     } catch (error) {
-      message.error(error.response?.data?.detail || `获取${tableLabels[tableKey]}失败`);
-      if (!append) {
-        setTables(prev => ({ ...prev, [tableKey]: createEmptyTable() }));
-        setTableLoaded(prev => ({ ...prev, [tableKey]: false }));
+      if (requestScope === requestScopeRef.current && tableRequestSeqRef.current[tableKey] === requestSeq) {
+        message.error(error.response?.data?.detail || `获取${tableLabels[tableKey]}失败`);
+        if (!append) {
+          setTables(prev => ({ ...prev, [tableKey]: createEmptyTable() }));
+          setTableLoaded(prev => ({ ...prev, [tableKey]: false }));
+        }
       }
     } finally {
-      setTableLoading(prev => ({ ...prev, [tableKey]: false }));
+      if (
+        requestScope === requestScopeRef.current
+        && tableRequestSeqRef.current[tableKey] === requestSeq
+      ) {
+        setTableLoading(prev => ({ ...prev, [tableKey]: false }));
+      }
     }
   }, []);
 
-  const fetchPlan = useCallback(async account => {
+  const fetchPlan = useCallback(async (account, scope = getCurrentRequestScope()) => {
     if (!account?.id) return;
+    const requestScope = scope;
+    const requestSeq = planRequestSeqRef.current + 1;
+    planRequestSeqRef.current = requestSeq;
     setPlanLoading(true);
     try {
       const { data } = await request.get(`/api/external-trading-accounts/${account.id}/executor/status/plan`);
+      if (requestScope !== requestScopeRef.current || requestSeq !== planRequestSeqRef.current) return;
       setPlan(data || null);
       setPlanLoaded(true);
     } catch (error) {
+      if (requestScope !== requestScopeRef.current || requestSeq !== planRequestSeqRef.current) return;
       message.error(error.response?.data?.detail || '获取净额预览失败');
       setPlan(null);
       setPlanLoaded(false);
     } finally {
-      setPlanLoading(false);
+      if (requestScope === requestScopeRef.current && requestSeq === planRequestSeqRef.current) {
+        setPlanLoading(false);
+      }
     }
   }, []);
 
@@ -437,12 +481,13 @@ const ExecutorStatusPage = ({ embedded = false }) => {
 
   const fetchActiveTab = useCallback((account, tabKey, force = false) => {
     if (!account?.id) return;
+    const requestScope = getCurrentRequestScope();
     if (tabKey === 'sub_accounts') {
-      fetchSubAccounts(account);
+      fetchSubAccounts(account, requestScope);
       return;
     }
     if (tabKey === 'plan') {
-      if (force || !planLoaded) fetchPlan(account);
+      if (force || !planLoaded) fetchPlan(account, requestScope);
       return;
     }
     const tableKey = tableKeyFromTab(tabKey);
@@ -475,9 +520,11 @@ const ExecutorStatusPage = ({ embedded = false }) => {
 
   useEffect(() => {
     if (!selectedAccount) return;
+    requestScopeRef.current += 1;
+    tableRequestSeqRef.current = {};
     resetExecutorData();
-    fetchBaseStatus(selectedAccount);
-    fetchSubAccounts(selectedAccount);
+    fetchBaseStatus(selectedAccount, requestScopeRef.current);
+    fetchSubAccounts(selectedAccount, requestScopeRef.current);
   }, [fetchBaseStatus, fetchSubAccounts, resetExecutorData, selectedAccount]);
 
   const handleAccountChange = value => {
@@ -491,12 +538,14 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const refreshAll = () => {
     if (!selectedAccount) return;
     setLedgerReloadToken(prev => prev + 1);
-    fetchBaseStatus(selectedAccount);
+    const requestScope = getCurrentRequestScope();
+    fetchBaseStatus(selectedAccount, requestScope);
     fetchActiveTab(selectedAccount, activeTab, true);
   };
 
   const executeNetted = async ({ force = false } = {}) => {
     if (!selectedAccount?.id) return;
+    if (executeLoading) return;
     setExecuteLoading(true);
     try {
       const { data } = await request.post(`/api/external-trading-accounts/${selectedAccount.id}/executor/execute`, { force });
@@ -1020,6 +1069,8 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     );
   };
 
+  const executorBusy = statusLoading || subAccountLoading || planLoading;
+
   const renderSimpleCard = (record, kind) => {
     const title = kind === 'sub'
       ? record.name
@@ -1369,10 +1420,22 @@ const ExecutorStatusPage = ({ embedded = false }) => {
             </div>
           </div>
           <div className="executor-actions">
-            <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={statusLoading || subAccountLoading || planLoading} disabled={!selectedAccount}>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={refreshAll}
+              loading={executorBusy}
+              disabled={!selectedAccount || executeLoading}
+            >
               刷新
             </Button>
-            <Button type="primary" danger icon={<ThunderboltOutlined />} onClick={() => executeNetted()} loading={executeLoading} disabled={!selectedAccount || statusLoading}>
+            <Button
+              type="primary"
+              danger
+              icon={<ThunderboltOutlined />}
+              onClick={() => executeNetted()}
+              loading={executeLoading}
+              disabled={!selectedAccount || executorBusy}
+            >
               执行净额限价单
             </Button>
           </div>

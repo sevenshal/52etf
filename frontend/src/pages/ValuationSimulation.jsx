@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -139,6 +139,7 @@ const ValuationSimulation = () => {
   const [running, setRunning] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingConfigId, setEditingConfigId] = useState(null);
+  const detailRequestIdRef = useRef(0);
 
   const selectedConfig = useMemo(
     () => configs.find(item => item.id === selectedConfigId) || null,
@@ -230,8 +231,7 @@ const ValuationSimulation = () => {
     }
   }, []);
 
-  const loadDetails = useCallback(async (config) => {
-    const configId = config?.id;
+  const loadDetails = useCallback(async (configId) => {
     if (!configId) {
       setPositions([]);
       setLogs([]);
@@ -240,6 +240,7 @@ const ValuationSimulation = () => {
       setPositionRefreshToken(v => v + 1);
       return;
     }
+    const requestId = ++detailRequestIdRef.current;
     setDetailLoading(true);
     setCandidateLoading(true);
     try {
@@ -248,14 +249,19 @@ const ValuationSimulation = () => {
         request.get(`/api/valuation-sim/configs/${configId}/logs`),
         request.get(`/api/valuation-sim/configs/${configId}/candidates?limit=50`),
       ]);
+      if (detailRequestIdRef.current !== requestId) return;
       setLogs(logResp.data || []);
       setCandidates(candidateResp.data?.candidates || []);
       setCandidateMeta(candidateResp.data || {});
     } catch (error) {
-      message.error('加载估值模拟盘明细失败');
+      if (detailRequestIdRef.current === requestId) {
+        message.error('加载估值模拟盘明细失败');
+      }
     } finally {
-      setDetailLoading(false);
-      setCandidateLoading(false);
+      if (detailRequestIdRef.current === requestId) {
+        setDetailLoading(false);
+        setCandidateLoading(false);
+      }
     }
   }, []);
 
@@ -266,8 +272,8 @@ const ValuationSimulation = () => {
   }, [loadConfigs, loadTags, loadExternalTradingAccounts]);
 
   useEffect(() => {
-    loadDetails(selectedConfig);
-  }, [loadDetails, selectedConfig]);
+    loadDetails(selectedConfigId);
+  }, [loadDetails, selectedConfigId]);
 
   useEffect(() => {
     if (!selectedExternalTradingAccountId) {
@@ -648,19 +654,33 @@ const ValuationSimulation = () => {
             bordered={false}
             extra={(
               <Space wrap>
-                <Button icon={<ReloadOutlined />} onClick={() => refreshAll()} loading={detailLoading || candidateLoading} />
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={() => refreshAll()}
+                  loading={loading || detailLoading || candidateLoading}
+                  disabled={loading || detailLoading || candidateLoading}
+                />
                 <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>添加模拟盘</Button>
                 <Button icon={<EditOutlined />} onClick={openEditModal} disabled={!selectedConfig}>编辑</Button>
-                <Button icon={<PlayCircleOutlined />} onClick={handleRun} loading={running} disabled={!selectedConfig}>运行</Button>
+                <Button
+                  icon={<PlayCircleOutlined />}
+                  onClick={handleRun}
+                  loading={running}
+                  disabled={!selectedConfig || running || loading}
+                />
                 <Popconfirm
                   title="重置后会清空策略输出和运行日志，不会影响外部账户持仓或历史记录"
                   onConfirm={handleReset}
-                  disabled={!selectedConfig}
+                  disabled={!selectedConfig || running || loading}
                 >
-                  <Button icon={<RestOutlined />} disabled={!selectedConfig}>重置</Button>
+                  <Button icon={<RestOutlined />} disabled={!selectedConfig || running || loading}>
+                    重置
+                  </Button>
                 </Popconfirm>
-                <Popconfirm title="删除该模拟盘及全部记录？" onConfirm={handleDelete} disabled={!selectedConfig}>
-                  <Button danger icon={<DeleteOutlined />} disabled={!selectedConfig}>删除</Button>
+                <Popconfirm title="删除该模拟盘及全部记录？" onConfirm={handleDelete} disabled={!selectedConfig || running || loading}>
+                  <Button danger icon={<DeleteOutlined />} disabled={!selectedConfig || running || loading}>
+                    删除
+                  </Button>
                 </Popconfirm>
               </Space>
             )}

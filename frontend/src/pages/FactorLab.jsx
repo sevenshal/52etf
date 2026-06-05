@@ -1660,7 +1660,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const [liveLogs, setLiveLogs] = useState([]);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveSaving, setLiveSaving] = useState(false);
-  const [liveActionLoading, setLiveActionLoading] = useState(false);
+  const [liveActionState, setLiveActionState] = useState({ action: null, configId: null });
   const [selectedLiveConfigId, setSelectedLiveConfigId] = useState(null);
   const [liveConfigModalOpen, setLiveConfigModalOpen] = useState(false);
   const [editingLiveConfigId, setEditingLiveConfigId] = useState(null);
@@ -2353,12 +2353,17 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     const numericId = Number(configId);
     return Number.isFinite(numericId) && numericId > 0 ? numericId : selectedLiveConfigId;
   }, [selectedLiveConfigId]);
+  const isLiveActionLoading = useCallback((configId, action) => (
+    liveActionState.action === action && liveActionState.configId === configId
+  ), [liveActionState]);
+  const isLiveActionBusy = Boolean(liveActionState.action);
 
   const handleLiveDelete = useCallback(async (configId = selectedLiveConfigId) => {
+    if (liveActionState.action) return;
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
-    setLiveActionLoading(true);
+    setLiveActionState({ action: 'delete', configId: targetConfigId });
     try {
       await request.delete(`/api/factor-lab/live-configs/${targetConfigId}`, { timeout: 300000 });
       message.success('线上交易配置已删除');
@@ -2370,15 +2375,22 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } catch (error) {
       message.error(getErrorMessage(error, '删除线上交易配置失败'));
     } finally {
-      setLiveActionLoading(false);
+      setLiveActionState({ action: null, configId: null });
     }
-  }, [editingLiveConfigId, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
+  }, [
+    editingLiveConfigId,
+    loadLiveConfigs,
+    liveActionState.action,
+    resolveLiveActionConfigId,
+    selectedLiveConfigId,
+  ]);
 
   const handleLiveGenerateSignal = useCallback(async (configId = selectedLiveConfigId) => {
+    if (liveActionState.action) return;
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
-    setLiveActionLoading(true);
+    setLiveActionState({ action: 'signal', configId: targetConfigId });
     try {
       const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/signal`, {}, { timeout: 300000 });
       message.success('已生成信号');
@@ -2389,15 +2401,16 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } catch (error) {
       message.error(getErrorMessage(error, '生成线上交易信号失败'));
     } finally {
-      setLiveActionLoading(false);
+      setLiveActionState({ action: null, configId: null });
     }
-  }, [loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
+  }, [liveActionState.action, loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
   const handleLiveExecute = useCallback(async (configId = selectedLiveConfigId) => {
+    if (liveActionState.action) return;
     const targetConfigId = resolveLiveActionConfigId(configId);
     if (!targetConfigId) return;
     setSelectedLiveConfigId(targetConfigId);
-    setLiveActionLoading(true);
+    setLiveActionState({ action: 'execute', configId: targetConfigId });
     try {
       const { data } = await request.post(`/api/factor-lab/live-configs/${targetConfigId}/execute`, {}, { timeout: 300000 });
       message.success('已执行线上交易');
@@ -2408,9 +2421,9 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     } catch (error) {
       message.error(getErrorMessage(error, '执行线上交易失败'));
     } finally {
-      setLiveActionLoading(false);
+      setLiveActionState({ action: null, configId: null });
     }
-  }, [loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
+  }, [liveActionState.action, loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
   const handleLiveRefresh = async () => {
     await loadLiveConfigs(selectedLiveConfigId);
@@ -2868,14 +2881,49 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       fixed: 'right',
       render: (_, row) => (
         <Space size={6} wrap>
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveEdit(row.id); }}>编辑</Button>
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>信号</Button>
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveExecute(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>执行</Button>
-          <Button size="small" danger onClick={event => { event.stopPropagation(); handleLiveDelete(row.id); }} loading={liveActionLoading && selectedLiveConfigId === row.id}>删除</Button>
+          <Button
+            size="small"
+            disabled={isLiveActionBusy}
+            onClick={event => { event.stopPropagation(); handleLiveEdit(row.id); }}
+          >
+            编辑
+          </Button>
+          <Button
+            size="small"
+            onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(row.id); }}
+            loading={isLiveActionLoading(row.id, 'signal')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(row.id, 'signal')}
+          >
+            信号
+          </Button>
+          <Button
+            size="small"
+            onClick={event => { event.stopPropagation(); handleLiveExecute(row.id); }}
+            loading={isLiveActionLoading(row.id, 'execute')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(row.id, 'execute')}
+          >
+            执行
+          </Button>
+          <Button
+            size="small"
+            danger
+            onClick={event => { event.stopPropagation(); handleLiveDelete(row.id); }}
+            loading={isLiveActionLoading(row.id, 'delete')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(row.id, 'delete')}
+          >
+            删除
+          </Button>
         </Space>
       ),
     },
-  ]), [handleLiveDelete, handleLiveEdit, handleLiveExecute, handleLiveGenerateSignal, liveActionLoading, selectedLiveConfigId]);
+  ]), [
+    handleLiveDelete,
+    handleLiveEdit,
+    handleLiveExecute,
+    handleLiveGenerateSignal,
+    isLiveActionBusy,
+    isLiveActionLoading,
+  ]);
   const liveLogColumns = useMemo(() => ([
     { title: '时间', dataIndex: 'timestamp', width: 180 },
     { title: '动作', dataIndex: 'action', width: 96, render: value => <Tag>{value}</Tag> },
@@ -3089,10 +3137,38 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
           <span>执行日 {config.last_execution_signal_date || '-'}</span>
         </div>
         <div className="factor-lab-live-card__actions">
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveEdit(config.id); }}>编辑</Button>
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>信号</Button>
-          <Button size="small" onClick={event => { event.stopPropagation(); handleLiveExecute(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>执行</Button>
-          <Button size="small" danger onClick={event => { event.stopPropagation(); handleLiveDelete(config.id); }} loading={liveActionLoading && selectedLiveConfigId === config.id}>删除</Button>
+          <Button
+            size="small"
+            disabled={isLiveActionBusy}
+            onClick={event => { event.stopPropagation(); handleLiveEdit(config.id); }}
+          >
+            编辑
+          </Button>
+          <Button
+            size="small"
+            onClick={event => { event.stopPropagation(); handleLiveGenerateSignal(config.id); }}
+            loading={isLiveActionLoading(config.id, 'signal')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(config.id, 'signal')}
+          >
+            信号
+          </Button>
+          <Button
+            size="small"
+            onClick={event => { event.stopPropagation(); handleLiveExecute(config.id); }}
+            loading={isLiveActionLoading(config.id, 'execute')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(config.id, 'execute')}
+          >
+            执行
+          </Button>
+          <Button
+            size="small"
+            danger
+            onClick={event => { event.stopPropagation(); handleLiveDelete(config.id); }}
+            loading={isLiveActionLoading(config.id, 'delete')}
+            disabled={isLiveActionBusy && !isLiveActionLoading(config.id, 'delete')}
+          >
+            删除
+          </Button>
         </div>
       </div>
     );
