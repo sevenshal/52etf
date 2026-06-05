@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Alert,
@@ -74,17 +74,7 @@ const AStockInnovation100 = ({ embedded = false }) => {
   const jobTaskIdRef = useRef(null);
   const finishedJobRef = useRef(null);
 
-  useEffect(() => {
-    fetchDetail();
-  }, []);
-
-  useEffect(() => {
-    if (!embedded) return undefined;
-    setHeaderActionHost(document.getElementById('factor-lab-innovation100-actions'));
-    return () => setHeaderActionHost(null);
-  }, [embedded]);
-
-  const fetchDetail = async (rebalanceId = selectedRebalanceId) => {
+  const fetchDetail = useCallback(async (rebalanceId = selectedRebalanceId) => {
     setLoading(true);
     try {
       const params = rebalanceId ? { rebalance_id: rebalanceId } : {};
@@ -99,7 +89,17 @@ const AStockInnovation100 = ({ embedded = false }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedRebalanceId]);
+
+  useEffect(() => {
+    fetchDetail();
+  }, [fetchDetail]);
+
+  useEffect(() => {
+    if (!embedded) return undefined;
+    setHeaderActionHost(document.getElementById('factor-lab-innovation100-actions'));
+    return () => setHeaderActionHost(null);
+  }, [embedded]);
 
   useEffect(() => {
     return subscribeBackendEvent('a_stock_innovation100_job', async (data) => {
@@ -118,7 +118,7 @@ const AStockInnovation100 = ({ embedded = false }) => {
         message.error(data.error || 'A股创新100回跑失败');
       }
     });
-  }, []);
+  }, [fetchDetail]);
 
   const handleRebuild = async () => {
     setRebuildLoading(true);
@@ -139,8 +139,8 @@ const AStockInnovation100 = ({ embedded = false }) => {
 
   const summary = detail?.summary || {};
   const rule = summary.rule_snapshot || {};
-  const levels = detail?.levels || [];
-  const benchmarkLevels = detail?.benchmark_levels || [];
+  const levels = useMemo(() => detail?.levels || [], [detail]);
+  const benchmarkLevels = useMemo(() => detail?.benchmark_levels || [], [detail]);
   const selectedConstituents = detail?.selected_constituents || [];
   const selectedRebalance = detail?.selected_rebalance;
   const levelDateList = useMemo(() => levels.map(item => item.date), [levels]);

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Card, Form, InputNumber, Button, message, Space, Table, Progress, Modal, DatePicker, Select } from 'antd';
 import request from '../../utils/request';
 import { subscribeBackendEvent } from '../../utils/backendEvents';
@@ -24,16 +24,7 @@ const FearBacktest = () => {
     dayjs()
   ];
 
-  useEffect(() => {
-    checkStatus();
-    fetchEtfList();
-  }, []);
-
-  useEffect(() => {
-    return subscribeBackendEvent('fear_backtest_status', applyBacktestStatus);
-  }, []);
-
-  const fetchEtfList = async () => {
+  const fetchEtfList = useCallback(async () => {
     try {
       const response = await request.get('/api/quant/etf/emotion/3');
       if (response.data?.data) {
@@ -42,16 +33,25 @@ const FearBacktest = () => {
     } catch (error) {
       message.error('获取ETF列表失败');
     }
-  };
+  }, []);
 
-  const checkStatus = async () => {
+  const checkStatus = useCallback(async () => {
     try {
       const response = await request.get('/api/backtest/status');
       applyBacktestStatus(response.data);
     } catch (error) {
       message.error('获取状态失败');
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    checkStatus();
+    fetchEtfList();
+  }, [checkStatus, fetchEtfList]);
+
+  useEffect(() => {
+    return subscribeBackendEvent('fear_backtest_status', applyBacktestStatus);
+  }, []);
 
   function applyBacktestStatus(nextStatus) {
     setStatus(nextStatus);

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Card, Form, Select, InputNumber, Button, Switch, Table, Tabs, message, Tag, Space, Typography } from 'antd';
 import { SettingOutlined, HistoryOutlined } from '@ant-design/icons';
 import request from '../utils/request';
@@ -10,52 +10,52 @@ const { TabPane } = Tabs;
 const { Title, Text } = Typography;
 
 const AutomatedTrading = () => {
-    const [configLoading, setConfigLoading] = useState(false);
-    const [logLoading, setLogLoading] = useState(false);
-    const [logs, setLogs] = useState([]);
-    const [form] = Form.useForm();
-    const [isEnabled, setIsEnabled] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [form] = Form.useForm();
+  const [isEnabled, setIsEnabled] = useState(false);
 
-    // Fetch config on mount
-    useEffect(() => {
-        fetchConfig();
-        fetchLogs();
-    }, []);
-
-    useEffect(() => {
-        return subscribeBackendEvent('automated_trading_logs', () => {
-            fetchLogs();
-        });
-    }, []);
-
-    const fetchConfig = async () => {
-        setConfigLoading(true);
-        try {
-            const response = await request.get('/api/trading/config');
+  const fetchConfig = useCallback(async () => {
+    setConfigLoading(true);
+    try {
+      const response = await request.get('/api/trading/config');
             if (response.data) {
                 form.setFieldsValue(response.data);
                 setIsEnabled(response.data.enabled);
             }
         } catch (error) {
             message.error('Failed to load configuration');
-        } finally {
-            setConfigLoading(false);
-        }
-    };
+    } finally {
+      setConfigLoading(false);
+    }
+  }, [form]);
 
-    const fetchLogs = async () => {
-        setLogLoading(true);
-        try {
+  const fetchLogs = useCallback(async () => {
+    setLogLoading(true);
+    try {
             const response = await request.get('/api/trading/logs');
             setLogs(response.data);
         } catch (error) {
             message.error('Failed to load trade logs');
-        } finally {
-            setLogLoading(false);
-        }
-    };
+    } finally {
+      setLogLoading(false);
+    }
+  }, []);
 
-    const onSaveConfig = async (values) => {
+  // Fetch config on mount
+  useEffect(() => {
+    fetchConfig();
+    fetchLogs();
+  }, [fetchConfig, fetchLogs]);
+
+  useEffect(() => {
+    return subscribeBackendEvent('automated_trading_logs', () => {
+      fetchLogs();
+    });
+  }, [fetchLogs]);
+
+  const onSaveConfig = async (values) => {
         setConfigLoading(true);
         try {
             await request.post('/api/trading/config', {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Card, Form, Select, Button, Switch, Typography, message, Skeleton } from 'antd';
 import request from '../utils/request';
 
@@ -8,29 +8,29 @@ const { Option } = Select;
 export const SZDTConfigForm = ({ onSuccess }) => {
     const [loading, setLoading] = useState(false);
     const [config, setConfig] = useState(null);
-    const [ibAccounts, setIbAccounts] = useState([]);
-    const [form] = Form.useForm();
+  const [ibAccounts, setIbAccounts] = useState([]);
+  const [form] = Form.useForm();
 
-    useEffect(() => {
-        fetchData();
-    }, []);
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [configRes, ibRes] = await Promise.all([
+        request.get('/api/szdt-configs/'),
+        request.get('/api/ib-accounts/')
+      ]);
+      setConfig(configRes.data);
+      setIbAccounts(ibRes.data);
+      form.setFieldsValue(configRes.data);
+    } catch (error) {
+      message.error('加载配置失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [form]);
 
-    const fetchData = async () => {
-        setLoading(true);
-        try {
-            const [configRes, ibRes] = await Promise.all([
-                request.get('/api/szdt-configs/'),
-                request.get('/api/ib-accounts/')
-            ]);
-            setConfig(configRes.data);
-            setIbAccounts(ibRes.data);
-            form.setFieldsValue(configRes.data);
-        } catch (error) {
-            message.error('加载配置失败');
-        } finally {
-            setLoading(false);
-        }
-    };
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
     const handleSave = async (values) => {
         try {

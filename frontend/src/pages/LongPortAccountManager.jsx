@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input,
@@ -21,11 +21,16 @@ const LongPortAccountManager = () => {
     const [form] = Form.useForm();
     const [statuses, setStatuses] = useState({});
 
-    useEffect(() => {
-        fetchAccounts();
+    const checkStatus = useCallback(async (id) => {
+        try {
+            const response = await request.get(`/api/longport-accounts/${id}/status`);
+            setStatuses(prev => ({ ...prev, [id]: response.data }));
+        } catch (error) {
+            setStatuses(prev => ({ ...prev, [id]: { status: 'error', message: '检查失败' } }));
+        }
     }, []);
 
-    const fetchAccounts = async () => {
+    const fetchAccounts = useCallback(async () => {
         setLoading(true);
         try {
             const response = await request.get('/api/longport-accounts');
@@ -37,16 +42,11 @@ const LongPortAccountManager = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, [checkStatus]);
 
-    const checkStatus = async (id) => {
-        try {
-            const response = await request.get(`/api/longport-accounts/${id}/status`);
-            setStatuses(prev => ({ ...prev, [id]: response.data }));
-        } catch (error) {
-            setStatuses(prev => ({ ...prev, [id]: { status: 'error', message: '检查失败' } }));
-        }
-    };
+    useEffect(() => {
+        fetchAccounts();
+    }, [fetchAccounts]);
 
     const handleSave = async (values) => {
         try {

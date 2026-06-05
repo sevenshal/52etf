@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
@@ -105,26 +105,6 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   const [liveSubAccounts, setLiveSubAccounts] = useState([]);
   const [logs, setLogs] = useState([]);
 
-  useEffect(() => {
-    fetchInitialData();
-  }, []);
-
-  useEffect(() => {
-    return subscribeBackendEvent('soxl_fear_strategy_run', async (data) => {
-      await fetchConfigs();
-      if (selectedConfig?.id === data.config_id) {
-        await fetchConfigDetail(data.config_id);
-        if (activeTab === 'logs') {
-          await fetchLogs(data.config_id);
-        }
-      }
-    });
-  }, [selectedConfig?.id, activeTab]);
-
-  useEffect(() => {
-    fetchLiveSubAccounts(selectedExternalTradingAccountId);
-  }, [selectedExternalTradingAccountId]);
-
   const accountMaps = useMemo(() => {
     const ibMap = new Map(ibAccounts.map((account) => [account.id, account]));
     const longportMap = new Map(longportAccounts.map((account) => [account.lp_account_id, account]));
@@ -161,11 +141,23 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       });
   }, [liveSubAccounts, selectedConfig?.id]);
 
-  const fetchInitialData = async () => {
-    await Promise.all([fetchConfigs(), fetchIbAccounts(), fetchLongportAccounts(), fetchExternalTradingAccounts()]);
-  };
+  const fetchLiveSubAccounts = useCallback(async (externalAccountId) => {
+    if (!externalAccountId) {
+      setLiveSubAccounts([]);
+      return [];
+    }
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+      setLiveSubAccounts(data || []);
+      return data || [];
+    } catch (error) {
+      message.error(error.response?.data?.detail || '获取虚拟子账户失败');
+      setLiveSubAccounts([]);
+      return [];
+    }
+  }, []);
 
-  const fetchConfigs = async () => {
+  const fetchConfigs = useCallback(async () => {
     setListLoading(true);
     try {
       const { data } = await request.get('/api/soxl-fear-strategy/configs');
@@ -175,9 +167,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     } finally {
       setListLoading(false);
     }
-  };
+  }, []);
 
-  const fetchConfigDetail = async (configId) => {
+  const fetchConfigDetail = useCallback(async (configId) => {
     setConfigLoading(true);
     try {
       const { data } = await request.get(`/api/soxl-fear-strategy/configs/${configId}`);
@@ -194,9 +186,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     } finally {
       setConfigLoading(false);
     }
-  };
+  }, [form, fetchLiveSubAccounts]);
 
-  const fetchLogs = async (configId = selectedConfig?.id) => {
+  const fetchLogs = useCallback(async (configId = selectedConfig?.id) => {
     if (!configId) {
       setLogs([]);
       return;
@@ -210,50 +202,58 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     } finally {
       setLogLoading(false);
     }
-  };
+  }, [selectedConfig?.id]);
 
-  const fetchIbAccounts = async () => {
+  const fetchIbAccounts = useCallback(async () => {
     try {
       const { data } = await request.get('/api/ib-accounts');
       setIbAccounts(data);
     } catch (error) {
       message.error('获取 IB 账户失败');
     }
-  };
+  }, []);
 
-  const fetchLongportAccounts = async () => {
+  const fetchLongportAccounts = useCallback(async () => {
     try {
       const { data } = await request.get('/api/longport-accounts');
       setLongportAccounts(data);
     } catch (error) {
       message.error('获取长桥账户失败');
     }
-  };
+  }, []);
 
-  const fetchExternalTradingAccounts = async () => {
+  const fetchExternalTradingAccounts = useCallback(async () => {
     try {
       const { data } = await request.get('/api/external-trading-accounts');
       setExternalTradingAccounts(data || []);
     } catch (error) {
       message.error(error.response?.data?.detail || '获取外部交易账户失败');
     }
-  };
+  }, []);
 
-  const fetchLiveSubAccounts = async (externalAccountId) => {
-    if (!externalAccountId) {
-      setLiveSubAccounts([]);
-      return [];
-    }
-    try {
-      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
-      setLiveSubAccounts(data || []);
-      return data || [];
-    } catch (error) {
-      message.error(error.response?.data?.detail || '获取虚拟子账户失败');
-      setLiveSubAccounts([]);
-      return [];
-    }
-  };
+  const fetchInitialData = useCallback(async () => {
+    await Promise.all([fetchConfigs(), fetchIbAccounts(), fetchLongportAccounts(), fetchExternalTradingAccounts()]);
+  }, [fetchConfigs, fetchIbAccounts, fetchLongportAccounts, fetchExternalTradingAccounts]);
+
+  useEffect(() => {
+    fetchInitialData();
+  }, [fetchInitialData]);
+
+  useEffect(() => {
+    return subscribeBackendEvent('soxl_fear_strategy_run', async (data) => {
+      await fetchConfigs();
+      if (selectedConfig?.id === data.config_id) {
+        await fetchConfigDetail(data.config_id);
+        if (activeTab === 'logs') {
+          await fetchLogs(data.config_id);
+        }
+      }
+    });
+  }, [activeTab, fetchConfigDetail, fetchConfigs, fetchLogs, selectedConfig?.id]);
+
+  useEffect(() => {
+    fetchLiveSubAccounts(selectedExternalTradingAccountId);
+  }, [fetchLiveSubAccounts, selectedExternalTradingAccountId]);
 
   const getAccountLabel = (record) => {
     if (!record) return '-';

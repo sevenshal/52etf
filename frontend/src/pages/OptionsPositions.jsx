@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Table, Card, Tag, Row, Col, Statistic, Tabs, Tooltip, Select, message } from 'antd';
 import { formatNumber, formatDate } from '../utils/format';
 import request from '../utils/request';
@@ -36,30 +36,31 @@ const OptionsPositions = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const { data } = await request.get('/api/longport-accounts');
+      setAccounts(data);
+      if (data && data.length > 0) {
+        // Default select the first account if not selected
+        if (!selectedAccount) {
+          const savedAccount = localStorage.getItem('longport_selected_account');
+          const accountToSelect = data.find(acc => acc.lp_account_id === savedAccount)
+            ? savedAccount
+            : data[0].lp_account_id;
+
+          setSelectedAccount(accountToSelect);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch longport accounts:', error);
+      message.error('获取长桥账户列表失败');
+    }
+  }, [selectedAccount]);
+
   // Fetch Longport Accounts
   useEffect(() => {
-    const fetchAccounts = async () => {
-      try {
-        const { data } = await request.get('/api/longport-accounts');
-        setAccounts(data);
-        if (data && data.length > 0) {
-          // Default select the first account if not selected
-          if (!selectedAccount) {
-            const savedAccount = localStorage.getItem('longport_selected_account');
-            const accountToSelect = data.find(acc => acc.lp_account_id === savedAccount)
-              ? savedAccount
-              : data[0].lp_account_id;
-
-            setSelectedAccount(accountToSelect);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch longport accounts:', error);
-        message.error('获取长桥账户列表失败');
-      }
-    }
     fetchAccounts();
-  }, []);
+  }, [fetchAccounts]);
 
   const handleAccountChange = (value) => {
     setSelectedAccount(value);
@@ -68,7 +69,7 @@ const OptionsPositions = () => {
 
   const [riskFreeRate, setRiskFreeRate] = useState(null);
 
-  const fetchPositions = async (optionType) => {
+  const fetchPositions = useCallback(async (optionType) => {
     if (!selectedAccount) return;
 
     setLoading(true);
@@ -89,14 +90,14 @@ const OptionsPositions = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedAccount]);
 
   useEffect(() => {
     // 初始只加载当前激活tab的数据
     if (selectedAccount) {
       fetchPositions(activeTab);
     }
-  }, [activeTab, selectedAccount]);
+  }, [activeTab, fetchPositions, selectedAccount]);
 
   const processPositionsData = (data) => {
     return data.map(group => {
@@ -188,11 +189,27 @@ const OptionsPositions = () => {
     });
   };
 
+  const fetchStockPositions = useCallback(async () => {
+    if (!selectedAccount) return;
+
+    setLoading(true);
+    try {
+      const { data } = await request.get('/api/positions/stocks', {
+        params: { lp_account_id: selectedAccount }
+      });
+      setStockPositions(data);
+    } catch (error) {
+      console.error('Failed to fetch stock positions:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedAccount]);
+
   useEffect(() => {
     if (activeTab === 'Stock') {
       fetchStockPositions();
     }
-  }, [activeTab]);
+  }, [activeTab, fetchStockPositions]);
 
 
   // 修改分组头部的统计卡片
@@ -715,23 +732,6 @@ const OptionsPositions = () => {
     }
   ];
 
-
-  // 添加获取股票持仓的函数
-  const fetchStockPositions = async () => {
-    if (!selectedAccount) return;
-
-    setLoading(true);
-    try {
-      const { data } = await request.get('/api/positions/stocks', {
-        params: { lp_account_id: selectedAccount }
-      });
-      setStockPositions(data);
-    } catch (error) {
-      console.error('Failed to fetch stock positions:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // 添加渲染股票持仓汇总的函数
   const renderStockSummary = () => {

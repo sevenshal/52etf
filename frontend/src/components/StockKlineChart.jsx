@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Form, InputNumber, Popover, Segmented, Spin, Switch } from 'antd';
 import { InfoCircleOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -125,9 +125,28 @@ const StockKlineChart = ({
   const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
   const [chartOption, setChartOption] = useState({});
 
+  const fetchKlines = useCallback(async () => {
+    setLoading(true);
+    setRawKlines([]);
+    try {
+      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
+        params: {
+          start_date: dayjs().subtract(5, 'year').format('YYYY-MM-DD'),
+          end_date: dayjs().format('YYYY-MM-DD')
+        }
+      });
+      const normalized = [...(data || [])].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      setRawKlines(normalized);
+    } catch (error) {
+      console.error('获取K线数据失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [symbol]);
+
   useEffect(() => {
     fetchKlines();
-  }, [symbol]);
+  }, [fetchKlines]);
 
   useEffect(() => {
     if (!rawKlines.length) {
@@ -153,52 +172,7 @@ const StockKlineChart = ({
     }
   }, [processedKlines, onKlinesChange]);
 
-  useEffect(() => {
-    if (processedKlines.length > 0 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      calculateBuySellPoints(processedKlines);
-    } else {
-      setBuyPoints([]);
-      setSellPoints([]);
-    }
-  }, [processedKlines, supportResistanceWindow, priceChangeRatio, stabilizationPeriod, volumeStdDevMultiplier]);
-
-  useEffect(() => {
-    if (processedKlines.length > 0) {
-      setChartOption(getChartOption());
-    } else {
-      setChartOption({});
-    }
-  }, [
-    processedKlines,
-    buyPoints,
-    sellPoints,
-    volumeStdDevMultiplier,
-    valuationHistory,
-    valuationFillMode,
-    valuationDateOffsetDays,
-    showSupportResistance,
-  ]);
-
-  const fetchKlines = async () => {
-    setLoading(true);
-    setRawKlines([]);
-    try {
-      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
-        params: {
-          start_date: dayjs().subtract(5, 'year').format('YYYY-MM-DD'),
-          end_date: dayjs().format('YYYY-MM-DD')
-        }
-      });
-      const normalized = [...(data || [])].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-      setRawKlines(normalized);
-    } catch (error) {
-      console.error('获取K线数据失败:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const calculateBuySellPoints = (klines) => {
+  const calculateBuySellPoints = useCallback((klines) => {
     const newBuyPoints = [];
     const newSellPoints = [];
     const buyPointIndexes = new Set();
@@ -272,9 +246,9 @@ const StockKlineChart = ({
 
     setBuyPoints(newBuyPoints);
     setSellPoints(newSellPoints);
-  };
+  }, [supportResistanceWindow, priceChangeRatio, stabilizationPeriod]);
 
-  const getChartOption = () => {
+  const getChartOption = useCallback(() => {
     const dates = processedKlines.map(item => formatDateKey(item.timestamp));
     const latestChartDate = dates.length ? dayjs(dates[dates.length - 1]) : null;
     const defaultZoomStartDate = latestChartDate ? latestChartDate.subtract(6, 'month') : null;
@@ -720,7 +694,32 @@ const StockKlineChart = ({
       ],
       series
     };
-  };
+  }, [
+    buyPoints,
+    processedKlines,
+    sellPoints,
+    showSupportResistance,
+    valuationDateOffsetDays,
+    valuationFillMode,
+    valuationHistory,
+  ]);
+
+  useEffect(() => {
+    if (processedKlines.length > 0 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
+      calculateBuySellPoints(processedKlines);
+    } else {
+      setBuyPoints([]);
+      setSellPoints([]);
+    }
+  }, [calculateBuySellPoints, processedKlines, priceChangeRatio, stabilizationPeriod]);
+
+  useEffect(() => {
+    if (processedKlines.length > 0) {
+      setChartOption(getChartOption());
+    } else {
+      setChartOption({});
+    }
+  }, [getChartOption, processedKlines.length]);
 
   return (
     <div>

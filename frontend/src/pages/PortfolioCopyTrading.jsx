@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
 import {
     Table, Card, Button, Modal, Form, Input, InputNumber,
@@ -130,16 +130,16 @@ const PortfolioCopyTrading = () => {
         return 'green';
     };
 
-    const fetchExternalTradingAccounts = async () => {
+    const fetchExternalTradingAccounts = useCallback(async () => {
         try {
             const response = await request.get('/api/external-trading-accounts');
             setExternalTradingAccounts(response.data || []);
         } catch (error) {
             message.error(formatError(error, '获取外部交易账户失败'));
         }
-    };
+    }, []);
 
-    const fetchSnowballLiveSubAccounts = async (externalAccountId) => {
+    const fetchSnowballLiveSubAccounts = useCallback(async (externalAccountId) => {
         if (!externalAccountId) {
             setSnowballLiveSubAccounts([]);
             return [];
@@ -153,9 +153,9 @@ const PortfolioCopyTrading = () => {
             setSnowballLiveSubAccounts([]);
             return [];
         }
-    };
+    }, []);
 
-    const fetchPortfolioLiveSubAccounts = async (externalAccountId) => {
+    const fetchPortfolioLiveSubAccounts = useCallback(async (externalAccountId) => {
         if (!externalAccountId) {
             setPortfolioLiveSubAccounts([]);
             return [];
@@ -169,9 +169,9 @@ const PortfolioCopyTrading = () => {
             setPortfolioLiveSubAccounts([]);
             return [];
         }
-    };
+    }, []);
 
-    const fetchSnowballConfigs = async () => {
+    const fetchSnowballConfigs = useCallback(async () => {
         setLoading(true);
         try {
             const response = await request.get('/api/snowball/configs');
@@ -181,11 +181,11 @@ const PortfolioCopyTrading = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
 
-    const fetchSnowballTabData = () => {
+    const fetchSnowballTabData = useCallback(() => {
         fetchSnowballConfigs();
-    };
+    }, [fetchSnowballConfigs]);
 
     const fetchSnowballAccountConfig = async () => {
         try {
@@ -208,25 +208,25 @@ const PortfolioCopyTrading = () => {
         }
     };
 
-    const fetchIbAccounts = async () => {
+    const fetchIbAccounts = useCallback(async () => {
         try {
             const response = await request.get('/api/ib-accounts');
             setIbAccounts(response.data);
         } catch (error) {
             message.error('获取 IB 账户列表失败');
         }
-    };
+    }, []);
 
-    const fetchLongportAccounts = async () => {
+    const fetchLongportAccounts = useCallback(async () => {
         try {
             const response = await request.get('/api/longport-accounts');
             setLongportAccounts(response.data);
         } catch (error) {
             message.error('获取长桥账户列表失败');
         }
-    };
+    }, []);
 
-    const fetchConfigs = async () => {
+    const fetchConfigs = useCallback(async () => {
         setLoading(true);
         try {
             const response = await request.get('/api/ib-copy-trading/configs');
@@ -236,7 +236,7 @@ const PortfolioCopyTrading = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
 
     const fetchPortfolioName = async () => {
         const id = form.getFieldValue('portfolio_id');
@@ -460,7 +460,7 @@ const PortfolioCopyTrading = () => {
         setSnowballBacktestModalVisible(true);
     };
 
-    const fetchSnowballBacktestDetail = async (run) => {
+    const fetchSnowballBacktestDetail = useCallback(async (run) => {
         if (!run?.id) return;
         setSelectedSnowballBacktestLoading(true);
         try {
@@ -471,9 +471,9 @@ const PortfolioCopyTrading = () => {
         } finally {
             setSelectedSnowballBacktestLoading(false);
         }
-    };
+    }, []);
 
-    const fetchSnowballBacktestRuns = async (record = snowballBacktestTarget, preferredRunId = null) => {
+    const fetchSnowballBacktestRuns = useCallback(async (record = snowballBacktestTarget, preferredRunId = null) => {
         if (!record?.id) return;
         setSnowballBacktestRunsLoading(true);
         try {
@@ -491,7 +491,7 @@ const PortfolioCopyTrading = () => {
         } finally {
             setSnowballBacktestRunsLoading(false);
         }
-    };
+    }, [fetchSnowballBacktestDetail, snowballBacktestTarget]);
 
     const handleViewSnowballBacktests = async (record) => {
         setSnowballBacktestTarget(record);
@@ -572,15 +572,16 @@ const PortfolioCopyTrading = () => {
         snowballBacktestHistoryVisible,
         snowballBacktestTarget,
         selectedSnowballBacktest?.id,
+        fetchSnowballBacktestRuns
     ]);
 
     useEffect(() => {
         fetchSnowballLiveSubAccounts(selectedSnowballExternalTradingAccountId);
-    }, [selectedSnowballExternalTradingAccountId]);
+    }, [fetchSnowballLiveSubAccounts, selectedSnowballExternalTradingAccountId]);
 
     useEffect(() => {
         fetchPortfolioLiveSubAccounts(selectedPortfolioExternalTradingAccountId);
-    }, [selectedPortfolioExternalTradingAccountId]);
+    }, [fetchPortfolioLiveSubAccounts, selectedPortfolioExternalTradingAccountId]);
 
     useEffect(() => {
         if (accountId) {
@@ -594,7 +595,15 @@ const PortfolioCopyTrading = () => {
             fetchLongportAccounts();
             fetchExternalTradingAccounts();
         }
-    }, [accountId, activeTab]);
+    }, [
+        accountId,
+        activeTab,
+        fetchConfigs,
+        fetchExternalTradingAccounts,
+        fetchIbAccounts,
+        fetchLongportAccounts,
+        fetchSnowballTabData
+    ]);
 
     const externalTradingAccountOptions = useMemo(() => externalTradingAccounts.map(account => ({
         label: `${account.name} (${account.identifier})${account.connected ? ' 在线' : ' 离线'}`,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { List, Layout, Typography, Spin, Select } from 'antd';  // 添加 Select
 import { LeftOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
@@ -18,9 +18,7 @@ const FearTradingLogs = () => {
     const PAGE_SIZE = 20;
     const [minLevel, setMinLevel] = useState('DEBUG');
 
-    // 修改 fetchLogs 函数，使用传入的 level 参数
-    const fetchLogs = async (pageNum, level = minLevel) => {
-        if (!hasMore || loading) return;
+    const fetchLogs = useCallback(async (pageNum, level = minLevel) => {
 
         setLoading(true);
         try {
@@ -41,9 +39,10 @@ const FearTradingLogs = () => {
             setHasMore(data.items.length === PAGE_SIZE);
         } catch (error) {
             console.error('获取交易日志失败:', error);
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
-    };
+    }, [minLevel]);
 
     // 修改 handleLevelChange 函数
     const handleLevelChange = (value) => {
@@ -64,10 +63,9 @@ const FearTradingLogs = () => {
         }
     };
 
-    // 修改 useEffect，添加 minLevel 依赖
     useEffect(() => {
         fetchLogs(1, minLevel);
-    }, [minLevel]);
+    }, [fetchLogs, minLevel]);
 
     return (
         <Layout>

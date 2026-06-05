@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { Card, Button, Descriptions, Table, Tag, Popover } from 'antd';
 import { LeftOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -51,6 +51,15 @@ const StockDetail = () => {
   const navigate = useNavigate();
   const [klines, setKlines] = useState([]);
   const [evcHistory, setEvcHistory] = useState([]);
+  const fetchEvcHistory = useCallback(async () => {
+    try {
+      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=${FIVE_YEAR_TRADING_BARS}`);
+      setEvcHistory(data || []);
+    } catch (error) {
+      console.error('获取估值历史失败:', error);
+    }
+  }, [symbol]);
+
   const stockMetrics = useMemo(() => computeStockWindowMetrics(klines, STOCK_METRIC_WINDOWS), [klines]);
   const latestSnapshot = stockMetrics.latest;
   const latestEvcSnapshot = useMemo(() => {
@@ -133,16 +142,7 @@ const StockDetail = () => {
 
   useEffect(() => {
     fetchEvcHistory();
-  }, [symbol]);
-
-  const fetchEvcHistory = async () => {
-    try {
-      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=${FIVE_YEAR_TRADING_BARS}`);
-      setEvcHistory(data || []);
-    } catch (error) {
-      console.error('获取估值历史失败:', error);
-    }
-  };
+  }, [fetchEvcHistory]);
 
   return (
     <div style={{ padding: '24px' }}>

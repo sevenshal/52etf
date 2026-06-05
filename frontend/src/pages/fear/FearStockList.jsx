@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
@@ -32,23 +32,7 @@ const FearStockList = () => {
     { key: '8', label: '港股个股' },
   ];
 
-  useEffect(() => {
-    // 检查是否有账户ID
-    const accountId = localStorage.getItem('accountId');
-    if (!accountId) {
-      navigate('/profile');
-      return;
-    }
-    loadStocks();
-  }, [navigate, activeType]);
-
-  const loadStocks = async () => {
-    // 只有在有账户ID的情况下才获取数据
-    fetchStocks();
-  }
-
-  // 获取股票列表
-  const fetchStocks = async () => {
+  const fetchStocks = useCallback(async () => {
     setLoading(true);
     try {
       const [stocksResponse, emoResponse] = await Promise.all([
@@ -86,7 +70,17 @@ const FearStockList = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeType]);
+
+  useEffect(() => {
+    // 检查是否有账户ID
+    const accountId = localStorage.getItem('accountId');
+    if (!accountId) {
+      navigate('/profile');
+      return;
+    }
+    fetchStocks();
+  }, [fetchStocks, navigate]);
 
   // 过滤已添加的股票
   const getAvailableCandidates = () => {
