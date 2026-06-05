@@ -27,8 +27,8 @@ import {
   ReloadOutlined,
   RestOutlined,
 } from '@ant-design/icons';
-import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
+import ExternalLedgerPositionsTable from '../components/ExternalLedgerPositionsTable';
 
 const { Text } = Typography;
 
@@ -38,8 +38,9 @@ const DEFAULT_VALUES = {
   universe_tag_ids: [],
   min_market_cap_100m: 100,
   max_market_cap_100m: null,
-  initial_cash: 100000,
   max_positions: 5,
+  external_trading_account_id: null,
+  live_sub_account_id: null,
   trigger_time: '18:00',
   trigger_timezone: 'America/New_York',
   undervalue_threshold: 0.9,
@@ -86,21 +87,61 @@ const formatTime = value => {
   return String(value).replace('T', ' ').slice(0, 19);
 };
 
-const actionColor = action => (action === 'BUY' ? 'green' : action === 'SELL' ? 'red' : 'default');
 const statusColor = status => (status === 'OK' ? 'green' : status === 'SKIPPED' ? 'gold' : status === 'ERROR' ? 'red' : 'default');
+const VALUATION_SIM_STRATEGY_TYPE = 'valuation_sim';
+const MARKET_TYPE_US_STOCK = 'US_STOCK';
+const isUsStockExternalAccount = account => String(account?.market_type || '').toUpperCase() === MARKET_TYPE_US_STOCK;
+const normalizeLedgerSorter = sorter => {
+  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
+  const sortField = activeSorter?.field || activeSorter?.columnKey;
+  const sortOrder = activeSorter?.order;
+  if (sortField !== 'realized_pnl' || !sortOrder) {
+    return { sortField: null, sortOrder: null };
+  }
+  return { sortField, sortOrder };
+};
+
+const isCurrentValuationSimSubAccount = (subAccount, configId) => (
+  Boolean(
+    configId
+    && subAccount?.strategy_type === VALUATION_SIM_STRATEGY_TYPE
+    && Number(subAccount?.strategy_config_id) === Number(configId),
+  )
+);
+
+const isAvailableValuationSimSubAccount = (subAccount, configId = null) => (
+  Boolean(
+    subAccount?.enabled
+    && (
+      subAccount?.binding_status === 'FREE'
+      || (!subAccount?.strategy_type && !subAccount?.strategy_config_id)
+      || isCurrentValuationSimSubAccount(subAccount, configId)
+    ),
+  )
+);
+
+const formatSubAccountOptionLabel = (subAccount, configId = null) => {
+  const name = subAccount?.name || subAccount?.id || '-';
+  if (!subAccount?.enabled) return `${name}（停用）`;
+  if (isCurrentValuationSimSubAccount(subAccount, configId)) return `${name}（当前配置）`;
+  if (isAvailableValuationSimSubAccount(subAccount, configId)) return name;
+  return `${name}（已占用：${subAccount?.binding_label || subAccount?.strategy_name || subAccount?.strategy_type || '其他策略'}）`;
+};
 
 const ValuationSimulation = () => {
   const [form] = Form.useForm();
   const [configs, setConfigs] = useState([]);
   const [selectedConfigId, setSelectedConfigId] = useState(null);
   const [positions, setPositions] = useState([]);
-  const [pendingOrders, setPendingOrders] = useState([]);
-  const [trades, setTrades] = useState([]);
+  const [positionPriceDetails, setPositionPriceDetails] = useState({});
+  const [positionTableSort, setPositionTableSort] = useState({ sortField: null, sortOrder: null });
   const [logs, setLogs] = useState([]);
-  const [equity, setEquity] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [candidateMeta, setCandidateMeta] = useState({});
   const [tagOptions, setTagOptions] = useState([]);
+  const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
+  const [externalTradingSubAccounts, setExternalTradingSubAccounts] = useState([]);
+  const [externalTradingAccountsLoading, setExternalTradingAccountsLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [candidateLoading, setCandidateLoading] = useState(false);
@@ -113,12 +154,23 @@ const ValuationSimulation = () => {
     () => configs.find(item => item.id === selectedConfigId) || null,
     [configs, selectedConfigId],
   );
+  const selectedConfigExternalAccount = useMemo(
+    () => externalTradingAccounts.find(item => Number(item.id) === Number(selectedConfig?.external_trading_account_id)) || null,
+    [externalTradingAccounts, selectedConfig?.external_trading_account_id],
+  );
+  const selectedConfigMarketType = selectedConfigExternalAccount?.market_type || MARKET_TYPE_US_STOCK;
+  const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
+  const hasSelectedExternalTradingAccount = Boolean(selectedExternalTradingAccountId);
 
-  const latestEquity = equity.length ? equity[equity.length - 1] : null;
-  const positionValue = positions.reduce((sum, item) => sum + (Number(item.last_market_value) || 0), 0);
-  const totalEquity = latestEquity?.total_equity ?? ((Number(selectedConfig?.current_cash) || 0) + positionValue);
-  const initialCash = Number(selectedConfig?.initial_cash) || 0;
-  const totalReturnPct = initialCash > 0 ? ((totalEquity / initialCash) - 1) * 100 : null;
+  const loadedPositionValue = positions.reduce((sum, item) => sum + (Number(item.market_value) || 0), 0);
+  const configPositionValue = Number(selectedConfig?.external_position_value);
+  const positionValue = Number.isFinite(configPositionValue) ? configPositionValue : loadedPositionValue;
+  const totalEquity = selectedConfig?.external_net_asset
+    ?? ((Number(selectedConfig?.external_cash_available) || 0) + positionValue);
+  const baselineEquity = Number(selectedConfig?.external_cash_allocated)
+    || Number(selectedConfig?.external_net_asset)
+    || 0;
+  const totalReturnPct = baselineEquity > 0 ? ((totalEquity / baselineEquity) - 1) * 100 : null;
   const tagNameMap = useMemo(() => {
     const map = {};
     tagOptions.forEach(item => {
@@ -162,13 +214,38 @@ const ValuationSimulation = () => {
     }
   }, []);
 
-  const loadDetails = useCallback(async (configId) => {
+  const loadExternalTradingAccounts = useCallback(async () => {
+    setExternalTradingAccountsLoading(true);
+    try {
+      const { data } = await request.get('/api/external-trading-accounts');
+      setExternalTradingAccounts(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '加载外部交易账户失败');
+    } finally {
+      setExternalTradingAccountsLoading(false);
+    }
+  }, []);
+
+  const loadExternalTradingSubAccounts = useCallback(async (accountId) => {
+    if (!accountId) {
+      setExternalTradingSubAccounts([]);
+      return;
+    }
+    try {
+      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts`);
+      setExternalTradingSubAccounts(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '加载外部交易子账户失败');
+      setExternalTradingSubAccounts([]);
+    }
+  }, []);
+
+  const loadDetails = useCallback(async (config) => {
+    const configId = config?.id;
     if (!configId) {
       setPositions([]);
-      setPendingOrders([]);
-      setTrades([]);
+      setPositionPriceDetails({});
       setLogs([]);
-      setEquity([]);
       setCandidates([]);
       setCandidateMeta({});
       return;
@@ -176,19 +253,28 @@ const ValuationSimulation = () => {
     setDetailLoading(true);
     setCandidateLoading(true);
     try {
-      const [positionResp, pendingResp, tradeResp, logResp, equityResp, candidateResp] = await Promise.all([
-        request.get(`/api/valuation-sim/configs/${configId}/positions`),
-        request.get(`/api/valuation-sim/configs/${configId}/pending-orders`),
-        request.get(`/api/valuation-sim/configs/${configId}/trades`),
+      const ledgerRequest = config.external_trading_account_id && config.live_sub_account_id
+        ? request.get(
+          `/api/external-trading-accounts/${config.external_trading_account_id}/executor/status/ledger-positions`,
+          {
+            params: {
+              page: 1,
+              page_size: 200,
+              sub_account_id: Number(config.live_sub_account_id),
+              sort_field: positionTableSort.sortField || undefined,
+              sort_order: positionTableSort.sortOrder || undefined,
+            },
+          },
+        )
+        : Promise.resolve({ data: { rows: [], price_details: {} } });
+      const [positionResp, logResp, candidateResp] = await Promise.all([
+        ledgerRequest,
         request.get(`/api/valuation-sim/configs/${configId}/logs`),
-        request.get(`/api/valuation-sim/configs/${configId}/equity`),
         request.get(`/api/valuation-sim/configs/${configId}/candidates?limit=50`),
       ]);
-      setPositions(positionResp.data || []);
-      setPendingOrders(pendingResp.data || []);
-      setTrades(tradeResp.data || []);
+      setPositions(positionResp.data?.rows || []);
+      setPositionPriceDetails(positionResp.data?.price_details || {});
       setLogs(logResp.data || []);
-      setEquity(equityResp.data || []);
       setCandidates(candidateResp.data?.candidates || []);
       setCandidateMeta(candidateResp.data || {});
     } catch (error) {
@@ -197,25 +283,38 @@ const ValuationSimulation = () => {
       setDetailLoading(false);
       setCandidateLoading(false);
     }
-  }, []);
+  }, [positionTableSort.sortField, positionTableSort.sortOrder]);
 
   useEffect(() => {
     loadConfigs();
     loadTags();
-  }, [loadConfigs, loadTags]);
+    loadExternalTradingAccounts();
+  }, [loadConfigs, loadTags, loadExternalTradingAccounts]);
 
   useEffect(() => {
-    loadDetails(selectedConfigId);
-  }, [loadDetails, selectedConfigId]);
+    loadDetails(selectedConfig);
+  }, [loadDetails, selectedConfig]);
+
+  useEffect(() => {
+    if (!selectedExternalTradingAccountId) {
+      setExternalTradingSubAccounts([]);
+      return;
+    }
+    loadExternalTradingSubAccounts(selectedExternalTradingAccountId);
+  }, [selectedExternalTradingAccountId, loadExternalTradingSubAccounts]);
 
   const refreshAll = async (preferredId = selectedConfigId) => {
     await loadConfigs(preferredId);
-    await loadDetails(preferredId);
+  };
+
+  const handlePositionTableChange = (_pagination, _filters, sorter) => {
+    setPositionTableSort(normalizeLedgerSorter(sorter));
   };
 
   const openCreateModal = () => {
     setEditingConfigId(null);
     form.setFieldsValue(DEFAULT_VALUES);
+    setExternalTradingSubAccounts([]);
     setModalOpen(true);
   };
 
@@ -238,7 +337,12 @@ const ValuationSimulation = () => {
         return;
       }
       setSaving(true);
-      const payload = { ...DEFAULT_VALUES, ...values };
+      const payload = {
+        ...DEFAULT_VALUES,
+        ...values,
+        external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
+        live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
+      };
       const response = editingConfigId
         ? await request.put(`/api/valuation-sim/configs/${editingConfigId}`, payload)
         : await request.post('/api/valuation-sim/configs', payload);
@@ -259,7 +363,7 @@ const ValuationSimulation = () => {
     setRunning(true);
     try {
       const { data } = await request.post(`/api/valuation-sim/configs/${selectedConfigId}/run`);
-      message.success(data?.message || '已完成一次模拟盘检查');
+      message.success(data?.message || '已同步到外部账户');
       await refreshAll(selectedConfigId);
     } catch (error) {
       message.error(error?.response?.data?.detail || '运行失败');
@@ -273,7 +377,7 @@ const ValuationSimulation = () => {
     setRunning(true);
     try {
       await request.post(`/api/valuation-sim/configs/${selectedConfigId}/reset`);
-      message.success('模拟盘已重置');
+      message.success('模拟盘策略输出和日志已重置');
       await refreshAll(selectedConfigId);
     } catch (error) {
       message.error(error?.response?.data?.detail || '重置失败');
@@ -296,6 +400,25 @@ const ValuationSimulation = () => {
     }
   };
 
+  const externalTradingAccountOptions = useMemo(() => (
+    externalTradingAccounts.map(item => {
+      const disabledReason = item.enabled === false ? '（停用）' : !isUsStockExternalAccount(item) ? '（非美股）' : '';
+      return {
+        label: `${item.name || item.identifier || item.id}${disabledReason}`,
+        value: item.id,
+        disabled: Boolean(disabledReason),
+      };
+    })
+  ), [externalTradingAccounts]);
+
+  const externalTradingSubAccountOptions = useMemo(() => (
+    externalTradingSubAccounts.map(item => ({
+      label: formatSubAccountOptionLabel(item, editingConfigId),
+      value: item.id,
+      disabled: !isAvailableValuationSimSubAccount(item, editingConfigId),
+    }))
+  ), [externalTradingSubAccounts, editingConfigId]);
+
   const configColumns = [
     {
       title: '名称',
@@ -316,7 +439,29 @@ const ValuationSimulation = () => {
       width: 80,
       render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>,
     },
-    { title: '现金', dataIndex: 'current_cash', key: 'current_cash', width: 120, render: formatMoney },
+    {
+      title: '账户',
+      dataIndex: 'account_source',
+      key: 'account_source',
+      width: 90,
+      render: () => <Tag color="blue">外部</Tag>,
+    },
+    {
+      title: '外部账户',
+      dataIndex: 'external_trading_account_id',
+      key: 'external_trading_account_id',
+      width: 160,
+      render: (value, record) => record.external_trading_account_name || value || '-',
+    },
+    {
+      title: '子账户',
+      dataIndex: 'live_sub_account_id',
+      key: 'live_sub_account_id',
+      width: 140,
+      render: (value, record) => record.live_sub_account_name || value || '-',
+    },
+    { title: '现金', dataIndex: 'external_cash_available', key: 'external_cash_available', width: 120, render: formatMoney },
+    { title: '净资产', dataIndex: 'external_net_asset', key: 'external_net_asset', width: 120, render: formatMoney },
     { title: '持仓数', dataIndex: 'max_positions', key: 'max_positions', width: 80 },
     {
       title: '触发',
@@ -355,18 +500,6 @@ const ValuationSimulation = () => {
     },
   ];
 
-  const positionColumns = [
-    { title: '股票', dataIndex: 'symbol', key: 'symbol', fixed: 'left', width: 100 },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 120, render: value => formatNumber(value, 4) },
-    { title: '成本', dataIndex: 'avg_cost', key: 'avg_cost', width: 100, render: formatMoney },
-    { title: '现价', dataIndex: 'last_price', key: 'last_price', width: 100, render: formatMoney },
-    { title: '市值', dataIndex: 'last_market_value', key: 'last_market_value', width: 120, render: formatMoney },
-    { title: '高水位', dataIndex: 'highest_price', key: 'highest_price', width: 100, render: formatMoney },
-    { title: '未创新高天数', dataIndex: 'days_without_high', key: 'days_without_high', width: 120 },
-    { title: '买入日', dataIndex: 'opened_trade_date', key: 'opened_trade_date', width: 110 },
-    { title: '计价日', dataIndex: 'last_trade_date', key: 'last_trade_date', width: 110 },
-  ];
-
   const candidateColumns = [
     { title: '股票', dataIndex: 'symbol', key: 'symbol', fixed: 'left', width: 100 },
     { title: '公司', dataIndex: 'company', key: 'company', width: 160, ellipsis: true },
@@ -381,30 +514,6 @@ const ValuationSimulation = () => {
     { title: '估值日', dataIndex: 'valuation_date', key: 'valuation_date', width: 110 },
   ];
 
-  const tradeColumns = [
-    { title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 170, render: formatTime },
-    { title: '交易日', dataIndex: 'trade_date', key: 'trade_date', width: 110 },
-    { title: '动作', dataIndex: 'action', key: 'action', width: 80, render: value => <Tag color={actionColor(value)}>{value}</Tag> },
-    { title: '股票', dataIndex: 'symbol', key: 'symbol', width: 100 },
-    { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: formatMoney },
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 120, render: value => formatNumber(value, 4) },
-    { title: '金额', dataIndex: 'amount', key: 'amount', width: 120, render: formatMoney },
-    { title: '实现盈亏', dataIndex: 'realized_pnl', key: 'realized_pnl', width: 120, render: formatMoney },
-    { title: '原因', dataIndex: 'reason', key: 'reason', width: 150 },
-  ];
-
-  const pendingColumns = [
-    { title: '信号日', dataIndex: 'signal_date', key: 'signal_date', width: 110 },
-    { title: '动作', dataIndex: 'action', key: 'action', width: 80, render: value => <Tag color={actionColor(value)}>{value}</Tag> },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 90, render: value => <Tag color={value === 'PENDING' ? 'blue' : statusColor(value)}>{value}</Tag> },
-    { title: '股票', dataIndex: 'symbol', key: 'symbol', width: 100 },
-    { title: '信号价', dataIndex: 'signal_price', key: 'signal_price', width: 100, render: formatMoney },
-    { title: '执行日', dataIndex: 'execution_date', key: 'execution_date', width: 110, render: value => value || '-' },
-    { title: '执行价', dataIndex: 'execution_price', key: 'execution_price', width: 100, render: formatMoney },
-    { title: '原因', dataIndex: 'reason', key: 'reason', width: 150 },
-    { title: '消息', dataIndex: 'message', key: 'message', ellipsis: true },
-  ];
-
   const logColumns = [
     { title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 170, render: formatTime },
     { title: '来源', dataIndex: 'trigger_source', key: 'trigger_source', width: 80 },
@@ -413,27 +522,8 @@ const ValuationSimulation = () => {
     { title: '候选', dataIndex: 'candidate_count', key: 'candidate_count', width: 80 },
     { title: '买入', dataIndex: 'buy_count', key: 'buy_count', width: 80 },
     { title: '卖出', dataIndex: 'sell_count', key: 'sell_count', width: 80 },
-    { title: '权益', dataIndex: 'total_equity', key: 'total_equity', width: 120, render: formatMoney },
     { title: '消息', dataIndex: 'message', key: 'message', ellipsis: true },
   ];
-
-  const equityChartOption = useMemo(() => ({
-    tooltip: { trigger: 'axis' },
-    grid: { top: 18, right: 16, bottom: 28, left: 58 },
-    xAxis: { type: 'category', data: equity.map(item => item.trade_date), boundaryGap: false },
-    yAxis: { type: 'value', scale: true, axisLabel: { formatter: value => `$${Number(value).toLocaleString()}` } },
-    series: [
-      {
-        name: '总权益',
-        type: 'line',
-        smooth: true,
-        symbol: 'none',
-        data: equity.map(item => item.total_equity),
-        lineStyle: { width: 2, color: '#1677ff' },
-        areaStyle: { color: 'rgba(22, 119, 255, 0.08)' },
-      },
-    ],
-  }), [equity]);
 
   return (
     <Spin spinning={loading}>
@@ -463,14 +553,31 @@ const ValuationSimulation = () => {
                 <Select options={[{ label: '启用', value: true }, { label: '停用', value: false }]} />
               </Form.Item>
             </Col>
-            <Col xs={12} md={5}>
-              <Form.Item name="initial_cash" label="初始资金" rules={[{ required: true }]}>
-                <InputNumber min={1} step={1000} precision={2} className="factor-lab-full" />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={5}>
+            <Col xs={12} md={4}>
               <Form.Item name="max_positions" label="最大持仓" rules={[{ required: true }]}>
                 <InputNumber min={1} max={50} className="factor-lab-full" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={10}>
+              <Form.Item name="external_trading_account_id" label="外部交易账户" rules={[{ required: true, message: '请选择外部交易账户' }]}>
+                <Select
+                  options={externalTradingAccountOptions}
+                  loading={externalTradingAccountsLoading}
+                  onChange={() => form.setFieldsValue({ live_sub_account_id: null })}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={10}>
+              <Form.Item
+                name="live_sub_account_id"
+                label="外部交易子账户"
+                rules={[{ required: true, message: '请选择外部交易子账户' }]}
+              >
+                <Select
+                  options={externalTradingSubAccountOptions}
+                  disabled={!hasSelectedExternalTradingAccount}
+                  placeholder={hasSelectedExternalTradingAccount ? '请选择子账户' : '先选择外部账户'}
+                />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
@@ -571,7 +678,11 @@ const ValuationSimulation = () => {
                 <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>添加模拟盘</Button>
                 <Button icon={<EditOutlined />} onClick={openEditModal} disabled={!selectedConfig}>编辑</Button>
                 <Button icon={<PlayCircleOutlined />} onClick={handleRun} loading={running} disabled={!selectedConfig}>运行</Button>
-                <Popconfirm title="重置后会清空持仓、成交、权益和日志" onConfirm={handleReset} disabled={!selectedConfig}>
+                <Popconfirm
+                  title="重置后会清空策略输出和运行日志，不会影响外部账户持仓或历史记录"
+                  onConfirm={handleReset}
+                  disabled={!selectedConfig}
+                >
                   <Button icon={<RestOutlined />} disabled={!selectedConfig}>重置</Button>
                 </Popconfirm>
                 <Popconfirm title="删除该模拟盘及全部记录？" onConfirm={handleDelete} disabled={!selectedConfig}>
@@ -587,7 +698,7 @@ const ValuationSimulation = () => {
                 columns={configColumns}
                 dataSource={configs}
                 pagination={false}
-                scroll={{ x: 1260 }}
+                scroll={{ x: 1760 }}
                 rowClassName={row => (row.id === selectedConfigId ? 'factor-lab-table-row-selected' : '')}
                 onRow={row => ({ onClick: () => setSelectedConfigId(row.id) })}
               />
@@ -601,29 +712,14 @@ const ValuationSimulation = () => {
         <>
           <div className="factor-lab-metrics valuation-sim-metrics">
             <Statistic title="总权益" value={formatMoney(totalEquity)} />
-            <Statistic title="现金" value={formatMoney(selectedConfig.current_cash)} />
+            <Statistic title="现金" value={formatMoney(selectedConfig.external_cash_available)} />
             <Statistic title="持仓市值" value={formatMoney(positionValue)} />
             <Statistic title="收益率" value={formatPct(totalReturnPct)} />
             <Statistic title="候选数" value={candidates.length} />
-            <Statistic title="待执行" value={pendingOrders.filter(item => item.status === 'PENDING').length} />
           </div>
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
-            <Col xs={24} lg={12}>
-              <Card title="当前持仓" bordered={false}>
-                <Table
-                  rowKey="id"
-                  size="small"
-                  loading={detailLoading}
-                  columns={positionColumns}
-                  dataSource={positions}
-                  pagination={false}
-                  scroll={{ x: 960, y: 320 }}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-                />
-              </Card>
-            </Col>
-            <Col xs={24} lg={12}>
+            <Col xs={24}>
               <Card
                 title={`当前候选 ${candidateMeta.trade_date || ''}`}
                 bordered={false}
@@ -645,42 +741,17 @@ const ValuationSimulation = () => {
 
           <Row gutter={[12, 12]} className="factor-lab-table-row">
             <Col xs={24}>
-              <Card title="待执行信号" bordered={false}>
-                <Table
-                  rowKey="id"
-                  size="small"
+              <Card title="当前持仓" bordered={false}>
+                <ExternalLedgerPositionsTable
                   loading={detailLoading}
-                  columns={pendingColumns}
-                  dataSource={pendingOrders}
+                  rows={positions}
+                  priceDetails={positionPriceDetails}
+                  showSubAccount={false}
+                  marketType={selectedConfigMarketType}
+                  realizedPnlSortOrder={positionTableSort.sortField === 'realized_pnl' ? positionTableSort.sortOrder : null}
+                  onChange={handlePositionTableChange}
                   pagination={false}
-                  scroll={{ x: 960, y: 260 }}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-                />
-              </Card>
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]} className="factor-lab-table-row">
-            <Col xs={24} lg={10}>
-              <Card title="权益曲线" bordered={false}>
-                {equity.length ? (
-                  <ReactECharts option={equityChartOption} style={{ height: 280 }} />
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                )}
-              </Card>
-            </Col>
-            <Col xs={24} lg={14}>
-              <Card title="成交记录" bordered={false}>
-                <Table
-                  rowKey="id"
-                  size="small"
-                  loading={detailLoading}
-                  columns={tradeColumns}
-                  dataSource={trades}
-                  pagination={false}
-                  scroll={{ x: 1080, y: 280 }}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+                  scroll={{ y: 320 }}
                 />
               </Card>
             </Col>

@@ -23,6 +23,7 @@ import {
 } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import request from '../utils/request';
+import ExternalLedgerPositionsTable from '../components/ExternalLedgerPositionsTable';
 import { PageSection, PageShell } from '../components/PageScaffold';
 import './ExecutorStatusPage.css';
 
@@ -177,6 +178,15 @@ const normalizeServerTableFilters = filters => Object.entries(filters || {}).red
   }
   return result;
 }, {});
+const normalizeLedgerSorter = sorter => {
+  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
+  const sortField = activeSorter?.field || activeSorter?.columnKey;
+  const sortOrder = activeSorter?.order;
+  if (sortField !== 'realized_pnl' || !sortOrder) {
+    return { sortField: null, sortOrder: null };
+  }
+  return { sortField, sortOrder };
+};
 const renderSymbolText = record => {
   const symbol = normalizeText(record?.symbol);
   const name = record?.symbol_name;
@@ -345,6 +355,8 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     unfilled_only: tableKey === 'orders' && state?.unfilledOnly ? 'true' : undefined,
     non_empty_only: tableKey === 'target_positions' && state?.nonEmptyOnly ? 'true' : undefined,
     delta_only: tableKey === 'target_positions' && state?.deltaOnly ? 'true' : undefined,
+    sort_field: tableKey === 'ledger_positions' ? state?.sortField || undefined : undefined,
+    sort_order: tableKey === 'ledger_positions' ? state?.sortOrder || undefined : undefined,
   });
 
   const fetchBaseStatus = useCallback(async account => {
@@ -517,12 +529,17 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     fetchActiveTab(selectedAccount, tabKey);
   };
 
-  const handleTableChange = tableKey => (pagination, filters) => {
+  const handleTableChange = tableKey => (pagination, filters, sorter) => {
     const previousState = tableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
+    const sortState = tableKey === 'ledger_positions'
+      ? normalizeLedgerSorter(sorter)
+      : { sortField: previousState.sortField || null, sortOrder: previousState.sortOrder || null };
     const next = {
       page: pagination?.current || 1,
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
       filters: normalizeServerTableFilters(filters),
+      sortField: sortState.sortField,
+      sortOrder: sortState.sortOrder,
       unfilledOnly: previousState.unfilledOnly || false,
       activeOnly: previousState.activeOnly || false,
       nonEmptyOnly: previousState.nonEmptyOnly || false,
@@ -841,17 +858,6 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '有效', dataIndex: 'effective_quantity', width: 100, render: value => formatNumber(value) },
     { title: '差额', dataIndex: 'delta_quantity', width: 100, render: value => <Text style={{ color: diffTextColor(value) }}>{formatNumber(value)}</Text> },
     { title: '动作', dataIndex: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : <Tag>HOLD</Tag> },
-    { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
-  ];
-  const ledgerColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', width: 220, render: renderSubStrategy, ...serverFilterProps('ledger_positions', 'sub_account') },
-    { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('ledger_positions', 'symbol') },
-    { title: '市价', width: 100, render: renderMarketPrice },
-    { title: '数量', dataIndex: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '可卖', dataIndex: 'available_quantity', width: 110, render: value => formatNumber(value) },
-    { title: '成本价', dataIndex: 'avg_cost', width: 100, render: value => formatNumber(value, 4) },
-    { title: '市值', dataIndex: 'market_value', width: 120, render: value => formatNumber(value, 2) },
-    { title: '已实现盈亏', dataIndex: 'realized_pnl', width: 120, render: value => formatNumber(value, 2) },
     { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
   ];
   const orderColumns = [
@@ -1215,7 +1221,18 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         <>
           {renderMobileCards(ledgerRows, 'ledger', 'ledger_positions')}
           <div className="executor-desktop-table">
-            <Table rowKey={record => `${record.sub_account_id}-${record.symbol}`} columns={ledgerColumns} dataSource={ledgerRows} loading={tableLoading.ledger_positions} pagination={paginationFor('ledger_positions')} onChange={handleTableChange('ledger_positions')} size="small" scroll={{ x: 1280 }} />
+            <ExternalLedgerPositionsTable
+              rows={ledgerRows}
+              loading={tableLoading.ledger_positions}
+              pagination={paginationFor('ledger_positions')}
+              onChange={handleTableChange('ledger_positions')}
+              priceDetails={priceDetails}
+              getColumnFilterProps={filterKey => serverFilterProps('ledger_positions', filterKey)}
+              showSubAccount
+              marketType={selectedAccount?.market_type}
+              realizedPnlSortOrder={tableState.ledger_positions?.sortField === 'realized_pnl' ? tableState.ledger_positions?.sortOrder : null}
+              scroll={{}}
+            />
           </div>
         </>
       );

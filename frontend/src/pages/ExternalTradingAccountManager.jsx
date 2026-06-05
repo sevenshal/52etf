@@ -35,6 +35,7 @@ import ReactECharts from 'echarts-for-react';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import { useAccount } from '../contexts/AccountContext';
+import ExternalLedgerPositionsTable from '../components/ExternalLedgerPositionsTable';
 import { PageSection, PageShell } from '../components/PageScaffold';
 import './ExternalTradingAccountManager.css';
 
@@ -230,6 +231,15 @@ const normalizeServerTableFilters = filters => Object.entries(filters || {}).red
   }
   return result;
 }, {});
+const normalizeLedgerSorter = sorter => {
+  const activeSorter = Array.isArray(sorter) ? sorter.find(item => item?.order) : sorter;
+  const sortField = activeSorter?.field || activeSorter?.columnKey;
+  const sortOrder = activeSorter?.order;
+  if (sortField !== 'realized_pnl' || !sortOrder) {
+    return { sortField: null, sortOrder: null };
+  }
+  return { sortField, sortOrder };
+};
 const joinFilterValues = values => (Array.isArray(values) && values.length ? values.join(',') : undefined);
 const symbolText = record => {
   const symbol = normalizeFilterText(record?.symbol);
@@ -283,14 +293,6 @@ const renderDiffValue = value => (
   <Text style={{ color: diffTextColor(value) }}>
     {formatNumber(value)}
   </Text>
-);
-const renderSellability = (value, record) => (
-  <Space direction="vertical" size={0}>
-    <Text>{formatNumber(value)}</Text>
-    {record?.raw_available_quantity !== undefined ? (
-      <Text type="secondary">原始 {formatNumber(record.raw_available_quantity)}</Text>
-    ) : null}
-  </Space>
 );
 const renderTargetSellability = (_, record) => (
   <Space direction="vertical" size={0}>
@@ -376,7 +378,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   const [editingSubAccount, setEditingSubAccount] = useState(null);
   const [activeAccountForSub, setActiveAccountForSub] = useState(null);
   const [executorStatusVisible, setExecutorStatusVisible] = useState(false);
-  const [executorStatusAccount, setExecutorStatusAccount] = useState(null);
+  const [executorStatusAccount] = useState(null);
   const [executorStatus, setExecutorStatus] = useState(null);
   const [executorStatusLoading, setExecutorStatusLoading] = useState(false);
   const [executorStatusTables, setExecutorStatusTables] = useState(createEmptyExecutorTables);
@@ -750,7 +752,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
 
 
 
-  const buildExecutorTableParams = tableState => {
+  const buildExecutorTableParams = (tableState, tableKey) => {
     const filters = tableState?.filters || {};
     return {
       page: tableState?.page || 1,
@@ -763,7 +765,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       status: joinFilterValues(filters.status),
       role: joinFilterValues(filters.role),
       event_type: joinFilterValues(filters.event_type),
-      process_status: joinFilterValues(filters.process_status)
+      process_status: joinFilterValues(filters.process_status),
+      sort_field: tableKey === 'ledger_positions' ? tableState?.sortField || undefined : undefined,
+      sort_order: tableKey === 'ledger_positions' ? tableState?.sortOrder || undefined : undefined
     };
   };
 
@@ -773,7 +777,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     try {
       const { data } = await request.get(
         `/api/external-trading-accounts/${account.id}/executor/status/${executorServerTableEndpoints[tableKey]}`,
-        { params: buildExecutorTableParams(tableState) }
+        { params: buildExecutorTableParams(tableState, tableKey) }
       );
       setExecutorStatusTables(prev => ({
         ...prev,
@@ -1053,12 +1057,17 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     );
   };
 
-  const handleExecutorServerTableChange = tableKey => (pagination, filters) => {
+  const handleExecutorServerTableChange = tableKey => (pagination, filters, sorter) => {
     const previousState = executorStatusTableState[tableKey] || { page: 1, pageSize: 10, filters: {} };
+    const sortState = tableKey === 'ledger_positions'
+      ? normalizeLedgerSorter(sorter)
+      : { sortField: previousState.sortField || null, sortOrder: previousState.sortOrder || null };
     const nextTableState = {
       page: pagination?.current || 1,
       pageSize: pagination?.pageSize || previousState.pageSize || 10,
-      filters: normalizeServerTableFilters(filters)
+      filters: normalizeServerTableFilters(filters),
+      sortField: sortState.sortField,
+      sortOrder: sortState.sortOrder
     };
     const nextState = {
       ...executorStatusTableState,
@@ -1201,21 +1210,6 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     { title: '动作', dataIndex: 'side', key: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : <Tag>HOLD</Tag> },
     { title: '需执行', dataIndex: 'demand_quantity', key: 'demand_quantity', width: 100, render: value => formatNumber(value) },
     { title: '信号版本', dataIndex: 'signal_version', key: 'signal_version', width: 170, render: value => value || '-' },
-    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime }
-  ];
-
-  const ledgerPositionColumns = [
-    { title: '子账户', dataIndex: 'sub_account_name', key: 'sub_account', width: 240, render: renderSubAccountStrategy, ...serverFilterProps('ledger_positions', 'sub_account') },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 150, render: renderSymbol, ...serverFilterProps('ledger_positions', 'symbol') },
-    marketPriceColumn,
-    { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 100, render: value => formatNumber(value) },
-    { title: '原始可用', dataIndex: 'raw_available_quantity', key: 'raw_available_quantity', width: 110, render: value => formatNumber(value) },
-    { title: '可卖', dataIndex: 'available_quantity', key: 'available_quantity', width: 150, render: renderSellability },
-    { title: 'T+1锁定', dataIndex: 't1_locked_quantity', key: 't1_locked_quantity', width: 110, render: value => formatNumber(value) },
-    { title: '当日买入', dataIndex: 'today_buy_quantity', key: 'today_buy_quantity', width: 100, render: value => formatNumber(value) },
-    { title: '成本价', dataIndex: 'avg_cost', key: 'avg_cost', width: 100, render: value => formatNumber(value, 4) },
-    { title: '市值', dataIndex: 'market_value', key: 'market_value', width: 120, render: value => formatNumber(value, 2) },
-    { title: '已实现盈亏', dataIndex: 'realized_pnl', key: 'realized_pnl', width: 120, render: value => formatNumber(value, 2) },
     { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170, render: formatTime }
   ];
 
@@ -2210,15 +2204,17 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
                 key: 'ledger',
                 label: '账本持仓',
                 children: (
-                  <Table
-                    rowKey={record => `${record.sub_account_id}-${record.symbol}`}
-                    columns={ledgerPositionColumns}
-                    dataSource={ledgerRows}
+                  <ExternalLedgerPositionsTable
+                    rows={ledgerRows}
                     loading={executorStatusTableLoading.ledger_positions}
                     pagination={executorServerPagination('ledger_positions')}
                     onChange={handleExecutorServerTableChange('ledger_positions')}
-                    size="small"
-                    scroll={{ x: 1660 }}
+                    priceDetails={executorPriceDetails}
+                    getColumnFilterProps={filterKey => serverFilterProps('ledger_positions', filterKey)}
+                    showSubAccount
+                    marketType={executorStatusAccount?.market_type || executorStatus?.account?.market_type}
+                    realizedPnlSortOrder={executorStatusTableState.ledger_positions?.sortField === 'realized_pnl' ? executorStatusTableState.ledger_positions?.sortOrder : null}
+                    scroll={{}}
                   />
                 )
               },
