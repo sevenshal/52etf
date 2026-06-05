@@ -30,12 +30,31 @@ def test_a_stock_fear_greed_targets_include_csi_all_share():
     ]
 
 
-def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
-    target_symbols = [str(item["symbol"]).upper() for item in A_STOCK_INDEX_FEAR_GREED_TARGETS]
-    proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
+def test_a_stock_fear_greed_targets_include_bse_50():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
 
-    assert len(proxy_symbols) == len(target_symbols)
-    assert list(zip(target_symbols, proxy_symbols)) == [
+    target = targets_by_symbol["899050.BJ"]
+    assert target["ticker"] == "北证50"
+    assert target["index_name"] == "北证50"
+    assert "899050.BJ" in pools
+    assert target["option_underlyings"] == []
+    assert target.get("proxy_etf") is None
+
+
+def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
+    proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
+    target_proxy_pairs = [
+        (str(item["symbol"]).upper(), str(item["proxy_etf"]).upper())
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+        if item.get("proxy_etf")
+    ]
+
+    assert proxy_symbols == [proxy for _, proxy in target_proxy_pairs]
+    assert target_proxy_pairs == [
         ("000510.SH", "563360.SH"),
         ("000905.SH", "510500.SH"),
         ("000985.SH", "510300.SH"),

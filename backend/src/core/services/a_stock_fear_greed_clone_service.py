@@ -113,7 +113,10 @@ class AStockInnovation100FearGreedCloneCalculator:
         self.label = str(self.target.get("label") or self.ticker)
         self.index_code = str(self.target.get("index_code") or self.target_symbol).upper()
         self.index_name = str(self.target.get("index_name") or self.index_code)
-        self.option_underlyings = tuple(self.target.get("option_underlyings") or A_STOCK_INNO100_OPTION_UNDERLYINGS)
+        option_underlyings = self.target.get("option_underlyings")
+        if option_underlyings is None:
+            option_underlyings = A_STOCK_INNO100_OPTION_UNDERLYINGS
+        self.option_underlyings = tuple(option_underlyings)
         self.custom_inno100 = bool(self.target.get("custom_inno100"))
 
     def calculate_history(
@@ -621,6 +624,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         return pd.to_numeric(frame.set_index("date")["close"], errors="coerce").sort_index()
 
     def _load_option_volume_pcr(self, start_date: date, end_date: date) -> pd.Series:
+        if not self.option_underlyings:
+            return pd.Series(dtype=float)
+
         params: Dict[str, Any] = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
@@ -838,10 +844,15 @@ class AStockInnovation100FearGreedCloneCalculator:
         return payload
 
     def _warnings(self) -> List[str]:
+        option_warning = (
+            f"The option component uses related A-share ETF option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}."
+            if self.option_underlyings
+            else "No related ETF option underlyings are configured; the option component is omitted when unavailable."
+        )
         return [
             f"This is an independent {self.label}-specific clone, not CNN's undisclosed calculation.",
             f"Scores use rolling z-score/CDF and equal-weighted available components; at least {A_STOCK_MIN_COMPONENT_COUNT} components are required.",
-            f"The option component uses related A-share ETF option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}.",
+            option_warning,
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

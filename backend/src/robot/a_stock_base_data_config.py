@@ -10,6 +10,7 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000510.SH", "name": "中证A500"},
     {"index_code": "000905.SH", "name": "中证500"},
     {"index_code": "000985.SH", "name": "中证全指"},
+    {"index_code": "899050.BJ", "name": "北证50"},
     {"index_code": "000699.SH", "name": "科创200"},
     {"index_code": "399006.SZ", "name": "创业板指"},
     {"index_code": "399998.SZ", "name": "中证煤炭"},
@@ -22,6 +23,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证A500",
         "index_name": "中证A500",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        "proxy_etf": "563360.SH",
     },
     {
         "symbol": "000905.SH",
@@ -29,6 +31,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证500",
         "index_name": "中证500",
         "option_underlyings": ["OP510500.SH", "OP159922.SZ"],
+        "proxy_etf": "510500.SH",
     },
     {
         "symbol": "000985.SH",
@@ -36,6 +39,14 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证全指",
         "index_name": "中证全指",
         "option_underlyings": ["OP510300.SH", "OP159919.SZ", "OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        "proxy_etf": "510300.SH",
+    },
+    {
+        "symbol": "899050.BJ",
+        "ticker": "北证50",
+        "label": "北证50",
+        "index_name": "北证50",
+        "option_underlyings": [],
     },
     {
         "symbol": "000699.SH",
@@ -43,6 +54,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "科创200",
         "index_name": "上证科创板200",
         "option_underlyings": ["OP588000.SH", "OP588080.SH"],
+        "proxy_etf": "588230.SH",
     },
     {
         "symbol": "399006.SZ",
@@ -50,6 +62,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "创业板",
         "index_name": "创业板指",
         "option_underlyings": ["OP159915.SZ"],
+        "proxy_etf": "159915.SZ",
     },
     {
         "symbol": "399998.SZ",
@@ -57,6 +70,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "煤炭",
         "index_name": "中证煤炭",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        "proxy_etf": "515220.SH",
     },
     {
         "symbol": "000015.SH",
@@ -64,6 +78,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "红利",
         "index_name": "上证红利",
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        "proxy_etf": "510880.SH",
     },
 ]
 A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (

@@ -94,7 +94,10 @@ def _build_a_stock_target_options() -> List[Dict[str, Any]]:
 
 def _build_a_stock_preset_pairs() -> List[Dict[str, Any]]:
     pairs = []
-    for target, etf_symbol in zip(A_STOCK_INDEX_FEAR_GREED_TARGETS, A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS):
+    for target in A_STOCK_INDEX_FEAR_GREED_TARGETS:
+        etf_symbol = target.get("proxy_etf")
+        if not etf_symbol:
+            continue
         fear_symbol = _normalize_symbol(target["symbol"])
         target_symbol = _normalize_symbol(etf_symbol)
         target_label = f"{A_STOCK_ETF_DAILY_NAMES.get(target_symbol, target_symbol)} {target_symbol}"
