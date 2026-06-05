@@ -10,6 +10,21 @@ from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ORDER_SUBMISSION_TIMEOUT = float(os.getenv("IB_ORDER_SUBMISSION_TIMEOUT", "8"))
+
+
+class IBOrderSubmissionPending(RuntimeError):
+    def __init__(self, symbol: str, timeout: float, status: str = "", trade=None):
+        clean_status = str(status or "").upper() or "UNKNOWN"
+        super().__init__(
+            f"IBKR order submission acknowledgement still pending for {symbol} "
+            f"after {timeout:.1f}s (last status: {clean_status})"
+        )
+        self.symbol = symbol
+        self.timeout = timeout
+        self.status = clean_status
+        self.trade = trade
+
 class IBKRService:
     def __init__(self, host=None, port=None, client_id=None):
         self.host = host or os.getenv('IB_HOST', '127.0.0.1')
@@ -102,7 +117,7 @@ class IBKRService:
             raise last_error
         raise ValueError(f"Unknown IB contract for {normalized}")
 
-    async def _await_order_submission(self, trade, symbol: str, timeout: float = 2.0):
+    async def _await_order_submission(self, trade, symbol: str, timeout: float = DEFAULT_ORDER_SUBMISSION_TIMEOUT):
         accepted_statuses = {"SUBMITTED", "PRESUBMITTED", "FILLED"}
         rejected_statuses = {"CANCELLED", "APICANCELLED", "INACTIVE"}
         deadline = asyncio.get_running_loop().time() + timeout
@@ -114,7 +129,10 @@ class IBKRService:
             if status in rejected_statuses:
                 raise RuntimeError(f"Order for {symbol} was rejected by IBKR with status {status}")
             if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError(f"Timed out waiting for IBKR order submission acknowledgement for {symbol}")
+                latest_status = str(getattr(trade.orderStatus, "status", "") or "").upper()
+                if latest_status in accepted_statuses:
+                    return trade
+                raise IBOrderSubmissionPending(symbol, timeout, latest_status, trade=trade)
             await asyncio.sleep(0.1)
 
     def get_net_liquidation(self) -> float:
@@ -186,7 +204,13 @@ class IBKRService:
         pos_data = self.get_position(symbol)
         return pos_data['qty'] + self.get_pending_qty(symbol)
 
-    async def place_market_order(self, symbol: str, action: str, quantity: int):
+    async def place_market_order(
+        self,
+        symbol: str,
+        action: str,
+        quantity: int,
+        submission_timeout: float = DEFAULT_ORDER_SUBMISSION_TIMEOUT,
+    ):
         """下市价单"""
         await self.connect()
         clean_symbol = self._normalize_ib_equity_symbol(symbol)
@@ -194,7 +218,7 @@ class IBKRService:
         logger.info(f"[{self.port}] Placing {action} market order for {quantity} {clean_symbol}")
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
-        return await self._await_order_submission(trade, clean_symbol)
+        return await self._await_order_submission(trade, clean_symbol, timeout=submission_timeout)
 
     async def place_limit_order(self, symbol: str, action: str, quantity: int, price: float, outside_rth: bool = False):
         """下限价单 (支持盘前盘后)"""

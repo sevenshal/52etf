@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock
 
-from src.core.services.ib_service import IBKRService
+from src.core.services.ib_service import IBKRService, IBOrderSubmissionPending
 
 
 class _FakeTrade:
@@ -75,6 +75,23 @@ class IBKRServiceAsyncTest(IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "rejected by IBKR"):
             await service.place_market_order("AAPL.US", "BUY", 1)
+
+    async def test_place_market_order_marks_ack_timeout_as_pending(self):
+        service = IBKRService(port=4001)
+        service.ib = _FakeIB()
+        service.connect = AsyncMock()
+        service.ib.placeOrder = lambda contract, order: _FakeTrade(
+            contract,
+            action=order.action,
+            quantity=order.totalQuantity,
+            status="PendingSubmit",
+        )
+
+        with self.assertRaises(IBOrderSubmissionPending) as ctx:
+            await service.place_market_order("AAPL.US", "BUY", 1, submission_timeout=0.01)
+
+        self.assertEqual("AAPL", ctx.exception.symbol)
+        self.assertEqual("PENDINGSUBMIT", ctx.exception.status)
 
 
 class IBKRServiceSyncTest(TestCase):

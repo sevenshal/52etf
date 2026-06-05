@@ -14,7 +14,7 @@ from croniter import croniter
 from ..core.database import Session, PortfolioCopyConfig, PortfolioCopyLog, IBKRAccountConfig
 from ..core.utils import mask_account_id, send_alert_email
 import traceback
-from ..core.services.ib_service import IBKRService
+from ..core.services.ib_service import IBKRService, IBOrderSubmissionPending
 from ..core.services.market import MarketService
 from ..core.external_trading_database import (
     ExternalTradingAccount,
@@ -839,6 +839,19 @@ class PortfolioCopyTrader:
                             f"[{masked_account_id}] Submitted MARKET {action} order for {qty} {symbol} "
                             f"(IB status: {ib_status or 'UNKNOWN'})"
                         )
+                except IBOrderSubmissionPending as e:
+                    logger.warning(f"[{masked_account_id}] Execution pending broker acknowledgement for {symbol}: {e}")
+                    self._log(
+                        config.account_id,
+                        config.portfolio_id,
+                        action,
+                        "SUBMITTED",
+                        str(e),
+                        symbol=symbol,
+                        quantity=qty,
+                        price=price,
+                        config_id=config.id,
+                    )
                 except Exception as e:
                     logger.error(f"[{masked_account_id}] Execution failed for {symbol}: {e}")
                     self._log(config.account_id, config.portfolio_id, action, "FAILED", str(e), symbol=symbol, config_id=config.id)
