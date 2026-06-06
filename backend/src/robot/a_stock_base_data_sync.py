@@ -28,8 +28,8 @@ from ..core.analytics_database import (
     AStockOptionDaily,
     AStockRepoDaily,
     AnalyticsSession,
-    connect_duckdb,
 )
+from ..core.duckdb_utils import connect_duckdb
 from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (

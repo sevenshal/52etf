@@ -7,6 +7,28 @@ from unittest import TestCase
 
 
 class AStockBaseDataSyncTest(TestCase):
+    def test_module_import_smoke(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                assert AStockBaseDataSyncService is not None
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def test_sync_fund_basic_handles_duplicate_provider_symbols(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)
