@@ -3,6 +3,10 @@
 
 uvicorn src.app.main:app --host 0.0.0.0 --port 8001 --reload
 
+## 接入文档
+
+- [外部交易账号长连接接入文档](docs/external-trading-websocket-integration.md)
+
 ## 开发说明：死代码扫描
 
 后端项目已经提供一套死代码检查入口：
