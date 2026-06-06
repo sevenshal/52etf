@@ -1,0 +1,118 @@
+name: Backend Deploy
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: 52etf-api-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build quant_server.pyz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: |
+          python -m venv .flow-build-venv
+          ./.flow-build-venv/bin/pip install -U pip shiv
+
+      - name: Build quant_server.pyz
+        id: build-package
+        run: |
+          set -euo pipefail
+
+          REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+          PY_TAG="$(.flow-build-venv/bin/python - <<'PY'
+          import sys
+          print(f"py{sys.version_info.major}{sys.version_info.minor}")
+          PY
+          )"
+          DEPS_DIR=".flow-deps/${PY_TAG}-${REQ_HASH}"
+
+          if [ ! -d "$DEPS_DIR" ]; then
+            echo "[build] dependency cache miss: $DEPS_DIR"
+            tmp_dir="${DEPS_DIR}.tmp"
+            rm -rf "$tmp_dir"
+            mkdir -p "$tmp_dir"
+            .flow-build-venv/bin/python -m pip install --target "$tmp_dir" -r requirements.txt
+            mkdir -p .flow-deps
+            mv "$tmp_dir" "$DEPS_DIR"
+          else
+            echo "[build] dependency cache hit: $DEPS_DIR"
+          fi
+
+          rm -rf build_dist quant_server.pyz
+          mkdir -p build_dist
+          cp -a "$DEPS_DIR"/. build_dist/
+          cp -r src build_dist/src
+          touch build_dist/src/__init__.py
+
+          .flow-build-venv/bin/shiv \
+            --site-packages ./build_dist \
+            -p '/usr/bin/env python3' \
+            -o quant_server.pyz \
+            -e src.app.main:start \
+            --build-id "$(date +%s)"
+
+          ls -lh quant_server.pyz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quant-server-artifact
+          path: quant_server.pyz
+
+  deploy:
+    name: Deploy to 52etf.vip
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      ECS_HOST: 52etf.vip
+      ECS_USER: ecs-user
+      ECS_TARGET: /tmp/quant_server.pyz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: quant-server-artifact
+          path: .
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.ECS_SSH_KEY }}
+
+      - name: Trust remote host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$ECS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload artifact
+        run: |
+          scp quant_server.pyz "${ECS_USER}@${ECS_HOST}:${ECS_TARGET}"
+
+      - name: Install and restart remote service
+        run: |
+          ssh "${ECS_USER}@${ECS_HOST}" 'set -e
+          sudo systemctl stop quant-server || true
+          sudo install -m 0755 /tmp/quant_server.pyz /opt/quant/backend/quant_server.pyz
+          cd /opt/quant/backend
+          sudo rm -rf /home/ecs-user/.shiv
+          sudo systemctl restart quant-server
+          sudo systemctl --no-pager --lines=8 status quant-server
+          '
