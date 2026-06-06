@@ -51,15 +51,15 @@ jobs:
             echo "ECS_SSH_KEY is empty. Please set the repository secret ECS_SSH_KEY."
             exit 1
           fi
-          mkdir -p ~/.ssh
-          touch ~/.ssh/deploy_key
-          cat <<'EOF' > ~/.ssh/deploy_key
-          ${{ secrets.ECS_SSH_KEY }}
-          EOF
-          perl -pi -e 's/\r$//' ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          echo "Loaded key fingerprints:"
-          ssh-keygen -l -f ~/.ssh/deploy_key
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.ECS_SSH_KEY }}
+
+      - name: Verify key loaded by agent
+        run: |
+          ssh-add -l
 
       - name: Trust remote host key
         run: |
@@ -74,10 +74,10 @@ jobs:
 
       - name: Upload bundle and replace remote web root
         run: |
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+          scp -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
             52etf_fe.tgz "${ECS_USER}@${ECS_HOST}:/tmp/52etf_fe.tgz"
 
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" "set -e
+          ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" "set -e
           sudo mkdir -p ${ECS_REMOTE_DIR}
           sudo rm -rf ${ECS_REMOTE_DIR}/*
           sudo tar xzf /tmp/52etf_fe.tgz -C ${ECS_REMOTE_DIR}
@@ -87,10 +87,5 @@ jobs:
 
       - name: Verify SSH access
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+          ssh -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
             "${ECS_USER}@${ECS_HOST}" 'echo SSH_OK'
-
-      - name: Cleanup SSH key
-        if: always()
-        run: |
-          rm -f ~/.ssh/deploy_key
