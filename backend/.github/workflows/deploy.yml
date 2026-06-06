@@ -92,23 +92,42 @@ jobs:
           name: quant-server-artifact
           path: .
 
-      - name: Set up SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.ECS_SSH_KEY }}
+      - name: Prepare SSH key
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.ECS_SSH_KEY }}" ]; then
+            echo "ECS_SSH_KEY is empty. Please set the repository secret ECS_SSH_KEY."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          touch ~/.ssh/deploy_key
+          cat <<'EOF' > ~/.ssh/deploy_key
+          ${{ secrets.ECS_SSH_KEY }}
+          EOF
+          perl -pi -e 's/\r$//' ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "Loaded key fingerprints:"
+          ssh-keygen -l -f ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub
 
       - name: Trust remote host key
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H "$ECS_HOST" >> ~/.ssh/known_hosts
 
+      - name: Verify SSH access
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            "${ECS_USER}@${ECS_HOST}" 'echo SSH_OK'
+
       - name: Upload artifact
         run: |
-          scp quant_server.pyz "${ECS_USER}@${ECS_HOST}:${ECS_TARGET}"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            quant_server.pyz "${ECS_USER}@${ECS_HOST}:${ECS_TARGET}"
 
       - name: Install and restart remote service
         run: |
-          ssh "${ECS_USER}@${ECS_HOST}" 'set -e
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" 'set -e
           sudo systemctl stop quant-server || true
           sudo install -m 0755 /tmp/quant_server.pyz /opt/quant/backend/quant_server.pyz
           cd /opt/quant/backend
@@ -116,3 +135,8 @@ jobs:
           sudo systemctl restart quant-server
           sudo systemctl --no-pager --lines=8 status quant-server
           '
+
+      - name: Cleanup SSH key
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key ~/.ssh/deploy_key.pub
