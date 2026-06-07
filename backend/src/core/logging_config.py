@@ -86,3 +86,11 @@ def configure_logging(stdout: TextIO = None, stderr: TextIO = None):
     access_log_filter = SensitiveQueryParamFilter()
     for handler in logging.getLogger().handlers:
         handler.addFilter(access_log_filter)
+
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        logger = logging.getLogger(logger_name)
+        if not any(
+            isinstance(filter_, SensitiveQueryParamFilter)
+            for filter_ in logger.filters
+        ):
+            logger.addFilter(access_log_filter)
