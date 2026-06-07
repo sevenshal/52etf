@@ -11,7 +11,8 @@ from urllib.request import Request, urlopen
 import pandas as pd
 from sqlalchemy import distinct, or_
 
-from ..core.analytics_database import ANALYTICS_DB_PATH, USStockDaily, connect_duckdb
+from ..core.analytics_database import USStockDaily
+from ..core.duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 from ..core.database import ETFHolding, Session, StockEVC, StockStaticInfoHistory, StockStaticInfoSnapshot
 from ..core.services.longport import LongPortKlineQuotaExceeded, LongPortService
 from ..core.static_info import STATIC_INFO_FIELDS
