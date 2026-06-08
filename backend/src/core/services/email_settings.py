@@ -82,6 +82,12 @@ EMAIL_SCENARIOS = [
         "description": "外部交易账号未收到交割单费用对账推送。",
     },
     {
+        "key": "xueqiu_token_freshness_alert",
+        "name": "雪球Token更新告警",
+        "category": "外部交易",
+        "description": "雪球 xq_a_token 超过24小时未更新或未配置。",
+    },
+    {
         "key": "xueqiu_top_holdings_report",
         "name": "雪球持仓报告",
         "category": "报告",

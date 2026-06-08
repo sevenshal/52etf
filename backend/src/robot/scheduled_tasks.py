@@ -23,6 +23,14 @@ LAST_RUN_MESSAGE_MAX_LENGTH = 4000
 TASK_ERROR_PREVIEW_LIMIT = 20
 TASK_ERROR_PREVIEW_MAX_LENGTH = 3600
 NO_STARTUP_CATCH_UP_TASK_KEYS = {"xueqiu_top_holdings_rebalance"}
+DEPRECATED_TASK_KEYS = [
+    "a_stock_income_sync",
+    "etf_historical_holdings_backfill",
+    "etf_nport_holdings_import",
+    "external_trading_fee_reconcile_retry",
+    "a_stock_fund_flow_sync",
+    "snowball_ptrade_heartbeat_check",
+]
 
 
 def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
@@ -590,6 +598,12 @@ def _run_xueqiu_top_holdings_rebalance():
     return result
 
 
+def _run_xueqiu_token_freshness_check():
+    from ..core.services.xueqiu_token_monitor import process_xueqiu_token_freshness_check_for_robot
+
+    return process_xueqiu_token_freshness_check_for_robot()
+
+
 @dataclass(frozen=True)
 class TaskDefinition:
     task_key: str
@@ -734,6 +748,16 @@ class ScheduledTaskManager:
                 runner=_run_external_trading_fee_reconcile,
                 default_cron_rule="35 9 * * mon-fri",
             ),
+            "xueqiu_token_freshness_check": TaskDefinition(
+                task_key="xueqiu_token_freshness_check",
+                name="雪球Token更新检查",
+                description="每天上午9点检查雪球 xq_a_token 最近24小时是否更新；超过24小时未更新或未配置则发送告警邮件。",
+                default_time="09:00",
+                default_enabled=True,
+                sort_order=22,
+                runner=_run_xueqiu_token_freshness_check,
+                default_cron_rule="0 9 * * *",
+            ),
             "external_trading_sub_account_nav_snapshot": TaskDefinition(
                 task_key="external_trading_sub_account_nav_snapshot",
                 name="外部交易子账户净资产快照",
@@ -780,13 +804,7 @@ class ScheduledTaskManager:
                 ScheduledTaskConfig.task_key == "etf_emotion_calculation"
             ).delete(synchronize_session=False)
             db.query(ScheduledTaskConfig).filter(
-                ScheduledTaskConfig.task_key.in_([
-                    "a_stock_income_sync",
-                    "etf_historical_holdings_backfill",
-                    "etf_nport_holdings_import",
-                    "external_trading_fee_reconcile_retry",
-                    "a_stock_fund_flow_sync",
-                ])
+                ScheduledTaskConfig.task_key.in_(DEPRECATED_TASK_KEYS)
             ).delete(synchronize_session=False)
             for task in self.task_definitions.values():
                 default_cron_rule = self._task_default_cron_rule(task)

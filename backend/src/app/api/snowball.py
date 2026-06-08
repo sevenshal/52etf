@@ -116,11 +116,13 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
                         with get_db_ctx() as db:
                             config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
                             if config and config.xueqiu_cookie:
+                                now = datetime.now()
                                 old_c = config.xueqiu_cookie
                                 if "xq_a_token=" in old_c:
                                     config.xueqiu_cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
                                 else:
                                     config.xueqiu_cookie = f"xq_a_token={new_token}; {old_c}"
+                                config.updated_at = now
                     break
     except Exception as e:
         logger.error(f"Failed to refresh Xueqiu guest token: {e}")
@@ -152,7 +154,11 @@ class SnowballAccountConfigModel(BaseModel):
     updated_at: Optional[datetime] = None
 
 class SnowballCookieSyncRequest(BaseModel):
-    xueqiu_cookie: str
+    xueqiu_cookie: Optional[str] = None
+    login_detected: Optional[bool] = None
+    token_present: Optional[bool] = None
+    source: Optional[str] = None
+    status_message: Optional[str] = None
 
 class SnowballConfigCreate(BaseModel):
     combination_id: str
@@ -1289,13 +1295,15 @@ async def update_account_config(
         data.xueqiu_cookie = _normalize_xueqiu_cookie(cookie)
 
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    now = datetime.now()
     if not config:
-        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=data.xueqiu_cookie)
+        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=data.xueqiu_cookie, updated_at=now)
         db.add(config)
     else:
         config.xueqiu_cookie = data.xueqiu_cookie
+        config.updated_at = now
     db.commit()
-    return {"message": "Success"}
+    return {"message": "Success", "updated_at": now.isoformat()}
 
 @router.post("/account-config/xueqiu-cookie-sync")
 async def sync_xueqiu_cookie_from_browser_extension(
@@ -1308,15 +1316,49 @@ async def sync_xueqiu_cookie_from_browser_extension(
     if expected_token and x_snowball_cookie_sync_token != expected_token:
         raise HTTPException(status_code=401, detail="Invalid sync token")
 
-    normalized_cookie = _normalize_xueqiu_cookie(data.xueqiu_cookie)
+    raw_cookie = (data.xueqiu_cookie or "").strip()
+    if not raw_cookie or data.login_detected is False or data.token_present is False:
+        from ...core.services.xueqiu_token_monitor import send_xueqiu_token_login_missing_alert
+
+        alert_sent = send_xueqiu_token_login_missing_alert(
+            account_id=account_id,
+            source=data.source,
+            status_message=data.status_message,
+        )
+        return {
+            "message": "Missing xq_a_token status accepted",
+            "status": "LOGIN_MISSING",
+            "alert_sent": alert_sent,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    try:
+        normalized_cookie = _normalize_xueqiu_cookie(raw_cookie)
+    except HTTPException:
+        from ...core.services.xueqiu_token_monitor import send_xueqiu_token_login_missing_alert
+
+        alert_sent = send_xueqiu_token_login_missing_alert(
+            account_id=account_id,
+            source=data.source,
+            status_message=data.status_message or "Cookie payload missing xq_a_token",
+        )
+        return {
+            "message": "Missing xq_a_token status accepted",
+            "status": "LOGIN_MISSING",
+            "alert_sent": alert_sent,
+            "updated_at": datetime.now().isoformat(),
+        }
+
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    now = datetime.now()
     if not config:
-        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=normalized_cookie)
+        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=normalized_cookie, updated_at=now)
         db.add(config)
     else:
         config.xueqiu_cookie = normalized_cookie
+        config.updated_at = now
     db.commit()
-    return {"message": "Success", "updated_at": datetime.now().isoformat()}
+    return {"message": "Success", "updated_at": now.isoformat()}
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
