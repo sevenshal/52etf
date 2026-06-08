@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from unittest import TestCase
+from unittest.mock import patch
 
 
 @dataclass
@@ -76,6 +78,49 @@ class XueqiuTokenMonitorTest(TestCase):
         self.assertEqual("MISSING", result["status"])
         self.assertIsNone(result["updated_at"])
         self.assertIsNone(result["age_hours"])
+
+    def test_process_xueqiu_token_freshness_uses_session_safe_snapshots(self):
+        from src.core.services.xueqiu_token_monitor import process_xueqiu_token_freshness_check_for_robot
+
+        state = {"closed": False}
+
+        class ExpiringRow:
+            def __init__(self):
+                self._data = {
+                    "account_id": "account-1",
+                    "xueqiu_cookie": "xq_a_token=fresh;",
+                    "updated_at": datetime.now() - timedelta(hours=1),
+                }
+
+            def __getattr__(self, name):
+                if name in self._data:
+                    if state["closed"]:
+                        raise RuntimeError("detached row access")
+                    return self._data[name]
+                raise AttributeError(name)
+
+        class FakeQuery:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def all(self):
+                return [ExpiringRow()]
+
+        class FakeDB:
+            def query(self, *_args, **_kwargs):
+                return FakeQuery()
+
+        @contextmanager
+        def fake_get_db_ctx():
+            try:
+                yield FakeDB()
+            finally:
+                state["closed"] = True
+
+        with patch("src.core.services.xueqiu_token_monitor.get_db_ctx", fake_get_db_ctx):
+            result = process_xueqiu_token_freshness_check_for_robot()
+
+        self.assertIn("status=OK", result)
 
     def test_scheduled_task_replaces_ptrade_heartbeat_check(self):
         from src.robot.scheduled_tasks import ScheduledTaskManager

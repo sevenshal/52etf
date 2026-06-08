@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -11,6 +12,13 @@ from ..utils import mask_account_id, send_alert_email
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 XUEQIU_TOKEN_MAX_AGE_HOURS = 24
 XUEQIU_TOKEN_FRESHNESS_ALERT_SCENARIO = "xueqiu_token_freshness_alert"
+
+
+@dataclass(frozen=True)
+class XueqiuTokenConfigSnapshot:
+    account_id: Optional[str]
+    xueqiu_cookie: Optional[str]
+    updated_at: Optional[datetime]
 
 
 def _to_naive_china_datetime(value: Optional[datetime]) -> Optional[datetime]:
@@ -123,11 +131,23 @@ def send_xueqiu_token_login_missing_alert(
 
 def process_xueqiu_token_freshness_check_for_robot() -> str:
     with get_db_ctx() as db:
-        configs = (
-            db.query(SnowballAccountConfig)
+        rows = (
+            db.query(
+                SnowballAccountConfig.account_id,
+                SnowballAccountConfig.xueqiu_cookie,
+                SnowballAccountConfig.updated_at,
+            )
             .filter(SnowballAccountConfig.xueqiu_cookie.isnot(None))
             .all()
         )
+        configs = [
+            XueqiuTokenConfigSnapshot(
+                account_id=row.account_id,
+                xueqiu_cookie=row.xueqiu_cookie,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
 
     result = evaluate_xueqiu_token_freshness(configs)
     message = format_xueqiu_token_freshness_message(result)
