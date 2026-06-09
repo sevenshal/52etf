@@ -683,6 +683,110 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_incremental_fund_daily_empty_date_batch_does_not_fallback_to_symbol_jobs(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                from src.core.analytics_database import AStockFundDaily, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def __init__(self):
+                        self.date_calls = []
+
+                    def get_a_stock_etf_basic_frame(self, list_status="L"):
+                        return pd.DataFrame(
+                            [
+                                {"ts_code": "159001.SZ", "name": "ETF1", "exchange": "SZ", "list_status": "L"},
+                                {"ts_code": "159002.SZ", "name": "ETF2", "exchange": "SZ", "list_status": "L"},
+                            ]
+                        )
+
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        assert start_date == date(2026, 5, 30)
+                        assert end_date == date(2026, 6, 1)
+                        return pd.DataFrame([{"cal_date": date(2026, 6, 1), "is_open": 1}])
+
+                    def get_a_stock_fund_daily_trade_date_frame(self, trade_date, **kwargs):
+                        self.date_calls.append((trade_date, kwargs))
+                        return pd.DataFrame(columns=["ts_code", "trade_date"])
+
+                    def get_a_stock_fund_daily_range_frame(self, *args, **kwargs):
+                        raise AssertionError("empty date batch should not fallback to symbol jobs")
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                fake_tushare = FakeTushare()
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
+                try:
+                    service._insert_analytics_mappings(
+                        AStockFundDaily,
+                        [
+                            {
+                                "ts_code": "159001.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "open": 1.0,
+                                "high": 1.0,
+                                "low": 1.0,
+                                "close": 1.0,
+                                "pre_close": 1.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                            {
+                                "ts_code": "159002.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "open": 2.0,
+                                "high": 2.0,
+                                "low": 2.0,
+                                "close": 2.0,
+                                "pre_close": 2.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        ],
+                    )
+                    result = service.sync_fund_daily(
+                        date(2019, 5, 26),
+                        date(2026, 6, 1),
+                        incremental=True,
+                    )
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert fake_tushare.date_calls == [(date(2026, 6, 1), {"raise_on_error": True})]
+                assert result["jobs"] == 2
+                assert result["date_batches"] == 1
+                assert result["symbol_jobs"] == 0
+                assert result["saved_rows"] == 0
+                assert result["errors"] == []
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def test_incremental_fund_adj_factor_batches_recent_trade_dates(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)

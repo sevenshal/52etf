@@ -866,6 +866,7 @@ class TushareService(QuoteProvider):
         trade_date: date,
         limit: int = 5000,
         raise_on_error: bool = False,
+        raise_on_empty: bool = False,
     ) -> pd.DataFrame:
         """按交易日批量获取A股ETF/场内基金日行情。"""
         trade_value = self._to_date(trade_date)
@@ -903,9 +904,11 @@ class TushareService(QuoteProvider):
             offset += limit
 
         if not frames:
-            if raise_on_error:
-                if first_error is not None:
+            if first_error is not None:
+                if raise_on_error:
                     raise first_error
+                return pd.DataFrame()
+            if raise_on_empty:
                 raise RuntimeError(f"Tushare fund_daily returned no rows for trade_date={trade_value}")
             return pd.DataFrame()
 
