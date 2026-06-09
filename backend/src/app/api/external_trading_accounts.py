@@ -830,11 +830,22 @@ def _serialize_target_position_status(
     pending_sell = safe_int((open_quantities or {}).get("SELL"))
     effective_quantity = current_quantity + pending_buy - pending_sell
     target_quantity = safe_int(row.target_quantity)
-    delta_quantity = target_quantity - effective_quantity
-    side = "BUY" if delta_quantity > 0 else "SELL" if delta_quantity < 0 else None
-    demand_quantity = abs(delta_quantity)
+    delta_quantity = target_quantity - current_quantity
+    execution_delta_quantity = target_quantity - effective_quantity
+    side = "BUY" if execution_delta_quantity > 0 else "SELL" if execution_delta_quantity < 0 else None
+    demand_quantity = abs(execution_delta_quantity)
     if side == "SELL":
         demand_quantity = min(demand_quantity, max(safe_int(sellability.get("computed_sellable_quantity")) - pending_sell, 0))
+    if pending_buy > 0 and pending_sell > 0:
+        action = "TRADING"
+    elif pending_buy > 0:
+        action = "BUYING"
+    elif pending_sell > 0:
+        action = "SELLING"
+    elif side:
+        action = side
+    else:
+        action = "HOLD"
 
     return {
         "id": row.id,
@@ -859,7 +870,11 @@ def _serialize_target_position_status(
         "pending_sell_quantity": pending_sell,
         "effective_quantity": effective_quantity,
         "delta_quantity": delta_quantity,
+        "ledger_delta_quantity": delta_quantity,
+        "execution_delta_quantity": execution_delta_quantity,
+        "execution_side": side,
         "side": side,
+        "action": action,
         "demand_quantity": demand_quantity,
         "target_weight_pct": row.target_weight_pct,
         "target_value": row.target_value,
