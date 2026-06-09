@@ -163,6 +163,31 @@ const diffTextColor = value => {
   if (!Number.isFinite(num) || num === 0) return undefined;
   return num > 0 ? '#cf1322' : '#389e0d';
 };
+const targetActionColor = value => {
+  const action = String(value || '').trim().toUpperCase();
+  if (action === 'BUY' || action === 'BUYING') return 'red';
+  if (action === 'SELL' || action === 'SELLING') return 'green';
+  if (action === 'TRADING') return 'orange';
+  return 'default';
+};
+const targetActionLabel = record => (
+  String(record?.action || record?.side || 'HOLD').trim().toUpperCase() || 'HOLD'
+);
+const targetActionTooltip = record => {
+  const action = targetActionLabel(record);
+  const pendingBuy = formatNumber(record?.pending_buy_quantity);
+  const pendingSell = formatNumber(record?.pending_sell_quantity);
+  const executionDelta = formatNumber(record?.execution_delta_quantity ?? record?.delta_quantity);
+  return `${action} / 待买 ${pendingBuy} / 待卖 ${pendingSell} / 执行差额 ${executionDelta}`;
+};
+const renderTargetAction = (_, record) => {
+  const action = targetActionLabel(record);
+  return (
+    <Tooltip title={targetActionTooltip(record)}>
+      <Tag color={targetActionColor(action)}>{action}</Tag>
+    </Tooltip>
+  );
+};
 const getBlockLabel = record => {
   if (record?.blocked_status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
   if (record?.status === 'BLOCKED_NON_RETRYABLE_REJECTION') return '规则阻断';
@@ -940,7 +965,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '可卖', dataIndex: 'available_quantity', width: 110, render: value => formatNumber(value) },
     { title: '有效', dataIndex: 'effective_quantity', width: 100, render: value => formatNumber(value) },
     { title: '差额', dataIndex: 'delta_quantity', width: 100, render: value => <Text style={{ color: diffTextColor(value) }}>{formatNumber(value)}</Text> },
-    { title: '动作', dataIndex: 'side', width: 80, render: value => value ? <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> : <Tag>HOLD</Tag> },
+    { title: '动作', dataIndex: 'action', width: 100, render: renderTargetAction },
     { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
   ];
   const orderColumns = [
@@ -1091,7 +1116,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
           </div>
           {kind === 'order' ? <Tag color={orderStatusColor(record.status)}>{record.status || '-'}</Tag> : null}
           {kind === 'sub' ? <Tag color={record.enabled ? 'green' : 'default'}>{record.enabled ? '启用' : '停用'}</Tag> : null}
-          {kind === 'target' && record.side ? <Tag color={record.side === 'BUY' ? 'red' : 'green'}>{record.side}</Tag> : null}
+          {kind === 'target' ? renderTargetAction(null, record) : null}
           {kind === 'deliver' ? <Tag color={deliverStatusColor(record.status)}>{record.status || '-'}</Tag> : null}
         </div>
         <div className="executor-row-card__metrics">
