@@ -33,6 +33,10 @@ TUSHARE_REPO_DAILY_MAX_REQUESTS_PER_MINUTE = max(
 )
 TUSHARE_INDEX_WEIGHT_MAX_REQUESTS_PER_MINUTE = 420
 TUSHARE_FUND_DAILY_MAX_REQUESTS_PER_MINUTE = 420
+TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE", "120")),
+)
 
 
 class TushareUnsupportedError(NotImplementedError):
@@ -81,6 +85,10 @@ class TushareService(QuoteProvider):
     )
     _fund_daily_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_FUND_DAILY_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _report_rc_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
 
@@ -343,6 +351,88 @@ class TushareService(QuoteProvider):
             if column in frame.columns:
                 frame[column] = pd.to_datetime(frame[column], format="%Y%m%d", errors="coerce").dt.date
         return frame.drop_duplicates()
+
+    def get_a_stock_report_rc_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 3000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """分页获取A股券商卖方研报盈利预测、评级和目标价明细。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        symbol = self.normalize_symbol(ts_code) if ts_code else None
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        fields = (
+            "ts_code,name,report_date,report_title,report_type,classify,org_name,"
+            "author_name,quarter,op_rt,op_pr,tp,np,eps,pe,rd,roe,ev_ebitda,"
+            "rating,max_price,min_price,imp_dg,create_time"
+        )
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 3000))
+        first_error = None
+        while True:
+            try:
+                self._report_rc_rate_limiter.wait()
+                kwargs = {
+                    "start_date": start_value.strftime("%Y%m%d"),
+                    "end_date": end_value.strftime("%Y%m%d"),
+                    "fields": fields,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                if symbol:
+                    kwargs["ts_code"] = symbol
+                frame = self.pro.report_rc(**kwargs)
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare report_rc fetch failed for %s %s~%s offset=%s: %s",
+                    symbol or "ALL",
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            if raise_on_error and first_error is not None:
+                raise first_error
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=[
+                "ts_code",
+                "report_date",
+                "org_name",
+                "author_name",
+                "report_title",
+                "quarter",
+                "report_type",
+                "classify",
+            ],
+            keep="last",
+        )
+        if "report_date" in result.columns:
+            result["report_date"] = pd.to_datetime(result["report_date"], format="%Y%m%d", errors="coerce").dt.date
+        if "create_time" in result.columns:
+            result["create_time"] = pd.to_datetime(result["create_time"], errors="coerce")
+        for column in ("op_rt", "op_pr", "tp", "np", "eps", "pe", "rd", "roe", "ev_ebitda", "max_price", "min_price"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["ts_code", "report_date"]).sort_values(["report_date", "ts_code"])
 
     def get_a_stock_daily_frame(self, trade_date: date) -> pd.DataFrame:
         """获取某交易日A股全市场价格截面。"""
@@ -770,6 +860,58 @@ class TushareService(QuoteProvider):
         if "adj_factor" in result.columns:
             result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
         return result.dropna(subset=["ts_code", "trade_date", "adj_factor"]).sort_values(["ts_code", "trade_date"])
+
+    def get_a_stock_fund_daily_trade_date_frame(
+        self,
+        trade_date: date,
+        limit: int = 5000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """按交易日批量获取A股ETF/场内基金日行情。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+
+        frames = []
+        offset = 0
+        limit = max(1, int(limit or 5000))
+        fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+        first_error = None
+        while True:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = self.pro.fund_daily(
+                    trade_date=trade_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare fund_daily fetch failed for trade_date=%s offset=%s: %s",
+                    trade_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            if raise_on_error:
+                if first_error is not None:
+                    raise first_error
+                raise RuntimeError(f"Tushare fund_daily returned no rows for trade_date={trade_value}")
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "trade_date"]).sort_values(["ts_code", "trade_date"])
 
     def get_a_stock_fund_daily_range_frame(
         self,

@@ -21,6 +21,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_basic",
         "a_stock_adj_factor",
         "a_stock_income",
+        "a_stock_report_rc",
         "a_stock_fund_basic",
         "a_stock_fund_daily",
         "a_stock_fund_adj_factor",
@@ -91,6 +92,38 @@ class AStockIncome(AnalyticsBase):
     operate_income = Column(Float)
     rd_exp = Column(Float)
     report_type = Column(String(16))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockReportRc(AnalyticsBase):
+    """Tushare A股券商卖方研报盈利预测/评级/目标价明细，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_report_rc"
+
+    id = Column(String(80), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    report_date = Column(Date, nullable=False)
+    report_title = Column(String(512))
+    report_type = Column(String(64))
+    classify = Column(String(64))
+    org_name = Column(String(128))
+    author_name = Column(String(256))
+    quarter = Column(String(16))
+    op_rt = Column(Float)
+    op_pr = Column(Float)
+    tp = Column(Float)
+    np = Column(Float)
+    eps = Column(Float)
+    pe = Column(Float)
+    rd = Column(Float)
+    roe = Column(Float)
+    ev_ebitda = Column(Float)
+    rating = Column(String(64))
+    max_price = Column(Float)
+    min_price = Column(Float)
+    imp_dg = Column(String(64))
+    create_time = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -344,6 +377,9 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_ann ON a_stock_income(ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_symbol_date ON a_stock_report_rc(ts_code, report_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_date_quarter ON a_stock_report_rc(report_date, quarter)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_org_date ON a_stock_report_rc(org_name, report_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",

@@ -562,6 +562,127 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_incremental_fund_daily_batches_recent_trade_dates(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AStockFundDaily, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def __init__(self):
+                        self.date_calls = []
+
+                    def get_a_stock_etf_basic_frame(self, list_status="L"):
+                        return pd.DataFrame(
+                            [
+                                {"ts_code": "159001.SZ", "name": "ETF1", "exchange": "SZ", "list_status": "L"},
+                                {"ts_code": "159002.SZ", "name": "ETF2", "exchange": "SZ", "list_status": "L"},
+                            ]
+                        )
+
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        assert start_date == date(2026, 5, 30)
+                        assert end_date == date(2026, 6, 1)
+                        return pd.DataFrame(
+                            [
+                                {"cal_date": date(2026, 5, 30), "is_open": 0},
+                                {"cal_date": date(2026, 5, 31), "is_open": 0},
+                                {"cal_date": date(2026, 6, 1), "is_open": 1},
+                            ]
+                        )
+
+                    def get_a_stock_fund_daily_trade_date_frame(self, trade_date, **kwargs):
+                        self.date_calls.append((trade_date, kwargs))
+                        return pd.DataFrame(
+                            [
+                                {"ts_code": "159001.SZ", "trade_date": "20260601", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "pre_close": 0.99, "change": 0.01, "pct_chg": 1.0, "vol": 100, "amount": 1000},
+                                {"ts_code": "159002.SZ", "trade_date": "20260601", "open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "pre_close": 1.98, "change": 0.02, "pct_chg": 1.0, "vol": 200, "amount": 2000},
+                                {"ts_code": "159999.SZ", "trade_date": "20260601", "open": 9.0, "high": 9.1, "low": 8.9, "close": 9.0, "pre_close": 8.99, "change": 0.01, "pct_chg": 0.1, "vol": 900, "amount": 9000},
+                            ]
+                        )
+
+                    def get_a_stock_fund_daily_range_frame(self, *args, **kwargs):
+                        raise AssertionError("fund_daily incremental should batch by trade_date")
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                fake_tushare = FakeTushare()
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
+                try:
+                    service._insert_analytics_mappings(
+                        AStockFundDaily,
+                        [
+                            {
+                                "ts_code": "159001.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "open": 1.0,
+                                "high": 1.0,
+                                "low": 1.0,
+                                "close": 1.0,
+                                "pre_close": 1.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                            {
+                                "ts_code": "159002.SZ",
+                                "trade_date": date(2026, 5, 29),
+                                "open": 2.0,
+                                "high": 2.0,
+                                "low": 2.0,
+                                "close": 2.0,
+                                "pre_close": 2.0,
+                                "change": 0.0,
+                                "pct_chg": 0.0,
+                                "vol": 0.0,
+                                "amount": 0.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        ],
+                    )
+                    result = service.sync_fund_daily(
+                        date(2019, 5, 26),
+                        date(2026, 6, 1),
+                        incremental=True,
+                    )
+                    rows = session.execute(
+                        text("SELECT ts_code, trade_date FROM a_stock_fund_daily WHERE trade_date = DATE '2026-06-01' ORDER BY ts_code")
+                    ).fetchall()
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert fake_tushare.date_calls == [(date(2026, 6, 1), {"raise_on_error": True})]
+                assert result["jobs"] == 2
+                assert result["date_batches"] == 1
+                assert result["symbol_jobs"] == 0
+                assert result["trading_days"] == 1
+                assert result["saved_rows"] == 2
+                assert rows == [("159001.SZ", date(2026, 6, 1)), ("159002.SZ", date(2026, 6, 1))]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def test_incremental_fund_adj_factor_batches_recent_trade_dates(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)
@@ -649,6 +770,233 @@ class AStockBaseDataSyncTest(TestCase):
                 assert result["symbol_jobs"] == 0
                 assert result["trading_days"] == 1
                 assert result["saved_rows"] == 2
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_incremental_income_plan_skips_fresh_symbols(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                from datetime import date
+
+                from src.robot.a_stock_base_data_sync import _plan_income_symbol_ranges
+
+                jobs, stats = _plan_income_symbol_ranges(
+                    ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    None,
+                    date(2026, 6, 8),
+                    incremental=True,
+                    symbol_bounds={
+                        "000001.SZ": (date(2014, 1, 2), date(2026, 4, 30)),
+                        "000002.SZ": (date(2014, 1, 2), date(2026, 4, 1)),
+                        "000003.SZ": (None, None),
+                    },
+                )
+
+                assert stats == {
+                    "skipped": 1,
+                    "backfill": 1,
+                    "incremental": 1,
+                    "full": 0,
+                }
+                assert jobs == [
+                    ("000002.SZ", date(2026, 2, 15), date(2026, 6, 8), "incremental"),
+                    ("000003.SZ", date(2014, 1, 2), date(2026, 6, 8), "backfill"),
+                ]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_report_rc_upsert_normalizes_duplicate_research_rows(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AnalyticsSession
+                from src.robot.a_stock_base_data_sync import _bulk_upsert_report_rc_frame
+
+                session = AnalyticsSession()
+                try:
+                    saved = _bulk_upsert_report_rc_frame(
+                        session,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "ts_code": "000001.SZ",
+                                    "name": "平安银行",
+                                    "report_date": "20260529",
+                                    "report_title": "一季报点评",
+                                    "report_type": "公司点评",
+                                    "classify": "一般报告",
+                                    "org_name": "测试证券",
+                                    "author_name": "张三",
+                                    "quarter": "2026Q4",
+                                    "eps": "2.10",
+                                    "pe": "8.5",
+                                    "rating": "买入",
+                                    "max_price": "18.5",
+                                    "min_price": "16.0",
+                                    "create_time": "2026-05-29 20:10:00",
+                                },
+                                {
+                                    "ts_code": "000001.SZ",
+                                    "name": "平安银行",
+                                    "report_date": "20260529",
+                                    "report_title": "一季报点评",
+                                    "report_type": "公司点评",
+                                    "classify": "一般报告",
+                                    "org_name": "测试证券",
+                                    "author_name": "张三",
+                                    "quarter": "2026Q4",
+                                    "eps": "2.20",
+                                    "pe": "8.1",
+                                    "rating": "增持",
+                                    "max_price": "19.0",
+                                    "min_price": "16.5",
+                                    "create_time": "2026-05-29 21:10:00",
+                                },
+                            ]
+                        ),
+                    )
+                    rows = session.execute(
+                        text(
+                            "SELECT ts_code, report_date, org_name, author_name, quarter, "
+                            "eps, pe, rating, max_price, min_price "
+                            "FROM a_stock_report_rc"
+                        )
+                    ).fetchall()
+                finally:
+                    AnalyticsSession.remove()
+
+                assert saved == 1
+                assert len(rows) == 1
+                row = rows[0]
+                assert row[:5] == ("000001.SZ", date(2026, 5, 29), "测试证券", "张三", "2026Q4")
+                assert round(row[5], 4) == 2.2
+                assert round(row[6], 4) == 8.1
+                assert row[7:] == ("增持", 19.0, 16.5)
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_incremental_report_rc_uses_repair_window(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                from datetime import date, datetime
+
+                from src.core.analytics_database import AStockReportRc, AnalyticsSession
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def __init__(self):
+                        self.fetch_calls = []
+
+                    def get_a_stock_report_rc_range_frame(self, start_date, end_date, **kwargs):
+                        self.fetch_calls.append((start_date, end_date, kwargs))
+                        return pd.DataFrame(
+                            [
+                                {
+                                    "ts_code": "000001.SZ",
+                                    "name": "平安银行",
+                                    "report_date": "20260530",
+                                    "report_title": "最新点评",
+                                    "report_type": "公司点评",
+                                    "classify": "一般报告",
+                                    "org_name": "测试证券",
+                                    "author_name": "张三",
+                                    "quarter": "2026Q4",
+                                    "eps": 2.3,
+                                    "pe": 8.0,
+                                    "rating": "买入",
+                                    "max_price": 20.0,
+                                    "min_price": 17.0,
+                                }
+                            ]
+                        )
+
+                now = datetime(2026, 5, 29, 20, 0, 0)
+                fake_tushare = FakeTushare()
+                session = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=session, tushare_service=fake_tushare)
+                try:
+                    service._insert_analytics_mappings(
+                        AStockReportRc,
+                        [
+                            {
+                                "id": "seed",
+                                "ts_code": "000001.SZ",
+                                "name": "平安银行",
+                                "report_date": date(2026, 5, 29),
+                                "report_title": "旧点评",
+                                "report_type": "公司点评",
+                                "classify": "一般报告",
+                                "org_name": "测试证券",
+                                "author_name": "张三",
+                                "quarter": "2026Q4",
+                                "eps": 2.1,
+                                "pe": 8.5,
+                                "rating": "买入",
+                                "max_price": 18.5,
+                                "min_price": 16.0,
+                                "created_at": now,
+                                "updated_at": now,
+                            }
+                        ],
+                    )
+                    result = service.sync_report_rc(
+                        date(2020, 1, 1),
+                        date(2026, 5, 30),
+                        incremental=True,
+                    )
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+
+                assert result["start_date"] == "2026-05-22"
+                assert result["chunks"] == 1
+                assert result["saved_rows"] == 1
+                assert fake_tushare.fetch_calls == [
+                    (date(2026, 5, 22), date(2026, 5, 30), {"raise_on_error": True})
+                ]
                 """
             )
             env = os.environ.copy()

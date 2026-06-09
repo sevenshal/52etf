@@ -26,6 +26,7 @@ from ..core.analytics_database import (
     AStockNameChange,
     AStockOptionBasic,
     AStockOptionDaily,
+    AStockReportRc,
     AStockRepoDaily,
     AnalyticsSession,
 )
@@ -70,6 +71,7 @@ A_STOCK_REPO_DAILY_CHUNK_CALENDAR_DAYS = 70
 A_STOCK_CHINABOND_CHUNK_TRADING_DAYS = 10
 A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS = 30
 A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
+A_STOCK_FUND_DAILY_BATCH_BY_DATE_MAX_DAYS = 10
 A_STOCK_FUND_ADJ_FACTOR_BATCH_BY_DATE_MAX_DAYS = 10
 
 
@@ -141,6 +143,13 @@ def _date_series(frame: pd.DataFrame, column: str, fallback: Optional[date] = No
     if fallback is not None:
         parsed = parsed.fillna(pd.Timestamp(fallback))
     return parsed.dt.date
+
+
+def _datetime_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+    text_values = frame[column].astype("string").str.strip()
+    return pd.to_datetime(text_values.mask(text_values == ""), errors="coerce")
 
 
 def _numeric_series(frame: pd.DataFrame, column: str, digits: int) -> pd.Series:
@@ -1149,18 +1158,46 @@ class AStockBaseDataSyncService:
             if symbol_start <= end_value:
                 jobs.append((symbol, symbol_start, end_value))
 
-        jobs, trading_days = self._filter_jobs_to_trading_days(jobs)
+        trading_dates = self._trading_dates(
+            min(job[1] for job in jobs),
+            max(job[2] for job in jobs),
+        ) if jobs else []
+        jobs = [
+            job
+            for job in jobs
+            if any(job[1] <= trading_date <= job[2] for trading_date in trading_dates)
+        ]
+        trading_days = len(trading_dates)
 
         if not jobs:
             return {
                 "symbol_count": len(symbols),
                 "jobs": 0,
+                "date_batches": 0,
+                "symbol_jobs": 0,
                 "saved_rows": 0,
                 "errors": [],
                 "start_date": None,
                 "end_date": end_value.isoformat(),
                 "trading_days": trading_days,
             }
+
+        date_to_symbols: Dict[date, set] = {}
+        symbol_jobs: List[Tuple[str, date, date]] = []
+        if incremental and not explicit_start:
+            for symbol, symbol_start, symbol_end in jobs:
+                job_trading_dates = [
+                    trading_date
+                    for trading_date in trading_dates
+                    if symbol_start <= trading_date <= symbol_end
+                ]
+                if 0 < len(job_trading_dates) <= A_STOCK_FUND_DAILY_BATCH_BY_DATE_MAX_DAYS:
+                    for trading_date in job_trading_dates:
+                        date_to_symbols.setdefault(trading_date, set()).add(symbol)
+                else:
+                    symbol_jobs.append((symbol, symbol_start, symbol_end))
+        else:
+            symbol_jobs = list(jobs)
 
         def fetch_job(symbol: str, symbol_start: date, symbol_end: date) -> Tuple[str, date, date, pd.DataFrame]:
             frame = self.tushare.get_a_stock_fund_daily_range_frame(
@@ -1171,40 +1208,78 @@ class AStockBaseDataSyncService:
             )
             return symbol, symbol_start, symbol_end, frame
 
+        def fetch_trade_date(trading_date: date) -> Tuple[date, pd.DataFrame]:
+            frame = self.tushare.get_a_stock_fund_daily_trade_date_frame(
+                trading_date,
+                raise_on_error=True,
+            )
+            return trading_date, frame
+
         saved_rows = 0
         errors: List[Dict[str, str]] = []
-        completed = 0
         total_jobs = len(jobs)
-        workers = min(SYNC_WORKERS, total_jobs)
+        completed_work = 0
+        date_batches = sorted(date_to_symbols.items(), key=lambda item: item[0])
+        total_work = len(date_batches) + len(symbol_jobs)
 
-        def report_progress(symbol: str, symbol_start: date, symbol_end: date):
+        def report_progress(message: str):
             self._progress(
-                (
-                    f"批量同步A股ETF日行情 {completed}/{total_jobs}，"
-                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
-                ),
+                message,
                 64,
-                processed_jobs=completed,
-                total_jobs=total_jobs,
+                processed_jobs=completed_work,
+                total_jobs=total_work,
+                fund_daily_symbol_jobs_total=total_jobs,
+                fund_daily_date_batches=len(date_batches),
+                fund_daily_symbol_jobs=len(symbol_jobs),
                 fund_daily_saved_rows=saved_rows,
                 fund_daily_errors=len(errors),
             )
 
+        for trading_date, batch_symbols in date_batches:
+            symbol_values = sorted(batch_symbols)
+            try:
+                _, frame = fetch_trade_date(trading_date)
+                if not frame.empty:
+                    frame = frame[frame["ts_code"].astype("string").str.upper().isin(symbol_values)]
+                saved_rows += _bulk_upsert_fund_daily_frame(self.analytics_db, frame)
+            except Exception as exc:
+                fallback_jobs = [
+                    (symbol, trading_date, trading_date)
+                    for symbol in sorted(batch_symbols)
+                ]
+                symbol_jobs.extend(fallback_jobs)
+                total_work += len(fallback_jobs)
+                self.logger.warning(
+                    "A stock ETF daily date batch sync failed for %s, fallback to %s symbol jobs: %s",
+                    trading_date,
+                    len(fallback_jobs),
+                    exc,
+                )
+            completed_work += 1
+            report_progress(
+                f"按日期批量同步A股ETF日行情 {completed_work}/{total_work}，"
+                f"最近完成 {trading_date.isoformat()} ({len(symbol_values)}只)"
+            )
+
+        workers = min(SYNC_WORKERS, len(symbol_jobs))
         if workers <= 1:
-            for symbol, symbol_start, symbol_end in jobs:
+            for symbol, symbol_start, symbol_end in symbol_jobs:
                 try:
                     _, _, _, frame = fetch_job(symbol, symbol_start, symbol_end)
                     saved_rows += _bulk_upsert_fund_daily_frame(self.analytics_db, frame)
                 except Exception as exc:
                     self.logger.warning("A stock ETF daily sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
                     errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
-                completed += 1
-                report_progress(symbol, symbol_start, symbol_end)
+                completed_work += 1
+                report_progress(
+                    f"批量同步A股ETF日行情 {completed_work}/{total_work}，"
+                    f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                )
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(fetch_job, symbol, symbol_start, symbol_end): (symbol, symbol_start, symbol_end)
-                    for symbol, symbol_start, symbol_end in jobs
+                    for symbol, symbol_start, symbol_end in symbol_jobs
                 }
                 for future in as_completed(futures):
                     symbol, symbol_start, symbol_end = futures[future]
@@ -1214,12 +1289,17 @@ class AStockBaseDataSyncService:
                     except Exception as exc:
                         self.logger.warning("A stock ETF daily sync failed for %s %s~%s: %s", symbol, symbol_start, symbol_end, exc)
                         errors.append({"symbol": symbol, "start_date": symbol_start.isoformat(), "end_date": symbol_end.isoformat(), "error": str(exc)})
-                    completed += 1
-                    report_progress(symbol, symbol_start, symbol_end)
+                    completed_work += 1
+                    report_progress(
+                        f"批量同步A股ETF日行情 {completed_work}/{total_work}，"
+                        f"最近完成 {symbol} {symbol_start.isoformat()} ~ {symbol_end.isoformat()}"
+                    )
 
         return {
             "symbol_count": len(symbols),
             "jobs": total_jobs,
+            "date_batches": len(date_batches),
+            "symbol_jobs": len(symbol_jobs),
             "saved_rows": saved_rows,
             "errors": errors,
             "start_date": min(job[1] for job in jobs).isoformat(),
@@ -2004,6 +2084,87 @@ class AStockBaseDataSyncService:
 
         return {"chunks": total_chunks, "saved_rows": saved_rows, "errors": errors}
 
+    def sync_report_rc(
+        self,
+        start_date: date,
+        end_date: date,
+        incremental: bool = True,
+        explicit_start: Optional[date] = None,
+    ) -> Dict:
+        default_start = _parse_date(start_date) or DEFAULT_START_DATE
+        end_value = _parse_date(end_date)
+        if not end_value or default_start > end_value:
+            return {
+                "status": "skipped",
+                "start_date": None,
+                "end_date": end_value.isoformat() if end_value else None,
+                "chunks": 0,
+                "fetched_rows": 0,
+                "saved_rows": 0,
+                "errors": [],
+            }
+
+        latest_report_date = _latest_analytics_date(self.analytics_db, AStockReportRc, "report_date")
+        if explicit_start:
+            report_start = _parse_date(explicit_start) or default_start
+        elif incremental:
+            report_start = _repair_window_start(default_start, latest_report_date)
+        else:
+            report_start = default_start
+        if report_start > end_value:
+            return {
+                "status": "up_to_date",
+                "start_date": report_start.isoformat(),
+                "end_date": end_value.isoformat(),
+                "chunks": 0,
+                "fetched_rows": 0,
+                "saved_rows": 0,
+                "errors": [],
+                "latest_report_date": latest_report_date.isoformat() if latest_report_date else None,
+            }
+
+        jobs = list(_year_chunks(report_start, end_value))
+        saved_rows = 0
+        fetched_rows = 0
+        errors: List[Dict[str, str]] = []
+        total_jobs = len(jobs)
+        for completed, (chunk_start, chunk_end) in enumerate(jobs, start=1):
+            try:
+                frame = self.tushare.get_a_stock_report_rc_range_frame(
+                    chunk_start,
+                    chunk_end,
+                    raise_on_error=True,
+                )
+                fetched_rows += len(frame)
+                saved_rows += _bulk_upsert_report_rc_frame(self.analytics_db, frame)
+            except Exception as exc:
+                self.logger.warning("A stock report_rc sync failed for %s~%s: %s", chunk_start, chunk_end, exc)
+                errors.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "error": str(exc)})
+
+            self._progress(
+                (
+                    f"批量同步A股卖方盈利预测 {completed}/{total_jobs}，"
+                    f"最近完成 {chunk_start.isoformat()} ~ {chunk_end.isoformat()}"
+                ),
+                92,
+                processed_chunks=completed,
+                total_chunks=total_jobs,
+                report_rc_fetched_rows=fetched_rows,
+                report_rc_saved_rows=saved_rows,
+                report_rc_errors=len(errors),
+            )
+
+        return {
+            "status": "completed" if not errors else "partial",
+            "start_date": report_start.isoformat(),
+            "end_date": end_value.isoformat(),
+            "chunks": total_jobs,
+            "fetched_rows": fetched_rows,
+            "saved_rows": saved_rows,
+            "errors": errors,
+            "latest_report_date": latest_report_date.isoformat() if latest_report_date else None,
+        }
+
     def sync_base_data(
         self,
         start_date: Optional[date] = None,
@@ -2019,6 +2180,7 @@ class AStockBaseDataSyncService:
         latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
+        latest_report_rc_date = _latest_analytics_date(self.analytics_db, AStockReportRc, "report_date")
         name_change_rows_before = _count_analytics_table_rows(self.analytics_db, AStockNameChange.__tablename__)
         self.analytics_db.commit()
 
@@ -2191,6 +2353,26 @@ class AStockBaseDataSyncService:
             progress_callback=self.progress_callback,
         )
 
+        report_rc_default_start = DEFAULT_START_DATE
+        if explicit_start:
+            report_rc_start = explicit_start
+        elif incremental:
+            report_rc_start = _repair_window_start(report_rc_default_start, latest_report_rc_date)
+        else:
+            report_rc_start = report_rc_default_start
+        self._progress(
+            "同步A股卖方盈利预测/目标价缓存",
+            92,
+            start_date=report_rc_start.isoformat(),
+            end_date=end_value.isoformat(),
+        )
+        report_rc_result = self.sync_report_rc(
+            report_rc_default_start,
+            end_value,
+            incremental=incremental,
+            explicit_start=explicit_start,
+        )
+
         if explicit_start:
             fund_flow_start = explicit_start
         else:
@@ -2228,6 +2410,7 @@ class AStockBaseDataSyncService:
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
+        report_rc_rows = _count_analytics_table_rows(self.analytics_db, AStockReportRc.__tablename__)
         option_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionBasic.__tablename__)
         option_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionDaily.__tablename__)
         repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
@@ -2294,6 +2477,7 @@ class AStockBaseDataSyncService:
                 "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
                 "chinabond": A_STOCK_CHINABOND_WARMUP_DAYS,
                 "income": INCOME_HISTORY_LOOKBACK_DAYS,
+                "report_rc": SYNC_INCREMENTAL_REPAIR_WINDOW_DAYS,
             },
             "reference_full_refresh": reference_full_refresh,
             "fund_basic_rows": fund_basic_rows,
@@ -2316,6 +2500,8 @@ class AStockBaseDataSyncService:
             "fund_daily_end_date": fund_daily_result.get("end_date"),
             "fund_daily_symbol_count": fund_daily_result.get("symbol_count"),
             "fund_daily_jobs": fund_daily_result.get("jobs"),
+            "fund_daily_date_batches": fund_daily_result.get("date_batches"),
+            "fund_daily_symbol_jobs": fund_daily_result.get("symbol_jobs"),
             "fund_daily_saved_rows": fund_daily_result.get("saved_rows"),
             "fund_daily_errors": len(fund_daily_result.get("errors") or []),
             "fund_adj_factor_start_date": fund_adj_factor_result.get("start_date"),
@@ -2377,6 +2563,13 @@ class AStockBaseDataSyncService:
             "income_total_seconds": income_result.get("total_seconds"),
             "income_avg_fetch_ms": income_result.get("avg_fetch_ms"),
             "income_insert_batches": income_result.get("insert_batches"),
+            "report_rc_start_date": report_rc_result.get("start_date"),
+            "report_rc_end_date": report_rc_result.get("end_date"),
+            "report_rc_chunks": report_rc_result.get("chunks"),
+            "report_rc_fetched_rows": report_rc_result.get("fetched_rows"),
+            "report_rc_saved_rows": report_rc_result.get("saved_rows"),
+            "report_rc_errors": len(report_rc_result.get("errors") or []),
+            "report_rc_latest_report_date_before": report_rc_result.get("latest_report_date"),
             "fund_flow_mode": fund_flow_result.get("mode"),
             "fund_flow_source": fund_flow_result.get("source"),
             "fund_flow_symbols": fund_flow_result.get("symbols") or fund_flow_result.get("fetched_symbols"),
@@ -2395,6 +2588,7 @@ class AStockBaseDataSyncService:
                 AStockFundFlowDaily.__tablename__: fund_flow_rows,
                 AStockAdjFactor.__tablename__: market_adj_factor_rows,
                 AStockIncome.__tablename__: income_rows,
+                AStockReportRc.__tablename__: report_rc_rows,
                 AStockFundDaily.__tablename__: fund_daily_rows,
                 AStockFundAdjFactor.__tablename__: fund_adj_factor_rows,
                 AStockIndexDaily.__tablename__: index_rows,
@@ -2474,6 +2668,96 @@ def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int
     # register one DataFrame and let DuckDB execute a set-based INSERT OR REPLACE.
     _insert_or_replace_analytics_frame(
         table.name,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+def _normalize_report_rc_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "id",
+        "ts_code",
+        "name",
+        "report_date",
+        "report_title",
+        "report_type",
+        "classify",
+        "org_name",
+        "author_name",
+        "quarter",
+        "op_rt",
+        "op_pr",
+        "tp",
+        "np",
+        "eps",
+        "pe",
+        "rd",
+        "roe",
+        "ev_ebitda",
+        "rating",
+        "max_price",
+        "min_price",
+        "imp_dg",
+        "create_time",
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["name"] = _clean_text_series(frame, "name")
+    normalized["report_date"] = _date_series(frame, "report_date")
+    normalized["report_title"] = _clean_text_series(frame, "report_title")
+    normalized["report_type"] = _clean_text_series(frame, "report_type")
+    normalized["classify"] = _clean_text_series(frame, "classify")
+    normalized["org_name"] = _clean_text_series(frame, "org_name")
+    normalized["author_name"] = _clean_text_series(frame, "author_name")
+    normalized["quarter"] = _clean_text_series(frame, "quarter")
+    for column in ("op_rt", "op_pr", "tp", "np", "eps", "pe", "rd", "roe", "ev_ebitda", "max_price", "min_price"):
+        normalized[column] = _numeric_series(frame, column, 6)
+    normalized["rating"] = _clean_text_series(frame, "rating")
+    normalized["imp_dg"] = _clean_text_series(frame, "imp_dg")
+    normalized["create_time"] = _datetime_series(frame, "create_time")
+    normalized = normalized.dropna(subset=["ts_code", "report_date"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    key_columns = [
+        "ts_code",
+        "report_date",
+        "org_name",
+        "author_name",
+        "report_title",
+        "quarter",
+        "report_type",
+        "classify",
+    ]
+    normalized["id"] = normalized[key_columns].apply(
+        lambda row: hashlib.sha1(
+            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
+        ).hexdigest(),
+        axis=1,
+    )
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_report_rc_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    normalized = _normalize_report_rc_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockReportRc.__tablename__,
         columns,
         normalized.loc[:, columns],
     )
@@ -2912,6 +3196,9 @@ def _plan_income_symbol_ranges(
                 sync_kind = "backfill"
         elif incremental:
             if latest_ann_date:
+                if latest_is_fresh:
+                    stats["skipped"] += 1
+                    continue
                 symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
                 sync_kind = "incremental"
             else:
