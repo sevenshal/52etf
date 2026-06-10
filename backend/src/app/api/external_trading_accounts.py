@@ -66,6 +66,7 @@ from ...core.services.external_trading_market import (
 
 from ...core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
+    MANUAL_PARENT_FILL_ELIGIBLE_STATUSES,
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
     STRATEGY_SNOWBALL,
     STRATEGY_PORTFOLIO_COPY,
@@ -980,10 +981,20 @@ def _attach_parent_order_repair_summary(
     item.update(summary)
     status = (row.status or "").upper()
     ptrade_status = str(row.ptrade_status or "")
+    is_manual_external_buy_fill = (
+        str(row.side or "").upper() == "BUY"
+        and status in MANUAL_PARENT_FILL_ELIGIBLE_STATUSES
+        and safe_int(row.filled_quantity) <= 0
+    )
     item["needs_fill_repair"] = (
         summary.get("child_count", 0) > 0
         and safe_int(summary.get("child_remaining_quantity")) > 0
-        and (status == "FILLED" or ptrade_status == "8" or safe_int(row.filled_quantity) > 0)
+        and (
+            status == "FILLED"
+            or ptrade_status == "8"
+            or safe_int(row.filled_quantity) > 0
+            or is_manual_external_buy_fill
+        )
     )
 
 

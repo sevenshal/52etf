@@ -10,6 +10,7 @@ from ptrade_robot import ptrade_client
 from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trade
 from src.app.api.external_trading_accounts import (
     _apply_event_sub_account_filter,
+    _attach_parent_order_repair_summary,
     _event_display_amount,
     _serialize_deliver_record_status,
     _serialize_event_log_status,
@@ -37,6 +38,7 @@ from src.core.services.external_trading_ledger import (
     reconcile_deliver_records,
     record_external_event_logs,
     record_submission_result,
+    repair_parent_order_manual_fill,
 )
 
 
@@ -60,6 +62,105 @@ class PTradeOrderStatusTest(TestCase):
             identifier="ptrade",
             market_type="A_STOCK",
         )
+
+    def test_failed_buy_parent_order_can_be_manually_confirmed_as_external_fill(self):
+        db = self._db_session()
+        account = ExternalTradingAccount(
+            id=2,
+            account_id="acct",
+            name="PTrade",
+            identifier="ptrade",
+            market_type="US_STOCK",
+            commission_rate_pct=0.0,
+            min_commission=0.0,
+            stamp_tax_rate_pct=0.0,
+        )
+        sub_account = ExternalTradingSubAccount(
+            id=88,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="SOXL策略",
+            strategy_type="soxl_fear_strategy",
+            cash_allocated=30000.0,
+            cash_available=30000.0,
+        )
+        db.add_all([account, sub_account])
+        db.flush()
+        parent = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            strategy_type="netted_executor",
+            client_order_id="parent-client-id",
+            symbol="SOXL.US",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=126,
+            filled_quantity=0,
+            remaining_quantity=126,
+            status="FAILED",
+            message="获取 SOXL.US 对手方最优价失败: 无可用 ask1",
+        )
+        db.add(parent)
+        db.flush()
+        child = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=88,
+            parent_order_id=parent.id,
+            allocation_role="CHILD",
+            strategy_type="soxl_fear_strategy",
+            client_order_id="child-client-id",
+            symbol="SOXL.US",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=126,
+            filled_quantity=0,
+            remaining_quantity=126,
+            status="FAILED",
+        )
+        db.add(child)
+        db.flush()
+
+        item = {}
+        _attach_parent_order_repair_summary(
+            item,
+            parent,
+            {
+                "child_count": 1,
+                "child_remaining_quantity": 126,
+                "child_unfilled_count": 1,
+            },
+        )
+
+        self.assertTrue(item["needs_fill_repair"])
+
+        result = repair_parent_order_manual_fill(
+            db,
+            order=parent,
+            fill_price=197.74,
+            traded_at=datetime(2026, 6, 10, 4, 5, 0),
+            note="外部账户手动买入",
+        )
+        db.flush()
+
+        fills = db.query(ExternalTradingOrderFill).order_by(ExternalTradingOrderFill.id.asc()).all()
+        position = db.query(ExternalTradingLedgerPosition).filter_by(sub_account_id=88, symbol="SOXL.US").first()
+
+        self.assertEqual(126, result["repair_quantity"])
+        self.assertEqual("FILLED", parent.status)
+        self.assertEqual("FILLED", child.status)
+        self.assertEqual(126, parent.filled_quantity)
+        self.assertEqual(126, child.filled_quantity)
+        self.assertEqual(0, parent.remaining_quantity)
+        self.assertEqual(0, child.remaining_quantity)
+        self.assertEqual(2, len(fills))
+        self.assertIsNone(fills[0].sub_account_id)
+        self.assertEqual(88, fills[1].sub_account_id)
+        self.assertEqual("manual_parent_external_fill", parent.raw_order_event["type"])
+        self.assertEqual(126, position.quantity)
+        self.assertAlmostEqual(197.74, position.avg_cost)
+        self.assertAlmostEqual(5084.76, sub_account.cash_available)
 
     def _red_stock_deliver_record(self):
         return {
