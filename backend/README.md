@@ -7,6 +7,16 @@ uvicorn src.app.main:app --host 0.0.0.0 --port 8001 --reload
 
 - [外部交易账号长连接接入文档](docs/external-trading-websocket-integration.md)
 
+## SQLite 事务约束
+
+线上主库使用 SQLite。写交易、机器人、定时任务、外部交易同步相关代码时，必须避免长事务：
+
+- 不要在 `get_db_ctx()` / `get_external_trading_db_ctx()` 的 `with` 作用域里执行 `await`、网络请求、券商/外部交易执行器调用、邮件发送、长时间计算或批量数据同步。
+- ORM 对象不要跨 session 长时间使用；需要事务外处理时，先在短事务里复制成普通 dict 或 `SimpleNamespace` 快照，再关闭 session。
+- 推荐模式是：短事务读取配置快照 -> 事务外调用行情/券商/执行器/计算 -> 短事务写状态和日志。
+- 如果必须同时操作主库和外部交易库，不要把两个 DB session 和外部 IO 包在同一个作用域里；先完成一个库的短写，再用另一个短事务回写状态。
+- 高频机器人路径里，清理、日志、状态更新都要保持短小，必要时加 retry/降频，而不是靠拉长 SQLite timeout。
+
 ## 开发说明：死代码扫描
 
 后端项目已经提供一套死代码检查入口：

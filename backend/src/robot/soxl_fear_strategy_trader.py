@@ -5,6 +5,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, time as dtime
 from math import ceil, floor
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -794,6 +795,69 @@ class SoxlFearStrategyTrader:
         trade = await snapshot.order_service.place_market_order(config.symbol, action, int(quantity))
         return str(getattr(getattr(trade, "order", None), "orderId", ""))
 
+    def _persist_run_result(
+        self,
+        *,
+        config_id: int,
+        account_id: str,
+        symbol: str,
+        trigger_source: str,
+        action: str,
+        status: str,
+        message: str,
+        state_values: SimpleNamespace,
+        run_message: Optional[str] = None,
+        price: Optional[float] = None,
+        quantity: Optional[int] = None,
+        fear_score: Optional[float] = None,
+        volume_ratio: Optional[float] = None,
+        position_ratio_before: Optional[float] = None,
+        position_ratio_after: Optional[float] = None,
+    ):
+        """Persist strategy state, run status, and log in one short main-db write."""
+        with get_db_ctx() as db:
+            state = db.query(SoxlFearStrategyState).filter(
+                SoxlFearStrategyState.config_id == config_id
+            ).first()
+            if not state:
+                state = SoxlFearStrategyState(
+                    config_id=config_id,
+                    account_id=account_id,
+                    symbol=symbol,
+                )
+                db.add(state)
+
+            state.account_id = account_id
+            state.symbol = symbol
+            state.last_processed_date = state_values.last_processed_date
+            state.cooldown_remaining_days = int(state_values.cooldown_remaining_days or 0)
+            state.greed_peak_price = state_values.greed_peak_price
+            state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
+
+            db.add(
+                SoxlFearStrategyLog(
+                    config_id=config_id,
+                    account_id=account_id,
+                    symbol=symbol,
+                    trigger_source=trigger_source,
+                    action=action,
+                    status=status,
+                    price=price,
+                    quantity=quantity,
+                    fear_score=fear_score,
+                    volume_ratio=volume_ratio,
+                    position_ratio_before=position_ratio_before,
+                    position_ratio_after=position_ratio_after,
+                    message=message[:1000],
+                )
+            )
+
+            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
+            if config:
+                config.last_run_at = datetime.now()
+                config.last_run_status = status
+                config.last_run_message = (run_message if run_message is not None else message)[:500]
+
     async def run_config_once(self, config: SoxlFearStrategyConfig, trigger_source: str = "auto", ignore_enabled: bool = False):
         config_id = config.id
         masked_account_id = mask_account_id(config.account_id)
@@ -824,6 +888,14 @@ class SoxlFearStrategyTrader:
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
             rebalance_notification = None
+            order_action = None
+            order_quantity = 0
+            order_message_template = None
+            trade_action = None
+            trade_quantity = 0
+            trade_message = ""
+            log_action = "CHECK"
+            status = "INFO"
 
             with get_db_ctx() as db:
                 persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
@@ -831,11 +903,16 @@ class SoxlFearStrategyTrader:
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
 
-                state = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config_id).first()
-                if not state:
-                    state = SoxlFearStrategyState(config_id=config_id, account_id=config.account_id, symbol=symbol)
-                    db.add(state)
-                    db.flush()
+                state_row = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config_id).first()
+                state = SimpleNamespace(
+                    config_id=config_id,
+                    account_id=config.account_id,
+                    symbol=symbol,
+                    last_processed_date=getattr(state_row, "last_processed_date", None),
+                    cooldown_remaining_days=int(getattr(state_row, "cooldown_remaining_days", 0) or 0),
+                    greed_peak_price=getattr(state_row, "greed_peak_price", None),
+                    take_profit_cycle_sell_count=int(getattr(state_row, "take_profit_cycle_sell_count", 0) or 0),
+                )
 
                 shares = int(broker_snapshot.shares)
                 available_shares = int(broker_snapshot.available_shares)
@@ -869,31 +946,15 @@ class SoxlFearStrategyTrader:
                         state.greed_peak_price = max(float(state.greed_peak_price or current_price), current_price)
 
                 if broker_snapshot.has_today_order:
-                    message = "今日已存在订单，跳过重复执行"
-                    self._append_log(
-                        config_id,
-                        config.account_id,
-                        symbol,
-                        trigger_source,
-                        "SKIP",
-                        "SKIPPED",
-                        message,
-                        price=current_price,
-                        fear_score=cnn_score,
-                        volume_ratio=volume_ratio,
-                        position_ratio_before=position_ratio_before,
-                        position_ratio_after=position_ratio_before,
-                    )
-                    self._update_run_status(config_id, "SKIPPED", message)
-                    return
+                    trade_message = "今日已存在订单，跳过重复执行"
+                    log_action = "SKIP"
+                    status = "SKIPPED"
 
-                trade_action = None
-                trade_quantity = 0
-                trade_message = ""
                 position_ratio_after = position_ratio_before
 
                 if (
-                    shares > 0
+                    log_action != "SKIP"
+                    and shares > 0
                     and can_trade
                     and is_greedy
                     and state.greed_peak_price
@@ -917,53 +978,33 @@ class SoxlFearStrategyTrader:
 
                     if drawdown_from_peak >= float(config.trailing_stop_pct) and avg_cost > 0 and current_price > avg_cost and current_position_ratio > float(config.min_position_pct_after_take_profit):
                         if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
-                            order_id = await self._place_order(
-                                config,
-                                broker_snapshot,
-                                "SELL",
-                                trade_quantity,
-                                current_price,
-                                trigger_source=trigger_source,
+                            order_action = "SELL"
+                            order_quantity = trade_quantity
+                            order_message_template = (
+                                f"CNN={cnn_score:.2f} 进入止盈区，价格较峰值回撤 {drawdown_from_peak:.2f}% "
+                                "触发移动止盈，订单ID={order_id}"
                             )
-                            trade_action = "SELL"
-                            state.cooldown_remaining_days = int(config.cooldown_days)
-                            state.take_profit_cycle_sell_count += 1
-                            if shares - trade_quantity <= 0 or state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
-                                state.greed_peak_price = None
-                            else:
-                                state.greed_peak_price = current_price
                             position_ratio_after = max(0.0, ((shares - trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else 0.0)
-                            trade_message = f"CNN={cnn_score:.2f} 进入止盈区，价格较峰值回撤 {drawdown_from_peak:.2f}% 触发移动止盈，订单ID={order_id}"
                         else:
                             trade_message = "止盈信号成立，但可卖数量过小或未达到调仓阈值"
                     else:
                         trade_message = f"处于止盈区，等待进一步回撤。当前回撤 {drawdown_from_peak:.2f}%"
 
-                if not trade_action and is_fear and volume_ratio >= float(config.volume_ratio_threshold) and can_trade:
+                if log_action != "SKIP" and not order_action and is_fear and volume_ratio >= float(config.volume_ratio_threshold) and can_trade:
                     buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
                     trade_quantity = min(floor(buy_amount / current_price), floor(available_cash / current_price))
                     actual_buy_amount = trade_quantity * current_price
                     trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
                     if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
-                        order_id = await self._place_order(
-                            config,
-                            broker_snapshot,
-                            "BUY",
-                            trade_quantity,
-                            current_price,
-                            trigger_source=trigger_source,
-                        )
-                        trade_action = "BUY"
-                        state.cooldown_remaining_days = int(config.cooldown_days)
-                        state.greed_peak_price = None
-                        state.take_profit_cycle_sell_count = 0
+                        order_action = "BUY"
+                        order_quantity = trade_quantity
+                        order_message_template = f"CNN={cnn_score:.2f} 进入买入区，{volume_detail} 放大，订单ID={{order_id}}"
                         position_ratio_after = ((shares + trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
-                        trade_message = f"CNN={cnn_score:.2f} 进入买入区，{volume_detail} 放大，订单ID={order_id}"
                     else:
                         trade_message = "买入信号成立，但可买数量过小或未达到调仓阈值"
 
-                if not trade_action and not trade_message:
+                if log_action != "SKIP" and not order_action and not trade_message:
                     if not can_trade:
                         trade_message = f"处于冷却期，剩余 {state.cooldown_remaining_days} 个交易日"
                     elif is_fear and volume_ratio < float(config.volume_ratio_threshold):
@@ -983,50 +1024,75 @@ class SoxlFearStrategyTrader:
                     else:
                         trade_message = "当前无买卖信号"
 
-                status = "SUCCESS" if trade_action else "INFO"
-                volume_ratio_detail = f" | volume_ratio={volume_ratio:.4f}"
-                if abs(volume_ratio - raw_volume_ratio) >= 0.00005:
-                    volume_ratio_detail += f" | raw_volume_ratio={raw_volume_ratio:.4f}"
-                self._append_log(
-                    config_id,
-                    config.account_id,
-                    symbol,
-                    trigger_source,
-                    trade_action or "CHECK",
-                    status,
-                    (
-                        f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
-                        f"{volume_ratio_detail}"
-                        f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
-                    ),
-                    price=current_price,
-                    quantity=trade_quantity if trade_action else None,
-                    fear_score=cnn_score,
-                    volume_ratio=volume_ratio,
-                    position_ratio_before=position_ratio_before,
-                    position_ratio_after=position_ratio_after,
+            if order_action:
+                order_id = await self._place_order(
+                    config,
+                    broker_snapshot,
+                    order_action,
+                    order_quantity,
+                    current_price,
+                    trigger_source=trigger_source,
                 )
-                self._update_run_status(config_id, status, trade_message)
-                logger.info("SOXL fear strategy %s config=%s result=%s msg=%s", masked_account_id, config_id, trade_action or "CHECK", trade_message)
-                if trade_action:
-                    rebalance_notification = {
-                        "config_id": config_id,
-                        "masked_account_id": masked_account_id,
-                        "account_type": config.account_type or "-",
-                        "symbol": symbol,
-                        "trigger_source": trigger_source,
-                        "action": trade_action,
-                        "quantity": trade_quantity,
-                        "price": current_price,
-                        "position_ratio_before": position_ratio_before,
-                        "position_ratio_after": position_ratio_after,
-                        "cnn_score": cnn_score,
-                        "cnn_timestamp": cnn_timestamp,
-                        "volume_ratio": volume_ratio,
-                        "raw_volume_ratio": raw_volume_ratio,
-                        "market_snapshot": dict(market_snapshot),
-                        "trade_message": trade_message,
-                    }
+                trade_action = order_action
+                trade_quantity = order_quantity
+                trade_message = order_message_template.format(order_id=order_id)
+                status = "SUCCESS"
+                state.cooldown_remaining_days = int(config.cooldown_days)
+                if trade_action == "SELL":
+                    state.take_profit_cycle_sell_count += 1
+                    if shares - trade_quantity <= 0 or state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
+                        state.greed_peak_price = None
+                    else:
+                        state.greed_peak_price = current_price
+                else:
+                    state.greed_peak_price = None
+                    state.take_profit_cycle_sell_count = 0
+
+            volume_ratio_detail = f" | volume_ratio={volume_ratio:.4f}"
+            if abs(volume_ratio - raw_volume_ratio) >= 0.00005:
+                volume_ratio_detail += f" | raw_volume_ratio={raw_volume_ratio:.4f}"
+            log_message = (
+                f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
+                f"{volume_ratio_detail}"
+                f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
+            )
+            self._persist_run_result(
+                config_id=config_id,
+                account_id=config.account_id,
+                symbol=symbol,
+                trigger_source=trigger_source,
+                action=trade_action or log_action,
+                status=status,
+                message=log_message,
+                state_values=state,
+                run_message=trade_message,
+                price=current_price,
+                quantity=trade_quantity if trade_action else None,
+                fear_score=cnn_score,
+                volume_ratio=volume_ratio,
+                position_ratio_before=position_ratio_before,
+                position_ratio_after=position_ratio_after,
+            )
+            logger.info("SOXL fear strategy %s config=%s result=%s msg=%s", masked_account_id, config_id, trade_action or "CHECK", trade_message)
+            if trade_action:
+                rebalance_notification = {
+                    "config_id": config_id,
+                    "masked_account_id": masked_account_id,
+                    "account_type": config.account_type or "-",
+                    "symbol": symbol,
+                    "trigger_source": trigger_source,
+                    "action": trade_action,
+                    "quantity": trade_quantity,
+                    "price": current_price,
+                    "position_ratio_before": position_ratio_before,
+                    "position_ratio_after": position_ratio_after,
+                    "cnn_score": cnn_score,
+                    "cnn_timestamp": cnn_timestamp,
+                    "volume_ratio": volume_ratio,
+                    "raw_volume_ratio": raw_volume_ratio,
+                    "market_snapshot": dict(market_snapshot),
+                    "trade_message": trade_message,
+                }
             if rebalance_notification:
                 self._send_rebalance_notification(**rebalance_notification)
         except Exception as exc:

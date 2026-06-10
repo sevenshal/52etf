@@ -3748,6 +3748,173 @@ def _factor_live_error_message(exc: Exception) -> str:
     return str(detail or exc or exc.__class__.__name__)
 
 
+def _factor_live_config_snapshot(config: FactorLiveTradingConfig) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=config.id,
+        account_id=config.account_id,
+        name=config.name,
+        enabled=config.enabled,
+        request_payload=config.request_payload,
+        external_trading_account_id=config.external_trading_account_id,
+        live_sub_account_id=config.live_sub_account_id,
+        signal_time=config.signal_time,
+        signal_timezone=config.signal_timezone,
+        execution_time=config.execution_time,
+        execution_timezone=config.execution_timezone,
+        last_signal_date=config.last_signal_date,
+        last_signal_at=config.last_signal_at,
+        last_signal_status=config.last_signal_status,
+        last_signal_message=config.last_signal_message,
+        last_signal_payload=config.last_signal_payload,
+        last_execution_signal_date=config.last_execution_signal_date,
+        last_execution_at=config.last_execution_at,
+        last_execution_status=config.last_execution_status,
+        last_execution_message=config.last_execution_message,
+        last_execution_payload=config.last_execution_payload,
+    )
+
+
+def _load_enabled_factor_live_config_snapshots() -> List[SimpleNamespace]:
+    with get_db_ctx() as db:
+        configs = (
+            db.query(FactorLiveTradingConfig)
+            .filter(FactorLiveTradingConfig.enabled == True)  # noqa: E712
+            .order_by(FactorLiveTradingConfig.id.asc())
+            .all()
+        )
+        return [_factor_live_config_snapshot(config) for config in configs]
+
+
+def _apply_factor_live_snapshot_updates(config: SimpleNamespace, updates: Dict[str, Any]) -> None:
+    for key, value in updates.items():
+        setattr(config, key, value)
+
+
+def _persist_factor_live_signal_success(config_id: int, plan: Dict[str, Any]) -> Dict[str, Any]:
+    signal_date_value = date.fromisoformat(plan["signal_date"])
+    payload = jsonable_encoder(plan)
+    now = datetime.now()
+    with get_db_ctx() as db:
+        config = db.query(FactorLiveTradingConfig).filter(FactorLiveTradingConfig.id == config_id).first()
+        if not config:
+            raise ValueError("因子线上交易配置不存在")
+        config.last_signal_date = signal_date_value
+        config.last_signal_at = now
+        config.last_signal_status = plan.get("status")
+        config.last_signal_message = plan.get("message")
+        config.last_signal_payload = payload
+        config.updated_at = now
+        _add_factor_live_log(
+            db,
+            config,
+            action="SIGNAL",
+            status=plan.get("status") or "OK",
+            message=plan.get("message"),
+            payload=plan,
+            signal_date=signal_date_value,
+        )
+    return {
+        "last_signal_date": signal_date_value,
+        "last_signal_at": now,
+        "last_signal_status": plan.get("status"),
+        "last_signal_message": plan.get("message"),
+        "last_signal_payload": payload,
+    }
+
+
+def _persist_factor_live_signal_failure(config_id: int, error_message: str) -> Dict[str, Any]:
+    now = datetime.now()
+    with get_db_ctx() as db:
+        config = db.query(FactorLiveTradingConfig).filter(FactorLiveTradingConfig.id == config_id).first()
+        if not config:
+            logger.warning("Factor live config not found while persisting signal failure: %s", config_id)
+            return {}
+        config.last_signal_at = now
+        config.last_signal_status = "FAILED"
+        config.last_signal_message = error_message[:1000]
+        config.updated_at = now
+        _add_factor_live_log(
+            db,
+            config,
+            action="SIGNAL",
+            status="FAILED",
+            message=error_message,
+            payload={},
+        )
+    return {
+        "last_signal_at": now,
+        "last_signal_status": "FAILED",
+        "last_signal_message": error_message[:1000],
+    }
+
+
+def _persist_factor_live_execution_result(
+    config_id: int,
+    execution_result: Dict[str, Any],
+    execution_status: str,
+) -> Dict[str, Any]:
+    signal_date_value = _normalize_signal_payload_date(execution_result.get("signal") or {})
+    payload = jsonable_encoder(execution_result)
+    now = datetime.now()
+    with get_db_ctx() as db:
+        config = db.query(FactorLiveTradingConfig).filter(FactorLiveTradingConfig.id == config_id).first()
+        if not config:
+            raise ValueError("因子线上交易配置不存在")
+        config.last_execution_signal_date = signal_date_value
+        config.last_execution_at = now
+        config.last_execution_status = execution_status
+        config.last_execution_message = execution_result.get("message")
+        config.last_execution_payload = payload
+        config.updated_at = now
+        _add_factor_live_log(
+            db,
+            config,
+            action="EXECUTE",
+            status=execution_status,
+            message=execution_result.get("message"),
+            payload=execution_result,
+            signal_date=signal_date_value,
+        )
+    return {
+        "last_execution_signal_date": signal_date_value,
+        "last_execution_at": now,
+        "last_execution_status": execution_status,
+        "last_execution_message": execution_result.get("message"),
+        "last_execution_payload": payload,
+    }
+
+
+def _persist_factor_live_execution_failure(
+    config_id: int,
+    error_message: str,
+    signal_date_value: Optional[date],
+) -> Dict[str, Any]:
+    now = datetime.now()
+    with get_db_ctx() as db:
+        config = db.query(FactorLiveTradingConfig).filter(FactorLiveTradingConfig.id == config_id).first()
+        if not config:
+            logger.warning("Factor live config not found while persisting execution failure: %s", config_id)
+            return {}
+        config.last_execution_at = now
+        config.last_execution_status = "FAILED"
+        config.last_execution_message = error_message[:1000]
+        config.updated_at = now
+        _add_factor_live_log(
+            db,
+            config,
+            action="EXECUTE",
+            status="FAILED",
+            message=error_message,
+            payload={"signal_date": signal_date_value.isoformat() if signal_date_value else None},
+            signal_date=signal_date_value,
+        )
+    return {
+        "last_execution_at": now,
+        "last_execution_status": "FAILED",
+        "last_execution_message": error_message[:1000],
+    }
+
+
 def _send_factor_live_automation_alert(
     config: FactorLiveTradingConfig,
     *,
@@ -3972,7 +4139,7 @@ def _cash_fill_weights_from_signal(signal_payload: Dict[str, Any], symbols: List
 
 
 async def _execute_factor_live_signal(
-    db: ORMSession,
+    db: Optional[ORMSession],
     external_db: ORMSession,
     config: FactorLiveTradingConfig,
     *,
@@ -4288,37 +4455,32 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
         "execution_waiting": 0,
         "errors": [],
     }
-    with get_db_ctx() as db, get_external_trading_db_ctx() as external_db:
-        configs = (
-            db.query(FactorLiveTradingConfig)
-            .filter(FactorLiveTradingConfig.enabled == True)  # noqa: E712
-            .order_by(FactorLiveTradingConfig.id.asc())
-            .all()
+    configs = _load_enabled_factor_live_config_snapshots()
+    result["checked"] = len(configs)
+    for config in configs:
+        market_kind = _factor_live_market_kind(config)
+        try:
+            signal_now = datetime.now(ZoneInfo(config.signal_timezone or "Asia/Shanghai"))
+        except ZoneInfoNotFoundError:
+            signal_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        signal_already_checked_today = (
+            config.last_signal_date
+            and config.last_signal_date == signal_now.date()
         )
-        result["checked"] = len(configs)
-        for config in configs:
-            market_kind = _factor_live_market_kind(config)
+        signal_trading_day = _is_us_trading_day(signal_now.date()) if market_kind == "us" else _is_china_trading_day(signal_now.date())
+        calendar_signal_day = (
+            signal_trading_day
+            and _is_time_reached(signal_now, config.signal_time)
+            and _factor_live_is_calendar_signal_day(config, signal_now.date())
+        )
+        if (
+            signal_trading_day
+            and _is_time_reached(signal_now, config.signal_time)
+            and calendar_signal_day
+            and not signal_already_checked_today
+        ):
             try:
-                signal_now = datetime.now(ZoneInfo(config.signal_timezone or "Asia/Shanghai"))
-            except ZoneInfoNotFoundError:
-                signal_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-            signal_already_checked_today = (
-                config.last_signal_date
-                and config.last_signal_date == signal_now.date()
-            )
-            signal_trading_day = _is_us_trading_day(signal_now.date()) if market_kind == "us" else _is_china_trading_day(signal_now.date())
-            calendar_signal_day = (
-                signal_trading_day
-                and _is_time_reached(signal_now, config.signal_time)
-                and _factor_live_is_calendar_signal_day(config, signal_now.date())
-            )
-            if (
-                signal_trading_day
-                and _is_time_reached(signal_now, config.signal_time)
-                and calendar_signal_day
-                and not signal_already_checked_today
-            ):
-                try:
+                with get_db_ctx() as db, get_external_trading_db_ctx() as external_db:
                     plan = _build_factor_live_signal_plan(
                         db,
                         external_db,
@@ -4326,82 +4488,61 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
                         signal_date=signal_now.date(),
                         rank_limit=100,
                     )
-                    signal_date_value = date.fromisoformat(plan["signal_date"])
-                    if not plan.get("is_signal_day"):
-                        continue
-                    config.last_signal_date = signal_date_value
-                    config.last_signal_at = datetime.now()
-                    config.last_signal_status = plan.get("status")
-                    config.last_signal_message = plan.get("message")
-                    config.last_signal_payload = jsonable_encoder(plan)
-                    config.updated_at = datetime.now()
-                    _add_factor_live_log(
-                        db,
-                        config,
-                        action="SIGNAL",
-                        status=plan.get("status") or "OK",
-                        message=plan.get("message"),
-                        payload=plan,
-                        signal_date=signal_date_value,
-                    )
-                    db.commit()
-                    result["signals"].append({"config_id": config.id, "status": plan.get("status"), "signal_date": plan.get("signal_date")})
-                except Exception as exc:
-                    error_message = _factor_live_error_message(exc)
-                    db.rollback()
-                    config.last_signal_at = datetime.now()
-                    config.last_signal_status = "FAILED"
-                    config.last_signal_message = error_message[:1000]
-                    config.updated_at = datetime.now()
-                    _add_factor_live_log(
-                        db,
-                        config,
-                        action="SIGNAL",
-                        status="FAILED",
-                        message=error_message,
-                        payload={},
-                    )
-                    db.commit()
-                    _send_factor_live_automation_alert(
-                        config,
-                        action="SIGNAL",
-                        status="FAILED",
-                        message=error_message,
-                        exc=exc,
-                    )
-                    result["errors"].append({"config_id": config.id, "action": "SIGNAL", "error": error_message})
-            else:
-                if not (signal_trading_day and _is_time_reached(signal_now, config.signal_time) and not calendar_signal_day):
-                    result["signal_waiting"] += 1
+                signal_date_value = date.fromisoformat(plan["signal_date"])
+                if not plan.get("is_signal_day"):
+                    continue
+                _apply_factor_live_snapshot_updates(
+                    config,
+                    _persist_factor_live_signal_success(config.id, plan),
+                )
+                result["signals"].append({"config_id": config.id, "status": plan.get("status"), "signal_date": plan.get("signal_date")})
+            except Exception as exc:
+                error_message = _factor_live_error_message(exc)
+                _apply_factor_live_snapshot_updates(
+                    config,
+                    _persist_factor_live_signal_failure(config.id, error_message),
+                )
+                _send_factor_live_automation_alert(
+                    config,
+                    action="SIGNAL",
+                    status="FAILED",
+                    message=error_message,
+                    exc=exc,
+                )
+                result["errors"].append({"config_id": config.id, "action": "SIGNAL", "error": error_message})
+        else:
+            if not (signal_trading_day and _is_time_reached(signal_now, config.signal_time) and not calendar_signal_day):
+                result["signal_waiting"] += 1
 
-            signal_payload = config.last_signal_payload or {}
-            signal_date_value = _normalize_signal_payload_date(signal_payload)
-            next_execution_date = (
-                _factor_live_next_execution_date(config, signal_payload, signal_date_value)
-                if signal_date_value
-                else None
-            )
+        signal_payload = config.last_signal_payload or {}
+        signal_date_value = _normalize_signal_payload_date(signal_payload)
+        next_execution_date = (
+            _factor_live_next_execution_date(config, signal_payload, signal_date_value)
+            if signal_date_value
+            else None
+        )
+        try:
+            execution_now = datetime.now(ZoneInfo(config.execution_timezone or "Asia/Shanghai"))
+        except ZoneInfoNotFoundError:
+            execution_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        execution_trading_day = _is_us_trading_day(execution_now.date()) if market_kind == "us" else _is_china_trading_day(execution_now.date())
+        signal_generated_date = config.last_signal_at.date() if config.last_signal_at else None
+        should_execute = (
+            signal_date_value
+            and signal_payload.get("should_rebalance")
+            and config.last_execution_signal_date != signal_date_value
+            and execution_trading_day
+            and next_execution_date
+            and execution_now.date() == next_execution_date
+            and (not signal_generated_date or execution_now.date() > signal_generated_date)
+            and _is_time_reached(execution_now, config.execution_time)
+        )
+        if should_execute:
             try:
-                execution_now = datetime.now(ZoneInfo(config.execution_timezone or "Asia/Shanghai"))
-            except ZoneInfoNotFoundError:
-                execution_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-            execution_trading_day = _is_us_trading_day(execution_now.date()) if market_kind == "us" else _is_china_trading_day(execution_now.date())
-            signal_generated_date = config.last_signal_at.date() if config.last_signal_at else None
-            should_execute = (
-                signal_date_value
-                and signal_payload.get("should_rebalance")
-                and config.last_execution_signal_date != signal_date_value
-                and execution_trading_day
-                and next_execution_date
-                and execution_now.date() == next_execution_date
-                and (not signal_generated_date or execution_now.date() > signal_generated_date)
-                and _is_time_reached(execution_now, config.execution_time)
-            )
-            if should_execute:
-                try:
+                with get_external_trading_db_ctx() as external_db:
                     execution_result = asyncio.run(
                         _execute_factor_live_signal(
-                            db,
+                            None,
                             external_db,
                             config,
                             signal_date=signal_date_value,
@@ -4415,66 +4556,43 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
                         if executor_failure
                         else execution_result.get("status")
                     ) or "OK"
-                    config.last_execution_signal_date = signal_date_value
-                    config.last_execution_at = datetime.now()
-                    config.last_execution_status = execution_status
-                    config.last_execution_message = execution_result.get("message")
-                    config.last_execution_payload = jsonable_encoder(execution_result)
-                    config.updated_at = datetime.now()
-                    _add_factor_live_log(
-                        db,
-                        config,
-                        action="EXECUTE",
-                        status=execution_status,
-                        message=execution_result.get("message"),
-                        payload=execution_result,
-                        signal_date=signal_date_value,
-                    )
-                    db.commit()
-                    if executor_failure:
-                        alert_message = f"外部交易执行器返回异常状态: {executor_failure.get('status')}"
-                        _send_factor_live_automation_alert(
-                            config,
-                            action="EXECUTE",
-                            status=execution_status,
-                            message=alert_message,
-                            signal_date=signal_date_value,
-                            payload=execution_result,
-                        )
-                        result["errors"].append({
-                            "config_id": config.id,
-                            "action": "EXECUTE",
-                            "error": alert_message,
-                        })
-                    result["executions"].append({"config_id": config.id, "status": execution_status, "signal_date": signal_date_value.isoformat()})
-                except Exception as exc:
-                    error_message = _factor_live_error_message(exc)
-                    db.rollback()
-                    config.last_execution_at = datetime.now()
-                    config.last_execution_status = "FAILED"
-                    config.last_execution_message = error_message[:1000]
-                    config.updated_at = datetime.now()
-                    _add_factor_live_log(
-                        db,
-                        config,
-                        action="EXECUTE",
-                        status="FAILED",
-                        message=error_message,
-                        payload={"signal_date": signal_date_value.isoformat() if signal_date_value else None},
-                        signal_date=signal_date_value,
-                    )
-                    db.commit()
+                _apply_factor_live_snapshot_updates(
+                    config,
+                    _persist_factor_live_execution_result(config.id, execution_result, execution_status),
+                )
+                if executor_failure:
+                    alert_message = f"外部交易执行器返回异常状态: {executor_failure.get('status')}"
                     _send_factor_live_automation_alert(
                         config,
                         action="EXECUTE",
-                        status="FAILED",
-                        message=error_message,
+                        status=execution_status,
+                        message=alert_message,
                         signal_date=signal_date_value,
-                        exc=exc,
+                        payload=execution_result,
                     )
-                    result["errors"].append({"config_id": config.id, "action": "EXECUTE", "error": error_message})
-            else:
-                result["execution_waiting"] += 1
+                    result["errors"].append({
+                        "config_id": config.id,
+                        "action": "EXECUTE",
+                        "error": alert_message,
+                    })
+                result["executions"].append({"config_id": config.id, "status": execution_status, "signal_date": signal_date_value.isoformat()})
+            except Exception as exc:
+                error_message = _factor_live_error_message(exc)
+                _apply_factor_live_snapshot_updates(
+                    config,
+                    _persist_factor_live_execution_failure(config.id, error_message, signal_date_value),
+                )
+                _send_factor_live_automation_alert(
+                    config,
+                    action="EXECUTE",
+                    status="FAILED",
+                    message=error_message,
+                    signal_date=signal_date_value,
+                    exc=exc,
+                )
+                result["errors"].append({"config_id": config.id, "action": "EXECUTE", "error": error_message})
+        else:
+            result["execution_waiting"] += 1
     return result
 
 
@@ -6182,15 +6300,19 @@ async def execute_factor_live_trading_signal(
 ):
     config = _get_factor_live_config_or_404(db, account_id, config_id)
     payload = payload or FactorLiveExecutionRequest()
+    config_snapshot = _factor_live_config_snapshot(config)
+    db.expunge(config)
+    db.rollback()
     result = await _execute_factor_live_signal(
-        db,
+        None,
         external_db,
-        config,
+        config_snapshot,
         signal_date=payload.signal_date,
         trigger_executor=payload.trigger_executor,
         force=payload.force,
         timeout_seconds=payload.timeout_seconds,
     )
+    config = _get_factor_live_config_or_404(db, account_id, config_id)
     signal_date_value = _normalize_signal_payload_date(result.get("signal") or {})
     config.last_execution_signal_date = signal_date_value
     config.last_execution_at = datetime.now()

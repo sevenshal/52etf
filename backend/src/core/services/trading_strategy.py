@@ -1,6 +1,7 @@
 import pandas as pd
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 from .longport import LongPortService
 from .quote import QuoteService
 from .market import MarketService
@@ -17,160 +18,192 @@ async def calculate_ma_signal(symbol: str, short_window: int, long_window: int, 
     """
     trade_service = LongPortService.get_instance(account_id)
     quote_service = QuoteService(trade_service)
-    
+
     end_date = MarketService.get_eastern_now().date()
     buffer_days = max(60, long_window * 3)
     start_date = end_date - timedelta(days=buffer_days)
-    
+
     klines = quote_service.get_klines(symbol if '.US' in symbol else f"{symbol}.US", start_date=start_date, end_date=end_date)
     if not klines:
         logger.error(f"Failed to fetch klines for {symbol}")
         return 'HOLD'
-    
+
     df = pd.DataFrame(klines)
     if df.empty:
         return 'HOLD'
-    
+
     df['close'] = df['close'].astype(float)
     df['EMA_short'] = df['close'].ewm(span=short_window, adjust=False).mean()
     df['EMA_long'] = df['close'].ewm(span=long_window, adjust=False).mean()
-    
+
     last_row = df.iloc[-1]
-    
+
     if last_row['EMA_short'] > last_row['EMA_long']:
         return 'BUY'
     elif last_row['EMA_short'] < last_row['EMA_long']:
         return 'SELL'
-    
+
     return 'HOLD'
+
+
+def _load_trading_config_snapshot(account_id: str):
+    with get_db_ctx() as db:
+        config = db.query(AutomatedTradingConfig).filter(
+            AutomatedTradingConfig.account_id == account_id,
+            AutomatedTradingConfig.enabled == True
+        ).first()
+        if not config:
+            return None
+        return SimpleNamespace(
+            account_id=config.account_id,
+            etf_code=config.etf_code,
+            short_window=config.short_window,
+            long_window=config.long_window,
+            ib_port=config.ib_port,
+            target_ratio=config.target_ratio,
+        )
+
+
+def _append_trade_log(
+    *,
+    account_id: str,
+    symbol: str,
+    action: str,
+    status: str,
+    message: str,
+    price=None,
+    quantity=0,
+):
+    with get_db_ctx() as db:
+        db.add(AutomatedTradeLog(
+            account_id=account_id,
+            symbol=symbol,
+            action=action,
+            price=price,
+            quantity=quantity,
+            status=status,
+            message=message,
+        ))
+
 
 async def execute_trading_strategy(account_id: str, client_id: int = 2):
     """执行自动化交易策略"""
     masked_account_id = mask_account_id(account_id)
     logger.info(f"Executing trading strategy for account: {masked_account_id} with client_id={client_id}")
-    
+
     try:
-        with get_db_ctx() as db:
-            config = db.query(AutomatedTradingConfig).filter(
-                AutomatedTradingConfig.account_id == account_id,
-                AutomatedTradingConfig.enabled == True
-            ).first()
-            
-            if not config:
-                logger.info(f"No enabled trading config for {masked_account_id}")
-                return
+        config = _load_trading_config_snapshot(account_id)
+        if not config:
+            logger.info(f"No enabled trading config for {masked_account_id}")
+            return
 
-            # 1. 计算信号
-            signal = await calculate_ma_signal(config.etf_code, config.short_window, config.long_window, account_id)
-            logger.info(f"Strategy Signal for {config.etf_code}: {signal}")
-            
-            if signal == 'HOLD':
-                return
+        # 1. 计算信号
+        signal = await calculate_ma_signal(config.etf_code, config.short_window, config.long_window, account_id)
+        logger.info(f"Strategy Signal for {config.etf_code}: {signal}")
 
-            # 2. 检查持仓
-            ib_service = IBKRService(port=config.ib_port, client_id=client_id)
-            try:
-                await ib_service.connect()
-                
-                # 获取账户快照 (Snapshot)
-                net_liq = ib_service.get_net_liquidation()
-                available_cash = ib_service.get_available_cash()
-                
-                # 获取持仓数据 (包含数量和价格)
-                pos_data = ib_service.get_position(config.etf_code)
-                position = pos_data['qty']
-                price = pos_data['price']
-                
-                # 如果 IB 没有价格数据，则查询市场价格
+        if signal == 'HOLD':
+            return
+
+        # 2. 检查持仓
+        ib_service = IBKRService(port=config.ib_port, client_id=client_id)
+        try:
+            await ib_service.connect()
+
+            # 获取账户快照 (Snapshot)
+            net_liq = ib_service.get_net_liquidation()
+            available_cash = ib_service.get_available_cash()
+
+            # 获取持仓数据 (包含数量和价格)
+            pos_data = ib_service.get_position(config.etf_code)
+            position = pos_data['qty']
+            price = pos_data['price']
+
+            # 如果 IB 没有价格数据，则查询市场价格
+            if not price or price <= 0:
+                price = await ib_service.get_market_price(config.etf_code)
                 if not price or price <= 0:
-                    price = await ib_service.get_market_price(config.etf_code)
-                    if not price or price <= 0:
-                        logger.error(f"Invalid market price for {config.etf_code}: {price}")
-                        return
-                
-                logger.info(f"Current Position for {config.etf_code}: {position}, Price: {price}, NetLiq: {net_liq}, Cash: {available_cash}")
-                
-                action = None
-                quantity = 0
+                    logger.error(f"Invalid market price for {config.etf_code}: {price}")
+                    return
 
-                if signal == 'BUY':
-                    # 计算目标持仓金额 = 净资产 * 目标比例
-                    target_value = net_liq * (config.target_ratio / 100.0)
-                    # 当前持仓金额
-                    current_value = position * price
-                    
-                    if current_value < target_value * 0.1: # 如果当前持仓不足目标的 10%，则买入补齐
-                        needed_value = target_value - current_value
-                        # 确保不超过可用资金
-                        actual_buy_value = min(needed_value, available_cash)
-                        quantity = int(actual_buy_value / price)
-                        if quantity > 0:
-                            action = 'BUY'
-                
-                elif signal == 'SELL' and position > 0:
-                    action = 'SELL'
-                    quantity = int(position) # 全部平仓
-                
-                if action and quantity > 0:
-                    # 检查今天是否已经有订单，防止重复下单
-                    if await ib_service.has_today_orders(config.etf_code):
-                        msg = f"Skipping order for {config.etf_code} as a non-cancelled order already exists for today."
-                        logger.info(msg)
-                        return
+            logger.info(f"Current Position for {config.etf_code}: {position}, Price: {price}, NetLiq: {net_liq}, Cash: {available_cash}")
 
-                    # 下单
-                    trade = await ib_service.place_market_order(config.etf_code, action, quantity)
-                    
-                    # 改进状态映射，避免误报 FAILED
-                    ib_status = trade.orderStatus.status
-                    if ib_status == 'Filled':
-                        status = 'SUCCESS'
-                    elif trade.isActive():
-                        status = 'SUBMITTED'
-                    elif ib_status in ('Cancelled', 'ApiCancelled'):
-                        status = 'CANCELLED'
-                    else:
-                        status = 'FAILED'
-                        
-                    message = f"Order {action} {quantity} {config.etf_code} @{price}. Status: {ib_status}"
-                    
-                    log = AutomatedTradeLog(
-                        account_id=account_id,
-                        symbol=config.etf_code,
-                        action=action,
-                        price=price,
-                        quantity=quantity,
-                        status=status,
-                        message=message
-                    )
-                    db.add(log)
-                    logger.info(message)
+            action = None
+            quantity = 0
+
+            if signal == 'BUY':
+                # 计算目标持仓金额 = 净资产 * 目标比例
+                target_value = net_liq * (config.target_ratio / 100.0)
+                # 当前持仓金额
+                current_value = position * price
+
+                if current_value < target_value * 0.1: # 如果当前持仓不足目标的 10%，则买入补齐
+                    needed_value = target_value - current_value
+                    # 确保不超过可用资金
+                    actual_buy_value = min(needed_value, available_cash)
+                    quantity = int(actual_buy_value / price)
+                    if quantity > 0:
+                        action = 'BUY'
+
+            elif signal == 'SELL' and position > 0:
+                action = 'SELL'
+                quantity = int(position) # 全部平仓
+
+            if action and quantity > 0:
+                # 检查今天是否已经有订单，防止重复下单
+                if await ib_service.has_today_orders(config.etf_code):
+                    msg = f"Skipping order for {config.etf_code} as a non-cancelled order already exists for today."
+                    logger.info(msg)
+                    return
+
+                # 下单
+                trade = await ib_service.place_market_order(config.etf_code, action, quantity)
+
+                # 改进状态映射，避免误报 FAILED
+                ib_status = trade.orderStatus.status
+                if ib_status == 'Filled':
+                    status = 'SUCCESS'
+                elif trade.isActive():
+                    status = 'SUBMITTED'
+                elif ib_status in ('Cancelled', 'ApiCancelled'):
+                    status = 'CANCELLED'
                 else:
-                    log = AutomatedTradeLog(
-                        account_id=account_id,
-                        symbol=config.etf_code,
-                        action='HOLD',
-                        price=price,
-                        quantity=0,
-                        status='SUCCESS',
-                        message="No action needed"
-                    )
-                    db.add(log)
-                    logger.info(f"No action needed for {config.etf_code} (Signal: {signal}, Position: {position}, TargetRatio: {config.target_ratio}%)")
-                    
-            finally:
-                ib_service.disconnect()
+                    status = 'FAILED'
+
+                message = f"Order {action} {quantity} {config.etf_code} @{price}. Status: {ib_status}"
+                _append_trade_log(
+                    account_id=account_id,
+                    symbol=config.etf_code,
+                    action=action,
+                    price=price,
+                    quantity=quantity,
+                    status=status,
+                    message=message,
+                )
+                logger.info(message)
+            else:
+                _append_trade_log(
+                    account_id=account_id,
+                    symbol=config.etf_code,
+                    action='HOLD',
+                    price=price,
+                    quantity=0,
+                    status='SUCCESS',
+                    message="No action needed",
+                )
+                logger.info(f"No action needed for {config.etf_code} (Signal: {signal}, Position: {position}, TargetRatio: {config.target_ratio}%)")
+
+        finally:
+            ib_service.disconnect()
 
     except Exception as e:
         logger.error(f"Error in execute_trading_strategy: {e}")
-        with get_db_ctx() as db:
-            db.add(AutomatedTradeLog(
-                account_id=account_id,
-                symbol="SYSTEM",
-                action="ERROR",
-                status="FAILED",
-                message=str(e)
-            ))
+        _append_trade_log(
+            account_id=account_id,
+            symbol="SYSTEM",
+            action="ERROR",
+            status="FAILED",
+            message=str(e),
+        )
 
 def is_market_closing_soon():
     """判断是否接近美股收盘"""
