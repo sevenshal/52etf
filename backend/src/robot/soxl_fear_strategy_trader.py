@@ -316,21 +316,21 @@ class SoxlFearStrategyTrader:
 
         return scores
 
-    def _fetch_daily_close_rows(
+    def _fetch_daily_price_rows(
         self,
         account_id: str,
         symbol: str,
         start_date: date,
         end_date: date,
         preferred_longport_account_id: Optional[str] = None,
-    ) -> List[Tuple[date, float]]:
+    ) -> List[Tuple[date, float, float]]:
         if start_date > end_date:
             return []
 
         market_data_service = self._get_market_data_service(account_id, preferred_longport_account_id)
         quote_service = QuoteService(market_data_service)
         klines = quote_service.get_klines(symbol, start_date=start_date, end_date=end_date)
-        rows: List[Tuple[date, float]] = []
+        rows: List[Tuple[date, float, float]] = []
         for item in klines or []:
             item_date = item.get("timestamp")
             if hasattr(item_date, "date"):
@@ -338,8 +338,9 @@ class SoxlFearStrategyTrader:
             if not isinstance(item_date, date) or item_date < start_date or item_date > end_date:
                 continue
             close_price = float(item.get("close") or 0)
-            if close_price > 0:
-                rows.append((item_date, close_price))
+            high_price = float(item.get("high") or close_price or 0)
+            if close_price > 0 and high_price > 0:
+                rows.append((item_date, high_price, close_price))
         return sorted(rows, key=lambda value: value[0])
 
     def _backfill_missing_greed_state(
@@ -359,13 +360,13 @@ class SoxlFearStrategyTrader:
             return None
 
         # Re-read the last processed day as well. This lets a prior intraday manual
-        # check be corrected by the final daily close without making the strategy
-        # more aggressive than the close-based backtest.
+        # check be corrected by the final daily high so the trailing-stop anchor
+        # stays aligned with the backtest.
         price_start = state.last_processed_date
         fear_start = max(date(2020, 1, 1), price_start - timedelta(days=14))
         preferred_longport_account_id = config.longport_account_id if config.account_type == "longport" else None
         try:
-            close_rows = self._fetch_daily_close_rows(
+            price_rows = self._fetch_daily_price_rows(
                 config.account_id,
                 symbol,
                 price_start,
@@ -373,9 +374,9 @@ class SoxlFearStrategyTrader:
                 preferred_longport_account_id=preferred_longport_account_id,
             )
         except Exception as exc:
-            logger.info("Failed to fetch SOXL daily close for greed state backfill: %s", exc)
+            logger.info("Failed to fetch SOXL daily price for greed state backfill: %s", exc)
             return None
-        if not close_rows:
+        if not price_rows:
             return None
 
         score_map = self._fetch_cnn_score_map(db, fear_start, backfill_end)
@@ -388,7 +389,7 @@ class SoxlFearStrategyTrader:
         last_score: Optional[float] = None
         processed_dates = []
 
-        for price_date, close_price in close_rows:
+        for price_date, high_price, _close_price in price_rows:
             while score_index < len(sorted_scores) and sorted_scores[score_index][0] <= price_date:
                 last_score = sorted_scores[score_index][1]
                 score_index += 1
@@ -396,7 +397,7 @@ class SoxlFearStrategyTrader:
                 continue
 
             if last_score >= float(config.greed_threshold):
-                state.greed_peak_price = max(float(state.greed_peak_price or close_price), close_price)
+                state.greed_peak_price = max(float(state.greed_peak_price or high_price), high_price)
             else:
                 state.greed_peak_price = None
                 state.take_profit_cycle_sell_count = 0
@@ -411,7 +412,7 @@ class SoxlFearStrategyTrader:
 
         state.last_processed_date = processed_dates[-1]
         logger.info(
-            "Backfilled SOXL greed state for %s from %s to %s using daily close",
+            "Backfilled SOXL greed state for %s from %s to %s using daily high",
             mask_account_id(config.account_id),
             processed_dates[0],
             processed_dates[-1],
@@ -532,6 +533,7 @@ class SoxlFearStrategyTrader:
         raw_volume_ratio = current_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
         return df, {
             "current_price": float(latest["close"]),
+            "current_high": float(latest["high"]),
             "current_volume": current_volume,
             "current_volume_source": projection.get("current_volume_source") or "quote",
             "current_volume_timestamp": projection.get("current_volume_timestamp") or now_et,
@@ -882,6 +884,7 @@ class SoxlFearStrategyTrader:
                 preferred_longport_account_id=config.longport_account_id if config.account_type == "longport" else None,
             )
             current_price = float(market_snapshot["current_price"])
+            current_high_price = float(market_snapshot.get("current_high") or current_price)
             volume_ratio = float(market_snapshot["volume_ratio"])
             raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
@@ -943,7 +946,7 @@ class SoxlFearStrategyTrader:
                         state.greed_peak_price = None
                         state.take_profit_cycle_sell_count = 0
                     else:
-                        state.greed_peak_price = max(float(state.greed_peak_price or current_price), current_price)
+                        state.greed_peak_price = max(float(state.greed_peak_price or current_high_price), current_high_price)
 
                 if broker_snapshot.has_today_order:
                     trade_message = "今日已存在订单，跳过重复执行"
@@ -964,7 +967,7 @@ class SoxlFearStrategyTrader:
                     current_position_ratio = position_ratio_before
                     min_hold_shares = ceil(portfolio_value * (float(config.min_position_pct_after_take_profit) / 100.0) / current_price) if portfolio_value > 0 and current_price > 0 else 0
 
-                    if float(config.sell_reduction_basis or "portfolio") == "portfolio":
+                    if str(config.sell_reduction_basis or "portfolio") == "portfolio":
                         trade_quantity = floor(portfolio_value * (float(config.sell_position_pct) / 100.0) / current_price)
                     else:
                         trade_quantity = floor(available_shares * (float(config.sell_position_pct) / 100.0))
@@ -1043,7 +1046,7 @@ class SoxlFearStrategyTrader:
                     if shares - trade_quantity <= 0 or state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
                         state.greed_peak_price = None
                     else:
-                        state.greed_peak_price = current_price
+                        state.greed_peak_price = current_high_price
                 else:
                     state.greed_peak_price = None
                     state.take_profit_cycle_sell_count = 0

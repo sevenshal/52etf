@@ -272,3 +272,129 @@ class SoxlFearExternalTradingTest(TestCase):
             self.assertEqual("SUCCESS", persisted_config.last_run_status)
         finally:
             db.close()
+
+    def test_run_config_once_trailing_take_profit_uses_intraday_high_as_peak(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(
+            engine,
+            tables=[
+                SoxlFearStrategyConfig.__table__,
+                SoxlFearStrategyState.__table__,
+                SoxlFearStrategyLog.__table__,
+            ],
+        )
+        session_factory = sessionmaker(bind=engine)
+        db = session_factory()
+        db.add(
+            SoxlFearStrategyConfig(
+                id=3,
+                account_id="acct",
+                enabled=True,
+                symbol="SOXL.US",
+                account_type="external",
+                buy_threshold=40.0,
+                greed_threshold=80.0,
+                volume_ratio_threshold=1.0,
+                buy_position_pct=50.0,
+                cooldown_days=5,
+                rebalance_threshold_pct=1.0,
+            )
+        )
+        db.commit()
+        db.close()
+
+        @contextmanager
+        def main_db_ctx():
+            session = session_factory()
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        async def fake_snapshot(_self, _config, current_price):
+            return BrokerSnapshot(
+                shares=100,
+                available_shares=100,
+                avg_cost=80,
+                current_price=current_price,
+                available_cash=0,
+                portfolio_value=10000,
+                has_today_order=False,
+                order_service=None,
+                external_trading_account_id=3,
+                live_sub_account_id=9,
+            )
+
+        placed_orders = []
+
+        async def fake_place_order(_self, _config, _snapshot, action, quantity, price, **_kwargs):
+            placed_orders.append((action, quantity, price))
+            return "order-2"
+
+        trader = SoxlFearStrategyTrader()
+        config = SimpleNamespace(
+            id=3,
+            account_id="acct",
+            enabled=True,
+            symbol="SOXL.US",
+            account_type="external",
+            ib_account_id=None,
+            longport_account_id=None,
+            buy_threshold=40.0,
+            greed_threshold=80.0,
+            volume_ratio_threshold=1.0,
+            buy_position_pct=50.0,
+            cooldown_days=5,
+            trailing_stop_pct=5.0,
+            sell_position_pct=50.0,
+            sell_reduction_basis="portfolio",
+            max_take_profit_sells_per_cycle=2,
+            min_position_pct_after_take_profit=10.0,
+            rebalance_threshold_pct=1.0,
+        )
+
+        with patch("src.robot.soxl_fear_strategy_trader.get_db_ctx", main_db_ctx), patch.object(
+            SoxlFearStrategyTrader,
+            "_fetch_latest_cnn_score",
+            return_value=(90.0, datetime(2026, 6, 9, 19, 53, 39)),
+        ), patch.object(
+            SoxlFearStrategyTrader,
+            "_build_realtime_dataframe",
+            return_value=(
+                None,
+                {
+                    "current_price": 100.0,
+                    "current_high": 106.0,
+                    "volume_ratio": 0.5,
+                    "raw_volume_ratio": 0.5,
+                    "quote_timestamp": datetime(2026, 6, 9, 15, 58),
+                    "volume_projection_source": "test",
+                },
+            ),
+        ), patch.object(
+            SoxlFearStrategyTrader,
+            "_build_broker_snapshot",
+            fake_snapshot,
+        ), patch.object(
+            SoxlFearStrategyTrader,
+            "_place_order",
+            fake_place_order,
+        ):
+            asyncio.run(trader.run_config_once(config, trigger_source="auto"))
+
+        self.assertEqual([("SELL", 50, 100.0)], placed_orders)
+        db = session_factory()
+        try:
+            log = db.query(SoxlFearStrategyLog).one()
+            state = db.query(SoxlFearStrategyState).one()
+            self.assertEqual("SELL", log.action)
+            self.assertEqual("SUCCESS", log.status)
+            self.assertIn("回撤 5.66%", log.message)
+            self.assertEqual(1, state.take_profit_cycle_sell_count)
+            self.assertEqual(106.0, state.greed_peak_price)
+        finally:
+            db.close()
