@@ -10,6 +10,8 @@ from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
 from ...core.static_info import get_static_info_snapshot_map
+from ...core.analytics_database import AnalyticsSession
+from ...core.services.a_stock_consensus import load_a_stock_klines
 from sqlalchemy.orm import Session
 
 # db_session removed, use dependency injection
@@ -31,6 +33,16 @@ class FavoriteResponse(BaseModel):
     success: bool
     message: str
 
+
+def _parse_date_query(value: Optional[str], field_name: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name} format. Use YYYY-MM-DD")
+
+
 @router.get("/klines/{symbol}", response_model=List[KLineData])
 async def get_stock_klines(
     request: Request,
@@ -50,22 +62,8 @@ async def get_stock_klines(
     trade_service: LongPortService = LongPortService.get_instance(lp_account_id)
     quote_service = QuoteService(trade_service)
     
-    # 解析日期
-    parsed_start_date = None
-    parsed_end_date = None
-    if start_date:
-        try:
-            parsed_start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
-            
-    if end_date:
-        try:
-            parsed_end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
-    else:
-        parsed_end_date = datetime.now().date()
+    parsed_start_date = _parse_date_query(start_date, "start_date")
+    parsed_end_date = _parse_date_query(end_date, "end_date") if end_date else datetime.now().date()
 
     # 使用日期范围获取
     klines_data = quote_service.get_klines(
@@ -105,6 +103,42 @@ async def get_stock_klines(
         ))
     
     return klines
+
+
+@router.get("/a-stock/klines/{symbol}", response_model=List[KLineData])
+async def get_a_stock_klines(
+    request: Request,
+    symbol: str,
+    account_id: str = Depends(valid_account),
+    period: Optional[str] = Query(default='d', enum=['d']),
+    start_date: str = Query(...),
+    end_date: Optional[str] = Query(None),
+):
+    """从本地 DuckDB 获取A股前复权日K。"""
+    if "days" in request.query_params:
+        raise HTTPException(status_code=400, detail="days 参数已不支持，请使用 start_date/end_date 日期区间")
+    parsed_start_date = _parse_date_query(start_date, "start_date")
+    parsed_end_date = _parse_date_query(end_date, "end_date") if end_date else datetime.now().date()
+    if not parsed_start_date:
+        raise HTTPException(status_code=400, detail="start_date is required")
+    if parsed_start_date > parsed_end_date:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+
+    analytics_db = AnalyticsSession()
+    try:
+        rows = load_a_stock_klines(
+            analytics_db,
+            symbol,
+            start_date=parsed_start_date,
+            end_date=parsed_end_date,
+        )
+        return [KLineData(**row) for row in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
 
 @router.post("/favorites/{symbol}", response_model=FavoriteResponse)
 async def add_favorite(

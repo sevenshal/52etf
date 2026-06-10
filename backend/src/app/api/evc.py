@@ -5,6 +5,11 @@ from sqlalchemy.orm import Session
 from ...core.database import StockEVC, StockTag, stock_tags, get_db
 from sqlalchemy import func, and_
 from ...core.static_info import get_static_info_snapshot_map
+from ...core.analytics_database import AnalyticsSession
+from ...core.services.a_stock_consensus import (
+    load_a_stock_consensus_history,
+    search_a_stock_consensus_candidates,
+)
 
 router = APIRouter(prefix="/api/evc")
 
@@ -18,6 +23,16 @@ class ValuationSearchRequest(BaseModel):
     include_static_info: Optional[bool] = None
     min_market_cap_100m: Optional[float] = None
     max_market_cap_100m: Optional[float] = None
+
+class AStockConsensusSearchRequest(BaseModel):
+    symbol: Optional[str] = None
+    min_market_cap_100m: Optional[float] = 100.0
+    max_market_cap_100m: Optional[float] = None
+    min_undervalue_pct: Optional[float] = 10.0
+    min_growth_pct: Optional[float] = 10.0
+    report_lookback_days: int = 60
+    min_report_count: int = 5
+    limit: int = 200
 
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
@@ -138,6 +153,38 @@ async def valuation_search(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/a-stock-consensus-search")
+async def a_stock_consensus_search(
+    request: AStockConsensusSearchRequest,
+    account_id: str = Depends(get_account_id)
+):
+    analytics_db = AnalyticsSession()
+    try:
+        if (
+            request.min_market_cap_100m is not None
+            and request.max_market_cap_100m is not None
+            and request.min_market_cap_100m > request.max_market_cap_100m
+        ):
+            raise HTTPException(status_code=400, detail="市值下限不能大于上限")
+        return search_a_stock_consensus_candidates(
+            analytics_db,
+            symbol=request.symbol,
+            min_market_cap_100m=request.min_market_cap_100m,
+            max_market_cap_100m=request.max_market_cap_100m,
+            min_undervalue_pct=request.min_undervalue_pct,
+            min_growth_pct=request.min_growth_pct,
+            report_lookback_days=request.report_lookback_days,
+            min_report_count=request.min_report_count,
+            limit=request.limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
 @router.get("/tags")
 async def get_stock_tags(
     account_id: str = Depends(get_account_id),
@@ -199,3 +246,22 @@ def get_stock_evc_history(
         d.pop("_sa_instance_state", None)
         result.append(d)
     return result
+
+@router.get("/a-stock-consensus/history/{symbol}")
+def get_a_stock_consensus_history(
+    symbol: str,
+    limit: int = Query(1260, description="查询条数"),
+    account_id: str = Depends(get_account_id),
+):
+    analytics_db = AnalyticsSession()
+    try:
+        return load_a_stock_consensus_history(
+            analytics_db,
+            symbol,
+            limit=max(1, min(int(limit or 1260), 5000)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
