@@ -1528,7 +1528,7 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         destroyOnClose
       >
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
-          <Text>系统会按你输入的成交价补写父单成交，并把成交数量分配到子单和子账户账本；此操作当前不支持自动撤销。</Text>
+          <Text>系统会按你输入的成交价补写或确认父单成交，并把成交数量分配到子单和子账户账本；此操作当前不支持自动撤销。</Text>
           <Space wrap>
             <Tag>{repairParentRecord?.symbol_name || repairParentRecord?.symbol || '-'}</Tag>
             <Tag color={repairParentRecord?.side === 'SELL' ? 'green' : 'red'}>{repairParentRecord?.side || '-'}</Tag>
