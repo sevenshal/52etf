@@ -106,6 +106,7 @@ const hasSeriesData = (values) => values.some(value => value !== null && value !
 
 const StockKlineChart = ({
   symbol,
+  klineUrl,
   valuationHistory = [],
   valuationFillMode = 'exact',
   valuationDateOffsetDays = -1,
@@ -129,7 +130,7 @@ const StockKlineChart = ({
     setLoading(true);
     setRawKlines([]);
     try {
-      const { data } = await request.get(`/api/stock/klines/${symbol}`, {
+      const { data } = await request.get(klineUrl || `/api/stock/klines/${symbol}`, {
         params: {
           start_date: dayjs().subtract(5, 'year').format('YYYY-MM-DD'),
           end_date: dayjs().format('YYYY-MM-DD')
@@ -142,7 +143,7 @@ const StockKlineChart = ({
     } finally {
       setLoading(false);
     }
-  }, [symbol]);
+  }, [klineUrl, symbol]);
 
   useEffect(() => {
     fetchKlines();

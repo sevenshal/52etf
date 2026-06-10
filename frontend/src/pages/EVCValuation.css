@@ -69,7 +69,8 @@
   min-width: 0;
 }
 
-.evc-stock-card__title a {
+.evc-stock-card__title a,
+.evc-stock-card__symbol {
   display: inline-block;
   color: #1677ff;
   font-size: 18px;

@@ -49,16 +49,21 @@ const renderMetricTitle = (title, content) => (
 const StockDetail = () => {
   const { symbol } = useParams();
   const navigate = useNavigate();
+  const normalizedSymbol = useMemo(() => (symbol || '').toUpperCase(), [symbol]);
+  const isAStock = useMemo(() => /\.(SH|SZ|BJ)$/.test(normalizedSymbol), [normalizedSymbol]);
   const [klines, setKlines] = useState([]);
   const [evcHistory, setEvcHistory] = useState([]);
   const fetchEvcHistory = useCallback(async () => {
     try {
-      const { data } = await request.get(`/api/evc/stock-evc/history/${symbol}?limit=${FIVE_YEAR_TRADING_BARS}`);
+      const historyUrl = isAStock
+        ? `/api/evc/a-stock-consensus/history/${normalizedSymbol}?limit=${FIVE_YEAR_TRADING_BARS}`
+        : `/api/evc/stock-evc/history/${normalizedSymbol}?limit=${FIVE_YEAR_TRADING_BARS}`;
+      const { data } = await request.get(historyUrl);
       setEvcHistory(data || []);
     } catch (error) {
       console.error('获取估值历史失败:', error);
     }
-  }, [symbol]);
+  }, [isAStock, normalizedSymbol]);
 
   const stockMetrics = useMemo(() => computeStockWindowMetrics(klines, STOCK_METRIC_WINDOWS), [klines]);
   const latestSnapshot = stockMetrics.latest;
@@ -155,7 +160,7 @@ const StockDetail = () => {
               onClick={() => navigate(-1)}
               style={{ marginRight: '12px' }}
             />
-            <span>{symbol} 股票详情</span>
+            <span>{normalizedSymbol} 股票详情</span>
           </div>
         }
       >
@@ -183,9 +188,16 @@ const StockDetail = () => {
             <Descriptions.Item label="PE">
               {formatNumber(latestEvcSnapshot?.pe_ratio, 2)}
             </Descriptions.Item>
-            <Descriptions.Item label="Forward PE">
+            <Descriptions.Item label={isAStock ? '下一年PE' : 'Forward PE'}>
               {formatNumber(latestEvcSnapshot?.forward_pe_ratio, 2)}
             </Descriptions.Item>
+            {isAStock && (
+              <Descriptions.Item label="目标价区间">
+                {latestEvcSnapshot
+                  ? `${formatNumber(latestEvcSnapshot.fair_value_lo, 2)} ~ ${formatNumber(latestEvcSnapshot.fair_value_hi, 2)}`
+                  : '-'}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="样本数">
               {latestSnapshot?.sampleSize || klines.length}
             </Descriptions.Item>
@@ -202,8 +214,11 @@ const StockDetail = () => {
           style={{ marginBottom: 16 }}
         />
         <StockKlineChart
-          symbol={symbol}
+          symbol={normalizedSymbol}
+          klineUrl={isAStock ? `/api/stock/a-stock/klines/${normalizedSymbol}` : undefined}
           valuationHistory={evcHistory}
+          valuationFillMode={isAStock ? 'forward' : 'exact'}
+          valuationDateOffsetDays={isAStock ? 0 : -1}
           onKlinesChange={setKlines}
           height={600}
         />
