@@ -213,6 +213,7 @@ const SoxlFearBacktest = () => {
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
+      volume_ratio_consecutive_days_values: parseNumberList(values.volume_ratio_consecutive_days_values, true),
       buy_position_pct_values: parseNumberList(values.buy_position_pct_values),
       cooldown_days_values: parseNumberList(values.cooldown_days_values, true),
       trailing_stop_pct_values: parseNumberList(values.trailing_stop_pct_values),
@@ -228,6 +229,7 @@ const SoxlFearBacktest = () => {
     buy_threshold: record.buy_threshold,
     greed_threshold: record.greed_threshold,
     volume_ratio_threshold: record.volume_ratio_threshold,
+    volume_ratio_consecutive_days: record.volume_ratio_consecutive_days ?? 1,
     buy_position_pct: record.buy_position_pct,
     cooldown_days: record.cooldown_days,
     trailing_stop_pct: record.trailing_stop_pct,
@@ -409,6 +411,7 @@ const SoxlFearBacktest = () => {
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
     { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
+    { title: '连续量比天数', dataIndex: 'volume_ratio_consecutive_days', width: 110 },
     { title: '买入仓位%', dataIndex: 'buy_position_pct', width: 90 },
     { title: '冷却天数', dataIndex: 'cooldown_days', width: 90 },
     { title: '止盈回撤%', dataIndex: 'trailing_stop_pct', width: 100 },
@@ -547,6 +550,7 @@ const SoxlFearBacktest = () => {
         </span>
       ),
     },
+    { title: '触发量比', dataIndex: 'buy_volume_ratio', width: 100, render: value => (value == null ? '-' : Number(value).toFixed(2)) },
     { title: '原因', dataIndex: 'reason' },
   ];
 
@@ -857,7 +861,7 @@ const SoxlFearBacktest = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description={`使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的前一可用交易日量比信号；当贪恐分数低于等于买入触发阈值，且量比放大时，在 ${selectedSymbol} 当日开盘价分批买入；当贪恐分数高于等于进入止盈区阈值后，若开盘价再从区内高点回撤，则按回撤规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
+          description={`使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的信号日量比；当贪恐分数低于等于买入触发阈值，且量比放大满足连续天数要求时，在 ${selectedSymbol} 信号日收盘价分批买入；连续 N 天量比使用最近 N 个交易日成交量对比再往前 20 个交易日均量；当贪恐分数高于等于进入止盈区阈值后，若收盘价较止盈区内 K 线最高价回撤，则按回撤规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。`}
         />
         <Form
           form={form}
@@ -875,6 +879,7 @@ const SoxlFearBacktest = () => {
             buy_threshold_values: '35,40,45',
             greed_threshold_values: '40,41,42',
             volume_ratio_threshold_values: '1.3,1.38,1.45',
+            volume_ratio_consecutive_days_values: '1',
             buy_position_pct_values: '50,60,70',
             cooldown_days_values: '5,10,15',
             trailing_stop_pct_values: '3,5,7',
@@ -957,6 +962,11 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={4}>
               <Form.Item name="volume_ratio_threshold_values" label="买入量比阈值(>=)候选">
                 <Input placeholder="例如 1.3,1.38,1.45" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="volume_ratio_consecutive_days_values" label="连续量比天数候选">
+                <Input placeholder="例如 1,3" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -1043,7 +1053,7 @@ const SoxlFearBacktest = () => {
             <Descriptions.Item label="搜索目标">{getObjectiveLabel(searchMeta.objective)}</Descriptions.Item>
             <Descriptions.Item label="贪恐来源">{searchMeta.fear_source_labels || formatFearSourceLabels(searchMeta.fear_sources || searchMeta.fear_source)}</Descriptions.Item>
             <Descriptions.Item label="量比来源">{searchMeta.volume_signal_label || searchMeta.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
-            <Descriptions.Item label="成交口径">{searchMeta.execution_price_label || '当日开盘价'}</Descriptions.Item>
+            <Descriptions.Item label="成交口径">{searchMeta.execution_price_label || '信号日收盘价'}</Descriptions.Item>
             <Descriptions.Item label="贪恐数据点">{searchMeta.fear_points}</Descriptions.Item>
             <Descriptions.Item label="并发进程数">{searchMeta.eval_workers}</Descriptions.Item>
             <Descriptions.Item label="有效组合数">{searchMeta.valid_combinations}</Descriptions.Item>
@@ -1057,7 +1067,7 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}`}
             pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 1980 }}
             onRow={(record) => ({
@@ -1104,6 +1114,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
               <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
+              <Descriptions.Item label="连续量比天数">{detailedResult.params?.volume_ratio_consecutive_days ?? 1}</Descriptions.Item>
               <Descriptions.Item label="每次买入仓位%">{detailedResult.params?.buy_position_pct}</Descriptions.Item>
               <Descriptions.Item label="冷却天数">{detailedResult.params?.cooldown_days}</Descriptions.Item>
               <Descriptions.Item label="移动止盈回撤%">{detailedResult.params?.trailing_stop_pct}</Descriptions.Item>
@@ -1115,7 +1126,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
-              <Descriptions.Item label="成交口径">{detailedResult.meta?.execution_price_label || '当日开盘价'}</Descriptions.Item>
+              <Descriptions.Item label="成交口径">{detailedResult.meta?.execution_price_label || '信号日收盘价'}</Descriptions.Item>
               <Descriptions.Item label="有效区间">{detailedResult.meta?.effective_start_date} ~ {detailedResult.meta?.effective_end_date}</Descriptions.Item>
               <Descriptions.Item label="交易日数">{detailedResult.meta?.trading_days}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital}</Descriptions.Item>
