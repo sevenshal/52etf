@@ -35,6 +35,8 @@ SEARCH_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="soxl
 SEARCH_EVAL_MAX_WORKERS = min(8, max(2, (os.cpu_count() or 4) // 2))
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
 SIGNAL_LOOKBACK_DAYS = 90
+VOLUME_LOOKBACK_DAYS = 20
+MAX_VOLUME_RATIO_CONSECUTIVE_DAYS = 20
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH",)
 
@@ -50,6 +52,14 @@ US_TARGET_OPTIONS = [
 
 def _normalize_symbol(value: str) -> str:
     return str(value or "").strip().upper()
+
+
+def _volume_ratio_consecutive_column(days: int) -> str:
+    return f"volume_ratio_consecutive_{days}"
+
+
+def _volume_ma_excluding_recent_column(days: int) -> str:
+    return f"volume_ma20_excluding_recent_{days}"
 
 
 def _fear_source_key_for_symbol(symbol: str) -> str:
@@ -158,6 +168,7 @@ class SOXLFearStrategyParams(BaseModel):
     buy_threshold: float = 40.0
     greed_threshold: float = 41.0
     volume_ratio_threshold: float = 1.38
+    volume_ratio_consecutive_days: int = 1
     buy_position_pct: float = 60.0
     cooldown_days: int = 10
     trailing_stop_pct: float = 5.0
@@ -204,6 +215,12 @@ class SOXLFearStrategyParams(BaseModel):
             raise ValueError("同轮止盈最多卖出次数必须在 1 到 20 之间")
         return value
 
+    @validator("volume_ratio_consecutive_days")
+    def validate_volume_ratio_consecutive_days(cls, value):
+        if value < 1 or value > MAX_VOLUME_RATIO_CONSECUTIVE_DAYS:
+            raise ValueError(f"连续量比天数必须在 1 到 {MAX_VOLUME_RATIO_CONSECUTIVE_DAYS} 之间")
+        return value
+
     @validator("sell_reduction_basis")
     def validate_sell_reduction_basis(cls, value):
         if value not in {"portfolio", "holdings"}:
@@ -224,6 +241,7 @@ class SOXLFearSearchParams(BaseModel):
     buy_threshold_values: List[float] = Field(default_factory=lambda: [35.0, 40.0, 45.0])
     greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0, 41.0, 42.0])
     volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3, 1.38, 1.45])
+    volume_ratio_consecutive_days_values: List[int] = Field(default_factory=lambda: [1])
     buy_position_pct_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
     cooldown_days_values: List[int] = Field(default_factory=lambda: [5, 10, 15])
     trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [3.0, 5.0, 7.0])
@@ -248,6 +266,12 @@ class SOXLFearSearchParams(BaseModel):
         if not SYMBOL_PATTERN.match(symbol):
             raise ValueError("volume_signal_symbol 格式不正确")
         return symbol
+
+    @validator("volume_ratio_consecutive_days_values", each_item=True)
+    def validate_volume_ratio_consecutive_days_values(cls, value):
+        if value < 1 or value > MAX_VOLUME_RATIO_CONSECUTIVE_DAYS:
+            raise ValueError(f"连续量比天数必须在 1 到 {MAX_VOLUME_RATIO_CONSECUTIVE_DAYS} 之间")
+        return value
 
     @validator("top_n")
     def validate_top_n(cls, value):
@@ -558,12 +582,27 @@ def _prepare_base_dataframe(
         signal_price_df = _fetch_signal_price_history(signal_symbol, lookback_start_date, end_date)[["date", "volume"]].copy()
     signal_price_df = _normalize_price_dates(signal_price_df)
     signal_price_df["signal_volume"] = pd.to_numeric(signal_price_df["volume"], errors="coerce")
-    signal_price_df["volume_ma20"] = signal_price_df["signal_volume"].shift(1).rolling(20).mean()
+    signal_price_df["volume_ma20"] = signal_price_df["signal_volume"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).mean()
     signal_price_df["volume_ratio"] = np.where(
         signal_price_df["volume_ma20"] > 0,
         signal_price_df["signal_volume"] / signal_price_df["volume_ma20"],
         np.nan,
     )
+    for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1):
+        baseline_column = _volume_ma_excluding_recent_column(days)
+        ratio_column = _volume_ratio_consecutive_column(days)
+        recent_min_volume = signal_price_df["signal_volume"].rolling(days, min_periods=days).min()
+        signal_price_df[baseline_column] = (
+            signal_price_df["signal_volume"]
+            .shift(days)
+            .rolling(VOLUME_LOOKBACK_DAYS, min_periods=VOLUME_LOOKBACK_DAYS)
+            .mean()
+        )
+        signal_price_df[ratio_column] = np.where(
+            signal_price_df[baseline_column] > 0,
+            recent_min_volume / signal_price_df[baseline_column],
+            np.nan,
+        )
     signal_price_df["signal_date"] = signal_price_df["date"]
     signal_price_df["date_ts"] = pd.to_datetime(signal_price_df["date"])
 
@@ -587,20 +626,27 @@ def _prepare_base_dataframe(
         "signal_volume",
         "volume_ma20",
         "volume_ratio",
+        *[
+            column
+            for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1)
+            for column in (
+                _volume_ma_excluding_recent_column(days),
+                _volume_ratio_consecutive_column(days),
+            )
+        ],
     ]].rename(columns={"date_ts": "signal_ts"})
 
-    merged_df = pd.merge_asof(
+    merged_df = pd.merge(
         price_df.sort_values("date_ts"),
         signal_df.sort_values("signal_ts"),
         left_on="date_ts",
         right_on="signal_ts",
-        direction="backward",
-        allow_exact_matches=False,
+        how="left",
     )
     merged_df = merged_df[merged_df["date"] >= start_date].sort_values("date").reset_index(drop=True)
     merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce")
     merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
-    merged_df["execution_price"] = pd.to_numeric(merged_df["open"], errors="coerce")
+    merged_df["execution_price"] = pd.to_numeric(merged_df["close"], errors="coerce")
     base_df = merged_df.dropna(
         subset=["fear_greed", "ma20", "volume_ma20", "volume_ratio", "execution_price", "signal_date"]
     ).reset_index(drop=True)
@@ -637,15 +683,15 @@ def _prepare_base_dataframe(
         "volume_signal_symbol": signal_symbol,
         "volume_signal_label": _symbol_label(signal_symbol),
         "volume_signal_points": int(len(signal_price_df)),
-        "execution_price_type": "next_open",
-        "execution_price_label": "当日开盘价",
-        "signal_lag_label": "使用前一可用信号日数据",
+        "execution_price_type": "same_day_close",
+        "execution_price_label": "信号日收盘价",
+        "signal_lag_label": "使用信号当天数据",
     }
     base_df.attrs["fear_source"] = fear_meta["fear_source"]
     base_df.attrs["fear_source_label"] = fear_meta["fear_source_label"]
     base_df.attrs["volume_signal_symbol"] = signal_symbol
     base_df.attrs["volume_signal_label"] = _symbol_label(signal_symbol)
-    base_df.attrs["execution_price_label"] = "当日开盘价"
+    base_df.attrs["execution_price_label"] = "信号日收盘价"
     return base_df, meta
 
 
@@ -946,6 +992,21 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     ma20_values = base_df["ma20"].to_numpy(dtype=float, copy=False)
     volume_ma20_values = base_df["volume_ma20"].to_numpy(dtype=float, copy=False)
     volume_ratios = base_df["volume_ratio"].to_numpy(dtype=float, copy=False)
+    volume_ratio_consecutive_days = int(params.volume_ratio_consecutive_days)
+    buy_volume_ratio_column = _volume_ratio_consecutive_column(volume_ratio_consecutive_days)
+    buy_volume_ma_column = _volume_ma_excluding_recent_column(volume_ratio_consecutive_days)
+    if buy_volume_ratio_column in base_df.columns:
+        buy_volume_ratios = base_df[buy_volume_ratio_column].to_numpy(dtype=float, copy=False)
+    elif volume_ratio_consecutive_days == 1:
+        buy_volume_ratios = volume_ratios
+    else:
+        raise ValueError(f"缺少连续 {volume_ratio_consecutive_days} 天量比信号列")
+    if buy_volume_ma_column in base_df.columns:
+        buy_volume_ma_values = base_df[buy_volume_ma_column].to_numpy(dtype=float, copy=False)
+    elif volume_ratio_consecutive_days == 1:
+        buy_volume_ma_values = volume_ma20_values
+    else:
+        raise ValueError(f"缺少连续 {volume_ratio_consecutive_days} 天量比基准列")
     fear_values = base_df["fear_greed"].to_numpy(dtype=float, copy=False)
     signal_volumes = (
         base_df["signal_volume"].to_numpy(dtype=float, copy=False)
@@ -978,6 +1039,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     for index in range(len(close_prices)):
         current_date = date_strings[index]
         close_price = float(close_prices[index])
+        high_price = float(high_prices[index])
         execution_price = float(execution_prices[index])
         signal_date = signal_dates[index]
         signal_date_text = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date)
@@ -985,6 +1047,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         fear_date_text = fear_date.isoformat() if hasattr(fear_date, "isoformat") else str(fear_date)
         fear_score = float(fear_values[index])
         volume_ratio = float(volume_ratios[index])
+        buy_volume_ratio = float(buy_volume_ratios[index])
+        buy_volume_signal_ok = (
+            np.isfinite(buy_volume_ratio)
+            and buy_volume_ratio >= float(params.volume_ratio_threshold)
+        )
         can_trade = cooldown_remaining == 0
         action_taken = False
 
@@ -997,7 +1064,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         if shares > 0:
             if is_greedy:
-                greed_peak_price = max(greed_peak_price or execution_price, execution_price)
+                greed_peak_price = max(greed_peak_price or high_price, high_price)
             else:
                 greed_peak_price = None
                 take_profit_sell_count_in_cycle = 0
@@ -1056,7 +1123,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         # Reset the trailing-stop anchor after a partial take-profit.
                         # This avoids repeatedly selling against the same historical peak
                         # without a fresh rebound/new high inside the take-profit regime.
-                        greed_peak_price = execution_price
+                        greed_peak_price = high_price
                         take_profit_sell_count_in_cycle += 1
 
                     cooldown_remaining = params.cooldown_days
@@ -1095,7 +1162,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "signal_volume": float(signal_volumes[index]),
                     })
 
-        if not action_taken and is_fear and volume_ratio >= params.volume_ratio_threshold and can_trade:
+        if not action_taken and is_fear and buy_volume_signal_ok and can_trade:
             portfolio_value = cash + shares * execution_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
             if buy_amount > 0:
@@ -1117,6 +1184,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
 
+                    if volume_ratio_consecutive_days == 1:
+                        buy_reason = f"{fear_source_label} {fear_score:.2f} 进入买入区 + 成交量放大 {buy_volume_ratio:.2f}"
+                    else:
+                        buy_reason = (
+                            f"{fear_source_label} {fear_score:.2f} 进入买入区"
+                            f" + 连续 {volume_ratio_consecutive_days} 天成交量放大 {buy_volume_ratio:.2f}"
+                        )
+
                     trades.append({
                         "date": current_date,
                         "action": "BUY",
@@ -1136,10 +1211,13 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "avg_cost_after": avg_cost,
                         "profit": 0.0,
                         "profit_pct": 0.0,
-                        "reason": f"{fear_source_label} {fear_score:.2f} 进入买入区 + 成交量放大 {volume_ratio:.2f}",
+                        "reason": buy_reason,
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
-                        "volume_ratio": volume_ratio,
+                        "volume_ratio": buy_volume_ratio,
+                        "single_day_volume_ratio": volume_ratio,
+                        "buy_volume_ratio": buy_volume_ratio,
+                        "volume_ratio_consecutive_days": volume_ratio_consecutive_days,
                         "signal_volume": float(signal_volumes[index]),
                     })
 
@@ -1169,6 +1247,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "ma20": float(ma20_values[index]),
                 "volume_ma20": float(volume_ma20_values[index]),
                 "volume_ratio": volume_ratio,
+                "buy_volume_ma20": float(buy_volume_ma_values[index]),
+                "buy_volume_ratio": buy_volume_ratio,
+                "volume_ratio_consecutive_days": volume_ratio_consecutive_days,
                 "fear_greed": float(fear_values[index]),
                 "cnn_fear_greed": float(fear_values[index]),
                 "equity": equity_value,
@@ -1231,6 +1312,7 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
+        payload.volume_ratio_consecutive_days_values,
         payload.buy_position_pct_values,
         payload.cooldown_days_values,
         payload.trailing_stop_pct_values,
@@ -1284,6 +1366,7 @@ def _evaluate_search_candidates(
                 payload.buy_threshold_values,
                 payload.greed_threshold_values,
                 payload.volume_ratio_threshold_values,
+                payload.volume_ratio_consecutive_days_values,
                 payload.buy_position_pct_values,
                 payload.cooldown_days_values,
                 payload.trailing_stop_pct_values,
@@ -1304,31 +1387,56 @@ def _evaluate_search_candidates(
     def flush_futures(futures_map):
         nonlocal processed_combinations
         nonlocal skipped_combinations
+
+        def consume_batch_result(batch_result):
+            nonlocal processed_combinations
+            nonlocal skipped_combinations
+
+            for index, sort_key, result in batch_result["results"]:
+                handle_completed_result(index, sort_key, result)
+            skipped_combinations += batch_result["skipped_combinations"]
+            for index, message in batch_result["skip_messages"]:
+                if skipped_combinations <= 5 or skipped_combinations % 100 == 0:
+                    logger.warning(
+                        "Skipping invalid SOXL fear parameter combination %s/%s: %s",
+                        index,
+                        total_combinations,
+                        message,
+                    )
+            processed_combinations += batch_result["processed_combinations"]
+
         for future in as_completed(list(futures_map.keys())):
             batch_meta = futures_map[future]
             try:
                 batch_result = future.result()
-                for index, sort_key, result in batch_result["results"]:
-                    handle_completed_result(index, sort_key, result)
-                skipped_combinations += batch_result["skipped_combinations"]
-                for index, message in batch_result["skip_messages"]:
-                    if skipped_combinations <= 5 or skipped_combinations % 100 == 0:
-                        logger.warning(
-                            "Skipping invalid SOXL fear parameter combination %s/%s: %s",
-                            index,
-                            total_combinations,
-                            message,
-                        )
-                processed_combinations += batch_result["processed_combinations"]
+                consume_batch_result(batch_result)
             except Exception as exc:
-                skipped_combinations += batch_meta["batch_size"]
-                processed_combinations += batch_meta["batch_size"]
                 logger.warning(
-                    "Skipping failed SOXL fear parameter batch %s-%s: %s",
+                    "SOXL fear parameter batch %s-%s failed in process pool, retrying inline: %s",
                     batch_meta["start_index"],
                     batch_meta["end_index"],
                     str(exc),
                 )
+                try:
+                    batch_result = _evaluate_search_batch(
+                        base_dfs[batch_meta["fear_source"]],
+                        batch_meta["fear_source"],
+                        FEAR_SOURCE_OPTIONS[batch_meta["fear_source"]]["label"],
+                        payload.initial_capital,
+                        payload.objective,
+                        payload.rebalance_threshold_pct,
+                        batch_meta["batch"],
+                    )
+                    consume_batch_result(batch_result)
+                except Exception as fallback_exc:
+                    skipped_combinations += batch_meta["batch_size"]
+                    processed_combinations += batch_meta["batch_size"]
+                    logger.warning(
+                        "Skipping failed SOXL fear parameter batch %s-%s after inline retry: %s",
+                        batch_meta["start_index"],
+                        batch_meta["end_index"],
+                        str(fallback_exc),
+                    )
             if progress_callback:
                 progress_callback(processed_combinations, total_combinations, skipped_combinations)
 
@@ -1352,6 +1460,7 @@ def _evaluate_search_candidates(
                 "end_index": batch[-1][0],
                 "batch_size": len(batch),
                 "fear_source": fear_source,
+                "batch": batch,
             }
 
             if len(futures_map) >= max_pending_batches:
@@ -1403,6 +1512,7 @@ def _evaluate_search_batch(
                 buy_threshold,
                 greed_threshold,
                 volume_ratio_threshold,
+                volume_ratio_consecutive_days,
                 buy_position_pct,
                 cooldown_days,
                 trailing_stop_pct,
@@ -1416,6 +1526,7 @@ def _evaluate_search_batch(
                 buy_threshold=float(buy_threshold),
                 greed_threshold=float(greed_threshold),
                 volume_ratio_threshold=float(volume_ratio_threshold),
+                volume_ratio_consecutive_days=int(volume_ratio_consecutive_days),
                 buy_position_pct=float(buy_position_pct),
                 cooldown_days=int(cooldown_days),
                 trailing_stop_pct=float(trailing_stop_pct),
@@ -1432,7 +1543,14 @@ def _evaluate_search_batch(
                 skip_messages.append((index, exc.errors()[0].get("msg", str(exc))))
             continue
 
-        result = _run_backtest(base_df, params, initial_capital, detailed=False)
+        try:
+            result = _run_backtest(base_df, params, initial_capital, detailed=False)
+        except Exception as exc:
+            skipped_combinations += 1
+            if len(skip_messages) < 5:
+                skip_messages.append((index, str(exc)))
+            continue
+
         result["fear_source"] = fear_source
         result["fear_source_label"] = fear_source_label
         sort_key = _result_sort_key(result, objective)
