@@ -3,6 +3,8 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
+  Descriptions,
   Divider,
   Empty,
   Form,
@@ -22,6 +24,7 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
   FileSearchOutlined,
@@ -87,8 +90,16 @@ const normalizeConfig = (config) => ({
   live_sub_account_id: config?.live_sub_account_id ?? undefined,
 });
 
+const normalizeStateFormValues = (state) => ({
+  last_processed_date: state?.last_processed_date ? dayjs(state.last_processed_date) : null,
+  cooldown_remaining_days: state?.cooldown_remaining_days ?? 0,
+  greed_peak_price: state?.greed_peak_price ?? null,
+  take_profit_cycle_sell_count: state?.take_profit_cycle_sell_count ?? 0,
+});
+
 const SoxlFearStrategy = ({ embedded = false }) => {
   const [form] = Form.useForm();
+  const [stateForm] = Form.useForm();
   const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
   const navigate = useNavigate();
   const [viewMode, setViewMode] = useState('list');
@@ -98,14 +109,18 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   const [listLoading, setListLoading] = useState(false);
   const [configLoading, setConfigLoading] = useState(false);
   const [logLoading, setLogLoading] = useState(false);
+  const [stateLoading, setStateLoading] = useState(false);
+  const [stateSaving, setStateSaving] = useState(false);
   const [manualLoadingId, setManualLoadingId] = useState(null);
   const logRequestSeqRef = useRef(0);
+  const stateRequestSeqRef = useRef(0);
   const isManualRunBusy = manualLoadingId !== null;
   const [ibAccounts, setIbAccounts] = useState([]);
   const [longportAccounts, setLongportAccounts] = useState([]);
   const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
   const [liveSubAccounts, setLiveSubAccounts] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [strategyState, setStrategyState] = useState(null);
 
   const accountMaps = useMemo(() => {
     const ibMap = new Map(ibAccounts.map((account) => [account.id, account]));
@@ -214,6 +229,34 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     }
   }, [selectedConfig?.id]);
 
+  const fetchState = useCallback(async (configId = selectedConfig?.id) => {
+    if (!configId) {
+      setStrategyState(null);
+      stateForm.resetFields();
+      return null;
+    }
+    const requestSeq = stateRequestSeqRef.current + 1;
+    stateRequestSeqRef.current = requestSeq;
+    setStateLoading(true);
+    try {
+      const { data } = await request.get(`/api/soxl-fear-strategy/configs/${configId}/state`);
+      if (requestSeq === stateRequestSeqRef.current) {
+        setStrategyState(data);
+        stateForm.setFieldsValue(normalizeStateFormValues(data));
+      }
+      return data;
+    } catch (error) {
+      if (requestSeq === stateRequestSeqRef.current) {
+        message.error(error.response?.data?.detail || '加载策略状态失败');
+      }
+      return null;
+    } finally {
+      if (requestSeq === stateRequestSeqRef.current) {
+        setStateLoading(false);
+      }
+    }
+  }, [selectedConfig?.id, stateForm]);
+
   const fetchIbAccounts = useCallback(async () => {
     try {
       const { data } = await request.get('/api/ib-accounts');
@@ -257,9 +300,12 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         if (activeTab === 'logs') {
           await fetchLogs(data.config_id);
         }
+        if (activeTab === 'state') {
+          await fetchState(data.config_id);
+        }
       }
     });
-  }, [activeTab, fetchConfigDetail, fetchConfigs, fetchLogs, selectedConfig?.id]);
+  }, [activeTab, fetchConfigDetail, fetchConfigs, fetchLogs, fetchState, selectedConfig?.id]);
 
   useEffect(() => {
     fetchLiveSubAccounts(selectedExternalTradingAccountId);
@@ -287,8 +333,10 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   const openCreate = () => {
     setSelectedConfig(null);
     setLogs([]);
+    setStrategyState(null);
     setLiveSubAccounts([]);
     form.resetFields();
+    stateForm.resetFields();
     form.setFieldsValue(defaultValues);
     setActiveTab('config');
     setViewMode('detail');
@@ -298,9 +346,14 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     setViewMode('detail');
     setActiveTab(tabKey);
     setLogs([]);
+    setStrategyState(null);
+    stateForm.resetFields();
     const config = await fetchConfigDetail(record.id);
     if (tabKey === 'logs' && config?.id) {
       await fetchLogs(config.id);
+    }
+    if (tabKey === 'state' && config?.id) {
+      await fetchState(config.id);
     }
   };
 
@@ -308,7 +361,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     setViewMode('list');
     setSelectedConfig(null);
     setLogs([]);
+    setStrategyState(null);
     form.resetFields();
+    stateForm.resetFields();
     await fetchConfigs();
   };
 
@@ -352,6 +407,31 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     }
   };
 
+  const handleSaveState = async (values) => {
+    if (!selectedConfig?.id) {
+      message.warning('请先保存配置');
+      return;
+    }
+    const payload = {
+      ...values,
+      last_processed_date: values.last_processed_date
+        ? values.last_processed_date.format('YYYY-MM-DD')
+        : null,
+      greed_peak_price: values.greed_peak_price ?? null,
+    };
+    setStateSaving(true);
+    try {
+      const { data } = await request.put(`/api/soxl-fear-strategy/configs/${selectedConfig.id}/state`, payload);
+      setStrategyState(data);
+      stateForm.setFieldsValue(normalizeStateFormValues(data));
+      message.success('策略状态已保存');
+    } catch (error) {
+      message.error(error.response?.data?.detail || '保存策略状态失败');
+    } finally {
+      setStateSaving(false);
+    }
+  };
+
   const handleManualRun = async (record = selectedConfig) => {
     if (isManualRunBusy) return;
     if (!record?.id) {
@@ -378,7 +458,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         setSelectedConfig(null);
         setViewMode('list');
         setLogs([]);
+        setStrategyState(null);
         form.resetFields();
+        stateForm.resetFields();
       }
       await fetchConfigs();
     } catch (error) {
@@ -872,6 +954,125 @@ const SoxlFearStrategy = ({ embedded = false }) => {
     );
   };
 
+  const renderStateValue = (value, formatter) => {
+    if (value === null || value === undefined || value === '') return '-';
+    return formatter ? formatter(value) : value;
+  };
+
+  const renderState = () => {
+    if (!selectedConfig?.id) {
+      return <Empty description="保存配置后查看状态" />;
+    }
+
+    return (
+      <>
+        <Space style={{ width: '100%', justifyContent: 'flex-end', marginBottom: 16 }} wrap>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => fetchState()}
+            loading={stateLoading}
+            disabled={isManualRunBusy}
+          >
+            刷新状态
+          </Button>
+        </Space>
+        <Descriptions
+          bordered
+          size="small"
+          column={{ xs: 1, sm: 2, lg: 3 }}
+          style={{ marginBottom: 16 }}
+        >
+          <Descriptions.Item label="状态行">
+            <Tag color={strategyState?.has_state ? 'success' : 'default'}>
+              {strategyState?.has_state ? '已创建' : '未创建'}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="配置ID">{selectedConfig.id}</Descriptions.Item>
+          <Descriptions.Item label="标的">{strategyState?.symbol || selectedConfig.symbol || '-'}</Descriptions.Item>
+          <Descriptions.Item label="最近处理交易日">
+            {renderStateValue(strategyState?.last_processed_date)}
+          </Descriptions.Item>
+          <Descriptions.Item label="剩余冷却交易日">
+            {renderStateValue(strategyState?.cooldown_remaining_days)}
+          </Descriptions.Item>
+          <Descriptions.Item label="止盈峰值">
+            {renderStateValue(strategyState?.greed_peak_price, (value) => Number(value).toFixed(4))}
+          </Descriptions.Item>
+          <Descriptions.Item label="本轮止盈次数">
+            {renderStateValue(strategyState?.take_profit_cycle_sell_count)}
+          </Descriptions.Item>
+          <Descriptions.Item label="更新时间">
+            {renderStateValue(strategyState?.updated_at, (value) => dayjs(value).format('YYYY-MM-DD HH:mm:ss'))}
+          </Descriptions.Item>
+        </Descriptions>
+
+        <Form
+          form={stateForm}
+          layout="vertical"
+          onFinish={handleSaveState}
+          initialValues={{
+            last_processed_date: null,
+            cooldown_remaining_days: 0,
+            greed_peak_price: null,
+            take_profit_cycle_sell_count: 0,
+          }}
+        >
+          <Row gutter={16}>
+            <Col xs={24} md={6}>
+              <Form.Item name="last_processed_date" label="最近处理交易日">
+                <DatePicker allowClear style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="cooldown_remaining_days"
+                label="剩余冷却交易日"
+                rules={[{ required: true, message: '请输入剩余冷却交易日' }]}
+              >
+                <InputNumber min={0} max={60} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="greed_peak_price" label="止盈峰值价格">
+                <InputNumber min={0} precision={4} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="take_profit_cycle_sell_count"
+                label="本轮止盈次数"
+                rules={[{ required: true, message: '请输入本轮止盈次数' }]}
+              >
+                <InputNumber min={0} max={20} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item>
+            <Space wrap>
+              <Button
+                type="primary"
+                htmlType="submit"
+                icon={<SaveOutlined />}
+                loading={stateSaving}
+                disabled={isManualRunBusy}
+              >
+                保存状态
+              </Button>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => fetchState()}
+                loading={stateLoading}
+                disabled={isManualRunBusy}
+              >
+                重新加载
+              </Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </>
+    );
+  };
+
   const renderList = () => (
     <Card>
       {!embedded && <Title level={4} style={{ margin: '0 0 16px' }}>情绪量能策略</Title>}
@@ -916,6 +1117,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
             if (key === 'logs') {
               fetchLogs();
             }
+            if (key === 'state') {
+              fetchState();
+            }
           }}
           items={[
             {
@@ -928,6 +1132,12 @@ const SoxlFearStrategy = ({ embedded = false }) => {
               label: <span className="soxl-fear-detail-tab-label"><HistoryOutlined />运行日志</span>,
               disabled: !selectedConfig?.id,
               children: renderLogs(),
+            },
+            {
+              key: 'state',
+              label: <span className="soxl-fear-detail-tab-label"><DatabaseOutlined />状态</span>,
+              disabled: !selectedConfig?.id,
+              children: renderState(),
             },
           ]}
         />
