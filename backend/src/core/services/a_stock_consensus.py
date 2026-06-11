@@ -473,11 +473,13 @@ def search_a_stock_consensus_candidates(
     if latest_trade_date is None:
         return []
 
-    lookback_days = max(1, min(int(report_lookback_days or 180), 1095))
-    start_date = latest_trade_date - timedelta(days=lookback_days)
     search_text = str(symbol or "").strip()
     search_symbol = normalize_a_stock_symbol(search_text) if _looks_like_a_stock_code(search_text) else ""
     name_search = search_text if search_text and not search_symbol else ""
+    has_search = bool(search_text)
+    lookback_days = max(1, min(int(report_lookback_days or 180), 1095))
+    start_date = latest_trade_date - timedelta(days=lookback_days)
+    date_filter = "" if has_search else "AND r.report_date >= :start_date"
     search_filter = ""
     params = {"start_date": start_date, "symbol": search_symbol, "name_pattern": f"%{name_search}%"}
     if search_symbol:
@@ -516,7 +518,8 @@ def search_a_stock_consensus_candidates(
             FROM a_stock_report_rc r
             JOIN latest_market m ON m.ts_code = r.ts_code
             LEFT JOIN a_stock_basic b ON b.ts_code = r.ts_code
-            WHERE r.report_date >= :start_date
+            WHERE 1 = 1
+              {date_filter}
               {search_filter}
             ORDER BY r.ts_code, r.report_date DESC
             """
@@ -528,7 +531,7 @@ def search_a_stock_consensus_candidates(
         rows,
         latest_trade_date,
         search_symbol=search_symbol,
-        has_search=bool(search_text),
+        has_search=has_search,
         min_market_cap_100m=min_market_cap_100m,
         max_market_cap_100m=max_market_cap_100m,
         min_undervalue_pct=min_undervalue_pct,

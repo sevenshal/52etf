@@ -261,6 +261,7 @@ def test_search_consensus_candidates_supports_name_query():
             if "MAX(trade_date)" in sql:
                 return type("ScalarResult", (), {"scalar": lambda self: date(2026, 6, 8)})()
             assert "LIKE :name_pattern" in sql
+            assert "r.report_date >= :start_date" not in sql
             assert params["name_pattern"] == "%茅台%"
             rows = [
                 {
@@ -312,3 +313,67 @@ def test_search_consensus_candidates_supports_name_query():
     )
 
     assert [item["symbol"] for item in result] == ["600519.SH"]
+
+
+def test_search_consensus_candidates_symbol_query_ignores_report_window():
+    class FakeDb:
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            if "MAX(trade_date)" in sql:
+                return type("ScalarResult", (), {"scalar": lambda self: date(2026, 6, 8)})()
+            assert "r.ts_code = :symbol" in sql
+            assert "r.report_date >= :start_date" not in sql
+            assert params["symbol"] == "300721.SZ"
+            rows = [
+                {
+                    "ts_code": "300721.SZ",
+                    "report_name": "怡达股份",
+                    "stock_name": "怡达股份",
+                    "industry": "化工",
+                    "market": "创业板",
+                    "trade_date": date(2026, 6, 8),
+                    "close": 35.0,
+                    "total_mv": 590_000.0,
+                    "circ_mv": 490_000.0,
+                    "report_date": date(2022, 12, 20),
+                    "report_title": "旧研报",
+                    "org_name": "机构A",
+                    "author_name": "分析师A",
+                    "quarter": "2022",
+                    "eps": 1.0,
+                    "min_price": 65.0,
+                    "max_price": None,
+                },
+                {
+                    "ts_code": "300721.SZ",
+                    "report_name": "怡达股份",
+                    "stock_name": "怡达股份",
+                    "industry": "化工",
+                    "market": "创业板",
+                    "trade_date": date(2026, 6, 8),
+                    "close": 35.0,
+                    "total_mv": 590_000.0,
+                    "circ_mv": 490_000.0,
+                    "report_date": date(2022, 12, 20),
+                    "report_title": "旧研报",
+                    "org_name": "机构A",
+                    "author_name": "分析师A",
+                    "quarter": "2023",
+                    "eps": 1.2,
+                    "min_price": 65.0,
+                    "max_price": None,
+                },
+            ]
+            return type("RowsResult", (), {"mappings": lambda self: type("Mappings", (), {"all": lambda self: rows})()})()
+
+    result = search_a_stock_consensus_candidates(
+        FakeDb(),
+        symbol="300721",
+        report_lookback_days=60,
+        min_report_count=5,
+        min_undervalue_pct=200.0,
+        min_growth_pct=200.0,
+    )
+
+    assert [item["symbol"] for item in result] == ["300721.SZ"]
+    assert result[0]["latest_report_date"] == "2022-12-20"
