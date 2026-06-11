@@ -1,16 +1,20 @@
 import asyncio
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from src.app.api.soxl_fear_strategy import (
     SoxlFearStrategyConfigPayload,
+    SoxlFearStrategyStatePayload,
+    get_soxl_fear_strategy_state_by_config,
+    update_soxl_fear_strategy_state_by_config,
     _resolve_trading_account_id,
 )
 from src.core.database import (
@@ -272,6 +276,129 @@ class SoxlFearExternalTradingTest(TestCase):
             self.assertEqual("SUCCESS", persisted_config.last_run_status)
         finally:
             db.close()
+
+    def test_persist_run_result_retries_sqlite_lock(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(
+            engine,
+            tables=[
+                SoxlFearStrategyConfig.__table__,
+                SoxlFearStrategyState.__table__,
+                SoxlFearStrategyLog.__table__,
+            ],
+        )
+        session_factory = sessionmaker(bind=engine)
+        db = session_factory()
+        db.add(
+            SoxlFearStrategyConfig(
+                id=22,
+                account_id="acct",
+                enabled=True,
+                symbol="SOXL.US",
+                account_type="external",
+                cooldown_days=5,
+            )
+        )
+        db.commit()
+        db.close()
+
+        attempts = {"value": 0}
+
+        @contextmanager
+        def flaky_main_db_ctx():
+            session = session_factory()
+            attempts["value"] += 1
+            try:
+                yield session
+                if attempts["value"] == 1:
+                    session.rollback()
+                    raise OperationalError("INSERT", {}, Exception("database is locked"))
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        trader = SoxlFearStrategyTrader()
+        state_values = SimpleNamespace(
+            last_processed_date=date(2026, 6, 10),
+            cooldown_remaining_days=5,
+            greed_peak_price=None,
+            take_profit_cycle_sell_count=0,
+        )
+        with patch("src.robot.soxl_fear_strategy_trader.get_db_ctx", flaky_main_db_ctx), patch(
+            "src.robot.soxl_fear_strategy_trader.time.sleep",
+            lambda _seconds: None,
+        ):
+            trader._persist_run_result(
+                config_id=22,
+                account_id="acct",
+                symbol="SOXL.US",
+                trigger_source="auto",
+                action="BUY",
+                status="SUCCESS",
+                message="filled",
+                state_values=state_values,
+                quantity=10,
+            )
+
+        self.assertEqual(2, attempts["value"])
+        db = session_factory()
+        try:
+            state = db.query(SoxlFearStrategyState).one()
+            log = db.query(SoxlFearStrategyLog).one()
+            self.assertEqual(5, state.cooldown_remaining_days)
+            self.assertEqual(date(2026, 6, 10), state.last_processed_date)
+            self.assertEqual("BUY", log.action)
+        finally:
+            db.close()
+
+    def test_soxl_state_api_reads_default_and_updates_state(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(
+            engine,
+            tables=[
+                SoxlFearStrategyConfig.__table__,
+                SoxlFearStrategyState.__table__,
+            ],
+        )
+        session_factory = sessionmaker(bind=engine)
+        db = session_factory()
+        db.add(
+            SoxlFearStrategyConfig(
+                id=31,
+                account_id="acct",
+                enabled=True,
+                symbol="SOXL.US",
+                account_type="external",
+            )
+        )
+        db.commit()
+
+        default_state = get_soxl_fear_strategy_state_by_config(31, account_id="acct", db=db)
+        self.assertFalse(default_state.has_state)
+        self.assertEqual(0, default_state.cooldown_remaining_days)
+
+        updated_state = update_soxl_fear_strategy_state_by_config(
+            31,
+            SoxlFearStrategyStatePayload(
+                last_processed_date=date(2026, 6, 10),
+                cooldown_remaining_days=7,
+                greed_peak_price=210.5,
+                take_profit_cycle_sell_count=1,
+            ),
+            account_id="acct",
+            db=db,
+        )
+        self.assertTrue(updated_state.has_state)
+        self.assertEqual(7, updated_state.cooldown_remaining_days)
+        self.assertEqual(210.5, updated_state.greed_peak_price)
+
+        row = db.query(SoxlFearStrategyState).one()
+        self.assertEqual(date(2026, 6, 10), row.last_processed_date)
+        self.assertEqual(1, row.take_profit_cycle_sell_count)
+        db.close()
 
     def test_run_config_once_trailing_take_profit_uses_intraday_high_as_peak(self):
         engine = create_engine("sqlite:///:memory:")

@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -132,6 +132,42 @@ class SoxlFearStrategyLogSchema(BaseModel):
     position_ratio_before: Optional[float] = None
     position_ratio_after: Optional[float] = None
     message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SoxlFearStrategyStatePayload(BaseModel):
+    last_processed_date: Optional[date] = None
+    cooldown_remaining_days: int = 0
+    greed_peak_price: Optional[float] = None
+    take_profit_cycle_sell_count: int = 0
+
+    @validator("cooldown_remaining_days")
+    def validate_cooldown_remaining_days(cls, value):
+        if value < 0 or value > 60:
+            raise ValueError("cooldown_remaining_days 必须在 0 到 60 之间")
+        return value
+
+    @validator("greed_peak_price")
+    def validate_greed_peak_price(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("greed_peak_price 不能为负数")
+        return value
+
+    @validator("take_profit_cycle_sell_count")
+    def validate_take_profit_cycle_sell_count(cls, value):
+        if value < 0 or value > 20:
+            raise ValueError("take_profit_cycle_sell_count 必须在 0 到 20 之间")
+        return value
+
+
+class SoxlFearStrategyStateSchema(SoxlFearStrategyStatePayload):
+    config_id: int
+    account_id: Optional[str] = None
+    symbol: str = "SOXL.US"
+    updated_at: Optional[datetime] = None
+    has_state: bool = False
 
     class Config:
         from_attributes = True
@@ -426,6 +462,23 @@ def _apply_payload_to_config(
     config.updated_at = datetime.now()
 
 
+def _soxl_state_response(
+    config: SoxlFearStrategyConfig,
+    state: Optional[SoxlFearStrategyState],
+) -> SoxlFearStrategyStateSchema:
+    return SoxlFearStrategyStateSchema(
+        config_id=config.id,
+        account_id=config.account_id,
+        symbol=getattr(state, "symbol", None) or config.symbol or "SOXL.US",
+        last_processed_date=getattr(state, "last_processed_date", None),
+        cooldown_remaining_days=int(getattr(state, "cooldown_remaining_days", 0) or 0),
+        greed_peak_price=getattr(state, "greed_peak_price", None),
+        take_profit_cycle_sell_count=int(getattr(state, "take_profit_cycle_sell_count", 0) or 0),
+        updated_at=getattr(state, "updated_at", None),
+        has_state=bool(state),
+    )
+
+
 @router.get("/configs", response_model=List[SoxlFearStrategyConfigSchema])
 def list_soxl_fear_strategy_configs(
     account_id: str = Depends(valid_account),
@@ -580,6 +633,45 @@ def get_soxl_fear_strategy_logs_by_config(
         .limit(page_size)
         .all()
     )
+
+
+@router.get("/configs/{config_id}/state", response_model=SoxlFearStrategyStateSchema)
+def get_soxl_fear_strategy_state_by_config(
+    config_id: int,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    state = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config.id).first()
+    return _soxl_state_response(config, state)
+
+
+@router.put("/configs/{config_id}/state", response_model=SoxlFearStrategyStateSchema)
+def update_soxl_fear_strategy_state_by_config(
+    config_id: int,
+    payload: SoxlFearStrategyStatePayload,
+    account_id: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    config = _get_config_or_404(db, account_id, config_id)
+    state = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config.id).first()
+    if not state:
+        state = SoxlFearStrategyState(
+            config_id=config.id,
+            account_id=config.account_id,
+            symbol=config.symbol or "SOXL.US",
+        )
+        db.add(state)
+    state.account_id = config.account_id
+    state.symbol = config.symbol or "SOXL.US"
+    state.last_processed_date = payload.last_processed_date
+    state.cooldown_remaining_days = int(payload.cooldown_remaining_days or 0)
+    state.greed_peak_price = payload.greed_peak_price
+    state.take_profit_cycle_sell_count = int(payload.take_profit_cycle_sell_count or 0)
+    state.updated_at = datetime.now()
+    db.commit()
+    db.refresh(state)
+    return _soxl_state_response(config, state)
 
 
 @router.post("/configs/{config_id}/manual-check")

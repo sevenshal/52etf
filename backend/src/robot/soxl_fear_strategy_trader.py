@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, time as dtime
@@ -10,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from sqlalchemy.exc import OperationalError
 
 from ..core.database import (
     CNNFearGreedIndex,
@@ -78,6 +80,9 @@ class SoxlFearStrategyTrader:
     MARKET_OPEN_TIME = dtime(9, 30)
     MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
     VOLUME_PROJECTION_WINDOW_MINUTES = 30
+    MAIN_DB_WRITE_RETRY_ATTEMPTS = 4
+    MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
+    MAIN_DB_WRITE_RETRY_MAX_SECONDS = 8.0
 
     def __new__(cls):
         with cls._lock:
@@ -128,34 +133,69 @@ class SoxlFearStrategyTrader:
         position_ratio_before: Optional[float] = None,
         position_ratio_after: Optional[float] = None,
     ):
-        with get_db_ctx() as db:
-            db.add(
-                SoxlFearStrategyLog(
-                    config_id=config_id,
-                    account_id=account_id,
-                    symbol=symbol,
-                    trigger_source=trigger_source,
-                    action=action,
-                    status=status,
-                    price=price,
-                    quantity=quantity,
-                    fear_score=fear_score,
-                    volume_ratio=volume_ratio,
-                    position_ratio_before=position_ratio_before,
-                    position_ratio_after=position_ratio_after,
-                    message=message[:1000],
+        def write_log():
+            with get_db_ctx() as db:
+                db.add(
+                    SoxlFearStrategyLog(
+                        config_id=config_id,
+                        account_id=account_id,
+                        symbol=symbol,
+                        trigger_source=trigger_source,
+                        action=action,
+                        status=status,
+                        price=price,
+                        quantity=quantity,
+                        fear_score=fear_score,
+                        volume_ratio=volume_ratio,
+                        position_ratio_before=position_ratio_before,
+                        position_ratio_after=position_ratio_after,
+                        message=message[:1000],
+                    )
                 )
-            )
+
+        self._write_main_db_with_retry("append SOXL strategy log", write_log)
 
     def _update_run_status(self, config_id: Optional[int], status: str, message: str):
         if not config_id:
             return
-        with get_db_ctx() as db:
-            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
-            if config:
-                config.last_run_at = datetime.now()
-                config.last_run_status = status
-                config.last_run_message = message[:500]
+
+        def write_status():
+            with get_db_ctx() as db:
+                config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
+                if config:
+                    config.last_run_at = datetime.now()
+                    config.last_run_status = status
+                    config.last_run_message = message[:500]
+
+        self._write_main_db_with_retry("update SOXL strategy run status", write_status)
+
+    def _is_sqlite_lock_error(self, exc: Exception) -> bool:
+        if not isinstance(exc, OperationalError):
+            return False
+        message = str(exc).lower()
+        return "database is locked" in message or "database table is locked" in message
+
+    def _write_main_db_with_retry(self, operation_name: str, writer):
+        for attempt in range(1, self.MAIN_DB_WRITE_RETRY_ATTEMPTS + 1):
+            try:
+                return writer()
+            except Exception as exc:
+                if not self._is_sqlite_lock_error(exc) or attempt >= self.MAIN_DB_WRITE_RETRY_ATTEMPTS:
+                    raise
+                sleep_seconds = min(
+                    self.MAIN_DB_WRITE_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                    self.MAIN_DB_WRITE_RETRY_MAX_SECONDS,
+                )
+                logger.warning(
+                    "%s hit SQLite lock, retrying %s/%s in %.1fs: %s",
+                    operation_name,
+                    attempt + 1,
+                    self.MAIN_DB_WRITE_RETRY_ATTEMPTS,
+                    sleep_seconds,
+                    exc,
+                )
+                time.sleep(sleep_seconds)
+        return None
 
     def _send_rebalance_notification(
         self,
@@ -817,48 +857,51 @@ class SoxlFearStrategyTrader:
         position_ratio_after: Optional[float] = None,
     ):
         """Persist strategy state, run status, and log in one short main-db write."""
-        with get_db_ctx() as db:
-            state = db.query(SoxlFearStrategyState).filter(
-                SoxlFearStrategyState.config_id == config_id
-            ).first()
-            if not state:
-                state = SoxlFearStrategyState(
-                    config_id=config_id,
-                    account_id=account_id,
-                    symbol=symbol,
+        def write_result():
+            with get_db_ctx() as db:
+                state = db.query(SoxlFearStrategyState).filter(
+                    SoxlFearStrategyState.config_id == config_id
+                ).first()
+                if not state:
+                    state = SoxlFearStrategyState(
+                        config_id=config_id,
+                        account_id=account_id,
+                        symbol=symbol,
+                    )
+                    db.add(state)
+
+                state.account_id = account_id
+                state.symbol = symbol
+                state.last_processed_date = state_values.last_processed_date
+                state.cooldown_remaining_days = int(state_values.cooldown_remaining_days or 0)
+                state.greed_peak_price = state_values.greed_peak_price
+                state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
+
+                db.add(
+                    SoxlFearStrategyLog(
+                        config_id=config_id,
+                        account_id=account_id,
+                        symbol=symbol,
+                        trigger_source=trigger_source,
+                        action=action,
+                        status=status,
+                        price=price,
+                        quantity=quantity,
+                        fear_score=fear_score,
+                        volume_ratio=volume_ratio,
+                        position_ratio_before=position_ratio_before,
+                        position_ratio_after=position_ratio_after,
+                        message=message[:1000],
+                    )
                 )
-                db.add(state)
 
-            state.account_id = account_id
-            state.symbol = symbol
-            state.last_processed_date = state_values.last_processed_date
-            state.cooldown_remaining_days = int(state_values.cooldown_remaining_days or 0)
-            state.greed_peak_price = state_values.greed_peak_price
-            state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
+                config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
+                if config:
+                    config.last_run_at = datetime.now()
+                    config.last_run_status = status
+                    config.last_run_message = (run_message if run_message is not None else message)[:500]
 
-            db.add(
-                SoxlFearStrategyLog(
-                    config_id=config_id,
-                    account_id=account_id,
-                    symbol=symbol,
-                    trigger_source=trigger_source,
-                    action=action,
-                    status=status,
-                    price=price,
-                    quantity=quantity,
-                    fear_score=fear_score,
-                    volume_ratio=volume_ratio,
-                    position_ratio_before=position_ratio_before,
-                    position_ratio_after=position_ratio_after,
-                    message=message[:1000],
-                )
-            )
-
-            config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
-            if config:
-                config.last_run_at = datetime.now()
-                config.last_run_status = status
-                config.last_run_message = (run_message if run_message is not None else message)[:500]
+        self._write_main_db_with_retry("persist SOXL strategy run result", write_result)
 
     async def run_config_once(self, config: SoxlFearStrategyConfig, trigger_source: str = "auto", ignore_enabled: bool = False):
         config_id = config.id
