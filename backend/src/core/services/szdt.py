@@ -10,6 +10,17 @@ from diskcache import Cache
 from urllib.parse import urlencode
 import os
 
+DEFAULT_TIMEOUT_SECONDS = 8.0
+SZDT_TIMEOUT_ENV = "SZDT_HTTP_TIMEOUT"
+
+
+def _load_timeout_seconds() -> float:
+    try:
+        return max(0.1, float(os.getenv(SZDT_TIMEOUT_ENV, str(DEFAULT_TIMEOUT_SECONDS))))
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SECONDS
+
+
 class SZDTService:
     """守猪逮兔量化服务
     
@@ -25,6 +36,8 @@ class SZDTService:
         self.auth_code = 'meHTJgAi8hEausoh4ACj5FzMeOelDSIm:34f95cf6f11365e8376344081b0c9d472257314f'
         self.partner_auth = 'meHTJgAi8hEausoh4ACj5FzMeOelDSIm'  # 合作伙伴认证码
         self.user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        self.timeout_seconds = _load_timeout_seconds()
+        self.timeout = httpx.Timeout(self.timeout_seconds)
         
         # 创建缓存目录
         cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "quant")
@@ -109,14 +122,18 @@ class SZDTService:
             url = f"{self.base_url}{path}"
             
             # 发送请求
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
                 if method == "GET":
                     response = await client.get(url, headers=headers)
                 else:
                     response = await client.post(url, headers=headers, json=data)
                 
                 response.raise_for_status()
-                resp = response.json()
+                try:
+                    resp = response.json()
+                except ValueError as exc:
+                    self._log_request_failure(method, path, exc, status_code=response.status_code)
+                    return None
                 self.logger.debug(f"响应数据: {resp}")
                 
                 # 如果提供了缓存键，则缓存响应
@@ -126,9 +143,40 @@ class SZDTService:
                 
                 return resp
                 
-        except Exception as e:
-            self.logger.error(f"请求失败 {method} {path}: {str(e)}")
+        except httpx.TimeoutException as exc:
+            self._log_request_failure(method, path, exc, timeout_seconds=self.timeout_seconds)
             return None
+        except httpx.HTTPStatusError as exc:
+            self._log_request_failure(method, path, exc)
+            return None
+        except httpx.TransportError as exc:
+            self._log_request_failure(method, path, exc)
+            return None
+        except Exception as exc:
+            self._log_request_failure(method, path, exc)
+            return None
+
+    def _log_request_failure(
+        self,
+        method: str,
+        path: str,
+        exc: BaseException,
+        *,
+        status_code: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+    ):
+        details = [f"type={exc.__class__.__name__}"]
+        response = getattr(exc, "response", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            details.append(f"status_code={status_code}")
+        if timeout_seconds is not None:
+            details.append(f"timeout={timeout_seconds:g}s")
+        message = str(exc).strip()
+        if message:
+            details.append(f"message={message}")
+        self.logger.error("请求失败 %s %s: %s", method, path, " ".join(details))
 
     @sleep_and_retry
     @limits(calls=10, period=1)

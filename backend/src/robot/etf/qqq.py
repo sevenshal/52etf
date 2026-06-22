@@ -217,7 +217,9 @@ class QQQDataFetcher(ETFDataFetcher):
         if self.PROXY:
             try:
                 return self._fetch_holdings(proxy=self.PROXY)
-            except (httpx.RequestError, httpx.HTTPStatusError, TypeError) as exc:
+            except Exception as exc:
+                if not self._should_retry_direct_after_proxy_error(exc):
+                    raise
                 self.logger.warning("通过代理获取 QQQ 持仓失败，尝试直连: %s", exc)
 
         return self._fetch_holdings(proxy=None)
@@ -241,6 +243,13 @@ class QQQDataFetcher(ETFDataFetcher):
         if "proxies" in parameters:
             return {"proxies": proxy}
         raise TypeError("httpx.Client does not support proxy configuration")
+
+    @staticmethod
+    def _should_retry_direct_after_proxy_error(exc: Exception) -> bool:
+        if isinstance(exc, (httpx.RequestError, httpx.HTTPStatusError, TypeError)):
+            return True
+        message = str(exc).lower()
+        return "socksio" in message and "socks" in message
 
     def _map_asset_class(self, holding_data: dict) -> str:
         ticker = str(holding_data.get("ticker") or "").strip().upper()

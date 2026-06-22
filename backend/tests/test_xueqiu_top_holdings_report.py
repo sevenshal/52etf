@@ -1,9 +1,10 @@
+import asyncio
 from datetime import datetime
 import os
 import tempfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -15,6 +16,8 @@ from src.robot.xueqiu_top_holdings_report import (
     CubeCurrentResult,
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
     build_equal_top10_top12_buffer_plan,
+    build_rebalance_payload,
+    describe_rebalance_quote_rejection,
     load_cached_year_top_cubes,
     rounded_rebalance_weights,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
@@ -156,6 +159,123 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(10.0, by_symbol["SZ.300394"]["rebalance_weight_pct"])
         self.assertEqual("keep", by_symbol["SZ.300757"]["strategy_action"])
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
+
+    def test_build_rebalance_payload_allows_etf_quote_type_13(self):
+        top_items = [
+            {
+                "stock_symbol": "SH.600000",
+                "stock_name": "浦发银行",
+                "rebalance_weight_pct": 60.0,
+            },
+            {
+                "stock_symbol": "SH.511880",
+                "stock_name": "银华日利",
+                "rebalance_weight_pct": 40.0,
+            },
+        ]
+        quotes = {
+            "SH600000": {
+                "price": 10.0,
+                "name": "浦发银行",
+                "quote": {"symbol": "SH600000", "current": 10.0, "type": 11, "status": 1},
+            },
+            "SH511880": {
+                "price": 100.0,
+                "name": "银华日利",
+                "quote": {"symbol": "SH511880", "current": 100.0, "type": 13, "status": 1},
+            },
+        }
+        metadata = {
+            "SH600000": {"stock_id": 1, "stock_name": "浦发银行", "segment_name": "银行"},
+            "SH511880": {"stock_id": 2, "stock_name": "银华日利", "segment_name": "货币基金"},
+        }
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_batch_quotes",
+            new=AsyncMock(return_value=quotes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata_map",
+            new=AsyncMock(return_value=metadata),
+        ):
+            payload = asyncio.run(
+                build_rebalance_payload(
+                    cookie="xq_a_token=test;",
+                    target_cube_symbol="ZH3630096",
+                    target_cube_id=3664154,
+                    top_items=top_items,
+                )
+            )
+
+        self.assertEqual(0.0, payload["cash"])
+        self.assertEqual(2, len(payload["holdings"]))
+        self.assertEqual(["SH600000", "SH511880"], [row["stock_symbol"] for row in payload["holdings"]])
+        self.assertEqual([60.0, 40.0], [row["weight"] for row in payload["holdings"]])
+        self.assertEqual([], payload["skipped_items"])
+
+    def test_rebalance_quote_validation_does_not_require_allowlisted_type(self):
+        self.assertIsNone(
+            describe_rebalance_quote_rejection(
+                "SH999999",
+                {"symbol": "SH999999", "current": 10.0, "type": 99, "status": 1},
+            )
+        )
+
+    def test_build_rebalance_payload_skips_blocked_quote_type_into_cash(self):
+        top_items = [
+            {
+                "stock_symbol": "SH.600000",
+                "stock_name": "浦发银行",
+                "rebalance_weight_pct": 60.0,
+            },
+            {
+                "stock_symbol": "SH.204001",
+                "stock_name": "GC001",
+                "rebalance_weight_pct": 40.0,
+            },
+        ]
+        quotes = {
+            "SH600000": {
+                "price": 10.0,
+                "name": "浦发银行",
+                "quote": {"symbol": "SH600000", "current": 10.0, "type": 11, "status": 1},
+            },
+            "SH204001": {
+                "price": 1.5,
+                "name": "GC001",
+                "quote": {"symbol": "SH204001", "current": 1.5, "type": 17, "status": 1},
+            },
+        }
+        metadata = {
+            "SH600000": {"stock_id": 1, "stock_name": "浦发银行", "segment_name": "银行"},
+            "SH204001": {"stock_id": 2, "stock_name": "GC001", "segment_name": "国债逆回购"},
+        }
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_batch_quotes",
+            new=AsyncMock(return_value=quotes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata_map",
+            new=AsyncMock(return_value=metadata),
+        ):
+            payload = asyncio.run(
+                build_rebalance_payload(
+                    cookie="xq_a_token=test;",
+                    target_cube_symbol="ZH3630096",
+                    target_cube_id=3664154,
+                    top_items=top_items,
+                )
+            )
+
+        self.assertEqual(40.0, payload["cash"])
+        self.assertEqual(1, len(payload["holdings"]))
+        self.assertEqual("SH600000", payload["holdings"][0]["stock_symbol"])
+        self.assertEqual(60.0, payload["holdings"][0]["weight"])
+        self.assertEqual(1, len(payload["skipped_items"]))
+        self.assertEqual("SH.204001", payload["skipped_items"][0]["stock_symbol"])
+        self.assertEqual("quote_type=17 blocked", payload["skipped_items"][0]["rebalance_skip_reason"])
+        by_symbol = {item["stock_symbol"]: item for item in payload["top_items"]}
+        self.assertEqual("quote_type=17 blocked", by_symbol["SH.204001"]["rebalance_skip_reason"])
+        self.assertFalse(any(row["stock_symbol"] == "SH204001" for row in payload["holdings"]))
 
     def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")

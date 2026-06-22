@@ -126,3 +126,27 @@ class QQQDataFetcherTest(TestCase):
             [call(proxy=fetcher.PROXY), call(proxy=None)],
             fetch_mock.call_args_list,
         )
+
+    def test_missing_socks_support_retries_direct(self):
+        fetcher = QQQDataFetcher()
+        fetcher.PROXY = "socks5://127.0.0.1:7891"
+
+        request = httpx.Request("GET", fetcher.HOLDINGS_URL)
+        direct_response = httpx.Response(200, request=request, json={"holdings": []})
+        missing_socks_error = RuntimeError(
+            "Using SOCKS proxy, but the 'socksio' package is not installed. "
+            "Make sure to install httpx using `pip install httpx[socks]`."
+        )
+
+        with patch.object(
+            fetcher,
+            "_fetch_holdings",
+            side_effect=[missing_socks_error, direct_response],
+        ) as fetch_mock:
+            result = fetcher._get_holdings_response()
+
+        self.assertIs(result, direct_response)
+        self.assertEqual(
+            [call(proxy=fetcher.PROXY), call(proxy=None)],
+            fetch_mock.call_args_list,
+        )

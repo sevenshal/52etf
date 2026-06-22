@@ -57,7 +57,17 @@ def _sanitize_logging_value(value):
         return tuple(_sanitize_logging_value(item) for item in value)
     if isinstance(value, dict):
         return {key: _sanitize_logging_value(item) for key, item in value.items()}
-    return redact_sensitive_query_params(value)
+    sanitized = redact_sensitive_query_params(value)
+    if sanitized != value:
+        return sanitized
+
+    if not isinstance(value, str):
+        string_value = str(value)
+        sanitized_string = redact_sensitive_query_params(string_value)
+        if sanitized_string != string_value:
+            return sanitized_string
+
+    return value
 
 
 class SensitiveQueryParamFilter(logging.Filter):
@@ -94,3 +104,5 @@ def configure_logging(stdout: TextIO = None, stderr: TextIO = None):
             for filter_ in logger.filters
         ):
             logger.addFilter(access_log_filter)
+
+    logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)

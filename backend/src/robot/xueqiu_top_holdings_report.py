@@ -46,7 +46,9 @@ DEFAULT_OUTPUT_DIR = ROOT / "lab" / "output" / "xueqiu_top_holdings"
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
-XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES = {11, 82}
+# Xueqiu quote type examples: 11=A-share, 13=ETF/fund, 82=STAR Market, 17=exchange repo.
+XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES_ENV = "XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES"
+DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {17}
 REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
@@ -142,6 +144,19 @@ def safe_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def get_rebalance_blocked_quote_types() -> Set[int]:
+    raw_value = os.getenv(XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES_ENV)
+    if raw_value is None:
+        return set(DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES)
+
+    blocked_types: Set[int] = set()
+    for item in re.split(r"[\s,;]+", raw_value.strip()):
+        quote_type = safe_int(item)
+        if quote_type is not None:
+            blocked_types.add(quote_type)
+    return blocked_types
 
 
 def xueqiu_timestamp_to_datetime(value: Any) -> Optional[datetime]:
@@ -1345,14 +1360,14 @@ def describe_rebalance_quote_rejection(raw_symbol: str, quote: Dict[str, Any]) -
     quote_type = safe_int(quote.get("type"))
     price = safe_float(quote.get("current"))
     status = safe_int(quote.get("status"))
-    if quote_type not in XUEQIU_REBALANCE_ALLOWED_QUOTE_TYPES:
-        return f"quote_type={quote_type} not allowed"
+    if not raw_symbol:
+        return "missing symbol"
     if not price or price <= 0:
         return "missing valid current price"
     if status is not None and status <= 0:
         return f"status={status}"
-    if not raw_symbol:
-        return "missing symbol"
+    if quote_type in get_rebalance_blocked_quote_types():
+        return f"quote_type={quote_type} blocked"
     return None
 
 
@@ -1505,6 +1520,7 @@ async def build_rebalance_payload(
     metadata_map = await fetch_stock_metadata_map(cookie=cookie, symbols=symbols, timeout=timeout)
 
     holdings: List[Dict[str, Any]] = []
+    skipped_items: List[Dict[str, Any]] = []
     for item in rebalance_items:
         raw_symbol = to_raw_xueqiu_symbol(item["stock_symbol"])
         weight = safe_float(item.get("rebalance_weight_pct")) or 0.0
@@ -1513,7 +1529,15 @@ async def build_rebalance_payload(
         quote_body = (quote.get("quote") or {})
         rejection = describe_rebalance_quote_rejection(raw_symbol, quote_body)
         if rejection:
-            raise RuntimeError(f"Unsupported Xueqiu rebalance stock {raw_symbol}: {rejection}")
+            item["rebalance_weight_pct"] = weight
+            item["rebalance_skip_reason"] = rejection
+            item["rebalance_quote_type"] = safe_int(quote_body.get("type"))
+            item["stock_name"] = metadata.get("stock_name") or quote.get("name") or item.get("stock_name") or ""
+            item["stock_id"] = metadata.get("stock_id")
+            item["segment_name"] = metadata.get("segment_name") or item.get("segment_name") or "其他"
+            skipped_items.append(dict(item))
+            logger.warning("Skipping unsupported Xueqiu rebalance stock %s: %s", raw_symbol, rejection)
+            continue
         price = safe_float(quote.get("price"))
         if not price or price <= 0:
             raise RuntimeError(f"Missing valid current price for {raw_symbol}")
@@ -1554,6 +1578,7 @@ async def build_rebalance_payload(
         "market": "cn",
         "holdings": holdings,
         "top_items": rebalance_items,
+        "skipped_items": skipped_items,
     }
 
 
@@ -2337,13 +2362,23 @@ async def run_top_holdings_job(
             rebalance_payload["strategy"] = strategy_plan.get("strategy_name")
             rebalance_payload["strategy_plan"] = strategy_plan
             rebalance_payload["active_filter"] = active_filter_summary
+            rebalance_skipped_items.extend(rebalance_payload.get("skipped_items") or [])
             top_items = rebalance_payload["top_items"]
-            rebalance_response = await create_xueqiu_rebalance(
-                cookie=cookie,
-                payload=rebalance_payload,
-                dry_run=dry_run,
-                timeout=timeout,
-            )
+            if rebalance_payload.get("holdings"):
+                rebalance_response = await create_xueqiu_rebalance(
+                    cookie=cookie,
+                    payload=rebalance_payload,
+                    dry_run=dry_run,
+                    timeout=timeout,
+                )
+            else:
+                rebalance_response = {
+                    "skipped": True,
+                    "message": "目标标的均不可调仓，已保留现金仓位并跳过提交。",
+                    "strategy": strategy_plan.get("strategy_name"),
+                    "strategy_plan": strategy_plan,
+                    "active_filter": active_filter_summary,
+                }
         else:
             rebalance_response = {
                 "skipped": True,

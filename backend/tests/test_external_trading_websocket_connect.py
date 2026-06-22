@@ -6,7 +6,7 @@ from fastapi import WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
 from src.app.api import external_trading_accounts as api_module
-from src.core.services.external_trading import ExternalTradingHub
+from src.core.services.external_trading import INITIAL_WEBSOCKET_SEND_STATE_ERROR, ExternalTradingHub
 
 
 def _account():
@@ -96,6 +96,24 @@ class ExternalTradingHubConnectTest(IsolatedAsyncioTestCase):
             lifecycle_events,
         )
 
+    async def test_connect_rolls_back_when_initial_send_hits_asgi_state_error(self):
+        hub = ExternalTradingHub()
+        lifecycle_events = []
+        hub._mark_connected = lambda account_pk: lifecycle_events.append(("connected", account_pk))
+        hub._mark_disconnected = lambda account_pk, reason: lifecycle_events.append(("disconnected", account_pk, reason))
+        websocket = _HubWebSocket(send_exception=RuntimeError(INITIAL_WEBSOCKET_SEND_STATE_ERROR))
+
+        with self.assertRaisesRegex(RuntimeError, "Expected ASGI message"):
+            await hub.connect(websocket, _account())
+
+        self.assertTrue(websocket.accepted)
+        self.assertEqual([], websocket.sent_messages)
+        self.assertEqual({}, hub._connections)
+        self.assertEqual(
+            [("disconnected", 1, f"initial connect send failed: {INITIAL_WEBSOCKET_SEND_STATE_ERROR}")],
+            lifecycle_events,
+        )
+
     async def test_connect_marks_connected_after_initial_send(self):
         hub = ExternalTradingHub()
         lifecycle_events = []
@@ -112,8 +130,12 @@ class ExternalTradingHubConnectTest(IsolatedAsyncioTestCase):
 
 
 class ExternalTradingWebSocketApiTest(IsolatedAsyncioTestCase):
-    async def test_initial_connect_disconnect_is_swallowed(self):
-        for exc in (WebSocketDisconnect(code=1006), ClientDisconnected()):
+    async def test_initial_connect_disconnect_or_asgi_state_error_is_swallowed(self):
+        for exc in (
+            WebSocketDisconnect(code=1006),
+            ClientDisconnected(),
+            RuntimeError(INITIAL_WEBSOCKET_SEND_STATE_ERROR),
+        ):
             with self.subTest(exception_type=type(exc).__name__):
                 websocket = _ApiWebSocket()
                 db_session = _DBSession(_account())

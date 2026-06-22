@@ -43,6 +43,10 @@ from .external_trading_crypto import decrypt_message, encrypt_message
 
 logger = logging.getLogger(__name__)
 
+INITIAL_WEBSOCKET_SEND_STATE_ERROR = (
+    "Expected ASGI message 'websocket.accept', 'websocket.close' or "
+    "'websocket.http.response.start' but got 'websocket.send'"
+)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 A_SHARE_OPEN = dtime(9, 30)
 A_SHARE_MORNING_CLOSE = dtime(11, 30)
@@ -59,6 +63,10 @@ PTRADE_MARKET_HOURS_ENFORCED_ACTIONS = {
     "get_today_orders",
     "get_deliver",
 }
+
+
+def is_initial_websocket_send_state_error(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and INITIAL_WEBSOCKET_SEND_STATE_ERROR in str(exc)
 _trading_day_cache: Dict[date, bool] = {}
 
 

@@ -26,12 +26,14 @@ DEFAULT_FMP_PROFILE_SKIP_SYMBOLS = {
     "CTL.US",
     "CTRP.US",
     "CXO.US",
+    "EUR.US",
     "ETFC.US",
     "FLIR.US",
     "JEC.US",
     "MYL.US",
     "NBL.US",
     "NQM6.US",
+    "NQU6.US",
     "RTN.US",
     "SYMC.US",
     "TIF.US",
@@ -156,6 +158,7 @@ class USStockIndustrySync:
         target_symbols = eligible_symbols if force else self._filter_missing_symbols(eligible_symbols)
         skipped_existing = len(eligible_symbols) - len(target_symbols)
         saved_symbols: Set[str] = set()
+        runtime_profile_unavailable_symbols: Set[str] = set()
         errors: List[Dict] = []
         api_calls = 0
 
@@ -168,7 +171,7 @@ class USStockIndustrySync:
             profile = self.fmp.get_company_profile(fmp_symbol)
             api_calls += 1
             if not profile:
-                errors.append({"symbol": symbol, "source": "single", "error": "FMP profile为空"})
+                runtime_profile_unavailable_symbols.add(symbol)
                 continue
             try:
                 self._upsert_profile(profile, symbol, snapshot_date)
@@ -178,6 +181,15 @@ class USStockIndustrySync:
 
         self.db.commit()
         remaining_after_limit = max(0, len(target_symbols) - single_limit)
+        skipped_profile_unavailable_symbols = sorted(
+            dict.fromkeys(
+                [
+                    *skipped_profile_unavailable_symbols,
+                    *runtime_profile_unavailable_symbols,
+                ]
+            )
+        )
+        resolved_symbols = saved_symbols | runtime_profile_unavailable_symbols
         return {
             "status": "ok",
             "provider": DEFAULT_PROVIDER,
@@ -188,7 +200,7 @@ class USStockIndustrySync:
             "skipped_existing": skipped_existing,
             "skipped_profile_unavailable": len(skipped_profile_unavailable_symbols),
             "skipped_profile_unavailable_symbols": skipped_profile_unavailable_symbols,
-            "remaining": len(target_symbols) - len(saved_symbols),
+            "remaining": max(0, len(target_symbols) - len(resolved_symbols)),
             "remaining_after_limit": remaining_after_limit,
             "api_calls": api_calls,
             "single_request_limit": single_limit,

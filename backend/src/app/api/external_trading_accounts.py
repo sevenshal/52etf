@@ -35,6 +35,7 @@ from ...core.external_trading_database import (
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
     external_trading_hub,
+    is_initial_websocket_send_state_error,
 )
 from ...core.services.external_trading_executor import trigger_external_trading_executor
 from ...core.services.external_trading_execution_policy import (
@@ -3564,6 +3565,15 @@ async def external_trading_websocket(websocket: WebSocket):
         except (WebSocketDisconnect, ClientDisconnected):
             logger.info(
                 "External trading WebSocket disconnected during initial connect: account_id=%r identifier=%r",
+                account_id,
+                identifier,
+            )
+            return
+        except RuntimeError as exc:
+            if not is_initial_websocket_send_state_error(exc):
+                raise
+            logger.info(
+                "External trading WebSocket initial send rejected by ASGI state: account_id=%r identifier=%r",
                 account_id,
                 identifier,
             )
