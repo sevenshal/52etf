@@ -46,6 +46,8 @@ DEFAULT_OUTPUT_DIR = ROOT / "lab" / "output" / "xueqiu_top_holdings"
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_RETRIES = 3
+CASH_SYMBOL = "CASH"
+CASH_NAME = "现金"
 # Xueqiu quote type examples: 11=A-share, 13=ETF/fund, 82=STAR Market, 17=exchange repo.
 XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES_ENV = "XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES"
 DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {17}
@@ -194,6 +196,11 @@ def to_raw_xueqiu_symbol(symbol: Any) -> str:
     return normalized.replace(".", "")
 
 
+def is_cash_symbol(symbol: Any) -> bool:
+    text = str(symbol or "").strip().upper()
+    return text in {CASH_SYMBOL, "CN_CASH"}
+
+
 def get_holding_name(holding: Dict[str, Any]) -> str:
     for key in ("stockName", "stock_name", "name", "stockNameCN"):
         value = holding.get(key)
@@ -208,6 +215,13 @@ def get_holding_weight(holding: Dict[str, Any]) -> Optional[float]:
         if number is not None:
             return number
     return None
+
+
+def calculate_cash_weight_from_holdings(non_cash_weight_pct: float) -> float:
+    cash_weight_pct = 100.0 - non_cash_weight_pct
+    if abs(cash_weight_pct) < 0.005:
+        return 0.0
+    return max(0.0, min(100.0, cash_weight_pct))
 
 
 def get_latest_cookie() -> str:
@@ -933,6 +947,7 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
             continue
         success_count += 1
         seen_symbols: Set[str] = set()
+        cube_non_cash_weight_pct = 0.0
         for holding in result.holdings:
             symbol = normalize_xueqiu_symbol(
                 holding.get("symbol")
@@ -950,12 +965,14 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
                     "year_rank": result.cube.year_rank,
                     "stock_symbol": symbol,
                     "stock_name": name,
+                    "is_cash": False,
                     "weight_pct": weight,
                 }
             )
             if symbol in seen_symbols:
                 continue
             seen_symbols.add(symbol)
+            cube_non_cash_weight_pct += weight
             stock_to_cubes[symbol].add(result.cube.symbol)
             stock_total_weight[symbol] += weight
             if name and symbol not in stock_names:
@@ -963,28 +980,60 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
             if len(stock_cube_examples[symbol]) < 5:
                 stock_cube_examples[symbol].append(result.cube.cube_name or result.cube.symbol)
 
+        cash_weight = calculate_cash_weight_from_holdings(cube_non_cash_weight_pct)
+        if cash_weight > 0:
+            holding_rows.append(
+                {
+                    "cube_symbol": result.cube.symbol,
+                    "cube_name": result.cube.cube_name,
+                    "year_rank": result.cube.year_rank,
+                    "stock_symbol": CASH_SYMBOL,
+                    "stock_name": CASH_NAME,
+                    "weight_pct": cash_weight,
+                    "is_cash": True,
+                }
+            )
+            stock_to_cubes[CASH_SYMBOL].add(result.cube.symbol)
+            stock_total_weight[CASH_SYMBOL] += cash_weight
+            if len(stock_cube_examples[CASH_SYMBOL]) < 5:
+                stock_cube_examples[CASH_SYMBOL].append(result.cube.cube_name or result.cube.symbol)
+
+    if success_count:
+        stock_to_cubes.setdefault(CASH_SYMBOL, set())
+        stock_total_weight.setdefault(CASH_SYMBOL, 0.0)
+        stock_names[CASH_SYMBOL] = CASH_NAME
+
     ranking = []
     for symbol, cube_symbols in stock_to_cubes.items():
         cube_count = len(cube_symbols)
         total_weight = stock_total_weight[symbol]
+        is_cash = is_cash_symbol(symbol)
+        average_weight_pct = total_weight / cube_count if cube_count else (0.0 if is_cash else None)
         ranking.append(
             {
                 "stock_symbol": symbol,
-                "stock_name": stock_names.get(symbol, ""),
+                "stock_name": CASH_NAME if is_cash else stock_names.get(symbol, ""),
+                "is_cash": is_cash,
                 "holding_cube_count": cube_count,
                 "holding_cube_ratio_pct": cube_count / success_count * 100.0 if success_count else None,
                 "total_weight_pct": total_weight,
                 "composite_weight_pct": total_weight / success_count if success_count else None,
-                "average_weight_pct": total_weight / cube_count if cube_count else None,
+                "average_weight_pct": average_weight_pct,
                 "example_cubes": stock_cube_examples.get(symbol, []),
             }
         )
 
-    total_stock_weight_pct = sum(item["total_weight_pct"] for item in ranking)
+    total_stock_weight_pct = sum(
+        item["total_weight_pct"]
+        for item in ranking
+        if not item.get("is_cash")
+    )
+    total_cash_weight_pct = stock_total_weight.get(CASH_SYMBOL, 0.0) if success_count else 0.0
+    total_portfolio_weight_pct = total_stock_weight_pct + total_cash_weight_pct
     for item in ranking:
         item["global_normalized_weight_pct"] = (
-            item["total_weight_pct"] / total_stock_weight_pct * 100.0
-            if total_stock_weight_pct > 0
+            item["total_weight_pct"] / total_portfolio_weight_pct * 100.0
+            if total_portfolio_weight_pct > 0
             else None
         )
     ranking.sort(
@@ -995,12 +1044,18 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
         ),
         reverse=True,
     )
+    for index, item in enumerate(ranking, start=1):
+        item["composite_rank"] = index
+    cash_item = next((item for item in ranking if item.get("is_cash")), None)
     return {
         "success_count": success_count,
         "failed_results": failed_results,
         "holding_rows": holding_rows,
         "ranking": ranking,
         "total_stock_weight_pct": total_stock_weight_pct,
+        "total_cash_weight_pct": total_cash_weight_pct,
+        "total_portfolio_weight_pct": total_portfolio_weight_pct,
+        "cash_item": dict(cash_item) if cash_item else None,
     }
 
 
@@ -1009,6 +1064,40 @@ def fmt_number(value: Any, digits: int = 2, suffix: str = "") -> str:
     if number is None:
         return "-"
     return f"{number:.{digits}f}{suffix}"
+
+
+def get_cash_ranking_item(aggregate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cash_item = aggregate.get("cash_item")
+    if isinstance(cash_item, dict):
+        return cash_item
+    for item in aggregate.get("ranking") or []:
+        if isinstance(item, dict) and (item.get("is_cash") or is_cash_symbol(item.get("stock_symbol"))):
+            return item
+    return None
+
+
+def count_non_cash_ranking_items(ranking: List[Dict[str, Any]]) -> int:
+    return len([
+        item
+        for item in ranking
+        if not (item.get("is_cash") or is_cash_symbol(item.get("stock_symbol")))
+    ])
+
+
+def build_report_table_items(
+    *,
+    top_items: List[Dict[str, Any]],
+    aggregate: Dict[str, Any],
+    top_n: int,
+) -> List[Dict[str, Any]]:
+    display_items = [dict(item) for item in top_items[:top_n]]
+    if any(item.get("is_cash") or is_cash_symbol(item.get("stock_symbol")) for item in display_items):
+        return display_items
+
+    cash_item = get_cash_ranking_item(aggregate)
+    if cash_item:
+        display_items.append(dict(cash_item))
+    return display_items
 
 
 def fmt_datetime_value(value: Any) -> str:
@@ -1698,7 +1787,15 @@ def build_report(
     )
     failed_results = aggregate["failed_results"]
     success_count = aggregate["success_count"]
+    stock_count = count_non_cash_ranking_items(ranking)
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
+    cash_item = get_cash_ranking_item(aggregate) or {}
+    cash_weight_pct = safe_float(cash_item.get("composite_weight_pct"))
+    report_table_items = build_report_table_items(
+        top_items=top_items,
+        aggregate=aggregate,
+        top_n=top_n,
+    )
     filter_label = (
         f"活跃{active_filter_summary.get('lookback_days')}天"
         if active_filter_summary
@@ -1744,10 +1841,12 @@ def build_report(
         [
             f"拉取成功: {success_count}",
             f"拉取失败: {len(failed_results)}",
-            f"覆盖股票数: {len(ranking)}",
+            f"覆盖股票数: {stock_count}",
             f"非现金持仓合计权重: {fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix='%')}",
+            f"现金综合权重: {fmt_number(cash_weight_pct, suffix='%')}",
+            f"现金持仓组合: {cash_item.get('holding_cube_count', 0)} ({fmt_number(cash_item.get('holding_cube_ratio_pct'), suffix='%')})",
             "",
-            f"统计口径: {scope_text}；个股综合权重 = 该股票在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。",
+            f"统计口径: {scope_text}；个股/现金综合权重 = 该项在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。",
             f"调仓策略: {strategy_plan.get('strategy_name') if strategy_plan else f'选取综合权重最高的 Top{top_n} 后归一化'}。",
         ]
     )
@@ -1802,12 +1901,12 @@ def build_report(
             "| ---: | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
-    for index, item in enumerate(top_items[:top_n], start=1):
+    for index, item in enumerate(report_table_items, start=1):
         lines.append(
             "| "
             + " | ".join(
                 [
-                    str(item.get("strategy_rank") or index),
+                    str(item.get("strategy_rank") or item.get("composite_rank") or index),
                     str(item.get("stock_symbol") or ""),
                     str(item.get("stock_name") or ""),
                     fmt_number(item.get("composite_weight_pct"), suffix="%"),
@@ -1859,7 +1958,15 @@ def build_report_html(
     )
     failed_results = aggregate["failed_results"]
     success_count = aggregate["success_count"]
+    stock_count = count_non_cash_ranking_items(ranking)
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
+    cash_item = get_cash_ranking_item(aggregate) or {}
+    cash_weight_pct = safe_float(cash_item.get("composite_weight_pct"))
+    report_table_items = build_report_table_items(
+        top_items=top_items,
+        aggregate=aggregate,
+        top_n=top_n,
+    )
     filter_label = (
         f"活跃{active_filter_summary.get('lookback_days')}天"
         if active_filter_summary
@@ -1911,8 +2018,10 @@ def build_report_html(
         [
             ("拉取成功", success_count),
             ("拉取失败", len(failed_results)),
-            ("覆盖股票数", len(ranking)),
+            ("覆盖股票数", stock_count),
             ("非现金持仓合计权重", fmt_number(total_stock_weight_pct / success_count if success_count else None, suffix="%")),
+            ("现金综合权重", fmt_number(cash_weight_pct, suffix="%")),
+            ("现金持仓组合", f"{cash_item.get('holding_cube_count', 0)} ({fmt_number(cash_item.get('holding_cube_ratio_pct'), suffix='%')})"),
             ("调仓策略", strategy_plan.get("strategy_name") if strategy_plan else f"Top{top_n}综合权重归一"),
         ]
     )
@@ -1963,10 +2072,10 @@ def build_report_html(
         for label, value in summary_rows
     )
     table_rows = []
-    for index, item in enumerate(top_items[:top_n], start=1):
+    for index, item in enumerate(report_table_items, start=1):
         table_rows.append(
             "<tr>"
-            f"<td class=\"num\">{esc(item.get('strategy_rank') or index)}</td>"
+            f"<td class=\"num\">{esc(item.get('strategy_rank') or item.get('composite_rank') or index)}</td>"
             f"<td>{esc(item.get('stock_symbol'))}</td>"
             f"<td>{esc(item.get('stock_name') or '')}</td>"
             f"<td class=\"num\">{esc(fmt_number(item.get('composite_weight_pct'), suffix='%'))}</td>"
@@ -2017,7 +2126,7 @@ def build_report_html(
   <h1>雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}</h1>
   <table class="summary">{rows_html}</table>
   {rebalance_action_html}
-  <p>统计口径: {esc(scope_text)}；个股综合权重 = 该股票在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。</p>
+  <p>统计口径: {esc(scope_text)}；个股/现金综合权重 = 该项在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。</p>
   <p>最终权重: {esc(final_weight_text)}。</p>
   <table>
     <thead>
@@ -2072,6 +2181,8 @@ def write_outputs(
     run_dir.mkdir(parents=True, exist_ok=True)
     ranking = aggregate["ranking"]
     failed_results = aggregate["failed_results"]
+    stock_count = count_non_cash_ranking_items(ranking)
+    cash_item = get_cash_ranking_item(aggregate)
     top_by_symbol = {item["stock_symbol"]: item for item in top_items}
     ranking_rows = []
     for row in ranking:
@@ -2094,8 +2205,11 @@ def write_outputs(
         "holdings_snapshot": holdings_snapshot_result,
         "success_count": aggregate["success_count"],
         "failed_count": len(failed_results),
-        "stock_count": len(ranking),
+        "stock_count": stock_count,
         "total_stock_weight_pct": aggregate.get("total_stock_weight_pct"),
+        "total_cash_weight_pct": aggregate.get("total_cash_weight_pct"),
+        "total_portfolio_weight_pct": aggregate.get("total_portfolio_weight_pct"),
+        "cash_item": cash_item,
         "top": top_items,
         "strategy_plan": strategy_plan,
         "rebalance_payload": rebalance_payload,
@@ -2122,6 +2236,7 @@ def write_outputs(
             "strategy_rank",
             "stock_symbol",
             "stock_name",
+            "is_cash",
             "composite_weight_pct",
             "global_normalized_weight_pct",
             "top_normalized_weight_pct",
@@ -2144,6 +2259,7 @@ def write_outputs(
             "year_rank",
             "stock_symbol",
             "stock_name",
+            "is_cash",
             "weight_pct",
         ],
     )
@@ -2181,7 +2297,7 @@ def save_run_record(
             cube_count=len(cubes),
             success_count=aggregate.get("success_count"),
             failed_count=len(failed_results),
-            stock_count=len(aggregate.get("ranking") or []),
+            stock_count=count_non_cash_ranking_items(aggregate.get("ranking") or []),
             top_n=len(top_items),
             cash_pct=(rebalance_payload or {}).get("cash"),
             top_holdings=top_items,
@@ -2496,7 +2612,7 @@ async def run_top_holdings_job(
         "rank_cache_refreshed": rank_cache_refreshed,
         "success_count": aggregate["success_count"],
         "failed_count": len(aggregate["failed_results"]),
-        "stock_count": len(aggregate["ranking"]),
+        "stock_count": count_non_cash_ranking_items(aggregate["ranking"]),
         "target_cube_symbol": target_cube_symbol if execute_rebalance else None,
         "target_cube_id": resolved_target_cube_id,
         "dry_run": dry_run,

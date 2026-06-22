@@ -14,8 +14,12 @@ from src.core.duckdb_utils import connect_duckdb
 from src.robot.xueqiu_top_holdings_report import (
     CubeInfo,
     CubeCurrentResult,
+    CubeFetchResult,
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
+    aggregate_holdings,
     build_equal_top10_top12_buffer_plan,
+    build_report,
+    build_report_html,
     build_rebalance_payload,
     describe_rebalance_quote_rejection,
     load_cached_year_top_cubes,
@@ -276,6 +280,74 @@ class XueqiuTopHoldingsReportTest(TestCase):
         by_symbol = {item["stock_symbol"]: item for item in payload["top_items"]}
         self.assertEqual("quote_type=17 blocked", by_symbol["SH.204001"]["rebalance_skip_reason"])
         self.assertFalse(any(row["stock_symbol"] == "SH204001" for row in payload["holdings"]))
+
+    def test_aggregate_adds_cash_as_special_holding_and_report_always_shows_it(self):
+        run_at = datetime(2026, 6, 22, 12, 0, 0)
+        cubes = [
+            CubeInfo(year_rank=1, symbol="ZH000001", cube_name="组合一"),
+            CubeInfo(year_rank=2, symbol="ZH000002", cube_name="组合二"),
+        ]
+        aggregate = aggregate_holdings(
+            [
+                CubeFetchResult(
+                    cube=cubes[0],
+                    holdings=[
+                        {
+                            "stock_symbol": "SH600000",
+                            "stock_name": "浦发银行",
+                            "weight": 80.0,
+                        }
+                    ],
+                ),
+                CubeFetchResult(
+                    cube=cubes[1],
+                    holdings=[
+                        {
+                            "stock_symbol": "SH600000",
+                            "stock_name": "浦发银行",
+                            "weight": 90.0,
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        report = build_report(
+            run_at=run_at,
+            cubes=cubes,
+            aggregate=aggregate,
+            top_n=1,
+            rank_cache_fetched_at=None,
+            rank_cache_refreshed=False,
+        )
+        html_report = build_report_html(
+            run_at=run_at,
+            cubes=cubes,
+            aggregate=aggregate,
+            top_n=1,
+            rank_cache_fetched_at=None,
+            rank_cache_refreshed=False,
+        )
+
+        cash_item = aggregate["cash_item"]
+        self.assertEqual("CASH", cash_item["stock_symbol"])
+        self.assertEqual("现金", cash_item["stock_name"])
+        self.assertTrue(cash_item["is_cash"])
+        self.assertEqual(30.0, cash_item["total_weight_pct"])
+        self.assertEqual(15.0, cash_item["composite_weight_pct"])
+        self.assertEqual(2, cash_item["holding_cube_count"])
+        self.assertEqual(2, cash_item["composite_rank"])
+        self.assertEqual([20.0, 10.0], [
+            row["weight_pct"]
+            for row in aggregate["holding_rows"]
+            if row.get("is_cash")
+        ])
+        self.assertIn("非现金持仓合计权重: 85.00%", report)
+        self.assertIn("现金综合权重: 15.00%", report)
+        self.assertIn("| 2 | CASH | 现金 | 15.00%", report)
+        self.assertIn("现金综合权重", html_report)
+        self.assertIn("CASH", html_report)
+        self.assertIn("15.00%", html_report)
 
     def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
