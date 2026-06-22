@@ -786,6 +786,27 @@ class XueqiuCubeRankCache(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class XueqiuCubeActivityCache(Base):
+    """雪球组合调仓活跃状态缓存。"""
+    __tablename__ = "xueqiu_cube_activity_cache"
+    __table_args__ = (
+        UniqueConstraint("activity_type", "symbol", name="uniq_xueqiu_cube_activity_type_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    activity_type = Column(String(64), nullable=False, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    latest_rebalance_at = Column(DateTime, index=True)
+    latest_rebalance_id = Column(Integer)
+    latest_rebalance_status = Column(String(32))
+    latest_rebalance_category = Column(String(64))
+    pages_fetched = Column(Integer)
+    page_limit_hit = Column(Boolean, default=False, nullable=False)
+    raw_data = Column(JSON)
+    checked_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class XueqiuTopHoldingsRun(Base):
     """雪球年榜组合综合持仓权重与自动调仓运行记录。"""
     __tablename__ = "xueqiu_top_holdings_runs"
@@ -1117,6 +1138,8 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_runs_status ON snowball_backtest_runs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_snowball_backtest_curve_run_date ON snowball_backtest_curve_points(run_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_rank_cache_type_fetched ON xueqiu_cube_rank_cache(rank_type, fetched_at)",
+        "CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_activity_cache_type_checked ON xueqiu_cube_activity_cache(activity_type, checked_at)",
+        "CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_activity_cache_type_latest ON xueqiu_cube_activity_cache(activity_type, latest_rebalance_at)",
         "CREATE INDEX IF NOT EXISTS idx_xueqiu_top_holdings_runs_target_time ON xueqiu_top_holdings_runs(target_cube_symbol, run_at)",
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",

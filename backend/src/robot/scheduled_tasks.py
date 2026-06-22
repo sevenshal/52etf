@@ -587,23 +587,29 @@ def _run_external_trading_sub_account_net_asset_snapshot():
 
 def _run_xueqiu_top_holdings_rebalance():
     today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    if today_shanghai.weekday() == 5:
-        from .xueqiu_top_holdings_report import process_xueqiu_year_rank_refresh_for_robot
-
-        result = process_xueqiu_year_rank_refresh_for_robot()
-        logging.getLogger("ScheduledTaskManager").info(
-            "Xueqiu year rank refresh result: %s",
-            result,
-        )
-        return result
     if not _is_china_trading_day(today_shanghai):
-        return f"跳过雪球Top1000活跃90天综合持仓自动调仓: {today_shanghai} 不是A股交易日"
+        return f"跳过雪球Top1000主理人活跃360天综合持仓自动调仓: {today_shanghai} 不是A股交易日"
 
     from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_rebalance_for_robot
 
     result = process_xueqiu_top_holdings_rebalance_for_robot()
     logging.getLogger("ScheduledTaskManager").info(
         "Xueqiu top holdings rebalance result: %s",
+        result,
+    )
+    return result
+
+
+def _run_xueqiu_top_holdings_cache_refresh():
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过雪球Top1000榜单和主理人调仓缓存刷新: {today_shanghai} 不是A股交易日"
+
+    from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_cache_refresh_for_robot
+
+    result = process_xueqiu_top_holdings_cache_refresh_for_robot()
+    logging.getLogger("ScheduledTaskManager").info(
+        "Xueqiu top holdings cache refresh result: %s",
         result,
     )
     return result
@@ -781,13 +787,23 @@ class ScheduledTaskManager:
             ),
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
-                name="雪球Top1000活跃90天综合持仓自动调仓",
-                description="每日14:40执行；A股交易日先筛选最近90天有调仓的年榜Top1000组合，再按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合；周六只刷新雪球年榜Top1000缓存。",
-                default_time="14:40",
+                name="雪球Top1000主理人活跃360天综合持仓自动调仓",
+                description="每日14:50执行；A股交易日拉取雪球年榜Top1000最新持仓，并使用已缓存的主理人调仓时间筛选最近360天活跃组合，再按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合。",
+                default_time="14:50",
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
-                default_cron_rule="40 14 * * *",
+                default_cron_rule="50 14 * * mon-fri",
+            ),
+            "xueqiu_top_holdings_cache_refresh": TaskDefinition(
+                task_key="xueqiu_top_holdings_cache_refresh",
+                name="雪球Top1000榜单和主理人调仓缓存刷新",
+                description="每日18:00执行；A股交易日刷新雪球年榜Top1000缓存，并更新缺失或过期的主理人最新调仓时间缓存，供次日收盘前自动调仓直接使用。",
+                default_time="18:00",
+                default_enabled=True,
+                sort_order=26,
+                runner=_run_xueqiu_top_holdings_cache_refresh,
+                default_cron_rule="0 18 * * mon-fri",
             ),
         }
 
@@ -843,9 +859,14 @@ class ScheduledTaskManager:
                 config.sort_order = task.sort_order
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
-                    and str(config.cron_rule or "").strip() == "40 14 * * mon-fri"
+                    and str(config.cron_rule or "").strip() in {"40 14 * * mon-fri", "40 14 * * *"}
                 ):
                     config.cron_rule = default_cron_rule
+                if (
+                    task.task_key == "xueqiu_top_holdings_rebalance"
+                    and str(config.schedule_time or "").strip() == "14:40"
+                ):
+                    config.schedule_time = task.default_time
                 if not self.is_valid_time(config.schedule_time):
                     config.schedule_time = task.default_time
                 if not self.is_valid_cron_rule(config.cron_rule):

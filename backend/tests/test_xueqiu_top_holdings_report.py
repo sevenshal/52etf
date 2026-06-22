@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.core.database import Base, XueqiuCubeRankCache
+from src.core.database import Base, XueqiuCubeActivityCache, XueqiuCubeRankCache
 from src.core.duckdb_utils import connect_duckdb
 from src.robot.xueqiu_top_holdings_report import (
     CubeInfo,
+    CubeActivityResult,
     CubeCurrentResult,
     CubeFetchResult,
+    ACTIVE_REBALANCE_ACTIVITY_TYPE,
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
     aggregate_holdings,
     build_equal_top10_top12_buffer_plan,
@@ -22,8 +24,12 @@ from src.robot.xueqiu_top_holdings_report import (
     build_report_html,
     build_rebalance_payload,
     describe_rebalance_quote_rejection,
+    latest_manager_rebalance_from_events,
+    load_cached_cube_activity,
     load_cached_year_top_cubes,
+    manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
+    save_cube_activity_cache,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
     save_year_top_cubes,
 )
@@ -54,6 +60,86 @@ class XueqiuTopHoldingsReportTest(TestCase):
             self.assertEqual([1, 2, 3, 4], [cube.year_rank for cube in loaded])
             self.assertEqual("best-symbol", loaded[0].cube_name)
             self.assertEqual("duplicate-rank", loaded[2].cube_name)
+
+    def test_latest_manager_rebalance_uses_user_rebalancing_updated_at(self):
+        events = [
+            {
+                "id": 227195415,
+                "category": "sys_rebalancing",
+                "status": "success",
+                "created_at": 1780522357000,
+                "updated_at": 1780522357000,
+            },
+            {
+                "id": 109183073,
+                "category": "user_rebalancing",
+                "status": "success",
+                "created_at": 1637900893000,
+                "updated_at": 1637902858000,
+            },
+        ]
+
+        activity = latest_manager_rebalance_from_events("ZH1319424", events, pages_fetched=1)
+
+        self.assertEqual(109183073, activity.latest_rebalance_id)
+        self.assertEqual("user_rebalancing", activity.latest_rebalance_category)
+        self.assertEqual("success", activity.latest_rebalance_status)
+        self.assertEqual("2021-11-26T13:00:58+08:00", activity.latest_rebalance_at.isoformat())
+
+    def test_manager_rebalance_from_show_origin_uses_updated_at(self):
+        activity = manager_rebalance_from_show_origin(
+            "ZH1319424",
+            rb_id=109183073,
+            origin_payload={
+                "rebalancing": {
+                    "id": 109183073,
+                    "category": "user_rebalancing",
+                    "status": "success",
+                    "created_at": 1637900893000,
+                    "updated_at": 1637902858000,
+                }
+            },
+            checked_at=datetime(2026, 6, 23, 18, 0, 0),
+        )
+
+        self.assertEqual(109183073, activity.latest_rebalance_id)
+        self.assertEqual("user_rebalancing", activity.latest_rebalance_category)
+        self.assertEqual("success", activity.latest_rebalance_status)
+        self.assertEqual("2021-11-26T13:00:58+08:00", activity.latest_rebalance_at.isoformat())
+
+    def test_save_and_load_cube_activity_cache(self):
+        with TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{tmpdir}/activity_cache.db")
+            Base.metadata.create_all(engine, tables=[XueqiuCubeActivityCache.__table__])
+            session_factory = sessionmaker(bind=engine)
+            latest_at = datetime(2026, 5, 22, 13, 0, 58)
+            checked_at = datetime(2026, 6, 1, 9, 30, 0)
+
+            with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
+                saved = save_cube_activity_cache(
+                    [
+                        CubeActivityResult(
+                            symbol="ZH000001",
+                            latest_rebalance_at=latest_at,
+                            latest_rebalance_id=123,
+                            latest_rebalance_status="success",
+                            latest_rebalance_category="user_rebalancing",
+                            pages_fetched=1,
+                            checked_at=checked_at,
+                        )
+                    ]
+                )
+                loaded = load_cached_cube_activity(
+                    [CubeInfo(year_rank=1, symbol="ZH000001")],
+                    activity_type=ACTIVE_REBALANCE_ACTIVITY_TYPE,
+                    min_checked_at=datetime(2026, 5, 31, 0, 0, 0),
+                )
+
+            self.assertEqual(1, saved)
+            self.assertIn("ZH000001", loaded)
+            self.assertTrue(loaded["ZH000001"].cache_hit)
+            self.assertEqual(123, loaded["ZH000001"].latest_rebalance_id)
+            self.assertEqual("2026-05-22T13:00:58+08:00", loaded["ZH000001"].latest_rebalance_at.isoformat())
 
     def test_buffer_plan_keeps_retained_weights_and_allocates_sold_weight_to_new_buy(self):
         ranking_symbols = [
@@ -164,7 +250,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("keep", by_symbol["SZ.300757"]["strategy_action"])
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
 
-    def test_build_rebalance_payload_allows_etf_quote_type_13(self):
+    def test_build_rebalance_payload_skips_etf_quote_type_13_into_cash(self):
         top_items = [
             {
                 "stock_symbol": "SH.600000",
@@ -210,11 +296,13 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 )
             )
 
-        self.assertEqual(0.0, payload["cash"])
-        self.assertEqual(2, len(payload["holdings"]))
-        self.assertEqual(["SH600000", "SH511880"], [row["stock_symbol"] for row in payload["holdings"]])
-        self.assertEqual([60.0, 40.0], [row["weight"] for row in payload["holdings"]])
-        self.assertEqual([], payload["skipped_items"])
+        self.assertEqual(40.0, payload["cash"])
+        self.assertEqual(1, len(payload["holdings"]))
+        self.assertEqual(["SH600000"], [row["stock_symbol"] for row in payload["holdings"]])
+        self.assertEqual([60.0], [row["weight"] for row in payload["holdings"]])
+        self.assertEqual(1, len(payload["skipped_items"]))
+        self.assertEqual("SH.511880", payload["skipped_items"][0]["stock_symbol"])
+        self.assertEqual("quote_type=13 blocked", payload["skipped_items"][0]["rebalance_skip_reason"])
 
     def test_rebalance_quote_validation_does_not_require_allowlisted_type(self):
         self.assertIsNone(

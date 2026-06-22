@@ -24,6 +24,7 @@ import pandas as pd
 from ..core.database import (
     SessionLocal,
     SnowballAccountConfig,
+    XueqiuCubeActivityCache,
     XueqiuCubeRankCache,
     XueqiuTopHoldingsRun,
 )
@@ -50,7 +51,7 @@ CASH_SYMBOL = "CASH"
 CASH_NAME = "现金"
 # Xueqiu quote type examples: 11=A-share, 13=ETF/fund, 82=STAR Market, 17=exchange repo.
 XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES_ENV = "XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES"
-DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {17}
+DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {13, 17}
 REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
@@ -60,8 +61,13 @@ BUFFER_EXECUTION_WEIGHT_RULE = (
     f"最小换手：保留成分偏离等权不超过{BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT:g}个百分点时沿用当前权重，"
     "卖出释放权重分配给补位成分"
 )
-ACTIVE_REBALANCE_LOOKBACK_DAYS = 90
+ACTIVE_REBALANCE_LOOKBACK_DAYS = 360
 ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
+ACTIVE_REBALANCE_ACTIVITY_TYPE = "manager_user_rebalance"
+ACTIVE_REBALANCE_ACTIVITY_LABEL = "主理人调仓"
+ACTIVE_REBALANCE_CACHE_TTL_HOURS = 24
+ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS = 2
+ACTIVE_REBALANCE_CACHE_MISS_ERROR = "missing_cached_manager_activity"
 XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
 XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
     "snapshot_date",
@@ -75,6 +81,11 @@ XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
     "latest_rebalance_at",
     "latest_rebalance_id",
     "latest_rebalance_status",
+    "active_rebalance_at",
+    "active_rebalance_id",
+    "active_rebalance_status",
+    "active_rebalance_category",
+    "active_rebalance_source",
     "holdings_source",
     "active_rebalance_days",
     "is_active",
@@ -116,12 +127,37 @@ class CubeFetchResult:
 
 
 @dataclass
+class CubeActivityResult:
+    symbol: str
+    latest_rebalance_at: Optional[datetime] = None
+    latest_rebalance_id: Optional[int] = None
+    latest_rebalance_status: str = ""
+    latest_rebalance_category: str = ""
+    source: str = ACTIVE_REBALANCE_ACTIVITY_TYPE
+    pages_fetched: int = 0
+    page_limit_hit: bool = False
+    cache_hit: bool = False
+    checked_at: Optional[datetime] = None
+    raw_event: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@dataclass
 class CubeCurrentResult:
     cube: CubeInfo
     holdings: List[Dict[str, Any]]
     latest_rebalance_at: Optional[datetime] = None
     latest_rebalance_id: Optional[int] = None
     latest_rebalance_status: str = ""
+    active_rebalance_at: Optional[datetime] = None
+    active_rebalance_id: Optional[int] = None
+    active_rebalance_status: str = ""
+    active_rebalance_category: str = ""
+    active_rebalance_source: str = ACTIVE_REBALANCE_ACTIVITY_TYPE
+    activity_cache_hit: bool = False
+    activity_pages_fetched: int = 0
+    activity_page_limit_hit: bool = False
+    activity_error: Optional[str] = None
     holdings_source: str = ""
     active: bool = False
     error: Optional[str] = None
@@ -170,6 +206,74 @@ def xueqiu_timestamp_to_datetime(value: Any) -> Optional[datetime]:
         return datetime.fromtimestamp(seconds, tz=CHINA_TZ)
     except (OSError, OverflowError, ValueError):
         return None
+
+
+def as_china_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(CHINA_TZ)
+    return value.replace(tzinfo=CHINA_TZ)
+
+
+def activity_cache_checked_after() -> datetime:
+    cutoff = datetime.now(CHINA_TZ) - timedelta(hours=ACTIVE_REBALANCE_CACHE_TTL_HOURS)
+    return cutoff.replace(tzinfo=None)
+
+
+def activity_cache_checked_at() -> datetime:
+    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+
+
+def _rebalance_event_time(event: Dict[str, Any]) -> Optional[datetime]:
+    return (
+        xueqiu_timestamp_to_datetime(event.get("updated_at"))
+        or xueqiu_timestamp_to_datetime(event.get("created_at"))
+    )
+
+
+def _rebalance_event_created_time(event: Dict[str, Any]) -> Optional[datetime]:
+    return xueqiu_timestamp_to_datetime(event.get("created_at")) or _rebalance_event_time(event)
+
+
+def is_manager_rebalance_event(event: Dict[str, Any]) -> bool:
+    return (
+        str(event.get("category") or "") == "user_rebalancing"
+        and str(event.get("status") or "") == "success"
+    )
+
+
+def latest_manager_rebalance_from_events(
+    symbol: str,
+    events: Iterable[Dict[str, Any]],
+    *,
+    pages_fetched: int = 0,
+    page_limit_hit: bool = False,
+    checked_at: Optional[datetime] = None,
+) -> CubeActivityResult:
+    latest_event: Optional[Dict[str, Any]] = None
+    latest_at: Optional[datetime] = None
+    for event in events:
+        if not isinstance(event, dict) or not is_manager_rebalance_event(event):
+            continue
+        event_at = _rebalance_event_time(event)
+        if event_at is None:
+            continue
+        if latest_at is None or event_at > latest_at:
+            latest_event = event
+            latest_at = event_at
+
+    return CubeActivityResult(
+        symbol=symbol,
+        latest_rebalance_at=latest_at,
+        latest_rebalance_id=safe_int((latest_event or {}).get("id")),
+        latest_rebalance_status=str((latest_event or {}).get("status") or ""),
+        latest_rebalance_category=str((latest_event or {}).get("category") or ""),
+        pages_fetched=pages_fetched,
+        page_limit_hit=page_limit_hit,
+        checked_at=checked_at,
+        raw_event=latest_event,
+    )
 
 
 def normalize_xueqiu_symbol(symbol: Any) -> Optional[str]:
@@ -512,6 +616,99 @@ def save_year_top_cubes(cubes: List[CubeInfo], fetched_at: datetime) -> None:
         db.close()
 
 
+def _activity_from_cache_row(row: XueqiuCubeActivityCache) -> CubeActivityResult:
+    return CubeActivityResult(
+        symbol=row.symbol,
+        latest_rebalance_at=as_china_datetime(row.latest_rebalance_at),
+        latest_rebalance_id=row.latest_rebalance_id,
+        latest_rebalance_status=row.latest_rebalance_status or "",
+        latest_rebalance_category=row.latest_rebalance_category or "",
+        source=row.activity_type or ACTIVE_REBALANCE_ACTIVITY_TYPE,
+        pages_fetched=row.pages_fetched or 0,
+        page_limit_hit=bool(row.page_limit_hit),
+        cache_hit=True,
+        checked_at=as_china_datetime(row.checked_at),
+        raw_event=(row.raw_data or {}).get("latest_event") if isinstance(row.raw_data, dict) else None,
+    )
+
+
+def load_cached_cube_activity(
+    cubes: List[CubeInfo],
+    *,
+    activity_type: str = ACTIVE_REBALANCE_ACTIVITY_TYPE,
+    min_checked_at: Optional[datetime] = None,
+) -> Dict[str, CubeActivityResult]:
+    symbols = sorted({cube.symbol for cube in cubes if cube.symbol})
+    if not symbols:
+        return {}
+    db = SessionLocal()
+    try:
+        query = db.query(XueqiuCubeActivityCache).filter(
+            XueqiuCubeActivityCache.activity_type == activity_type,
+            XueqiuCubeActivityCache.symbol.in_(symbols),
+        )
+        if min_checked_at is not None:
+            query = query.filter(XueqiuCubeActivityCache.checked_at >= min_checked_at)
+        rows = query.all()
+        return {row.symbol: _activity_from_cache_row(row) for row in rows}
+    finally:
+        db.close()
+
+
+def save_cube_activity_cache(
+    activity_results: Iterable[CubeActivityResult],
+    *,
+    activity_type: str = ACTIVE_REBALANCE_ACTIVITY_TYPE,
+) -> int:
+    results = [
+        result
+        for result in activity_results
+        if result.symbol and not result.cache_hit and not result.error
+    ]
+    if not results:
+        return 0
+    now = activity_cache_checked_at()
+    db = SessionLocal()
+    saved_count = 0
+    try:
+        for result in results:
+            row = (
+                db.query(XueqiuCubeActivityCache)
+                .filter(
+                    XueqiuCubeActivityCache.activity_type == activity_type,
+                    XueqiuCubeActivityCache.symbol == result.symbol,
+                )
+                .first()
+            )
+            if row is None:
+                row = XueqiuCubeActivityCache(
+                    activity_type=activity_type,
+                    symbol=result.symbol,
+                    created_at=now,
+                )
+                db.add(row)
+            row.latest_rebalance_at = _to_naive_china_datetime(result.latest_rebalance_at)
+            row.latest_rebalance_id = result.latest_rebalance_id
+            row.latest_rebalance_status = result.latest_rebalance_status
+            row.latest_rebalance_category = result.latest_rebalance_category
+            row.pages_fetched = result.pages_fetched
+            row.page_limit_hit = bool(result.page_limit_hit)
+            row.raw_data = {
+                "latest_event": result.raw_event,
+                "source": result.source,
+            }
+            row.checked_at = _to_naive_china_datetime(result.checked_at) or now
+            row.updated_at = now
+            saved_count += 1
+        db.commit()
+        return saved_count
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 async def load_or_refresh_year_top_cubes(
     *,
     cookie: str,
@@ -568,13 +765,168 @@ def select_current_holdings(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any
     return [], ""
 
 
+def extract_cube_show_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        cube = data.get("cube")
+        if isinstance(cube, dict):
+            return cube
+        return data
+    cube = payload.get("cube")
+    if isinstance(cube, dict):
+        return cube
+    return payload
+
+
+def extract_last_user_rebalance_id(payload: Dict[str, Any]) -> Optional[int]:
+    cube_payload = extract_cube_show_payload(payload)
+    for key in ("last_user_rb_gid", "lastUserRbGid", "last_user_rb_id", "lastUserRbId"):
+        value = safe_int(cube_payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def extract_show_origin_rebalance_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        rebalancing = data.get("rebalancing")
+        if isinstance(rebalancing, dict):
+            return rebalancing
+        return data
+    rebalancing = payload.get("rebalancing")
+    if isinstance(rebalancing, dict):
+        return rebalancing
+    return payload
+
+
+def manager_rebalance_from_show_origin(
+    symbol: str,
+    *,
+    rb_id: Optional[int],
+    origin_payload: Optional[Dict[str, Any]],
+    checked_at: Optional[datetime] = None,
+) -> CubeActivityResult:
+    if rb_id is None:
+        return CubeActivityResult(
+            symbol=symbol,
+            checked_at=checked_at,
+            raw_event=None,
+        )
+    if not isinstance(origin_payload, dict):
+        return CubeActivityResult(
+            symbol=symbol,
+            latest_rebalance_id=rb_id,
+            checked_at=checked_at,
+            error=f"Unexpected show_origin payload for {symbol}: {origin_payload}",
+        )
+
+    event = extract_show_origin_rebalance_payload(origin_payload)
+    event_at = _rebalance_event_time(event)
+    category = str(event.get("category") or "")
+    status = str(event.get("status") or "")
+    if not event_at or category != "user_rebalancing" or status != "success":
+        return CubeActivityResult(
+            symbol=symbol,
+            latest_rebalance_id=safe_int(event.get("id")) or rb_id,
+            latest_rebalance_status=status,
+            latest_rebalance_category=category,
+            checked_at=checked_at,
+            raw_event=event,
+        )
+    return CubeActivityResult(
+        symbol=symbol,
+        latest_rebalance_at=event_at,
+        latest_rebalance_id=safe_int(event.get("id")) or rb_id,
+        latest_rebalance_status=status,
+        latest_rebalance_category=category,
+        checked_at=checked_at,
+        raw_event=event,
+    )
+
+
+async def fetch_cube_manager_activity(
+    client: httpx.AsyncClient,
+    cube: CubeInfo,
+    *,
+    retries: int,
+) -> CubeActivityResult:
+    last_error: Optional[BaseException] = None
+    checked_at = datetime.now(CHINA_TZ)
+
+    for attempt in range(1, retries + 1):
+        try:
+            show_response = await client.get(
+                f"{XUEQIU_API_BASE_URL}/cubes/show.json",
+                params={"symbol": cube.symbol},
+            )
+            if show_response.status_code >= 400:
+                error_code = ""
+                try:
+                    error_payload = show_response.json()
+                    error_code = str(error_payload.get("error_code") or "")
+                except ValueError:
+                    pass
+                error = RuntimeError(f"HTTP {show_response.status_code}: {show_response.text[:300]}")
+                setattr(error, "xueqiu_error_code", error_code)
+                raise error
+            show_payload = show_response.json()
+            if not isinstance(show_payload, dict):
+                raise ValueError(f"Unexpected cube show payload for {cube.symbol}: {show_payload}")
+            rb_id = extract_last_user_rebalance_id(show_payload)
+            if rb_id is None:
+                return manager_rebalance_from_show_origin(
+                    cube.symbol,
+                    rb_id=None,
+                    origin_payload=None,
+                    checked_at=checked_at,
+                )
+
+            origin_response = await client.get(
+                f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/show_origin.json",
+                params={"rb_id": rb_id},
+            )
+            if origin_response.status_code >= 400:
+                error_code = ""
+                try:
+                    error_payload = origin_response.json()
+                    error_code = str(error_payload.get("error_code") or "")
+                except ValueError:
+                    pass
+                error = RuntimeError(f"HTTP {origin_response.status_code}: {origin_response.text[:300]}")
+                setattr(error, "xueqiu_error_code", error_code)
+                raise error
+            origin_payload = origin_response.json()
+            if not isinstance(origin_payload, dict):
+                raise ValueError(f"Unexpected show_origin payload for {cube.symbol}: {origin_payload}")
+            return manager_rebalance_from_show_origin(
+                cube.symbol,
+                rb_id=rb_id,
+                origin_payload=origin_payload,
+                checked_at=checked_at,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt < retries:
+                retry_delay = min(10.0, 0.8 * attempt)
+                if getattr(exc, "xueqiu_error_code", "") in {"10026", "400016"}:
+                    retry_delay = min(45.0, 5.0 * attempt)
+                await asyncio.sleep(retry_delay)
+    return CubeActivityResult(
+        symbol=cube.symbol,
+        checked_at=checked_at,
+        error=repr(last_error),
+    )
+
+
 async def fetch_cube_current(
     client: httpx.AsyncClient,
     cube: CubeInfo,
     *,
-    active_since: datetime,
+    active_since: Optional[datetime],
     semaphore: asyncio.Semaphore,
     retries: int,
+    cached_activity: Optional[CubeActivityResult] = None,
 ) -> CubeCurrentResult:
     url = f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/current.json"
     last_error: Optional[BaseException] = None
@@ -603,14 +955,31 @@ async def fetch_cube_current(
                 latest_id = safe_int(last_rb.get("id"))
                 latest_status = str(last_rb.get("status") or "")
                 holdings, holdings_source = select_current_holdings(payload)
+                activity = cached_activity
+                active_rebalance_at = activity.latest_rebalance_at if activity else None
+                activity_error = activity.error if activity else None
                 return CubeCurrentResult(
                     cube=cube,
                     holdings=holdings,
                     latest_rebalance_at=latest_at,
                     latest_rebalance_id=latest_id,
                     latest_rebalance_status=latest_status,
+                    active_rebalance_at=active_rebalance_at,
+                    active_rebalance_id=activity.latest_rebalance_id if activity else None,
+                    active_rebalance_status=activity.latest_rebalance_status if activity else "",
+                    active_rebalance_category=activity.latest_rebalance_category if activity else "",
+                    active_rebalance_source=ACTIVE_REBALANCE_ACTIVITY_TYPE,
+                    activity_cache_hit=bool(activity and activity.cache_hit),
+                    activity_pages_fetched=activity.pages_fetched if activity else 0,
+                    activity_page_limit_hit=bool(activity and activity.page_limit_hit),
+                    activity_error=activity_error,
                     holdings_source=holdings_source,
-                    active=bool(latest_at and latest_at >= active_since),
+                    active=bool(
+                        active_since is not None
+                        and active_rebalance_at
+                        and active_rebalance_at >= active_since
+                        and not activity_error
+                    ),
                 )
             except BaseException as exc:  # noqa: BLE001
                 last_error = exc
@@ -622,6 +991,32 @@ async def fetch_cube_current(
         return CubeCurrentResult(cube=cube, holdings=[], error=repr(last_error))
 
 
+def apply_activity_to_current_result(
+    result: CubeCurrentResult,
+    activity: CubeActivityResult,
+    *,
+    active_since: datetime,
+) -> CubeCurrentResult:
+    active_rebalance_at = activity.latest_rebalance_at
+    return replace(
+        result,
+        active_rebalance_at=active_rebalance_at,
+        active_rebalance_id=activity.latest_rebalance_id,
+        active_rebalance_status=activity.latest_rebalance_status,
+        active_rebalance_category=activity.latest_rebalance_category,
+        active_rebalance_source=activity.source or ACTIVE_REBALANCE_ACTIVITY_TYPE,
+        activity_cache_hit=activity.cache_hit,
+        activity_pages_fetched=activity.pages_fetched,
+        activity_page_limit_hit=activity.page_limit_hit,
+        activity_error=activity.error,
+        active=bool(
+            active_rebalance_at
+            and active_rebalance_at >= active_since
+            and not activity.error
+        ),
+    )
+
+
 async def fetch_all_cube_current(
     cubes: List[CubeInfo],
     *,
@@ -629,8 +1024,25 @@ async def fetch_all_cube_current(
     workers: int,
     timeout: float,
     retries: int,
-    active_since: datetime,
+    active_since: Optional[datetime],
+    refresh_activity_cache: bool = True,
 ) -> List[CubeCurrentResult]:
+    cached_activity = (
+        load_cached_cube_activity(
+            cubes,
+            min_checked_at=activity_cache_checked_after() if refresh_activity_cache else None,
+        )
+        if active_since is not None
+        else {}
+    )
+    if cached_activity:
+        logger.info(
+            "Loaded Xueqiu cube manager activity cache: cached=%s source=%s ttl_hours=%s refresh_missing=%s",
+            len(cached_activity),
+            ACTIVE_REBALANCE_ACTIVITY_TYPE,
+            ACTIVE_REBALANCE_CACHE_TTL_HOURS if refresh_activity_cache else "disabled",
+            refresh_activity_cache,
+        )
     headers = build_headers(cookie, referer=XUEQIU_WEB_BASE_URL)
     timeout_config = httpx.Timeout(timeout)
     current_workers = max(1, workers)
@@ -644,6 +1056,7 @@ async def fetch_all_cube_current(
                 active_since=active_since,
                 semaphore=semaphore,
                 retries=retries,
+                cached_activity=cached_activity.get(cube.symbol),
             )
             for cube in cubes
         ]
@@ -653,6 +1066,67 @@ async def fetch_all_cube_current(
             results.append(result)
             if index % 100 == 0:
                 logger.info("Fetched current snapshots for %s/%s cubes", index, len(cubes))
+        if active_since is not None and not refresh_activity_cache:
+            for index, result in enumerate(results):
+                if result.error or result.activity_cache_hit:
+                    continue
+                missing_activity = CubeActivityResult(
+                    symbol=result.cube.symbol,
+                    source=ACTIVE_REBALANCE_ACTIVITY_TYPE,
+                    checked_at=datetime.now(CHINA_TZ),
+                    error=ACTIVE_REBALANCE_CACHE_MISS_ERROR,
+                )
+                results[index] = apply_activity_to_current_result(
+                    result,
+                    missing_activity,
+                    active_since=active_since,
+                )
+        elif active_since is not None:
+            activity_workers = max(1, min(current_workers, ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS))
+            activity_semaphore = asyncio.Semaphore(activity_workers)
+            logger.info(
+                "Fetching Xueqiu manager activity: missing=%s cached=%s workers=%s",
+                len([result for result in results if not result.error and not result.activity_cache_hit]),
+                len([result for result in results if result.activity_cache_hit]),
+                activity_workers,
+            )
+
+            async def fetch_activity_for_result(index: int, result: CubeCurrentResult) -> Tuple[int, CubeActivityResult]:
+                async with activity_semaphore:
+                    activity = await fetch_cube_manager_activity(
+                        client,
+                        result.cube,
+                        retries=retries,
+                    )
+                    return index, activity
+
+            activity_tasks = [
+                fetch_activity_for_result(index, result)
+                for index, result in enumerate(results)
+                if not result.error and not result.activity_cache_hit
+            ]
+            activity_results: List[CubeActivityResult] = []
+            for activity_index, task in enumerate(asyncio.as_completed(activity_tasks), start=1):
+                result_index, activity = await task
+                results[result_index] = apply_activity_to_current_result(
+                    results[result_index],
+                    activity,
+                    active_since=active_since,
+                )
+                activity_results.append(activity)
+                if activity_index % 100 == 0:
+                    logger.info(
+                        "Fetched Xueqiu manager activity for %s/%s cubes",
+                        activity_index,
+                        len(activity_tasks),
+                    )
+            saved_activity_count = save_cube_activity_cache(activity_results)
+            if saved_activity_count:
+                logger.info(
+                    "Saved Xueqiu cube manager activity cache: saved=%s source=%s",
+                    saved_activity_count,
+                    ACTIVE_REBALANCE_ACTIVITY_TYPE,
+                )
         return results
 
 
@@ -663,41 +1137,66 @@ def build_active_filter_summary(
     active_since: datetime,
     lookback_days: int,
 ) -> Dict[str, Any]:
-    active_results = [result for result in current_results if result.active and not result.error]
-    failed_results = [result for result in current_results if result.error]
-    inactive_results = [result for result in current_results if not result.active and not result.error]
+    active_results = [
+        result for result in current_results if result.active and not (result.error or result.activity_error)
+    ]
+    failed_results = [result for result in current_results if result.error or result.activity_error]
+    current_failed_results = [result for result in current_results if result.error]
+    activity_failed_results = [result for result in current_results if result.activity_error and not result.error]
+    inactive_results = [
+        result for result in current_results if not result.active and not (result.error or result.activity_error)
+    ]
     fallback_results = [result for result in current_results if result.holdings_source == "last_rb"]
     latest_times = [
-        result.latest_rebalance_at
+        result.active_rebalance_at
         for result in current_results
-        if result.latest_rebalance_at is not None
+        if result.active_rebalance_at is not None
     ]
     active_latest_times = [
-        result.latest_rebalance_at
+        result.active_rebalance_at
         for result in active_results
-        if result.latest_rebalance_at is not None
+        if result.active_rebalance_at is not None
     ]
     return {
         "enabled": True,
         "lookback_days": lookback_days,
+        "activity_source": ACTIVE_REBALANCE_ACTIVITY_TYPE,
+        "activity_label": ACTIVE_REBALANCE_ACTIVITY_LABEL,
         "active_since": active_since.isoformat(),
         "source_cube_count": len(source_cubes),
         "active_cube_count": len(active_results),
         "inactive_cube_count": len(inactive_results),
         "activity_failed_count": len(failed_results),
-        "current_snapshot_failed_count": len(failed_results),
+        "current_snapshot_failed_count": len(current_failed_results),
+        "manager_activity_failed_count": len(activity_failed_results),
+        "activity_cache_hit_count": len([result for result in current_results if result.activity_cache_hit]),
+        "activity_page_limit_hit_count": len([result for result in current_results if result.activity_page_limit_hit]),
         "holdings_fallback_count": len(fallback_results),
-        "latest_rebalance_at_max": max(latest_times).isoformat() if latest_times else None,
-        "latest_rebalance_at_min_active": min(active_latest_times).isoformat() if active_latest_times else None,
+        "latest_active_rebalance_at_max": max(latest_times).isoformat() if latest_times else None,
+        "latest_active_rebalance_at_min_active": min(active_latest_times).isoformat() if active_latest_times else None,
         "failed_examples": [
             {
                 "symbol": result.cube.symbol,
                 "cube_name": result.cube.cube_name,
-                "error": result.error,
+                "error": result.error or result.activity_error,
             }
             for result in failed_results[:10]
         ],
     }
+
+
+def active_filter_description(active_filter_summary: Optional[Dict[str, Any]]) -> str:
+    if not active_filter_summary:
+        return ""
+    label = active_filter_summary.get("activity_label") or "调仓"
+    return f"最近 {active_filter_summary.get('lookback_days')} 天有{label}"
+
+
+def active_filter_compact_label(active_filter_summary: Optional[Dict[str, Any]]) -> str:
+    if not active_filter_summary:
+        return ""
+    label = active_filter_summary.get("activity_label") or "调仓"
+    return f"{label}活跃{active_filter_summary.get('lookback_days')}天"
 
 
 def _quote_duckdb_identifier(identifier: str) -> str:
@@ -744,6 +1243,11 @@ def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
             latest_rebalance_at TIMESTAMP,
             latest_rebalance_id BIGINT,
             latest_rebalance_status VARCHAR,
+            active_rebalance_at TIMESTAMP,
+            active_rebalance_id BIGINT,
+            active_rebalance_status VARCHAR,
+            active_rebalance_category VARCHAR,
+            active_rebalance_source VARCHAR,
             holdings_source VARCHAR,
             active_rebalance_days INTEGER,
             is_active BOOLEAN,
@@ -760,6 +1264,22 @@ def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
         )
         """
     )
+    existing_columns = {
+        row[1]
+        for row in connection.execute(
+            f"PRAGMA table_info({_quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)})"
+        ).fetchall()
+    }
+    column_ddls = {
+        "active_rebalance_at": "TIMESTAMP",
+        "active_rebalance_id": "BIGINT",
+        "active_rebalance_status": "VARCHAR",
+        "active_rebalance_category": "VARCHAR",
+        "active_rebalance_source": "VARCHAR",
+    }
+    for column_name, column_type in column_ddls.items():
+        if column_name not in existing_columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_type}")
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_holdings_snapshot_stock "
         f"ON {table}(snapshot_date, stock_symbol)"
@@ -791,6 +1311,7 @@ def build_xueqiu_cube_holdings_snapshot_rows(
         cube = result.cube
         replace_cube_symbols.add(cube.symbol)
         latest_rebalance_at = _to_naive_china_datetime(result.latest_rebalance_at)
+        active_rebalance_at = _to_naive_china_datetime(result.active_rebalance_at)
         for holding in result.holdings:
             symbol = normalize_xueqiu_symbol(
                 holding.get("symbol")
@@ -814,6 +1335,11 @@ def build_xueqiu_cube_holdings_snapshot_rows(
                     "latest_rebalance_at": latest_rebalance_at,
                     "latest_rebalance_id": result.latest_rebalance_id,
                     "latest_rebalance_status": result.latest_rebalance_status,
+                    "active_rebalance_at": active_rebalance_at,
+                    "active_rebalance_id": result.active_rebalance_id,
+                    "active_rebalance_status": result.active_rebalance_status,
+                    "active_rebalance_category": result.active_rebalance_category,
+                    "active_rebalance_source": result.active_rebalance_source,
                     "holdings_source": result.holdings_source,
                     "active_rebalance_days": active_rebalance_days,
                     "is_active": bool(result.active),
@@ -1796,11 +2322,7 @@ def build_report(
         aggregate=aggregate,
         top_n=top_n,
     )
-    filter_label = (
-        f"活跃{active_filter_summary.get('lookback_days')}天"
-        if active_filter_summary
-        else ""
-    )
+    filter_label = active_filter_compact_label(active_filter_summary)
     lines = [
         f"雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}",
         "",
@@ -1812,11 +2334,13 @@ def build_report(
     if active_filter_summary:
         lines.extend(
             [
-                f"活跃筛选: 最近 {active_filter_summary.get('lookback_days')} 天有调仓",
+                f"活跃筛选: {active_filter_description(active_filter_summary)}",
                 f"活跃截止时间: {fmt_datetime_value(active_filter_summary.get('active_since'))}",
                 f"活跃组合: {active_filter_summary.get('active_cube_count')}",
                 f"非活跃组合: {active_filter_summary.get('inactive_cube_count')}",
                 f"活跃检查失败: {active_filter_summary.get('activity_failed_count')}",
+                f"主理人调仓缓存命中: {active_filter_summary.get('activity_cache_hit_count')}",
+                f"主理人调仓翻页触顶: {active_filter_summary.get('activity_page_limit_hit_count')}",
                 f"持仓回退到last_rb: {active_filter_summary.get('holdings_fallback_count')}",
             ]
         )
@@ -1832,7 +2356,7 @@ def build_report(
                 f"cubes={holdings_snapshot_result.get('replaced_cube_count')}"
             )
     scope_text = (
-        f"先筛选最近 {active_filter_summary.get('lookback_days')} 天有调仓的组合；"
+        f"先筛选{active_filter_description(active_filter_summary)}的组合；"
         "再把成功拉取的活跃组合等权合成一个组合"
         if active_filter_summary
         else "把成功拉取的组合等权合成一个组合"
@@ -1967,13 +2491,9 @@ def build_report_html(
         aggregate=aggregate,
         top_n=top_n,
     )
-    filter_label = (
-        f"活跃{active_filter_summary.get('lookback_days')}天"
-        if active_filter_summary
-        else ""
-    )
+    filter_label = active_filter_compact_label(active_filter_summary)
     scope_text = (
-        f"先筛选最近 {active_filter_summary.get('lookback_days')} 天有调仓的组合；"
+        f"先筛选{active_filter_description(active_filter_summary)}的组合；"
         "再把成功拉取的活跃组合等权合成一个组合"
         if active_filter_summary
         else "把成功拉取的组合等权合成一个组合"
@@ -1991,11 +2511,13 @@ def build_report_html(
     if active_filter_summary:
         summary_rows.extend(
             [
-                ("活跃筛选", f"最近 {active_filter_summary.get('lookback_days')} 天有调仓"),
+                ("活跃筛选", active_filter_description(active_filter_summary)),
                 ("活跃截止时间", fmt_datetime_value(active_filter_summary.get("active_since"))),
                 ("活跃组合", active_filter_summary.get("active_cube_count")),
                 ("非活跃组合", active_filter_summary.get("inactive_cube_count")),
                 ("活跃检查失败", active_filter_summary.get("activity_failed_count")),
+                ("主理人调仓缓存命中", active_filter_summary.get("activity_cache_hit_count")),
+                ("主理人调仓翻页触顶", active_filter_summary.get("activity_page_limit_hit_count")),
                 ("持仓回退到last_rb", active_filter_summary.get("holdings_fallback_count")),
             ]
         )
@@ -2341,6 +2863,7 @@ async def run_top_holdings_job(
     target_cube_symbol: str = DEFAULT_TARGET_CUBE_SYMBOL,
     target_cube_id: Optional[int] = None,
     active_rebalance_days: Optional[int] = None,
+    refresh_activity_cache: bool = True,
 ) -> Dict[str, Any]:
     run_at = datetime.now(CHINA_TZ)
     if not force and not is_china_trading_day(run_at.date()):
@@ -2366,7 +2889,11 @@ async def run_top_holdings_job(
         raise RuntimeError("No Xueqiu cubes available.")
 
     active_filter_summary: Optional[Dict[str, Any]] = None
-    active_since = run_at - timedelta(days=active_rebalance_days or 0)
+    active_since = (
+        run_at - timedelta(days=active_rebalance_days)
+        if active_rebalance_days and active_rebalance_days > 0
+        else None
+    )
     current_results = await fetch_all_cube_current(
         cubes,
         cookie=cookie,
@@ -2374,6 +2901,7 @@ async def run_top_holdings_job(
         timeout=timeout,
         retries=retries,
         active_since=active_since,
+        refresh_activity_cache=refresh_activity_cache,
     )
     holdings_snapshot_result: Optional[Dict[str, Any]] = None
     try:
@@ -2397,7 +2925,7 @@ async def run_top_holdings_job(
             "error": str(exc),
         }
         logger.warning("Failed to save Xueqiu cube holdings snapshots to DuckDB: %s", exc)
-    if active_rebalance_days and active_rebalance_days > 0:
+    if active_rebalance_days and active_rebalance_days > 0 and active_since is not None:
         active_filter_summary = build_active_filter_summary(
             source_cubes=cubes,
             current_results=current_results,
@@ -2419,20 +2947,20 @@ async def run_top_holdings_job(
         )
         if active_filter_summary["activity_failed_count"] > failure_limit:
             raise RuntimeError(
-                "Xueqiu current snapshot fetch failed for too many cubes: "
+                "Xueqiu current/activity fetch failed for too many cubes: "
                 f"failed={active_filter_summary['activity_failed_count']} "
                 f"limit={failure_limit} source={len(cubes)}"
             )
         current_results = [
             result
             for result in current_results
-            if result.active or result.error
+            if result.active or result.error or result.activity_error
         ]
-        if not any(not result.error for result in current_results):
+        if not any(not (result.error or result.activity_error) for result in current_results):
             raise RuntimeError(f"No Xueqiu cubes rebalanced within {active_rebalance_days} days.")
 
     results = [
-        CubeFetchResult(cube=result.cube, holdings=result.holdings, error=result.error)
+        CubeFetchResult(cube=result.cube, holdings=result.holdings, error=result.error or result.activity_error)
         for result in current_results
     ]
     aggregate = aggregate_holdings(results)
@@ -2587,11 +3115,7 @@ async def run_top_holdings_job(
         rebalance_response=rebalance_response,
     )
     if not no_email:
-        subject_filter = (
-            f"活跃{active_filter_summary.get('lookback_days')}天"
-            if active_filter_summary
-            else ""
-        )
+        subject_filter = active_filter_compact_label(active_filter_summary)
         subject = (
             f"雪球年榜1000{subject_filter}组合Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
             if execute_rebalance
@@ -2637,6 +3161,7 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
             retries=DEFAULT_RETRIES,
             target_cube_symbol=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL),
             active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
+            refresh_activity_cache=False,
         )
     )
     if result.get("skipped"):
@@ -2655,7 +3180,7 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         else f"snapshot_rows={holdings_snapshot.get('saved_rows')} "
     )
     return (
-        "雪球Top1000活跃90天综合持仓自动调仓 "
+        f"雪球Top1000主理人活跃{ACTIVE_REBALANCE_LOOKBACK_DAYS}天综合持仓自动调仓 "
         f"record_id={result.get('record_id')} "
         f"target={result.get('target_cube_symbol')} "
         f"cube_id={result.get('target_cube_id')} "
@@ -2667,6 +3192,125 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
         f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"
+    )
+
+
+async def run_top_holdings_cache_refresh_job(
+    *,
+    limit: int = RANK_TARGET_COUNT,
+    workers: int = DEFAULT_WORKERS,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    force_refresh_rank: bool = True,
+    force_refresh_activity: bool = False,
+) -> Dict[str, Any]:
+    run_at = datetime.now(CHINA_TZ)
+    cookie = get_latest_cookie()
+    cubes, rank_cache_fetched_at, rank_cache_refreshed = await load_or_refresh_year_top_cubes(
+        cookie=cookie,
+        force_refresh=force_refresh_rank,
+        limit=limit,
+        timeout=timeout,
+    )
+    cached_activity = (
+        {}
+        if force_refresh_activity
+        else load_cached_cube_activity(
+            cubes,
+            min_checked_at=activity_cache_checked_after(),
+        )
+    )
+    refresh_cubes = [
+        cube
+        for cube in cubes
+        if cube.symbol not in cached_activity
+    ]
+
+    activity_results: List[CubeActivityResult] = []
+    if refresh_cubes:
+        activity_workers = max(1, min(workers, ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS))
+        headers = build_headers(cookie, referer=XUEQIU_WEB_BASE_URL)
+        timeout_config = httpx.Timeout(timeout)
+        limits = httpx.Limits(max_connections=activity_workers, max_keepalive_connections=activity_workers)
+        semaphore = asyncio.Semaphore(activity_workers)
+        async with httpx.AsyncClient(headers=headers, timeout=timeout_config, limits=limits) as client:
+            async def fetch_activity(cube: CubeInfo) -> CubeActivityResult:
+                async with semaphore:
+                    return await fetch_cube_manager_activity(
+                        client,
+                        cube,
+                        retries=retries,
+                    )
+
+            tasks = [fetch_activity(cube) for cube in refresh_cubes]
+            for index, task in enumerate(asyncio.as_completed(tasks), start=1):
+                activity_results.append(await task)
+                if index % 100 == 0:
+                    logger.info(
+                        "Refreshed Xueqiu manager activity cache source for %s/%s cubes",
+                        index,
+                        len(refresh_cubes),
+                    )
+
+    saved_activity_count = save_cube_activity_cache(activity_results)
+    activity_by_symbol: Dict[str, CubeActivityResult] = dict(cached_activity)
+    for result in activity_results:
+        if not result.error:
+            activity_by_symbol[result.symbol] = result
+
+    active_since = run_at - timedelta(days=ACTIVE_REBALANCE_LOOKBACK_DAYS)
+    active_count = len([
+        activity
+        for activity in activity_by_symbol.values()
+        if activity.latest_rebalance_at and activity.latest_rebalance_at >= active_since
+    ])
+    failed_results = [result for result in activity_results if result.error]
+
+    return {
+        "run_at": run_at.isoformat(),
+        "rank_cache_fetched_at": rank_cache_fetched_at.isoformat() if rank_cache_fetched_at else None,
+        "rank_cache_refreshed": rank_cache_refreshed,
+        "source_cube_count": len(cubes),
+        "fresh_cache_count": len(cached_activity),
+        "refresh_cube_count": len(refresh_cubes),
+        "saved_activity_count": saved_activity_count,
+        "failed_count": len(failed_results),
+        "active_count": active_count,
+        "inactive_count": max(0, len(activity_by_symbol) - active_count),
+        "activity_source": ACTIVE_REBALANCE_ACTIVITY_TYPE,
+        "activity_label": ACTIVE_REBALANCE_ACTIVITY_LABEL,
+        "lookback_days": ACTIVE_REBALANCE_LOOKBACK_DAYS,
+        "failed_examples": [
+            {
+                "symbol": result.symbol,
+                "error": result.error,
+            }
+            for result in failed_results[:10]
+        ],
+    }
+
+
+def process_xueqiu_top_holdings_cache_refresh_for_robot() -> str:
+    result = asyncio.run(
+        run_top_holdings_cache_refresh_job(
+            limit=RANK_TARGET_COUNT,
+            workers=DEFAULT_WORKERS,
+            timeout=DEFAULT_TIMEOUT,
+            retries=DEFAULT_RETRIES,
+            force_refresh_rank=True,
+            force_refresh_activity=False,
+        )
+    )
+    return (
+        "雪球Top1000榜单和主理人调仓缓存刷新 "
+        f"rank_refreshed={result.get('rank_cache_refreshed')} "
+        f"source={result.get('source_cube_count')} "
+        f"fresh_cache={result.get('fresh_cache_count')} "
+        f"refresh={result.get('refresh_cube_count')} "
+        f"saved={result.get('saved_activity_count')} "
+        f"failed={result.get('failed_count')} "
+        f"active{result.get('lookback_days')}={result.get('active_count')} "
+        f"inactive={result.get('inactive_count')}"
     )
 
 
@@ -2712,6 +3356,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-email", action="store_true")
     parser.add_argument("--force", action="store_true", help="Run even if today is not an A-share trading day.")
     parser.add_argument("--force-refresh-rank", action="store_true", help="Refresh Xueqiu year rank even if DB cache is fresh.")
+    parser.add_argument("--no-refresh-activity-cache", action="store_true", help="Use cached manager rebalance activity only.")
     parser.add_argument("--execute-rebalance", action="store_true", help="Submit rebalance request to the target cube.")
     parser.add_argument("--dry-run", action="store_true", help="Build rebalance payload without sending it.")
     parser.add_argument("--target-cube-symbol", default=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL))
@@ -2751,6 +3396,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 target_cube_symbol=args.target_cube_symbol,
                 target_cube_id=args.target_cube_id,
                 active_rebalance_days=args.active_rebalance_days,
+                refresh_activity_cache=not args.no_refresh_activity_cache,
             )
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
