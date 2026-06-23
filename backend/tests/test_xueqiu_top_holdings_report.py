@@ -437,6 +437,75 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertIn("CASH", html_report)
         self.assertIn("15.00%", html_report)
 
+    def test_report_shows_top12_even_when_strategy_targets_top10(self):
+        run_at = datetime(2026, 6, 22, 12, 0, 0)
+        cubes = [CubeInfo(year_rank=1, symbol="ZH000001", cube_name="组合一")]
+        ranking = [
+            {
+                "composite_rank": index,
+                "stock_symbol": f"SH.{600000 + index:06d}",
+                "stock_name": f"股票{index}",
+                "composite_weight_pct": 13.0 - index,
+                "holding_cube_count": 1,
+                "holding_cube_ratio_pct": 100.0,
+                "average_weight_pct": 13.0 - index,
+                "example_cubes": ["组合一"],
+            }
+            for index in range(1, 13)
+        ]
+        target_items = [
+            {
+                **item,
+                "strategy_rank": item["composite_rank"],
+                "top_normalized_weight_pct": 10.0,
+                "rebalance_weight_pct": 10.0,
+                "strategy_action": "keep",
+                "current_weight_pct": 10.0,
+            }
+            for item in ranking[:10]
+        ]
+        aggregate = {
+            "ranking": ranking,
+            "failed_results": [],
+            "success_count": 1,
+            "total_stock_weight_pct": 100.0,
+        }
+        strategy_plan = {
+            "strategy_name": "Top10等权 + 跌出Top12才卖",
+            "top_n": 10,
+            "sell_rank": 12,
+            "target_items": target_items,
+            "summary": {},
+        }
+
+        report = build_report(
+            run_at=run_at,
+            cubes=cubes,
+            aggregate=aggregate,
+            top_n=10,
+            rank_cache_fetched_at=None,
+            rank_cache_refreshed=False,
+            strategy_plan=strategy_plan,
+        )
+        html_report = build_report_html(
+            run_at=run_at,
+            cubes=cubes,
+            aggregate=aggregate,
+            top_n=10,
+            rank_cache_fetched_at=None,
+            rank_cache_refreshed=False,
+            strategy_plan=strategy_plan,
+        )
+
+        self.assertIn("雪球年榜1000组合综合持仓权重 Top12", report)
+        self.assertIn("邮件展示: 综合排名 Top12；目标权重只计算 Top10。", report)
+        self.assertIn("| 10 | SH.600010 | 股票10 | 3.00% | 10.00% | 10.00% | keep | 10.00%", report)
+        self.assertIn("| 11 | SH.600011 | 股票11 | 2.00% | - | - |  | -", report)
+        self.assertIn("| 12 | SH.600012 | 股票12 | 1.00% | - | - |  | -", report)
+        self.assertIn("<h1>雪球年榜1000组合综合持仓权重 Top12</h1>", html_report)
+        self.assertIn("<td class=\"num\">11</td><td>SH.600011</td>", html_report)
+        self.assertIn("<td class=\"num\">12</td><td>SH.600012</td>", html_report)
+
     def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)

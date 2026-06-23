@@ -55,6 +55,7 @@ DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {13, 17}
 REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
+REPORT_TABLE_DISPLAY_RANK = BUFFER_STRATEGY_SELL_RANK
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
 BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT = 1.0
 BUFFER_EXECUTION_WEIGHT_RULE = (
@@ -1610,19 +1611,71 @@ def count_non_cash_ranking_items(ranking: List[Dict[str, Any]]) -> int:
     ])
 
 
+def report_display_count(top_n: int) -> int:
+    return max(top_n, REPORT_TABLE_DISPLAY_RANK)
+
+
+def report_item_symbol_key(item: Dict[str, Any]) -> str:
+    symbol = item.get("stock_symbol")
+    if item.get("is_cash") or is_cash_symbol(symbol):
+        return CASH_SYMBOL
+    normalized = normalize_xueqiu_symbol(symbol)
+    return normalized or str(symbol or "").strip().upper()
+
+
+def merge_report_table_item(
+    ranking_item: Dict[str, Any],
+    target_items_by_symbol: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    merged = dict(ranking_item)
+    target_item = target_items_by_symbol.get(report_item_symbol_key(ranking_item))
+    if not target_item:
+        return merged
+    for key in (
+        "strategy_rank",
+        "top_normalized_weight_pct",
+        "rebalance_weight_pct",
+        "strategy_action",
+        "current_weight_pct",
+        "rebalance_skip_reason",
+        "rebalance_quote_type",
+        "stock_id",
+        "segment_name",
+    ):
+        if key in target_item:
+            merged[key] = target_item.get(key)
+    if target_item.get("stock_name"):
+        merged["stock_name"] = target_item.get("stock_name")
+    return merged
+
+
 def build_report_table_items(
     *,
     top_items: List[Dict[str, Any]],
     aggregate: Dict[str, Any],
     top_n: int,
 ) -> List[Dict[str, Any]]:
-    display_items = [dict(item) for item in top_items[:top_n]]
+    target_items_by_symbol = {
+        report_item_symbol_key(item): item
+        for item in top_items
+        if report_item_symbol_key(item)
+    }
+    seen_symbols: Set[str] = set()
+    display_items: List[Dict[str, Any]] = []
+    for ranking_item in (aggregate.get("ranking") or [])[:report_display_count(top_n)]:
+        symbol_key = report_item_symbol_key(ranking_item)
+        if symbol_key and symbol_key in seen_symbols:
+            continue
+        if symbol_key:
+            seen_symbols.add(symbol_key)
+        display_items.append(merge_report_table_item(ranking_item, target_items_by_symbol))
+
     if any(item.get("is_cash") or is_cash_symbol(item.get("stock_symbol")) for item in display_items):
         return display_items
 
     cash_item = get_cash_ranking_item(aggregate)
     if cash_item:
-        display_items.append(dict(cash_item))
+        display_items.append(merge_report_table_item(cash_item, target_items_by_symbol))
     return display_items
 
 
@@ -2322,9 +2375,10 @@ def build_report(
         aggregate=aggregate,
         top_n=top_n,
     )
+    display_count = report_display_count(top_n)
     filter_label = active_filter_compact_label(active_filter_summary)
     lines = [
-        f"雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}",
+        f"雪球年榜1000{filter_label}组合综合持仓权重 Top{display_count}",
         "",
         f"统计时间: {run_at.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"年榜缓存时间: {rank_cache_fetched_at.strftime('%Y-%m-%d %H:%M:%S') if rank_cache_fetched_at else '-'}",
@@ -2372,6 +2426,7 @@ def build_report(
             "",
             f"统计口径: {scope_text}；个股/现金综合权重 = 该项在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。",
             f"调仓策略: {strategy_plan.get('strategy_name') if strategy_plan else f'选取综合权重最高的 Top{top_n} 后归一化'}。",
+            f"邮件展示: 综合排名 Top{display_count}；目标权重只计算 Top{top_n}。",
         ]
     )
     if strategy_plan:
@@ -2491,6 +2546,7 @@ def build_report_html(
         aggregate=aggregate,
         top_n=top_n,
     )
+    display_count = report_display_count(top_n)
     filter_label = active_filter_compact_label(active_filter_summary)
     scope_text = (
         f"先筛选{active_filter_description(active_filter_summary)}的组合；"
@@ -2545,6 +2601,7 @@ def build_report_html(
             ("现金综合权重", fmt_number(cash_weight_pct, suffix="%")),
             ("现金持仓组合", f"{cash_item.get('holding_cube_count', 0)} ({fmt_number(cash_item.get('holding_cube_ratio_pct'), suffix='%')})"),
             ("调仓策略", strategy_plan.get("strategy_name") if strategy_plan else f"Top{top_n}综合权重归一"),
+            ("邮件展示", f"综合排名 Top{display_count}；目标权重只计算 Top{top_n}"),
         ]
     )
     if strategy_plan:
@@ -2645,7 +2702,7 @@ def build_report_html(
   </style>
 </head>
 <body>
-  <h1>雪球年榜1000{filter_label}组合综合持仓权重 Top{top_n}</h1>
+  <h1>雪球年榜1000{filter_label}组合综合持仓权重 Top{display_count}</h1>
   <table class="summary">{rows_html}</table>
   {rebalance_action_html}
   <p>统计口径: {esc(scope_text)}；个股/现金综合权重 = 该项在统计组合中的持仓权重之和 / 统计组合数，未持有记为 0。</p>
@@ -3116,10 +3173,11 @@ async def run_top_holdings_job(
     )
     if not no_email:
         subject_filter = active_filter_compact_label(active_filter_summary)
+        subject_display_count = report_display_count(top_n)
         subject = (
-            f"雪球年榜1000{subject_filter}组合Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
+            f"雪球年榜1000{subject_filter}组合Top{subject_display_count}展示/Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
             if execute_rebalance
-            else f"雪球年榜1000{subject_filter}组合综合持仓权重 Top{top_n} - {run_at.strftime('%Y-%m-%d')}"
+            else f"雪球年榜1000{subject_filter}组合综合持仓权重 Top{subject_display_count} - {run_at.strftime('%Y-%m-%d')}"
         )
         send_configured_email(
             "xueqiu_top_holdings_report",
