@@ -902,6 +902,7 @@ class ScheduledTaskConfig(Base):
     cron_rule = Column(String(1000))
     timezone = Column(String(64), default="Asia/Shanghai", nullable=False)
     allow_queue = Column(Boolean, default=True, nullable=False)
+    parameters = Column(JSON)
     sort_order = Column(Integer, default=0, nullable=False)
     last_trigger_source = Column(String(32))
     last_run_started_at = Column(DateTime)
@@ -1179,6 +1180,7 @@ def ensure_table_columns():
             "cron_rule": "ALTER TABLE scheduled_task_configs ADD COLUMN cron_rule VARCHAR(1000)",
             "timezone": "ALTER TABLE scheduled_task_configs ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'",
             "allow_queue": "ALTER TABLE scheduled_task_configs ADD COLUMN allow_queue BOOLEAN NOT NULL DEFAULT 1",
+            "parameters": "ALTER TABLE scheduled_task_configs ADD COLUMN parameters JSON",
         },
         "valuation_sim_configs": {
             "universe_tag_ids": "ALTER TABLE valuation_sim_configs ADD COLUMN universe_tag_ids JSON",

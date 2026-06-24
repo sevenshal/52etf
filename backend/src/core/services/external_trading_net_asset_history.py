@@ -186,5 +186,13 @@ async def record_all_sub_account_net_asset_history(
     }
 
 
-def process_external_trading_sub_account_net_asset_snapshot_for_robot() -> Dict[str, Any]:
-    return asyncio.run(record_all_sub_account_net_asset_history(source="scheduled_close"))
+def process_external_trading_sub_account_net_asset_snapshot_for_robot(
+    *,
+    trading_date: Optional[date] = None,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    return asyncio.run(record_all_sub_account_net_asset_history(
+        trading_date=trading_date,
+        source="scheduled_close",
+        timeout=timeout,
+    ))

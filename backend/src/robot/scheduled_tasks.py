@@ -31,6 +31,32 @@ DEPRECATED_TASK_KEYS = [
     "a_stock_fund_flow_sync",
     "snowball_ptrade_heartbeat_check",
 ]
+XUEQIU_RANK_DEFAULT_LIMIT = 1000
+XUEQIU_RANK_MIN_LIMIT = 100
+XUEQIU_RANK_DRIFT_DEFAULT_MIN_OVERLAP_PCT = 50.0
+XUEQIU_ACTIVITY_DEFAULT_CACHE_TTL_HOURS = 24.0
+XUEQIU_ACTIVE_REBALANCE_DEFAULT_DAYS = 360
+XUEQIU_REBALANCE_DEFAULT_TOP_N = 10
+XUEQIU_REBALANCE_DEFAULT_SELL_RANK = 12
+XUEQIU_REBALANCE_MAX_TOP_N = 50
+XUEQIU_ACTIVITY_DEFAULT_REQUEST_MIN_INTERVAL_MS = 350
+EVC_STOCK_FETCH_DEFAULT_PAGE_SIZE = 60
+ETF_PUT_CALL_DEFAULT_PAGE_LIMIT = 1000
+ETF_PUT_CALL_DEFAULT_RECENT_LIMIT = 10
+ETF_PUT_CALL_DEFAULT_EXPIRATIONS_LIMIT = 100
+ETF_PUT_CALL_DEFAULT_SLEEP_SECONDS = 0.2
+US_STOCK_INDUSTRY_DEFAULT_LIMIT = 900
+ETF_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
+ETF_FEAR_GREED_DEFAULT_HISTORY_DAYS = 390
+ETF_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
+ETF_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
+ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS = 40
+A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
+A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 550
+A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
+A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
+XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS = 24
+EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
 def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
@@ -57,17 +83,47 @@ def _format_error_preview(
     return _truncate_task_message(preview, max_length) or ""
 
 
-def _run_evc_stock_fetch():
+def _parse_optional_task_date(value: Optional[str], field_name: str) -> Optional[date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"{field_name} 必须是 YYYY-MM-DD") from exc
+
+
+def _parse_optional_symbol_list(value: Optional[str]) -> Optional[List[str]]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    symbols = [item.strip().upper() for item in re.split(r"[\s,;]+", text) if item.strip()]
+    return list(dict.fromkeys(symbols)) or None
+
+
+def _run_evc_stock_fetch(
+    page_size: int = EVC_STOCK_FETCH_DEFAULT_PAGE_SIZE,
+    max_pages: int = 0,
+    fetch_tags: bool = True,
+):
     from .evc_manager import EVCManager
 
-    EVCManager().fetch_and_stocks()
+    EVCManager().fetch_and_stocks(
+        page_size=page_size,
+        max_pages=max_pages if max_pages > 0 else None,
+        fetch_tags=fetch_tags,
+    )
 
 
-def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
+def _run_us_stock_base_data_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     from .us_stock_base_data_sync import sync_us_stock_base_data
 
-    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
-    us_result = sync_us_stock_base_data(start_date=parsed_start_date)
+    parsed_start_date = _parse_optional_task_date(start_date, "开始日期")
+    parsed_end_date = _parse_optional_task_date(end_date, "结束日期")
+    us_result = sync_us_stock_base_data(start_date=parsed_start_date, end_date=parsed_end_date)
     static_result = us_result.get("static_snapshot") or {}
     daily_errors = us_result.get("daily_errors") or []
 
@@ -112,10 +168,18 @@ def _run_us_stock_base_data_sync(start_date: Optional[str] = None):
     return result_message
 
 
-def _run_us_stock_industry_sync():
+def _run_us_stock_industry_sync(
+    candidate_etfs: Optional[str] = "",
+    limit: int = US_STOCK_INDUSTRY_DEFAULT_LIMIT,
+    force_refresh: bool = False,
+):
     from .us_stock_industry_sync import sync_us_stock_industry_snapshots
 
-    result = sync_us_stock_industry_snapshots()
+    result = sync_us_stock_industry_snapshots(
+        candidate_etfs=_parse_optional_symbol_list(candidate_etfs),
+        limit=limit,
+        force=force_refresh,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         (
             "US stock industry synced: symbols=%s target=%s saved=%s skipped=%s "
@@ -150,13 +214,13 @@ def _run_us_stock_industry_sync():
     )
 
 
-def _run_etf_fair_value_analysis():
+def _run_etf_fair_value_analysis(symbols: Optional[str] = ""):
     from ..core.services.longport import LongPortService
     from .etf_manager import ETFManager
 
     manager = ETFManager(LongPortService.get_instance())
     try:
-        manager.analyze_all_fair_value()
+        manager.analyze_all_fair_value(etf_symbols=_parse_optional_symbol_list(symbols))
     finally:
         manager.db_session.close()
 
@@ -231,12 +295,24 @@ def _run_etf_holdings_sync(start_date: Optional[str] = None):
     return _run_etf_holdings_ingest()
 
 
-def _run_etf_put_call_ratio_sync(full: bool = False):
+def _run_etf_put_call_ratio_sync(
+    full: bool = False,
+    page_limit: int = ETF_PUT_CALL_DEFAULT_PAGE_LIMIT,
+    recent_limit: int = ETF_PUT_CALL_DEFAULT_RECENT_LIMIT,
+    expirations_limit: int = ETF_PUT_CALL_DEFAULT_EXPIRATIONS_LIMIT,
+    sleep_seconds: float = ETF_PUT_CALL_DEFAULT_SLEEP_SECONDS,
+):
     from .etf_putcallratio_sync import BarchartETFPutCallRatioSync
 
     syncer = BarchartETFPutCallRatioSync()
     try:
-        result = syncer.sync_all(full=full)
+        result = syncer.sync_all(
+            full=full,
+            page_limit=page_limit,
+            recent_limit=recent_limit,
+            expirations_limit=expirations_limit,
+            sleep_seconds=sleep_seconds,
+        )
     finally:
         syncer.close()
 
@@ -259,12 +335,12 @@ def _run_etf_put_call_ratio_sync(full: bool = False):
         )
 
 
-def _run_cnn_fear_greed_fetch():
+def _run_cnn_fear_greed_fetch(start_date: Optional[str] = None):
     from .cnn_fear_index import CNNFearGreedIndexScraper
 
     scraper = CNNFearGreedIndexScraper()
     try:
-        result = scraper.fetch_data_and_save_history()
+        result = scraper.fetch_data_and_save_history(start_date=_parse_optional_task_date(start_date, "开始日期"))
     finally:
         scraper.db_session.close()
 
@@ -279,37 +355,43 @@ def _run_cnn_fear_greed_fetch():
     )
 
 
-def _run_etf_fear_greed_backfill(start_date: Optional[str] = None):
+def _run_etf_fear_greed_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    recent_days: int = ETF_FEAR_GREED_DEFAULT_RECENT_DAYS,
+    history_days: int = ETF_FEAR_GREED_DEFAULT_HISTORY_DAYS,
+    score_window: int = ETF_FEAR_GREED_DEFAULT_SCORE_WINDOW,
+    min_periods: int = ETF_FEAR_GREED_DEFAULT_MIN_PERIODS,
+    max_holdings: int = ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS,
+    use_historical_holdings: bool = True,
+):
     from ..core.services.etf_fear_greed_clone_service import (
         DEFAULT_ETF_FEAR_GREED_SYMBOLS,
         ETFFearGreedCloneCalculator,
     )
 
-    end_date = date.today()
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
     if start_date:
-        output_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        output_start_date = _parse_optional_task_date(start_date, "开始日期")
     else:
         # Daily runs only need to refresh the recent tail, but still need a
         # long calculation window for rolling z-score and 52-week components.
-        output_start_date = end_date - timedelta(days=3)
+        output_start_date = end_value - timedelta(days=recent_days)
 
-    # The slowest component needs about 244 trading days to warm up
-    # (125-day momentum raw value + 120-point rolling score). 390 calendar
-    # days leaves a small buffer while still fitting the 2025+ holdings backfill.
-    calculation_start_date = output_start_date - timedelta(days=390)
+    calculation_start_date = output_start_date - timedelta(days=history_days)
     calculator = ETFFearGreedCloneCalculator()
     logger = logging.getLogger("ScheduledTaskManager")
     for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS:
         result = calculator.backfill_to_db(
             symbol=symbol,
             start_date=calculation_start_date,
-            end_date=end_date,
+            end_date=end_value,
             output_start_date=output_start_date,
-            history_days=390,
-            score_window=252,
-            min_periods=120,
-            max_holdings=40,
-            use_historical_holdings=True,
+            history_days=history_days,
+            score_window=score_window,
+            min_periods=min_periods,
+            max_holdings=max_holdings,
+            use_historical_holdings=use_historical_holdings,
         )
         logger.info(
             "%s fear greed backfill saved %s rows, range=%s~%s",
@@ -320,11 +402,20 @@ def _run_etf_fear_greed_backfill(start_date: Optional[str] = None):
         )
 
 
-def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
+def _run_a_stock_base_data_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    incremental: bool = True,
+):
     from .a_stock_base_data_sync import sync_a_stock_base_data
 
-    parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
-    result = sync_a_stock_base_data(start_date=parsed_start_date, incremental=parsed_start_date is None)
+    parsed_start_date = _parse_optional_task_date(start_date, "开始日期")
+    parsed_end_date = _parse_optional_task_date(end_date, "结束日期")
+    result = sync_a_stock_base_data(
+        start_date=parsed_start_date,
+        end_date=parsed_end_date,
+        incremental=incremental and parsed_start_date is None,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
@@ -431,10 +522,18 @@ def _run_a_stock_base_data_sync(start_date: Optional[str] = None):
     )
 
 
-def _run_a_stock_innovation100_rebuild():
+def _run_a_stock_innovation100_rebuild(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    full_rebuild: bool = False,
+):
     from ..app.api.a_stock_innovation100 import rebuild_a_stock_innovation100_for_scheduler
 
-    result = rebuild_a_stock_innovation100_for_scheduler()
+    result = rebuild_a_stock_innovation100_for_scheduler(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        full_rebuild=full_rebuild,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         "A stock innovation100 refreshed: mode=%s, status=%s, latest_date=%s, latest_level=%s, levels_saved=%s, rebalances_saved=%s",
         result.get("mode"),
@@ -446,19 +545,26 @@ def _run_a_stock_innovation100_rebuild():
     )
 
 
-def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
+def _run_a_stock_etf_fear_greed_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    recent_days: int = A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS,
+    history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
+    score_window: int = A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
+    min_periods: int = A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS,
+):
     from ..core.services.a_stock_fear_greed_clone_service import (
         A_STOCK_FEAR_GREED_TARGETS,
         AStockInnovation100FearGreedCloneCalculator,
     )
 
-    end_date = date.today()
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
     if start_date:
-        output_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        output_start_date = _parse_optional_task_date(start_date, "开始日期")
     else:
-        output_start_date = end_date - timedelta(days=3)
+        output_start_date = end_value - timedelta(days=recent_days)
 
-    calculation_start_date = output_start_date - timedelta(days=550)
+    calculation_start_date = output_start_date - timedelta(days=history_days)
     logger = logging.getLogger("ScheduledTaskManager")
     results = []
     errors = []
@@ -468,11 +574,11 @@ def _run_a_stock_etf_fear_greed_backfill(start_date: Optional[str] = None):
             calculator = AStockInnovation100FearGreedCloneCalculator(symbol)
             result = calculator.backfill_to_db(
                 start_date=calculation_start_date,
-                end_date=end_date,
+                end_date=end_value,
                 output_start_date=output_start_date,
-                history_days=550,
-                score_window=252,
-                min_periods=120,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
             )
             results.append(result)
             logger.info(
@@ -511,8 +617,12 @@ def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
     )
 
 
-def _run_external_trading_fee_reconcile():
-    if _external_trading_fee_reconcile_succeeded_today():
+def _run_external_trading_fee_reconcile(
+    check_date: Optional[str] = None,
+    skip_if_already_succeeded: bool = True,
+):
+    parsed_check_date = _parse_optional_task_date(check_date, "检查日期")
+    if skip_if_already_succeeded and parsed_check_date is None and _external_trading_fee_reconcile_succeeded_today():
         return "跳过费用对账检查: 今日早前检查已成功"
 
     from ..core.services.external_trading_fee_reconcile import (
@@ -521,7 +631,7 @@ def _run_external_trading_fee_reconcile():
 
     logger = logging.getLogger("ScheduledTaskManager")
     now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
-    today = now_shanghai.date()
+    today = parsed_check_date or now_shanghai.date()
 
     result = check_and_alert_missing_deliver_records(today)
 
@@ -561,8 +671,11 @@ def _is_china_trading_day(check_date: date) -> bool:
     return True
 
 
-def _run_external_trading_sub_account_net_asset_snapshot():
-    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+def _run_external_trading_sub_account_net_asset_snapshot(
+    trading_date: Optional[str] = None,
+    timeout_seconds: float = EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS,
+):
+    today_shanghai = _parse_optional_task_date(trading_date, "交易日期") or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     if not _is_china_trading_day(today_shanghai):
         return f"跳过外部交易子账户净资产快照: {today_shanghai} 不是A股交易日"
 
@@ -570,7 +683,10 @@ def _run_external_trading_sub_account_net_asset_snapshot():
         process_external_trading_sub_account_net_asset_snapshot_for_robot,
     )
 
-    result = process_external_trading_sub_account_net_asset_snapshot_for_robot()
+    result = process_external_trading_sub_account_net_asset_snapshot_for_robot(
+        trading_date=today_shanghai,
+        timeout=timeout_seconds,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         "External trading sub-account net asset snapshot result: %s",
         result,
@@ -585,14 +701,22 @@ def _run_external_trading_sub_account_net_asset_snapshot():
     )
 
 
-def _run_xueqiu_top_holdings_rebalance():
+def _run_xueqiu_top_holdings_rebalance(
+    top_n: int = XUEQIU_REBALANCE_DEFAULT_TOP_N,
+    active_rebalance_days: int = XUEQIU_ACTIVE_REBALANCE_DEFAULT_DAYS,
+    sell_rank: int = XUEQIU_REBALANCE_DEFAULT_SELL_RANK,
+):
     today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     if not _is_china_trading_day(today_shanghai):
-        return f"跳过雪球Top1000主理人活跃360天综合持仓自动调仓: {today_shanghai} 不是A股交易日"
+        return f"跳过雪球年榜主理人活跃综合持仓自动调仓: {today_shanghai} 不是A股交易日"
 
     from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_rebalance_for_robot
 
-    result = process_xueqiu_top_holdings_rebalance_for_robot()
+    result = process_xueqiu_top_holdings_rebalance_for_robot(
+        top_n=top_n,
+        active_rebalance_days=active_rebalance_days,
+        sell_rank=sell_rank,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         "Xueqiu top holdings rebalance result: %s",
         result,
@@ -600,14 +724,24 @@ def _run_xueqiu_top_holdings_rebalance():
     return result
 
 
-def _run_xueqiu_top_holdings_cache_refresh():
+def _run_xueqiu_top_holdings_cache_refresh(
+    rank_limit: int = XUEQIU_RANK_DEFAULT_LIMIT,
+    rank_drift_min_overlap_pct: float = XUEQIU_RANK_DRIFT_DEFAULT_MIN_OVERLAP_PCT,
+    activity_cache_ttl_hours: float = XUEQIU_ACTIVITY_DEFAULT_CACHE_TTL_HOURS,
+    activity_request_min_interval_ms: int = XUEQIU_ACTIVITY_DEFAULT_REQUEST_MIN_INTERVAL_MS,
+):
     today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     if not _is_china_trading_day(today_shanghai):
-        return f"跳过雪球Top1000榜单和主理人调仓缓存刷新: {today_shanghai} 不是A股交易日"
+        return f"跳过雪球年榜榜单和主理人调仓缓存刷新: {today_shanghai} 不是A股交易日"
 
     from .xueqiu_top_holdings_report import process_xueqiu_top_holdings_cache_refresh_for_robot
 
-    result = process_xueqiu_top_holdings_cache_refresh_for_robot()
+    result = process_xueqiu_top_holdings_cache_refresh_for_robot(
+        rank_limit=rank_limit,
+        rank_drift_min_overlap_pct=rank_drift_min_overlap_pct,
+        activity_cache_ttl_hours=activity_cache_ttl_hours,
+        activity_request_min_interval_ms=activity_request_min_interval_ms,
+    )
     logging.getLogger("ScheduledTaskManager").info(
         "Xueqiu top holdings cache refresh result: %s",
         result,
@@ -615,10 +749,38 @@ def _run_xueqiu_top_holdings_cache_refresh():
     return result
 
 
-def _run_xueqiu_token_freshness_check():
+def _run_xueqiu_token_freshness_check(
+    max_age_hours: int = XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS,
+):
     from ..core.services.xueqiu_token_monitor import process_xueqiu_token_freshness_check_for_robot
 
-    return process_xueqiu_token_freshness_check_for_robot()
+    return process_xueqiu_token_freshness_check_for_robot(max_age_hours=max_age_hours)
+
+
+@dataclass(frozen=True)
+class TaskParameterDefinition:
+    key: str
+    label: str
+    value_type: str
+    default: Any
+    description: str = ""
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    step: Optional[float] = None
+    suffix: Optional[str] = None
+
+    def serialize(self) -> dict:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "type": self.value_type,
+            "default": self.default,
+            "description": self.description,
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "step": self.step,
+            "suffix": self.suffix,
+        }
 
 
 @dataclass(frozen=True)
@@ -633,6 +795,7 @@ class TaskDefinition:
     default_cron_rule: Optional[str] = None
     default_allow_queue: bool = True
     default_timezone: str = DEFAULT_TASK_TIMEZONE
+    parameter_schema: tuple[TaskParameterDefinition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -664,6 +827,35 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=10,
                 runner=_run_evc_stock_fetch,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="page_size",
+                        label="每页数量",
+                        value_type="integer",
+                        default=EVC_STOCK_FETCH_DEFAULT_PAGE_SIZE,
+                        min_value=1,
+                        max_value=200,
+                        step=1,
+                        description="EVC 股票搜索接口每页拉取数量。",
+                    ),
+                    TaskParameterDefinition(
+                        key="max_pages",
+                        label="最多页数",
+                        value_type="integer",
+                        default=0,
+                        min_value=0,
+                        max_value=1000,
+                        step=1,
+                        description="0 表示不限页数；用于临时小范围验证。",
+                    ),
+                    TaskParameterDefinition(
+                        key="fetch_tags",
+                        label="同步标签",
+                        value_type="boolean",
+                        default=True,
+                        description="是否同步 EVC 股票标签。",
+                    ),
+                ),
             ),
             "evc_static_info_sync": TaskDefinition(
                 task_key="evc_static_info_sync",
@@ -673,6 +865,22 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=11,
                 runner=_run_us_stock_base_data_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时按增量窗口同步。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时同步到今天。",
+                    ),
+                ),
             ),
             "us_stock_industry_sync": TaskDefinition(
                 task_key="us_stock_industry_sync",
@@ -682,6 +890,33 @@ class ScheduledTaskManager:
                 default_enabled=False,
                 sort_order=13,
                 runner=_run_us_stock_industry_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="candidate_etfs",
+                        label="ETF池",
+                        value_type="string",
+                        default="SPY.US,QQQ.US",
+                        description="从这些 ETF 的持仓股中补全行业分类，逗号/空格分隔。",
+                    ),
+                    TaskParameterDefinition(
+                        key="limit",
+                        label="每日上限",
+                        value_type="integer",
+                        default=US_STOCK_INDUSTRY_DEFAULT_LIMIT,
+                        min_value=0,
+                        max_value=5000,
+                        step=10,
+                        suffix="只",
+                        description="单次最多请求 FMP profile 的股票数量；0 表示不请求。",
+                    ),
+                    TaskParameterDefinition(
+                        key="force_refresh",
+                        label="强制刷新",
+                        value_type="boolean",
+                        default=False,
+                        description="开启后已存在行业数据的股票也会重新请求。",
+                    ),
+                ),
             ),
             "etf_fair_value_analysis": TaskDefinition(
                 task_key="etf_fair_value_analysis",
@@ -691,6 +926,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=20,
                 runner=_run_etf_fair_value_analysis,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="symbols",
+                        label="ETF列表",
+                        value_type="string",
+                        default="",
+                        description="可选，逗号/空格分隔；为空时分析全部支持的 ETF。",
+                    ),
+                ),
             ),
             "etf_holdings_backfill": TaskDefinition(
                 task_key="etf_holdings_backfill",
@@ -700,6 +944,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=15,
                 runner=_run_etf_holdings_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时抓取最新持仓，填写后从该日期回刷历史持仓。",
+                    ),
+                ),
             ),
             "etf_put_call_ratio_sync": TaskDefinition(
                 task_key="etf_put_call_ratio_sync",
@@ -709,6 +962,56 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=55,
                 runner=_run_etf_put_call_ratio_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="full",
+                        label="全量历史",
+                        value_type="boolean",
+                        default=False,
+                        description="关闭时只抓最近记录；开启时分页拉取完整历史。",
+                    ),
+                    TaskParameterDefinition(
+                        key="page_limit",
+                        label="历史页上限",
+                        value_type="integer",
+                        default=ETF_PUT_CALL_DEFAULT_PAGE_LIMIT,
+                        min_value=1,
+                        max_value=10000,
+                        step=100,
+                        description="全量历史模式下单个 ETF 的历史分页上限。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_limit",
+                        label="最近条数",
+                        value_type="integer",
+                        default=ETF_PUT_CALL_DEFAULT_RECENT_LIMIT,
+                        min_value=1,
+                        max_value=200,
+                        step=1,
+                        description="非全量模式下单个 ETF 抓取的最近历史条数。",
+                    ),
+                    TaskParameterDefinition(
+                        key="expirations_limit",
+                        label="到期页上限",
+                        value_type="integer",
+                        default=ETF_PUT_CALL_DEFAULT_EXPIRATIONS_LIMIT,
+                        min_value=1,
+                        max_value=1000,
+                        step=10,
+                        description="当前期权到期未平仓快照的分页上限。",
+                    ),
+                    TaskParameterDefinition(
+                        key="sleep_seconds",
+                        label="请求间隔",
+                        value_type="float",
+                        default=ETF_PUT_CALL_DEFAULT_SLEEP_SECONDS,
+                        min_value=0,
+                        max_value=10,
+                        step=0.1,
+                        suffix="秒",
+                        description="Barchart 请求之间的休眠时间。",
+                    ),
+                ),
             ),
             "cnn_fear_greed_fetch": TaskDefinition(
                 task_key="cnn_fear_greed_fetch",
@@ -718,6 +1021,15 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=50,
                 runner=_run_cnn_fear_greed_fetch,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时按 CNN 历史最新日期增量回补。",
+                    ),
+                ),
             ),
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
@@ -727,6 +1039,33 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=60,
                 runner=_run_etf_fear_greed_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="输出开始",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时只输出最近几天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时使用今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_days",
+                        label="最近天数",
+                        value_type="integer",
+                        default=ETF_FEAR_GREED_DEFAULT_RECENT_DAYS,
+                        min_value=0,
+                        max_value=60,
+                        step=1,
+                        suffix="天",
+                        description="未填写输出开始日期时，回写最近多少个自然日。",
+                    ),
+                ),
             ),
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
@@ -736,6 +1075,29 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=74,
                 runner=_run_a_stock_base_data_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时增量同步，填写后从该日期回刷。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时同步到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="incremental",
+                        label="增量模式",
+                        value_type="boolean",
+                        default=True,
+                        description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
             ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",
@@ -745,6 +1107,29 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_a_stock_innovation100_rebuild,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；填写后执行全量重建并从该日期输出。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时刷新到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="full_rebuild",
+                        label="全量重建",
+                        value_type="boolean",
+                        default=False,
+                        description="开启后清理并重建创新100结果；默认只增量刷新。",
+                    ),
+                ),
             ),
             "a_stock_etf_fear_greed_backfill": TaskDefinition(
                 task_key="a_stock_etf_fear_greed_backfill",
@@ -754,6 +1139,33 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_a_stock_etf_fear_greed_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="输出开始",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时只输出最近几天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时使用今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_days",
+                        label="最近天数",
+                        value_type="integer",
+                        default=A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS,
+                        min_value=0,
+                        max_value=60,
+                        step=1,
+                        suffix="天",
+                        description="未填写输出开始日期时，回写最近多少个自然日。",
+                    ),
+                ),
             ),
             "external_trading_fee_reconcile": TaskDefinition(
                 task_key="external_trading_fee_reconcile",
@@ -764,46 +1176,176 @@ class ScheduledTaskManager:
                 sort_order=23,
                 runner=_run_external_trading_fee_reconcile,
                 default_cron_rule="35 9 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="check_date",
+                        label="检查日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时检查当天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="skip_if_already_succeeded",
+                        label="成功后跳过",
+                        value_type="boolean",
+                        default=True,
+                        description="当天已成功检查过时跳过，避免重复告警。",
+                    ),
+                ),
             ),
             "xueqiu_token_freshness_check": TaskDefinition(
                 task_key="xueqiu_token_freshness_check",
                 name="雪球Token更新检查",
-                description="每天上午9点检查雪球 xq_a_token 最近24小时是否更新；超过24小时未更新或未配置则发送告警邮件。",
+                description="检查雪球 xq_a_token 最近24小时是否更新；超过24小时未更新或未配置则发送告警邮件。",
                 default_time="09:00",
                 default_enabled=True,
                 sort_order=22,
                 runner=_run_xueqiu_token_freshness_check,
                 default_cron_rule="0 9 * * *",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="max_age_hours",
+                        label="最长有效期",
+                        value_type="integer",
+                        default=XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS,
+                        min_value=1,
+                        max_value=168,
+                        step=1,
+                        suffix="小时",
+                        description="雪球 xq_a_token 超过该时长未更新则告警。",
+                    ),
+                ),
             ),
             "external_trading_sub_account_nav_snapshot": TaskDefinition(
                 task_key="external_trading_sub_account_nav_snapshot",
                 name="外部交易子账户净资产快照",
-                description="A股收盘后5分钟计算每个虚拟子账户的净资产、持仓市值和可用资金，并写入每日历史曲线。",
+                description="A股收盘后计算每个虚拟子账户的净资产、持仓市值和可用资金，并写入每日历史曲线。",
                 default_time="15:05",
                 default_enabled=True,
                 sort_order=24,
                 runner=_run_external_trading_sub_account_net_asset_snapshot,
                 default_cron_rule="5 15 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="trading_date",
+                        label="交易日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时使用当天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="timeout_seconds",
+                        label="估值超时",
+                        value_type="float",
+                        default=EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS,
+                        min_value=1,
+                        max_value=120,
+                        step=1,
+                        suffix="秒",
+                        description="查询券商快照/行情估值时的单次超时时间。",
+                    ),
+                ),
             ),
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
-                name="雪球Top1000主理人活跃360天综合持仓自动调仓",
-                description="每日14:50执行；A股交易日拉取雪球年榜Top1000最新持仓，并使用已缓存的主理人调仓时间筛选最近360天活跃组合，再按Top10等权、跌出Top12才卖、从Top10补位的缓冲策略调仓目标雪球组合。",
+                name="雪球年榜主理人活跃综合持仓自动调仓",
+                description="A股交易日拉取雪球年榜组合最新持仓，并使用已缓存的主理人调仓时间筛选近期活跃组合，再按可配置Top N等权、跌出缓冲区才卖、从Top N补位的缓冲策略调仓目标雪球组合。",
                 default_time="14:50",
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
                 default_cron_rule="50 14 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="top_n",
+                        label="目标Top N",
+                        value_type="integer",
+                        default=XUEQIU_REBALANCE_DEFAULT_TOP_N,
+                        min_value=1,
+                        max_value=XUEQIU_REBALANCE_MAX_TOP_N,
+                        step=1,
+                        suffix="只",
+                        description="自动调仓目标持仓数量，目标权重按Top N等权计算。",
+                    ),
+                    TaskParameterDefinition(
+                        key="active_rebalance_days",
+                        label="主理人活跃天数",
+                        value_type="integer",
+                        default=XUEQIU_ACTIVE_REBALANCE_DEFAULT_DAYS,
+                        min_value=1,
+                        max_value=1000,
+                        step=1,
+                        suffix="天",
+                        description="只纳入最近这段时间内发生主理人调仓的组合。",
+                    ),
+                    TaskParameterDefinition(
+                        key="sell_rank",
+                        label="缓冲区Top N",
+                        value_type="integer",
+                        default=XUEQIU_REBALANCE_DEFAULT_SELL_RANK,
+                        min_value=1,
+                        max_value=100,
+                        step=1,
+                        suffix="名",
+                        description="已有持仓跌出这个综合排名后才卖出；实际执行时不会低于目标Top N。",
+                    ),
+                ),
             ),
             "xueqiu_top_holdings_cache_refresh": TaskDefinition(
                 task_key="xueqiu_top_holdings_cache_refresh",
-                name="雪球Top1000榜单和主理人调仓缓存刷新",
-                description="每日18:00执行；A股交易日刷新雪球年榜Top1000缓存，并更新缺失或过期的主理人最新调仓时间缓存，供次日收盘前自动调仓直接使用。",
+                name="雪球年榜榜单和主理人调仓缓存刷新",
+                description="A股交易日刷新雪球年榜缓存，并更新缺失或过期的主理人最新调仓时间缓存，供收盘前自动调仓直接使用。",
                 default_time="18:00",
                 default_enabled=True,
                 sort_order=26,
                 runner=_run_xueqiu_top_holdings_cache_refresh,
                 default_cron_rule="0 18 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="rank_limit",
+                        label="榜单Top N",
+                        value_type="integer",
+                        default=XUEQIU_RANK_DEFAULT_LIMIT,
+                        min_value=XUEQIU_RANK_MIN_LIMIT,
+                        max_value=XUEQIU_RANK_DEFAULT_LIMIT,
+                        step=20,
+                        suffix="个",
+                        description="从雪球年榜拉取并缓存的组合数量。",
+                    ),
+                    TaskParameterDefinition(
+                        key="rank_drift_min_overlap_pct",
+                        label="重合度下限",
+                        value_type="float",
+                        default=XUEQIU_RANK_DRIFT_DEFAULT_MIN_OVERLAP_PCT,
+                        min_value=0,
+                        max_value=100,
+                        step=1,
+                        suffix="%",
+                        description="新榜单与历史基准最高重合度低于该值时直接失败，避免异常榜单污染缓存。",
+                    ),
+                    TaskParameterDefinition(
+                        key="activity_cache_ttl_hours",
+                        label="调仓缓存TTL",
+                        value_type="float",
+                        default=XUEQIU_ACTIVITY_DEFAULT_CACHE_TTL_HOURS,
+                        min_value=0,
+                        max_value=168,
+                        step=1,
+                        suffix="小时",
+                        description="只刷新缺失或超过该时长的主理人调仓时间缓存。",
+                    ),
+                    TaskParameterDefinition(
+                        key="activity_request_min_interval_ms",
+                        label="请求间隔",
+                        value_type="integer",
+                        default=XUEQIU_ACTIVITY_DEFAULT_REQUEST_MIN_INTERVAL_MS,
+                        min_value=100,
+                        max_value=5000,
+                        step=50,
+                        suffix="ms",
+                        description="刷新主理人调仓时间时两次请求之间的最小间隔。",
+                    ),
+                ),
             ),
         }
 
@@ -824,6 +1366,70 @@ class ScheduledTaskManager:
         if len(triggered_by) <= 8:
             return f"{triggered_by[:2]}***"
         return f"{triggered_by[:4]}***{triggered_by[-4:]}"
+
+    def _task_default_parameters(self, task: TaskDefinition) -> Dict[str, Any]:
+        return {definition.key: definition.default for definition in task.parameter_schema}
+
+    def _normalize_parameter_value(
+        self,
+        definition: TaskParameterDefinition,
+        value: Any,
+    ) -> Any:
+        raw_value = definition.default if value is None or value == "" else value
+        label = definition.label or definition.key
+        suffix = definition.suffix or ""
+
+        try:
+            if definition.value_type == "integer":
+                if isinstance(raw_value, bool):
+                    raise ValueError
+                normalized = int(raw_value)
+            elif definition.value_type == "float":
+                if isinstance(raw_value, bool):
+                    raise ValueError
+                normalized = float(raw_value)
+            elif definition.value_type == "boolean":
+                if isinstance(raw_value, bool):
+                    normalized = raw_value
+                elif isinstance(raw_value, str):
+                    normalized = raw_value.strip().lower() in {"1", "true", "yes", "on"}
+                else:
+                    normalized = bool(raw_value)
+            else:
+                normalized = str(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} 参数格式不正确")
+
+        if definition.value_type in {"integer", "float"}:
+            if definition.min_value is not None and normalized < definition.min_value:
+                raise ValueError(f"{label} 不能低于 {definition.min_value:g}{suffix}")
+            if definition.max_value is not None and normalized > definition.max_value:
+                raise ValueError(f"{label} 不能高于 {definition.max_value:g}{suffix}")
+
+        return normalized
+
+    def _normalize_task_parameters(
+        self,
+        task: TaskDefinition,
+        parameters: Optional[Dict[str, Any]],
+        *,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        if not task.parameter_schema:
+            return {}
+        raw_parameters = parameters if isinstance(parameters, dict) else {}
+        normalized: Dict[str, Any] = {}
+        for definition in task.parameter_schema:
+            try:
+                normalized[definition.key] = self._normalize_parameter_value(
+                    definition,
+                    raw_parameters.get(definition.key, definition.default),
+                )
+            except ValueError:
+                if strict:
+                    raise
+                normalized[definition.key] = definition.default
+        return normalized
 
     def ensure_task_configs(self):
         with get_db_ctx() as db:
@@ -849,6 +1455,7 @@ class ScheduledTaskManager:
                             cron_rule=default_cron_rule,
                             timezone=task.default_timezone,
                             allow_queue=task.default_allow_queue,
+                            parameters=self._task_default_parameters(task),
                             sort_order=task.sort_order,
                         )
                     )
@@ -856,6 +1463,7 @@ class ScheduledTaskManager:
 
                 config.name = task.name
                 config.description = task.description
+                config.parameters = self._normalize_task_parameters(task, config.parameters)
                 config.sort_order = task.sort_order
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
@@ -873,8 +1481,8 @@ class ScheduledTaskManager:
                     config.cron_rule = default_cron_rule
                 if not self.is_valid_timezone(config.timezone):
                     config.timezone = task.default_timezone
-                if config.allow_queue is None:
-                    config.allow_queue = task.default_allow_queue
+                if config.allow_queue is not True:
+                    config.allow_queue = True
 
     def is_valid_time(self, value: str) -> bool:
         return bool(value and TIME_PATTERN.match(value))
@@ -1193,6 +1801,7 @@ class ScheduledTaskManager:
         allow_queue: Optional[bool] = None,
         timezone: Optional[str] = None,
         schedule_time: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
         updated_by: Optional[str] = None,
     ) -> dict:
         self.bootstrap()
@@ -1223,8 +1832,11 @@ class ScheduledTaskManager:
                 task.default_time,
                 timezone=timezone_value,
             )
-            if allow_queue is not None:
-                config.allow_queue = bool(allow_queue)
+            config.allow_queue = True
+            if parameters is not None:
+                config.parameters = self._normalize_task_parameters(task, parameters, strict=True)
+            else:
+                config.parameters = self._normalize_task_parameters(task, config.parameters)
             config.updated_by = updated_by
             config.updated_at = datetime.now()
 
@@ -1246,6 +1858,8 @@ class ScheduledTaskManager:
         task = self._require_task(task_key)
         config = self._get_task_snapshot(task_key)
         allow_queue = bool(config.get("allow_queue"))
+        configured_parameters = self._normalize_task_parameters(task, config.get("parameters"))
+        effective_runner_kwargs = {**configured_parameters, **runner_kwargs}
         done_event = None if background or not allow_queue else threading.Event()
         direct_run: Optional[QueuedTaskRun] = None
 
@@ -1259,7 +1873,7 @@ class ScheduledTaskManager:
                 task=task,
                 trigger_source=trigger_source,
                 triggered_by=triggered_by,
-                runner_kwargs=dict(runner_kwargs),
+                runner_kwargs=effective_runner_kwargs,
                 queued_at=datetime.now(),
                 done_event=done_event,
             )
@@ -1421,6 +2035,7 @@ class ScheduledTaskManager:
         scheduled_jobs = jobs or []
         next_runs = [job.get("next_run") for job in scheduled_jobs if job and job.get("next_run")]
         next_run = min(next_runs) if next_runs else None
+        task = self.task_definitions.get(config["task_key"])
         return {
             "task_key": config["task_key"],
             "name": config["name"],
@@ -1430,6 +2045,11 @@ class ScheduledTaskManager:
             "cron_rule": config["cron_rule"],
             "timezone": config["timezone"],
             "allow_queue": config["allow_queue"],
+            "parameters": config.get("parameters") or {},
+            "parameter_schema": [
+                definition.serialize()
+                for definition in (task.parameter_schema if task else ())
+            ],
             "first_daily_trigger_minutes": self._cron_sort_minutes(
                 config.get("cron_rule"),
                 timezone=config.get("timezone"),
@@ -1437,6 +2057,7 @@ class ScheduledTaskManager:
             "sort_order": config["sort_order"],
             "supports_start_date": config["task_key"] in {
                 "evc_static_info_sync",
+                "cnn_fear_greed_fetch",
                 "a_stock_base_data_sync",
                 "etf_holdings_backfill",
                 "soxx_fear_greed_backfill",
@@ -1479,6 +2100,7 @@ class ScheduledTaskManager:
             self._time_to_cron(config.schedule_time) if self.is_valid_time(config.schedule_time) else None
         )
         timezone = self._task_timezone(config.timezone or (task.default_timezone if task else None))
+        parameters = self._normalize_task_parameters(task, config.parameters) if task else {}
         return {
             "task_key": config.task_key,
             "name": config.name,
@@ -1488,6 +2110,7 @@ class ScheduledTaskManager:
             "cron_rule": cron_rule,
             "timezone": timezone,
             "allow_queue": config.allow_queue is not False,
+            "parameters": parameters,
             "sort_order": config.sort_order,
             "last_trigger_source": config.last_trigger_source,
             "last_run_started_at": config.last_run_started_at,

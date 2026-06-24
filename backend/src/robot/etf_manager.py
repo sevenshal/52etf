@@ -444,10 +444,19 @@ class ETFManager:
             self.logger.error(f"分析ETF {etf_symbol} 失败: {str(e)}\n{traceback.format_exc()}")
             raise 
 
-    def analyze_all_fair_value(self):
+    def analyze_all_fair_value(self, etf_symbols=None):
         """分析所有支持的ETF"""
         try:
-            for etf_symbol in self.fetchers.keys():
+            symbols = list(self.fetchers.keys())
+            if etf_symbols:
+                requested = [str(symbol or "").strip().upper() for symbol in etf_symbols if str(symbol or "").strip()]
+                symbols = [symbol for symbol in requested if symbol in self.fetchers]
+                unsupported = [symbol for symbol in requested if symbol not in self.fetchers]
+                if unsupported:
+                    self.logger.warning("跳过不支持的ETF估值分析标的: %s", ",".join(unsupported))
+                if not symbols:
+                    raise ValueError("没有可分析的ETF标的")
+            for etf_symbol in symbols:
                 try:
                     self.analyze_etf(etf_symbol)
                     self.logger.info(f"完成ETF {etf_symbol} 分析")

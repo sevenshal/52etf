@@ -1,7 +1,7 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .account import valid_account
 from ...robot.scheduled_tasks import scheduled_task_manager
@@ -15,6 +15,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
     schedule_time: Optional[str] = None
     timezone: Optional[str] = None
     allow_queue: Optional[bool] = None
+    parameters: Optional[Dict[str, Any]] = None
 
 
 class ScheduledTaskRunRequest(BaseModel):
@@ -30,6 +31,8 @@ class ScheduledTaskResponse(BaseModel):
     cron_rule: Optional[str] = None
     timezone: str = "Asia/Shanghai"
     allow_queue: bool = True
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    parameter_schema: List[Dict[str, Any]] = Field(default_factory=list)
     first_daily_trigger_minutes: Optional[int] = None
     sort_order: int
     supports_start_date: bool = False
@@ -66,6 +69,7 @@ def update_scheduled_task(
             schedule_time=payload.schedule_time,
             timezone=payload.timezone,
             allow_queue=payload.allow_queue,
+            parameters=payload.parameters,
             updated_by=account_id,
         )
     except KeyError:
@@ -84,14 +88,13 @@ def run_scheduled_task_now(
         runner_kwargs = {}
         if task_key in {
             "evc_static_info_sync",
+            "cnn_fear_greed_fetch",
             "a_stock_base_data_sync",
             "etf_holdings_backfill",
             "soxx_fear_greed_backfill",
             "a_stock_etf_fear_greed_backfill",
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
-        if task_key == "etf_put_call_ratio_sync":
-            runner_kwargs["full"] = True
         scheduled_task_manager.trigger_task(
             task_key=task_key,
             trigger_source="manual",

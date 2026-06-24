@@ -25,7 +25,7 @@ class EVCManager:
         self.db_session = Session()
         self.evc_service = EVCService()
 
-    def fetch_and_stocks(self):
+    def fetch_and_stocks(self, page_size: int = 60, max_pages: int = None, fetch_tags: bool = True):
         """分页抓取所有股票数据并存储到数据库"""
         try:
             today = date.today()
@@ -33,35 +33,38 @@ class EVCManager:
             total_tags_fetched = 0
             total_stocks_fetched = 0
 
-            # 首先获取并存储标签
-            try:
-                tags = self.evc_service.get_stock_tags()
-                for tag_data in tags:
-                    tag = StockTag(
-                        id=tag_data.id,
-                        created_at=tag_data.created_at,
-                        name=tag_data.name,
-                        built_in=tag_data.built_in,
-                        official_only=tag_data.official_only,
-                        includes_option_put_call=tag_data.includes_option_put_call,
-                        option_put_call_fetch_tag_ordinal=tag_data.option_put_call_fetch_tag_ordinal,
-                        sort_group=tag_data.sort_group,
-                        updated_at=datetime.now()
-                    )
-                    self.db_session.merge(tag)
-                self.db_session.commit()
-                total_tags_fetched = len(tags)
-                self.logger.info(f"Successfully stored/updated {total_tags_fetched} tags")
-            except Exception as e:
-                self.logger.error(f"Error fetching tags: {str(e)}")
-                self.db_session.rollback()
+            if fetch_tags:
+                # 首先获取并存储标签
+                try:
+                    tags = self.evc_service.get_stock_tags()
+                    for tag_data in tags:
+                        tag = StockTag(
+                            id=tag_data.id,
+                            created_at=tag_data.created_at,
+                            name=tag_data.name,
+                            built_in=tag_data.built_in,
+                            official_only=tag_data.official_only,
+                            includes_option_put_call=tag_data.includes_option_put_call,
+                            option_put_call_fetch_tag_ordinal=tag_data.option_put_call_fetch_tag_ordinal,
+                            sort_group=tag_data.sort_group,
+                            updated_at=datetime.now()
+                        )
+                        self.db_session.merge(tag)
+                    self.db_session.commit()
+                    total_tags_fetched = len(tags)
+                    self.logger.info(f"Successfully stored/updated {total_tags_fetched} tags")
+                except Exception as e:
+                    self.logger.error(f"Error fetching tags: {str(e)}")
+                    self.db_session.rollback()
 
             # 然后获取股票数据
             page = 1
-            size = 60  # 每页数量
+            size = max(1, int(page_size or 60))  # 每页数量
             total_processed = 0
 
             while True:
+                if max_pages is not None and page > int(max_pages):
+                    break
                 try:
                     # 获取一页数据
                     stocks, ret_page, ret_total = self.evc_service.search_stock(

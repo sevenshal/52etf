@@ -200,6 +200,33 @@ class XueqiuTopHoldingsReportTest(TestCase):
 
         save_cache.assert_not_called()
 
+    def test_load_or_refresh_year_top_cubes_uses_custom_overlap_threshold(self):
+        cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")
+            for index in range(1, 101)
+        ]
+        baseline_symbols = {f"ZH{index:06d}" for index in range(1, 61)}
+        baseline_symbols.update({f"ZH9{index:05d}" for index in range(61, 101)})
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_year_top_cubes",
+            new=AsyncMock(return_value=cubes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_drift_baselines",
+            return_value=[("snapshot:2026-06-23", baseline_symbols)],
+        ), patch("src.robot.xueqiu_top_holdings_report.save_year_top_cubes") as save_cache:
+            with self.assertRaisesRegex(RuntimeError, "threshold=70%"):
+                asyncio.run(
+                    load_or_refresh_year_top_cubes(
+                        cookie="xq_a_token=test;",
+                        force_refresh=True,
+                        limit=100,
+                        min_overlap_ratio=0.70,
+                    )
+                )
+
+        save_cache.assert_not_called()
+
     def test_load_or_refresh_year_top_cubes_writes_history_before_rank_cache(self):
         cubes = [
             CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")

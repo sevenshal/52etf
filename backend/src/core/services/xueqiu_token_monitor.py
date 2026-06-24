@@ -95,7 +95,11 @@ def format_xueqiu_token_freshness_message(result: Dict[str, Any]) -> str:
 
 def send_xueqiu_token_freshness_alert(result: Dict[str, Any]) -> bool:
     status = result.get("status")
-    subject = "雪球 token 未配置告警" if status == "MISSING" else "雪球 token 超过24小时未更新"
+    subject = (
+        "雪球 token 未配置告警"
+        if status == "MISSING"
+        else f"雪球 token 超过{result.get('max_age_hours')}小时未更新"
+    )
     body = (
         "雪球 token 新鲜度检查发现异常。\n\n"
         f"{format_xueqiu_token_freshness_message(result)}\n\n"
@@ -129,7 +133,7 @@ def send_xueqiu_token_login_missing_alert(
     )
 
 
-def process_xueqiu_token_freshness_check_for_robot() -> str:
+def process_xueqiu_token_freshness_check_for_robot(max_age_hours: int = XUEQIU_TOKEN_MAX_AGE_HOURS) -> str:
     with get_db_ctx() as db:
         rows = (
             db.query(
@@ -149,7 +153,7 @@ def process_xueqiu_token_freshness_check_for_robot() -> str:
             for row in rows
         ]
 
-    result = evaluate_xueqiu_token_freshness(configs)
+    result = evaluate_xueqiu_token_freshness(configs, max_age_hours=max_age_hours)
     message = format_xueqiu_token_freshness_message(result)
     if result["status"] != "OK":
         sent = send_xueqiu_token_freshness_alert(result)

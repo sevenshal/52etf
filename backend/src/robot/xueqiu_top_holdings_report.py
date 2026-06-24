@@ -278,8 +278,8 @@ def as_china_datetime(value: Optional[datetime]) -> Optional[datetime]:
     return value.replace(tzinfo=CHINA_TZ)
 
 
-def activity_cache_checked_after() -> datetime:
-    cutoff = datetime.now(CHINA_TZ) - timedelta(hours=ACTIVE_REBALANCE_CACHE_TTL_HOURS)
+def activity_cache_checked_after(ttl_hours: float = ACTIVE_REBALANCE_CACHE_TTL_HOURS) -> datetime:
+    cutoff = datetime.now(CHINA_TZ) - timedelta(hours=max(0.0, float(ttl_hours)))
     return cutoff.replace(tzinfo=None)
 
 
@@ -923,9 +923,18 @@ def validate_xueqiu_rank_cache_drift(
     }
 
 
-def save_validated_year_top_cubes(cubes: List[CubeInfo], fetched_at: datetime) -> Dict[str, Any]:
+def save_validated_year_top_cubes(
+    cubes: List[CubeInfo],
+    fetched_at: datetime,
+    *,
+    min_overlap_ratio: float = RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO,
+) -> Dict[str, Any]:
     baselines = load_xueqiu_rank_drift_baselines(limit=len(cubes) or RANK_TARGET_COUNT)
-    drift_summary = validate_xueqiu_rank_cache_drift(cubes, baselines)
+    drift_summary = validate_xueqiu_rank_cache_drift(
+        cubes,
+        baselines,
+        min_overlap_ratio=min_overlap_ratio,
+    )
     save_xueqiu_cube_rank_history_to_duckdb(cubes, fetched_at)
     save_year_top_cubes(cubes, fetched_at)
     return drift_summary
@@ -1063,15 +1072,27 @@ async def load_or_refresh_year_top_cubes(
     force_refresh: bool = False,
     limit: int = RANK_TARGET_COUNT,
     timeout: float = DEFAULT_TIMEOUT,
+    min_overlap_ratio: float = RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO,
+    drift_summary_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[CubeInfo], datetime, bool]:
     if not force_refresh:
         cached, fetched_at = load_cached_year_top_cubes(limit=limit)
         if cached and fetched_at:
+            if drift_summary_out is not None:
+                drift_summary_out.clear()
+                drift_summary_out.update({"checked": False, "source": "cache"})
             return cached, fetched_at, False
 
     fetched_at = datetime.now()
     cubes = await fetch_year_top_cubes(cookie=cookie, target_count=limit, timeout=timeout)
-    save_validated_year_top_cubes(cubes, fetched_at)
+    drift_summary = save_validated_year_top_cubes(
+        cubes,
+        fetched_at,
+        min_overlap_ratio=min_overlap_ratio,
+    )
+    if drift_summary_out is not None:
+        drift_summary_out.clear()
+        drift_summary_out.update(drift_summary)
     return cubes, fetched_at, True
 
 
@@ -2162,8 +2183,8 @@ def count_non_cash_ranking_items(ranking: List[Dict[str, Any]]) -> int:
     ])
 
 
-def report_display_count(top_n: int) -> int:
-    return max(top_n, REPORT_TABLE_DISPLAY_RANK)
+def report_display_count(top_n: int, sell_rank: Optional[int] = None) -> int:
+    return max(top_n, sell_rank or REPORT_TABLE_DISPLAY_RANK)
 
 
 def report_item_symbol_key(item: Dict[str, Any]) -> str:
@@ -2205,6 +2226,7 @@ def build_report_table_items(
     top_items: List[Dict[str, Any]],
     aggregate: Dict[str, Any],
     top_n: int,
+    sell_rank: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     target_items_by_symbol = {
         report_item_symbol_key(item): item
@@ -2213,7 +2235,7 @@ def build_report_table_items(
     }
     seen_symbols: Set[str] = set()
     display_items: List[Dict[str, Any]] = []
-    for ranking_item in (aggregate.get("ranking") or [])[:report_display_count(top_n)]:
+    for ranking_item in (aggregate.get("ranking") or [])[:report_display_count(top_n, sell_rank)]:
         symbol_key = report_item_symbol_key(ranking_item)
         if symbol_key and symbol_key in seen_symbols:
             continue
@@ -2503,7 +2525,10 @@ def build_equal_top10_top12_buffer_plan(
         removed_items.append(item)
 
     return {
-        "strategy_name": BUFFER_STRATEGY_NAME,
+        "strategy_name": (
+            f"Top{top_n}等权 + 跌出Top{sell_rank}才卖 + "
+            f"从Top{top_n}补位 + 成分变化才调仓"
+        ),
         "top_n": top_n,
         "sell_rank": sell_rank,
         "top10_symbols": top10_symbols,
@@ -2921,12 +2946,14 @@ def build_report(
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
     cash_item = get_cash_ranking_item(aggregate) or {}
     cash_weight_pct = safe_float(cash_item.get("composite_weight_pct"))
+    strategy_sell_rank = safe_int((strategy_plan or {}).get("sell_rank"))
     report_table_items = build_report_table_items(
         top_items=top_items,
         aggregate=aggregate,
         top_n=top_n,
+        sell_rank=strategy_sell_rank,
     )
-    display_count = report_display_count(top_n)
+    display_count = report_display_count(top_n, strategy_sell_rank)
     filter_label = active_filter_compact_label(active_filter_summary)
     lines = [
         f"雪球年榜1000{filter_label}组合综合持仓权重 Top{display_count}",
@@ -3092,12 +3119,14 @@ def build_report_html(
     total_stock_weight_pct = safe_float(aggregate.get("total_stock_weight_pct")) or 0.0
     cash_item = get_cash_ranking_item(aggregate) or {}
     cash_weight_pct = safe_float(cash_item.get("composite_weight_pct"))
+    strategy_sell_rank = safe_int((strategy_plan or {}).get("sell_rank"))
     report_table_items = build_report_table_items(
         top_items=top_items,
         aggregate=aggregate,
         top_n=top_n,
+        sell_rank=strategy_sell_rank,
     )
-    display_count = report_display_count(top_n)
+    display_count = report_display_count(top_n, strategy_sell_rank)
     filter_label = active_filter_compact_label(active_filter_summary)
     scope_text = (
         f"先筛选{active_filter_description(active_filter_summary)}的组合；"
@@ -3471,6 +3500,7 @@ async def run_top_holdings_job(
     target_cube_symbol: str = DEFAULT_TARGET_CUBE_SYMBOL,
     target_cube_id: Optional[int] = None,
     active_rebalance_days: Optional[int] = None,
+    sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
     refresh_activity_cache: bool = True,
 ) -> Dict[str, Any]:
     run_at = datetime.now(CHINA_TZ)
@@ -3600,7 +3630,7 @@ async def run_top_holdings_job(
             ranking=aggregate["ranking"],
             current_holdings=current_target_holdings,
             top_n=top_n,
-            sell_rank=max(BUFFER_STRATEGY_SELL_RANK, top_n),
+            sell_rank=max(safe_int(sell_rank) or BUFFER_STRATEGY_SELL_RANK, top_n),
         )
         top_items = strategy_plan["target_items"]
         if strategy_plan.get("component_changed"):
@@ -3724,7 +3754,7 @@ async def run_top_holdings_job(
     )
     if not no_email:
         subject_filter = active_filter_compact_label(active_filter_summary)
-        subject_display_count = report_display_count(top_n)
+        subject_display_count = report_display_count(top_n, safe_int((strategy_plan or {}).get("sell_rank")))
         subject = (
             f"雪球年榜1000{subject_filter}组合Top{subject_display_count}展示/Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
             if execute_rebalance
@@ -3757,10 +3787,17 @@ async def run_top_holdings_job(
     }
 
 
-def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
+def process_xueqiu_top_holdings_rebalance_for_robot(
+    top_n: int = BUFFER_STRATEGY_TOP_N,
+    active_rebalance_days: int = ACTIVE_REBALANCE_LOOKBACK_DAYS,
+    sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
+) -> str:
+    normalized_top_n = max(1, int(top_n or BUFFER_STRATEGY_TOP_N))
+    normalized_active_days = max(1, int(active_rebalance_days or ACTIVE_REBALANCE_LOOKBACK_DAYS))
+    normalized_sell_rank = max(normalized_top_n, int(sell_rank or BUFFER_STRATEGY_SELL_RANK))
     result = asyncio.run(
         run_top_holdings_job(
-            top_n=10,
+            top_n=normalized_top_n,
             execute_rebalance=True,
             dry_run=False,
             no_email=False,
@@ -3769,7 +3806,8 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
             timeout=DEFAULT_TIMEOUT,
             retries=DEFAULT_RETRIES,
             target_cube_symbol=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL),
-            active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
+            active_rebalance_days=normalized_active_days,
+            sell_rank=normalized_sell_rank,
             refresh_activity_cache=False,
         )
     )
@@ -3789,8 +3827,10 @@ def process_xueqiu_top_holdings_rebalance_for_robot() -> str:
         else f"snapshot_rows={holdings_snapshot.get('saved_rows')} "
     )
     return (
-        f"雪球Top1000主理人活跃{ACTIVE_REBALANCE_LOOKBACK_DAYS}天综合持仓自动调仓 "
+        f"雪球Top1000主理人活跃{normalized_active_days}天综合持仓自动调仓 "
         f"record_id={result.get('record_id')} "
+        f"top_n={normalized_top_n} "
+        f"sell_rank={normalized_sell_rank} "
         f"target={result.get('target_cube_symbol')} "
         f"cube_id={result.get('target_cube_id')} "
         f"success={result.get('success_count')} "
@@ -3812,21 +3852,27 @@ async def run_top_holdings_cache_refresh_job(
     retries: int = DEFAULT_RETRIES,
     force_refresh_rank: bool = True,
     force_refresh_activity: bool = False,
+    rank_drift_min_overlap_ratio: float = RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO,
+    activity_cache_ttl_hours: float = ACTIVE_REBALANCE_CACHE_TTL_HOURS,
+    activity_request_min_interval_seconds: float = XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
 ) -> Dict[str, Any]:
     run_at = datetime.now(CHINA_TZ)
     cookie = get_latest_cookie()
+    rank_drift_summary: Dict[str, Any] = {}
     cubes, rank_cache_fetched_at, rank_cache_refreshed = await load_or_refresh_year_top_cubes(
         cookie=cookie,
         force_refresh=force_refresh_rank,
         limit=limit,
         timeout=timeout,
+        min_overlap_ratio=rank_drift_min_overlap_ratio,
+        drift_summary_out=rank_drift_summary,
     )
     cached_activity = (
         {}
         if force_refresh_activity
         else load_cached_cube_activity(
             cubes,
-            min_checked_at=activity_cache_checked_after(),
+            min_checked_at=activity_cache_checked_after(activity_cache_ttl_hours),
         )
     )
     previous_activity = load_cached_cube_activity(cubes)
@@ -3843,7 +3889,7 @@ async def run_top_holdings_cache_refresh_job(
         timeout_config = httpx.Timeout(timeout)
         limits = httpx.Limits(max_connections=activity_workers, max_keepalive_connections=activity_workers)
         activity_pacer = AsyncRequestPacer(
-            min_interval_seconds=XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
+            min_interval_seconds=activity_request_min_interval_seconds,
             jitter_seconds=XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS,
         )
         logger.info(
@@ -3851,7 +3897,7 @@ async def run_top_holdings_cache_refresh_job(
             len(refresh_cubes),
             len(cached_activity),
             len(previous_activity),
-            XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
+            activity_request_min_interval_seconds,
         )
         async with httpx.AsyncClient(headers=headers, timeout=timeout_config, limits=limits) as client:
             for index, cube in enumerate(refresh_cubes, start=1):
@@ -3872,17 +3918,6 @@ async def run_top_holdings_cache_refresh_job(
                     )
 
     saved_activity_count = save_cube_activity_cache(activity_results)
-    activity_by_symbol: Dict[str, CubeActivityResult] = dict(cached_activity)
-    for result in activity_results:
-        if not result.error:
-            activity_by_symbol[result.symbol] = result
-
-    active_since = run_at - timedelta(days=ACTIVE_REBALANCE_LOOKBACK_DAYS)
-    active_count = len([
-        activity
-        for activity in activity_by_symbol.values()
-        if activity.latest_rebalance_at and activity.latest_rebalance_at >= active_since
-    ])
     failed_results = [result for result in activity_results if result.error]
 
     return {
@@ -3894,11 +3929,12 @@ async def run_top_holdings_cache_refresh_job(
         "refresh_cube_count": len(refresh_cubes),
         "saved_activity_count": saved_activity_count,
         "failed_count": len(failed_results),
-        "active_count": active_count,
-        "inactive_count": max(0, len(activity_by_symbol) - active_count),
         "activity_source": ACTIVE_REBALANCE_ACTIVITY_TYPE,
         "activity_label": ACTIVE_REBALANCE_ACTIVITY_LABEL,
-        "lookback_days": ACTIVE_REBALANCE_LOOKBACK_DAYS,
+        "activity_cache_ttl_hours": activity_cache_ttl_hours,
+        "rank_drift_min_overlap_ratio": rank_drift_min_overlap_ratio,
+        "rank_drift": rank_drift_summary,
+        "activity_request_min_interval_seconds": activity_request_min_interval_seconds,
         "failed_examples": [
             {
                 "symbol": result.symbol,
@@ -3909,27 +3945,47 @@ async def run_top_holdings_cache_refresh_job(
     }
 
 
-def process_xueqiu_top_holdings_cache_refresh_for_robot() -> str:
+def process_xueqiu_top_holdings_cache_refresh_for_robot(
+    rank_limit: int = RANK_TARGET_COUNT,
+    rank_drift_min_overlap_pct: float = RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO * 100,
+    activity_cache_ttl_hours: float = ACTIVE_REBALANCE_CACHE_TTL_HOURS,
+    activity_request_min_interval_ms: int = int(XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS * 1000),
+) -> str:
+    normalized_rank_limit = max(RANK_CACHE_MIN_VALID_LIMIT, min(RANK_TARGET_COUNT, int(rank_limit or RANK_TARGET_COUNT)))
+    normalized_overlap_ratio = max(0.0, min(1.0, float(rank_drift_min_overlap_pct or 0.0) / 100.0))
+    normalized_cache_ttl_hours = max(0.0, float(activity_cache_ttl_hours))
+    normalized_interval_seconds = max(0.0, float(activity_request_min_interval_ms or 0) / 1000.0)
     result = asyncio.run(
         run_top_holdings_cache_refresh_job(
-            limit=RANK_TARGET_COUNT,
+            limit=normalized_rank_limit,
             workers=DEFAULT_WORKERS,
             timeout=DEFAULT_TIMEOUT,
             retries=DEFAULT_RETRIES,
             force_refresh_rank=True,
             force_refresh_activity=False,
+            rank_drift_min_overlap_ratio=normalized_overlap_ratio,
+            activity_cache_ttl_hours=normalized_cache_ttl_hours,
+            activity_request_min_interval_seconds=normalized_interval_seconds,
         )
     )
+    rank_drift = result.get("rank_drift") or {}
+    rank_overlap_message = "rank_overlap=not_checked"
+    if rank_drift.get("checked") and rank_drift.get("best_overlap_ratio") is not None:
+        rank_overlap_message = (
+            f"rank_overlap={float(rank_drift.get('best_overlap_ratio')):.1%} "
+            f"rank_overlap_count={rank_drift.get('best_overlap_count')}"
+        )
     return (
-        "雪球Top1000榜单和主理人调仓缓存刷新 "
+        f"雪球年榜Top{normalized_rank_limit}榜单和主理人调仓缓存刷新 "
         f"rank_refreshed={result.get('rank_cache_refreshed')} "
+        f"overlap_threshold={normalized_overlap_ratio:.0%} "
+        f"{rank_overlap_message} "
+        f"activity_ttl_hours={normalized_cache_ttl_hours:g} "
         f"source={result.get('source_cube_count')} "
         f"fresh_cache={result.get('fresh_cache_count')} "
         f"refresh={result.get('refresh_cube_count')} "
         f"saved={result.get('saved_activity_count')} "
-        f"failed={result.get('failed_count')} "
-        f"active{result.get('lookback_days')}={result.get('active_count')} "
-        f"inactive={result.get('inactive_count')}"
+        f"failed={result.get('failed_count')}"
     )
 
 

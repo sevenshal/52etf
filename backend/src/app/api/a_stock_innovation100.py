@@ -272,10 +272,21 @@ def get_rebalance_detail(
     }
 
 
-def rebuild_a_stock_innovation100_for_scheduler() -> Dict:
+def rebuild_a_stock_innovation100_for_scheduler(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    full_rebuild: bool = False,
+) -> Dict:
     with get_db_ctx() as db:
         builder = AStockInnovation100Builder(db)
         try:
-            return builder.refresh_incremental(end_date=date.today())
+            end_value = end_date or date.today()
+            if full_rebuild or start_date:
+                return builder.rebuild(
+                    start_date=start_date or DEFAULT_START_DATE,
+                    end_date=end_value,
+                    force_rebuild_outputs=True,
+                )
+            return builder.refresh_incremental(end_date=end_value)
         finally:
             builder.close()
