@@ -1,3 +1,4 @@
+from datetime import date
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
@@ -136,3 +137,47 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual([45.0, 35.0], [row["composite_weight_pct"] for row in result["history"]])
         self.assertEqual([1, 1], [row["composite_rank"] for row in result["history"]])
         self.assertEqual("2026-06-22", result["latest"]["snapshot_date"])
+
+    def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+
+            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holding_details(
+                    symbol="SH600001",
+                    snapshot_date=date(2026, 6, 22),
+                    active_only=True,
+                    limit=1,
+                )
+
+        self.assertTrue(result["available"])
+        self.assertEqual("SH.600001", result["symbol"])
+        self.assertEqual("2026-06-22", result["snapshot_date"])
+        self.assertEqual(2, result["cube_count"])
+        self.assertEqual(2, result["holding_cube_count"])
+        self.assertEqual(70.0, result["total_weight_pct"])
+        self.assertEqual(35.0, result["average_weight_pct"])
+        self.assertEqual(["ZH1"], [row["cube_symbol"] for row in result["details"]])
+        self.assertEqual([50.0], [row["weight_pct"] for row in result["details"]])
+
+    def test_details_returns_synthesized_cash_by_cube(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+
+            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holding_details(
+                    symbol="CASH",
+                    snapshot_date=date(2026, 6, 22),
+                    active_only=True,
+                    limit=10,
+                )
+
+        self.assertTrue(result["available"])
+        self.assertEqual("CASH", result["symbol"])
+        self.assertEqual(2, result["holding_cube_count"])
+        self.assertEqual(30.0, result["total_weight_pct"])
+        self.assertEqual(15.0, result["average_weight_pct"])
+        self.assertEqual(["ZH2", "ZH1"], [row["cube_symbol"] for row in result["details"]])
+        self.assertEqual([20.0, 10.0], [row["weight_pct"] for row in result["details"]])

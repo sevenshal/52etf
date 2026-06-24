@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import sys
 import traceback
@@ -39,6 +40,11 @@ XUEQIU_STOCK_BASE_URL = "https://stock.xueqiu.com"
 XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
 RANK_CACHE_TYPE = "year"
 RANK_CACHE_TTL_DAYS = 7
+RANK_CACHE_MIN_VALID_RATIO = 0.90
+RANK_CACHE_MIN_VALID_LIMIT = 100
+RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO = 0.50
+RANK_CACHE_DRIFT_BASELINE_CACHE_MAX_AGE_DAYS = 30
+RANK_CACHE_DRIFT_RECENT_SNAPSHOT_COUNT = 10
 RANK_PAGE_SIZE = 20
 RANK_TARGET_COUNT = 1000
 DEFAULT_TARGET_CUBE_SYMBOL = "ZH3630096"
@@ -69,6 +75,29 @@ ACTIVE_REBALANCE_ACTIVITY_LABEL = "主理人调仓"
 ACTIVE_REBALANCE_CACHE_TTL_HOURS = 24
 ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS = 1
 ACTIVE_REBALANCE_CACHE_MISS_ERROR = "missing_cached_manager_activity"
+XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS = 0.35
+XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS = 0.08
+XUEQIU_ACTIVITY_HTTP_ERROR_COOLDOWN_SECONDS = 5.0
+XUEQIU_ACTIVITY_THROTTLE_STATUS_CODES = {400, 403, 429}
+XUEQIU_CUBE_RANK_HISTORY_TABLE = "xueqiu_cube_rank_history"
+XUEQIU_CUBE_RANK_HISTORY_COLUMNS = [
+    "rank_date",
+    "fetched_at",
+    "rank_type",
+    "year_rank",
+    "cube_symbol",
+    "cube_id",
+    "cube_name",
+    "screen_name",
+    "daily_gain",
+    "week_gain",
+    "year_gain",
+    "recommend_count",
+    "net_value",
+    "raw_cube_json",
+    "created_at",
+    "updated_at",
+]
 XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
 XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
     "snapshot_date",
@@ -103,6 +132,7 @@ XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
 
 
 logger = logging.getLogger("xueqiu_top_holdings_report")
+XUEQIU_CUBE_SYMBOL_PATTERN = re.compile(r"^ZH\d+$")
 
 
 @dataclass
@@ -162,6 +192,37 @@ class CubeCurrentResult:
     holdings_source: str = ""
     active: bool = False
     error: Optional[str] = None
+
+
+class AsyncRequestPacer:
+    def __init__(
+        self,
+        *,
+        min_interval_seconds: float,
+        jitter_seconds: float = 0.0,
+    ) -> None:
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds))
+        self.jitter_seconds = max(0.0, float(jitter_seconds))
+        self._next_request_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            wait_seconds = max(0.0, self._next_request_at - now)
+            jitter_seconds = random.uniform(0.0, self.jitter_seconds) if self.jitter_seconds else 0.0
+            self._next_request_at = max(now, self._next_request_at) + self.min_interval_seconds + jitter_seconds
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+
+    async def cooldown(self, seconds: float) -> None:
+        delay = max(0.0, float(seconds))
+        if delay <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            self._next_request_at = max(self._next_request_at, loop.time() + delay)
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -391,6 +452,10 @@ def cube_from_rank_item(item: Dict[str, Any], rank: int) -> CubeInfo:
     )
 
 
+def is_valid_xueqiu_cube_symbol(symbol: Optional[str]) -> bool:
+    return bool(XUEQIU_CUBE_SYMBOL_PATTERN.fullmatch(str(symbol or "").strip().upper()))
+
+
 def cube_from_cache_row(row: XueqiuCubeRankCache) -> CubeInfo:
     return CubeInfo(
         year_rank=row.year_rank,
@@ -412,11 +477,15 @@ def normalize_ranked_cubes(cubes: Iterable[CubeInfo]) -> List[CubeInfo]:
     duplicate_symbols: Dict[str, int] = defaultdict(int)
     invalid_rank_count = 0
     dropped_symbol_count = 0
+    dropped_invalid_symbol_count = 0
 
     for index, cube in enumerate(cubes, start=1):
-        symbol = (cube.symbol or "").strip()
+        symbol = (cube.symbol or "").strip().upper()
         if not symbol:
             dropped_symbol_count += 1
+            continue
+        if not is_valid_xueqiu_cube_symbol(symbol):
+            dropped_invalid_symbol_count += 1
             continue
         rank = safe_int(cube.year_rank)
         if rank is None or rank <= 0:
@@ -452,15 +521,26 @@ def normalize_ranked_cubes(cubes: Iterable[CubeInfo]) -> List[CubeInfo]:
             len(duplicate_symbols),
             sample_symbols or "-",
         )
-    if dropped_symbol_count or invalid_rank_count or renumbered_count:
+    if dropped_symbol_count or dropped_invalid_symbol_count or invalid_rank_count or renumbered_count:
         logger.warning(
-            "Normalized Xueqiu year-rank cubes before persistence: dropped_blank_symbols=%s invalid_ranks=%s renumbered=%s final_count=%s",
+            "Normalized Xueqiu year-rank cubes before persistence: "
+            "dropped_blank_symbols=%s dropped_invalid_symbols=%s invalid_ranks=%s renumbered=%s final_count=%s",
             dropped_symbol_count,
+            dropped_invalid_symbol_count,
             invalid_rank_count,
             renumbered_count,
             len(result),
         )
     return result
+
+
+def cube_symbol_set(cubes: Iterable[CubeInfo]) -> Set[str]:
+    symbols: Set[str] = set()
+    for cube in cubes:
+        symbol = (cube.symbol or "").strip().upper()
+        if is_valid_xueqiu_cube_symbol(symbol):
+            symbols.add(symbol)
+    return symbols
 
 
 def load_cubes_from_file(path: Path, limit: Optional[int] = None) -> List[CubeInfo]:
@@ -487,6 +567,7 @@ async def fetch_year_top_cubes(
     headers = build_headers(cookie)
     cubes: List[CubeInfo] = []
     duplicate_symbols: Dict[str, int] = defaultdict(int)
+    invalid_symbols: List[str] = []
     seen_symbols: Set[str] = set()
     async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(timeout)) as client:
         page = 1
@@ -507,8 +588,11 @@ async def fetch_year_top_cubes(
                 break
             for item in batch:
                 cube = cube_from_rank_item(item, len(cubes) + 1)
-                symbol = (cube.symbol or "").strip()
+                symbol = (cube.symbol or "").strip().upper()
                 if not symbol:
+                    continue
+                if not is_valid_xueqiu_cube_symbol(symbol):
+                    invalid_symbols.append(symbol)
                     continue
                 if symbol in seen_symbols:
                     duplicate_symbols[symbol] += 1
@@ -531,7 +615,19 @@ async def fetch_year_top_cubes(
             len(duplicate_symbols),
             sample_symbols or "-",
         )
+    if invalid_symbols:
+        sample_symbols = ", ".join(sorted(set(invalid_symbols))[:5])
+        logger.warning(
+            "Skipped invalid Xueqiu year-rank symbols while fetching: invalid=%s sample=%s",
+            len(invalid_symbols),
+            sample_symbols or "-",
+        )
     if len(cubes) < target_count:
+        if invalid_symbols:
+            raise RuntimeError(
+                "Xueqiu year rank returned invalid cube symbols: "
+                f"valid={len(cubes)} invalid={len(invalid_symbols)} expected={target_count}"
+            )
         if duplicate_symbols and cubes:
             logger.warning(
                 "Using shortened Xueqiu year-rank list after de-duplication: unique_count=%s expected=%s",
@@ -572,16 +668,267 @@ def load_cached_year_top_cubes(
         )
         if not rows:
             return [], latest.fetched_at
-        if len(rows) < limit:
+        cubes = normalize_ranked_cubes(cube_from_cache_row(row) for row in rows)
+        if limit >= RANK_CACHE_MIN_VALID_LIMIT and len(cubes) < math.ceil(limit * RANK_CACHE_MIN_VALID_RATIO):
             logger.warning(
-                "Using shortened Xueqiu year-rank cache: cached_count=%s requested_limit=%s fetched_at=%s",
-                len(rows),
+                "Ignoring shortened Xueqiu year-rank cache: valid_count=%s requested_limit=%s fetched_at=%s",
+                len(cubes),
                 limit,
                 latest.fetched_at.strftime("%Y-%m-%d %H:%M:%S"),
             )
-        return [cube_from_cache_row(row) for row in rows], latest.fetched_at
+            return [], latest.fetched_at
+        if len(cubes) < limit:
+            logger.warning(
+                "Using shortened Xueqiu year-rank cache: cached_count=%s requested_limit=%s fetched_at=%s",
+                len(cubes),
+                limit,
+                latest.fetched_at.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        return cubes, latest.fetched_at
     finally:
         db.close()
+
+
+def _duckdb_table_exists(connection, table_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_name = ?
+        """,
+        [table_name],
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def load_recent_xueqiu_rank_history_cube_sets(
+    *,
+    limit: int = RANK_CACHE_DRIFT_RECENT_SNAPSHOT_COUNT,
+    exclude_date: Optional[date] = None,
+) -> List[Tuple[str, Set[str]]]:
+    if limit <= 0:
+        return []
+    connection = None
+    try:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        if not _duckdb_table_exists(connection, XUEQIU_CUBE_RANK_HISTORY_TABLE):
+            return []
+
+        table = _quote_duckdb_identifier(XUEQIU_CUBE_RANK_HISTORY_TABLE)
+        params: List[Any] = [RANK_CACHE_TYPE]
+        where_clause = "WHERE rank_type = ?"
+        if exclude_date is not None:
+            where_clause += " AND rank_date <> ?"
+            params.append(exclude_date)
+        date_rows = connection.execute(
+            (
+                f"SELECT rank_date, COUNT(DISTINCT cube_symbol) AS cube_count "
+                f"FROM {table} "
+                f"{where_clause} "
+                f"GROUP BY rank_date "
+                f"ORDER BY rank_date DESC "
+                f"LIMIT ?"
+            ),
+            [*params, limit],
+        ).fetchall()
+
+        baselines: List[Tuple[str, Set[str]]] = []
+        for rank_date, _cube_count in date_rows:
+            rows = connection.execute(
+                f"SELECT DISTINCT cube_symbol FROM {table} WHERE rank_type = ? AND rank_date = ?",
+                [RANK_CACHE_TYPE, rank_date],
+            ).fetchall()
+            symbols = {
+                str(row[0]).strip().upper()
+                for row in rows
+                if row and is_valid_xueqiu_cube_symbol(str(row[0]).strip().upper())
+            }
+            if symbols:
+                date_label = rank_date.isoformat() if hasattr(rank_date, "isoformat") else str(rank_date)
+                baselines.append((f"rank_history:{date_label}", symbols))
+        return baselines
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load recent Xueqiu rank history for rank drift guard: %s", exc)
+        return []
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def load_recent_xueqiu_snapshot_cube_sets(
+    *,
+    limit: int = RANK_CACHE_DRIFT_RECENT_SNAPSHOT_COUNT,
+    exclude_date: Optional[date] = None,
+) -> List[Tuple[str, Set[str]]]:
+    if limit <= 0:
+        return []
+    connection = None
+    try:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        if not _duckdb_table_exists(connection, XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE):
+            return []
+
+        table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
+        params: List[Any] = []
+        where_clause = ""
+        if exclude_date is not None:
+            where_clause = "WHERE snapshot_date <> ?"
+            params.append(exclude_date)
+        date_rows = connection.execute(
+            (
+                f"SELECT snapshot_date, COUNT(DISTINCT cube_symbol) AS cube_count "
+                f"FROM {table} "
+                f"{where_clause} "
+                f"GROUP BY snapshot_date "
+                f"ORDER BY snapshot_date DESC "
+                f"LIMIT ?"
+            ),
+            [*params, limit],
+        ).fetchall()
+
+        baselines: List[Tuple[str, Set[str]]] = []
+        for snapshot_date, _cube_count in date_rows:
+            rows = connection.execute(
+                f"SELECT DISTINCT cube_symbol FROM {table} WHERE snapshot_date = ?",
+                [snapshot_date],
+            ).fetchall()
+            symbols = {
+                str(row[0]).strip().upper()
+                for row in rows
+                if row and is_valid_xueqiu_cube_symbol(str(row[0]).strip().upper())
+            }
+            if symbols:
+                date_label = snapshot_date.isoformat() if hasattr(snapshot_date, "isoformat") else str(snapshot_date)
+                baselines.append((f"snapshot:{date_label}", symbols))
+        return baselines
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load recent Xueqiu holdings snapshots for rank drift guard: %s", exc)
+        return []
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def load_xueqiu_rank_drift_baselines(
+    *,
+    limit: int = RANK_TARGET_COUNT,
+) -> List[Tuple[str, Set[str]]]:
+    today = datetime.now(CHINA_TZ).date()
+    baselines: List[Tuple[str, Set[str]]] = []
+    baselines.extend(
+        (label, symbols)
+        for label, symbols in load_recent_xueqiu_rank_history_cube_sets(
+            limit=RANK_CACHE_DRIFT_RECENT_SNAPSHOT_COUNT,
+            exclude_date=today,
+        )
+        if len(symbols) >= RANK_CACHE_MIN_VALID_LIMIT
+    )
+    baselines.extend(
+        (label, symbols)
+        for label, symbols in load_recent_xueqiu_snapshot_cube_sets(
+            limit=RANK_CACHE_DRIFT_RECENT_SNAPSHOT_COUNT,
+            exclude_date=today,
+        )
+        if len(symbols) >= RANK_CACHE_MIN_VALID_LIMIT
+    )
+
+    cached, cached_at = load_cached_year_top_cubes(
+        limit=limit,
+        max_age_days=RANK_CACHE_DRIFT_BASELINE_CACHE_MAX_AGE_DAYS,
+    )
+    if cached:
+        label = "rank_cache"
+        if cached_at is not None:
+            label = f"rank_cache:{cached_at.strftime('%Y-%m-%d %H:%M:%S')}"
+        symbols = cube_symbol_set(cached)
+        if len(symbols) >= RANK_CACHE_MIN_VALID_LIMIT:
+            baselines.append((label, symbols))
+    return baselines
+
+
+def validate_xueqiu_rank_cache_drift(
+    cubes: Iterable[CubeInfo],
+    baseline_symbol_sets: Iterable[Tuple[str, Set[str]]],
+    *,
+    min_overlap_ratio: float = RANK_CACHE_DRIFT_MIN_OVERLAP_RATIO,
+    min_symbol_count: int = RANK_CACHE_MIN_VALID_LIMIT,
+) -> Dict[str, Any]:
+    new_symbols = cube_symbol_set(cubes)
+    candidates: List[Dict[str, Any]] = []
+    for label, baseline_symbols in baseline_symbol_sets:
+        normalized_baseline = {
+            str(symbol).strip().upper()
+            for symbol in baseline_symbols
+            if is_valid_xueqiu_cube_symbol(str(symbol).strip().upper())
+        }
+        if len(new_symbols) < min_symbol_count or len(normalized_baseline) < min_symbol_count:
+            continue
+        overlap_count = len(new_symbols & normalized_baseline)
+        denominator = min(len(new_symbols), len(normalized_baseline))
+        overlap_ratio = overlap_count / denominator if denominator else 0.0
+        candidates.append(
+            {
+                "label": label,
+                "new_count": len(new_symbols),
+                "baseline_count": len(normalized_baseline),
+                "overlap_count": overlap_count,
+                "overlap_ratio": overlap_ratio,
+            }
+        )
+
+    if not candidates:
+        logger.warning(
+            "Skipped Xueqiu year-rank drift guard because no usable baseline exists: new_count=%s",
+            len(new_symbols),
+        )
+        return {
+            "checked": False,
+            "new_count": len(new_symbols),
+            "baseline_count": 0,
+        }
+
+    best = max(candidates, key=lambda item: (item["overlap_ratio"], item["overlap_count"]))
+    if best["overlap_ratio"] < min_overlap_ratio:
+        candidate_summary = ", ".join(
+            (
+                f"{item['label']}={item['overlap_count']}/"
+                f"{min(item['new_count'], item['baseline_count'])}"
+                f"({item['overlap_ratio']:.1%})"
+            )
+            for item in sorted(candidates, key=lambda item: item["overlap_ratio"], reverse=True)[:5]
+        )
+        raise RuntimeError(
+            "Xueqiu year rank refresh drift too large: "
+            f"best={best['label']} overlap={best['overlap_count']}/"
+            f"{min(best['new_count'], best['baseline_count'])}"
+            f"({best['overlap_ratio']:.1%}) "
+            f"threshold={min_overlap_ratio:.0%} baselines={candidate_summary}"
+        )
+
+    logger.info(
+        "Validated Xueqiu year-rank drift: best=%s overlap=%s/%s ratio=%.1f%% baselines=%s",
+        best["label"],
+        best["overlap_count"],
+        min(best["new_count"], best["baseline_count"]),
+        best["overlap_ratio"] * 100,
+        len(candidates),
+    )
+    return {
+        "checked": True,
+        "new_count": len(new_symbols),
+        "baseline_count": len(candidates),
+        "best_label": best["label"],
+        "best_overlap_count": best["overlap_count"],
+        "best_overlap_ratio": best["overlap_ratio"],
+    }
+
+
+def save_validated_year_top_cubes(cubes: List[CubeInfo], fetched_at: datetime) -> Dict[str, Any]:
+    baselines = load_xueqiu_rank_drift_baselines(limit=len(cubes) or RANK_TARGET_COUNT)
+    drift_summary = validate_xueqiu_rank_cache_drift(cubes, baselines)
+    save_xueqiu_cube_rank_history_to_duckdb(cubes, fetched_at)
+    save_year_top_cubes(cubes, fetched_at)
+    return drift_summary
 
 
 def save_year_top_cubes(cubes: List[CubeInfo], fetched_at: datetime) -> None:
@@ -724,7 +1071,7 @@ async def load_or_refresh_year_top_cubes(
 
     fetched_at = datetime.now()
     cubes = await fetch_year_top_cubes(cookie=cookie, target_count=limit, timeout=timeout)
-    save_year_top_cubes(cubes, fetched_at)
+    save_validated_year_top_cubes(cubes, fetched_at)
     return cubes, fetched_at, True
 
 
@@ -851,12 +1198,16 @@ async def fetch_cube_manager_activity(
     cube: CubeInfo,
     *,
     retries: int,
+    previous_activity: Optional[CubeActivityResult] = None,
+    request_pacer: Optional[AsyncRequestPacer] = None,
 ) -> CubeActivityResult:
     last_error: Optional[BaseException] = None
     checked_at = datetime.now(CHINA_TZ)
 
     for attempt in range(1, retries + 1):
         try:
+            if request_pacer is not None:
+                await request_pacer.wait()
             show_response = await client.get(
                 f"{XUEQIU_API_BASE_URL}/cubes/show.json",
                 params={"symbol": cube.symbol},
@@ -869,6 +1220,7 @@ async def fetch_cube_manager_activity(
                 except ValueError:
                     pass
                 error = RuntimeError(f"HTTP {show_response.status_code}: {show_response.text[:300]}")
+                setattr(error, "xueqiu_status_code", show_response.status_code)
                 setattr(error, "xueqiu_error_code", error_code)
                 raise error
             show_payload = show_response.json()
@@ -882,7 +1234,18 @@ async def fetch_cube_manager_activity(
                     origin_payload=None,
                     checked_at=checked_at,
                 )
+            if previous_activity and previous_activity.latest_rebalance_id == rb_id and not previous_activity.error:
+                return replace(
+                    previous_activity,
+                    checked_at=checked_at,
+                    cache_hit=False,
+                    pages_fetched=1,
+                    page_limit_hit=False,
+                    source=ACTIVE_REBALANCE_ACTIVITY_TYPE,
+                )
 
+            if request_pacer is not None:
+                await request_pacer.wait()
             origin_response = await client.get(
                 f"{XUEQIU_API_BASE_URL}/cubes/rebalancing/show_origin.json",
                 params={"rb_id": rb_id},
@@ -895,6 +1258,7 @@ async def fetch_cube_manager_activity(
                 except ValueError:
                     pass
                 error = RuntimeError(f"HTTP {origin_response.status_code}: {origin_response.text[:300]}")
+                setattr(error, "xueqiu_status_code", origin_response.status_code)
                 setattr(error, "xueqiu_error_code", error_code)
                 raise error
             origin_payload = origin_response.json()
@@ -910,8 +1274,14 @@ async def fetch_cube_manager_activity(
             last_error = exc
             if attempt < retries:
                 retry_delay = min(10.0, 0.8 * attempt)
-                if getattr(exc, "xueqiu_error_code", "") in {"10026", "400016"}:
-                    retry_delay = min(45.0, 5.0 * attempt)
+                status_code = safe_int(getattr(exc, "xueqiu_status_code", None))
+                if (
+                    status_code in XUEQIU_ACTIVITY_THROTTLE_STATUS_CODES
+                    or getattr(exc, "xueqiu_error_code", "") in {"10026", "400016"}
+                ):
+                    retry_delay = min(45.0, XUEQIU_ACTIVITY_HTTP_ERROR_COOLDOWN_SECONDS * attempt)
+                    if request_pacer is not None:
+                        await request_pacer.cooldown(retry_delay)
                 await asyncio.sleep(retry_delay)
     return CubeActivityResult(
         symbol=cube.symbol,
@@ -1036,6 +1406,11 @@ async def fetch_all_cube_current(
         if active_since is not None
         else {}
     )
+    previous_activity = (
+        load_cached_cube_activity(cubes)
+        if active_since is not None and refresh_activity_cache
+        else dict(cached_activity)
+    )
     if cached_activity:
         logger.info(
             "Loaded Xueqiu cube manager activity cache: cached=%s source=%s ttl_hours=%s refresh_missing=%s",
@@ -1084,43 +1459,75 @@ async def fetch_all_cube_current(
                 )
         elif active_since is not None:
             activity_workers = max(1, min(current_workers, ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS))
-            activity_semaphore = asyncio.Semaphore(activity_workers)
+            activity_pacer = AsyncRequestPacer(
+                min_interval_seconds=XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
+                jitter_seconds=XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS,
+            )
             logger.info(
                 "Fetching Xueqiu manager activity: missing=%s cached=%s workers=%s",
                 len([result for result in results if not result.error and not result.activity_cache_hit]),
                 len([result for result in results if result.activity_cache_hit]),
                 activity_workers,
             )
-
-            async def fetch_activity_for_result(index: int, result: CubeCurrentResult) -> Tuple[int, CubeActivityResult]:
-                async with activity_semaphore:
-                    activity = await fetch_cube_manager_activity(
-                        client,
-                        result.cube,
-                        retries=retries,
-                    )
-                    return index, activity
-
-            activity_tasks = [
-                fetch_activity_for_result(index, result)
+            activity_targets = [
+                (index, result)
                 for index, result in enumerate(results)
                 if not result.error and not result.activity_cache_hit
             ]
             activity_results: List[CubeActivityResult] = []
-            for activity_index, task in enumerate(asyncio.as_completed(activity_tasks), start=1):
-                result_index, activity = await task
-                results[result_index] = apply_activity_to_current_result(
-                    results[result_index],
-                    activity,
-                    active_since=active_since,
-                )
-                activity_results.append(activity)
-                if activity_index % 100 == 0:
-                    logger.info(
-                        "Fetched Xueqiu manager activity for %s/%s cubes",
-                        activity_index,
-                        len(activity_tasks),
+            if activity_workers == 1:
+                for activity_index, (result_index, result) in enumerate(activity_targets, start=1):
+                    activity = await fetch_cube_manager_activity(
+                        client,
+                        result.cube,
+                        retries=retries,
+                        previous_activity=previous_activity.get(result.cube.symbol),
+                        request_pacer=activity_pacer,
                     )
+                    results[result_index] = apply_activity_to_current_result(
+                        results[result_index],
+                        activity,
+                        active_since=active_since,
+                    )
+                    activity_results.append(activity)
+                    if activity_index % 100 == 0:
+                        logger.info(
+                            "Fetched Xueqiu manager activity for %s/%s cubes",
+                            activity_index,
+                            len(activity_targets),
+                        )
+            else:
+                activity_semaphore = asyncio.Semaphore(activity_workers)
+
+                async def fetch_activity_for_result(index: int, result: CubeCurrentResult) -> Tuple[int, CubeActivityResult]:
+                    async with activity_semaphore:
+                        activity = await fetch_cube_manager_activity(
+                            client,
+                            result.cube,
+                            retries=retries,
+                            previous_activity=previous_activity.get(result.cube.symbol),
+                            request_pacer=activity_pacer,
+                        )
+                        return index, activity
+
+                activity_tasks = [
+                    fetch_activity_for_result(index, result)
+                    for index, result in activity_targets
+                ]
+                for activity_index, task in enumerate(asyncio.as_completed(activity_tasks), start=1):
+                    result_index, activity = await task
+                    results[result_index] = apply_activity_to_current_result(
+                        results[result_index],
+                        activity,
+                        active_since=active_since,
+                    )
+                    activity_results.append(activity)
+                    if activity_index % 100 == 0:
+                        logger.info(
+                            "Fetched Xueqiu manager activity for %s/%s cubes",
+                            activity_index,
+                            len(activity_tasks),
+                        )
             saved_activity_count = save_cube_activity_cache(activity_results)
             if saved_activity_count:
                 logger.info(
@@ -1129,6 +1536,29 @@ async def fetch_all_cube_current(
                     ACTIVE_REBALANCE_ACTIVITY_TYPE,
                 )
         return results
+
+
+def xueqiu_fetch_failure_limit(source_count: int) -> int:
+    return max(5, math.ceil(max(0, source_count) * ACTIVE_REBALANCE_MAX_FAILED_RATIO))
+
+
+def ensure_xueqiu_current_fetch_quality(
+    current_results: List[CubeCurrentResult],
+    *,
+    source_count: int,
+) -> None:
+    failed_results = [result for result in current_results if result.error]
+    failure_limit = xueqiu_fetch_failure_limit(source_count)
+    if len(failed_results) > failure_limit:
+        examples = ", ".join(
+            f"{result.cube.symbol}:{result.error}"
+            for result in failed_results[:3]
+        )
+        raise RuntimeError(
+            "Xueqiu current holdings fetch failed for too many cubes before saving snapshot: "
+            f"failed={len(failed_results)} limit={failure_limit} source={source_count} "
+            f"examples={examples}"
+        )
 
 
 def build_active_filter_summary(
@@ -1226,6 +1656,127 @@ def _holding_segment_name(holding: Dict[str, Any]) -> str:
         if value:
             return str(value)
     return ""
+
+
+def ensure_xueqiu_cube_rank_history_schema(connection) -> None:
+    table = _quote_duckdb_identifier(XUEQIU_CUBE_RANK_HISTORY_TABLE)
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            rank_date DATE NOT NULL,
+            fetched_at TIMESTAMP NOT NULL,
+            rank_type VARCHAR NOT NULL,
+            year_rank INTEGER NOT NULL,
+            cube_symbol VARCHAR NOT NULL,
+            cube_id BIGINT,
+            cube_name VARCHAR,
+            screen_name VARCHAR,
+            daily_gain DOUBLE,
+            week_gain DOUBLE,
+            year_gain DOUBLE,
+            recommend_count BIGINT,
+            net_value DOUBLE,
+            raw_cube_json VARCHAR,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (rank_date, rank_type, cube_symbol)
+        )
+        """
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_rank_history_date "
+        f"ON {table}(rank_type, rank_date, year_rank)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_rank_history_symbol "
+        f"ON {table}(cube_symbol, rank_date)"
+    )
+
+
+def build_xueqiu_cube_rank_history_rows(
+    *,
+    cubes: List[CubeInfo],
+    fetched_at: datetime,
+) -> Tuple[List[Dict[str, Any]], date]:
+    normalized_cubes = normalize_ranked_cubes(cubes)
+    rank_at = _to_naive_china_datetime(fetched_at) or datetime.now(CHINA_TZ).replace(tzinfo=None)
+    rank_date = rank_at.date()
+    saved_at = datetime.now(CHINA_TZ).replace(tzinfo=None)
+    rows: List[Dict[str, Any]] = []
+    for cube in normalized_cubes:
+        rows.append(
+            {
+                "rank_date": rank_date,
+                "fetched_at": rank_at,
+                "rank_type": RANK_CACHE_TYPE,
+                "year_rank": cube.year_rank or 0,
+                "cube_symbol": cube.symbol,
+                "cube_id": cube.cube_id,
+                "cube_name": cube.cube_name,
+                "screen_name": cube.screen_name,
+                "daily_gain": cube.daily_gain,
+                "week_gain": cube.week_gain,
+                "year_gain": cube.year_gain,
+                "recommend_count": cube.recommend_count,
+                "net_value": cube.net_value,
+                "raw_cube_json": json.dumps(
+                    cube.raw_data or {},
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                ),
+                "created_at": saved_at,
+                "updated_at": saved_at,
+            }
+        )
+    return rows, rank_date
+
+
+def save_xueqiu_cube_rank_history_to_duckdb(
+    cubes: List[CubeInfo],
+    fetched_at: datetime,
+) -> Dict[str, Any]:
+    rows, rank_date = build_xueqiu_cube_rank_history_rows(
+        cubes=cubes,
+        fetched_at=fetched_at,
+    )
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    table = _quote_duckdb_identifier(XUEQIU_CUBE_RANK_HISTORY_TABLE)
+    temp_rows_name = "xueqiu_cube_rank_history_rows"
+    try:
+        ensure_xueqiu_cube_rank_history_schema(connection)
+        connection.execute(
+            f"DELETE FROM {table} WHERE rank_date = ? AND rank_type = ?",
+            [rank_date, RANK_CACHE_TYPE],
+        )
+        if rows:
+            frame = pd.DataFrame(rows).loc[:, XUEQIU_CUBE_RANK_HISTORY_COLUMNS]
+            connection.register(temp_rows_name, frame)
+            quoted_columns = ", ".join(
+                _quote_duckdb_identifier(column)
+                for column in XUEQIU_CUBE_RANK_HISTORY_COLUMNS
+            )
+            connection.execute(
+                (
+                    f"INSERT INTO {table} ({quoted_columns}) "
+                    f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_rows_name)}"
+                )
+            )
+        logger.info(
+            "Saved Xueqiu cube rank history to DuckDB: table=%s date=%s rows=%s database=%s",
+            XUEQIU_CUBE_RANK_HISTORY_TABLE,
+            rank_date.isoformat(),
+            len(rows),
+            ANALYTICS_DB_PATH,
+        )
+        return {
+            "table": XUEQIU_CUBE_RANK_HISTORY_TABLE,
+            "rank_date": rank_date.isoformat(),
+            "saved_rows": len(rows),
+            "database": ANALYTICS_DB_PATH,
+        }
+    finally:
+        connection.close()
 
 
 def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
@@ -2960,11 +3511,44 @@ async def run_top_holdings_job(
         active_since=active_since,
         refresh_activity_cache=refresh_activity_cache,
     )
+    ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
+    snapshot_results = list(current_results)
     holdings_snapshot_result: Optional[Dict[str, Any]] = None
+    if active_rebalance_days and active_rebalance_days > 0 and active_since is not None:
+        active_filter_summary = build_active_filter_summary(
+            source_cubes=cubes,
+            current_results=current_results,
+            active_since=active_since,
+            lookback_days=active_rebalance_days,
+        )
+        logger.info(
+            "Filtered Xueqiu cubes by latest rebalance within %s days using current snapshots: "
+            "active=%s source=%s failed=%s fallback_holdings=%s",
+            active_rebalance_days,
+            active_filter_summary["active_cube_count"],
+            active_filter_summary["source_cube_count"],
+            active_filter_summary["activity_failed_count"],
+            active_filter_summary["holdings_fallback_count"],
+        )
+        failure_limit = xueqiu_fetch_failure_limit(len(cubes))
+        if active_filter_summary["activity_failed_count"] > failure_limit:
+            raise RuntimeError(
+                "Xueqiu current/activity fetch failed for too many cubes: "
+                f"failed={active_filter_summary['activity_failed_count']} "
+                f"limit={failure_limit} source={len(cubes)}"
+            )
+        current_results = [
+            result
+            for result in current_results
+            if result.active or result.error or result.activity_error
+        ]
+        if not any(not (result.error or result.activity_error) for result in current_results):
+            raise RuntimeError(f"No Xueqiu cubes rebalanced within {active_rebalance_days} days.")
+
     try:
         holdings_snapshot_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
             run_at=run_at,
-            current_results=current_results,
+            current_results=snapshot_results,
             active_rebalance_days=active_rebalance_days,
         )
         logger.info(
@@ -2982,39 +3566,6 @@ async def run_top_holdings_job(
             "error": str(exc),
         }
         logger.warning("Failed to save Xueqiu cube holdings snapshots to DuckDB: %s", exc)
-    if active_rebalance_days and active_rebalance_days > 0 and active_since is not None:
-        active_filter_summary = build_active_filter_summary(
-            source_cubes=cubes,
-            current_results=current_results,
-            active_since=active_since,
-            lookback_days=active_rebalance_days,
-        )
-        logger.info(
-            "Filtered Xueqiu cubes by latest rebalance within %s days using current snapshots: "
-            "active=%s source=%s failed=%s fallback_holdings=%s",
-            active_rebalance_days,
-            active_filter_summary["active_cube_count"],
-            active_filter_summary["source_cube_count"],
-            active_filter_summary["activity_failed_count"],
-            active_filter_summary["holdings_fallback_count"],
-        )
-        failure_limit = max(
-            5,
-            math.ceil(len(cubes) * ACTIVE_REBALANCE_MAX_FAILED_RATIO),
-        )
-        if active_filter_summary["activity_failed_count"] > failure_limit:
-            raise RuntimeError(
-                "Xueqiu current/activity fetch failed for too many cubes: "
-                f"failed={active_filter_summary['activity_failed_count']} "
-                f"limit={failure_limit} source={len(cubes)}"
-            )
-        current_results = [
-            result
-            for result in current_results
-            if result.active or result.error or result.activity_error
-        ]
-        if not any(not (result.error or result.activity_error) for result in current_results):
-            raise RuntimeError(f"No Xueqiu cubes rebalanced within {active_rebalance_days} days.")
 
     results = [
         CubeFetchResult(cube=result.cube, holdings=result.holdings, error=result.error or result.activity_error)
@@ -3278,6 +3829,7 @@ async def run_top_holdings_cache_refresh_job(
             min_checked_at=activity_cache_checked_after(),
         )
     )
+    previous_activity = load_cached_cube_activity(cubes)
     refresh_cubes = [
         cube
         for cube in cubes
@@ -3286,23 +3838,32 @@ async def run_top_holdings_cache_refresh_job(
 
     activity_results: List[CubeActivityResult] = []
     if refresh_cubes:
-        activity_workers = max(1, min(workers, ACTIVE_REBALANCE_ACTIVITY_REFRESH_WORKERS))
+        activity_workers = 1
         headers = build_headers(cookie, referer=XUEQIU_WEB_BASE_URL)
         timeout_config = httpx.Timeout(timeout)
         limits = httpx.Limits(max_connections=activity_workers, max_keepalive_connections=activity_workers)
-        semaphore = asyncio.Semaphore(activity_workers)
+        activity_pacer = AsyncRequestPacer(
+            min_interval_seconds=XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
+            jitter_seconds=XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS,
+        )
+        logger.info(
+            "Refreshing Xueqiu manager activity cache sequentially: refresh=%s cached=%s previous_cache=%s min_interval=%.2fs",
+            len(refresh_cubes),
+            len(cached_activity),
+            len(previous_activity),
+            XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS,
+        )
         async with httpx.AsyncClient(headers=headers, timeout=timeout_config, limits=limits) as client:
-            async def fetch_activity(cube: CubeInfo) -> CubeActivityResult:
-                async with semaphore:
-                    return await fetch_cube_manager_activity(
+            for index, cube in enumerate(refresh_cubes, start=1):
+                activity_results.append(
+                    await fetch_cube_manager_activity(
                         client,
                         cube,
                         retries=retries,
+                        previous_activity=previous_activity.get(cube.symbol),
+                        request_pacer=activity_pacer,
                     )
-
-            tasks = [fetch_activity(cube) for cube in refresh_cubes]
-            for index, task in enumerate(asyncio.as_completed(tasks), start=1):
-                activity_results.append(await task)
+                )
                 if index % 100 == 0:
                     logger.info(
                         "Refreshed Xueqiu manager activity cache source for %s/%s cubes",
@@ -3382,7 +3943,7 @@ def process_xueqiu_year_rank_refresh_for_robot() -> str:
             page_size=RANK_PAGE_SIZE,
             timeout=DEFAULT_TIMEOUT,
         )
-        save_year_top_cubes(cubes, fetched_at)
+        save_validated_year_top_cubes(cubes, fetched_at)
         return {
             "fetched_at": fetched_at,
             "count": len(cubes),

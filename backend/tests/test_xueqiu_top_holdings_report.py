@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 import os
 import tempfile
 from tempfile import TemporaryDirectory
@@ -18,20 +18,28 @@ from src.robot.xueqiu_top_holdings_report import (
     CubeFetchResult,
     ACTIVE_REBALANCE_ACTIVITY_TYPE,
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
+    XUEQIU_CUBE_RANK_HISTORY_TABLE,
     aggregate_holdings,
     build_equal_top10_top12_buffer_plan,
     build_report,
     build_report_html,
     build_rebalance_payload,
     describe_rebalance_quote_rejection,
+    ensure_xueqiu_current_fetch_quality,
+    fetch_cube_manager_activity,
     latest_manager_rebalance_from_events,
     load_cached_cube_activity,
+    load_or_refresh_year_top_cubes,
     load_cached_year_top_cubes,
+    load_recent_xueqiu_rank_history_cube_sets,
+    load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
     save_cube_activity_cache,
+    save_xueqiu_cube_rank_history_to_duckdb,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
     save_year_top_cubes,
+    validate_xueqiu_rank_cache_drift,
 )
 
 
@@ -49,6 +57,8 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 CubeInfo(year_rank=4, symbol="ZH000001", cube_name="duplicate-symbol"),
                 CubeInfo(year_rank=0, symbol="ZH000003", cube_name="missing-rank"),
                 CubeInfo(year_rank=2, symbol="ZH000004", cube_name="duplicate-rank"),
+                CubeInfo(year_rank=5, symbol="SH000001", cube_name="not-a-cube"),
+                CubeInfo(year_rank=6, symbol="zh000005", cube_name="lowercase-cube"),
             ]
 
             with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
@@ -56,10 +66,223 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 loaded, cached_at = load_cached_year_top_cubes(limit=10, max_age_days=30)
 
             self.assertEqual(fetched_at, cached_at)
-            self.assertEqual(["ZH000001", "ZH000002", "ZH000004", "ZH000003"], [cube.symbol for cube in loaded])
-            self.assertEqual([1, 2, 3, 4], [cube.year_rank for cube in loaded])
+            self.assertEqual(["ZH000001", "ZH000002", "ZH000004", "ZH000003", "ZH000005"], [cube.symbol for cube in loaded])
+            self.assertEqual([1, 2, 3, 4, 5], [cube.year_rank for cube in loaded])
             self.assertEqual("best-symbol", loaded[0].cube_name)
             self.assertEqual("duplicate-rank", loaded[2].cube_name)
+
+    def test_load_cached_year_top_cubes_ignores_severely_shortened_large_cache(self):
+        with TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{tmpdir}/rank_cache.db")
+            Base.metadata.create_all(engine, tables=[XueqiuCubeRankCache.__table__])
+            session_factory = sessionmaker(bind=engine)
+            fetched_at = datetime(2026, 6, 24, 18, 0, 0)
+            cubes = [
+                CubeInfo(year_rank=index, symbol=f"SH{index:06d}", cube_name=f"invalid-{index}")
+                for index in range(1, 101)
+            ]
+            cubes.extend([
+                CubeInfo(year_rank=101 + index, symbol=f"ZH{index:06d}", cube_name=f"valid-{index}")
+                for index in range(1, 5)
+            ])
+
+            with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
+                save_year_top_cubes(cubes, fetched_at)
+                loaded, cached_at = load_cached_year_top_cubes(limit=100, max_age_days=30)
+
+            self.assertEqual(fetched_at, cached_at)
+            self.assertEqual([], loaded)
+
+    def test_current_fetch_quality_rejects_bad_snapshot_before_writing(self):
+        results = [
+            CubeCurrentResult(cube=CubeInfo(year_rank=index, symbol=f"ZH{index:06d}"), holdings=[], error="HTTP 400")
+            for index in range(1, 12)
+        ]
+        results.extend([
+            CubeCurrentResult(
+                cube=CubeInfo(year_rank=100 + index, symbol=f"ZH{100 + index:06d}"),
+                holdings=[{"stock_symbol": "SZ300308", "stock_name": "中际旭创", "weight": 10.0}],
+            )
+            for index in range(1, 3)
+        ])
+
+        with self.assertRaisesRegex(RuntimeError, "before saving snapshot"):
+            ensure_xueqiu_current_fetch_quality(results, source_count=100)
+
+    def test_rank_cache_drift_guard_accepts_recent_snapshot_overlap(self):
+        cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")
+            for index in range(1, 101)
+        ]
+        baseline_symbols = {f"ZH{index:06d}" for index in range(1, 91)}
+        baseline_symbols.update({f"ZH9{index:05d}" for index in range(1, 11)})
+
+        summary = validate_xueqiu_rank_cache_drift(
+            cubes,
+            [("snapshot:2026-06-23", baseline_symbols)],
+            min_overlap_ratio=0.50,
+            min_symbol_count=50,
+        )
+
+        self.assertTrue(summary["checked"])
+        self.assertEqual("snapshot:2026-06-23", summary["best_label"])
+        self.assertEqual(90, summary["best_overlap_count"])
+
+    def test_rank_cache_drift_guard_rejects_low_overlap(self):
+        cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")
+            for index in range(1, 101)
+        ]
+        baseline_symbols = {f"ZH9{index:05d}" for index in range(1, 101)}
+
+        with self.assertRaisesRegex(RuntimeError, "drift too large"):
+            validate_xueqiu_rank_cache_drift(
+                cubes,
+                [("snapshot:2026-06-23", baseline_symbols)],
+                min_overlap_ratio=0.50,
+                min_symbol_count=50,
+            )
+
+    def test_rank_drift_baseline_includes_rank_history_snapshots_and_cache(self):
+        history_symbols = {f"ZH{index:06d}" for index in range(1, 101)}
+        snapshot_symbols = {f"ZH{index:06d}" for index in range(1, 101)}
+        cached_cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH9{index:05d}")
+            for index in range(1, 101)
+        ]
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.load_recent_xueqiu_rank_history_cube_sets",
+            return_value=[("rank_history:2026-06-22", history_symbols)],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_recent_xueqiu_snapshot_cube_sets",
+            return_value=[("snapshot:2026-06-23", snapshot_symbols)],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_cached_year_top_cubes",
+            return_value=(cached_cubes, datetime(2026, 6, 24, 18, 0, 0)),
+        ):
+            baselines = load_xueqiu_rank_drift_baselines(limit=100)
+
+        self.assertEqual(
+            [
+                ("rank_history:2026-06-22", history_symbols),
+                ("snapshot:2026-06-23", snapshot_symbols),
+                (
+                    "rank_cache:2026-06-24 18:00:00",
+                    {f"ZH9{index:05d}" for index in range(1, 101)},
+                ),
+            ],
+            baselines,
+        )
+
+    def test_load_or_refresh_year_top_cubes_rejects_rank_drift_before_writing_cache(self):
+        cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")
+            for index in range(1, 101)
+        ]
+        baseline_symbols = {f"ZH9{index:05d}" for index in range(1, 101)}
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_year_top_cubes",
+            new=AsyncMock(return_value=cubes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_drift_baselines",
+            return_value=[("snapshot:2026-06-23", baseline_symbols)],
+        ), patch("src.robot.xueqiu_top_holdings_report.save_year_top_cubes") as save_cache:
+            with self.assertRaisesRegex(RuntimeError, "drift too large"):
+                asyncio.run(
+                    load_or_refresh_year_top_cubes(
+                        cookie="xq_a_token=test;",
+                        force_refresh=True,
+                        limit=100,
+                    )
+                )
+
+        save_cache.assert_not_called()
+
+    def test_load_or_refresh_year_top_cubes_writes_history_before_rank_cache(self):
+        cubes = [
+            CubeInfo(year_rank=index, symbol=f"ZH{index:06d}")
+            for index in range(1, 101)
+        ]
+        baseline_symbols = {f"ZH{index:06d}" for index in range(1, 101)}
+        calls = []
+
+        def record_history(_cubes, _fetched_at):
+            calls.append("history")
+            return {"saved_rows": len(_cubes)}
+
+        def record_cache(_cubes, _fetched_at):
+            calls.append("cache")
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_year_top_cubes",
+            new=AsyncMock(return_value=cubes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_drift_baselines",
+            return_value=[("rank_history:2026-06-23", baseline_symbols)],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.save_xueqiu_cube_rank_history_to_duckdb",
+            side_effect=record_history,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.save_year_top_cubes",
+            side_effect=record_cache,
+        ):
+            loaded, _fetched_at, refreshed = asyncio.run(
+                load_or_refresh_year_top_cubes(
+                    cookie="xq_a_token=test;",
+                    force_refresh=True,
+                    limit=100,
+                )
+            )
+
+        self.assertTrue(refreshed)
+        self.assertEqual(cubes, loaded)
+        self.assertEqual(["history", "cache"], calls)
+
+    def test_fetch_cube_manager_activity_reuses_previous_activity_when_rb_id_unchanged(self):
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def get(self, url, params=None):
+                self.calls.append((url, params or {}))
+                return FakeResponse({"data": {"cube": {"last_user_rb_gid": 12345}}})
+
+        client = FakeClient()
+        previous_activity = CubeActivityResult(
+            symbol="ZH000001",
+            latest_rebalance_at=datetime(2026, 6, 1, 12, 0, 0),
+            latest_rebalance_id=12345,
+            latest_rebalance_status="success",
+            latest_rebalance_category="user_rebalancing",
+            cache_hit=True,
+        )
+
+        activity = asyncio.run(
+            fetch_cube_manager_activity(
+                client,
+                CubeInfo(year_rank=1, symbol="ZH000001"),
+                retries=1,
+                previous_activity=previous_activity,
+            )
+        )
+
+        self.assertEqual(1, len(client.calls))
+        self.assertIn("/cubes/show.json", client.calls[0][0])
+        self.assertFalse(activity.cache_hit)
+        self.assertEqual(12345, activity.latest_rebalance_id)
+        self.assertEqual(previous_activity.latest_rebalance_at, activity.latest_rebalance_at)
 
     def test_latest_manager_rebalance_uses_user_rebalancing_updated_at(self):
         events = [
@@ -505,6 +728,68 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertIn("<h1>雪球年榜1000组合综合持仓权重 Top12</h1>", html_report)
         self.assertIn("<td class=\"num\">11</td><td>SH.600011</td>", html_report)
         self.assertIn("<td class=\"num\">12</td><td>SH.600012</td>", html_report)
+
+    def test_save_xueqiu_cube_rank_history_to_duckdb_replaces_same_day_rank(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        fetched_at = datetime(2026, 6, 23, 18, 0, 0)
+        try:
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                first_result = save_xueqiu_cube_rank_history_to_duckdb(
+                    [
+                        CubeInfo(year_rank=1, symbol="ZH000001", cube_id=101, cube_name="旧一"),
+                        CubeInfo(year_rank=2, symbol="ZH000002", cube_id=102, cube_name="旧二"),
+                    ],
+                    fetched_at,
+                )
+                second_result = save_xueqiu_cube_rank_history_to_duckdb(
+                    [
+                        CubeInfo(year_rank=1, symbol="ZH000002", cube_id=102, cube_name="新二"),
+                        CubeInfo(year_rank=2, symbol="ZH000003", cube_id=103, cube_name="新三"),
+                    ],
+                    fetched_at,
+                )
+                baselines = load_recent_xueqiu_rank_history_cube_sets(
+                    limit=5,
+                    exclude_date=date(2026, 6, 24),
+                )
+
+                connection = connect_duckdb(path, prefer_read_only=False)
+                try:
+                    rows = connection.execute(
+                        f"""
+                        SELECT
+                            CAST(rank_date AS VARCHAR),
+                            year_rank,
+                            cube_symbol,
+                            cube_id,
+                            cube_name
+                        FROM {XUEQIU_CUBE_RANK_HISTORY_TABLE}
+                        ORDER BY year_rank
+                        """
+                    ).fetchall()
+                finally:
+                    connection.close()
+
+            self.assertEqual(2, first_result["saved_rows"])
+            self.assertEqual(2, second_result["saved_rows"])
+            self.assertEqual(
+                [
+                    ("2026-06-23", 1, "ZH000002", 102, "新二"),
+                    ("2026-06-23", 2, "ZH000003", 103, "新三"),
+                ],
+                rows,
+            )
+            self.assertEqual(
+                [("rank_history:2026-06-23", {"ZH000002", "ZH000003"})],
+                baselines,
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")

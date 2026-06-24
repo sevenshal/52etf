@@ -1588,6 +1588,162 @@ def load_xueqiu_top_holdings_history(
         connection.close()
 
 
+def load_xueqiu_top_holding_details(
+    *,
+    symbol: str,
+    snapshot_date: date,
+    active_only: bool = True,
+    limit: int = 1000,
+) -> Dict[str, Any]:
+    normalized_symbol = _normalize_xueqiu_snapshot_symbol(symbol)
+    raw_symbol = _raw_xueqiu_snapshot_symbol(normalized_symbol)
+    normalized_limit = max(1, min(int(limit or 1000), 5000))
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="symbol 不能为空")
+
+    connection = _connect_duckdb()
+    try:
+        if not _duckdb_table_exists(connection, XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE):
+            return {
+                "available": False,
+                "reason": "snapshot_table_missing",
+                "active_only": active_only,
+                "symbol": normalized_symbol,
+                "raw_symbol": raw_symbol,
+                "snapshot_date": snapshot_date.isoformat(),
+                "limit": normalized_limit,
+                "cube_count": 0,
+                "holding_cube_count": 0,
+                "holding_cube_ratio_pct": None,
+                "total_weight_pct": 0.0,
+                "average_weight_pct": None,
+                "details": [],
+            }
+
+        cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+        summary_rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            {cte},
+            date_summary AS (
+                SELECT
+                    snapshot_date,
+                    MAX(snapshot_at) AS snapshot_at,
+                    COUNT(DISTINCT cube_symbol) AS cube_count,
+                    MAX(active_rebalance_days) AS active_rebalance_days
+                FROM filtered_holdings
+                WHERE snapshot_date = ?
+                GROUP BY snapshot_date
+            ),
+            selected_holdings AS (
+                SELECT filtered_holdings.*
+                FROM filtered_holdings
+                WHERE snapshot_date = ?
+                  AND (
+                    UPPER(stock_symbol) = ?
+                    OR UPPER(raw_stock_symbol) = ?
+                  )
+            )
+            SELECT
+                MAX(selected_holdings.snapshot_date) AS snapshot_date,
+                MAX(date_summary.snapshot_at) AS snapshot_at,
+                MAX(date_summary.cube_count) AS cube_count,
+                MAX(date_summary.active_rebalance_days) AS active_rebalance_days,
+                ANY_VALUE(selected_holdings.stock_symbol) AS stock_symbol,
+                ANY_VALUE(selected_holdings.raw_stock_symbol) AS raw_stock_symbol,
+                ANY_VALUE(selected_holdings.stock_name) AS stock_name,
+                ANY_VALUE(selected_holdings.segment_name) AS segment_name,
+                COUNT(DISTINCT selected_holdings.cube_symbol) AS holding_cube_count,
+                SUM(selected_holdings.weight_pct) AS total_weight_pct,
+                SUM(selected_holdings.weight_pct) / NULLIF(COUNT(DISTINCT selected_holdings.cube_symbol), 0) AS average_weight_pct
+            FROM date_summary
+            LEFT JOIN selected_holdings ON selected_holdings.snapshot_date = date_summary.snapshot_date
+            """,
+            [snapshot_date, snapshot_date, normalized_symbol, raw_symbol],
+        )
+        rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            {cte},
+            date_summary AS (
+                SELECT
+                    snapshot_date,
+                    MAX(snapshot_at) AS snapshot_at,
+                    COUNT(DISTINCT cube_symbol) AS cube_count,
+                    MAX(active_rebalance_days) AS active_rebalance_days
+                FROM filtered_holdings
+                WHERE snapshot_date = ?
+                GROUP BY snapshot_date
+            ),
+            selected_holdings AS (
+                SELECT filtered_holdings.*
+                FROM filtered_holdings
+                WHERE snapshot_date = ?
+                  AND (
+                    UPPER(stock_symbol) = ?
+                    OR UPPER(raw_stock_symbol) = ?
+                  )
+            )
+            SELECT
+                selected_holdings.snapshot_date,
+                date_summary.snapshot_at,
+                date_summary.cube_count,
+                date_summary.active_rebalance_days,
+                selected_holdings.stock_symbol,
+                selected_holdings.raw_stock_symbol,
+                selected_holdings.stock_name,
+                selected_holdings.segment_name,
+                selected_holdings.cube_symbol,
+                selected_holdings.cube_id,
+                selected_holdings.cube_name,
+                selected_holdings.screen_name,
+                selected_holdings.year_rank,
+                selected_holdings.holdings_source,
+                selected_holdings.is_active,
+                selected_holdings.latest_rebalance_at,
+                selected_holdings.active_rebalance_at,
+                selected_holdings.weight_pct
+            FROM selected_holdings
+            JOIN date_summary ON selected_holdings.snapshot_date = date_summary.snapshot_date
+            ORDER BY selected_holdings.weight_pct DESC, selected_holdings.year_rank ASC NULLS LAST, selected_holdings.cube_symbol
+            LIMIT ?
+            """,
+            [snapshot_date, snapshot_date, normalized_symbol, raw_symbol, normalized_limit],
+        )
+        summary = summary_rows[0] if summary_rows else {}
+        cube_count = summary.get("cube_count") or (rows[0].get("cube_count") if rows else 0)
+        holding_cube_count = summary.get("holding_cube_count") or 0
+        total_weight_pct = float(summary.get("total_weight_pct") or 0.0)
+        return {
+            "available": True,
+            "active_only": active_only,
+            "symbol": normalized_symbol,
+            "raw_symbol": raw_symbol,
+            "stock_name": summary.get("stock_name") or (rows[0].get("stock_name") if rows else None),
+            "segment_name": summary.get("segment_name") or (rows[0].get("segment_name") if rows else None),
+            "snapshot_date": snapshot_date.isoformat(),
+            "snapshot_at": summary.get("snapshot_at") or (rows[0].get("snapshot_at") if rows else None),
+            "active_rebalance_days": summary.get("active_rebalance_days") or (rows[0].get("active_rebalance_days") if rows else None),
+            "limit": normalized_limit,
+            "cube_count": cube_count or 0,
+            "holding_cube_count": holding_cube_count,
+            "holding_cube_ratio_pct": (
+                holding_cube_count * 100.0 / cube_count
+                if cube_count
+                else None
+            ),
+            "total_weight_pct": total_weight_pct,
+            "average_weight_pct": (
+                total_weight_pct / holding_cube_count
+                if holding_cube_count
+                else None
+            ),
+            "details": rows,
+        }
+    finally:
+        connection.close()
+
+
 def _get_max_trade_date() -> date:
     connection = _connect_duckdb()
     try:
@@ -2580,6 +2736,22 @@ def get_xueqiu_top_holdings_history(
 ):
     return load_xueqiu_top_holdings_history(
         symbol=symbol,
+        active_only=active_only,
+        limit=limit,
+    )
+
+
+@router.get("/xueqiu-top-holdings/details")
+def get_xueqiu_top_holding_details(
+    symbol: str = Query(..., min_length=1),
+    snapshot_date: date = Query(...),
+    active_only: bool = Query(True, description="只统计主理人活跃组合"),
+    limit: int = Query(1000, ge=1, le=5000),
+    _: str = Depends(valid_account),
+):
+    return load_xueqiu_top_holding_details(
+        symbol=symbol,
+        snapshot_date=snapshot_date,
         active_only=active_only,
         limit=limit,
     )
