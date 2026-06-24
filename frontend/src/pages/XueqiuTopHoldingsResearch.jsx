@@ -126,11 +126,15 @@ const XueqiuTopHoldingsResearch = () => {
   const [searchText, setSearchText] = useState('');
   const [latestData, setLatestData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
+  const [detailData, setDetailData] = useState(null);
   const [selectedSymbol, setSelectedSymbol] = useState('');
+  const [selectedHistoryDate, setSelectedHistoryDate] = useState('');
   const [latestLoading, setLatestLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const latestRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
 
   const latestItems = latestData?.items || [];
   const selectedItem = useMemo(
@@ -138,6 +142,7 @@ const XueqiuTopHoldingsResearch = () => {
     [latestItems, selectedSymbol],
   );
   const historyRows = historyData?.history || [];
+  const detailRows = detailData?.details || [];
 
   const filteredItems = useMemo(() => {
     const keyword = normalizeSearchText(searchText);
@@ -182,6 +187,7 @@ const XueqiuTopHoldingsResearch = () => {
   const fetchHistory = useCallback(async symbol => {
     if (!symbol) {
       setHistoryData(null);
+      setSelectedHistoryDate('');
       return;
     }
     const requestId = historyRequestRef.current + 1;
@@ -192,7 +198,15 @@ const XueqiuTopHoldingsResearch = () => {
         params: { symbol, active_only: activeOnly, limit: 800 },
       });
       if (historyRequestRef.current !== requestId) return;
-      setHistoryData(response.data || {});
+      const payload = response.data || {};
+      const rows = payload.history || [];
+      setHistoryData(payload);
+      setSelectedHistoryDate(previous => {
+        if (previous && rows.some(row => row.snapshot_date === previous)) {
+          return previous;
+        }
+        return payload.latest?.snapshot_date || rows[rows.length - 1]?.snapshot_date || '';
+      });
     } catch (error) {
       if (historyRequestRef.current === requestId) {
         message.error(error?.response?.data?.detail || error.message || '加载权重历史失败');
@@ -204,6 +218,37 @@ const XueqiuTopHoldingsResearch = () => {
     }
   }, [activeOnly]);
 
+  const fetchDetails = useCallback(async (symbol, snapshotDate) => {
+    if (!symbol || !snapshotDate) {
+      setDetailData(null);
+      return;
+    }
+    const requestId = detailRequestRef.current + 1;
+    detailRequestRef.current = requestId;
+    setDetailLoading(true);
+    setDetailData(null);
+    try {
+      const response = await request.get('/api/factor-lab/xueqiu-top-holdings/details', {
+        params: {
+          symbol,
+          snapshot_date: snapshotDate,
+          active_only: activeOnly,
+          limit: 2000,
+        },
+      });
+      if (detailRequestRef.current !== requestId) return;
+      setDetailData(response.data || {});
+    } catch (error) {
+      if (detailRequestRef.current === requestId) {
+        message.error(error?.response?.data?.detail || error.message || '加载组合详情失败');
+      }
+    } finally {
+      if (detailRequestRef.current === requestId) {
+        setDetailLoading(false);
+      }
+    }
+  }, [activeOnly]);
+
   useEffect(() => {
     fetchLatest();
   }, [fetchLatest]);
@@ -211,6 +256,10 @@ const XueqiuTopHoldingsResearch = () => {
   useEffect(() => {
     fetchHistory(selectedSymbol);
   }, [fetchHistory, selectedSymbol]);
+
+  useEffect(() => {
+    fetchDetails(selectedSymbol, selectedHistoryDate);
+  }, [fetchDetails, selectedHistoryDate, selectedSymbol]);
 
   const columns = useMemo(() => [
     {
@@ -297,8 +346,59 @@ const XueqiuTopHoldingsResearch = () => {
     { title: '持有均重', dataIndex: 'average_weight_pct', width: 106, align: 'right', render: percentFormatter },
   ], []);
 
+  const detailColumns = useMemo(() => [
+    {
+      title: '年榜',
+      dataIndex: 'year_rank',
+      width: 78,
+      align: 'right',
+      sorter: (a, b) => Number(a.year_rank || 999999) - Number(b.year_rank || 999999),
+      render: value => (value ? `#${value}` : '-'),
+    },
+    {
+      title: '组合',
+      dataIndex: 'cube_symbol',
+      width: 112,
+      render: value => (
+        value
+          ? <a href={`https://xueqiu.com/P/${value}`} target="_blank" rel="noreferrer">{value}</a>
+          : '-'
+      ),
+    },
+    {
+      title: '组合名称',
+      dataIndex: 'cube_name',
+      width: 180,
+      ellipsis: true,
+      render: value => value || '-',
+    },
+    {
+      title: '仓位',
+      dataIndex: 'weight_pct',
+      width: 92,
+      align: 'right',
+      sorter: (a, b) => Number(a.weight_pct || 0) - Number(b.weight_pct || 0),
+      render: percentFormatter,
+    },
+    {
+      title: '主理人调仓',
+      dataIndex: 'active_rebalance_at',
+      width: 168,
+      render: value => (value ? String(value).replace('T', ' ').slice(0, 19) : '-'),
+    },
+    {
+      title: '持仓来源',
+      dataIndex: 'holdings_source',
+      width: 92,
+      render: value => value || '-',
+    },
+  ], []);
+
   const chartOption = useMemo(() => getHistoryChartOption(historyRows), [historyRows]);
   const latestRow = historyData?.latest || selectedItem;
+  const detailSummaryText = selectedHistoryDate
+    ? `${selectedHistoryDate} · ${numberFormatter(detailData?.holding_cube_count || 0)} / ${numberFormatter(detailData?.cube_count || 0)} 个组合 · 合计 ${percentFormatter(detailData?.total_weight_pct)}`
+    : '-';
 
   return (
     <div className="xueqiu-holdings-page">
@@ -352,6 +452,7 @@ const XueqiuTopHoldingsResearch = () => {
             <Table
               rowKey="stock_symbol"
               size="small"
+              className="xueqiu-holdings-latest-table"
               loading={latestLoading}
               columns={columns}
               dataSource={filteredItems}
@@ -396,7 +497,35 @@ const XueqiuTopHoldingsResearch = () => {
                   dataSource={[...historyRows].reverse()}
                   pagination={{ defaultPageSize: 8, hideOnSinglePage: true }}
                   scroll={{ x: 640 }}
+                  rowClassName={record => (
+                    record.snapshot_date === selectedHistoryDate
+                      ? 'xueqiu-holdings-history-row-selected'
+                      : ''
+                  )}
+                  onRow={record => ({
+                    onClick: () => setSelectedHistoryDate(record.snapshot_date),
+                  })}
                 />
+                <div className="xueqiu-holdings-details">
+                  <div className="xueqiu-holdings-details__header">
+                    <div>
+                      <Text type="secondary">组合详情</Text>
+                      <h3>{detailSummaryText}</h3>
+                    </div>
+                    <Tag color="blue">{selectedSymbol}</Tag>
+                  </div>
+                  <Table
+                    rowKey={record => `${record.snapshot_date}-${record.cube_symbol}`}
+                    size="small"
+                    className="xueqiu-holdings-detail-table"
+                    loading={detailLoading}
+                    columns={detailColumns}
+                    dataSource={detailRows}
+                    pagination={{ defaultPageSize: 8, showSizeChanger: true, pageSizeOptions: [8, 20, 50, 100] }}
+                    scroll={{ x: 720, y: 320 }}
+                    locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+                  />
+                </div>
               </>
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
