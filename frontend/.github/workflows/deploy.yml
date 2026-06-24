@@ -25,7 +25,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -37,12 +37,6 @@ jobs:
           test -d build
           rm -f 52etf_fe.tgz
           tar czf 52etf_fe.tgz -C build .
-
-      - name: Upload bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: 52etf-fe-artifact
-          path: 52etf_fe.tgz
 
       - name: Prepare SSH key
         shell: bash
@@ -66,11 +60,10 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "$ECS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Download bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: 52etf-fe-artifact
-          path: .
+      - name: Verify SSH access
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            "${ECS_USER}@${ECS_HOST}" 'echo SSH_OK'
 
       - name: Upload bundle and replace remote web root
         run: |
@@ -84,11 +77,6 @@ jobs:
           sudo find ${ECS_REMOTE_DIR} -type d -exec chmod 755 {} +
           sudo find ${ECS_REMOTE_DIR} -type f -exec chmod 644 {} +
           "
-
-      - name: Verify SSH access
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            "${ECS_USER}@${ECS_HOST}" 'echo SSH_OK'
 
       - name: Cleanup SSH key
         if: always()
