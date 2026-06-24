@@ -1,0 +1,74 @@
+.xueqiu-holdings-page {
+  width: 100%;
+}
+
+.xueqiu-holdings-metrics {
+  margin-bottom: 12px;
+}
+
+.xueqiu-holdings-metrics .ant-card-body {
+  padding: 12px 14px;
+}
+
+.xueqiu-holdings-metrics .ant-statistic-title {
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.xueqiu-holdings-metrics .ant-statistic-content {
+  color: #172033;
+  font-size: 20px;
+}
+
+.xueqiu-holdings-toolbar {
+  justify-content: flex-end;
+}
+
+.xueqiu-holdings-toolbar .ant-input-affix-wrapper {
+  width: 180px;
+}
+
+.xueqiu-holdings-row-selected > td {
+  background: #eef6ff !important;
+}
+
+.xueqiu-holdings-page .ant-table-tbody > tr {
+  cursor: pointer;
+}
+
+.xueqiu-holdings-selected {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.xueqiu-holdings-selected h2 {
+  margin: 2px 0 0;
+  color: #172033;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.xueqiu-holdings-history-table {
+  margin-top: 8px;
+}
+
+@media (max-width: 768px) {
+  .xueqiu-holdings-toolbar {
+    width: 100%;
+  }
+
+  .xueqiu-holdings-toolbar .ant-input-affix-wrapper {
+    flex: 1 1 160px;
+    width: auto;
+  }
+
+  .xueqiu-holdings-selected {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

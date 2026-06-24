@@ -51,6 +51,7 @@ function App() {
           <Route path="/factor-lab" element={<FactorLab />} />
           <Route path="/factor-lab/live" element={<LiveTabRedirect tab="factor" />} />
           <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
+          <Route path="/factor-lab/xueqiu-holdings" element={<FactorLab initialTab="xueqiu-holdings" />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
