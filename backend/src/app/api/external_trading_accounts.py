@@ -29,6 +29,7 @@ from ...core.external_trading_database import (
     ExternalTradingSubAccount,
     ExternalTradingSubAccountNetAssetHistory,
     ExternalTradingTargetPosition,
+    ExternalTradingValuationSimPositionState,
     ExternalTradingSessionLocal as ExternalTradingDBSession,
     get_external_trading_db,
 )
@@ -2337,6 +2338,9 @@ async def delete_external_trading_sub_account(
     db.query(ExternalTradingOrderFill).filter(ExternalTradingOrderFill.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingOrder).filter(ExternalTradingOrder.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingTargetPosition).filter(ExternalTradingTargetPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
+    db.query(ExternalTradingValuationSimPositionState).filter(
+        ExternalTradingValuationSimPositionState.sub_account_id == sub_account.id
+    ).delete(synchronize_session=False)
     db.query(ExternalTradingLedgerPosition).filter(ExternalTradingLedgerPosition.sub_account_id == sub_account.id).delete(synchronize_session=False)
     db.query(ExternalTradingSubAccountNetAssetHistory).filter(
         ExternalTradingSubAccountNetAssetHistory.sub_account_id == sub_account.id

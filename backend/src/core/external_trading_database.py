@@ -138,6 +138,30 @@ class ExternalTradingLedgerPosition(ExternalTradingBase):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class ExternalTradingValuationSimPositionState(ExternalTradingBase):
+    """估值成长模拟盘在外部交易子账户持仓上的策略状态。"""
+    __tablename__ = "valuation_sim_position_states"
+    __table_args__ = (
+        UniqueConstraint("config_id", "sub_account_id", "symbol", name="uq_valuation_sim_state_config_sub_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True, nullable=False)
+    external_trading_account_id = Column(Integer, index=True, nullable=False)
+    sub_account_id = Column(Integer, index=True, nullable=False)
+    config_id = Column(Integer, index=True, nullable=False)
+    symbol = Column(String(32), index=True, nullable=False)
+    highest_price = Column(Float)
+    highest_price_date = Column(Date)
+    days_without_high = Column(Integer, default=0, nullable=False)
+    opened_trade_date = Column(Date)
+    last_trade_date = Column(Date)
+    last_price = Column(Float)
+    last_market_value = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class ExternalTradingBrokerPositionSnapshot(ExternalTradingBase):
     """外部券商真实持仓快照。"""
     __tablename__ = "external_trading_broker_position_snapshots"
@@ -402,6 +426,7 @@ def ensure_external_trading_indexes():
         "CREATE INDEX IF NOT EXISTS idx_external_target_positions_sub_symbol ON external_trading_target_positions(sub_account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_account_date ON external_trading_sub_account_net_asset_history(account_id, external_trading_account_id, trading_date)",
         "CREATE INDEX IF NOT EXISTS idx_external_sub_account_nav_sub_date ON external_trading_sub_account_net_asset_history(sub_account_id, trading_date)",
+        "CREATE INDEX IF NOT EXISTS idx_valuation_sim_position_states_config_symbol ON valuation_sim_position_states(config_id, sub_account_id, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_lifecycle ON external_trading_orders(status, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_external_orders_broker ON external_trading_orders(external_trading_account_id, broker_order_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_order_fills_order ON external_trading_order_fills(order_id, created_at)",
@@ -504,6 +529,9 @@ def drop_deprecated_external_trading_columns():
         "external_trading_target_positions": [
             "protection_limit_price",
             "protection_limit_source",
+        ],
+        "external_trading_ledger_positions": [
+            "strategy_state",
         ],
     }
     with external_trading_engine.begin() as conn:

@@ -16,6 +16,7 @@ from ...core.external_trading_database import (
     ExternalTradingLedgerPosition,
     ExternalTradingSubAccount,
     ExternalTradingTargetPosition,
+    ExternalTradingValuationSimPositionState,
     get_external_trading_db,
 )
 from ...core.services.external_trading_ledger import (
@@ -322,6 +323,14 @@ def _clear_target_positions(
     if target_sub_account_id:
         query = query.filter(ExternalTradingTargetPosition.sub_account_id == target_sub_account_id)
     query.delete(synchronize_session=False)
+
+    state_query = external_db.query(ExternalTradingValuationSimPositionState).filter(
+        ExternalTradingValuationSimPositionState.account_id == config.account_id,
+        ExternalTradingValuationSimPositionState.config_id == config.id,
+    )
+    if target_sub_account_id:
+        state_query = state_query.filter(ExternalTradingValuationSimPositionState.sub_account_id == target_sub_account_id)
+    state_query.delete(synchronize_session=False)
 
 
 def _bind_valuation_sim_sub_account(

@@ -20,6 +20,7 @@ from ..external_trading_database import (
     ExternalTradingAccount,
     ExternalTradingLedgerPosition,
     ExternalTradingSubAccount,
+    ExternalTradingValuationSimPositionState,
     get_external_trading_db_ctx,
 )
 from ..static_info import get_static_info_snapshot_map
@@ -463,6 +464,47 @@ def _resolve_lot_size(account: ExternalTradingAccount, sub_account: ExternalTrad
     return account_lot_size if account_lot_size > 0 else 1
 
 
+def _parse_iso_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
+def _update_position_strategy_mark(
+    state: ExternalTradingValuationSimPositionState,
+    quantity: int,
+    trade_date: date,
+    price: float,
+    high_price: Optional[float] = None,
+) -> ExternalTradingValuationSimPositionState:
+    high_mark = _positive_float(high_price) or price
+    previous_high = _positive_float(state.highest_price)
+    last_trade_date = _parse_iso_date(state.last_trade_date)
+
+    if previous_high is None or high_mark > previous_high:
+        state.highest_price = high_mark
+        state.highest_price_date = trade_date
+        state.days_without_high = 0
+    elif last_trade_date != trade_date:
+        state.days_without_high = int(state.days_without_high or 0) + 1
+
+    if not state.opened_trade_date:
+        state.opened_trade_date = trade_date
+    state.last_trade_date = trade_date
+    state.last_price = price
+    state.last_market_value = max(0, int(quantity or 0)) * price
+    state.updated_at = datetime.now()
+    return state
+
+
 class ValuationSimulationService:
     def __init__(self, db: ORMSession, external_db: Optional[ORMSession] = None):
         self.db = db
@@ -592,49 +634,236 @@ class ValuationSimulationService:
             if _normalized_external_symbol(position.symbol)
         }
 
-        candidate_payload = _build_candidate_payload(self.db, config, signal_date)
+        active_symbols = [
+            symbol for symbol in current_quantities.keys()
+            if symbol
+        ]
+        zero_symbols = [
+            _normalized_external_symbol(position.symbol)
+            for position in positions
+            if external_safe_int(position.quantity) <= 0 and _normalized_external_symbol(position.symbol)
+        ]
+        if zero_symbols:
+            external_db.query(ExternalTradingValuationSimPositionState).filter(
+                ExternalTradingValuationSimPositionState.config_id == config.id,
+                ExternalTradingValuationSimPositionState.sub_account_id == sub_account.id,
+                ExternalTradingValuationSimPositionState.symbol.in_(list(dict.fromkeys(zero_symbols))),
+            ).delete(synchronize_session=False)
+
+        state_by_symbol: Dict[str, ExternalTradingValuationSimPositionState] = {}
+        if active_symbols:
+            state_rows = (
+                external_db.query(ExternalTradingValuationSimPositionState)
+                .filter(
+                    ExternalTradingValuationSimPositionState.config_id == config.id,
+                    ExternalTradingValuationSimPositionState.sub_account_id == sub_account.id,
+                    ExternalTradingValuationSimPositionState.symbol.in_(active_symbols),
+                )
+                .all()
+            )
+            state_by_symbol = {
+                _normalized_external_symbol(row.symbol): row
+                for row in state_rows
+                if _normalized_external_symbol(row.symbol)
+            }
+            for symbol in active_symbols:
+                if symbol in state_by_symbol:
+                    continue
+                row = ExternalTradingValuationSimPositionState(
+                    account_id=config.account_id,
+                    external_trading_account_id=account.id,
+                    sub_account_id=sub_account.id,
+                    config_id=config.id,
+                    symbol=symbol,
+                    days_without_high=0,
+                )
+                external_db.add(row)
+                state_by_symbol[symbol] = row
+
+        candidate_payload = _build_candidate_payload(self.db, config, signal_date, exclude_symbols=active_symbols)
+        latest_prices = dict(candidate_payload.get("latest_prices") or {})
+        missing_price_symbols = [
+            str(position.symbol or "").strip().upper()
+            for position in active_positions
+            if str(position.symbol or "").strip().upper() not in latest_prices
+        ]
+        if missing_price_symbols:
+            _signals, held_latest_prices = _load_price_context(
+                list(dict.fromkeys(missing_price_symbols)),
+                signal_date,
+                int(config.ema_window or 120),
+                int(config.volume_lookback_days or 20),
+                int(config.volume_consecutive_days or 3),
+                int(getattr(config, "trailing_stop_atr_window", 20) or 20),
+            )
+            latest_prices.update(held_latest_prices)
+
         max_positions = max(1, int(config.max_positions or 5))
-        selected_candidates = (candidate_payload.get("candidates") or [])[:max_positions]
         valuation = _stored_sub_account_valuation(sub_account, active_positions)
-        net_asset = max(0.0, _safe_float(valuation.get("net_asset")))
         lot_size = _resolve_lot_size(account, sub_account)
-        target_count = len(selected_candidates)
-        target_value_per_symbol = net_asset / target_count if target_count else 0.0
+        position_by_symbol = {
+            _normalized_external_symbol(position.symbol): position
+            for position in active_positions
+            if _normalized_external_symbol(position.symbol)
+        }
+        position_prices: Dict[str, float] = {}
+        stop_sell_symbols = set()
+        sell_reasons: Dict[str, str] = {}
+
+        for symbol, position in position_by_symbol.items():
+            price_info = latest_prices.get(symbol) or {}
+            price = _positive_float(price_info.get("close")) or _position_reference_price(position)
+            if price is None:
+                continue
+            position_prices[symbol] = price
+            high_price = _positive_float(price_info.get("high")) or price
+            state = _update_position_strategy_mark(
+                state_by_symbol[symbol],
+                external_safe_int(position.quantity),
+                signal_date,
+                price,
+                high_price=high_price,
+            )
+            highest_price = _positive_float(state.highest_price) or price
+            atr = _positive_float(price_info.get("atr"))
+            atr_multiple = _safe_float(getattr(config, "trailing_stop_atr_multiple", 2.5), 2.5)
+            atr_stop_amount = atr * atr_multiple if atr is not None and atr_multiple > 0 else None
+            if atr_stop_amount is not None and highest_price > 0:
+                drawdown_amount = highest_price - price
+                if drawdown_amount >= atr_stop_amount:
+                    reason = "trailing_stop_profit" if price >= external_safe_float(position.avg_cost) else "trailing_stop_loss"
+                    stop_sell_symbols.add(symbol)
+                    sell_reasons[symbol] = reason
+
+        effective_positions = [
+            position for position in active_positions
+            if _normalized_external_symbol(position.symbol) not in stop_sell_symbols
+        ]
+        held_symbols = {
+            _normalized_external_symbol(position.symbol)
+            for position in effective_positions
+            if _normalized_external_symbol(position.symbol)
+        }
+        raw_candidates = [
+            candidate for candidate in (candidate_payload.get("candidates") or [])
+            if _normalized_external_symbol(candidate.get("symbol")) not in held_symbols
+        ]
+        available_slots = max(0, max_positions - len(effective_positions))
+        new_candidate_count = len(raw_candidates)
+        stale_positions = []
+        stale_high_days = int(getattr(config, "stale_high_days", 5) or 5)
+        for position in effective_positions:
+            symbol = _normalized_external_symbol(position.symbol)
+            if not symbol or symbol not in position_prices:
+                continue
+            state = state_by_symbol.get(symbol)
+            if state and int(state.days_without_high or 0) >= stale_high_days:
+                stale_positions.append(position)
+
+        replacement_slots = max(0, min(len(stale_positions), new_candidate_count - available_slots))
+        if replacement_slots > 0:
+            def stale_sort_key(item: ExternalTradingLedgerPosition):
+                state = state_by_symbol.get(_normalized_external_symbol(item.symbol))
+                return (
+                    int(getattr(state, "days_without_high", 0) or 0),
+                    -_safe_float(getattr(state, "last_market_value", None)),
+                )
+
+            stale_positions.sort(key=stale_sort_key, reverse=True)
+            for priority, position in enumerate(stale_positions[:replacement_slots], start=1):
+                symbol = _normalized_external_symbol(position.symbol)
+                if not symbol:
+                    continue
+                sell_reasons[symbol] = "stale_replaced"
+
+        sell_symbols = set(sell_reasons.keys())
+        remaining_positions = [
+            position for position in active_positions
+            if _normalized_external_symbol(position.symbol) not in sell_symbols
+        ]
+        blocked_symbols = {
+            _normalized_external_symbol(position.symbol)
+            for position in remaining_positions
+            if _normalized_external_symbol(position.symbol)
+        }
+        buy_slots = max(0, max_positions - len(remaining_positions))
+        buy_candidates = [
+            candidate for candidate in raw_candidates
+            if _normalized_external_symbol(candidate.get("symbol")) not in blocked_symbols
+        ][:buy_slots]
+
+        estimated_sale_cash = 0.0
+        for symbol in sell_symbols:
+            position = position_by_symbol.get(symbol)
+            if not position:
+                continue
+            price = position_prices.get(symbol) or _position_reference_price(position)
+            if price is not None:
+                estimated_sale_cash += external_safe_int(position.quantity) * price
+        cash_for_buys = max(0.0, _safe_float(valuation.get("cash_available")) + estimated_sale_cash)
+        cash_per_buy = cash_for_buys / len(buy_candidates) if buy_candidates else 0.0
 
         targets: List[Dict[str, Any]] = []
         target_quantities: Dict[str, int] = {}
-        target_symbols = set()
-        for candidate in selected_candidates:
-            symbol = _normalized_external_symbol(candidate.get("symbol"))
-            price = _positive_float(candidate.get("price"))
-            if not symbol or price is None:
+        for position in remaining_positions:
+            symbol = _normalized_external_symbol(position.symbol)
+            quantity = external_safe_int(position.quantity)
+            if not symbol or quantity <= 0:
                 continue
-            target_symbols.add(symbol)
-            target_quantity = _floor_to_lot(target_value_per_symbol / price, lot_size)
-            target_quantities[symbol] = target_quantity
+            price = position_prices.get(symbol) or _position_reference_price(position)
+            target_value = round(quantity * price, 2) if price is not None else _position_market_value(position)
+            target_quantities[symbol] = quantity
             targets.append({
                 "symbol": symbol,
-                "target_quantity": target_quantity,
-                "target_weight_pct": round(100.0 / target_count, 4) if target_count else 0.0,
-                "target_value": round(target_quantity * price, 2),
-                "reference_price": round(price, 4),
-                "reference_price_source": "valuation_candidate_close",
+                "target_quantity": quantity,
+                "target_weight_pct": None,
+                "target_value": target_value,
+                "reference_price": round(price, 4) if price is not None else None,
+                "reference_price_source": "valuation_hold_close" if symbol in position_prices else "external_ledger",
             })
 
-        for position in active_positions:
-            symbol = _normalized_external_symbol(position.symbol)
-            if not symbol or symbol in target_symbols:
+        for symbol in sorted(sell_symbols):
+            position = position_by_symbol.get(symbol)
+            if not position:
                 continue
-            price = _position_reference_price(position)
+            price = position_prices.get(symbol) or _position_reference_price(position)
+            target_quantities[symbol] = 0
             targets.append({
                 "symbol": symbol,
                 "target_quantity": 0,
                 "target_weight_pct": 0.0,
                 "target_value": 0.0,
                 "reference_price": round(price, 4) if price is not None else None,
-                "reference_price_source": "external_ledger",
+                "reference_price_source": f"valuation_{sell_reasons.get(symbol) or 'sell'}",
             })
-            target_quantities[symbol] = 0
+
+        for candidate in buy_candidates:
+            symbol = _normalized_external_symbol(candidate.get("symbol"))
+            price = _positive_float(candidate.get("price"))
+            if not symbol or price is None:
+                continue
+            target_quantity = _floor_to_lot(cash_per_buy / price, lot_size)
+            if target_quantity <= 0:
+                continue
+            target_quantities[symbol] = target_quantity
+            targets.append({
+                "symbol": symbol,
+                "target_quantity": target_quantity,
+                "target_weight_pct": None,
+                "target_value": round(target_quantity * price, 2),
+                "reference_price": round(price, 4),
+                "reference_price_source": "valuation_candidate_close",
+            })
+
+        total_target_value = sum(_safe_float(target.get("target_value")) for target in targets if _safe_float(target.get("target_value")) > 0)
+        for target in targets:
+            if target.get("target_weight_pct") is not None:
+                continue
+            target["target_weight_pct"] = (
+                round(_safe_float(target.get("target_value")) / total_target_value * 100.0, 4)
+                if total_target_value > 0 and external_safe_int(target.get("target_quantity")) > 0
+                else 0.0
+            )
 
         signal_id = f"valuation_sim:{config.id}:{signal_date.isoformat()}"
         signal_version = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -649,8 +878,15 @@ class ValuationSimulationService:
         symbols = set(current_quantities.keys()) | set(target_quantities.keys())
         buy_count = sum(1 for symbol in symbols if target_quantities.get(symbol, 0) > current_quantities.get(symbol, 0))
         sell_count = sum(1 for symbol in symbols if target_quantities.get(symbol, 0) < current_quantities.get(symbol, 0))
+        positive_target_symbols = {
+            str(target.get("symbol"))
+            for target in targets
+            if external_safe_int(target.get("target_quantity")) > 0
+        }
         message = (
-            f"已同步估值模拟盘策略输出：目标 {len(target_symbols)} 只，需买 {buy_count} 只，需卖 {sell_count} 只"
+            f"已同步估值模拟盘策略输出：持有目标 {len(positive_target_symbols)} 只，"
+            f"止盈止损 {len(stop_sell_symbols)} 只，替换卖出 {len(sell_symbols - stop_sell_symbols)} 只，"
+            f"需买 {buy_count} 只，需卖 {sell_count} 只"
             if targets
             else "当前无策略输出，已清空估值模拟盘输出"
         )
@@ -659,7 +895,7 @@ class ValuationSimulationService:
             "message": message,
             "trade_date": signal_date,
             "candidate_count": len(candidate_payload.get("candidates") or []),
-            "target_count": len(target_symbols),
+            "target_count": len(positive_target_symbols),
             "buy_count": buy_count,
             "sell_count": sell_count,
             "total_equity": valuation.get("net_asset"),
