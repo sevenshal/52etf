@@ -50,7 +50,6 @@ const DEFAULT_VALUES = {
   volume_lookback_days: 20,
   volume_consecutive_days: 3,
   volume_ratio_threshold: 1.4,
-  trailing_stop_pct: 5,
   trailing_stop_atr_window: 20,
   trailing_stop_atr_multiple: 2.5,
   stale_high_days: 5,
@@ -452,6 +451,7 @@ const ValuationSimulation = () => {
           <Tag>增长x{formatNumber(record.next_fy_growth_threshold, 2)}</Tag>
           <Tag>量比x{formatNumber(record.volume_ratio_threshold, 2)}</Tag>
           <Tag>ATR{record.trailing_stop_atr_window || 20} x{formatNumber(record.trailing_stop_atr_multiple || 2.5, 2)}</Tag>
+          <Tag>未新高{record.stale_high_days || 5}天</Tag>
           <Tag>市值{record.min_market_cap_100m || 0}-{record.max_market_cap_100m || '∞'}亿</Tag>
           <Tag>{renderUniverseTags(record)}</Tag>
         </Space>
