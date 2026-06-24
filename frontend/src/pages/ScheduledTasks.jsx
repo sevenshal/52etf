@@ -5,6 +5,7 @@ import {
   Button,
   DatePicker,
   Input,
+  InputNumber,
   Modal,
   Segmented,
   Space,
@@ -187,6 +188,22 @@ const showFullResultMessage = (task) => {
   });
 };
 
+const renderParameterLabel = (parameter) => {
+  const label = (
+    <Text type="secondary" style={{ fontSize: 12 }}>
+      {parameter.label || parameter.key}
+    </Text>
+  );
+  if (!parameter.description) {
+    return label;
+  }
+  return (
+    <Tooltip title={parameter.description}>
+      {label}
+    </Tooltip>
+  );
+};
+
 const TaskResultMessage = ({ task }) => {
   const messageText = task.last_run_message;
   if (!messageText) {
@@ -279,6 +296,23 @@ const ScheduledTasks = () => {
     );
   };
 
+  const updateTaskParameter = (taskKey, parameterKey, value) => {
+    setTasks((prev) =>
+      prev.map((task) => {
+        if (task.task_key !== taskKey) {
+          return task;
+        }
+        return {
+          ...task,
+          parameters: {
+            ...(task.parameters || {}),
+            [parameterKey]: value,
+          },
+        };
+      })
+    );
+  };
+
   const handleSave = async (task) => {
     setSavingTaskKey(task.task_key);
     try {
@@ -286,7 +320,7 @@ const ScheduledTasks = () => {
         enabled: task.enabled,
         cron_rule: task.cron_rule,
         timezone: task.timezone,
-        allow_queue: task.allow_queue,
+        parameters: task.parameters || {},
       });
       updateTaskField(task.task_key, data);
       message.success('任务配置已保存');
@@ -425,35 +459,80 @@ const ScheduledTasks = () => {
       ),
     },
     {
-      title: '排队',
-      dataIndex: 'allow_queue',
-      width: 86,
-      align: 'center',
-      render: (_, task) => (
-        <Switch
-          checked={task.allow_queue !== false}
-          checkedChildren="排队"
-          unCheckedChildren="直跑"
-          onChange={(checked) => updateTaskField(task.task_key, { allow_queue: checked })}
-        />
-      ),
-    },
-    {
-      title: '下次执行',
-      dataIndex: 'next_run_at',
-      width: 168,
-      render: (value) => (
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {value ? formatDateTime(value) : '未安排'}
-        </Text>
-      ),
-    },
-    {
-      title: '最近运行',
-      dataIndex: 'last_run_started_at',
+      title: '参数',
+      dataIndex: 'parameters',
       width: 260,
+      render: (_, task) => {
+        const schema = Array.isArray(task.parameter_schema) ? task.parameter_schema : [];
+        if (!schema.length) {
+          return <Text type="secondary">无</Text>;
+        }
+        return (
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            {schema.map((parameter) => {
+              const value = (task.parameters || {})[parameter.key] ?? parameter.default;
+              const inputStyle = { width: 112 };
+              let control = null;
+              if (parameter.type === 'boolean') {
+                control = (
+                  <Switch
+                    size="small"
+                    checked={!!value}
+                    onChange={(checked) => updateTaskParameter(task.task_key, parameter.key, checked)}
+                  />
+                );
+              } else if (parameter.type === 'integer' || parameter.type === 'float') {
+                control = (
+                  <InputNumber
+                    size="small"
+                    style={inputStyle}
+                    value={value}
+                    min={parameter.min_value ?? undefined}
+                    max={parameter.max_value ?? undefined}
+                    step={parameter.step ?? 1}
+                    precision={parameter.type === 'integer' ? 0 : undefined}
+                    addonAfter={parameter.suffix || null}
+                    onChange={(nextValue) => updateTaskParameter(task.task_key, parameter.key, nextValue)}
+                  />
+                );
+              } else {
+                control = (
+                  <Input
+                    size="small"
+                    value={value ?? ''}
+                    suffix={parameter.suffix || null}
+                    onChange={(event) => updateTaskParameter(task.task_key, parameter.key, event.target.value)}
+                  />
+                );
+              }
+              return (
+                <div
+                  key={parameter.key}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '86px 128px',
+                    gap: 8,
+                    alignItems: 'center',
+                  }}
+                >
+                  {renderParameterLabel(parameter)}
+                  {control}
+                </div>
+              );
+            })}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '执行时间',
+      dataIndex: 'next_run_at',
+      width: 300,
       render: (_, task) => (
         <Space direction="vertical" size={2}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            下次：{task.next_run_at ? formatDateTime(task.next_run_at) : '未安排'}
+          </Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
             开始：{formatDateTime(task.last_run_started_at)}
           </Text>
@@ -534,7 +613,7 @@ const ScheduledTasks = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="Cron 格式为“分 时 日 月 周”，周几请用 mon-fri/sat/sun 这种英文写法。可选择上海时间或美东时间，美东时间会按夏令时自动换算；修改保存后立即重载调度；开启排队的任务进入统一队列顺序执行，关闭排队的任务触发后立即执行。"
+        message="Cron 格式为“分 时 日 月 周”，周几请用 mon-fri/sat/sun 这种英文写法。可选择上海时间或美东时间，美东时间会按夏令时自动换算；修改保存后立即重载调度；所有任务进入统一队列顺序执行。"
       />
 
       <Table
@@ -545,7 +624,7 @@ const ScheduledTasks = () => {
         pagination={false}
         size="middle"
         tableLayout="fixed"
-        scroll={{ x: 1520 }}
+        scroll={{ x: 1700 }}
         locale={{ emptyText: '暂无定时任务' }}
       />
       <Modal
