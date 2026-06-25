@@ -1065,6 +1065,16 @@ class ScheduledTaskManager:
                         suffix="天",
                         description="未填写输出开始日期时，回写最近多少个自然日。",
                     ),
+                    TaskParameterDefinition(
+                        key="max_holdings",
+                        label="最多持仓",
+                        value_type="integer",
+                        default=ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS,
+                        min_value=0,
+                        max_value=500,
+                        step=1,
+                        description="单个 ETF 参与成分股强弱/广度计算的最大持仓数；0 表示不限制。",
+                    ),
                 ),
             ),
             "a_stock_base_data_sync": TaskDefinition(
