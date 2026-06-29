@@ -162,6 +162,115 @@ class PTradeOrderStatusTest(TestCase):
         self.assertAlmostEqual(197.74, position.avg_cost)
         self.assertAlmostEqual(5084.76, sub_account.cash_available)
 
+    def test_unfilled_sell_parent_order_can_be_manually_confirmed_as_external_fill(self):
+        db = self._db_session()
+        account = ExternalTradingAccount(
+            id=2,
+            account_id="acct",
+            name="PTrade",
+            identifier="ptrade",
+            market_type="A_STOCK",
+            commission_rate_pct=0.0,
+            min_commission=0.0,
+            stamp_tax_rate_pct=0.0,
+        )
+        sub_account = ExternalTradingSubAccount(
+            id=89,
+            account_id="acct",
+            external_trading_account_id=2,
+            name="沪深300策略",
+            strategy_type="portfolio_copy_live",
+            cash_allocated=1000.0,
+            cash_available=1000.0,
+        )
+        position = ExternalTradingLedgerPosition(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=89,
+            symbol="510300.SH",
+            quantity=200,
+            available_quantity=200,
+            avg_cost=2.0,
+            market_price=3.0,
+            market_value=600.0,
+        )
+        db.add_all([account, sub_account, position])
+        db.flush()
+        parent = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            allocation_role="PARENT",
+            strategy_type="netted_executor",
+            client_order_id="sell-parent-client-id",
+            symbol="510300.SH",
+            side="SELL",
+            order_type="LIMIT",
+            quantity=100,
+            filled_quantity=0,
+            remaining_quantity=100,
+            status="ACKNOWLEDGED",
+        )
+        db.add(parent)
+        db.flush()
+        child = ExternalTradingOrder(
+            account_id="acct",
+            external_trading_account_id=2,
+            sub_account_id=89,
+            parent_order_id=parent.id,
+            allocation_role="CHILD",
+            strategy_type="portfolio_copy_live",
+            client_order_id="sell-child-client-id",
+            symbol="510300.SH",
+            side="SELL",
+            order_type="LIMIT",
+            quantity=100,
+            filled_quantity=0,
+            remaining_quantity=100,
+            status="ACKNOWLEDGED",
+        )
+        db.add(child)
+        db.flush()
+
+        item = {}
+        _attach_parent_order_repair_summary(
+            item,
+            parent,
+            {
+                "child_count": 1,
+                "child_remaining_quantity": 100,
+                "child_unfilled_count": 1,
+            },
+        )
+
+        self.assertTrue(item["needs_fill_repair"])
+
+        result = repair_parent_order_manual_fill(
+            db,
+            order=parent,
+            fill_price=3.21,
+            traded_at=datetime(2026, 6, 10, 10, 5, 0),
+            note="外部账户手动卖出",
+        )
+        db.flush()
+
+        fills = db.query(ExternalTradingOrderFill).order_by(ExternalTradingOrderFill.id.asc()).all()
+
+        self.assertEqual(100, result["repair_quantity"])
+        self.assertEqual("FILLED", parent.status)
+        self.assertEqual("FILLED", child.status)
+        self.assertEqual(100, parent.filled_quantity)
+        self.assertEqual(100, child.filled_quantity)
+        self.assertEqual(0, parent.remaining_quantity)
+        self.assertEqual(0, child.remaining_quantity)
+        self.assertEqual(2, len(fills))
+        self.assertIsNone(fills[0].sub_account_id)
+        self.assertEqual(89, fills[1].sub_account_id)
+        self.assertEqual("manual_parent_external_fill", parent.raw_order_event["type"])
+        self.assertEqual(100, position.quantity)
+        self.assertEqual(100, position.available_quantity)
+        self.assertAlmostEqual(121.0, position.realized_pnl)
+        self.assertAlmostEqual(1321.0, sub_account.cash_available)
+
     def _red_stock_deliver_record(self):
         return {
             "init_date": 20260528,

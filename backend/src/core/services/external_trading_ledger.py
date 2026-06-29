@@ -60,12 +60,6 @@ TERMINAL_ORDER_STATUSES = {
     STATUS_BLOCKED_INSUFFICIENT_POSITION,
     STATUS_BLOCKED_NON_RETRYABLE_REJECTION,
 }
-MANUAL_PARENT_FILL_ELIGIBLE_STATUSES = {
-    "FAILED",
-    "REJECTED",
-    "EXPIRED",
-    "NOT_SUPPORTED",
-}
 PASSIVE_CHILD_ORDER_STATUSES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_PENDING"}
 
 PTRADE_STATUS_MAP = {
@@ -1879,27 +1873,30 @@ def repair_parent_order_manual_fill(
     status = str(order.status or "").upper()
     ptrade_status = str(order.ptrade_status or "")
     reported_filled_quantity = safe_int(order.filled_quantity)
+    existing_fill_quantity, _ = _order_fill_totals(db, order.id)
+    effective_filled_quantity = max(reported_filled_quantity, existing_fill_quantity)
+    parent_remaining_quantity = max(
+        safe_int(order.remaining_quantity),
+        order_quantity - effective_filled_quantity,
+        0,
+    )
     has_reported_fill = (
         status in {"FILLED", "PARTIALLY_FILLED"}
         or ptrade_status in {"7", "8"}
         or reported_filled_quantity > 0
     )
-    is_manual_external_buy_fill = (
-        side == "BUY"
-        and status in MANUAL_PARENT_FILL_ELIGIBLE_STATUSES
-        and reported_filled_quantity <= 0
-    )
-    if not has_reported_fill and not is_manual_external_buy_fill:
-        raise ValueError("父单没有明确成交状态；仅失败买单支持人工确认外部手动成交")
+    has_unfilled_parent_quantity = parent_remaining_quantity > 0
+    if not has_reported_fill and not has_unfilled_parent_quantity:
+        raise ValueError("父单没有可补成交数量")
 
-    target_quantity = order_quantity if is_manual_external_buy_fill else reported_filled_quantity
-    if status == "FILLED" or ptrade_status == "8":
+    target_quantity = reported_filled_quantity
+    is_manual_external_fill = has_unfilled_parent_quantity
+    if status == "FILLED" or ptrade_status == "8" or has_unfilled_parent_quantity:
         target_quantity = order_quantity
     target_quantity = min(max(target_quantity, 0), order_quantity)
     if target_quantity <= 0:
         raise ValueError("父单已成数量为 0，无法补成交")
 
-    existing_fill_quantity, _ = _order_fill_totals(db, order.id)
     missing_parent_fill_quantity = max(target_quantity - existing_fill_quantity, 0)
     allocations = _allocate_parent_fill_quantities(db, order, missing_parent_fill_quantity)
     repair_quantity = sum(safe_int(item.get("quantity")) for item in allocations)
@@ -1918,7 +1915,7 @@ def repair_parent_order_manual_fill(
 
     traded_time = traded_at or order.last_event_at or datetime.now()
     estimated_fee_increment = _estimated_fee_increment_for_order(db, order, repair_quantity * fill_price)
-    event_type = "manual_parent_external_fill" if is_manual_external_buy_fill else "manual_parent_fill_repair"
+    event_type = "manual_parent_external_fill" if is_manual_external_fill else "manual_parent_fill_repair"
     event = {
         "type": event_type,
         "note": note,
@@ -1957,7 +1954,7 @@ def repair_parent_order_manual_fill(
     order.submitted_at = order.submitted_at or traded_time
     order.last_event_at = traded_time
     order.raw_order_event = event
-    if is_manual_external_buy_fill:
+    if is_manual_external_fill:
         order.message = (
             f"人工确认外部手动成交，按 {fill_price:.2f} 元补 {repair_quantity} 股"
             + (f"（{note}）" if note else "")
