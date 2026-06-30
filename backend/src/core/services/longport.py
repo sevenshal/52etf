@@ -454,19 +454,12 @@ class LongPortService(QuoteProvider, TradeService):
         try:
             resp = self.ctx.quote(symbols)
             if resp:
-                return [{
-                    'symbol': quote.symbol,
-                    'price': float(quote.last_done),
-                    'change': float(quote.last_done) - float(quote.prev_close),
-                    'percent_change': (float(quote.last_done) - float(quote.prev_close)) / float(quote.prev_close) * 100,
-                    'high': float(quote.high),
-                    'low': float(quote.low),
-                    'open': float(quote.open),
-                    'prev_close': float(quote.prev_close),
-                    'volume': quote.volume,
-                    'turnover': float(quote.turnover),
-                    'timestamp': quote.timestamp
-                } for quote in resp]
+                result = []
+                for quote in resp:
+                    normalized = self._normalize_realtime_quote(quote)
+                    if normalized:
+                        result.append(normalized)
+                return result
             return []
         except Exception as e:
             logging.error(f"获取{symbols}实时行情失败: {str(e)}")
@@ -479,34 +472,59 @@ class LongPortService(QuoteProvider, TradeService):
         try:
             resp = self.ctx.option_quote(symbols)
             if resp:
-                return [{
-                    'symbol': quote.symbol,
-                    'price': float(quote.last_done),
-                    'change': float(quote.last_done) - float(quote.prev_close),
-                    'percent_change': (float(quote.last_done) - float(quote.prev_close)) / float(quote.prev_close) * 100,
-                    'high': float(quote.high),
-                    'low': float(quote.low),
-                    'open': float(quote.open),
-                    'prev_close': float(quote.prev_close),
-                    'volume': quote.volume,
-                    'turnover': float(quote.turnover),
-                    'timestamp': quote.timestamp,
-                    # 期权特有字段
-                    'implied_volatility': float(quote.implied_volatility),
-                    'open_interest': quote.open_interest,
-                    'expiry_date': quote.expiry_date,
-                    'strike_price': float(quote.strike_price),
-                    'contract_multiplier': float(quote.contract_multiplier),
-                    'contract_type': quote.contract_type.__class__.__name__,
-                    'contract_size': float(quote.contract_size),
-                    'direction': quote.direction.__class__.__name__,
-                    'historical_volatility': float(quote.historical_volatility),
-                    'underlying_symbol': quote.underlying_symbol
-                } for quote in resp]
+                result = []
+                for quote in resp:
+                    normalized = self._normalize_realtime_quote(quote)
+                    if not normalized:
+                        continue
+                    normalized.update({
+                        # 期权特有字段
+                        'implied_volatility': _to_float(getattr(quote, "implied_volatility", None)),
+                        'open_interest': getattr(quote, "open_interest", None),
+                        'expiry_date': getattr(quote, "expiry_date", None),
+                        'strike_price': _to_float(getattr(quote, "strike_price", None)),
+                        'contract_multiplier': _to_float(getattr(quote, "contract_multiplier", None)),
+                        'contract_type': getattr(getattr(quote, "contract_type", None), "__class__", type(None)).__name__,
+                        'contract_size': _to_float(getattr(quote, "contract_size", None)),
+                        'direction': getattr(getattr(quote, "direction", None), "__class__", type(None)).__name__,
+                        'historical_volatility': _to_float(getattr(quote, "historical_volatility", None)),
+                        'underlying_symbol': getattr(quote, "underlying_symbol", None),
+                    })
+                    result.append(normalized)
+                return result
             return []
         except Exception as e:
             logging.error(f"获取期权{symbols}实时行情失败: {str(e)}")
             return []
+
+    def _normalize_realtime_quote(self, quote) -> Optional[Dict]:
+        symbol = getattr(quote, "symbol", None)
+        price = _to_float(getattr(quote, "last_done", None))
+        if price is None:
+            logging.warning("跳过%s实时行情: last_done无效", symbol or "未知标的")
+            return None
+
+        prev_close = _to_float(getattr(quote, "prev_close", None))
+        change = price - prev_close if prev_close is not None else None
+        percent_change = None
+        if prev_close is not None and prev_close > 0:
+            percent_change = change / prev_close * 100
+        elif prev_close is not None:
+            logging.warning("跳过%s实时行情涨跌幅计算: prev_close=%s", symbol or "未知标的", prev_close)
+
+        return {
+            'symbol': symbol,
+            'price': price,
+            'change': change,
+            'percent_change': percent_change,
+            'high': _to_float(getattr(quote, "high", None)),
+            'low': _to_float(getattr(quote, "low", None)),
+            'open': _to_float(getattr(quote, "open", None)),
+            'prev_close': prev_close,
+            'volume': getattr(quote, "volume", None),
+            'turnover': _to_float(getattr(quote, "turnover", None)),
+            'timestamp': getattr(quote, "timestamp", None),
+        }
 
     def _resolve_candlestick_period(self, period):
         normalized = str(period or 'd').lower()

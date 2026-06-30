@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+from sqlalchemy.exc import OperationalError
 import httpx
 import logging
 import fnmatch
@@ -11,6 +12,7 @@ import re
 import hashlib
 import json
 import os
+import time
 from ...core.database import (
     get_db,
     get_db_ctx,
@@ -60,6 +62,9 @@ SNOWBALL_A_SHARE_LOT_SIZE = 100
 SNOWBALL_MIN_ROUND_UP_QUANTITY = 50
 SNOWBALL_STAR_MARKET_MIN_ROUND_UP_QUANTITY = 150
 SNOWBALL_STAR_MARKET_MIN_BUY_QUANTITY = 200
+SNOWBALL_MAIN_DB_WRITE_RETRY_ATTEMPTS = 3
+SNOWBALL_MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
+SNOWBALL_MAIN_DB_WRITE_RETRY_MAX_SECONDS = 4.0
 XUEQIU_API_BASE_URL = "https://api.xueqiu.com"
 XUEQIU_STOCK_BASE_URL = "https://stock.xueqiu.com"
 XUEQIU_WEB_BASE_URL = "https://xueqiu.com"
@@ -837,21 +842,54 @@ def _build_snowball_target_signal_version(item: Dict[str, Any], target_rows: Lis
     return f"snowball:{item.get('id')}:{digest[:16]}"[:64]
 
 
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _write_snowball_main_db_with_retry(operation_name: str, writer):
+    for attempt in range(1, SNOWBALL_MAIN_DB_WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            return writer()
+        except Exception as exc:
+            if not _is_sqlite_lock_error(exc) or attempt >= SNOWBALL_MAIN_DB_WRITE_RETRY_ATTEMPTS:
+                raise
+            sleep_seconds = min(
+                SNOWBALL_MAIN_DB_WRITE_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                SNOWBALL_MAIN_DB_WRITE_RETRY_MAX_SECONDS,
+            )
+            logger.warning(
+                "%s hit SQLite lock, retrying %s/%s in %.1fs: %s",
+                operation_name,
+                attempt + 1,
+                SNOWBALL_MAIN_DB_WRITE_RETRY_ATTEMPTS,
+                sleep_seconds,
+                exc,
+            )
+            time.sleep(sleep_seconds)
+    return None
+
+
 def _mark_snowball_external_sync_failure(config_id: int, message: str) -> None:
-    with get_db_ctx() as db:
-        config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == config_id).first()
-        if config:
-            config.last_external_sync_at = datetime.now()
-            config.last_external_sync_status = "FAILED"
-            config.last_external_sync_message = message[:500]
-            db.add(SnowballCopyLog(
-                cli_id=config.cli_id,
-                combination_id=config.combination_id,
-                action="TARGET_SYNC",
-                status="FAILED",
-                message=message[:1000],
-                account_id=config.account_id,
-            ))
+    def write_failure():
+        with get_db_ctx() as db:
+            config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == config_id).first()
+            if config:
+                config.last_external_sync_at = datetime.now()
+                config.last_external_sync_status = "FAILED"
+                config.last_external_sync_message = message[:500]
+                db.add(SnowballCopyLog(
+                    cli_id=config.cli_id,
+                    combination_id=config.combination_id,
+                    action="TARGET_SYNC",
+                    status="FAILED",
+                    message=message[:1000],
+                    account_id=config.account_id,
+                ))
+
+    _write_snowball_main_db_with_retry("mark Snowball external sync failure", write_failure)
 
 
 async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_source: str) -> Dict[str, Any]:
@@ -956,41 +994,44 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
 
     signal_version = _build_snowball_target_signal_version(item, target_rows)
 
-    with get_db_ctx() as db, get_external_trading_db_ctx() as trading_db:
-        config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == item["id"]).first()
-        sub_account = trading_db.query(ExternalTradingSubAccount).filter(
-            ExternalTradingSubAccount.id == item["live_sub_account_id"],
-            ExternalTradingSubAccount.account_id == item["account_id"],
-            ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
-            ExternalTradingSubAccount.strategy_config_id == item["id"],
-        ).first()
-        if not config or not sub_account:
-            raise ValueError("雪球配置或绑定虚拟子账户不存在")
+    def write_sync_result():
+        with get_db_ctx() as db, get_external_trading_db_ctx() as trading_db:
+            config = db.query(SnowballCopyConfig).filter(SnowballCopyConfig.id == item["id"]).first()
+            sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == item["live_sub_account_id"],
+                ExternalTradingSubAccount.account_id == item["account_id"],
+                ExternalTradingSubAccount.strategy_type == STRATEGY_SNOWBALL,
+                ExternalTradingSubAccount.strategy_config_id == item["id"],
+            ).first()
+            if not config or not sub_account:
+                raise ValueError("雪球配置或绑定虚拟子账户不存在")
 
-        sync_target_positions(
-            trading_db,
-            sub_account=sub_account,
-            targets=target_rows,
-            signal_id=f"snowball:{item['combination_id']}",
-            signal_version=signal_version,
-            source_execution_id=None,
-        )
-        config.last_external_sync_at = datetime.now()
-        config.last_external_sync_status = "SYNCED"
-        config.last_external_sync_message = (
-            f"{trigger_source}: 同步目标仓位 {len(target_rows)} 个"
-            + (f"，跳过 {len(skipped)} 个缺价标的" if skipped else "")
-        )[:500]
-        if changed:
-            db.add(SnowballCopyLog(
-                cli_id=config.cli_id,
-                combination_id=config.combination_id,
-                action="TARGET_SYNC",
-                quantity=len(target_rows),
-                status="TARGET_SYNCED",
-                message=config.last_external_sync_message,
-                account_id=config.account_id,
-            ))
+            sync_target_positions(
+                trading_db,
+                sub_account=sub_account,
+                targets=target_rows,
+                signal_id=f"snowball:{item['combination_id']}",
+                signal_version=signal_version,
+                source_execution_id=None,
+            )
+            config.last_external_sync_at = datetime.now()
+            config.last_external_sync_status = "SYNCED"
+            config.last_external_sync_message = (
+                f"{trigger_source}: 同步目标仓位 {len(target_rows)} 个"
+                + (f"，跳过 {len(skipped)} 个缺价标的" if skipped else "")
+            )[:500]
+            if changed:
+                db.add(SnowballCopyLog(
+                    cli_id=config.cli_id,
+                    combination_id=config.combination_id,
+                    action="TARGET_SYNC",
+                    quantity=len(target_rows),
+                    status="TARGET_SYNCED",
+                    message=config.last_external_sync_message,
+                    account_id=config.account_id,
+                ))
+
+    _write_snowball_main_db_with_retry("persist Snowball external sync result", write_sync_result)
 
     return {
         "config_id": item["id"],
@@ -1055,7 +1096,20 @@ async def sync_snowball_external_trading_config_ids(
                 "status": "FAILED",
                 "error": error_message,
             })
-            _mark_snowball_external_sync_failure(item.get("id"), error_message)
+            try:
+                _mark_snowball_external_sync_failure(item.get("id"), error_message)
+            except Exception as mark_exc:
+                if _is_sqlite_lock_error(mark_exc):
+                    logger.warning(
+                        "Snowball external sync failure marker skipped after SQLite lock: config=%s error=%s",
+                        item.get("id"),
+                        mark_exc,
+                    )
+                else:
+                    logger.exception(
+                        "Snowball external sync failure marker failed: config=%s",
+                        item.get("id"),
+                    )
 
     if trigger_executor and affected_accounts:
         for external_account_id, owner_account_id in affected_accounts.items():

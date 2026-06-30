@@ -68,3 +68,61 @@ class LongPortKlineQuotaTest(TestCase):
         self.assertEqual(1, len(result["daily_errors"]))
         self.assertEqual("AMTM.US", result["daily_errors"][0]["symbol"])
         self.assertEqual("longport_kline_quota_exceeded", result["daily_errors"][0]["error_type"])
+
+
+class LongPortRealtimeQuoteTest(TestCase):
+    def _service(self, quotes):
+        service = object.__new__(LongPortService)
+        service.ctx = SimpleNamespace(quote=lambda _symbols: quotes)
+        return service
+
+    def test_quote_batch_keeps_zero_prev_close_quote_without_dividing(self):
+        quote = SimpleNamespace(
+            symbol="AIN.US",
+            last_done="12.5",
+            prev_close="0",
+            high="13",
+            low="12",
+            open="12.1",
+            volume=1000,
+            turnover="12500",
+            timestamp=datetime(2026, 6, 29, 5, 30),
+        )
+
+        result = self._service([quote]).get_quote_batch(["AIN.US"])
+
+        self.assertEqual(1, len(result))
+        self.assertEqual("AIN.US", result[0]["symbol"])
+        self.assertEqual(12.5, result[0]["price"])
+        self.assertEqual(12.5, result[0]["change"])
+        self.assertIsNone(result[0]["percent_change"])
+        self.assertEqual(0.0, result[0]["prev_close"])
+
+    def test_quote_batch_skips_bad_quote_and_keeps_other_symbols(self):
+        bad_quote = SimpleNamespace(
+            symbol="BAD.US",
+            last_done="",
+            prev_close="10",
+            high="",
+            low="",
+            open="",
+            volume=0,
+            turnover="",
+            timestamp=None,
+        )
+        good_quote = SimpleNamespace(
+            symbol="SPSC.US",
+            last_done="20",
+            prev_close="10",
+            high="21",
+            low="19",
+            open="19.5",
+            volume=2000,
+            turnover="40000",
+            timestamp=datetime(2026, 6, 29, 5, 30),
+        )
+
+        result = self._service([bad_quote, good_quote]).get_quote_batch(["BAD.US", "SPSC.US"])
+
+        self.assertEqual(["SPSC.US"], [row["symbol"] for row in result])
+        self.assertEqual(100.0, result[0]["percent_change"])
