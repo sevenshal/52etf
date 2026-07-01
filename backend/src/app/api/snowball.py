@@ -357,6 +357,22 @@ def _snowball_target_quantity(target_value: float, price: float, symbol: Optiona
         return SNOWBALL_A_SHARE_LOT_SIZE
     return quantity
 
+
+def _should_recalculate_snowball_target(
+    *,
+    has_old_target: bool,
+    old_quantity: int,
+    old_weight: Optional[float],
+    new_weight: float,
+    candidate_quantity: int,
+    threshold_pct: float,
+) -> bool:
+    if not has_old_target or old_weight is None:
+        return True
+    if abs(new_weight - old_weight) >= threshold_pct:
+        return True
+    return safe_int(old_quantity) != safe_int(candidate_quantity)
+
 async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
     url = f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json?symbol={symbol}"
@@ -961,10 +977,17 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
                 continue
             accepted_weight = old_weight if old_weight is not None else 0.0
         else:
-            weight_diff_pct = abs(weight - old_weight) if old_weight is not None else threshold_pct
-            should_recalculate = (not has_old_target) or old_weight is None or weight_diff_pct >= threshold_pct
+            candidate_quantity = _snowball_target_quantity(latest_target_value, price, xq_symbol)
+            should_recalculate = _should_recalculate_snowball_target(
+                has_old_target=has_old_target,
+                old_quantity=old_quantity,
+                old_weight=old_weight,
+                new_weight=weight,
+                candidate_quantity=candidate_quantity,
+                threshold_pct=threshold_pct,
+            )
             if should_recalculate:
-                final_quantity = _snowball_target_quantity(latest_target_value, price, xq_symbol)
+                final_quantity = candidate_quantity
                 accepted_weight = weight
                 if old_quantity != final_quantity or old_weight is None or abs(weight - old_weight) > 1e-9:
                     changed = True
