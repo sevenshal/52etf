@@ -77,6 +77,9 @@ class BrokerSnapshot:
 class SoxlFearStrategyTrader:
     _instance = None
     _lock = threading.Lock()
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+    EASTERN_TZ = ZoneInfo("US/Eastern")
+    UTC_TZ = ZoneInfo("UTC")
     MARKET_OPEN_TIME = dtime(9, 30)
     MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
     VOLUME_PROJECTION_WINDOW_MINUTES = 30
@@ -220,6 +223,22 @@ class SoxlFearStrategyTrader:
         action_label = "买入" if action == "BUY" else "卖出"
         amount = float(quantity or 0) * float(price or 0)
         quote_timestamp = market_snapshot.get("quote_timestamp")
+        cnn_timestamp_text = self._format_notification_datetime(
+            cnn_timestamp,
+            assumed_tz=self.UTC_TZ,
+            secondary_tz=self.SHANGHAI_TZ,
+            secondary_label="上海",
+        )
+        quote_timestamp_text = self._format_notification_datetime(
+            quote_timestamp,
+            assumed_tz=self.EASTERN_TZ,
+            secondary_tz=self.SHANGHAI_TZ,
+            secondary_label="上海",
+        )
+        notification_time_text = self._format_notification_datetime(
+            self._get_notification_time(),
+            assumed_tz=self.SHANGHAI_TZ,
+        )
         body = "\n".join([
             "SOXL 情绪量能策略已产生调仓动作。",
             "",
@@ -233,21 +252,81 @@ class SoxlFearStrategyTrader:
             f"估算金额: {amount:.2f}",
             f"仓位变化: {position_ratio_before:.2f}% -> {position_ratio_after:.2f}%",
             f"CNN 情绪分数: {cnn_score:.2f}",
-            f"CNN 更新时间: {cnn_timestamp or '-'}",
+            f"CNN 更新时间: {cnn_timestamp_text}",
             f"量能倍数: {volume_ratio:.4f}",
             f"原始量能倍数: {raw_volume_ratio:.4f}",
             f"量能来源: {market_snapshot.get('volume_projection_source') or '-'}",
-            f"行情时间: {quote_timestamp or '-'}",
+            f"行情时间: {quote_timestamp_text}",
             f"触发来源: {trigger_source}",
             "",
             f"执行信息: {trade_message}",
-            f"通知时间: {datetime.now().isoformat()}",
+            f"通知时间: {notification_time_text}",
         ])
         send_configured_email(
             "soxl_fear_strategy_rebalance_signal",
             f"SOXL情绪量能策略调仓提醒: {action_label} {symbol} {masked_account_id}#{config_id}",
             body,
         )
+
+    def _get_notification_time(self) -> datetime:
+        return datetime.now(self.SHANGHAI_TZ)
+
+    @staticmethod
+    def _timezone_label(value: datetime) -> str:
+        tzinfo = value.tzinfo
+        zone_key = getattr(tzinfo, "key", None)
+        if zone_key:
+            return str(zone_key)
+        zone_name = value.tzname()
+        return str(zone_name or "UTC")
+
+    @staticmethod
+    def _timezone_offset_label(value: datetime) -> str:
+        offset = value.utcoffset()
+        if offset is None:
+            return "UTC"
+        total_minutes = int(offset.total_seconds() // 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        total_minutes = abs(total_minutes)
+        hours, minutes = divmod(total_minutes, 60)
+        return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+    def _coerce_timezone_aware_datetime(self, value, assumed_tz: ZoneInfo) -> Optional[datetime]:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(assumed_tz)
+        return value.replace(tzinfo=assumed_tz)
+
+    def _format_zoned_datetime(self, value: datetime) -> str:
+        return (
+            f"{value.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({self._timezone_label(value)}, {self._timezone_offset_label(value)})"
+        )
+
+    def _format_notification_datetime(
+        self,
+        value,
+        *,
+        assumed_tz: ZoneInfo,
+        secondary_tz: Optional[ZoneInfo] = None,
+        secondary_label: Optional[str] = None,
+    ) -> str:
+        primary = self._coerce_timezone_aware_datetime(value, assumed_tz)
+        if primary is None:
+            return "-"
+
+        primary_text = self._format_zoned_datetime(primary)
+        if secondary_tz is None:
+            return primary_text
+
+        secondary = primary.astimezone(secondary_tz)
+        secondary_text = self._format_zoned_datetime(secondary)
+        if secondary_text == primary_text:
+            return primary_text
+        if secondary_label:
+            return f"{primary_text} | {secondary_label} {secondary_text}"
+        return f"{primary_text} | {secondary_text}"
 
     def _fetch_latest_cnn_score(self) -> Tuple[float, datetime]:
         scraper = CNNFearGreedIndexScraper()
@@ -278,10 +357,9 @@ class SoxlFearStrategyTrader:
     def _to_eastern_datetime(self, value) -> Optional[datetime]:
         if not isinstance(value, datetime):
             return None
-        eastern = ZoneInfo("US/Eastern")
         if value.tzinfo is not None:
-            return value.astimezone(eastern)
-        return value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(eastern)
+            return value.astimezone(self.EASTERN_TZ)
+        return value.replace(tzinfo=self.SHANGHAI_TZ).astimezone(self.EASTERN_TZ)
 
     def _fallback_volume_completion_ratio(self, now_et: datetime, market_date: date) -> Tuple[float, str]:
         close_time = MarketService.get_us_market_close_time(market_date)
