@@ -357,6 +357,21 @@ def _snowball_target_quantity(target_value: float, price: float, symbol: Optiona
         return SNOWBALL_A_SHARE_LOT_SIZE
     return quantity
 
+
+def _should_recalculate_snowball_target(
+    *,
+    force_recalculate: bool,
+    has_old_target: bool,
+    old_weight: Optional[float],
+    new_weight: float,
+    threshold_pct: float,
+) -> bool:
+    if force_recalculate:
+        return True
+    if not has_old_target or old_weight is None:
+        return True
+    return abs(new_weight - old_weight) >= threshold_pct
+
 async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
     url = f"{XUEQIU_API_BASE_URL}/cube/center/cube/holdSymbols.json?symbol={symbol}"
@@ -961,8 +976,13 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
                 continue
             accepted_weight = old_weight if old_weight is not None else 0.0
         else:
-            weight_diff_pct = abs(weight - old_weight) if old_weight is not None else threshold_pct
-            should_recalculate = (not has_old_target) or old_weight is None or weight_diff_pct >= threshold_pct
+            should_recalculate = _should_recalculate_snowball_target(
+                force_recalculate=trigger_source == "manual",
+                has_old_target=has_old_target,
+                old_weight=old_weight,
+                new_weight=weight,
+                threshold_pct=threshold_pct,
+            )
             if should_recalculate:
                 final_quantity = _snowball_target_quantity(latest_target_value, price, xq_symbol)
                 accepted_weight = weight
