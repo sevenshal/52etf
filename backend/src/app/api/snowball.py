@@ -365,22 +365,13 @@ def _should_recalculate_snowball_target(
     old_weight: Optional[float],
     new_weight: float,
     candidate_quantity: int,
-    price: float,
-    base_value: float,
     threshold_pct: float,
 ) -> bool:
     if not has_old_target or old_weight is None:
         return True
     if abs(new_weight - old_weight) >= threshold_pct:
         return True
-    if safe_int(old_quantity) == safe_int(candidate_quantity):
-        return False
-    if threshold_pct <= 0:
-        return True
-
-    quantity_delta_value = abs(safe_int(candidate_quantity) - safe_int(old_quantity)) * max(safe_float(price), 0.0)
-    allowed_drift_value = max(safe_float(base_value), 0.0) * threshold_pct / 100.0
-    return quantity_delta_value > allowed_drift_value
+    return safe_int(old_quantity) != safe_int(candidate_quantity)
 
 async def fetch_xueqiu_holdings(symbol: str, cookie: str = None) -> List[Dict]:
     """Fetch holdings from Xueqiu API"""
@@ -993,8 +984,6 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
                 old_weight=old_weight,
                 new_weight=weight,
                 candidate_quantity=candidate_quantity,
-                price=price,
-                base_value=base_value,
                 threshold_pct=threshold_pct,
             )
             if should_recalculate:

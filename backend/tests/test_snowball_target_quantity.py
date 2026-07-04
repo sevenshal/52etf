@@ -20,7 +20,7 @@ class SnowballTargetQuantityTest(TestCase):
     def test_star_market_existing_100_lot_rounding_below_threshold_is_unchanged(self):
         self.assertEqual(100, _snowball_target_quantity(510, 10, "688001.SH"))
 
-    def test_recalculates_when_lot_delta_value_exceeds_tracking_error_budget(self):
+    def test_recalculates_when_asset_change_crosses_lot_boundary(self):
         self.assertTrue(
             _should_recalculate_snowball_target(
                 has_old_target=True,
@@ -28,22 +28,6 @@ class SnowballTargetQuantityTest(TestCase):
                 old_weight=10.27,
                 new_weight=10.27,
                 candidate_quantity=200,
-                price=390.0,
-                base_value=700000.0,
-                threshold_pct=5.0,
-            )
-        )
-
-    def test_keeps_target_when_lot_delta_value_is_within_tracking_error_budget(self):
-        self.assertFalse(
-            _should_recalculate_snowball_target(
-                has_old_target=True,
-                old_quantity=100,
-                old_weight=2.5,
-                new_weight=2.5,
-                candidate_quantity=200,
-                price=3.5,
-                base_value=700000.0,
                 threshold_pct=5.0,
             )
         )
@@ -56,8 +40,6 @@ class SnowballTargetQuantityTest(TestCase):
                 old_weight=10.27,
                 new_weight=10.28,
                 candidate_quantity=100,
-                price=390.0,
-                base_value=700000.0,
                 threshold_pct=5.0,
             )
         )
