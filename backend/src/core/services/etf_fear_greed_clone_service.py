@@ -158,7 +158,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         min_periods: int = 120,
         include_history: bool = False,
         history_points: int = 180,
-        max_holdings: int = 40,
+        max_holdings: int = 0,
         use_historical_holdings: bool = True,
     ) -> Dict[str, Any]:
         etf_symbol = self._normalize_etf_symbol(symbol)
@@ -254,7 +254,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         history_days: int = 1200,
         score_window: int = 252,
         min_periods: int = 120,
-        max_holdings: int = 40,
+        max_holdings: int = 0,
         use_historical_holdings: bool = True,
     ) -> Dict[str, Any]:
         etf_symbol = self._normalize_etf_symbol(symbol)
@@ -330,7 +330,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         history_days: int = 550,
         score_window: int = 252,
         min_periods: int = 120,
-        max_holdings: int = 40,
+        max_holdings: int = 0,
         include_extended: bool = True,
         include_holdings_quotes: bool = True,
         cache_ttl_seconds: int = REALTIME_CACHE_TTL_SECONDS,
@@ -383,7 +383,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         history_days: int = 550,
         score_window: int = 252,
         min_periods: int = 120,
-        max_holdings: int = 40,
+        max_holdings: int = 0,
         include_extended: bool = True,
         include_holdings_quotes: bool = True,
     ) -> Dict[str, Any]:
@@ -549,7 +549,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         history_days: int = 1200,
         score_window: int = 252,
         min_periods: int = 120,
-        max_holdings: int = 40,
+        max_holdings: int = 0,
         use_historical_holdings: bool = True,
     ) -> Dict[str, Any]:
         result = self.calculate_history(
@@ -2109,7 +2109,7 @@ def main() -> None:
     parser.add_argument("--score-window", type=int, default=252)
     parser.add_argument("--min-periods", type=int, default=120)
     parser.add_argument("--include-history", action="store_true")
-    parser.add_argument("--max-holdings", type=int, default=40)
+    parser.add_argument("--max-holdings", type=int, default=0)
     parser.add_argument("--backfill-db", action="store_true", help="Calculate all valid history and store it in SQLite.")
     parser.add_argument(
         "--use-current-holdings",
