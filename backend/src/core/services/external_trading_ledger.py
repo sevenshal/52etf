@@ -26,6 +26,7 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
     aggregate_execution_policy,
+    normalize_min_order_amount,
     resolve_execution_policy,
 )
 
@@ -543,6 +544,7 @@ def serialize_sub_account(sub_account: Optional[ExternalTradingSubAccount]) -> O
         "executor_order_timeout_seconds": sub_account.executor_order_timeout_seconds,
         "executor_max_replace_count": sub_account.executor_max_replace_count,
         "executor_max_slippage_pct": sub_account.executor_max_slippage_pct,
+        "executor_min_order_amount": getattr(sub_account, "executor_min_order_amount", None),
         "executor_clip_sell_to_available": True,
         "executor_price_level_sequence": sub_account.executor_price_level_sequence,
         "executor_order_timeout_seconds_sequence": getattr(sub_account, "executor_order_timeout_seconds_sequence", None),
@@ -4146,6 +4148,39 @@ def _reference_price_for_symbol(reference_prices: Dict[str, float], symbol: str)
     )
 
 
+def _estimate_demand_notional(
+    *,
+    target: ExternalTradingTargetPosition,
+    ledger_position: Optional[ExternalTradingLedgerPosition],
+    quantity: int,
+) -> Tuple[float, Optional[float], Optional[str]]:
+    reference_price = safe_float(getattr(target, "reference_price", None), None)
+    if reference_price and reference_price > 0 and quantity > 0:
+        return round_money(reference_price * quantity), reference_price, getattr(target, "reference_price_source", None) or "target_reference_price"
+    market_price = safe_float(getattr(ledger_position, "market_price", None), None)
+    if market_price and market_price > 0 and quantity > 0:
+        return round_money(market_price * quantity), market_price, "ledger_market_price"
+    avg_cost = safe_float(getattr(ledger_position, "avg_cost", None), None)
+    if avg_cost and avg_cost > 0 and quantity > 0:
+        return round_money(avg_cost * quantity), avg_cost, "ledger_avg_cost"
+    return 0.0, None, None
+
+
+def _should_skip_demand_for_min_order_amount(
+    *,
+    side: str,
+    target_quantity: int,
+    quantity: int,
+    estimated_notional: float,
+    min_order_amount: float,
+) -> bool:
+    if quantity <= 0 or min_order_amount <= 0 or estimated_notional <= 0:
+        return False
+    if str(side or "").upper() == "SELL" and safe_int(target_quantity) <= 0:
+        return False
+    return estimated_notional < min_order_amount
+
+
 def collect_internal_cross_reference_symbols(plan: Optional[Dict[str, Any]]) -> List[str]:
     symbols: List[str] = []
     for cross in (plan or {}).get("internal_crosses") or []:
@@ -4285,6 +4320,19 @@ def _build_demand_rows(
             sub_account,
             fallback=execution_policy_fallback,
         )
+        min_order_amount = normalize_min_order_amount(execution_policy.get("min_order_amount"))
+        estimated_notional, estimated_price, estimated_price_source = _estimate_demand_notional(
+            target=target,
+            ledger_position=ledger_position,
+            quantity=quantity,
+        )
+        skipped_for_min_order_amount = _should_skip_demand_for_min_order_amount(
+            side=side,
+            target_quantity=target_quantity,
+            quantity=quantity,
+            estimated_notional=estimated_notional,
+            min_order_amount=min_order_amount,
+        )
         blocked_order = None
         for candidate in block_by_key.get((sub_account.id, symbol, side), []):
             if _block_matches_demand(
@@ -4327,13 +4375,24 @@ def _build_demand_rows(
             "target_updated_at": target.updated_at.isoformat() if target.updated_at else None,
             "reference_price": safe_float(target.reference_price, None),
             "reference_price_source": target.reference_price_source,
+            "estimated_notional": estimated_notional,
+            "estimated_notional_price": estimated_price,
+            "estimated_notional_price_source": estimated_price_source,
             "execution_policy": execution_policy,
             "price_level": execution_policy.get("price_level"),
             "lot_size": execution_policy.get("lot_size"),
             "order_timeout_seconds": execution_policy.get("order_timeout_seconds"),
             "order_timeout_seconds_sequence": execution_policy.get("order_timeout_seconds_sequence"),
             "max_replace_count": execution_policy.get("max_replace_count"),
+            "min_order_amount": min_order_amount,
             "price_level_sequence": execution_policy.get("price_level_sequence"),
+            "skipped": skipped_for_min_order_amount,
+            "skipped_reason": "SKIPPED_MIN_ORDER_AMOUNT" if skipped_for_min_order_amount else None,
+            "skipped_message": (
+                f"预计金额 {estimated_notional:.2f} 低于最小下单金额 {min_order_amount:.2f}"
+                if skipped_for_min_order_amount
+                else None
+            ),
             "blocked": blocked_order is not None,
             "blocked_reason": blocked_order.cancel_reason if blocked_order else None,
             "blocked_status": blocked_order.status if blocked_order else None,
@@ -4379,7 +4438,28 @@ def build_netted_target_execution_plan(
     )
     demands_by_symbol: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     blocked_demands = []
+    skipped = []
     for demand in demands:
+        if demand.get("skipped"):
+            skipped.append({
+                "account_id": demand.get("account_id"),
+                "sub_account_id": demand.get("sub_account_id"),
+                "sub_account_name": demand.get("sub_account_name"),
+                "strategy_type": demand.get("strategy_type"),
+                "strategy_config_id": demand.get("strategy_config_id"),
+                "symbol": demand.get("symbol"),
+                "side": demand.get("side"),
+                "quantity": demand.get("quantity"),
+                "target_quantity": demand.get("target_quantity"),
+                "effective_quantity": demand.get("effective_quantity"),
+                "estimated_notional": demand.get("estimated_notional"),
+                "estimated_notional_price": demand.get("estimated_notional_price"),
+                "estimated_notional_price_source": demand.get("estimated_notional_price_source"),
+                "min_order_amount": demand.get("min_order_amount"),
+                "reason": demand.get("skipped_reason"),
+                "message": demand.get("skipped_message"),
+            })
+            continue
         if demand.get("blocked"):
             blocked_demands.append(demand)
             continue
@@ -4388,7 +4468,6 @@ def build_netted_target_execution_plan(
 
     internal_crosses = []
     external_orders = []
-    skipped = []
     for symbol in sorted(demands_by_symbol.keys()):
         bucket = demands_by_symbol[symbol]
         buy_demands = bucket["BUY"]

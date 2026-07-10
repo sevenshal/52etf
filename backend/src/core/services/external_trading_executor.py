@@ -162,6 +162,7 @@ def _load_accounts(
                 "executor_order_timeout_seconds_sequence": getattr(row, "executor_order_timeout_seconds_sequence", None),
                 "executor_max_replace_count": row.executor_max_replace_count,
                 "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
+                "executor_min_order_amount": getattr(row, "executor_min_order_amount", 0.0),
                 "executor_clip_sell_to_available": True,
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }
