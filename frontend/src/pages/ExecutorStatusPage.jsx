@@ -62,6 +62,7 @@ const formatPolicy = policy => {
   if (!policy) return '-';
   const maxReplace = policy.max_replace_count ?? policy.executor_max_replace_count;
   const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
+  const minOrderAmount = Number(policy.min_order_amount ?? policy.executor_min_order_amount ?? 0);
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const timeoutSequence = timeoutSequenceToText(
     policy.order_timeout_seconds_sequence
@@ -70,7 +71,7 @@ const formatPolicy = policy => {
         ? [policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds]
         : undefined)
   );
-  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}%`;
+  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / 最低金额${minOrderAmount > 0 ? Number(minOrderAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '关闭'}`;
 };
 const roleLabel = value => {
   if (value === 'PARENT') return '父单';

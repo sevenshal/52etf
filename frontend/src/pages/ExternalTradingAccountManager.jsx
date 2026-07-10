@@ -142,6 +142,7 @@ const formatPolicy = policy => {
   if (!policy) return '-';
   const maxReplace = policy.max_replace_count ?? policy.executor_max_replace_count;
   const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
+  const minOrderAmount = Number(policy.min_order_amount ?? policy.executor_min_order_amount ?? 0);
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const timeoutSequence = timeoutSequenceToText(
     policy.order_timeout_seconds_sequence
@@ -150,7 +151,7 @@ const formatPolicy = policy => {
         ? [policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds]
         : DEFAULT_TIMEOUT_SEQUENCE)
   );
-  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}%`;
+  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / 最低金额${minOrderAmount > 0 ? formatNumber(minOrderAmount, 2) : '关闭'}`;
 };
 const renderTradeFeeSummary = (_, record) => {
   const summary = record?.trade_fee_summary || {};
@@ -353,6 +354,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_order_timeout_seconds_sequence: timeoutSequenceToText(DEFAULT_TIMEOUT_SEQUENCE),
       executor_max_replace_count: 3,
       executor_max_slippage_pct: 0.5,
+      executor_min_order_amount: 0,
       executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
       commission_rate_pct: 0.025,
       min_commission: 5,
@@ -375,6 +377,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       ),
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
       executor_max_slippage_pct: record.executor_max_slippage_pct ?? 0.5,
+      executor_min_order_amount: record.executor_min_order_amount ?? 0,
       executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
       commission_rate_pct: record.commission_rate_pct ?? 0.025,
       min_commission: record.min_commission ?? 5,
@@ -484,6 +487,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_order_timeout_seconds_sequence: '',
       executor_max_replace_count: null,
       executor_max_slippage_pct: null,
+      executor_min_order_amount: null,
       executor_price_level_sequence: ''
     });
     setSubModalVisible(true);
@@ -503,6 +507,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         : '',
       executor_max_replace_count: subAccount.executor_max_replace_count,
       executor_max_slippage_pct: subAccount.executor_max_slippage_pct,
+      executor_min_order_amount: subAccount.executor_min_order_amount,
       executor_price_level_sequence: Array.isArray(subAccount.executor_price_level_sequence)
         ? sequenceToText(subAccount.executor_price_level_sequence)
         : ''
@@ -546,6 +551,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         executor_order_timeout_seconds_sequence: timeoutSequence,
         executor_max_replace_count: values.executor_max_replace_count ?? null,
         executor_max_slippage_pct: values.executor_max_slippage_pct ?? null,
+        executor_min_order_amount: values.executor_min_order_amount ?? null,
         executor_price_level_sequence: priceSequence
       };
       if (editingSubAccount) {
@@ -1053,6 +1059,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           <Form.Item name="executor_max_slippage_pct" label="最大滑点 (%)" rules={[{ required: true, message: '请输入最大滑点' }]}>
             <InputNumber min={0} max={20} step={0.1} style={{ width: '100%' }} />
           </Form.Item>
+          <Form.Item name="executor_min_order_amount" label="单笔最低金额" rules={[{ required: true, message: '请输入单笔最低金额' }]}>
+            <InputNumber min={0} step={100} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
           <Form.Item name="executor_lot_size" label="默认最小交易单位" rules={[{ required: true, message: '请输入默认最小交易单位' }]}>
             <InputNumber min={1} step={100} style={{ width: '100%' }} />
           </Form.Item>
@@ -1115,6 +1124,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           </Form.Item>
           <Form.Item name="executor_max_slippage_pct" label="最大滑点 (%)">
             <InputNumber min={0} max={20} step={0.1} style={{ width: '100%' }} placeholder="继承账户默认" />
+          </Form.Item>
+          <Form.Item name="executor_min_order_amount" label="单笔最低金额">
+            <InputNumber min={0} step={100} precision={2} style={{ width: '100%' }} placeholder="继承账户默认，0 表示不限制" />
           </Form.Item>
           <Form.Item name="executor_lot_size" label="最小交易单位">
             <InputNumber min={1} step={100} style={{ width: '100%' }} placeholder="继承账户默认" />
