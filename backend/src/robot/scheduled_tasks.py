@@ -50,7 +50,7 @@ ETF_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 ETF_FEAR_GREED_DEFAULT_HISTORY_DAYS = 390
 ETF_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
 ETF_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
-ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS = 40
+ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS = 0
 A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 550
 A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
@@ -1064,16 +1064,6 @@ class ScheduledTaskManager:
                         step=1,
                         suffix="天",
                         description="未填写输出开始日期时，回写最近多少个自然日。",
-                    ),
-                    TaskParameterDefinition(
-                        key="max_holdings",
-                        label="最多持仓",
-                        value_type="integer",
-                        default=ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS,
-                        min_value=0,
-                        max_value=500,
-                        step=1,
-                        description="单个 ETF 参与成分股强弱/广度计算的最大持仓数；0 表示不限制。",
                     ),
                 ),
             ),

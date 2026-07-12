@@ -4,6 +4,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -276,6 +277,54 @@ class SoxlFearExternalTradingTest(TestCase):
             self.assertEqual("SUCCESS", persisted_config.last_run_status)
         finally:
             db.close()
+
+    def test_send_rebalance_notification_includes_timezone_context(self):
+        trader = SoxlFearStrategyTrader()
+        fixed_notification_time = datetime(2026, 7, 3, 3, 58, 34, 442533, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        with patch(
+            "src.robot.soxl_fear_strategy_trader.send_configured_email"
+        ) as mock_send, patch.object(
+            SoxlFearStrategyTrader,
+            "_get_notification_time",
+            return_value=fixed_notification_time,
+        ):
+            trader._send_rebalance_notification(
+                config_id=2,
+                masked_account_id="***ijkl",
+                account_type="external",
+                symbol="SOXL.US",
+                trigger_source="auto",
+                action="BUY",
+                quantity=196,
+                price=179.4050,
+                position_ratio_before=56.52,
+                position_ratio_after=99.79,
+                cnn_score=30.86,
+                cnn_timestamp=datetime(2026, 7, 2, 19, 52, 0),
+                volume_ratio=1.4203,
+                raw_volume_ratio=1.3978,
+                market_snapshot={
+                    "volume_projection_source": "fallback_close_curve",
+                    "quote_timestamp": datetime(2026, 7, 2, 15, 57, 33, tzinfo=ZoneInfo("US/Eastern")),
+                },
+                trade_message="外部目标仓位已同步",
+            )
+
+        self.assertEqual(1, mock_send.call_count)
+        _, _, body = mock_send.call_args[0]
+        self.assertIn(
+            "CNN 更新时间: 2026-07-02 19:52:00 (UTC, UTC+00:00) | 上海 2026-07-03 03:52:00 (Asia/Shanghai, UTC+08:00)",
+            body,
+        )
+        self.assertIn(
+            "行情时间: 2026-07-02 15:57:33 (US/Eastern, UTC-04:00) | 上海 2026-07-03 03:57:33 (Asia/Shanghai, UTC+08:00)",
+            body,
+        )
+        self.assertIn(
+            "通知时间: 2026-07-03 03:58:34 (Asia/Shanghai, UTC+08:00)",
+            body,
+        )
 
     def test_persist_run_result_retries_sqlite_lock(self):
         engine = create_engine("sqlite:///:memory:")

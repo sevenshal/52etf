@@ -56,7 +56,6 @@ async def get_etf_fear_greed_clone(
     min_periods: int = 120,
     include_history: bool = False,
     history_points: int = 180,
-    max_holdings: int = 40,
     use_historical_holdings: bool = True,
 ):
     """获取ETF版本的独立复刻恐贪指数。
@@ -75,7 +74,6 @@ async def get_etf_fear_greed_clone(
                 min_periods=min_periods,
                 include_history=include_history,
                 history_points=history_points,
-                max_holdings=max_holdings,
                 use_historical_holdings=use_historical_holdings,
             )
         )
@@ -89,7 +87,6 @@ async def get_etf_fear_greed_clone_realtime(
     history_days: int = 550,
     score_window: int = 252,
     min_periods: int = 120,
-    max_holdings: int = 40,
     include_extended: bool = True,
     include_holdings_quotes: bool = True,
 ):
@@ -108,7 +105,6 @@ async def get_etf_fear_greed_clone_realtime(
                 history_days=history_days,
                 score_window=score_window,
                 min_periods=min_periods,
-                max_holdings=max_holdings,
                 include_extended=include_extended,
                 include_holdings_quotes=include_holdings_quotes,
             )
@@ -168,7 +164,6 @@ async def backfill_etf_fear_greed_clone(
     history_days: int = 1200,
     score_window: int = 252,
     min_periods: int = 120,
-    max_holdings: int = 40,
     use_historical_holdings: bool = True,
 ):
     """计算 ETF 恐贪复刻指数历史并写入 SQLite。"""
@@ -182,7 +177,6 @@ async def backfill_etf_fear_greed_clone(
                 history_days=history_days,
                 score_window=score_window,
                 min_periods=min_periods,
-                max_holdings=max_holdings,
                 use_historical_holdings=use_historical_holdings,
             )
         )

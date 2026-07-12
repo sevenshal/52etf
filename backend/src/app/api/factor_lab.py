@@ -124,6 +124,7 @@ logger = logging.getLogger(__name__)
 
 ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
 XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
+XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS = 5
 try:
     FACTOR_LIVE_ALERT_COOLDOWN_SECONDS = int(os.getenv("FACTOR_LIVE_ALERT_COOLDOWN_SECONDS", "1800"))
 except ValueError:
@@ -1364,6 +1365,8 @@ def _empty_xueqiu_top_holdings_latest(active_only: bool, limit: int, reason: str
         "active_only": active_only,
         "limit": limit,
         "snapshot_date": None,
+        "rank_compare_snapshot_date": None,
+        "rank_compare_trading_days": XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS,
         "snapshot_at": None,
         "cube_count": 0,
         "source_cube_count": 0,
@@ -1389,6 +1392,21 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
                 SELECT MAX(snapshot_date) AS snapshot_date
                 FROM cube_rows
             ),
+            rank_dates AS (
+                SELECT DISTINCT snapshot_date
+                FROM filtered_holdings
+            ),
+            compare_snapshot AS (
+                SELECT snapshot_date
+                FROM (
+                    SELECT
+                        snapshot_date,
+                        ROW_NUMBER() OVER (ORDER BY snapshot_date DESC) AS snapshot_rank_desc
+                    FROM rank_dates
+                    WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+                ) ranked_dates
+                WHERE snapshot_rank_desc = {XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
+            ),
             latest_cube_summary AS (
                 SELECT
                     cube_rows.snapshot_date,
@@ -1411,6 +1429,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             )
             SELECT
                 latest_snapshot.snapshot_date,
+                compare_snapshot.snapshot_date AS rank_compare_snapshot_date,
                 latest_cube_summary.snapshot_at,
                 COALESCE(filtered_latest_summary.cube_count, 0) AS cube_count,
                 COALESCE(filtered_latest_summary.holding_row_count, 0) AS holding_row_count,
@@ -1418,6 +1437,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
                 COALESCE(latest_cube_summary.active_cube_count, 0) AS active_cube_count,
                 latest_cube_summary.active_rebalance_days
             FROM latest_snapshot
+            LEFT JOIN compare_snapshot ON TRUE
             LEFT JOIN latest_cube_summary ON latest_cube_summary.snapshot_date = latest_snapshot.snapshot_date
             LEFT JOIN filtered_latest_summary ON filtered_latest_summary.snapshot_date = latest_snapshot.snapshot_date
             """,
@@ -1434,6 +1454,21 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             latest_snapshot AS (
                 SELECT MAX(snapshot_date) AS snapshot_date
                 FROM cube_rows
+            ),
+            rank_dates AS (
+                SELECT DISTINCT snapshot_date
+                FROM filtered_holdings
+            ),
+            compare_snapshot AS (
+                SELECT snapshot_date
+                FROM (
+                    SELECT
+                        snapshot_date,
+                        ROW_NUMBER() OVER (ORDER BY snapshot_date DESC) AS snapshot_rank_desc
+                    FROM rank_dates
+                    WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+                ) ranked_dates
+                WHERE snapshot_rank_desc = {XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
             ),
             snapshot_holdings AS (
                 SELECT filtered_holdings.*
@@ -1467,10 +1502,43 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
                     ) AS composite_rank,
                     *
                 FROM stock_summary
+            ),
+            compare_holdings AS (
+                SELECT filtered_holdings.*
+                FROM filtered_holdings
+                JOIN compare_snapshot ON filtered_holdings.snapshot_date = compare_snapshot.snapshot_date
+            ),
+            compare_snapshot_summary AS (
+                SELECT COUNT(DISTINCT cube_symbol) AS cube_count
+                FROM compare_holdings
+            ),
+            compare_stock_summary AS (
+                SELECT
+                    stock_symbol,
+                    COUNT(DISTINCT cube_symbol) AS holding_cube_count,
+                    SUM(weight_pct) AS total_weight_pct
+                FROM compare_holdings
+                CROSS JOIN compare_snapshot_summary
+                GROUP BY stock_symbol
+            ),
+            compare_ranked AS (
+                SELECT
+                    ROW_NUMBER() OVER (
+                        ORDER BY total_weight_pct DESC, holding_cube_count DESC, stock_symbol DESC
+                    ) AS composite_rank,
+                    *
+                FROM compare_stock_summary
             )
-            SELECT *
+            SELECT
+                ranked.*,
+                compare_ranked.composite_rank AS rank_5d_ago,
+                CASE
+                    WHEN compare_ranked.composite_rank IS NULL THEN NULL
+                    ELSE compare_ranked.composite_rank - ranked.composite_rank
+                END AS rank_change_5d
             FROM ranked
-            ORDER BY composite_rank
+            LEFT JOIN compare_ranked ON compare_ranked.stock_symbol = ranked.stock_symbol
+            ORDER BY ranked.composite_rank
             LIMIT ?
             """,
             [normalized_limit],
@@ -1480,6 +1548,8 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             "active_only": active_only,
             "limit": normalized_limit,
             "snapshot_date": snapshot_date,
+            "rank_compare_snapshot_date": metadata.get("rank_compare_snapshot_date"),
+            "rank_compare_trading_days": XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS,
             "snapshot_at": metadata.get("snapshot_at"),
             "cube_count": metadata.get("cube_count") or 0,
             "holding_row_count": metadata.get("holding_row_count") or 0,
