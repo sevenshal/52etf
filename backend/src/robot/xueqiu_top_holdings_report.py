@@ -68,6 +68,23 @@ BUFFER_EXECUTION_WEIGHT_RULE = (
     f"最小换手：保留成分偏离等权不超过{BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT:g}个百分点时沿用当前权重，"
     "卖出释放权重分配给补位成分"
 )
+RANK_ACCELERATION_TARGET_CUBE_SYMBOL = "ZH3644546"
+RANK_ACCELERATION_COMPARE_TRADING_DAYS = 5
+RANK_ACCELERATION_TOP_N = 10
+RANK_ACCELERATION_SELL_RANK = 15
+RANK_ACCELERATION_CURRENT_RANK_LIMIT = 50
+RANK_ACCELERATION_MIN_HOLDING_CUBES = 8
+RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE = 3
+RANK_ACCELERATION_MIN_RANK_CHANGE = 20
+RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT = 20
+RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES = 10
+RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT = 80
+RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES = 5
+RANK_ACCELERATION_MAX_SEGMENT_POSITIONS = 3
+RANK_ACCELERATION_MAX_REPLACEMENTS = 2
+RANK_ACCELERATION_STRATEGY_NAME = (
+    "5日排名加速Top10等权 + 持仓广度确认 + 跌出加速Top15才卖 + 每次最多替换2只"
+)
 ACTIVE_REBALANCE_LOOKBACK_DAYS = 360
 ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
 ACTIVE_REBALANCE_ACTIVITY_TYPE = "manager_user_rebalance"
@@ -2034,6 +2051,7 @@ async def fetch_target_cube_holdings(
 def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
     stock_to_cubes: Dict[str, Set[str]] = defaultdict(set)
     stock_names: Dict[str, str] = {}
+    stock_segments: Dict[str, str] = {}
     stock_total_weight: Dict[str, float] = defaultdict(float)
     stock_cube_examples: Dict[str, List[str]] = defaultdict(list)
     holding_rows: List[Dict[str, Any]] = []
@@ -2057,6 +2075,11 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
             if not symbol or weight is None or weight <= 0:
                 continue
             name = get_holding_name(holding)
+            segment_name = str(
+                holding.get("segment_name")
+                or holding.get("segmentName")
+                or ""
+            ).strip()
             holding_rows.append(
                 {
                     "cube_symbol": result.cube.symbol,
@@ -2064,6 +2087,7 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
                     "year_rank": result.cube.year_rank,
                     "stock_symbol": symbol,
                     "stock_name": name,
+                    "segment_name": segment_name,
                     "is_cash": False,
                     "weight_pct": weight,
                 }
@@ -2076,6 +2100,8 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
             stock_total_weight[symbol] += weight
             if name and symbol not in stock_names:
                 stock_names[symbol] = name
+            if segment_name and symbol not in stock_segments:
+                stock_segments[symbol] = segment_name
             if len(stock_cube_examples[symbol]) < 5:
                 stock_cube_examples[symbol].append(result.cube.cube_name or result.cube.symbol)
 
@@ -2112,6 +2138,7 @@ def aggregate_holdings(results: Iterable[CubeFetchResult]) -> Dict[str, Any]:
             {
                 "stock_symbol": symbol,
                 "stock_name": CASH_NAME if is_cash else stock_names.get(symbol, ""),
+                "segment_name": CASH_NAME if is_cash else stock_segments.get(symbol, ""),
                 "is_cash": is_cash,
                 "holding_cube_count": cube_count,
                 "holding_cube_ratio_pct": cube_count / success_count * 100.0 if success_count else None,
@@ -2569,6 +2596,409 @@ def build_equal_top10_top12_buffer_plan(
     }
 
 
+def load_xueqiu_rank_comparison_snapshot(
+    *,
+    current_snapshot_date: date,
+    trading_days: int = RANK_ACCELERATION_COMPARE_TRADING_DAYS,
+    active_only: bool = True,
+) -> Dict[str, Any]:
+    """Load the ranked holdings snapshot N prior trading snapshots before the current run."""
+    normalized_days = max(1, int(trading_days or RANK_ACCELERATION_COMPARE_TRADING_DAYS))
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+    try:
+        table_exists = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_name = ?
+            """,
+            [XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE],
+        ).fetchone()[0]
+        if not table_exists:
+            return {
+                "available": False,
+                "reason": "snapshot_table_missing",
+                "compare_snapshot_date": None,
+                "trading_days": normalized_days,
+                "items": [],
+                "by_symbol": {},
+            }
+
+        compare_row = connection.execute(
+            f"""
+            SELECT snapshot_date
+            FROM (
+                SELECT
+                    snapshot_date,
+                    ROW_NUMBER() OVER (ORDER BY snapshot_date DESC) AS snapshot_rank_desc
+                FROM (
+                    SELECT DISTINCT snapshot_date
+                    FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+                    WHERE snapshot_date < ?
+                      {"AND COALESCE(is_active, FALSE)" if active_only else ""}
+                ) snapshot_dates
+            ) ranked_dates
+            WHERE snapshot_rank_desc = ?
+            """,
+            [current_snapshot_date, normalized_days],
+        ).fetchone()
+        if not compare_row:
+            return {
+                "available": False,
+                "reason": "comparison_snapshot_missing",
+                "compare_snapshot_date": None,
+                "trading_days": normalized_days,
+                "items": [],
+                "by_symbol": {},
+            }
+
+        compare_snapshot_date = compare_row[0]
+        compare_snapshot_date_label = (
+            compare_snapshot_date.isoformat()
+            if hasattr(compare_snapshot_date, "isoformat")
+            else str(compare_snapshot_date)
+        )
+        active_filter_sql = "AND COALESCE(is_active, FALSE)" if active_only else ""
+        cursor = connection.execute(
+            f"""
+            WITH base_holdings AS (
+                SELECT
+                    cube_symbol,
+                    stock_symbol,
+                    stock_name,
+                    segment_name,
+                    CAST(weight_pct AS DOUBLE) AS weight_pct
+                FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+                WHERE snapshot_date = ?
+                  AND weight_pct IS NOT NULL
+                  AND weight_pct > 0
+                  {active_filter_sql}
+            ),
+            cube_weights AS (
+                SELECT cube_symbol, SUM(weight_pct) AS stock_weight_pct
+                FROM base_holdings
+                GROUP BY cube_symbol
+            ),
+            cash_holdings AS (
+                SELECT
+                    cube_symbol,
+                    '{CASH_SYMBOL}' AS stock_symbol,
+                    '{CASH_NAME}' AS stock_name,
+                    '{CASH_NAME}' AS segment_name,
+                    GREATEST(0.0, 100.0 - stock_weight_pct) AS weight_pct
+                FROM cube_weights
+                WHERE GREATEST(0.0, 100.0 - stock_weight_pct) > 0.005
+            ),
+            holding_union AS (
+                SELECT cube_symbol, stock_symbol, stock_name, segment_name, weight_pct
+                FROM base_holdings
+                UNION ALL
+                SELECT cube_symbol, stock_symbol, stock_name, segment_name, weight_pct
+                FROM cash_holdings
+            ),
+            stock_summary AS (
+                SELECT
+                    stock_symbol,
+                    ANY_VALUE(stock_name) AS stock_name,
+                    ANY_VALUE(segment_name) AS segment_name,
+                    COUNT(DISTINCT cube_symbol) AS holding_cube_count,
+                    SUM(weight_pct) AS total_weight_pct
+                FROM holding_union
+                GROUP BY stock_symbol
+            ),
+            ranked AS (
+                SELECT
+                    ROW_NUMBER() OVER (
+                        ORDER BY total_weight_pct DESC, holding_cube_count DESC, stock_symbol DESC
+                    ) AS composite_rank,
+                    *
+                FROM stock_summary
+            )
+            SELECT *
+            FROM ranked
+            ORDER BY composite_rank
+            """,
+            [compare_snapshot_date],
+        )
+        columns = [column[0] for column in cursor.description or []]
+        items = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        by_symbol = {
+            str(item.get("stock_symbol") or ""): item
+            for item in items
+            if item.get("stock_symbol")
+        }
+        return {
+            "available": True,
+            "reason": None,
+            "compare_snapshot_date": compare_snapshot_date_label,
+            "trading_days": normalized_days,
+            "items": items,
+            "by_symbol": by_symbol,
+        }
+    finally:
+        connection.close()
+
+
+def build_rank_acceleration_buffer_plan(
+    *,
+    ranking: List[Dict[str, Any]],
+    comparison_snapshot: Dict[str, Any],
+    current_holdings: List[Dict[str, Any]],
+    top_n: int = RANK_ACCELERATION_TOP_N,
+    sell_rank: int = RANK_ACCELERATION_SELL_RANK,
+    max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
+    max_replacements: int = RANK_ACCELERATION_MAX_REPLACEMENTS,
+) -> Dict[str, Any]:
+    if not comparison_snapshot.get("available"):
+        raise RuntimeError(
+            "Rank acceleration comparison snapshot unavailable: "
+            f"{comparison_snapshot.get('reason') or 'unknown'}"
+        )
+
+    normalized_top_n = max(1, int(top_n or RANK_ACCELERATION_TOP_N))
+    normalized_sell_rank = max(normalized_top_n, int(sell_rank or RANK_ACCELERATION_SELL_RANK))
+    comparison_by_symbol = comparison_snapshot.get("by_symbol") or {}
+    comparison_universe_count = len(comparison_snapshot.get("items") or [])
+    current_items = extract_current_target_holdings(current_holdings)
+    current_by_symbol = {item["stock_symbol"]: item for item in current_items}
+    current_symbols = [item["stock_symbol"] for item in current_items]
+    current_symbol_set = set(current_symbols)
+    enriched_items: List[Dict[str, Any]] = []
+
+    for index, ranking_item in enumerate(ranking, start=1):
+        symbol = normalize_xueqiu_symbol(ranking_item.get("stock_symbol"))
+        if not symbol or not to_raw_xueqiu_symbol(symbol):
+            continue
+        item = dict(ranking_item)
+        item["stock_symbol"] = symbol
+        current_rank = safe_int(item.get("composite_rank")) or index
+        current_holding_cubes = safe_int(item.get("holding_cube_count")) or 0
+        current_total_weight = safe_float(item.get("total_weight_pct")) or 0.0
+        previous = comparison_by_symbol.get(symbol)
+        is_new = previous is None
+        previous_rank = safe_int((previous or {}).get("composite_rank"))
+        previous_holding_cubes = safe_int((previous or {}).get("holding_cube_count")) or 0
+        previous_total_weight = safe_float((previous or {}).get("total_weight_pct")) or 0.0
+        effective_previous_rank = previous_rank or (comparison_universe_count + 1)
+        effective_rank_change = effective_previous_rank - current_rank
+        holding_cube_change = current_holding_cubes - previous_holding_cubes
+        total_weight_change = current_total_weight - previous_total_weight
+        strong_new_entry = (
+            is_new
+            and current_rank <= RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT
+            and current_holding_cubes >= RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES
+        )
+        buy_eligible = (
+            current_rank <= RANK_ACCELERATION_CURRENT_RANK_LIMIT
+            and current_holding_cubes >= RANK_ACCELERATION_MIN_HOLDING_CUBES
+            and holding_cube_change >= RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE
+            and total_weight_change > 0
+            and (
+                strong_new_entry
+                or (not is_new and effective_rank_change >= RANK_ACCELERATION_MIN_RANK_CHANGE)
+            )
+        )
+        retain_eligible = (
+            current_rank <= RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT
+            and current_holding_cubes >= RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES
+            and holding_cube_change > 0
+            and total_weight_change > 0
+            and effective_rank_change > 0
+        )
+        item.update(
+            {
+                "rank_compare_snapshot_date": comparison_snapshot.get("compare_snapshot_date"),
+                "rank_5d_ago": previous_rank,
+                "rank_change_5d": None if is_new else effective_rank_change,
+                "acceleration_rank_change_5d": effective_rank_change,
+                "holding_cube_count_5d_ago": previous_holding_cubes,
+                "holding_cube_count_change_5d": holding_cube_change,
+                "total_weight_pct_5d_ago": previous_total_weight,
+                "total_weight_change_5d": total_weight_change,
+                "is_new_5d": is_new,
+                "strong_new_entry": strong_new_entry,
+                "buy_eligible": buy_eligible,
+                "retain_eligible": retain_eligible,
+            }
+        )
+        enriched_items.append(item)
+
+    def acceleration_sort_key(item: Dict[str, Any]) -> Tuple[float, int, float, int, str]:
+        return (
+            safe_float(item.get("acceleration_rank_change_5d")) or 0.0,
+            safe_int(item.get("holding_cube_count_change_5d")) or 0,
+            safe_float(item.get("total_weight_change_5d")) or 0.0,
+            -(safe_int(item.get("composite_rank")) or 999999),
+            str(item.get("stock_symbol") or ""),
+        )
+
+    retain_candidates = sorted(
+        [
+            item
+            for item in enriched_items
+            if item.get("retain_eligible")
+            and (item.get("buy_eligible") or item.get("stock_symbol") in current_symbol_set)
+        ],
+        key=acceleration_sort_key,
+        reverse=True,
+    )
+    for index, item in enumerate(retain_candidates, start=1):
+        item["acceleration_rank"] = index
+        item["strategy_rank"] = index
+    item_by_symbol = {item["stock_symbol"]: item for item in enriched_items}
+    buffer_symbols = {
+        item["stock_symbol"]
+        for item in retain_candidates[:normalized_sell_rank]
+    }
+
+    planned_removed = [symbol for symbol in current_symbols if symbol not in buffer_symbols]
+    removed_symbols = list(planned_removed)
+    if len(current_symbols) >= normalized_top_n and len(removed_symbols) > max_replacements:
+        removed_symbols = sorted(
+            removed_symbols,
+            key=lambda symbol: (
+                safe_int((item_by_symbol.get(symbol) or {}).get("acceleration_rank")) or 999999,
+                symbol,
+            ),
+            reverse=True,
+        )[:max_replacements]
+    removed_set = set(removed_symbols)
+    retained_symbols = [symbol for symbol in current_symbols if symbol not in removed_set]
+    if len(retained_symbols) > normalized_top_n:
+        retained_symbols = sorted(
+            retained_symbols,
+            key=lambda symbol: (
+                safe_int((item_by_symbol.get(symbol) or {}).get("acceleration_rank")) or 999999,
+                symbol,
+            ),
+        )[:normalized_top_n]
+
+    segment_counts: Dict[str, int] = defaultdict(int)
+
+    def segment_key(symbol: str) -> str:
+        segment = str((item_by_symbol.get(symbol) or {}).get("segment_name") or "").strip()
+        return "" if segment in {"", "其他", CASH_NAME} else segment
+
+    for symbol in retained_symbols:
+        segment = segment_key(symbol)
+        if segment:
+            segment_counts[segment] += 1
+
+    buy_candidates = [item for item in retain_candidates if item.get("buy_eligible")]
+    added_symbols: List[str] = []
+    selected_set = set(retained_symbols)
+    for item in buy_candidates:
+        if len(retained_symbols) + len(added_symbols) >= normalized_top_n:
+            break
+        symbol = item["stock_symbol"]
+        if symbol in selected_set:
+            continue
+        segment = segment_key(symbol)
+        if segment and segment_counts[segment] >= max_segment_positions:
+            continue
+        added_symbols.append(symbol)
+        selected_set.add(symbol)
+        if segment:
+            segment_counts[segment] += 1
+
+    final_symbols = retained_symbols + added_symbols
+    final_symbols = sorted(
+        final_symbols,
+        key=lambda symbol: (
+            safe_int((item_by_symbol.get(symbol) or {}).get("acceleration_rank")) or 999999,
+            symbol,
+        ),
+    )
+    component_changed = set(final_symbols) != set(current_symbols)
+    target_weight = 100.0 / normalized_top_n
+    execution_weights = (
+        build_min_turnover_execution_weights(
+            final_symbols=final_symbols,
+            added_symbols=added_symbols,
+            current_by_symbol=current_by_symbol,
+        )
+        if len(final_symbols) == normalized_top_n
+        else {symbol: target_weight for symbol in final_symbols}
+    )
+
+    target_items: List[Dict[str, Any]] = []
+    for symbol in final_symbols:
+        item = dict(item_by_symbol.get(symbol) or {})
+        current_weight = safe_float((current_by_symbol.get(symbol) or {}).get("weight_pct"))
+        execution_weight = execution_weights.get(symbol, target_weight)
+        strategy_action = "buy" if symbol in added_symbols else "keep"
+        if strategy_action == "keep" and (
+            current_weight is None or abs(execution_weight - current_weight) > 0.005
+        ):
+            strategy_action = "adjust"
+        item.update(
+            {
+                "stock_symbol": symbol,
+                "stock_name": item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or "",
+                "strategy_rank": item.get("acceleration_rank"),
+                "top_normalized_weight_pct": target_weight,
+                "rebalance_weight_pct": execution_weight,
+                "strategy_action": strategy_action,
+                "current_weight_pct": current_weight,
+            }
+        )
+        target_items.append(item)
+
+    removed_items: List[Dict[str, Any]] = []
+    for symbol in removed_symbols:
+        item = dict(item_by_symbol.get(symbol) or {})
+        item.update(
+            {
+                "stock_symbol": symbol,
+                "stock_name": item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or "",
+                "strategy_action": "sell",
+                "current_weight_pct": (current_by_symbol.get(symbol) or {}).get("weight_pct"),
+            }
+        )
+        removed_items.append(item)
+
+    return {
+        "strategy_name": RANK_ACCELERATION_STRATEGY_NAME,
+        "top_n": normalized_top_n,
+        "sell_rank": normalized_sell_rank,
+        "compare_snapshot_date": comparison_snapshot.get("compare_snapshot_date"),
+        "compare_trading_days": comparison_snapshot.get("trading_days"),
+        "buy_rule": (
+            f"当前综合排名Top{RANK_ACCELERATION_CURRENT_RANK_LIMIT}、至少{RANK_ACCELERATION_MIN_HOLDING_CUBES}个活跃组合持有、"
+            f"持仓组合增加至少{RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE}个且总权重上升；"
+            f"旧标的5日上升至少{RANK_ACCELERATION_MIN_RANK_CHANGE}名，强势新进需进入Top{RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT}"
+        ),
+        "sell_rule": (
+            f"跌出5日排名加速Top{normalized_sell_rank}才卖，"
+            f"每次最多替换{max_replacements}只"
+        ),
+        "execution_weight_rule": (
+            f"Top{normalized_top_n}每只目标上限{target_weight:g}%；不足{normalized_top_n}只时剩余资金留现金；"
+            f"新增成分按板块最多{max_segment_positions}只"
+        ),
+        "current_symbols": current_symbols,
+        "retained_symbols": retained_symbols,
+        "removed_symbols": removed_symbols,
+        "planned_removed_symbols": planned_removed,
+        "added_symbols": added_symbols,
+        "final_symbols": final_symbols,
+        "component_changed": component_changed,
+        "eligible_buy_count": len(buy_candidates),
+        "eligible_retain_count": len(retain_candidates),
+        "target_items": target_items,
+        "removed_items": removed_items,
+        "acceleration_items": retain_candidates,
+        "current_items": current_items,
+        "summary": {
+            "current": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in current_symbols],
+            "retained": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in retained_symbols],
+            "removed": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in removed_symbols],
+            "added": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in added_symbols],
+            "final": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in final_symbols],
+        },
+    }
+
+
 async def fetch_batch_quotes(
     *,
     cookie: str,
@@ -3009,10 +3439,17 @@ def build_report(
     )
     if strategy_plan:
         plan_summary = strategy_plan.get("summary") or {}
+        buy_rule = strategy_plan.get("buy_rule") or (
+            f"从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 "
+            f"{strategy_plan.get('top_n', top_n)} 只"
+        )
+        sell_rule = strategy_plan.get("sell_rule") or (
+            f"已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖"
+        )
         lines.extend(
             [
-                f"买入/补位: 从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只。",
-                f"卖出: 已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖。",
+                f"买入/补位: {buy_rule}。",
+                f"卖出: {sell_rule}。",
                 f"权重: {strategy_plan.get('execution_weight_rule') or BUFFER_EXECUTION_WEIGHT_RULE}；成分无变化不提交调仓。",
                 f"当前持仓: {'、'.join(plan_summary.get('current') or []) or '-'}",
                 f"保留: {'、'.join(plan_summary.get('retained') or []) or '-'}",
@@ -3186,10 +3623,17 @@ def build_report_html(
     )
     if strategy_plan:
         plan_summary = strategy_plan.get("summary") or {}
+        buy_rule = strategy_plan.get("buy_rule") or (
+            f"从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 "
+            f"{strategy_plan.get('top_n', top_n)} 只"
+        )
+        sell_rule = strategy_plan.get("sell_rule") or (
+            f"已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖"
+        )
         summary_rows.extend(
             [
-                ("买入/补位", f"从当前综合排名 Top{strategy_plan.get('top_n', top_n)} 中补足到 {strategy_plan.get('top_n', top_n)} 只"),
-                ("卖出规则", f"已有持仓跌出 Top{strategy_plan.get('sell_rank', BUFFER_STRATEGY_SELL_RANK)} 才卖"),
+                ("买入/补位", buy_rule),
+                ("卖出规则", sell_rule),
                 ("权重规则", f"{strategy_plan.get('execution_weight_rule') or BUFFER_EXECUTION_WEIGHT_RULE}；成分无变化不提交调仓"),
                 ("当前持仓", "、".join(plan_summary.get("current") or []) or "-"),
                 ("保留", "、".join(plan_summary.get("retained") or []) or "-"),
@@ -3482,6 +3926,122 @@ def save_run_record(
         db.close()
 
 
+async def execute_rank_acceleration_target_rebalance(
+    *,
+    cookie: str,
+    aggregate: Dict[str, Any],
+    current_snapshot_date: date,
+    target_cube_symbol: str,
+    target_cube_id: Optional[int],
+    active_filter_summary: Optional[Dict[str, Any]],
+    dry_run: bool,
+    timeout: float,
+) -> Dict[str, Any]:
+    comparison_snapshot = load_xueqiu_rank_comparison_snapshot(
+        current_snapshot_date=current_snapshot_date,
+        trading_days=RANK_ACCELERATION_COMPARE_TRADING_DAYS,
+        active_only=True,
+    )
+    if not comparison_snapshot.get("available"):
+        return {
+            "target_cube_symbol": target_cube_symbol,
+            "target_cube_id": target_cube_id,
+            "status": "SKIPPED",
+            "top_items": [],
+            "strategy_plan": None,
+            "rebalance_payload": None,
+            "rebalance_response": {
+                "skipped": True,
+                "message": (
+                    f"缺少{RANK_ACCELERATION_COMPARE_TRADING_DAYS}个交易日前的持仓快照，"
+                    "星澜贰号本次不调仓。"
+                ),
+                "reason": comparison_snapshot.get("reason"),
+            },
+            "rebalance_skipped": [],
+            "comparison_snapshot": comparison_snapshot,
+        }
+
+    current_payload = await fetch_target_cube_current_payload(
+        cookie=cookie,
+        target_cube_symbol=target_cube_symbol,
+        timeout=timeout,
+    )
+    current_holdings, holdings_source = select_current_holdings(current_payload)
+    if not holdings_source:
+        raise RuntimeError(f"Unexpected target cube holdings payload for {target_cube_symbol}: {current_payload}")
+    latest_target_rebalance = current_payload.get("last_rb") if isinstance(current_payload.get("last_rb"), dict) else {}
+    resolved_target_cube_id = (
+        safe_int(latest_target_rebalance.get("cube_id"))
+        or safe_int(current_payload.get("cube_id"))
+        or safe_int(target_cube_id)
+        or safe_int(os.getenv("XUEQIU_RANK_ACCELERATION_TARGET_CUBE_ID"))
+    )
+    if not resolved_target_cube_id:
+        raise RuntimeError(
+            f"Unable to resolve cube_id for rank acceleration target {target_cube_symbol}; "
+            "configure XUEQIU_RANK_ACCELERATION_TARGET_CUBE_ID"
+        )
+
+    strategy_plan = build_rank_acceleration_buffer_plan(
+        ranking=aggregate["ranking"],
+        comparison_snapshot=comparison_snapshot,
+        current_holdings=current_holdings,
+    )
+    top_items = strategy_plan["target_items"]
+    rebalance_payload = None
+    rebalance_response: Dict[str, Any]
+    rebalance_skipped_items: List[Dict[str, Any]] = []
+    if strategy_plan.get("component_changed"):
+        rebalance_payload = await build_rebalance_payload(
+            cookie=cookie,
+            target_cube_symbol=target_cube_symbol,
+            target_cube_id=resolved_target_cube_id,
+            top_items=top_items,
+            timeout=timeout,
+        )
+        rebalance_payload["strategy"] = strategy_plan.get("strategy_name")
+        rebalance_payload["strategy_plan"] = strategy_plan
+        rebalance_payload["active_filter"] = active_filter_summary
+        rebalance_skipped_items.extend(rebalance_payload.get("skipped_items") or [])
+        top_items = rebalance_payload["top_items"]
+        if rebalance_payload.get("holdings"):
+            rebalance_response = await create_xueqiu_rebalance(
+                cookie=cookie,
+                payload=rebalance_payload,
+                dry_run=dry_run,
+                timeout=timeout,
+            )
+        else:
+            rebalance_response = {
+                "skipped": True,
+                "message": "星澜贰号目标标的均不可调仓，已跳过提交。",
+                "strategy": strategy_plan.get("strategy_name"),
+            }
+    else:
+        rebalance_response = {
+            "skipped": True,
+            "message": "星澜贰号目标组合成分未变化，本次不提交调仓。",
+            "strategy": strategy_plan.get("strategy_name"),
+            "strategy_plan": strategy_plan,
+        }
+
+    status = "DRY_RUN" if dry_run else "SUCCESS"
+    if rebalance_response.get("skipped"):
+        status = "SKIPPED"
+    return {
+        "target_cube_symbol": target_cube_symbol,
+        "target_cube_id": resolved_target_cube_id,
+        "status": status,
+        "top_items": top_items,
+        "strategy_plan": strategy_plan,
+        "rebalance_payload": rebalance_payload,
+        "rebalance_response": rebalance_response,
+        "rebalance_skipped": rebalance_skipped_items,
+        "comparison_snapshot": comparison_snapshot,
+    }
+
+
 async def run_top_holdings_job(
     *,
     list_path: Optional[str] = None,
@@ -3499,6 +4059,8 @@ async def run_top_holdings_job(
     dry_run: bool = False,
     target_cube_symbol: str = DEFAULT_TARGET_CUBE_SYMBOL,
     target_cube_id: Optional[int] = None,
+    rank_acceleration_target_cube_symbol: Optional[str] = None,
+    rank_acceleration_target_cube_id: Optional[int] = None,
     active_rebalance_days: Optional[int] = None,
     sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
     refresh_activity_cache: bool = True,
@@ -3609,6 +4171,7 @@ async def run_top_holdings_job(
     strategy_plan: Optional[Dict[str, Any]] = None
     resolved_target_cube_id = None
     latest_target_rebalance = None
+    rank_acceleration_result: Optional[Dict[str, Any]] = None
 
     if execute_rebalance:
         fallback_cube_id = target_cube_id or safe_int(os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_ID")) or DEFAULT_TARGET_CUBE_ID
@@ -3668,6 +4231,38 @@ async def run_top_holdings_job(
                 "strategy": strategy_plan.get("strategy_name"),
                 "strategy_plan": strategy_plan,
                 "active_filter": active_filter_summary,
+            }
+
+    if execute_rebalance and rank_acceleration_target_cube_symbol:
+        try:
+            rank_acceleration_result = await execute_rank_acceleration_target_rebalance(
+                cookie=cookie,
+                aggregate=aggregate,
+                current_snapshot_date=run_at.date(),
+                target_cube_symbol=rank_acceleration_target_cube_symbol,
+                target_cube_id=rank_acceleration_target_cube_id,
+                active_filter_summary=active_filter_summary,
+                dry_run=dry_run,
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Rank acceleration target rebalance failed: target=%s",
+                rank_acceleration_target_cube_symbol,
+            )
+            rank_acceleration_result = {
+                "target_cube_symbol": rank_acceleration_target_cube_symbol,
+                "target_cube_id": rank_acceleration_target_cube_id,
+                "status": "FAILED",
+                "top_items": [],
+                "strategy_plan": None,
+                "rebalance_payload": None,
+                "rebalance_response": {
+                    "skipped": True,
+                    "error": str(exc),
+                    "message": f"星澜贰号调仓失败: {exc}",
+                },
+                "rebalance_skipped": [],
             }
 
     report_text = build_report(
@@ -3752,6 +4347,30 @@ async def run_top_holdings_job(
         rebalance_payload=rebalance_payload,
         rebalance_response=rebalance_response,
     )
+    if rank_acceleration_result:
+        secondary_response = rank_acceleration_result.get("rebalance_response") or {}
+        secondary_message = (
+            f"shared_snapshot={run_at.date().isoformat()} "
+            f"compare_snapshot={(rank_acceleration_result.get('comparison_snapshot') or {}).get('compare_snapshot_date')} "
+            f"status={rank_acceleration_result.get('status')} "
+            f"target={rank_acceleration_result.get('target_cube_symbol')}"
+        )
+        secondary_record_id = save_run_record(
+            run_at=run_at,
+            target_cube_symbol=rank_acceleration_result.get("target_cube_symbol") or RANK_ACCELERATION_TARGET_CUBE_SYMBOL,
+            target_cube_id=rank_acceleration_result.get("target_cube_id"),
+            status=rank_acceleration_result.get("status") or "FAILED",
+            message=secondary_message,
+            dry_run=dry_run,
+            rank_cache_fetched_at=rank_cache_fetched_at,
+            rank_cache_refreshed=rank_cache_refreshed,
+            cubes=cubes,
+            aggregate=aggregate,
+            top_items=rank_acceleration_result.get("top_items") or [],
+            rebalance_payload=rank_acceleration_result.get("rebalance_payload"),
+            rebalance_response=secondary_response,
+        )
+        rank_acceleration_result["record_id"] = secondary_record_id
     if not no_email:
         subject_filter = active_filter_compact_label(active_filter_summary)
         subject_display_count = report_display_count(top_n, safe_int((strategy_plan or {}).get("sell_rank")))
@@ -3784,6 +4403,7 @@ async def run_top_holdings_job(
         "active_filter": active_filter_summary,
         "holdings_snapshot": holdings_snapshot_result,
         "top": top_items,
+        "rank_acceleration_target": rank_acceleration_result,
     }
 
 
@@ -3806,6 +4426,13 @@ def process_xueqiu_top_holdings_rebalance_for_robot(
             timeout=DEFAULT_TIMEOUT,
             retries=DEFAULT_RETRIES,
             target_cube_symbol=os.getenv("XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL", DEFAULT_TARGET_CUBE_SYMBOL),
+            rank_acceleration_target_cube_symbol=os.getenv(
+                "XUEQIU_RANK_ACCELERATION_TARGET_CUBE_SYMBOL",
+                RANK_ACCELERATION_TARGET_CUBE_SYMBOL,
+            ),
+            rank_acceleration_target_cube_id=safe_int(
+                os.getenv("XUEQIU_RANK_ACCELERATION_TARGET_CUBE_ID")
+            ),
             active_rebalance_days=normalized_active_days,
             sell_rank=normalized_sell_rank,
             refresh_activity_cache=False,
@@ -3814,6 +4441,8 @@ def process_xueqiu_top_holdings_rebalance_for_robot(
     if result.get("skipped"):
         return str(result.get("message"))
     response = result.get("rebalance_response") or {}
+    rank_acceleration = result.get("rank_acceleration_target") or {}
+    rank_acceleration_response = rank_acceleration.get("rebalance_response") or {}
     active_filter = result.get("active_filter") or {}
     active_message = (
         f"active={active_filter.get('active_cube_count')}/{active_filter.get('source_cube_count')} "
@@ -3840,7 +4469,14 @@ def process_xueqiu_top_holdings_rebalance_for_robot(
         f"{snapshot_message}"
         f"rebalance_skipped={response.get('skipped') if isinstance(response, dict) else None} "
         f"rebalance_id={response.get('id') if isinstance(response, dict) else None} "
-        f"rebalance_status={response.get('status') if isinstance(response, dict) else None}"
+        f"rebalance_status={response.get('status') if isinstance(response, dict) else None} "
+        f"rank_acceleration_target={rank_acceleration.get('target_cube_symbol')} "
+        f"rank_acceleration_record_id={rank_acceleration.get('record_id')} "
+        f"rank_acceleration_status={rank_acceleration.get('status')} "
+        f"rank_acceleration_rebalance_skipped="
+        f"{rank_acceleration_response.get('skipped') if isinstance(rank_acceleration_response, dict) else None} "
+        f"rank_acceleration_rebalance_id="
+        f"{rank_acceleration_response.get('id') if isinstance(rank_acceleration_response, dict) else None}"
     )
 
 

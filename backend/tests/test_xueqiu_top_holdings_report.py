@@ -21,20 +21,24 @@ from src.robot.xueqiu_top_holdings_report import (
     XUEQIU_CUBE_RANK_HISTORY_TABLE,
     aggregate_holdings,
     build_equal_top10_top12_buffer_plan,
+    build_rank_acceleration_buffer_plan,
     build_report,
     build_report_html,
     build_rebalance_payload,
     describe_rebalance_quote_rejection,
     ensure_xueqiu_current_fetch_quality,
+    execute_rank_acceleration_target_rebalance,
     fetch_cube_manager_activity,
     latest_manager_rebalance_from_events,
     load_cached_cube_activity,
     load_or_refresh_year_top_cubes,
     load_cached_year_top_cubes,
     load_recent_xueqiu_rank_history_cube_sets,
+    load_xueqiu_rank_comparison_snapshot,
     load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
+    process_xueqiu_top_holdings_rebalance_for_robot,
     save_cube_activity_cache,
     save_xueqiu_cube_rank_history_to_duckdb,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
@@ -44,12 +48,45 @@ from src.robot.xueqiu_top_holdings_report import (
 
 
 class XueqiuTopHoldingsReportTest(TestCase):
+    @staticmethod
+    def _rank_acceleration_fixture():
+        ranking = []
+        comparison_items = [{} for _ in range(100)]
+        comparison_by_symbol = {}
+        for index in range(1, 16):
+            symbol = f"SH.{600000 + index:06d}"
+            ranking.append(
+                {
+                    "composite_rank": index,
+                    "stock_symbol": symbol,
+                    "stock_name": f"加速股票{index}",
+                    "segment_name": f"行业{index % 4}",
+                    "holding_cube_count": 12,
+                    "total_weight_pct": 500.0 - index,
+                    "composite_weight_pct": 5.0 - index / 100.0,
+                }
+            )
+            if index > 1:
+                comparison_by_symbol[symbol] = {
+                    "composite_rank": index + 30,
+                    "holding_cube_count": 8,
+                    "total_weight_pct": 300.0 - index,
+                }
+        return ranking, {
+            "available": True,
+            "reason": None,
+            "compare_snapshot_date": date(2026, 7, 3),
+            "trading_days": 5,
+            "items": comparison_items,
+            "by_symbol": comparison_by_symbol,
+        }
+
     def test_save_year_top_cubes_deduplicates_symbols_and_reassigns_ranks(self):
         with TemporaryDirectory() as tmpdir:
             engine = create_engine(f"sqlite:///{tmpdir}/rank_cache.db")
             Base.metadata.create_all(engine, tables=[XueqiuCubeRankCache.__table__])
             session_factory = sessionmaker(bind=engine)
-            fetched_at = datetime(2026, 5, 30, 15, 0, 0)
+            fetched_at = datetime.now()
 
             cubes = [
                 CubeInfo(year_rank=1, symbol="ZH000001", cube_name="best-symbol"),
@@ -499,6 +536,163 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(10.0, by_symbol["SZ.300394"]["rebalance_weight_pct"])
         self.assertEqual("keep", by_symbol["SZ.300757"]["strategy_action"])
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
+
+    def test_rank_acceleration_plan_selects_strong_new_and_breadth_confirmed_risers(self):
+        ranking, comparison = self._rank_acceleration_fixture()
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+        )
+
+        self.assertTrue(plan["component_changed"])
+        self.assertEqual(10, len(plan["final_symbols"]))
+        self.assertEqual("SH.600001", plan["final_symbols"][0])
+        first_item = next(item for item in plan["target_items"] if item["stock_symbol"] == "SH.600001")
+        self.assertTrue(first_item["is_new_5d"])
+        self.assertTrue(first_item["strong_new_entry"])
+        self.assertEqual(10.0, first_item["rebalance_weight_pct"])
+        self.assertTrue(all(item["buy_eligible"] for item in plan["target_items"]))
+
+    def test_rank_acceleration_plan_limits_full_portfolio_to_two_replacements(self):
+        ranking, comparison = self._rank_acceleration_fixture()
+        current_holdings = [
+            {
+                "stock_symbol": f"SZ{index:06d}",
+                "stock_name": f"旧持仓{index}",
+                "weight": 10.0,
+            }
+            for index in range(1, 11)
+        ]
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+        )
+
+        self.assertEqual(2, len(plan["removed_symbols"]))
+        self.assertEqual(2, len(plan["added_symbols"]))
+        self.assertEqual(10, len(plan["final_symbols"]))
+        self.assertEqual(100.0, round(sum(item["rebalance_weight_pct"] for item in plan["target_items"]), 2))
+
+    def test_rank_comparison_snapshot_uses_fifth_prior_snapshot(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                for day in range(1, 6):
+                    save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                        run_at=datetime(2026, 6, day, 14, 50, 0),
+                        active_rebalance_days=360,
+                        current_results=[
+                            CubeCurrentResult(
+                                cube=CubeInfo(year_rank=1, symbol="ZH000001", cube_name="组合一"),
+                                holdings=[
+                                    {
+                                        "stock_symbol": "SH600001",
+                                        "stock_name": "股票一",
+                                        "weight": 60.0,
+                                    }
+                                ],
+                                active=True,
+                            )
+                        ],
+                    )
+
+                comparison = load_xueqiu_rank_comparison_snapshot(
+                    current_snapshot_date=date(2026, 6, 6),
+                    trading_days=5,
+                )
+
+            self.assertTrue(comparison["available"])
+            self.assertEqual("2026-06-01", comparison["compare_snapshot_date"])
+            self.assertEqual(1, comparison["by_symbol"]["SH.600001"]["holding_cube_count"])
+            self.assertEqual(60.0, comparison["by_symbol"]["SH.600001"]["total_weight_pct"])
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_robot_rebalance_enables_rank_acceleration_target_in_same_job(self):
+        result = {
+            "skipped": False,
+            "record_id": 1,
+            "target_cube_symbol": "ZH3630096",
+            "target_cube_id": 3664154,
+            "success_count": 1000,
+            "failed_count": 0,
+            "stock_count": 600,
+            "rebalance_response": {"skipped": True},
+            "active_filter": {"active_cube_count": 600, "source_cube_count": 1000},
+            "holdings_snapshot": {"saved_rows": 3000},
+            "rank_acceleration_target": {
+                "target_cube_symbol": "ZH3644546",
+                "record_id": 2,
+                "status": "SKIPPED",
+                "rebalance_response": {"skipped": True},
+            },
+        }
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.run_top_holdings_job",
+            new=AsyncMock(return_value=result),
+        ) as run_job, patch.dict(os.environ, {}, clear=True):
+            message = process_xueqiu_top_holdings_rebalance_for_robot()
+
+        self.assertEqual("ZH3644546", run_job.await_args.kwargs["rank_acceleration_target_cube_symbol"])
+        self.assertIn("rank_acceleration_target=ZH3644546", message)
+
+    def test_rank_acceleration_target_rebalance_uses_target_cube_in_same_run(self):
+        ranking, comparison = self._rank_acceleration_fixture()
+        aggregate = {
+            "ranking": ranking,
+            "failed_results": [],
+            "success_count": 100,
+        }
+
+        async def fake_payload(**kwargs):
+            return {
+                "target_cube_symbol": kwargs["target_cube_symbol"],
+                "cube_id": kwargs["target_cube_id"],
+                "holdings": [{"stock_symbol": "SH600001", "weight": 10.0}],
+                "top_items": kwargs["top_items"],
+                "skipped_items": [],
+            }
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
+            return_value=comparison,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
+            new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": []}}),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.build_rebalance_payload",
+            new=AsyncMock(side_effect=fake_payload),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.create_xueqiu_rebalance",
+            new=AsyncMock(return_value={"id": 12345, "status": "success"}),
+        ) as create_rebalance:
+            result = asyncio.run(
+                execute_rank_acceleration_target_rebalance(
+                    cookie="xq_a_token=test;",
+                    aggregate=aggregate,
+                    current_snapshot_date=date(2026, 7, 10),
+                    target_cube_symbol="ZH3644546",
+                    target_cube_id=None,
+                    active_filter_summary=None,
+                    dry_run=False,
+                    timeout=10.0,
+                )
+            )
+
+        self.assertEqual("ZH3644546", result["target_cube_symbol"])
+        self.assertEqual(3644546, result["target_cube_id"])
+        self.assertEqual("SUCCESS", result["status"])
+        self.assertEqual(10, len(result["top_items"]))
+        create_rebalance.assert_awaited_once()
 
     def test_build_rebalance_payload_skips_etf_quote_type_13_into_cash(self):
         top_items = [

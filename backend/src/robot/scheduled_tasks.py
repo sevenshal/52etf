@@ -1248,8 +1248,8 @@ class ScheduledTaskManager:
             ),
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
-                name="雪球年榜主理人活跃综合持仓自动调仓",
-                description="A股交易日拉取雪球年榜组合最新持仓，并使用已缓存的主理人调仓时间筛选近期活跃组合，再按可配置Top N等权、跌出缓冲区才卖、从Top N补位的缓冲策略调仓目标雪球组合。",
+                name="雪球年榜双组合自动调仓",
+                description="A股交易日共享一次雪球年榜活跃组合持仓快照，同时调仓星澜壹号综合权重策略与星澜贰号5日排名加速策略。",
                 default_time="14:50",
                 default_enabled=True,
                 sort_order=25,
