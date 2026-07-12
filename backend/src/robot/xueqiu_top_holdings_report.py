@@ -3747,6 +3747,116 @@ def build_report_html(
 </html>"""
 
 
+def build_rank_acceleration_email_section_html(result: Dict[str, Any]) -> str:
+    def esc(value: Any) -> str:
+        return html.escape(str(value if value is not None else ""))
+
+    strategy_plan = result.get("strategy_plan") or {}
+    plan_summary = strategy_plan.get("summary") or {}
+    rebalance_payload = result.get("rebalance_payload") or {}
+    rebalance_response = result.get("rebalance_response") or {}
+    comparison_snapshot = result.get("comparison_snapshot") or {}
+    target_items = result.get("top_items") or strategy_plan.get("target_items") or []
+    status = result.get("status") or "UNKNOWN"
+    response_status = rebalance_response.get("status")
+    response_id = rebalance_response.get("id")
+    response_message = (
+        rebalance_response.get("message")
+        or rebalance_response.get("error")
+        or rebalance_response.get("error_message")
+        or "-"
+    )
+    compare_snapshot_date = (
+        comparison_snapshot.get("compare_snapshot_date")
+        or strategy_plan.get("compare_snapshot_date")
+        or "-"
+    )
+    summary_rows = [
+        ("目标组合", f"{result.get('target_cube_symbol') or RANK_ACCELERATION_TARGET_CUBE_SYMBOL} / cube_id={result.get('target_cube_id') or '-'}"),
+        ("任务状态", status),
+        ("雪球调仓", response_status or ("已跳过" if rebalance_response.get("skipped") else "-")),
+        ("雪球调仓ID", response_id or "-"),
+        ("5日对比快照", compare_snapshot_date),
+        ("买入候选", strategy_plan.get("eligible_buy_count", 0)),
+        ("缓冲候选", strategy_plan.get("eligible_retain_count", 0)),
+        ("目标现金", fmt_number(rebalance_payload.get("cash"), suffix="%")),
+        ("买入规则", strategy_plan.get("buy_rule") or "-"),
+        ("卖出规则", strategy_plan.get("sell_rule") or "-"),
+        ("权重规则", strategy_plan.get("execution_weight_rule") or "-"),
+        ("当前持仓", "、".join(plan_summary.get("current") or []) or "-"),
+        ("保留", "、".join(plan_summary.get("retained") or []) or "-"),
+        ("卖出", "、".join(plan_summary.get("removed") or []) or "-"),
+        ("买入", "、".join(plan_summary.get("added") or []) or "-"),
+        ("最终持仓", "、".join(plan_summary.get("final") or []) or "-"),
+        ("任务提示", response_message),
+    ]
+    summary_html = "".join(
+        f"<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>"
+        for label, value in summary_rows
+    )
+
+    target_rows = []
+    for index, item in enumerate(target_items, start=1):
+        previous_rank = "新进" if item.get("is_new_5d") else (
+            f"#{safe_int(item.get('rank_5d_ago'))}"
+            if safe_int(item.get("rank_5d_ago")) is not None
+            else "-"
+        )
+        rank_change = safe_int(item.get("acceleration_rank_change_5d"))
+        rank_change_text = f"+{rank_change}" if rank_change is not None and rank_change > 0 else str(rank_change or "-")
+        holding_change = safe_int(item.get("holding_cube_count_change_5d"))
+        holding_change_text = (
+            f"+{holding_change}"
+            if holding_change is not None and holding_change > 0
+            else str(holding_change or "-")
+        )
+        target_rows.append(
+            "<tr>"
+            f"<td class=\"num\">{esc(item.get('strategy_rank') or index)}</td>"
+            f"<td>{esc(item.get('stock_symbol'))}</td>"
+            f"<td>{esc(item.get('stock_name') or '')}</td>"
+            f"<td class=\"num\">{esc('#' + str(item.get('composite_rank')) if item.get('composite_rank') else '-')}</td>"
+            f"<td class=\"num\">{esc(previous_rank)}</td>"
+            f"<td class=\"num\">{esc(rank_change_text)}</td>"
+            f"<td class=\"num\">{esc(item.get('holding_cube_count') or '-')}</td>"
+            f"<td class=\"num\">{esc(holding_change_text)}</td>"
+            f"<td class=\"num\">{esc(fmt_number(item.get('rebalance_weight_pct'), suffix='%'))}</td>"
+            f"<td>{esc(item.get('strategy_action') or '')}</td>"
+            "</tr>"
+        )
+    target_table_body = "".join(target_rows) or (
+        '<tr><td colspan="10" style="text-align:center;color:#6b7280;">本次没有可展示的目标持仓</td></tr>'
+    )
+    return f"""
+  <hr style="border:0;border-top:2px solid #d1d5db;margin:28px 0;">
+  <h1>星澜贰号 · 5日排名加速组合</h1>
+  <table class="summary">{summary_html}</table>
+  <h2>目标持仓与调仓动作</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>加速排名</th><th>股票</th><th>名称</th><th>当前综合排名</th><th>5日前排名</th>
+        <th>5日上升</th><th>持仓组合数</th><th>组合数变化</th><th>目标权重</th><th>动作</th>
+      </tr>
+    </thead>
+    <tbody>{target_table_body}</tbody>
+  </table>
+"""
+
+
+def append_rank_acceleration_email_section(
+    report_html: str,
+    result: Optional[Dict[str, Any]],
+) -> str:
+    if not result:
+        return report_html
+    section_html = build_rank_acceleration_email_section_html(result)
+    closing_tag = "</body>"
+    if closing_tag in report_html:
+        return report_html.replace(closing_tag, f"{section_html}\n{closing_tag}", 1)
+    return f"{report_html}{section_html}"
+
+
 def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as file:
@@ -4374,15 +4484,26 @@ async def run_top_holdings_job(
     if not no_email:
         subject_filter = active_filter_compact_label(active_filter_summary)
         subject_display_count = report_display_count(top_n, safe_int((strategy_plan or {}).get("sell_rank")))
-        subject = (
-            f"雪球年榜1000{subject_filter}组合Top{subject_display_count}展示/Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
-            if execute_rebalance
-            else f"雪球年榜1000{subject_filter}组合综合持仓权重 Top{subject_display_count} - {run_at.strftime('%Y-%m-%d')}"
+        email_report_html = append_rank_acceleration_email_section(
+            report_html,
+            rank_acceleration_result,
         )
+        if execute_rebalance and rank_acceleration_result:
+            subject = f"雪球年榜1000{subject_filter}双组合自动调仓 - {run_at.strftime('%Y-%m-%d')}"
+        elif execute_rebalance:
+            subject = (
+                f"雪球年榜1000{subject_filter}组合Top{subject_display_count}展示/"
+                f"Top{top_n}自动调仓 - {run_at.strftime('%Y-%m-%d')}"
+            )
+        else:
+            subject = (
+                f"雪球年榜1000{subject_filter}组合综合持仓权重 "
+                f"Top{subject_display_count} - {run_at.strftime('%Y-%m-%d')}"
+            )
         send_configured_email(
             "xueqiu_top_holdings_report",
             subject,
-            report_html,
+            email_report_html,
             mimeType="html",
             receiver_email=receiver_email,
         )

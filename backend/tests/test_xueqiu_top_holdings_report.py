@@ -20,6 +20,7 @@ from src.robot.xueqiu_top_holdings_report import (
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
     XUEQIU_CUBE_RANK_HISTORY_TABLE,
     aggregate_holdings,
+    append_rank_acceleration_email_section,
     build_equal_top10_top12_buffer_plan,
     build_rank_acceleration_buffer_plan,
     build_report,
@@ -693,6 +694,60 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("SUCCESS", result["status"])
         self.assertEqual(10, len(result["top_items"]))
         create_rebalance.assert_awaited_once()
+
+    def test_rank_acceleration_is_appended_to_same_email(self):
+        result = {
+            "target_cube_symbol": "ZH3644546",
+            "target_cube_id": 3644546,
+            "status": "SUCCESS",
+            "comparison_snapshot": {"compare_snapshot_date": "2026-07-03"},
+            "strategy_plan": {
+                "eligible_buy_count": 11,
+                "eligible_retain_count": 15,
+                "buy_rule": "买入规则样例",
+                "sell_rule": "卖出规则样例",
+                "execution_weight_rule": "等权规则样例",
+                "summary": {
+                    "current": [],
+                    "retained": [],
+                    "removed": [],
+                    "added": ["SZ.000938(紫光股份)"],
+                    "final": ["SZ.000938(紫光股份)"],
+                },
+            },
+            "rebalance_payload": {"cash": 0.0},
+            "rebalance_response": {"id": 12345, "status": "success"},
+            "top_items": [
+                {
+                    "strategy_rank": 1,
+                    "stock_symbol": "SZ.000938",
+                    "stock_name": "紫光股份",
+                    "composite_rank": 15,
+                    "rank_5d_ago": None,
+                    "is_new_5d": True,
+                    "acceleration_rank_change_5d": 671,
+                    "holding_cube_count": 12,
+                    "holding_cube_count_change_5d": 12,
+                    "rebalance_weight_pct": 10.0,
+                    "strategy_action": "buy",
+                }
+            ],
+        }
+
+        combined = append_rank_acceleration_email_section(
+            "<html><body><h1>星澜壹号</h1></body></html>",
+            result,
+        )
+
+        self.assertEqual(1, combined.count("</body>"))
+        self.assertLess(combined.index("星澜壹号"), combined.index("星澜贰号"))
+        self.assertIn("ZH3644546", combined)
+        self.assertIn("2026-07-03", combined)
+        self.assertIn("紫光股份", combined)
+        self.assertIn("新进", combined)
+        self.assertIn("+671", combined)
+        self.assertIn("+12", combined)
+        self.assertIn("12345", combined)
 
     def test_build_rebalance_payload_skips_etf_quote_type_13_into_cash(self):
         top_items = [
