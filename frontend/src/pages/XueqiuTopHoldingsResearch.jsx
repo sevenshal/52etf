@@ -42,6 +42,21 @@ const rankDeltaNumber = value => (
     ? null
     : Number(value)
 );
+const isNewRankEntry = (record, hasCompareSnapshot) => (
+  hasCompareSnapshot && rankDeltaNumber(record?.rank_5d_ago) === null
+);
+const compareRankDelta = (a, b, hasCompareSnapshot) => {
+  const aIsNew = isNewRankEntry(a, hasCompareSnapshot);
+  const bIsNew = isNewRankEntry(b, hasCompareSnapshot);
+  if (aIsNew !== bIsNew) return aIsNew ? 1 : -1;
+  if (aIsNew && bIsNew) {
+    const aRank = rankDeltaNumber(a.composite_rank) ?? Number.MAX_SAFE_INTEGER;
+    const bRank = rankDeltaNumber(b.composite_rank) ?? Number.MAX_SAFE_INTEGER;
+    return bRank - aRank;
+  }
+  return (rankDeltaNumber(a.rank_change_5d) ?? 0)
+    - (rankDeltaNumber(b.rank_change_5d) ?? 0);
+};
 const renderRankDelta = value => {
   const delta = rankDeltaNumber(value);
   if (delta === null || delta === 0) return '-';
@@ -275,6 +290,7 @@ const XueqiuTopHoldingsResearch = () => {
     fetchDetails(selectedSymbol, selectedHistoryDate);
   }, [fetchDetails, selectedHistoryDate, selectedSymbol]);
 
+  const hasRankCompareSnapshot = Boolean(latestData?.rank_compare_snapshot_date);
   const latestColumns = useMemo(() => [
     {
       title: '排名',
@@ -289,8 +305,13 @@ const XueqiuTopHoldingsResearch = () => {
       dataIndex: 'rank_change_5d',
       width: 118,
       align: 'right',
-      sorter: (a, b) => Number(a.rank_change_5d || 0) - Number(b.rank_change_5d || 0),
-      render: renderRankDelta,
+      sorter: (a, b) => compareRankDelta(a, b, hasRankCompareSnapshot),
+      sortDirections: ['descend', 'ascend'],
+      render: (value, record) => (
+        isNewRankEntry(record, hasRankCompareSnapshot)
+          ? <Tag color="green">新进</Tag>
+          : renderRankDelta(value)
+      ),
     },
     {
       title: '股票',
@@ -357,7 +378,7 @@ const XueqiuTopHoldingsResearch = () => {
       ellipsis: true,
       render: value => value || '-',
     },
-  ], [latestData?.cube_count]);
+  ], [hasRankCompareSnapshot, latestData?.cube_count]);
 
   const historyColumns = useMemo(() => [
     { title: '日期', dataIndex: 'snapshot_date', width: 118 },
