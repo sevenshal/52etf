@@ -37,6 +37,20 @@ const numberFormatter = value => {
 };
 
 const normalizeSearchText = value => String(value || '').trim().toUpperCase();
+const rankDeltaNumber = value => (
+  value === null || value === undefined || Number.isNaN(Number(value))
+    ? null
+    : Number(value)
+);
+const renderRankDelta = value => {
+  const delta = rankDeltaNumber(value);
+  if (delta === null || delta === 0) return '-';
+  return (
+    <Text style={{ color: delta > 0 ? '#389e0d' : '#cf1322' }}>
+      {delta > 0 ? `+${delta}` : `${delta}`}
+    </Text>
+  );
+};
 
 const getHistoryChartOption = (historyRows = []) => {
   const dates = historyRows.map(row => row.snapshot_date);
@@ -261,7 +275,7 @@ const XueqiuTopHoldingsResearch = () => {
     fetchDetails(selectedSymbol, selectedHistoryDate);
   }, [fetchDetails, selectedHistoryDate, selectedSymbol]);
 
-  const columns = useMemo(() => [
+  const latestColumns = useMemo(() => [
     {
       title: '排名',
       dataIndex: 'composite_rank',
@@ -269,6 +283,14 @@ const XueqiuTopHoldingsResearch = () => {
       fixed: 'left',
       sorter: (a, b) => Number(a.composite_rank || 0) - Number(b.composite_rank || 0),
       render: value => <Tag color={Number(value) <= 12 ? 'blue' : 'default'}>#{value}</Tag>,
+    },
+    {
+      title: '5日排名上升',
+      dataIndex: 'rank_change_5d',
+      width: 118,
+      align: 'right',
+      sorter: (a, b) => Number(a.rank_change_5d || 0) - Number(b.rank_change_5d || 0),
+      render: renderRankDelta,
     },
     {
       title: '股票',
@@ -454,7 +476,7 @@ const XueqiuTopHoldingsResearch = () => {
               size="small"
               className="xueqiu-holdings-latest-table"
               loading={latestLoading}
-              columns={columns}
+              columns={latestColumns}
               dataSource={filteredItems}
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
               scroll={{ x: 980, y: 560 }}
