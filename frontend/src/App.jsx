@@ -27,6 +27,7 @@ import SoxlFearBacktest from './pages/SoxlFearBacktest';
 import FactorLab from './pages/FactorLab';
 import LiveTrading from './pages/LiveTrading';
 import EmailSettings from './pages/EmailSettings';
+import WebAccountManager from './pages/WebAccountManager';
 
 const LiveTabRedirect = ({ tab }) => {
   const location = useLocation();
@@ -53,6 +54,7 @@ function App() {
           <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
           <Route path="/factor-lab/xueqiu-holdings" element={<FactorLab initialTab="xueqiu-holdings" />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/web-account-manager" element={<WebAccountManager />} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
