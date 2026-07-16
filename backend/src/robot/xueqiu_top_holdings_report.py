@@ -71,19 +71,28 @@ BUFFER_EXECUTION_WEIGHT_RULE = (
 RANK_ACCELERATION_TARGET_CUBE_SYMBOL = "ZH3644546"
 RANK_ACCELERATION_COMPARE_TRADING_DAYS = 5
 RANK_ACCELERATION_TOP_N = 10
-RANK_ACCELERATION_SELL_RANK = 15
+RANK_ACCELERATION_SELL_RANK = 30
 RANK_ACCELERATION_CURRENT_RANK_LIMIT = 50
 RANK_ACCELERATION_MIN_HOLDING_CUBES = 8
 RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE = 3
 RANK_ACCELERATION_MIN_RANK_CHANGE = 20
 RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT = 20
 RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES = 10
-RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT = 80
+RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT = 100
 RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES = 5
 RANK_ACCELERATION_MAX_SEGMENT_POSITIONS = 3
 RANK_ACCELERATION_MAX_REPLACEMENTS = 2
+RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS = 5
+RANK_ACCELERATION_BUY_CONFIRM_WINDOW = 3
+RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS = 2
+RANK_ACCELERATION_SELL_CONFIRM_DAYS = 2
+RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS = 5
+RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS = 3
+RANK_ACCELERATION_HARD_EXIT_RANK = 150
+RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES = 3
 RANK_ACCELERATION_STRATEGY_NAME = (
-    "5日排名加速Top10等权 + 持仓广度确认 + 跌出加速Top15才卖 + 每次最多替换2只"
+    "5日排名加速Top10等权 + 3日买入确认 + 持有5日 + 跌出加速Top30连续2日才卖"
+    " + 每次最多替换2只/滚动5日最多3只"
 )
 ACTIVE_REBALANCE_LOOKBACK_DAYS = 360
 ACTIVE_REBALANCE_MAX_FAILED_RATIO = 0.10
@@ -2319,20 +2328,20 @@ def rounded_rebalance_weights(top_items: List[Dict[str, Any]]) -> List[Dict[str,
     selected = [dict(item) for item in top_items]
     if not selected:
         return selected
-    rounded_weights = [
-        round(_rebalance_source_weight(item), 2)
-        for item in selected
-    ]
-    delta = round(100.0 - sum(rounded_weights), 2)
-    adjust_index = next(
-        (
-            index
-            for index, item in enumerate(selected)
-            if item.get("strategy_action") in {"buy", "trim", "adjust"}
-        ),
-        0,
-    )
-    rounded_weights[adjust_index] = round(rounded_weights[adjust_index] + delta, 2)
+    source_weights = [_rebalance_source_weight(item) for item in selected]
+    rounded_weights = [round(weight, 2) for weight in source_weights]
+    source_total = sum(source_weights)
+    if source_total >= 99.995:
+        delta = round(100.0 - sum(rounded_weights), 2)
+        adjust_index = next(
+            (
+                index
+                for index, item in enumerate(selected)
+                if item.get("strategy_action") in {"buy", "trim", "adjust"}
+            ),
+            0,
+        )
+        rounded_weights[adjust_index] = round(rounded_weights[adjust_index] + delta, 2)
     for item, weight in zip(selected, rounded_weights):
         item["rebalance_weight_pct"] = weight
     return selected
@@ -2739,11 +2748,112 @@ def load_xueqiu_rank_comparison_snapshot(
         connection.close()
 
 
+def _as_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _rank_acceleration_history_plan(entry: Dict[str, Any]) -> Dict[str, Any]:
+    plan = entry.get("strategy_plan")
+    if isinstance(plan, dict):
+        return plan
+    payload = entry.get("rebalance_payload")
+    if isinstance(payload, dict) and isinstance(payload.get("strategy_plan"), dict):
+        return payload["strategy_plan"]
+    response = entry.get("rebalance_response")
+    if isinstance(response, dict) and isinstance(response.get("strategy_plan"), dict):
+        return response["strategy_plan"]
+    return {}
+
+
+def _is_rank_acceleration_initial_build(plan: Dict[str, Any]) -> bool:
+    if "initial_build" in plan:
+        return bool(plan.get("initial_build"))
+    current_symbols = list(plan.get("current_symbols") or [])
+    added_symbols = list(plan.get("added_symbols") or [])
+    target_count = safe_int(plan.get("top_n")) or RANK_ACCELERATION_TOP_N
+    return len(current_symbols) <= 1 and len(added_symbols) >= target_count
+
+
+def load_rank_acceleration_strategy_history(
+    *,
+    target_cube_symbol: str,
+    current_snapshot_date: date,
+    limit: int = 40,
+) -> List[Dict[str, Any]]:
+    """Load one production strategy snapshot per prior run date using a short DB read."""
+    cutoff = datetime.combine(current_snapshot_date, datetime.min.time())
+    db = SessionLocal()
+    try:
+        records = (
+            db.query(XueqiuTopHoldingsRun)
+            .filter(
+                XueqiuTopHoldingsRun.target_cube_symbol == target_cube_symbol,
+                XueqiuTopHoldingsRun.run_at < cutoff,
+                XueqiuTopHoldingsRun.dry_run.is_(False),
+            )
+            .order_by(XueqiuTopHoldingsRun.run_at.desc(), XueqiuTopHoldingsRun.id.desc())
+            .limit(max(1, int(limit)))
+            .all()
+        )
+        history: List[Dict[str, Any]] = []
+        seen_dates: Set[date] = set()
+        for record in records:
+            run_date = _as_date(record.run_at)
+            if run_date is None or run_date in seen_dates:
+                continue
+            seen_dates.add(run_date)
+            payload = dict(record.rebalance_payload or {})
+            response = dict(record.rebalance_response or {})
+            plan = _rank_acceleration_history_plan(
+                {
+                    "rebalance_payload": payload,
+                    "rebalance_response": response,
+                }
+            )
+            executed = record.status == "SUCCESS" and not response.get("skipped")
+            executed_added_symbols = [
+                str(item.get("stock_symbol") or "")
+                for item in (record.top_holdings or [])
+                if isinstance(item, dict)
+                and item.get("strategy_action") == "buy"
+                and item.get("stock_symbol")
+            ]
+            if executed and not executed_added_symbols:
+                executed_added_symbols = list(plan.get("added_symbols") or [])
+            initial_build = _is_rank_acceleration_initial_build(plan)
+            history.append(
+                {
+                    "run_date": run_date,
+                    "status": record.status,
+                    "strategy_plan": plan,
+                    "rebalance_executed": executed,
+                    "added_symbols": executed_added_symbols if executed else [],
+                    "replacement_count": (
+                        0 if initial_build else len(executed_added_symbols)
+                    ) if executed else 0,
+                }
+            )
+        return history
+    finally:
+        db.close()
+
+
 def build_rank_acceleration_buffer_plan(
     *,
     ranking: List[Dict[str, Any]],
     comparison_snapshot: Dict[str, Any],
     current_holdings: List[Dict[str, Any]],
+    strategy_history: Optional[List[Dict[str, Any]]] = None,
+    current_snapshot_date: Optional[date] = None,
     top_n: int = RANK_ACCELERATION_TOP_N,
     sell_rank: int = RANK_ACCELERATION_SELL_RANK,
     max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
@@ -2757,6 +2867,7 @@ def build_rank_acceleration_buffer_plan(
 
     normalized_top_n = max(1, int(top_n or RANK_ACCELERATION_TOP_N))
     normalized_sell_rank = max(normalized_top_n, int(sell_rank or RANK_ACCELERATION_SELL_RANK))
+    snapshot_date = current_snapshot_date or date.today()
     comparison_by_symbol = comparison_snapshot.get("by_symbol") or {}
     comparison_universe_count = len(comparison_snapshot.get("items") or [])
     current_items = extract_current_target_holdings(current_holdings)
@@ -2764,6 +2875,38 @@ def build_rank_acceleration_buffer_plan(
     current_symbols = [item["stock_symbol"] for item in current_items]
     current_symbol_set = set(current_symbols)
     enriched_items: List[Dict[str, Any]] = []
+
+    normalized_history: List[Dict[str, Any]] = []
+    seen_history_dates: Set[date] = set()
+    for history_entry in strategy_history or []:
+        run_date = _as_date(history_entry.get("run_date"))
+        if run_date is None or run_date >= snapshot_date or run_date in seen_history_dates:
+            continue
+        seen_history_dates.add(run_date)
+        entry = dict(history_entry)
+        entry["run_date"] = run_date
+        normalized_history.append(entry)
+    normalized_history.sort(key=lambda entry: entry["run_date"], reverse=True)
+
+    def history_signal_symbols(entry: Dict[str, Any], key: str) -> Set[str]:
+        plan = _rank_acceleration_history_plan(entry)
+        values = plan.get(key) or []
+        if key == "daily_buy_signal_symbols" and not values:
+            values = [
+                item.get("stock_symbol")
+                for item in (plan.get("acceleration_items") or [])
+                if isinstance(item, dict) and item.get("buy_eligible")
+            ][:normalized_top_n]
+        return {str(value) for value in values if value}
+
+    previous_buy_signal_sets = [
+        history_signal_symbols(entry, "daily_buy_signal_symbols")
+        for entry in normalized_history[: RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1]
+    ]
+    previous_exit_signal_sets = [
+        history_signal_symbols(entry, "normal_exit_signal_symbols")
+        for entry in normalized_history[: RANK_ACCELERATION_SELL_CONFIRM_DAYS - 1]
+    ]
 
     for index, ranking_item in enumerate(ranking, start=1):
         symbol = normalize_xueqiu_symbol(ranking_item.get("stock_symbol"))
@@ -2798,12 +2941,10 @@ def build_rank_acceleration_buffer_plan(
                 or (not is_new and effective_rank_change >= RANK_ACCELERATION_MIN_RANK_CHANGE)
             )
         )
-        retain_eligible = (
+        hold_pool_eligible = (
             current_rank <= RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT
             and current_holding_cubes >= RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES
-            and holding_cube_change > 0
-            and total_weight_change > 0
-            and effective_rank_change > 0
+            and not (holding_cube_change < 0 and total_weight_change < 0)
         )
         item.update(
             {
@@ -2818,7 +2959,7 @@ def build_rank_acceleration_buffer_plan(
                 "is_new_5d": is_new,
                 "strong_new_entry": strong_new_entry,
                 "buy_eligible": buy_eligible,
-                "retain_eligible": retain_eligible,
+                "hold_pool_eligible": hold_pool_eligible,
             }
         )
         enriched_items.append(item)
@@ -2832,46 +2973,163 @@ def build_rank_acceleration_buffer_plan(
             str(item.get("stock_symbol") or ""),
         )
 
-    retain_candidates = sorted(
-        [
-            item
-            for item in enriched_items
-            if item.get("retain_eligible")
-            and (item.get("buy_eligible") or item.get("stock_symbol") in current_symbol_set)
-        ],
+    acceleration_items = sorted(enriched_items, key=acceleration_sort_key, reverse=True)
+    for index, item in enumerate(acceleration_items, start=1):
+        item["acceleration_rank"] = index
+        item["strategy_rank"] = index
+
+    raw_buy_candidates = sorted(
+        [item for item in enriched_items if item.get("buy_eligible")],
         key=acceleration_sort_key,
         reverse=True,
     )
-    for index, item in enumerate(retain_candidates, start=1):
-        item["acceleration_rank"] = index
-        item["strategy_rank"] = index
+    daily_buy_signal_symbols: List[str] = []
+    for index, item in enumerate(raw_buy_candidates, start=1):
+        item["buy_signal_rank"] = index
+        item["daily_buy_signal"] = index <= normalized_top_n
+        if item["daily_buy_signal"]:
+            daily_buy_signal_symbols.append(item["stock_symbol"])
+
+    daily_buy_signal_set = set(daily_buy_signal_symbols)
+    confirmed_buy_candidates: List[Dict[str, Any]] = []
+    for item in raw_buy_candidates:
+        symbol = item["stock_symbol"]
+        confirmation_count = int(symbol in daily_buy_signal_set) + sum(
+            int(symbol in signal_set) for signal_set in previous_buy_signal_sets
+        )
+        item["buy_confirmation_count"] = confirmation_count
+        item["buy_confirmed"] = (
+            symbol in daily_buy_signal_set
+            and confirmation_count >= RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS
+        )
+        if item["buy_confirmed"]:
+            confirmed_buy_candidates.append(item)
+
+    hold_candidates = sorted(
+        [item for item in enriched_items if item.get("hold_pool_eligible")],
+        key=acceleration_sort_key,
+        reverse=True,
+    )
+    for index, item in enumerate(hold_candidates, start=1):
+        item["hold_buffer_rank"] = index
+        item["retain_eligible"] = index <= normalized_sell_rank
     item_by_symbol = {item["stock_symbol"]: item for item in enriched_items}
     buffer_symbols = {
         item["stock_symbol"]
-        for item in retain_candidates[:normalized_sell_rank]
+        for item in hold_candidates[:normalized_sell_rank]
     }
 
-    planned_removed = [symbol for symbol in current_symbols if symbol not in buffer_symbols]
-    removed_symbols = list(planned_removed)
-    if len(current_symbols) >= normalized_top_n and len(removed_symbols) > max_replacements:
-        removed_symbols = sorted(
-            removed_symbols,
-            key=lambda symbol: (
-                safe_int((item_by_symbol.get(symbol) or {}).get("acceleration_rank")) or 999999,
-                symbol,
+    def history_added_symbols(entry: Dict[str, Any]) -> Set[str]:
+        values = entry.get("added_symbols")
+        if values is None:
+            values = _rank_acceleration_history_plan(entry).get("added_symbols") or []
+        return {str(value) for value in values if value}
+
+    entry_dates: Dict[str, Optional[date]] = {}
+    for symbol in current_symbols:
+        entry_dates[symbol] = next(
+            (
+                entry["run_date"]
+                for entry in normalized_history
+                if entry.get("rebalance_executed") and symbol in history_added_symbols(entry)
             ),
-            reverse=True,
-        )[:max_replacements]
-    removed_set = set(removed_symbols)
-    retained_symbols = [symbol for symbol in current_symbols if symbol not in removed_set]
-    if len(retained_symbols) > normalized_top_n:
-        retained_symbols = sorted(
-            retained_symbols,
-            key=lambda symbol: (
-                safe_int((item_by_symbol.get(symbol) or {}).get("acceleration_rank")) or 999999,
-                symbol,
-            ),
-        )[:normalized_top_n]
+            None,
+        )
+
+    hard_exit_symbols: List[str] = []
+    normal_exit_signal_symbols: List[str] = []
+    confirmed_normal_exit_symbols: List[str] = []
+    min_holding_blocked_symbols: List[str] = []
+    holding_statuses: List[Dict[str, Any]] = []
+    normal_exit_ready: List[str] = []
+    for symbol in current_symbols:
+        item = item_by_symbol.get(symbol) or {}
+        current_rank = safe_int(item.get("composite_rank"))
+        current_holding_cubes = safe_int(item.get("holding_cube_count")) or 0
+        hard_exit = (
+            current_rank is None
+            or current_rank > RANK_ACCELERATION_HARD_EXIT_RANK
+            or current_holding_cubes < RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES
+        )
+        normal_exit_signal = not hard_exit and symbol not in buffer_symbols
+        exit_confirmed = (
+            normal_exit_signal
+            and len(previous_exit_signal_sets) == RANK_ACCELERATION_SELL_CONFIRM_DAYS - 1
+            and all(symbol in signal_set for signal_set in previous_exit_signal_sets)
+        )
+        entry_date = entry_dates[symbol]
+        completed_holding_days = None
+        if entry_date is not None:
+            completed_holding_days = len(
+                {
+                    entry["run_date"]
+                    for entry in normalized_history
+                    if entry_date < entry["run_date"] < snapshot_date
+                }
+            )
+        min_holding_satisfied = (
+            completed_holding_days is None
+            or completed_holding_days >= RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS
+        )
+        if hard_exit:
+            hard_exit_symbols.append(symbol)
+        if normal_exit_signal:
+            normal_exit_signal_symbols.append(symbol)
+        if exit_confirmed:
+            confirmed_normal_exit_symbols.append(symbol)
+            if min_holding_satisfied:
+                normal_exit_ready.append(symbol)
+            else:
+                min_holding_blocked_symbols.append(symbol)
+        holding_statuses.append(
+            {
+                "stock_symbol": symbol,
+                "entry_date": entry_date.isoformat() if entry_date else None,
+                "completed_holding_days": completed_holding_days,
+                "hold_buffer_rank": safe_int(item.get("hold_buffer_rank")),
+                "hard_exit": hard_exit,
+                "normal_exit_signal": normal_exit_signal,
+                "exit_confirmed": exit_confirmed,
+                "min_holding_satisfied": min_holding_satisfied,
+            }
+        )
+
+    def history_replacement_count(entry: Dict[str, Any]) -> int:
+        if not entry.get("rebalance_executed"):
+            return 0
+        value = safe_int(entry.get("replacement_count"))
+        if value is not None:
+            return max(0, value)
+        plan = _rank_acceleration_history_plan(entry)
+        if _is_rank_acceleration_initial_build(plan):
+            return 0
+        return len(history_added_symbols(entry))
+
+    rolling_history = normalized_history[: RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS - 1]
+    rolling_prior_replacements = sum(history_replacement_count(entry) for entry in rolling_history)
+    rolling_replacement_capacity = max(
+        0,
+        RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS - rolling_prior_replacements,
+    )
+    initial_build = not current_symbols
+    addition_capacity = (
+        normalized_top_n
+        if initial_build
+        else min(max_replacements, rolling_replacement_capacity)
+    )
+
+    def normal_exit_sort_key(symbol: str) -> Tuple[int, int, float, str]:
+        item = item_by_symbol.get(symbol) or {}
+        return (
+            safe_int(item.get("hold_buffer_rank")) or 999999,
+            safe_int(item.get("composite_rank")) or 999999,
+            -(safe_float(item.get("acceleration_rank_change_5d")) or 0.0),
+            symbol,
+        )
+
+    normal_exit_ready = sorted(normal_exit_ready, key=normal_exit_sort_key, reverse=True)
+    hard_exit_set = set(hard_exit_symbols)
+    retained_symbols = [symbol for symbol in current_symbols if symbol not in hard_exit_set]
 
     segment_counts: Dict[str, int] = defaultdict(int)
 
@@ -2884,22 +3142,65 @@ def build_rank_acceleration_buffer_plan(
         if segment:
             segment_counts[segment] += 1
 
-    buy_candidates = [item for item in retain_candidates if item.get("buy_eligible")]
     added_symbols: List[str] = []
     selected_set = set(retained_symbols)
-    for item in buy_candidates:
-        if len(retained_symbols) + len(added_symbols) >= normalized_top_n:
+    buy_candidates = [
+        item
+        for item in confirmed_buy_candidates
+        if item.get("stock_symbol") not in current_symbol_set
+    ]
+
+    def take_next_buy() -> Optional[str]:
+        for item in buy_candidates:
+            symbol = item["stock_symbol"]
+            if symbol in selected_set:
+                continue
+            segment = segment_key(symbol)
+            if segment and segment_counts[segment] >= max_segment_positions:
+                continue
+            selected_set.add(symbol)
+            if segment:
+                segment_counts[segment] += 1
+            return symbol
+        return None
+
+    remaining_additions = addition_capacity
+    base_vacancies = max(0, normalized_top_n - len(retained_symbols))
+    while base_vacancies > 0 and remaining_additions > 0:
+        symbol = take_next_buy()
+        if not symbol:
             break
-        symbol = item["stock_symbol"]
-        if symbol in selected_set:
-            continue
-        segment = segment_key(symbol)
-        if segment and segment_counts[segment] >= max_segment_positions:
-            continue
         added_symbols.append(symbol)
-        selected_set.add(symbol)
-        if segment:
-            segment_counts[segment] += 1
+        base_vacancies -= 1
+        remaining_additions -= 1
+
+    normal_removed_symbols: List[str] = []
+    for symbol in normal_exit_ready:
+        if remaining_additions <= 0:
+            break
+        if symbol not in retained_symbols:
+            continue
+        removed_segment = segment_key(symbol)
+        retained_symbols.remove(symbol)
+        selected_set.discard(symbol)
+        if removed_segment:
+            segment_counts[removed_segment] = max(0, segment_counts[removed_segment] - 1)
+        replacement_symbol = take_next_buy()
+        if not replacement_symbol:
+            retained_symbols.append(symbol)
+            selected_set.add(symbol)
+            if removed_segment:
+                segment_counts[removed_segment] += 1
+            continue
+        normal_removed_symbols.append(symbol)
+        added_symbols.append(replacement_symbol)
+        remaining_additions -= 1
+
+    removed_symbols = hard_exit_symbols + normal_removed_symbols
+    planned_removed = hard_exit_symbols + normal_exit_ready
+    deferred_normal_exit_symbols = [
+        symbol for symbol in normal_exit_ready if symbol not in set(normal_removed_symbols)
+    ]
 
     final_symbols = retained_symbols + added_symbols
     final_symbols = sorted(
@@ -2951,7 +3252,13 @@ def build_rank_acceleration_buffer_plan(
             {
                 "stock_symbol": symbol,
                 "stock_name": item.get("stock_name") or (current_by_symbol.get(symbol) or {}).get("stock_name") or "",
-                "strategy_action": "sell",
+                "strategy_action": "hard_sell" if symbol in hard_exit_set else "sell",
+                "exit_reason": (
+                    f"综合排名>{RANK_ACCELERATION_HARD_EXIT_RANK}或活跃组合数<"
+                    f"{RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES}"
+                    if symbol in hard_exit_set
+                    else f"连续{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出加速Top{normalized_sell_rank}"
+                ),
                 "current_weight_pct": (current_by_symbol.get(symbol) or {}).get("weight_pct"),
             }
         )
@@ -2966,15 +3273,21 @@ def build_rank_acceleration_buffer_plan(
         "buy_rule": (
             f"当前综合排名Top{RANK_ACCELERATION_CURRENT_RANK_LIMIT}、至少{RANK_ACCELERATION_MIN_HOLDING_CUBES}个活跃组合持有、"
             f"持仓组合增加至少{RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE}个且总权重上升；"
-            f"旧标的5日上升至少{RANK_ACCELERATION_MIN_RANK_CHANGE}名，强势新进需进入Top{RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT}"
+            f"旧标的5日上升至少{RANK_ACCELERATION_MIN_RANK_CHANGE}名，强势新进需进入Top{RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT}；"
+            f"当天加速Top{normalized_top_n}且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}日至少"
+            f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足"
         ),
         "sell_rule": (
-            f"跌出5日排名加速Top{normalized_sell_rank}才卖，"
-            f"每次最多替换{max_replacements}只"
+            f"持满{RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS}个完整交易日且连续"
+            f"{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出5日排名加速Top{normalized_sell_rank}才卖；"
+            f"综合排名>{RANK_ACCELERATION_HARD_EXIT_RANK}或活跃组合数<"
+            f"{RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES}立即退出"
         ),
         "execution_weight_rule": (
             f"Top{normalized_top_n}每只目标上限{target_weight:g}%；不足{normalized_top_n}只时剩余资金留现金；"
-            f"新增成分按板块最多{max_segment_positions}只"
+            f"新增成分按板块最多{max_segment_positions}只；每次最多替换{max_replacements}只，"
+            f"滚动{RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS}日最多"
+            f"{RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS}只"
         ),
         "current_symbols": current_symbols,
         "retained_symbols": retained_symbols,
@@ -2983,11 +3296,24 @@ def build_rank_acceleration_buffer_plan(
         "added_symbols": added_symbols,
         "final_symbols": final_symbols,
         "component_changed": component_changed,
+        "initial_build": initial_build,
+        "daily_buy_signal_symbols": daily_buy_signal_symbols,
+        "confirmed_buy_symbols": [item["stock_symbol"] for item in confirmed_buy_candidates],
+        "normal_exit_signal_symbols": normal_exit_signal_symbols,
+        "confirmed_normal_exit_symbols": confirmed_normal_exit_symbols,
+        "hard_exit_symbols": hard_exit_symbols,
+        "normal_removed_symbols": normal_removed_symbols,
+        "min_holding_blocked_symbols": min_holding_blocked_symbols,
+        "deferred_normal_exit_symbols": deferred_normal_exit_symbols,
+        "holding_statuses": holding_statuses,
+        "rolling_prior_replacements": rolling_prior_replacements,
+        "rolling_replacement_capacity": rolling_replacement_capacity,
+        "replacement_count": 0 if initial_build else len(added_symbols),
         "eligible_buy_count": len(buy_candidates),
-        "eligible_retain_count": len(retain_candidates),
+        "eligible_retain_count": len(hold_candidates),
         "target_items": target_items,
         "removed_items": removed_items,
-        "acceleration_items": retain_candidates,
+        "acceleration_items": hold_candidates[:normalized_sell_rank],
         "current_items": current_items,
         "summary": {
             "current": [_symbol_label(symbol, item_by_symbol, current_by_symbol) for symbol in current_symbols],
@@ -3777,8 +4103,17 @@ def build_rank_acceleration_email_section_html(result: Dict[str, Any]) -> str:
         ("雪球调仓", response_status or ("已跳过" if rebalance_response.get("skipped") else "-")),
         ("雪球调仓ID", response_id or "-"),
         ("5日对比快照", compare_snapshot_date),
-        ("买入候选", strategy_plan.get("eligible_buy_count", 0)),
+        ("已确认买入候选", len(strategy_plan.get("confirmed_buy_symbols") or [])),
+        ("当日买入信号", len(strategy_plan.get("daily_buy_signal_symbols") or [])),
         ("缓冲候选", strategy_plan.get("eligible_retain_count", 0)),
+        ("普通退出信号", len(strategy_plan.get("normal_exit_signal_symbols") or [])),
+        ("硬退出", "、".join(strategy_plan.get("hard_exit_symbols") or []) or "-"),
+        ("持有期保护", "、".join(strategy_plan.get("min_holding_blocked_symbols") or []) or "-"),
+        (
+            "滚动换仓额度",
+            f"此前4个交易日已替换{strategy_plan.get('rolling_prior_replacements', 0)}只；"
+            f"本次计划替换{strategy_plan.get('replacement_count', 0)}只",
+        ),
         ("目标现金", fmt_number(rebalance_payload.get("cash"), suffix="%")),
         ("买入规则", strategy_plan.get("buy_rule") or "-"),
         ("卖出规则", strategy_plan.get("sell_rule") or "-"),
@@ -4093,10 +4428,16 @@ async def execute_rank_acceleration_target_rebalance(
             "configure XUEQIU_RANK_ACCELERATION_TARGET_CUBE_ID"
         )
 
+    strategy_history = load_rank_acceleration_strategy_history(
+        target_cube_symbol=target_cube_symbol,
+        current_snapshot_date=current_snapshot_date,
+    )
     strategy_plan = build_rank_acceleration_buffer_plan(
         ranking=aggregate["ranking"],
         comparison_snapshot=comparison_snapshot,
         current_holdings=current_holdings,
+        strategy_history=strategy_history,
+        current_snapshot_date=current_snapshot_date,
     )
     top_items = strategy_plan["target_items"]
     rebalance_payload = None

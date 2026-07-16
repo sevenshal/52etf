@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.core.database import Base, XueqiuCubeActivityCache, XueqiuCubeRankCache
+from src.core.database import Base, XueqiuCubeActivityCache, XueqiuCubeRankCache, XueqiuTopHoldingsRun
 from src.core.duckdb_utils import connect_duckdb
 from src.robot.xueqiu_top_holdings_report import (
     CubeInfo,
@@ -35,6 +35,7 @@ from src.robot.xueqiu_top_holdings_report import (
     load_or_refresh_year_top_cubes,
     load_cached_year_top_cubes,
     load_recent_xueqiu_rank_history_cube_sets,
+    load_rank_acceleration_strategy_history,
     load_xueqiu_rank_comparison_snapshot,
     load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
@@ -80,6 +81,69 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "trading_days": 5,
             "items": comparison_items,
             "by_symbol": comparison_by_symbol,
+        }
+
+    @staticmethod
+    def _rank_acceleration_turnover_fixture():
+        ranking = []
+        comparison_items = [{} for _ in range(100)]
+        comparison_by_symbol = {}
+        for index in range(1, 41):
+            symbol = f"SH.{600000 + index:06d}"
+            ranking.append(
+                {
+                    "composite_rank": index,
+                    "stock_symbol": symbol,
+                    "stock_name": f"换仓股票{index}",
+                    "segment_name": "",
+                    "holding_cube_count": 12,
+                    "total_weight_pct": 500.0 - index,
+                }
+            )
+            comparison_by_symbol[symbol] = {
+                "composite_rank": index + 40 if index <= 10 else index,
+                "holding_cube_count": 8 if index <= 10 else 12,
+                "total_weight_pct": 300.0 - index if index <= 10 else 500.0 - index,
+            }
+        current_symbols = [f"SH.{600000 + index:06d}" for index in range(31, 41)]
+        current_holdings = [
+            {
+                "stock_symbol": symbol.replace(".", ""),
+                "stock_name": f"旧持仓{index}",
+                "weight": 10.0,
+            }
+            for index, symbol in enumerate(current_symbols, start=1)
+        ]
+        comparison = {
+            "available": True,
+            "reason": None,
+            "compare_snapshot_date": date(2026, 7, 3),
+            "trading_days": 5,
+            "items": comparison_items,
+            "by_symbol": comparison_by_symbol,
+        }
+        return ranking, comparison, current_holdings, current_symbols
+
+    @staticmethod
+    def _strategy_history_entry(
+        run_date,
+        *,
+        buy_signals=None,
+        exit_signals=None,
+        added_symbols=None,
+        replacement_count=0,
+        executed=False,
+    ):
+        return {
+            "run_date": run_date,
+            "strategy_plan": {
+                "daily_buy_signal_symbols": buy_signals or [],
+                "normal_exit_signal_symbols": exit_signals or [],
+                "added_symbols": added_symbols or [],
+            },
+            "rebalance_executed": executed,
+            "added_symbols": added_symbols or [],
+            "replacement_count": replacement_count,
         }
 
     def test_save_year_top_cubes_deduplicates_symbols_and_reassigns_ranks(self):
@@ -540,11 +604,19 @@ class XueqiuTopHoldingsReportTest(TestCase):
 
     def test_rank_acceleration_plan_selects_strong_new_and_breadth_confirmed_risers(self):
         ranking, comparison = self._rank_acceleration_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
 
         plan = build_rank_acceleration_buffer_plan(
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            strategy_history=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
         )
 
         self.assertTrue(plan["component_changed"])
@@ -557,26 +629,234 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertTrue(all(item["buy_eligible"] for item in plan["target_items"]))
 
     def test_rank_acceleration_plan_limits_full_portfolio_to_two_replacements(self):
-        ranking, comparison = self._rank_acceleration_fixture()
-        current_holdings = [
-            {
-                "stock_symbol": f"SZ{index:06d}",
-                "stock_name": f"旧持仓{index}",
-                "weight": 10.0,
-            }
-            for index in range(1, 11)
-        ]
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
 
         plan = build_rank_acceleration_buffer_plan(
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+            strategy_history=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                    exit_signals=current_symbols,
+                )
+            ],
         )
 
         self.assertEqual(2, len(plan["removed_symbols"]))
         self.assertEqual(2, len(plan["added_symbols"]))
         self.assertEqual(10, len(plan["final_symbols"]))
         self.assertEqual(100.0, round(sum(item["rebalance_weight_pct"] for item in plan["target_items"]), 2))
+
+    def test_rank_acceleration_requires_buy_and_sell_confirmation(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+        )
+
+        self.assertEqual([], plan["confirmed_buy_symbols"])
+        self.assertEqual(current_symbols, plan["normal_exit_signal_symbols"])
+        self.assertEqual([], plan["confirmed_normal_exit_symbols"])
+        self.assertFalse(plan["component_changed"])
+
+    def test_rank_acceleration_minimum_holding_period_blocks_normal_exit(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
+        history = [
+            self._strategy_history_entry(
+                date(2026, 7, 9),
+                buy_signals=buy_signals,
+                exit_signals=current_symbols,
+            ),
+            self._strategy_history_entry(date(2026, 7, 8)),
+            self._strategy_history_entry(date(2026, 7, 7)),
+            self._strategy_history_entry(
+                date(2026, 7, 6),
+                added_symbols=current_symbols,
+                executed=True,
+            ),
+        ]
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            strategy_history=history,
+            current_snapshot_date=date(2026, 7, 10),
+        )
+
+        self.assertEqual(current_symbols, plan["confirmed_normal_exit_symbols"])
+        self.assertEqual(current_symbols, plan["min_holding_blocked_symbols"])
+        self.assertFalse(plan["component_changed"])
+
+    def test_rank_acceleration_rolling_limit_reduces_and_then_blocks_replacements(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
+        history = [
+            self._strategy_history_entry(
+                date(2026, 7, 9),
+                buy_signals=buy_signals,
+                exit_signals=current_symbols,
+                replacement_count=1,
+                executed=True,
+            ),
+            self._strategy_history_entry(
+                date(2026, 7, 8),
+                replacement_count=1,
+                executed=True,
+            ),
+            self._strategy_history_entry(date(2026, 7, 7)),
+            self._strategy_history_entry(date(2026, 7, 6)),
+        ]
+
+        limited_plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            strategy_history=history,
+            current_snapshot_date=date(2026, 7, 10),
+        )
+
+        self.assertEqual(2, limited_plan["rolling_prior_replacements"])
+        self.assertEqual(1, limited_plan["replacement_count"])
+        self.assertEqual(1, len(limited_plan["removed_symbols"]))
+
+        history[2] = self._strategy_history_entry(
+            date(2026, 7, 7),
+            replacement_count=1,
+            executed=True,
+        )
+        blocked_plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            strategy_history=history,
+            current_snapshot_date=date(2026, 7, 10),
+        )
+
+        self.assertEqual(3, blocked_plan["rolling_prior_replacements"])
+        self.assertEqual(0, blocked_plan["replacement_count"])
+        self.assertFalse(blocked_plan["component_changed"])
+
+    def test_rank_acceleration_hard_exit_ignores_confirmation_and_holding_period(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        hard_exit_symbol = current_symbols[0]
+        hard_exit_item = next(item for item in ranking if item["stock_symbol"] == hard_exit_symbol)
+        hard_exit_item["composite_rank"] = 151
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+        )
+
+        self.assertEqual([hard_exit_symbol], plan["hard_exit_symbols"])
+        self.assertEqual([hard_exit_symbol], plan["removed_symbols"])
+        self.assertTrue(plan["component_changed"])
+        self.assertEqual(9, len(plan["final_symbols"]))
+
+        rounded_items = rounded_rebalance_weights(plan["target_items"])
+        self.assertEqual(90.0, sum(item["rebalance_weight_pct"] for item in rounded_items))
+
+    def test_rank_acceleration_history_loads_signals_and_executed_replacements(self):
+        with TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{tmpdir}/history.db")
+            Base.metadata.create_all(engine, tables=[XueqiuTopHoldingsRun.__table__])
+            session_factory = sessionmaker(bind=engine)
+            db = session_factory()
+            try:
+                db.add_all(
+                    [
+                        XueqiuTopHoldingsRun(
+                            run_at=datetime(2026, 7, 9, 14, 50),
+                            target_cube_symbol="ZH3644546",
+                            status="SUCCESS",
+                            dry_run=False,
+                            top_n=10,
+                            top_holdings=[
+                                {
+                                    "stock_symbol": "SH.600001",
+                                    "strategy_action": "buy",
+                                }
+                            ],
+                            rebalance_payload={
+                                "strategy_plan": {
+                                    "daily_buy_signal_symbols": ["SH.600001"],
+                                    "added_symbols": ["SH.600001"],
+                                }
+                            },
+                            rebalance_response={"id": 12345},
+                        ),
+                        XueqiuTopHoldingsRun(
+                            run_at=datetime(2026, 7, 8, 14, 50),
+                            target_cube_symbol="ZH3644546",
+                            status="SKIPPED",
+                            dry_run=False,
+                            top_n=10,
+                            top_holdings=[],
+                            rebalance_response={
+                                "skipped": True,
+                                "strategy_plan": {
+                                    "normal_exit_signal_symbols": ["SH.600031"]
+                                },
+                            },
+                        ),
+                        XueqiuTopHoldingsRun(
+                            run_at=datetime(2026, 7, 7, 14, 50),
+                            target_cube_symbol="ZH3644546",
+                            status="SUCCESS",
+                            dry_run=False,
+                            top_n=10,
+                            top_holdings=[
+                                {
+                                    "stock_symbol": f"SH.{600000 + index:06d}",
+                                    "strategy_action": "buy",
+                                }
+                                for index in range(1, 11)
+                            ],
+                            rebalance_payload={
+                                "strategy_plan": {
+                                    "top_n": 10,
+                                    "current_symbols": ["SH.511880"],
+                                    "added_symbols": [
+                                        f"SH.{600000 + index:06d}"
+                                        for index in range(1, 11)
+                                    ],
+                                }
+                            },
+                            rebalance_response={"id": 12344},
+                        ),
+                    ]
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
+                history = load_rank_acceleration_strategy_history(
+                    target_cube_symbol="ZH3644546",
+                    current_snapshot_date=date(2026, 7, 10),
+                )
+
+        self.assertEqual(
+            [date(2026, 7, 9), date(2026, 7, 8), date(2026, 7, 7)],
+            [entry["run_date"] for entry in history],
+        )
+        self.assertEqual(1, history[0]["replacement_count"])
+        self.assertEqual(["SH.600001"], history[0]["added_symbols"])
+        self.assertEqual(
+            ["SH.600031"],
+            history[1]["strategy_plan"]["normal_exit_signal_symbols"],
+        )
+        self.assertEqual(0, history[2]["replacement_count"])
 
     def test_rank_comparison_snapshot_uses_fifth_prior_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
@@ -648,6 +928,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
 
     def test_rank_acceleration_target_rebalance_uses_target_cube_in_same_run(self):
         ranking, comparison = self._rank_acceleration_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
         aggregate = {
             "ranking": ranking,
             "failed_results": [],
@@ -669,6 +950,14 @@ class XueqiuTopHoldingsReportTest(TestCase):
         ), patch(
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": []}}),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
+            return_value=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
         ), patch(
             "src.robot.xueqiu_top_holdings_report.build_rebalance_payload",
             new=AsyncMock(side_effect=fake_payload),
