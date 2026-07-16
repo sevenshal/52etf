@@ -505,7 +505,6 @@ def ensure_strategy_sub_account(
         sub_account.cash_allocated = float(cash_allocated or 0)
         if not sub_account.cash_available and float(cash_allocated or 0) > 0:
             sub_account.cash_available = float(cash_allocated or 0)
-        sub_account.enabled = True
         sub_account.updated_at = now
         return sub_account
 
