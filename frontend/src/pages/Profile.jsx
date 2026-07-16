@@ -16,7 +16,7 @@ import { PageSection, PageShell } from '../components/PageScaffold';
 import './Profile.css';
 
 const Profile = () => {
-  const { accountId, login, logout } = useAccount();
+  const { accountId, isAdmin, login, logout } = useAccount();
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -34,7 +34,7 @@ const Profile = () => {
       }
 
       // 验证成功后保存
-      login(values.accountId);
+      login(values.accountId, response.data.is_admin);
       message.success('账户设置成功');
       navigate('/');
     } catch (error) {
@@ -67,6 +67,11 @@ const Profile = () => {
       className: 'profile-section--trade',
       items: [
         {
+          title: '持仓',
+          onClick: () => navigate('/options'),
+          arrow: true
+        },
+        {
           title: '杠杆ETF策略自动化交易',
           onClick: () => navigate('/automated-trading'),
         },
@@ -87,11 +92,11 @@ const Profile = () => {
       icon: <WalletOutlined />,
       className: 'profile-section--accounts',
       items: [
-        {
-          title: '持仓',
-          onClick: () => navigate('/options'),
+        ...(isAdmin ? [{
+          title: '系统账户管理',
+          onClick: () => navigate('/web-account-manager'),
           arrow: true
-        },
+        }] : []),
         {
           title: 'IBKR 账户管理',
           onClick: () => navigate('/ib-account-manager'),
