@@ -8,7 +8,9 @@ from zoneinfo import ZoneInfo
 
 from ..external_trading_database import (
     ExternalTradingAccount,
+    ExternalTradingLedgerPosition,
     ExternalTradingOrder,
+    ExternalTradingSubAccount,
     ExternalTradingTargetPosition,
     get_external_trading_db_ctx,
 )
@@ -70,6 +72,8 @@ A_SHARE_CLOSE = dtime(15, 0)
 
 _running_lock = threading.Lock()
 _running_account_ids: Set[int] = set()
+_liquidation_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
+_liquidation_statuses: Dict[Tuple[int, int], Dict[str, Any]] = {}
 _trading_day_cache: Dict[date, bool] = {}
 
 
@@ -133,6 +137,111 @@ def _try_mark_running(account_pk: int) -> bool:
 def _clear_running(account_pk: int) -> None:
     with _running_lock:
         _running_account_ids.discard(account_pk)
+
+
+def _set_liquidation_status(
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_id: int,
+    status: str,
+    message: str,
+    **details: Any,
+) -> None:
+    _liquidation_statuses[(external_account_id, sub_account_id)] = {
+        "account_id": account_id,
+        "external_account_id": external_account_id,
+        "sub_account_id": sub_account_id,
+        "status": status,
+        "message": message,
+        "updated_at": datetime.now().isoformat(),
+        **details,
+    }
+
+
+def get_liquidation_statuses(account_id: str) -> List[Dict[str, Any]]:
+    return [
+        dict(row)
+        for row in _liquidation_statuses.values()
+        if row.get("account_id") == account_id
+    ]
+
+
+async def _continue_liquidation_until_terminal(
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_id: int,
+) -> None:
+    key = (external_account_id, sub_account_id)
+    try:
+        # Broker cancellation is confirmed asynchronously by order events. Keep
+        # progressing on the server so closing the browser cannot strand a
+        # liquidation between cancellation and resubmission.
+        for _ in range(120):
+            await asyncio.sleep(1.0)
+            try:
+                result = await liquidate_and_pause_sub_account(
+                    account_id=account_id,
+                    external_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                    schedule_continuation=False,
+                )
+            except ValueError as exc:
+                if "执行器正在运行" in str(exc):
+                    continue
+                _set_liquidation_status(
+                    account_id=account_id,
+                    external_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                    status="FAILED",
+                    message=str(exc),
+                )
+                logger.exception("Background sub-account liquidation stopped")
+                return
+            except ExternalTradingConnectionError as exc:
+                _set_liquidation_status(
+                    account_id=account_id,
+                    external_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                    status="FAILED",
+                    message=str(exc),
+                )
+                logger.exception("Background sub-account liquidation lost PTrade connection")
+                return
+            if result.get("status") not in {"CANCEL_REQUESTED", "WAITING_CANCEL"}:
+                return
+        logger.error(
+            "Background sub-account liquidation timed out: account=%s sub_account=%s",
+            external_account_id,
+            sub_account_id,
+        )
+        _set_liquidation_status(
+            account_id=account_id,
+            external_account_id=external_account_id,
+            sub_account_id=sub_account_id,
+            status="FAILED",
+            message="等待旧委托撤单确认超时",
+        )
+    finally:
+        _liquidation_tasks.pop(key, None)
+
+
+def _schedule_liquidation_continuation(
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_id: int,
+) -> None:
+    key = (external_account_id, sub_account_id)
+    task = _liquidation_tasks.get(key)
+    if task and not task.done():
+        return
+    _liquidation_tasks[key] = asyncio.create_task(_continue_liquidation_until_terminal(
+        account_id=account_id,
+        external_account_id=external_account_id,
+        sub_account_id=sub_account_id,
+    ))
 
 
 def _load_accounts(
@@ -606,6 +715,330 @@ async def _submit_current_targets(
         "parent_orders": parent_orders,
         "result": result,
     }
+
+
+async def _submit_liquidation_after_cancels(
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_id: int,
+) -> Dict[str, Any]:
+    """Submit all sellable holdings at best ask and pause the virtual sub-account."""
+    _set_liquidation_status(
+        account_id=account_id,
+        external_account_id=external_account_id,
+        sub_account_id=sub_account_id,
+        status="LIQUIDATING",
+        message="旧委托已撤销，正在按卖一价生成清仓委托",
+    )
+    if not external_trading_hub.get_status(external_account_id).get("connected"):
+        raise ExternalTradingConnectionError("外部交易账户未连接，无法一键清仓")
+
+    with get_external_trading_db_ctx() as db:
+        account = db.query(ExternalTradingAccount).filter(
+            ExternalTradingAccount.id == external_account_id,
+            ExternalTradingAccount.account_id == account_id,
+        ).first()
+        sub_account = db.query(ExternalTradingSubAccount).filter(
+            ExternalTradingSubAccount.id == sub_account_id,
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == external_account_id,
+        ).first()
+        if not account or not sub_account:
+            raise ValueError("外部交易账户或虚拟子账户不存在")
+        if not account.enabled:
+            raise ValueError("外部交易账户已停用，无法一键清仓")
+
+        positions = db.query(ExternalTradingLedgerPosition).filter(
+            ExternalTradingLedgerPosition.sub_account_id == sub_account_id,
+            ExternalTradingLedgerPosition.quantity > 0,
+        ).all()
+        held_symbols = {normalize_symbol(row.symbol) for row in positions}
+        now = datetime.now()
+        targets = db.query(ExternalTradingTargetPosition).filter(
+            ExternalTradingTargetPosition.sub_account_id == sub_account_id,
+        ).all()
+        targets_by_symbol = {normalize_symbol(row.symbol): row for row in targets}
+        for target in targets:
+            target.target_quantity = 0
+            target.target_weight_pct = 0
+            target.target_value = 0
+            target.reference_price = None
+            target.reference_price_source = "manual_liquidation_best_ask"
+            target.status = "ACTIVE"
+            target.updated_at = now
+        for symbol in held_symbols - set(targets_by_symbol):
+            db.add(ExternalTradingTargetPosition(
+                account_id=account_id,
+                external_trading_account_id=external_account_id,
+                sub_account_id=sub_account_id,
+                strategy_type=sub_account.strategy_type,
+                strategy_config_id=sub_account.strategy_config_id,
+                symbol=symbol,
+                target_quantity=0,
+                target_weight_pct=0,
+                target_value=0,
+                reference_price_source="manual_liquidation_best_ask",
+                status="ACTIVE",
+                created_at=now,
+                updated_at=now,
+            ))
+        # The demand planner intentionally ignores paused sub-accounts. Temporarily
+        # include this one while constructing the liquidation plan, then pause it
+        # again before the transaction is committed.
+        sub_account.enabled = True
+        db.flush()
+
+        policy = resolve_execution_policy(account, sub_account)
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id=account_id,
+            external_trading_account_id=external_account_id,
+            sub_account_ids=[sub_account_id],
+            price_level=-1,
+            lot_size=policy.get("lot_size"),
+            order_timeout_seconds=policy.get("order_timeout_seconds"),
+            max_replace_count=policy.get("max_replace_count"),
+            clip_sell_to_available=True,
+            price_level_sequence=[-1] * (policy.get("max_replace_count", 0) + 1),
+            order_timeout_seconds_sequence=policy.get("order_timeout_seconds_sequence"),
+        )
+        for order in plan.get("external_orders") or []:
+            order["price_level"] = -1
+            order["remark"] = "manual liquidate and pause at best ask"
+            order_policy = order.setdefault("execution_policy", {})
+            order_policy["price_level"] = -1
+            order_policy["price_level_sequence"] = [-1] * (order_policy.get("max_replace_count", 0) + 1)
+            for allocation in order.get("allocations") or []:
+                allocation["reference_price"] = None
+
+        market_type = normalize_external_trading_market_type(account.market_type)
+        _apply_execution_metadata(db, account_pk=external_account_id, plan=plan, price_level=-1, market_type=market_type)
+        execution_orders, parent_rows = create_netted_execution_orders(
+            db,
+            account_id=account_id,
+            external_trading_account_id=external_account_id,
+            orders=plan.get("external_orders") or [],
+            deadline_at=now + timedelta(seconds=policy.get("order_timeout_seconds")),
+            executor_trigger="manual_liquidate_and_pause",
+        )
+        sub_account.enabled = False
+        sub_account.updated_at = now
+        parent_client_order_ids = [row.client_order_id for row in parent_rows]
+        parent_orders = [serialize_order(row) for row in parent_rows]
+
+    result = {"orders": [], "message": "子账户无可卖持仓，已暂停"}
+    if execution_orders:
+        try:
+            result = await external_trading_hub.place_orders(external_account_id, execution_orders, timeout=60.0)
+            with get_external_trading_db_ctx() as db:
+                record_submission_result(
+                    db,
+                    external_trading_account_id=external_account_id,
+                    response_orders=result.get("orders") or [],
+                    insufficient_sellable_block_until=_market_deadline_as_naive_china(market_type),
+                    protection_limit_deadline_at=_market_close_as_naive_china(market_type),
+                )
+        except ExternalTradingConnectionError as exc:
+            _mark_submission_error(parent_client_order_ids, str(exc))
+            raise
+
+    final_status = "SUBMITTED" if execution_orders else "COMPLETED"
+    final_message = "清仓委托已提交" if execution_orders else "无可卖持仓，子账户已暂停"
+    _set_liquidation_status(
+        account_id=account_id,
+        external_account_id=external_account_id,
+        sub_account_id=sub_account_id,
+        status=final_status,
+        message=final_message,
+        order_count=len(execution_orders),
+    )
+    return {
+        "status": final_status,
+        "sub_account_id": sub_account_id,
+        "paused": True,
+        "execution_orders": execution_orders,
+        "parent_orders": parent_orders,
+        "skipped": plan.get("skipped") or [],
+        "result": result,
+    }
+
+
+async def liquidate_and_pause_sub_account(
+    *,
+    account_id: str,
+    external_account_id: int,
+    sub_account_id: int,
+    schedule_continuation: bool = True,
+) -> Dict[str, Any]:
+    """Pause, cancel every active order, then liquidate after cancellation is confirmed."""
+    if not _try_mark_running(external_account_id):
+        raise ValueError("该交易账户的执行器正在运行，请稍后重试")
+    try:
+        _set_liquidation_status(
+            account_id=account_id,
+            external_account_id=external_account_id,
+            sub_account_id=sub_account_id,
+            status="PAUSING",
+            message="正在暂停子账户并检查活动委托",
+        )
+        cancel_items: List[Dict[str, Any]] = []
+        waiting_for_cancel = False
+        with get_external_trading_db_ctx() as db:
+            account = db.query(ExternalTradingAccount).filter(
+                ExternalTradingAccount.id == external_account_id,
+                ExternalTradingAccount.account_id == account_id,
+            ).first()
+            sub_account = db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == sub_account_id,
+                ExternalTradingSubAccount.account_id == account_id,
+                ExternalTradingSubAccount.external_trading_account_id == external_account_id,
+            ).first()
+            if not account or not sub_account:
+                raise ValueError("外部交易账户或虚拟子账户不存在")
+            if not account.enabled:
+                raise ValueError("外部交易账户已停用，无法一键清仓")
+
+            # Freeze the strategy before touching broker orders. Target zero is
+            # persisted now so no subsequent executor run can recreate buys.
+            now = datetime.now()
+            sub_account.enabled = False
+            sub_account.updated_at = now
+            positions = db.query(ExternalTradingLedgerPosition).filter(
+                ExternalTradingLedgerPosition.sub_account_id == sub_account_id,
+                ExternalTradingLedgerPosition.quantity > 0,
+            ).all()
+            targets = db.query(ExternalTradingTargetPosition).filter(
+                ExternalTradingTargetPosition.sub_account_id == sub_account_id,
+            ).all()
+            targets_by_symbol = {normalize_symbol(row.symbol): row for row in targets}
+            for target in targets:
+                target.target_quantity = 0
+                target.target_weight_pct = 0
+                target.target_value = 0
+                target.reference_price = None
+                target.reference_price_source = "manual_liquidation_best_ask"
+                target.status = "ACTIVE"
+                target.updated_at = now
+            for position in positions:
+                symbol = normalize_symbol(position.symbol)
+                if symbol in targets_by_symbol:
+                    continue
+                db.add(ExternalTradingTargetPosition(
+                    account_id=account_id,
+                    external_trading_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                    strategy_type=sub_account.strategy_type,
+                    strategy_config_id=sub_account.strategy_config_id,
+                    symbol=symbol,
+                    target_quantity=0,
+                    target_weight_pct=0,
+                    target_value=0,
+                    reference_price_source="manual_liquidation_best_ask",
+                    status="ACTIVE",
+                    created_at=now,
+                    updated_at=now,
+                ))
+
+            active_children = db.query(ExternalTradingOrder).filter(
+                ExternalTradingOrder.sub_account_id == sub_account_id,
+                ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
+            ).all()
+            cancel_rows: Dict[int, ExternalTradingOrder] = {}
+            for child in active_children:
+                row = child
+                if child.parent_order_id:
+                    row = db.query(ExternalTradingOrder).filter(
+                        ExternalTradingOrder.id == child.parent_order_id,
+                    ).first() or child
+                if row.status not in ACTIVE_ORDER_STATUSES:
+                    continue
+                cancel_rows[row.id] = row
+            for row in cancel_rows.values():
+                if row.status == "CANCEL_PENDING":
+                    waiting_for_cancel = True
+                    continue
+                order_id = row.broker_order_id or row.entrust_no
+                if not order_id:
+                    waiting_for_cancel = True
+                    continue
+                row.cancel_reason = "manual_liquidate_and_pause"
+                row.message = "一键清仓：等待旧委托撤单确认"
+                row.updated_at = now
+                cancel_items.append({
+                    "order_id": order_id,
+                    "client_order_id": row.client_order_id,
+                })
+
+        if cancel_items:
+            if not external_trading_hub.get_status(external_account_id).get("connected"):
+                raise ExternalTradingConnectionError("外部交易账户未连接，子账户已暂停，但无法撤销活动委托")
+            response = await external_trading_hub.cancel_orders(external_account_id, cancel_items, timeout=15.0)
+            with get_external_trading_db_ctx() as db:
+                record_cancel_result(
+                    db,
+                    external_trading_account_id=external_account_id,
+                    response_orders=response.get("orders") or [],
+                )
+            failed = [item for item in response.get("orders") or [] if item.get("ok") is False]
+            _set_liquidation_status(
+                account_id=account_id,
+                external_account_id=external_account_id,
+                sub_account_id=sub_account_id,
+                status="FAILED" if failed else "CANCEL_REQUESTED",
+                message="部分旧委托撤单失败" if failed else "已提交旧委托撤单，等待券商确认",
+                cancel_requested=len(cancel_items),
+            )
+            if not failed and schedule_continuation:
+                _schedule_liquidation_continuation(
+                    account_id=account_id,
+                    external_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                )
+            return {
+                "status": "CANCEL_FAILED" if failed else "CANCEL_REQUESTED",
+                "sub_account_id": sub_account_id,
+                "paused": True,
+                "cancel_requested": len(cancel_items),
+                "cancel_orders": response.get("orders") or [],
+                "message": "部分旧委托撤单失败" if failed else "已提交旧委托撤单，等待确认后自动继续清仓",
+            }
+        if waiting_for_cancel:
+            _set_liquidation_status(
+                account_id=account_id,
+                external_account_id=external_account_id,
+                sub_account_id=sub_account_id,
+                status="WAITING_CANCEL",
+                message="正在等待旧委托撤单确认",
+            )
+            if schedule_continuation:
+                _schedule_liquidation_continuation(
+                    account_id=account_id,
+                    external_account_id=external_account_id,
+                    sub_account_id=sub_account_id,
+                )
+            return {
+                "status": "WAITING_CANCEL",
+                "sub_account_id": sub_account_id,
+                "paused": True,
+                "message": "正在等待旧委托撤单确认",
+            }
+        return await _submit_liquidation_after_cancels(
+            account_id=account_id,
+            external_account_id=external_account_id,
+            sub_account_id=sub_account_id,
+        )
+    except Exception as exc:
+        _set_liquidation_status(
+            account_id=account_id,
+            external_account_id=external_account_id,
+            sub_account_id=sub_account_id,
+            status="FAILED",
+            message=str(exc),
+        )
+        raise
+    finally:
+        _clear_running(external_account_id)
 
 
 async def _run_account_executor(

@@ -38,7 +38,11 @@ from ...core.services.external_trading import (
     external_trading_hub,
     is_initial_websocket_send_state_error,
 )
-from ...core.services.external_trading_executor import trigger_external_trading_executor
+from ...core.services.external_trading_executor import (
+    get_liquidation_statuses,
+    liquidate_and_pause_sub_account,
+    trigger_external_trading_executor,
+)
 from ...core.services.external_trading_execution_policy import (
     ALLOWED_EXECUTOR_PRICE_LEVELS,
     DEFAULT_EXECUTOR_LOT_SIZE,
@@ -1831,6 +1835,7 @@ async def external_trading_account_status_websocket(websocket: WebSocket):
                 payload = {
                     "type": "external_trading_accounts",
                     "accounts": _list_serialized_accounts(db, account_id),
+                    "sub_account_liquidations": get_liquidation_statuses(account_id),
                     "pushed_at": datetime.now(),
                 }
             finally:
@@ -2268,6 +2273,27 @@ async def update_external_trading_sub_account(
     db.commit()
     db.refresh(sub_account)
     return await _serialize_sub_account_with_binding(db, sub_account, main_db=main_db, account=account)
+
+
+@router.post("/{external_account_id}/sub-accounts/{sub_account_id}/liquidate-and-pause")
+async def liquidate_external_trading_sub_account_and_pause(
+    external_account_id: int,
+    sub_account_id: int,
+    account_id: str = Depends(valid_account),
+):
+    try:
+        return await liquidate_and_pause_sub_account(
+            account_id=account_id,
+            external_account_id=external_account_id,
+            sub_account_id=sub_account_id,
+        )
+    except ExternalTradingConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Liquidate and pause sub-account failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.delete("/{external_account_id}/sub-accounts/{sub_account_id}")
