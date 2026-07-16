@@ -28,6 +28,7 @@ import {
   LineChartOutlined,
   PlusOutlined,
   RightOutlined,
+  StopOutlined,
   SyncOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -45,6 +46,16 @@ const MARKET_TYPE_OPTIONS = [
 ];
 const marketTypeLabel = value => (value === MARKET_TYPE_US_STOCK ? '美股' : 'A股');
 const marketTypeColor = value => (value === MARKET_TYPE_US_STOCK ? 'blue' : 'red');
+const LIQUIDATION_STATUS_META = {
+  PAUSING: { label: '暂停中', color: 'processing' },
+  CANCEL_REQUESTED: { label: '已请求撤单', color: 'processing' },
+  WAITING_CANCEL: { label: '等待撤单', color: 'processing' },
+  LIQUIDATING: { label: '清仓下单中', color: 'processing' },
+  SUBMITTED: { label: '清仓单已提交', color: 'blue' },
+  COMPLETED: { label: '清仓完成', color: 'green' },
+  FAILED: { label: '清仓失败', color: 'red' }
+};
+const ACTIVE_LIQUIDATION_STATUSES = new Set(['PAUSING', 'CANCEL_REQUESTED', 'WAITING_CANCEL', 'LIQUIDATING']);
 const marketDefaultFields = value => (
   value === MARKET_TYPE_US_STOCK
     ? { executor_lot_size: 1, stamp_tax_rate_pct: 0 }
@@ -258,6 +269,8 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
   const [netAssetHistoryAccount, setNetAssetHistoryAccount] = useState(null);
   const [netAssetHistorySubAccount, setNetAssetHistorySubAccount] = useState(null);
   const [netAssetHistory, setNetAssetHistory] = useState(null);
+  const [liquidatingSubAccountId, setLiquidatingSubAccountId] = useState(null);
+  const [liquidationStatuses, setLiquidationStatuses] = useState({});
   const [form] = Form.useForm();
   const [subForm] = Form.useForm();
   const statusWsRef = useRef(null);
@@ -309,6 +322,11 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           const payload = JSON.parse(event.data);
           if (Array.isArray(payload?.accounts)) {
             setAccounts(payload.accounts);
+          }
+          if (Array.isArray(payload?.sub_account_liquidations)) {
+            setLiquidationStatuses(Object.fromEntries(
+              payload.sub_account_liquidations.map(item => [item.sub_account_id, item])
+            ));
           }
         } catch (error) {
           console.warn('解析交易账户状态推送失败', error);
@@ -579,6 +597,41 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     }
   };
 
+  const handleLiquidateAndPause = async (account, subAccount) => {
+    setLiquidatingSubAccountId(subAccount.id);
+    try {
+      const endpoint = `/api/external-trading-accounts/${account.id}/sub-accounts/${subAccount.id}/liquidate-and-pause`;
+      const { data } = await request.post(endpoint);
+      if (data?.status === 'CANCEL_FAILED') {
+        throw new Error(data?.message || '旧委托撤单失败');
+      }
+      if (['CANCEL_REQUESTED', 'WAITING_CANCEL'].includes(data?.status)) {
+        message.info('子账户已暂停，后台将在旧委托撤单确认后自动按卖一价清仓');
+        await fetchSubAccounts(account.id);
+        return;
+      }
+      const orderCount = data?.execution_orders?.length || 0;
+      message.success(orderCount ? `已按卖一价提交 ${orderCount} 笔清仓委托，并暂停子账户` : '子账户无可卖持仓，已暂停');
+      await fetchSubAccounts(account.id);
+    } catch (error) {
+      message.error(error.response?.data?.detail || error.message || '一键清仓并暂停失败');
+      await fetchSubAccounts(account.id);
+    } finally {
+      setLiquidatingSubAccountId(null);
+    }
+  };
+
+  const renderLiquidationStatus = subAccountId => {
+    const status = liquidationStatuses[subAccountId];
+    if (!status) return '-';
+    const meta = LIQUIDATION_STATUS_META[status.status] || { label: status.status, color: 'default' };
+    return <Tooltip title={status.message || meta.label}><Tag color={meta.color}>{meta.label}</Tag></Tooltip>;
+  };
+
+  const isSubAccountLiquidating = subAccountId => (
+    ACTIVE_LIQUIDATION_STATUSES.has(liquidationStatuses[subAccountId]?.status)
+  );
+
   const fetchBrokerPositions = async account => {
     if (!account?.id) return;
     setBrokerPositionsLoading(true);
@@ -661,11 +714,30 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       { title: '执行策略', dataIndex: 'effective_executor_policy', key: 'effective_executor_policy', width: 320, render: formatPolicy },
       { title: '持仓数', dataIndex: 'position_count', key: 'position_count', render: value => formatNumber(value) },
       { title: '启用', dataIndex: 'enabled', key: 'enabled', render: value => value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
+      { title: '清仓状态', key: 'liquidation_status', render: (_, record) => renderLiquidationStatus(record.id) },
       {
         title: '操作',
         key: 'action',
         render: (_, subAccount) => (
           <Space>
+            <Popconfirm
+              title="一键清仓并暂停子账户？"
+              description="将按卖一价卖出该子账户全部可卖持仓，并立即暂停子账户。提交后请在执行器状态中确认成交。"
+              okText="确认清仓"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleLiquidateAndPause(account, subAccount)}
+            >
+              <Button
+                size="small"
+                icon={<StopOutlined />}
+                danger
+                loading={liquidatingSubAccountId === subAccount.id || isSubAccountLiquidating(subAccount.id)}
+                disabled={isSubAccountLiquidating(subAccount.id)}
+              >
+                清仓并暂停
+              </Button>
+            </Popconfirm>
             <Button size="small" icon={<LineChartOutlined />} onClick={() => openNetAssetHistory(account, subAccount)}>
               曲线
             </Button>
@@ -817,6 +889,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             <Tag color={subAccount.enabled ? 'green' : 'default'}>
               {subAccount.enabled ? '启用' : '停用'}
             </Tag>
+            {renderLiquidationStatus(subAccount.id) !== '-' && renderLiquidationStatus(subAccount.id)}
           </div>
           <div className="external-subaccount-card__binding">
             {subAccount.binding_status === 'BOUND'
@@ -849,6 +922,24 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             累计交易费 {formatNumber(feeTotal, 2)}
           </div>
           <div className="external-subaccount-card__actions">
+            <Popconfirm
+              title="一键清仓并暂停子账户？"
+              description="将按卖一价卖出全部可卖持仓，并立即暂停子账户。"
+              okText="确认清仓"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleLiquidateAndPause(account, subAccount)}
+            >
+              <Button
+                size="small"
+                icon={<StopOutlined />}
+                danger
+                loading={liquidatingSubAccountId === subAccount.id || isSubAccountLiquidating(subAccount.id)}
+                disabled={loading || isSubAccountLiquidating(subAccount.id)}
+              >
+                清仓并暂停
+              </Button>
+            </Popconfirm>
             <Button
               size="small"
               icon={<LineChartOutlined />}
