@@ -30,6 +30,17 @@ Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 Session = scoped_session(SessionLocal)
 
+
+class WebAccount(Base):
+    """可登录 Web 系统的账户。"""
+    __tablename__ = "web_accounts"
+
+    account_id = Column(String(128), primary_key=True)
+    note = Column(String(500), nullable=False, default="")
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
 # 股票-标签关联表
 stock_tags = Table(
     'stock_tags',
