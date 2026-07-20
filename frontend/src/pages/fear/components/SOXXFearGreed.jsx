@@ -50,6 +50,14 @@ const fearTextColor = (value) => {
 
 const fearStatus = value => (isFiniteNumber(value) ? getFearGreedStatus(value) : '未入库');
 
+const formatCompactVolume = (value) => {
+  if (!isFiniteNumber(value)) return '-';
+  const number = Number(value);
+  if (Math.abs(number) >= 100000000) return `${(number / 100000000).toFixed(1)}亿`;
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`;
+  return Math.round(number).toLocaleString();
+};
+
 const formatDateTime = (value) => {
   if (!value) return '-';
   return new Date(value).toLocaleString();
@@ -189,19 +197,38 @@ const SOXXFearGreed = () => {
     const dates = filteredData.map(item => item.date);
     const scores = filteredData.map(item => item.score ?? null);
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
+    const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
     const priceValues = prices.filter(value => value !== null && value !== undefined);
     const priceMin = priceValues.length ? Math.floor(Math.min(...priceValues) * 0.92) : undefined;
     const priceMax = priceValues.length ? Math.ceil(Math.max(...priceValues) * 1.08) : undefined;
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: [`${ticker}贪恐`, `${ticker}价格`], top: 0 },
-      grid: { left: 48, right: 56, top: 48, bottom: 56 },
-      dataZoom: [
-        { type: 'inside', start: 0, end: 100 },
-        { type: 'slider', start: 0, end: 100 },
+      legend: { data: [`${ticker}贪恐`, `${ticker}价格`, '成交量'], top: 0 },
+      grid: [
+        { left: 56, right: 64, top: 48, height: '57%' },
+        { left: 56, right: 64, top: '72%', bottom: 58 },
       ],
-      xAxis: { type: 'category', boundaryGap: false, data: dates },
+      dataZoom: [
+        { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+        { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 8 },
+      ],
+      axisPointer: { link: [{ xAxisIndex: 'all' }] },
+      xAxis: [
+        {
+          type: 'category',
+          boundaryGap: false,
+          data: dates,
+          axisLabel: { show: false },
+          axisTick: { show: false },
+        },
+        {
+          type: 'category',
+          gridIndex: 1,
+          boundaryGap: true,
+          data: dates,
+        },
+      ],
       yAxis: [
         {
           type: 'value',
@@ -218,6 +245,15 @@ const SOXXFearGreed = () => {
           max: priceMax,
           axisLine: { show: true, lineStyle: { color: '#fa8c16' } },
           splitLine: { show: false },
+        },
+        {
+          type: 'value',
+          name: '成交量',
+          gridIndex: 1,
+          min: 0,
+          axisLabel: { formatter: formatCompactVolume },
+          axisLine: { show: true, lineStyle: { color: '#8c8c8c' } },
+          splitLine: { lineStyle: { color: '#f5f5f5' } },
         },
       ],
       series: [
@@ -239,6 +275,16 @@ const SOXXFearGreed = () => {
           data: prices,
           lineStyle: { width: 2, color: '#fa8c16' },
           itemStyle: { color: '#fa8c16' },
+        },
+        {
+          name: '成交量',
+          type: 'bar',
+          xAxisIndex: 1,
+          yAxisIndex: 2,
+          data: volumes,
+          barMaxWidth: 12,
+          itemStyle: { color: 'rgba(89, 126, 164, 0.55)' },
+          emphasis: { itemStyle: { color: '#597ea4' } },
         },
       ],
     };

@@ -138,7 +138,7 @@
 }
 
 .soxx-fear-chart {
-  height: 420px;
+  height: 520px;
 }
 
 @media (max-width: 720px) {
@@ -165,6 +165,6 @@
   }
 
   .soxx-fear-chart {
-    height: 340px;
+    height: 430px;
   }
 }
