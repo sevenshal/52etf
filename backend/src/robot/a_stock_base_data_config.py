@@ -11,6 +11,7 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000905.SH", "name": "中证500"},
     {"index_code": "000985.SH", "name": "中证全指"},
     {"index_code": "899050.BJ", "name": "北证50"},
+    {"index_code": "000688.SH", "name": "科创50"},
     {"index_code": "000699.SH", "name": "科创200"},
     {"index_code": "399006.SZ", "name": "创业板指"},
     {"index_code": "399998.SZ", "name": "中证煤炭"},
@@ -49,6 +50,14 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "option_underlyings": [],
     },
     {
+        "symbol": "000688.SH",
+        "ticker": "科创50",
+        "label": "科创50",
+        "index_name": "上证科创板50成份指数",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH"],
+        "proxy_etf": "588000.SH",
+    },
+    {
         "symbol": "000699.SH",
         "ticker": "科创200",
         "label": "科创200",
@@ -85,6 +94,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "563360.SH",
     "510500.SH",
     "510300.SH",
+    "588000.SH",
     "588230.SH",
     "159915.SZ",
     "515220.SH",
@@ -93,6 +103,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
 A_STOCK_ETF_DAILY_NAMES = {
     "563360.SH": "A500ETF",
     "510500.SH": "中证500ETF",
+    "588000.SH": "科创50ETF",
     "588230.SH": "科创200ETF",
     "159915.SZ": "创业板ETF",
     "515220.SH": "煤炭ETF",
