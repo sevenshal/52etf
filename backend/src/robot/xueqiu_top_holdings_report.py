@@ -23,6 +23,7 @@ import httpx
 import pandas as pd
 
 from ..core.database import (
+    ETFFearGreedCloneHistory,
     SessionLocal,
     SnowballAccountConfig,
     XueqiuCubeActivityCache,
@@ -61,6 +62,11 @@ DEFAULT_XUEQIU_REBALANCE_BLOCKED_QUOTE_TYPES = {13, 17}
 REBALANCE_QUOTE_BATCH_SIZE = 50
 BUFFER_STRATEGY_TOP_N = 10
 BUFFER_STRATEGY_SELL_RANK = 12
+CSI_ALL_SHARE_FEAR_GREED_SYMBOL = "000985.SH"
+FEAR_GREED_FEAR_THRESHOLD = 25.0
+FEAR_GREED_GREED_THRESHOLD = 75.0
+FEAR_GREED_FEAR_TARGET_COUNT = 10
+FEAR_GREED_GREED_TARGET_COUNT = 3
 REPORT_TABLE_DISPLAY_RANK = BUFFER_STRATEGY_SELL_RANK
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
 BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT = 1.0
@@ -2391,6 +2397,7 @@ def build_min_turnover_execution_weights(
     final_symbols: List[str],
     added_symbols: List[str],
     current_by_symbol: Dict[str, Dict[str, Any]],
+    target_total_weight_pct: float = 100.0,
 ) -> Dict[str, float]:
     """Build submission weights that avoid touching retained holdings unnecessarily."""
     if not final_symbols:
@@ -2398,7 +2405,7 @@ def build_min_turnover_execution_weights(
 
     added_set = set(added_symbols)
     retained_symbols = [symbol for symbol in final_symbols if symbol not in added_set]
-    equal_weight = 100.0 / len(final_symbols)
+    equal_weight = target_total_weight_pct / len(final_symbols)
 
     weights: Dict[str, float] = {}
     retained_sum = 0.0
@@ -2413,14 +2420,14 @@ def build_min_turnover_execution_weights(
         weights[symbol] = weight
         retained_sum += weight
 
-    remaining_weight = 100.0 - retained_sum
+    remaining_weight = target_total_weight_pct - retained_sum
     if added_symbols:
         if remaining_weight <= 0:
-            retained_target_sum = max(0.0, 100.0 - equal_weight * len(added_symbols))
+            retained_target_sum = max(0.0, target_total_weight_pct - equal_weight * len(added_symbols))
             scale = retained_target_sum / retained_sum if retained_sum > 0 else 0.0
             for symbol in retained_symbols:
                 weights[symbol] = weights[symbol] * scale
-            remaining_weight = 100.0 - retained_target_sum
+            remaining_weight = target_total_weight_pct - retained_target_sum
         per_added_weight = remaining_weight / len(added_symbols)
         for symbol in added_symbols:
             weights[symbol] = max(0.0, per_added_weight)
@@ -2456,8 +2463,8 @@ def build_min_turnover_execution_weights(
             weights[symbol] = max(0.0, weights.get(symbol, 0.0) + per_symbol_delta)
 
     total = sum(weights.values())
-    if total > 0 and abs(total - 100.0) > 1e-9:
-        scale = 100.0 / total
+    if total > 0 and abs(total - target_total_weight_pct) > 1e-9:
+        scale = target_total_weight_pct / total
         weights = {symbol: weight * scale for symbol, weight in weights.items()}
     return weights
 
@@ -2468,6 +2475,7 @@ def build_equal_top10_top12_buffer_plan(
     current_holdings: List[Dict[str, Any]],
     top_n: int = BUFFER_STRATEGY_TOP_N,
     sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
+    target_total_weight_pct: float = 100.0,
 ) -> Dict[str, Any]:
     candidates = _ranked_rebalance_candidates(ranking)
     if len(candidates) < max(top_n, sell_rank):
@@ -2526,11 +2534,12 @@ def build_equal_top10_top12_buffer_plan(
     final_symbol_set = set(final_symbols)
     current_symbol_set = set(current_symbols)
     component_changed = final_symbol_set != current_symbol_set
-    equal_weight = 100.0 / len(final_symbols) if final_symbols else 0.0
+    equal_weight = target_total_weight_pct / len(final_symbols) if final_symbols else 0.0
     execution_weights = build_min_turnover_execution_weights(
         final_symbols=final_symbols,
         added_symbols=added_symbols,
         current_by_symbol=current_by_symbol,
+        target_total_weight_pct=target_total_weight_pct,
     )
 
     target_items: List[Dict[str, Any]] = []
@@ -2567,6 +2576,8 @@ def build_equal_top10_top12_buffer_plan(
         ),
         "top_n": top_n,
         "sell_rank": sell_rank,
+        "target_total_weight_pct": target_total_weight_pct,
+        "target_cash_weight_pct": 100.0 - target_total_weight_pct,
         "top10_symbols": top10_symbols,
         "top12_symbols": [item["stock_symbol"] for item in top12_items],
         "current_symbols": current_symbols,
@@ -2603,6 +2614,45 @@ def build_equal_top10_top12_buffer_plan(
             ],
         },
     }
+
+
+def load_latest_csi_all_share_fear_greed() -> Optional[Dict[str, Any]]:
+    """Read a plain snapshot so no ORM object/session crosses external I/O."""
+    with SessionLocal() as db:
+        row = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(ETFFearGreedCloneHistory.symbol == CSI_ALL_SHARE_FEAR_GREED_SYMBOL)
+            .order_by(ETFFearGreedCloneHistory.date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "symbol": row.symbol,
+            "date": row.date.isoformat(),
+            "score": float(row.score),
+            "rating": row.rating,
+        }
+
+
+def resolve_fear_greed_target_count(
+    fear_greed: Optional[Dict[str, Any]],
+    *,
+    current_holding_count: Optional[int] = None,
+    default_top_n: int = BUFFER_STRATEGY_TOP_N,
+) -> Tuple[int, str]:
+    if not fear_greed:
+        return default_top_n, "missing_fallback"
+    score = safe_float(fear_greed.get("score"))
+    if score is None:
+        return default_top_n, "invalid_fallback"
+    if score < FEAR_GREED_FEAR_THRESHOLD:
+        return FEAR_GREED_FEAR_TARGET_COUNT, "fear"
+    if score > FEAR_GREED_GREED_THRESHOLD:
+        return FEAR_GREED_GREED_TARGET_COUNT, "greed"
+    if current_holding_count is not None and current_holding_count <= FEAR_GREED_GREED_TARGET_COUNT:
+        return FEAR_GREED_GREED_TARGET_COUNT, "neutral_keep_3"
+    return default_top_n, "neutral_keep_10"
 
 
 def load_xueqiu_rank_comparison_snapshot(
@@ -4620,6 +4670,7 @@ async def run_top_holdings_job(
     rebalance_payload = None
     rebalance_response = None
     strategy_plan: Optional[Dict[str, Any]] = None
+    fear_greed_snapshot: Optional[Dict[str, Any]] = None
     resolved_target_cube_id = None
     latest_target_rebalance = None
     rank_acceleration_result: Optional[Dict[str, Any]] = None
@@ -4640,11 +4691,29 @@ async def run_top_holdings_job(
             target_cube_symbol=target_cube_symbol,
             timeout=timeout,
         )
+        try:
+            fear_greed_snapshot = load_latest_csi_all_share_fear_greed()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load CSI All Share fear greed, using current Top%s logic: %s", top_n, exc)
+            fear_greed_snapshot = None
+        strategy_top_n, fear_greed_regime = resolve_fear_greed_target_count(
+            fear_greed_snapshot,
+            current_holding_count=len(extract_current_target_holdings(current_target_holdings)),
+            default_top_n=top_n,
+        )
         strategy_plan = build_equal_top10_top12_buffer_plan(
             ranking=aggregate["ranking"],
             current_holdings=current_target_holdings,
-            top_n=top_n,
-            sell_rank=max(safe_int(sell_rank) or BUFFER_STRATEGY_SELL_RANK, top_n),
+            top_n=strategy_top_n,
+            sell_rank=max(safe_int(sell_rank) or BUFFER_STRATEGY_SELL_RANK, strategy_top_n),
+            target_total_weight_pct=float(strategy_top_n * 10),
+        )
+        strategy_plan["fear_greed"] = fear_greed_snapshot
+        strategy_plan["fear_greed_regime"] = fear_greed_regime
+        strategy_plan["configured_top_n"] = top_n
+        strategy_plan["strategy_name"] = (
+            f"中证全指恐贪择时({fear_greed_regime}) + "
+            f"{strategy_plan['strategy_name']}"
         )
         top_items = strategy_plan["target_items"]
         if strategy_plan.get("component_changed"):
@@ -4678,7 +4747,10 @@ async def run_top_holdings_job(
         else:
             rebalance_response = {
                 "skipped": True,
-                "message": "目标组合成分未变化，按Top10等权缓冲策略不提交调仓。",
+                "message": (
+                    f"目标组合成分未变化，按Top{strategy_top_n}等权/跌出Top"
+                    f"{strategy_plan['sell_rank']}缓冲策略不提交调仓。"
+                ),
                 "strategy": strategy_plan.get("strategy_name"),
                 "strategy_plan": strategy_plan,
                 "active_filter": active_filter_summary,
@@ -4866,6 +4938,7 @@ async def run_top_holdings_job(
         "holdings_snapshot": holdings_snapshot_result,
         "top": top_items,
         "rank_acceleration_target": rank_acceleration_result,
+        "fear_greed": fear_greed_snapshot,
     }
 
 

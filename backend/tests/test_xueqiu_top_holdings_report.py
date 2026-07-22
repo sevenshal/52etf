@@ -41,6 +41,7 @@ from src.robot.xueqiu_top_holdings_report import (
     manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
     process_xueqiu_top_holdings_rebalance_for_robot,
+    resolve_fear_greed_target_count,
     save_cube_activity_cache,
     save_xueqiu_cube_rank_history_to_duckdb,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
@@ -50,6 +51,57 @@ from src.robot.xueqiu_top_holdings_report import (
 
 
 class XueqiuTopHoldingsReportTest(TestCase):
+    def test_fear_greed_regime_selects_target_position_count_at_boundaries(self):
+        self.assertEqual((10, "fear"), resolve_fear_greed_target_count({"score": 24.99}))
+        self.assertEqual(
+            (3, "neutral_keep_3"),
+            resolve_fear_greed_target_count({"score": 25}, current_holding_count=3),
+        )
+        self.assertEqual(
+            (10, "neutral_keep_10"),
+            resolve_fear_greed_target_count({"score": 75}, current_holding_count=10),
+        )
+        self.assertEqual(
+            (10, "neutral_keep_10"),
+            resolve_fear_greed_target_count({"score": 50}, current_holding_count=7),
+        )
+        self.assertEqual((3, "greed"), resolve_fear_greed_target_count({"score": 75.01}))
+        self.assertEqual((10, "missing_fallback"), resolve_fear_greed_target_count(None))
+
+    def test_top3_regime_keeps_holdings_until_one_falls_out_of_top12(self):
+        ranking = [
+            {"stock_symbol": f"SH.{600000 + index}", "stock_name": str(index)}
+            for index in range(15)
+        ]
+        current_holdings = [
+            {"stock_symbol": "SH600000", "weight": 33.34},
+            {"stock_symbol": "SH600004", "weight": 33.33},
+            {"stock_symbol": "SH600011", "weight": 33.33},
+        ]
+        stable_plan = build_equal_top10_top12_buffer_plan(
+            ranking=ranking,
+            current_holdings=current_holdings,
+            top_n=3,
+            sell_rank=12,
+            target_total_weight_pct=30.0,
+        )
+        self.assertFalse(stable_plan["component_changed"])
+        self.assertEqual(["SH.600000", "SH.600004", "SH.600011"], stable_plan["final_symbols"])
+        self.assertEqual(30.0, sum(item["rebalance_weight_pct"] for item in stable_plan["target_items"]))
+        self.assertEqual(70.0, stable_plan["target_cash_weight_pct"])
+
+        ranking[11], ranking[12] = ranking[12], ranking[11]
+        changed_plan = build_equal_top10_top12_buffer_plan(
+            ranking=ranking,
+            current_holdings=current_holdings,
+            top_n=3,
+            sell_rank=12,
+            target_total_weight_pct=30.0,
+        )
+        self.assertTrue(changed_plan["component_changed"])
+        self.assertIn("SH.600011", changed_plan["removed_symbols"])
+        self.assertIn("SH.600001", changed_plan["added_symbols"])
+
     @staticmethod
     def _rank_acceleration_fixture():
         ranking = []
