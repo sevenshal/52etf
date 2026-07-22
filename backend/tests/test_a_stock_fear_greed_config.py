@@ -4,6 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.robot.a_stock_base_data_config import (
+    A_STOCK_ETF_DAILY_NAMES,
+    A_STOCK_ETF_DAILY_SYMBOLS,
     A_STOCK_FACTOR_INDEX_POOLS,
     A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
     A_STOCK_INDEX_FEAR_GREED_TARGETS,
@@ -60,6 +62,30 @@ def test_a_stock_fear_greed_targets_include_star_50():
     assert target["proxy_etf"] == "588000.SH"
 
 
+def test_a_stock_fear_greed_targets_include_priority_sector_indexes():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
+    expected = {
+        "399975.SZ": ("证券公司", "中证全指证券公司指数", "512880.SH", "证券ETF"),
+        "H30184.CSI": ("半导体", "中证全指半导体产品与设备指数", "512480.SH", "半导体ETF"),
+        "399989.SZ": ("中证医疗", "中证医疗指数", "512170.SH", "医疗ETF"),
+        "000819.SH": ("有色金属", "中证申万有色金属指数", "512400.SH", "有色ETF"),
+    }
+
+    for symbol, (ticker, index_name, proxy_etf, proxy_name) in expected.items():
+        target = targets_by_symbol[symbol]
+        assert target["ticker"] == ticker
+        assert target["index_name"] == index_name
+        assert target["option_underlyings"] == []
+        assert target["proxy_etf"] == proxy_etf
+        assert symbol in pools
+        assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
+        assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [
@@ -76,6 +102,10 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("000688.SH", "588000.SH"),
         ("000699.SH", "588230.SH"),
         ("399006.SZ", "159915.SZ"),
+        ("399975.SZ", "512880.SH"),
+        ("H30184.CSI", "512480.SH"),
+        ("399989.SZ", "512170.SH"),
+        ("000819.SH", "512400.SH"),
         ("399998.SZ", "515220.SH"),
         ("000015.SH", "510880.SH"),
     ]
