@@ -20,6 +20,10 @@ const ETF_OPTIONS = [
   { symbol: '000688.SH', ticker: '科创50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000699.SH', ticker: '科创200', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399006.SZ', ticker: '创业板指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '399975.SZ', ticker: '证券公司', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: 'H30184.CSI', ticker: '半导体', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '399989.SZ', ticker: '中证医疗', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '000819.SH', ticker: '有色金属', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399998.SZ', ticker: '中证煤炭', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000015.SH', ticker: '上证红利', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
