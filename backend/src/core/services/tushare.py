@@ -38,6 +38,12 @@ TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE = max(
     int(os.getenv("TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE", "120")),
 )
 
+# Tushare publishes CSI-owned indexes with the .CSI suffix even when the
+# application uses the familiar exchange-style symbol as its canonical key.
+TUSHARE_INDEX_DAILY_CODE_ALIASES = {
+    "000985.SH": "000985.CSI",
+}
+
 
 class TushareUnsupportedError(NotImplementedError):
     pass
@@ -714,6 +720,7 @@ class TushareService(QuoteProvider):
     def get_index_daily_range_frame(self, ts_code: str, start_date: date, end_date: date, limit: int = 5000) -> pd.DataFrame:
         """分页获取A股指数日行情。"""
         index_code = self.normalize_symbol(ts_code)
+        provider_code = TUSHARE_INDEX_DAILY_CODE_ALIASES.get(index_code, index_code)
         start_value = self._to_date(start_date)
         end_value = self._to_date(end_date)
         if not index_code or not start_value or not end_value or start_value > end_value:
@@ -724,7 +731,7 @@ class TushareService(QuoteProvider):
         while True:
             try:
                 frame = self.pro.index_daily(
-                    ts_code=index_code,
+                    ts_code=provider_code,
                     start_date=start_value.strftime("%Y%m%d"),
                     end_date=end_value.strftime("%Y%m%d"),
                     fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
@@ -744,6 +751,8 @@ class TushareService(QuoteProvider):
         if not frames:
             return pd.DataFrame()
         result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        if provider_code != index_code:
+            result["ts_code"] = index_code
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
