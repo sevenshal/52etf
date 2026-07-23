@@ -37,6 +37,9 @@ const numberFormatter = value => {
 };
 
 const normalizeSearchText = value => String(value || '').trim().toUpperCase();
+const getXueqiuStockUrl = symbol => (
+  `https://xueqiu.com/S/${String(symbol || '').replace('.', '').toUpperCase()}`
+);
 const rankDeltaNumber = value => (
   value === null || value === undefined || Number.isNaN(Number(value))
     ? null
@@ -520,7 +523,17 @@ const XueqiuTopHoldingsResearch = () => {
                 <div className="xueqiu-holdings-selected">
                   <div>
                     <Text type="secondary">当前标的</Text>
-                    <h2>{selectedSymbol} {selectedItem?.stock_name || historyData?.latest?.stock_name || ''}</h2>
+                    <h2>
+                      <a
+                        href={getXueqiuStockUrl(selectedSymbol)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {selectedSymbol}
+                      </a>
+                      {' '}
+                      {selectedItem?.stock_name || historyData?.latest?.stock_name || ''}
+                    </h2>
                   </div>
                   <Space size={6} wrap>
                     <Tag color="blue">#{latestRow?.composite_rank || '-'}</Tag>
