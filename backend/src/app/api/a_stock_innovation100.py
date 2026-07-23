@@ -2,7 +2,7 @@ import logging
 import threading
 import uuid
 from datetime import date, datetime
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -102,7 +102,53 @@ def _run_rebuild_job(task_id: str, start_date: date, end_date: Optional[date]):
         ScopedSession.remove()
 
 
-def _serialize_rebalance(row: AStockInnovation100Rebalance) -> Dict:
+def _removal_codes(rows: Iterable[AStockInnovation100Rebalance]) -> set:
+    codes = set()
+    for row in rows:
+        for item in row.removals or []:
+            code = item.get("ts_code") if isinstance(item, dict) else item
+            if code:
+                codes.add(str(code))
+    return codes
+
+
+def _load_constituent_name_map(
+    db: Session,
+    rows: Iterable[AStockInnovation100Rebalance],
+) -> Dict[str, str]:
+    codes = _removal_codes(rows)
+    if not codes:
+        return {}
+    constituents = (
+        db.query(AStockInnovation100Constituent)
+        .filter(
+            AStockInnovation100Constituent.index_code == INDEX_CODE,
+            AStockInnovation100Constituent.ts_code.in_(codes),
+        )
+        .order_by(AStockInnovation100Constituent.rebalance_date.desc())
+        .all()
+    )
+    name_map = {}
+    for constituent in constituents:
+        if constituent.ts_code not in name_map and constituent.name:
+            name_map[constituent.ts_code] = constituent.name
+    return name_map
+
+
+def _serialize_rebalance(
+    row: AStockInnovation100Rebalance,
+    constituent_name_map: Optional[Dict[str, str]] = None,
+) -> Dict:
+    name_map = constituent_name_map or {}
+    removals = []
+    for item in row.removals or []:
+        if isinstance(item, dict):
+            ts_code = item.get("ts_code")
+            name = item.get("name") or name_map.get(ts_code)
+        else:
+            ts_code = str(item)
+            name = name_map.get(ts_code)
+        removals.append({"ts_code": ts_code, "name": name})
     return {
         "id": row.id,
         "index_code": row.index_code,
@@ -113,7 +159,7 @@ def _serialize_rebalance(row: AStockInnovation100Rebalance) -> Dict:
         "turnover_pct": row.turnover_pct,
         "total_circ_mv": row.total_circ_mv,
         "additions": row.additions or [],
-        "removals": row.removals or [],
+        "removals": removals,
         "rule_snapshot": row.rule_snapshot or {},
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
@@ -206,6 +252,11 @@ def get_detail(
     if not selected_rebalance and rebalances:
         selected_rebalance = rebalances[0]
 
+    serialized_rebalance_rows = list(rebalances)
+    if selected_rebalance and all(row.id != selected_rebalance.id for row in serialized_rebalance_rows):
+        serialized_rebalance_rows.append(selected_rebalance)
+    constituent_name_map = _load_constituent_name_map(db, serialized_rebalance_rows)
+
     selected_constituents = []
     if selected_rebalance:
         selected_constituents = (
@@ -239,8 +290,12 @@ def get_detail(
         ],
         "benchmark_levels": benchmark_levels,
         "yearly_returns": compute_yearly_returns(levels),
-        "rebalances": [_serialize_rebalance(row) for row in rebalances],
-        "selected_rebalance": _serialize_rebalance(selected_rebalance) if selected_rebalance else None,
+        "rebalances": [_serialize_rebalance(row, constituent_name_map) for row in rebalances],
+        "selected_rebalance": (
+            _serialize_rebalance(selected_rebalance, constituent_name_map)
+            if selected_rebalance
+            else None
+        ),
         "selected_constituents": [_serialize_constituent(row) for row in selected_constituents],
     }
 
@@ -257,6 +312,7 @@ def get_rebalance_detail(
     ).first()
     if not rebalance:
         raise HTTPException(status_code=404, detail="未找到该再平衡记录")
+    constituent_name_map = _load_constituent_name_map(db, [rebalance])
     constituents = (
         db.query(AStockInnovation100Constituent)
         .filter(
@@ -267,7 +323,7 @@ def get_rebalance_detail(
         .all()
     )
     return {
-        "rebalance": _serialize_rebalance(rebalance),
+        "rebalance": _serialize_rebalance(rebalance, constituent_name_map),
         "constituents": [_serialize_constituent(row) for row in constituents],
     }
 

@@ -1088,35 +1088,16 @@ class AStockInnovation100Builder:
 
             self._update_amount_history(market_frame, amount_history)
 
-            if not is_output_date:
-                continue
-
-            processed_output_dates += 1
-
             if pending_constituents is not None and pending_effective_date == current_date:
                 current_constituents = pending_constituents
                 current_weight_map = {item["ts_code"]: float(item["weight"]) for item in current_constituents}
                 pending_constituents = None
                 pending_effective_date = None
 
-            daily_return = self._weighted_daily_return(market_frame, current_weight_map)
-            level *= (1.0 + daily_return)
-            high_watermark = max(high_watermark, level)
-            drawdown_pct = (level / high_watermark - 1.0) * 100 if high_watermark > 0 else 0.0
-            levels.append(
-                {
-                    "index_code": INDEX_CODE,
-                    "date": current_date,
-                    "level": _round_or_none(level, 6),
-                    "daily_return_pct": _round_or_none(daily_return * 100, 6),
-                    "drawdown_pct": _round_or_none(drawdown_pct, 6),
-                    "constituent_count": len(current_constituents),
-                    "total_circ_mv": _round_or_none(sum(float(item.get("circ_mv") or 0.0) for item in current_constituents), 4),
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now(),
-                }
-            )
-
+            # Quarter-end can already be the latest persisted level when the task
+            # first sees the next quarter's opening trading day.  Detect the
+            # boundary across the whole lookback window, not only on new output
+            # dates, otherwise that rebalance is skipped forever.
             if current_index < len(trading_dates) - 1 and self._is_quarter_end(trading_dates, current_index):
                 existing_rebalance = (
                     self.db.query(AStockInnovation100Rebalance)
@@ -1147,6 +1128,29 @@ class AStockInnovation100Builder:
                     )
                     pending_constituents = next_constituents
                     pending_effective_date = effective_date
+
+            if not is_output_date:
+                continue
+
+            processed_output_dates += 1
+
+            daily_return = self._weighted_daily_return(market_frame, current_weight_map)
+            level *= (1.0 + daily_return)
+            high_watermark = max(high_watermark, level)
+            drawdown_pct = (level / high_watermark - 1.0) * 100 if high_watermark > 0 else 0.0
+            levels.append(
+                {
+                    "index_code": INDEX_CODE,
+                    "date": current_date,
+                    "level": _round_or_none(level, 6),
+                    "daily_return_pct": _round_or_none(daily_return * 100, 6),
+                    "drawdown_pct": _round_or_none(drawdown_pct, 6),
+                    "constituent_count": len(current_constituents),
+                    "total_circ_mv": _round_or_none(sum(float(item.get("circ_mv") or 0.0) for item in current_constituents), 4),
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                }
+            )
 
         self._progress("写入创新100增量指数点位", 92)
         self._bulk_upsert(AStockInnovation100Level, levels, ["index_code", "date"], batch_size=1000)
