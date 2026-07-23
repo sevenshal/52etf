@@ -86,6 +86,30 @@ def test_a_stock_fear_greed_targets_include_priority_sector_indexes():
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
 
 
+def test_a_stock_fear_greed_targets_include_second_tier_sector_indexes():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
+    expected = {
+        "399967.SZ": ("中证军工", "中证军工指数", "512660.SH", "军工ETF"),
+        "930997.CSI": ("新能源车", "中证新能源汽车产业指数", "515030.SH", "新能源车ETF"),
+        "000932.SH": ("主要消费", "中证主要消费指数", "159928.SZ", "消费ETF"),
+        "399986.SZ": ("中证银行", "中证银行指数", "512800.SH", "银行ETF"),
+    }
+
+    for symbol, (ticker, index_name, proxy_etf, proxy_name) in expected.items():
+        target = targets_by_symbol[symbol]
+        assert target["ticker"] == ticker
+        assert target["index_name"] == index_name
+        assert target["option_underlyings"] == []
+        assert target["proxy_etf"] == proxy_etf
+        assert symbol in pools
+        assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
+        assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [
@@ -106,6 +130,10 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("H30184.CSI", "512480.SH"),
         ("399989.SZ", "512170.SH"),
         ("000819.SH", "512400.SH"),
+        ("399967.SZ", "512660.SH"),
+        ("930997.CSI", "515030.SH"),
+        ("000932.SH", "159928.SZ"),
+        ("399986.SZ", "512800.SH"),
         ("399998.SZ", "515220.SH"),
         ("000015.SH", "510880.SH"),
     ]
