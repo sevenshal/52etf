@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .account import valid_account
+from .account import valid_admin_account
 from ...robot.scheduled_tasks import scheduled_task_manager
 
 router = APIRouter(prefix="/api/scheduled-tasks", tags=["scheduled-tasks"])
@@ -51,7 +51,7 @@ class ScheduledTaskResponse(BaseModel):
 
 
 @router.get("", response_model=List[ScheduledTaskResponse])
-def list_scheduled_tasks(_account_id: str = Depends(valid_account)):
+def list_scheduled_tasks(_account_id: str = Depends(valid_admin_account)):
     return scheduled_task_manager.list_tasks()
 
 
@@ -59,7 +59,7 @@ def list_scheduled_tasks(_account_id: str = Depends(valid_account)):
 def update_scheduled_task(
     task_key: str,
     payload: ScheduledTaskUpdateRequest,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         return scheduled_task_manager.update_task(
@@ -82,7 +82,7 @@ def update_scheduled_task(
 def run_scheduled_task_now(
     task_key: str,
     payload: Optional[ScheduledTaskRunRequest] = None,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         runner_kwargs = {}

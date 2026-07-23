@@ -5,6 +5,8 @@ from typing import Optional, Tuple
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 
+from .account import ADMIN_ACCOUNT_ID, is_valid_account
+
 router = APIRouter()
 
 DEFAULT_LOG_FILE_KEY = "service"
@@ -51,6 +53,11 @@ def _read_last_lines(path: str, num_lines: int = 10, chunk_size: int = 8192):
 
 @router.websocket("/ws/log")
 async def websocket_endpoint(websocket: WebSocket):
+    account_id = websocket.query_params.get("account_id", "")
+    if account_id != ADMIN_ACCOUNT_ID or not is_valid_account(account_id):
+        await websocket.close(code=1008, reason="仅管理员可查看系统日志")
+        return
+
     await websocket.accept()
     log_file_key = websocket.query_params.get("file", DEFAULT_LOG_FILE_KEY)
     try:

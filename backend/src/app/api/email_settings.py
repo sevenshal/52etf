@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .account import valid_account
+from .account import valid_admin_account
 from ...core.services.email_settings import get_email_settings, update_email_settings
 
 
@@ -33,14 +33,14 @@ class EmailSettingsUpdateRequest(BaseModel):
 
 
 @router.get("", response_model=EmailSettingsResponse)
-def read_email_settings(_account_id: str = Depends(valid_account)):
+def read_email_settings(_account_id: str = Depends(valid_admin_account)):
     return get_email_settings()
 
 
 @router.put("", response_model=EmailSettingsResponse)
 def save_email_settings(
     payload: EmailSettingsUpdateRequest,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         return update_email_settings(

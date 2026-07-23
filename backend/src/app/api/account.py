@@ -87,7 +87,7 @@ async def valid_account(x_account_id: Optional[str] = Header(None)) -> str:
 
 async def valid_admin_account(account_id: str = Depends(valid_account)) -> str:
     if account_id != ADMIN_ACCOUNT_ID:
-        raise HTTPException(status_code=403, detail="仅管理员可操作账户")
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
     return account_id
 
 @router.get("/validate-account", response_model=AccountValidation)
