@@ -309,7 +309,11 @@ const AStockInnovation100 = ({ embedded = false }) => {
       render: value => {
         const removals = value || [];
         if (!removals.length) return '-';
-        return removals.slice(0, 6).map(item => <Tag key={item}>{item}</Tag>);
+        return removals.slice(0, 6).map(item => {
+          const tsCode = typeof item === 'string' ? item : item?.ts_code;
+          const name = typeof item === 'string' ? null : item?.name;
+          return <Tag key={tsCode}>{name || tsCode}</Tag>;
+        });
       },
     },
   ];
