@@ -147,7 +147,7 @@ const Profile = () => {
         },
       ]
     },
-    {
+    ...(isAdmin ? [{
       title: '系统管理',
       icon: <SettingOutlined />,
       className: 'profile-section--system',
@@ -168,7 +168,7 @@ const Profile = () => {
           arrow: true
         }
       ]
-    }
+    }] : [])
   ];
 
   const renderMenu = (items, menuClassName = '') => (

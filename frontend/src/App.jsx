@@ -1,6 +1,6 @@
 import React from 'react';
 import { Navigate, Routes, Route, useLocation } from 'react-router-dom';
-import { AccountProvider } from './contexts/AccountContext';
+import { AccountProvider, useAccount } from './contexts/AccountContext';
 import AppLayout from './pages/Layout';
 import FearDashboard from './pages/fear/FearDashboard';
 import FearStockList from './pages/fear/FearStockList';
@@ -36,6 +36,16 @@ const LiveTabRedirect = ({ tab }) => {
   return <Navigate to={`/live?${searchParams.toString()}`} replace />;
 };
 
+const AdminRoute = ({ children }) => {
+  const { isAdmin, accountReady } = useAccount();
+
+  if (!accountReady) {
+    return null;
+  }
+
+  return isAdmin ? children : <Navigate to="/profile" replace />;
+};
+
 function App() {
   return (
     <AccountProvider>
@@ -54,14 +64,14 @@ function App() {
           <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
           <Route path="/factor-lab/xueqiu-holdings" element={<FactorLab initialTab="xueqiu-holdings" />} />
           <Route path="/profile" element={<Profile />} />
-          <Route path="/web-account-manager" element={<WebAccountManager />} />
+          <Route path="/web-account-manager" element={<AdminRoute><WebAccountManager /></AdminRoute>} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
           <Route path="/evc/valuation" element={<EVCValuation />} />
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
-          <Route path="/system-log" element={<SystemLog />} />
+          <Route path="/system-log" element={<AdminRoute><SystemLog /></AdminRoute>} />
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
           <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
@@ -71,8 +81,8 @@ function App() {
           <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
           <Route path="/external-trading-accounts" element={<LiveTabRedirect tab="accounts" />} />
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
-          <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
-          <Route path="/email-settings" element={<EmailSettings />} />
+          <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
+          <Route path="/email-settings" element={<AdminRoute><EmailSettings /></AdminRoute>} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
         </Route>

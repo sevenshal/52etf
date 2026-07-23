@@ -12,7 +12,8 @@ const buildLogWsUrl = (logFile) => {
     ? apiUrl.replace(/^http/, 'ws')
     : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 
-  return `${wsHost}/ws/log?file=${encodeURIComponent(logFile)}`;
+  const accountId = localStorage.getItem('accountId') || '';
+  return `${wsHost}/ws/log?file=${encodeURIComponent(logFile)}&account_id=${encodeURIComponent(accountId)}`;
 };
 
 const SystemLog = () => {

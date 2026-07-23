@@ -30,6 +30,8 @@ const PROFILE_ROUTES = [
   '/soxl-fear-backtest',
   '/monthly-analysis',
   '/scheduled-tasks',
+  '/email-settings',
+  '/web-account-manager',
   '/system-log',
 ];
 
