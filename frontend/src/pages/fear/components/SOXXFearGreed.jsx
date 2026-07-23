@@ -24,6 +24,10 @@ const ETF_OPTIONS = [
   { symbol: 'H30184.CSI', ticker: '半导体', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399989.SZ', ticker: '中证医疗', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000819.SH', ticker: '有色金属', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '399967.SZ', ticker: '中证军工', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '930997.CSI', ticker: '新能源车', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '000932.SH', ticker: '主要消费', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '399986.SZ', ticker: '中证银行', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399998.SZ', ticker: '中证煤炭', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000015.SH', ticker: '上证红利', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
