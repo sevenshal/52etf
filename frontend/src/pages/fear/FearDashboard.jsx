@@ -33,7 +33,7 @@ const FearDashboard = () => {
   return (
     <>
       <Card
-        title='标普500恐贪指数'
+        title='CNN恐贪指数'
         style={{ marginBottom: 16 }}
       >
         <Tabs activeKey={activeTab} onChange={setActiveTab}>
