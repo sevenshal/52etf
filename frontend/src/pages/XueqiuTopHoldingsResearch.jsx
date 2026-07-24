@@ -5,6 +5,7 @@ import {
   Col,
   Empty,
   Input,
+  InputNumber,
   Row,
   Space,
   Statistic,
@@ -15,6 +16,7 @@ import {
   message,
 } from 'antd';
 import {
+  FilterOutlined,
   LineChartOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -67,6 +69,56 @@ const renderRankDelta = value => {
     <Text style={{ color: delta > 0 ? '#389e0d' : '#cf1322' }}>
       {delta > 0 ? `+${delta}` : `${delta}`}
     </Text>
+  );
+};
+
+const setNumericFilterValue = (setSelectedKeys, current, key, value) => {
+  const next = { ...(current || {}), [key]: value };
+  const hasMin = next.min !== null && next.min !== undefined && next.min !== '';
+  const hasMax = next.max !== null && next.max !== undefined && next.max !== '';
+  setSelectedKeys(hasMin || hasMax ? [next] : []);
+};
+
+const numericRangeFilterDropdown = ({
+  setSelectedKeys,
+  selectedKeys,
+  confirm,
+  clearFilters,
+}) => {
+  const value = selectedKeys[0] || {};
+  return (
+    <div style={{ padding: 8, width: 180 }} onKeyDown={event => event.stopPropagation()}>
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <InputNumber
+          min={0}
+          precision={0}
+          placeholder="最小组合数"
+          value={value.min}
+          onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'min', nextValue)}
+          style={{ width: '100%' }}
+        />
+        <InputNumber
+          min={0}
+          precision={0}
+          placeholder="最大组合数"
+          value={value.max}
+          onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'max', nextValue)}
+          style={{ width: '100%' }}
+        />
+        <Space>
+          <Button size="small" type="primary" onClick={() => confirm()}>筛选</Button>
+          <Button
+            size="small"
+            onClick={() => {
+              clearFilters?.();
+              confirm();
+            }}
+          >
+            重置
+          </Button>
+        </Space>
+      </Space>
+    </div>
   );
 };
 
@@ -310,6 +362,16 @@ const XueqiuTopHoldingsResearch = () => {
       align: 'right',
       sorter: (a, b) => compareRankDelta(a, b, hasRankCompareSnapshot),
       sortDirections: ['descend', 'ascend'],
+      filters: [
+        { text: '新进', value: 'new' },
+        { text: '非新进', value: 'existing' },
+      ],
+      filterMultiple: false,
+      onFilter: (value, record) => (
+        value === 'new'
+          ? isNewRankEntry(record, hasRankCompareSnapshot)
+          : !isNewRankEntry(record, hasRankCompareSnapshot)
+      ),
       render: (value, record) => (
         isNewRankEntry(record, hasRankCompareSnapshot)
           ? <Tag color="green">新进</Tag>
@@ -348,6 +410,19 @@ const XueqiuTopHoldingsResearch = () => {
       width: 112,
       align: 'right',
       sorter: (a, b) => Number(a.holding_cube_count || 0) - Number(b.holding_cube_count || 0),
+      filterIcon: filtered => (
+        <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
+      ),
+      filterDropdown: numericRangeFilterDropdown,
+      onFilter: (value, record) => {
+        const count = Number(record.holding_cube_count);
+        if (!Number.isFinite(count)) return false;
+        const hasMin = value?.min !== null && value?.min !== undefined && value?.min !== '';
+        const hasMax = value?.max !== null && value?.max !== undefined && value?.max !== '';
+        const min = hasMin ? Number(value.min) : null;
+        const max = hasMax ? Number(value.max) : null;
+        return (min === null || count >= min) && (max === null || count <= max);
+      },
       render: value => `${numberFormatter(value)} / ${numberFormatter(latestData?.cube_count)}`,
     },
     {
