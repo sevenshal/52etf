@@ -44,12 +44,6 @@ const formatNumber = (value, digits = 1) => (
   isFiniteNumber(value) ? Number(value).toFixed(digits) : '-'
 );
 
-const formatSignedNumber = (value, digits = 1, suffix = '') => {
-  if (!isFiniteNumber(value)) return '-';
-  const number = Number(value);
-  return `${number > 0 ? '+' : ''}${number.toFixed(digits)}${suffix}`;
-};
-
 const fearColor = value => (isFiniteNumber(value) ? getFearGreedColor(value) : '#8c8c8c');
 
 const fearTextColor = (value) => {
@@ -66,6 +60,10 @@ const formatCompactVolume = (value) => {
   if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`;
   return Math.round(number).toLocaleString();
 };
+
+const formatVolumeRatio = value => (
+  isFiniteNumber(value) ? `${Number(value).toFixed(2)}×` : '-'
+);
 
 const formatDateTime = (value) => {
   if (!value) return '-';
@@ -454,11 +452,6 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
   const price = latest?.etf_price?.close;
-  const scoreDeltaText = [
-    isFiniteNumber(summary?.score_change_7d) ? `7日${formatSignedNumber(summary.score_change_7d, 1)}` : null,
-    isFiniteNumber(summary?.score_change_1m) ? `1月${formatSignedNumber(summary.score_change_1m, 1)}` : null,
-  ].filter(Boolean).join(' · ');
-
   return (
     <button
       type="button"
@@ -489,10 +482,8 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
 
       <div className="soxx-fear-summary-footer">
         <span>{latest?.date || '-'}</span>
-        <span>
-          {summary?.is_stale && summary?.stale_days !== null
-            ? `${summary.stale_days}天未更新`
-            : scoreDeltaText || `${summary?.history_points ?? 0}条`}
+        <span title="恐贪日期成交量 ÷ 不含当日的前20个交易日平均成交量">
+          量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>
       </div>
     </button>
