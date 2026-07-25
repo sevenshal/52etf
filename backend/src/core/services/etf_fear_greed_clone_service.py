@@ -27,6 +27,7 @@ from .evc import EVCService
 from .longport import LongPortService
 from .market import MarketService
 from .quote import QuoteService
+from .volume_metrics import calculate_volume_ratio
 from ..database import ETFHolding as DBETFHolding
 from ..database import (
     ETFFearGreedCloneHistory,
@@ -1912,11 +1913,28 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "score_change_1m": None,
                 "price_change_7d_pct": None,
                 "price_change_1m_pct": None,
+                "volume_ratio_20d": None,
+                "volume_ma20": None,
                 "history_points": 0,
                 "is_stale": True,
                 "stale_days": None,
             }
 
+        previous_volume_rows = (
+            db.query(ETFFearGreedCloneHistory)
+            .filter(
+                ETFFearGreedCloneHistory.symbol == symbol,
+                ETFFearGreedCloneHistory.date < latest_row.date,
+                ETFFearGreedCloneHistory.etf_volume.isnot(None),
+            )
+            .order_by(ETFFearGreedCloneHistory.date.desc())
+            .limit(20)
+            .all()
+        )
+        volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
+            latest_row.etf_volume,
+            [row.etf_volume for row in previous_volume_rows],
+        )
         seven_day_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=7))
         one_month_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=30))
         history_points = (
@@ -1935,6 +1953,16 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "score_change_1m": cls._score_change(latest_row, one_month_row),
             "price_change_7d_pct": cls._price_change_pct(latest_row, seven_day_row),
             "price_change_1m_pct": cls._price_change_pct(latest_row, one_month_row),
+            "volume_ratio_20d": (
+                round(volume_ratio_20d, 6)
+                if volume_ratio_20d is not None
+                else None
+            ),
+            "volume_ma20": (
+                round(volume_ma20, 4)
+                if volume_ma20 is not None
+                else None
+            ),
             "history_points": history_points,
             "is_stale": stale_days > 5,
             "stale_days": stale_days,
