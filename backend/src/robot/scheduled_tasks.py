@@ -687,9 +687,11 @@ def _run_external_trading_sub_account_net_asset_snapshot(
         trading_date=today_shanghai,
         timeout=timeout_seconds,
     )
+    from .external_trading_log import summarize_external_trading_net_asset_snapshot
+
     logging.getLogger("ScheduledTaskManager").info(
         "External trading sub-account net asset snapshot result: %s",
-        result,
+        summarize_external_trading_net_asset_snapshot(result),
     )
     return (
         "外部交易子账户净资产快照 "

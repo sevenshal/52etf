@@ -6,6 +6,7 @@ from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
 from .scheduled_tasks import scheduled_task_manager, run_startup_tasks
+from .external_trading_log import summarize_external_trading_executor_result
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
@@ -97,7 +98,10 @@ def _process_external_trading_executor():
 
     executor_result = process_external_trading_executor_for_robot()
     if executor_result.get("processed") or executor_result.get("failed"):
-      logging.info("External trading executor result: %s", executor_result)
+      logging.info(
+        "External trading executor result: %s",
+        summarize_external_trading_executor_result(executor_result),
+      )
   except Exception:
     logging.exception("External trading executor failed")
 
