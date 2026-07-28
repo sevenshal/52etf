@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Col, Empty, Radio, Row, Skeleton, Space, Statistic, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Divider, Empty, Radio, Row, Skeleton, Space, Statistic, Tag, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
 import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
@@ -8,10 +8,10 @@ import './SOXXFearGreed.css';
 const { Text } = Typography;
 
 const ETF_OPTIONS = [
-  { symbol: 'SOXX.US', ticker: 'SOXX', label: '半导体' },
-  { symbol: 'SPY.US', ticker: 'SPY', label: '标普500' },
-  { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100' },
-  { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯' },
+  { symbol: 'SOXX.US', ticker: 'SOXX', label: '半导体', market: 'US' },
+  { symbol: 'SPY.US', ticker: 'SPY', label: '标普500', market: 'US' },
+  { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100', market: 'US' },
+  { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯', market: 'US' },
   { symbol: '000985.SH', ticker: '中证全指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '899050.BJ', ticker: '北证50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
@@ -31,6 +31,9 @@ const ETF_OPTIONS = [
   { symbol: '399998.SZ', ticker: '中证煤炭', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000015.SH', ticker: '上证红利', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
+
+const US_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market === 'US');
+const CN_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market !== 'US');
 
 const DEFAULT_DETAIL_STATE = {
   data: [],
@@ -322,25 +325,49 @@ const SOXXFearGreed = () => {
       )}
 
       {summaryLoading && !summaries.length ? (
-        <div className="soxx-fear-summary-grid">
-          {ETF_OPTIONS.slice(0, 8).map(item => (
-            <div className="soxx-fear-summary-card" key={item.symbol}>
-              <Skeleton active paragraph={{ rows: 3 }} title={false} />
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="soxx-fear-summary-grid">
+            {US_ETF_OPTIONS.map(item => (
+              <div className="soxx-fear-summary-card" key={item.symbol}>
+                <Skeleton active paragraph={{ rows: 3 }} title={false} />
+              </div>
+            ))}
+          </div>
+          <Divider className="soxx-fear-market-divider" />
+          <div className="soxx-fear-summary-grid">
+            {CN_ETF_OPTIONS.slice(0, 4).map(item => (
+              <div className="soxx-fear-summary-card" key={item.symbol}>
+                <Skeleton active paragraph={{ rows: 3 }} title={false} />
+              </div>
+            ))}
+          </div>
+        </>
       ) : (
-        <div className="soxx-fear-summary-grid">
-          {ETF_OPTIONS.map(item => (
-            <SummaryCard
-              key={item.symbol}
-              option={item}
-              summary={summaryBySymbol[item.symbol]}
-              active={expandedSymbol === item.symbol}
-              onToggle={() => toggleExpanded(item.symbol)}
-            />
-          ))}
-        </div>
+        <>
+          <div className="soxx-fear-summary-grid">
+            {US_ETF_OPTIONS.map(item => (
+              <SummaryCard
+                key={item.symbol}
+                option={item}
+                summary={summaryBySymbol[item.symbol]}
+                active={expandedSymbol === item.symbol}
+                onToggle={() => toggleExpanded(item.symbol)}
+              />
+            ))}
+          </div>
+          <Divider className="soxx-fear-market-divider" />
+          <div className="soxx-fear-summary-grid">
+            {CN_ETF_OPTIONS.map(item => (
+              <SummaryCard
+                key={item.symbol}
+                option={item}
+                summary={summaryBySymbol[item.symbol]}
+                active={expandedSymbol === item.symbol}
+                onToggle={() => toggleExpanded(item.symbol)}
+              />
+            ))}
+          </div>
+        </>
       )}
 
       {expandedSymbol && (

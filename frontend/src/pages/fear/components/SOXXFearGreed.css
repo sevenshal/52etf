@@ -2,6 +2,10 @@
   margin-bottom: 16px;
 }
 
+.soxx-fear-market-divider {
+  margin: 20px 0;
+}
+
 .soxx-fear-summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
