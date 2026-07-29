@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 # 创建基础目录
-DB_PATH = '/var/lib/quant_robot/evc_stocks.db'
+DB_PATH = os.getenv("QUANT_SQLITE_PATH") or "/var/lib/quant_robot/evc_stocks.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # 创建基础引擎和Base类

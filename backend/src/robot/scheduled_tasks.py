@@ -55,6 +55,10 @@ A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 550
 A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
 A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
+HK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
+HK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 900
+HK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
+HK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
 XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS = 24
 EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -599,6 +603,76 @@ def _run_a_stock_etf_fear_greed_backfill(
     )
 
 
+def _run_hk_stock_base_data_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_market_days: int = 1,
+    weight_manifest_path: str = "",
+    download_review_documents: bool = False,
+    review_cache_dir: str = "",
+):
+    from .hk_stock_base_data_sync import sync_hk_stock_base_data
+
+    result = sync_hk_stock_base_data(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        max_market_days=max_market_days,
+        weight_manifest_path=str(weight_manifest_path or "").strip() or None,
+        download_review_documents=download_review_documents,
+        review_cache_dir=str(review_cache_dir or "").strip() or None,
+    )
+    return (
+        "HK base data sync "
+        f"basic={result.get('basic_rows')} "
+        f"market_dates={result.get('market', {}).get('date_count')} "
+        f"market_rows={result.get('market', {}).get('rows')} "
+        f"indexes={result.get('indexes')} "
+        f"weights={result.get('weights')}"
+        f" review_documents={result.get('review_documents')}"
+    )
+
+
+def _run_hk_index_fear_greed_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    recent_days: int = HK_FEAR_GREED_DEFAULT_RECENT_DAYS,
+    history_days: int = HK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
+    score_window: int = HK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
+    min_periods: int = HK_FEAR_GREED_DEFAULT_MIN_PERIODS,
+):
+    from ..core.services.hk_stock_fear_greed_service import HKStockFearGreedCalculator
+    from .hk_stock_base_data_config import HK_INDEX_FEAR_GREED_TARGETS
+
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    output_start = (
+        _parse_optional_task_date(start_date, "开始日期")
+        if start_date else end_value - timedelta(days=recent_days)
+    )
+    calculation_start = output_start - timedelta(days=history_days)
+    saved = 0
+    results = []
+    errors = []
+    for target in HK_INDEX_FEAR_GREED_TARGETS:
+        try:
+            result = HKStockFearGreedCalculator(target["symbol"]).backfill_to_db(
+                start_date=calculation_start,
+                end_date=end_value,
+                output_start_date=output_start,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
+            )
+            saved += int(result.get("saved") or 0)
+            results.append(result)
+        except Exception as exc:
+            errors.append({"symbol": target["symbol"], "error": str(exc)})
+    return (
+        "HK index fear greed backfill "
+        f"saved={saved} completed={len(results)} errors={len(errors)} "
+        f"error_detail={errors[:5]}"
+    )
+
+
 def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
     if result.get("status") == "SKIPPED":
         return (
@@ -889,7 +963,7 @@ class ScheduledTaskManager:
                 name="美股行业分类同步",
                 description="使用 FMP Company Profile 补全 SPY/QQQ 成分股的 sector/industry 元数据，保存到 SQLite。",
                 default_time="07:05",
-                default_enabled=False,
+                default_enabled=True,
                 sort_order=13,
                 runner=_run_us_stock_industry_sync,
                 parameter_schema=(
@@ -1166,6 +1240,68 @@ class ScheduledTaskManager:
                         step=1,
                         suffix="天",
                         description="未填写输出开始日期时，回写最近多少个自然日。",
+                    ),
+                ),
+            ),
+            "hk_stock_base_data_sync": TaskDefinition(
+                task_key="hk_stock_base_data_sync",
+                name="港股基础数据同步",
+                description="按交易日从 Tushare 同步港股全市场原始日线、HSI/HSTECH 指数日线，并可导入已复核的恒生季度权重快照；复权由本地根据前收盘跳变推导。",
+                default_time="17:20",
+                default_enabled=True,
+                sort_order=77,
+                runner=_run_hk_stock_base_data_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date", label="开始日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时按最新入库日期增量同步。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date", label="结束日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时同步到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="max_market_days", label="单次行情天数", value_type="integer",
+                        default=1, min_value=1, max_value=1000, step=1,
+                        description="当前账号 hk_daily 仅 1 次/分钟；日常保持 1，历史回填可提高并让任务低速续跑。",
+                    ),
+                    TaskParameterDefinition(
+                        key="weight_manifest_path", label="权重清单路径", value_type="string",
+                        default="", description="可选，导入已人工复核的恒生官方季度权重 JSON。",
+                    ),
+                    TaskParameterDefinition(
+                        key="download_review_documents", label="下载官方检讨公告",
+                        value_type="boolean", default=False,
+                        description="下载并缓存2020年以来恒生官方季度检讨PDF，供权重提取和复核。",
+                    ),
+                    TaskParameterDefinition(
+                        key="review_cache_dir", label="公告缓存目录", value_type="string",
+                        default="", description="可选；为空时使用服务端默认缓存目录。",
+                    ),
+                ),
+            ),
+            "hk_index_fear_greed_backfill": TaskDefinition(
+                task_key="hk_index_fear_greed_backfill",
+                name="港股指数贪恐回跑入库",
+                description="计算恒生指数、恒生国企指数和恒生科技指数贪恐值，使用官方季度权重锚点及按复权收益漂移的日权重。",
+                default_time="17:30",
+                default_enabled=False,
+                sort_order=78,
+                runner=_run_hk_index_fear_greed_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date", label="输出开始", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时只刷新最近几天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date", label="结束日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时使用今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_days", label="最近天数", value_type="integer",
+                        default=HK_FEAR_GREED_DEFAULT_RECENT_DAYS,
+                        min_value=0, max_value=60, step=1, suffix="天",
+                        description="未填写输出开始日期时回写最近多少个自然日。",
                     ),
                 ),
             ),
@@ -2064,6 +2200,8 @@ class ScheduledTaskManager:
                 "etf_holdings_backfill",
                 "soxx_fear_greed_backfill",
                 "a_stock_etf_fear_greed_backfill",
+                "hk_stock_base_data_sync",
+                "hk_index_fear_greed_backfill",
             },
             "is_running": is_running,
             "is_queued": is_queued,

@@ -37,6 +37,11 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_option_basic",
         "a_stock_option_daily",
         "a_stock_repo_daily",
+        "hk_stock_basic",
+        "hk_stock_daily",
+        "hk_stock_daily_qfq",
+        "hk_index_daily",
+        "hk_index_weight_snapshot",
         "us_stock_daily",
         "xueqiu_cube_holdings_snapshots",
     }
@@ -370,6 +375,82 @@ class USStockDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class HKStockBasic(AnalyticsBase):
+    """Tushare 港股证券基础信息。"""
+    __tablename__ = "hk_stock_basic"
+
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(128))
+    fullname = Column(String(256))
+    enname = Column(String(256))
+    market = Column(String(64))
+    list_status = Column(String(8))
+    list_date = Column(Date)
+    delist_date = Column(Date)
+    trade_unit = Column(Float)
+    isin = Column(String(32))
+    curr_type = Column(String(16))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class HKStockDaily(AnalyticsBase):
+    """Tushare 港股未复权日行情；qfq view 根据前收盘跳变自行复权。"""
+    __tablename__ = "hk_stock_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    pre_close = Column(Float)
+    change = Column(Float)
+    pct_chg = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class HKIndexDaily(AnalyticsBase):
+    """港股主要指数日行情，主要来自 Tushare index_global。"""
+    __tablename__ = "hk_index_daily"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    pre_close = Column(Float)
+    change = Column(Float)
+    pct_chg = Column(Float)
+    swing = Column(Float)
+    vol = Column(Float)
+    source = Column(String(32), default="tushare_index_global", nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class HKIndexWeightSnapshot(AnalyticsBase):
+    """恒生指数公司季度检讨公告中的历史成分权重锚点。"""
+    __tablename__ = "hk_index_weight_snapshot"
+
+    index_code = Column(String(16), primary_key=True)
+    effective_date = Column(Date, primary_key=True)
+    con_code = Column(String(16), primary_key=True)
+    con_name = Column(String(256))
+    weight = Column(Float)
+    free_float_factor = Column(Float)
+    reference_date = Column(Date)
+    source_url = Column(String(1024))
+    source_document = Column(String(256))
+    extraction_method = Column(String(32))
+    verified = Column(Float, default=0)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 def ensure_analytics_schema():
     AnalyticsBase.metadata.create_all(analytics_engine)
     index_sqls = [
@@ -402,6 +483,11 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_defs_pair ON a_stock_chinabond_yield_curve_defs(pair_key, rating)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_daily_curve_date ON a_stock_chinabond_yield_curve_daily(curve_id, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_chinabond_curve_daily_date_term ON a_stock_chinabond_yield_curve_daily(trade_date, term)",
+        "CREATE INDEX IF NOT EXISTS idx_hk_stock_daily_symbol_date ON hk_stock_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_hk_stock_daily_date_symbol ON hk_stock_daily(trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_hk_index_daily_symbol_date ON hk_index_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_hk_index_weight_index_date ON hk_index_weight_snapshot(index_code, effective_date)",
+        "CREATE INDEX IF NOT EXISTS idx_hk_index_weight_constituent ON hk_index_weight_snapshot(con_code, effective_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_symbol_date ON us_stock_daily(symbol, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]
@@ -500,6 +586,66 @@ def ensure_analytics_schema():
           AND f.adj_factor > 0
           AND a.anchor_adj_factor IS NOT NULL
           AND a.anchor_adj_factor > 0
+        """,
+        """
+        CREATE OR REPLACE VIEW hk_stock_daily_qfq AS
+        WITH ordered AS (
+            SELECT
+                d.*,
+                LAG(d.close) OVER (
+                    PARTITION BY d.ts_code ORDER BY d.trade_date
+                ) AS previous_raw_close
+            FROM hk_stock_daily d
+        ),
+        event_factors AS (
+            SELECT
+                *,
+                CASE
+                    WHEN previous_raw_close > 0
+                     AND pre_close > 0
+                     AND ABS(pre_close / previous_raw_close - 1.0) >= 0.005
+                    THEN pre_close / previous_raw_close
+                    ELSE 1.0
+                END AS event_factor
+            FROM ordered
+        ),
+        cumulative AS (
+            SELECT
+                *,
+                COALESCE(
+                    EXP(SUM(LN(event_factor)) OVER (
+                        PARTITION BY ts_code
+                        ORDER BY trade_date
+                        ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
+                    )),
+                    1.0
+                ) AS cumulative_factor
+            FROM event_factors
+        )
+        SELECT
+            c.ts_code,
+            c.ts_code AS symbol,
+            c.trade_date,
+            CAST(c.open * c.cumulative_factor AS DOUBLE) AS open,
+            CAST(c.high * c.cumulative_factor AS DOUBLE) AS high,
+            CAST(c.low * c.cumulative_factor AS DOUBLE) AS low,
+            CAST(c.close * c.cumulative_factor AS DOUBLE) AS close,
+            CAST(c.pre_close * c.cumulative_factor AS DOUBLE) AS pre_close,
+            c.change,
+            c.pct_chg,
+            c.vol,
+            c.vol AS volume,
+            c.amount,
+            c.amount AS turnover,
+            c.event_factor,
+            c.cumulative_factor,
+            1.0 AS anchor_factor,
+            'derived_qfq' AS adjust_type,
+            c.created_at,
+            c.updated_at
+        FROM cumulative c
+        WHERE c.close IS NOT NULL
+          AND c.cumulative_factor > 0
         """,
     ]
     with analytics_engine.begin() as conn:

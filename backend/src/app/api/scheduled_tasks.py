@@ -93,6 +93,8 @@ def run_scheduled_task_now(
             "etf_holdings_backfill",
             "soxx_fear_greed_backfill",
             "a_stock_etf_fear_greed_backfill",
+            "hk_stock_base_data_sync",
+            "hk_index_fear_greed_backfill",
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
         scheduled_task_manager.trigger_task(
