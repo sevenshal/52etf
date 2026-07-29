@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -186,61 +187,69 @@ class HKIndexReviewAutomation:
         }
         recent_start = as_of - timedelta(days=self.discovery_lookback_days)
         release_dates = sorted(known_dates | set(_fridays_between(recent_start, as_of)))
-        documents = []
-        for release_date in release_dates:
-            output = self.cache_dir / f"{release_date:%Y%m%d}.pdf"
-            metadata_path = output.with_suffix(".source.json")
-            if output.exists() and output.stat().st_size > 10_000:
-                metadata = (
-                    json.loads(metadata_path.read_text(encoding="utf-8"))
-                    if metadata_path.exists()
-                    else {}
-                )
-                documents.append(
-                    {
-                        "path": output,
-                        "source_url": metadata.get("source_url"),
-                        "sha256": self._sha256(output),
-                    }
-                )
-                continue
-            timestamps = (
-                ("T174500", "T180000", "T183000", "T163000", "T000000")
-                if release_date in known_dates
-                else ("T174500", "T180000")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = executor.map(
+                lambda release_date: self._discover_release_document(
+                    release_date,
+                    release_date in known_dates,
+                ),
+                release_dates,
             )
-            for timestamp in timestamps:
-                source_url = PRESS_RELEASE_URL.format(
-                    release_stamp=f"{release_date:%Y%m%d}{timestamp}"
-                )
-                response = requests.get(
-                    source_url,
-                    headers={"User-Agent": "52ETF-HK-index-review-monitor/1.0"},
-                    timeout=30,
-                )
-                if response.status_code != 200 or not response.content.startswith(b"%PDF"):
-                    continue
-                temporary = output.with_suffix(".pdf.tmp")
-                temporary.write_bytes(response.content)
-                if not self._is_index_review_pdf(temporary):
-                    temporary.unlink(missing_ok=True)
-                    continue
-                temporary.replace(output)
-                metadata = {
-                    "source_url": source_url,
-                    "sha256": self._sha256(output),
-                    "downloaded_at": datetime.now().isoformat(),
-                }
-                _atomic_write_json(metadata_path, metadata)
-                documents.append(
-                    {
-                        "path": output,
-                        "source_url": source_url,
-                        "sha256": metadata["sha256"],
-                    }
-                )
-                break
-        return documents
+            documents = [item for item in results if item]
+        return sorted(documents, key=lambda item: item["path"].name)
+
+    def _discover_release_document(
+        self,
+        release_date: date,
+        is_known_date: bool,
+    ) -> Optional[Dict]:
+        output = self.cache_dir / f"{release_date:%Y%m%d}.pdf"
+        metadata_path = output.with_suffix(".source.json")
+        if output.exists() and output.stat().st_size > 10_000:
+            metadata = (
+                json.loads(metadata_path.read_text(encoding="utf-8"))
+                if metadata_path.exists()
+                else {}
+            )
+            return {
+                "path": output,
+                "source_url": metadata.get("source_url"),
+                "sha256": self._sha256(output),
+            }
+        timestamps = (
+            ("T174500", "T180000", "T183000", "T163000", "T000000")
+            if is_known_date
+            else ("T174500", "T180000")
+        )
+        for timestamp in timestamps:
+            source_url = PRESS_RELEASE_URL.format(
+                release_stamp=f"{release_date:%Y%m%d}{timestamp}"
+            )
+            response = requests.get(
+                source_url,
+                headers={"User-Agent": "52ETF-HK-index-review-monitor/1.0"},
+                timeout=30,
+            )
+            if response.status_code != 200 or not response.content.startswith(b"%PDF"):
+                continue
+            temporary = output.with_suffix(".pdf.tmp")
+            temporary.write_bytes(response.content)
+            if not self._is_index_review_pdf(temporary):
+                temporary.unlink(missing_ok=True)
+                continue
+            temporary.replace(output)
+            metadata = {
+                "source_url": source_url,
+                "sha256": self._sha256(output),
+                "downloaded_at": datetime.now().isoformat(),
+            }
+            _atomic_write_json(metadata_path, metadata)
+            return {
+                "path": output,
+                "source_url": source_url,
+                "sha256": metadata["sha256"],
+            }
+        return None
 
     @staticmethod
     def _is_index_review_pdf(path: Path) -> bool:
