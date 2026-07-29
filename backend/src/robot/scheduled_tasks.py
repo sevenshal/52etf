@@ -963,7 +963,7 @@ class ScheduledTaskManager:
                 name="美股行业分类同步",
                 description="使用 FMP Company Profile 补全 SPY/QQQ 成分股的 sector/industry 元数据，保存到 SQLite。",
                 default_time="07:05",
-                default_enabled=True,
+                default_enabled=False,
                 sort_order=13,
                 runner=_run_us_stock_industry_sync,
                 parameter_schema=(
@@ -1285,7 +1285,7 @@ class ScheduledTaskManager:
                 name="港股指数贪恐回跑入库",
                 description="计算恒生指数、恒生国企指数和恒生科技指数贪恐值，使用官方季度权重锚点及按复权收益漂移的日权重。",
                 default_time="17:30",
-                default_enabled=False,
+                default_enabled=True,
                 sort_order=78,
                 runner=_run_hk_index_fear_greed_backfill,
                 parameter_schema=(
