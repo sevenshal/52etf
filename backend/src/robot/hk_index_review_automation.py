@@ -289,8 +289,12 @@ class HKIndexReviewAutomation:
     def _extract_text(pdf_path: Path) -> str:
         sections = []
         for page_number, page in enumerate(PdfReader(str(pdf_path)).pages, start=1):
+            try:
+                page_text = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                page_text = page.extract_text() or ""
             sections.append(
-                f"\n===== PAGE {page_number} =====\n{page.extract_text() or ''}"
+                f"\n===== PAGE {page_number} =====\n{page_text}"
             )
         return "".join(sections)
 
@@ -306,6 +310,9 @@ class HKIndexReviewAutomation:
             "Read the official Hang Seng index review text file "
             f"{text_path.name}. Extract the complete post-review constituent lists and "
             "post-review weights for exactly HSI, HSCEI, and HSTECH from the appendices. "
+            "Only use security rows under each appendix's 'Constituent List'. Read the "
+            "rightmost 'After **' value from the 'Weighting (%)' columns; do not use the "
+            "'Before' value, FAF, sector subtotal, constituent count, or share-class table. "
             "Use the document's stated effective date. Codes must contain digits only. "
             "Weights must be the published percentage weights and must total approximately "
             "100 for each index. Record the 1-based source page numbers. Never estimate, "
