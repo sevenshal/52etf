@@ -12,6 +12,9 @@ const ETF_OPTIONS = [
   { symbol: 'SPY.US', ticker: 'SPY', label: '标普500', market: 'US' },
   { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100', market: 'US' },
   { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯', market: 'US' },
+  { symbol: 'HSI.HK', ticker: '恒生指数', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: 'HSCEI.HK', ticker: '国企指数', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: 'HSTECH.HK', ticker: '恒生科技', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000985.SH', ticker: '中证全指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '899050.BJ', ticker: '北证50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
@@ -33,7 +36,8 @@ const ETF_OPTIONS = [
 ];
 
 const US_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market === 'US');
-const CN_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market !== 'US');
+const HK_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market === 'HK');
+const CN_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market !== 'US' && item.market !== 'HK');
 
 const DEFAULT_DETAIL_STATE = {
   data: [],
@@ -333,7 +337,15 @@ const SOXXFearGreed = () => {
               </div>
             ))}
           </div>
-          <Divider className="soxx-fear-market-divider" />
+          <Divider className="soxx-fear-market-divider">港股</Divider>
+          <div className="soxx-fear-summary-grid">
+            {HK_ETF_OPTIONS.map(item => (
+              <div className="soxx-fear-summary-card" key={item.symbol}>
+                <Skeleton active paragraph={{ rows: 3 }} title={false} />
+              </div>
+            ))}
+          </div>
+          <Divider className="soxx-fear-market-divider">A股</Divider>
           <div className="soxx-fear-summary-grid">
             {CN_ETF_OPTIONS.slice(0, 4).map(item => (
               <div className="soxx-fear-summary-card" key={item.symbol}>
@@ -355,7 +367,19 @@ const SOXXFearGreed = () => {
               />
             ))}
           </div>
-          <Divider className="soxx-fear-market-divider" />
+          <Divider className="soxx-fear-market-divider">港股</Divider>
+          <div className="soxx-fear-summary-grid">
+            {HK_ETF_OPTIONS.map(item => (
+              <SummaryCard
+                key={item.symbol}
+                option={item}
+                summary={summaryBySymbol[item.symbol]}
+                active={expandedSymbol === item.symbol}
+                onToggle={() => toggleExpanded(item.symbol)}
+              />
+            ))}
+          </div>
+          <Divider className="soxx-fear-market-divider">A股</Divider>
           <div className="soxx-fear-summary-grid">
             {CN_ETF_OPTIONS.map(item => (
               <SummaryCard

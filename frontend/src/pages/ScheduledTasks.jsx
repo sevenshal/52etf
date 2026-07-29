@@ -55,6 +55,14 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '传入开始日期后，行情、复权、财务等模块会按各自 warmup 向前扩展回刷。'
     };
   }
+  if (taskKey === 'hk_stock_base_data_sync') {
+    return {
+      autoLabel: '增量同步',
+      backfillLabel: '按日期低速回填',
+      autoDetail: '每天同步一个缺失港股交易日，并刷新主要指数；适配当前 Tushare 每分钟一次的权限。',
+      backfillDetail: '从所选日期寻找缺失交易日，按接口限速续跑；可在任务参数中调整单次行情天数。'
+    };
+  }
   if (taskKey === 'etf_holdings_backfill') {
     return {
       autoLabel: '增量同步',
@@ -63,7 +71,7 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期覆盖写入数据库。'
     };
   }
-  if (taskKey === 'soxx_fear_greed_backfill' || taskKey === 'a_stock_etf_fear_greed_backfill') {
+  if (taskKey === 'soxx_fear_greed_backfill' || taskKey === 'a_stock_etf_fear_greed_backfill' || taskKey === 'hk_index_fear_greed_backfill') {
     return {
       autoLabel: '增量同步',
       backfillLabel: '按日期回跑',
