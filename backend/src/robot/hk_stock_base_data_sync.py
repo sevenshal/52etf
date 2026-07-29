@@ -215,6 +215,29 @@ class HKStockBaseDataSyncService:
     ) -> Dict:
         symbols = self._constituent_symbols(start_date)
         symbols = list(dict.fromkeys([*symbols, *(extra_symbols or [])]))
+        return self.sync_symbols_history_yahoo(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            workers=workers,
+            skip_covered=True,
+        )
+
+    def sync_symbols_history_yahoo(
+        self,
+        symbols: List[str],
+        start_date: date,
+        end_date: date,
+        workers: int = 8,
+        skip_covered: bool = False,
+    ) -> Dict:
+        symbols = list(
+            dict.fromkeys(
+                normalized
+                for normalized in (normalize_hk_symbol(item) for item in symbols)
+                if normalized
+            )
+        )
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:
             covered = {
@@ -232,7 +255,8 @@ class HKStockBaseDataSyncService:
             }
         finally:
             connection.close()
-        symbols = [symbol for symbol in symbols if symbol not in covered]
+        if skip_covered:
+            symbols = [symbol for symbol in symbols if symbol not in covered]
         frames = {}
         errors = []
         with ThreadPoolExecutor(max_workers=max(1, min(int(workers), 16))) as executor:
@@ -624,6 +648,9 @@ class HKStockBaseDataSyncService:
         weight_manifest_path: Optional[str] = None,
         download_review_documents: bool = False,
         review_cache_dir: Optional[str] = None,
+        auto_process_reviews: bool = True,
+        codex_path: Optional[str] = None,
+        review_discovery_lookback_days: int = 45,
     ) -> Dict:
         end_value = end_date or date.today()
         market_latest = self._max_date("hk_stock_daily")
@@ -642,11 +669,21 @@ class HKStockBaseDataSyncService:
             "indexes": self.sync_index_daily(index_start, end_value),
             "weights": None,
             "review_documents": None,
+            "review_automation": None,
         }
         if download_review_documents:
             result["review_documents"] = self.download_official_review_documents(review_cache_dir)
         if weight_manifest_path:
             result["weights"] = self.import_weight_snapshot_manifest(weight_manifest_path)
+        if auto_process_reviews:
+            from .hk_index_review_automation import HKIndexReviewAutomation
+
+            result["review_automation"] = HKIndexReviewAutomation(
+                sync_service=self,
+                cache_dir=review_cache_dir,
+                codex_path=codex_path,
+                discovery_lookback_days=review_discovery_lookback_days,
+            ).run(as_of=end_value)
         return result
 
     @staticmethod
@@ -673,6 +710,9 @@ def sync_hk_stock_base_data(
     weight_manifest_path: Optional[str] = None,
     download_review_documents: bool = False,
     review_cache_dir: Optional[str] = None,
+    auto_process_reviews: bool = True,
+    codex_path: Optional[str] = None,
+    review_discovery_lookback_days: int = 45,
 ) -> Dict:
     service = HKStockBaseDataSyncService()
     return service.sync_incremental(
@@ -682,4 +722,7 @@ def sync_hk_stock_base_data(
         weight_manifest_path=weight_manifest_path,
         download_review_documents=download_review_documents,
         review_cache_dir=review_cache_dir,
+        auto_process_reviews=auto_process_reviews,
+        codex_path=codex_path,
+        review_discovery_lookback_days=review_discovery_lookback_days,
     )

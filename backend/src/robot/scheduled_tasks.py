@@ -610,6 +610,9 @@ def _run_hk_stock_base_data_sync(
     weight_manifest_path: str = "",
     download_review_documents: bool = False,
     review_cache_dir: str = "",
+    auto_process_reviews: bool = True,
+    codex_path: str = "",
+    review_discovery_lookback_days: int = 45,
 ):
     from .hk_stock_base_data_sync import sync_hk_stock_base_data
 
@@ -620,6 +623,9 @@ def _run_hk_stock_base_data_sync(
         weight_manifest_path=str(weight_manifest_path or "").strip() or None,
         download_review_documents=download_review_documents,
         review_cache_dir=str(review_cache_dir or "").strip() or None,
+        auto_process_reviews=auto_process_reviews,
+        codex_path=str(codex_path or "").strip() or None,
+        review_discovery_lookback_days=review_discovery_lookback_days,
     )
     return (
         "HK base data sync "
@@ -629,6 +635,7 @@ def _run_hk_stock_base_data_sync(
         f"indexes={result.get('indexes')} "
         f"weights={result.get('weights')}"
         f" review_documents={result.get('review_documents')}"
+        f" review_automation={result.get('review_automation')}"
     )
 
 
@@ -1277,6 +1284,22 @@ class ScheduledTaskManager:
                     TaskParameterDefinition(
                         key="review_cache_dir", label="公告缓存目录", value_type="string",
                         default="", description="可选；为空时使用服务端默认缓存目录。",
+                    ),
+                    TaskParameterDefinition(
+                        key="auto_process_reviews", label="Codex自动处理新检讨",
+                        value_type="boolean", default=True,
+                        description="发现新的恒生季度检讨PDF后，由Codex只读解析，硬校验通过才补行情并导入权重。",
+                    ),
+                    TaskParameterDefinition(
+                        key="codex_path", label="Codex路径", value_type="string",
+                        default="/home/ecs-user/.local/bin/codex",
+                        description="线上Codex CLI绝对路径；Codex只生成候选JSON，不直接写数据库。",
+                    ),
+                    TaskParameterDefinition(
+                        key="review_discovery_lookback_days", label="公告发现窗口",
+                        value_type="integer", default=45, min_value=30, max_value=370,
+                        step=1, suffix="天",
+                        description="每次检查最近若干天内周五发布的官方检讨公告，并兼容已知历史发布日期。",
                     ),
                 ),
             ),
