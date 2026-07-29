@@ -337,7 +337,7 @@ const SOXXFearGreed = () => {
               </div>
             ))}
           </div>
-          <Divider className="soxx-fear-market-divider">港股</Divider>
+          <Divider className="soxx-fear-market-divider"></Divider>
           <div className="soxx-fear-summary-grid">
             {HK_ETF_OPTIONS.map(item => (
               <div className="soxx-fear-summary-card" key={item.symbol}>
@@ -345,7 +345,7 @@ const SOXXFearGreed = () => {
               </div>
             ))}
           </div>
-          <Divider className="soxx-fear-market-divider">A股</Divider>
+          <Divider className="soxx-fear-market-divider"></Divider>
           <div className="soxx-fear-summary-grid">
             {CN_ETF_OPTIONS.slice(0, 4).map(item => (
               <div className="soxx-fear-summary-card" key={item.symbol}>
