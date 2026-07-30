@@ -62,6 +62,23 @@ def test_a_stock_fear_greed_targets_include_star_50():
     assert target["proxy_etf"] == "588000.SH"
 
 
+def test_a_stock_fear_greed_targets_include_star_100():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
+
+    target = targets_by_symbol["000698.SH"]
+    assert target["ticker"] == "科创100"
+    assert target["index_name"] == "上证科创板100指数"
+    assert "000698.SH" in pools
+    assert target["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]
+    assert target["proxy_etf"] == "588220.SH"
+    assert target["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
+    assert A_STOCK_ETF_DAILY_NAMES[target["proxy_etf"]] == "科创100ETF"
+
+
 def test_a_stock_fear_greed_targets_include_priority_sector_indexes():
     targets_by_symbol = {
         str(item["symbol"]).upper(): item
@@ -124,6 +141,7 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("000905.SH", "510500.SH"),
         ("000985.SH", "510300.SH"),
         ("000688.SH", "588000.SH"),
+        ("000698.SH", "588220.SH"),
         ("000699.SH", "588230.SH"),
         ("399006.SZ", "159915.SZ"),
         ("399975.SZ", "512880.SH"),
