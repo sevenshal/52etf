@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import and_, func
@@ -8,10 +9,10 @@ from sqlalchemy import and_, func
 from ..database import (
     AStockIndexValuationSnapshot,
     ETFFearGreedCloneHistory,
-    ETFFearGreedCloneHolding,
     Session,
     StockEVC,
 )
+from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -106,30 +107,32 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
     db = Session()
     try:
-        latest = (
+        latest_row = (
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
             .order_by(ETFFearGreedCloneHistory.date.desc())
             .first()
         )
-        if latest is None:
+        if latest_row is None:
             return {"status": "unavailable", "reason": "fear_greed_history_missing"}
-        holdings = (
-            db.query(ETFFearGreedCloneHolding)
-            .filter(
-                ETFFearGreedCloneHolding.symbol == normalized_symbol,
-                ETFFearGreedCloneHolding.date == latest.date,
-            )
-            .all()
-        )
-        holding_symbols = {
-            str(row.holding_symbol or "").strip().upper()
-            for row in holdings
-            if row.holding_symbol
-        }
-        if not holding_symbols:
-            return {"status": "unavailable", "reason": "constituent_weights_missing"}
+        latest = SimpleNamespace(date=latest_row.date, etf_close=latest_row.etf_close)
+    finally:
+        Session.remove()
 
+    holding_rows, holdings_as_of = AStockInnovation100FearGreedCloneCalculator(
+        normalized_symbol
+    ).load_holdings_on_or_before(latest.date)
+    holdings = [SimpleNamespace(holding_symbol=row["symbol"], **row) for row in holding_rows]
+    holding_symbols = {
+        str(row.holding_symbol or "").strip().upper()
+        for row in holdings
+        if row.holding_symbol
+    }
+    if not holding_symbols:
+        return {"status": "unavailable", "reason": "constituent_weights_missing"}
+
+    db = Session()
+    try:
         latest_dates = (
             db.query(StockEVC.symbol.label("symbol"), func.max(StockEVC.date).label("date"))
             .filter(StockEVC.symbol.in_(holding_symbols))
@@ -153,6 +156,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuations={str(row.symbol).upper(): row for row in valuation_rows},
         )
         result["index_date"] = latest.date.isoformat()
+        result["holdings_as_of"] = holdings_as_of.isoformat() if holdings_as_of else None
         return result
     finally:
         Session.remove()

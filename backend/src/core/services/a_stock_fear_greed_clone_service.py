@@ -206,6 +206,17 @@ class AStockInnovation100FearGreedCloneCalculator:
             "warnings": warnings,
         }
 
+    def load_holdings_on_or_before(self, day: date) -> Tuple[List[Dict[str, Any]], Optional[date]]:
+        """Load the constituent snapshot effective for an index trading day."""
+        timestamp = pd.Timestamp(day)
+        holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(
+            pd.DatetimeIndex([timestamp], name="date")
+        )
+        return (
+            holdings_by_date.get(timestamp, []),
+            holdings_as_of_by_date.get(timestamp),
+        )
+
     def backfill_to_db(
         self,
         start_date: Optional[date] = None,

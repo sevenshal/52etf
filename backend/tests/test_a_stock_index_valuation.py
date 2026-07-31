@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from src.core.services.a_stock_index_valuation import calculate_weighted_index_valuation
 
 
@@ -64,3 +65,23 @@ def test_calculate_weighted_index_valuation_excludes_incomplete_rows_and_reports
     assert result["fair_value_hi"] == pytest.approx(1400)
     assert result["rating"] == "低估"
     assert result["forward_rating"] == "低估"
+
+
+def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):
+    calculator = AStockInnovation100FearGreedCloneCalculator("000985.SH")
+    requested_day = date(2026, 7, 31)
+    snapshot_day = date(2026, 6, 30)
+
+    def fake_build(index):
+        timestamp = index[0]
+        return (
+            {timestamp: [{"symbol": "600519.SH", "name": "贵州茅台", "weight": 0.05}]},
+            {timestamp: snapshot_day},
+        )
+
+    monkeypatch.setattr(calculator, "_build_holdings_by_date", fake_build)
+
+    holdings, holdings_as_of = calculator.load_holdings_on_or_before(requested_day)
+
+    assert holdings == [{"symbol": "600519.SH", "name": "贵州茅台", "weight": 0.05}]
+    assert holdings_as_of == snapshot_day
