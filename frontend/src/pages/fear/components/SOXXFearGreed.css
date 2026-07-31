@@ -107,6 +107,28 @@
   line-height: 1.35;
 }
 
+.soxx-fear-summary-valuation {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e8e8e8;
+  color: #8c8c8c;
+  font-size: 11px;
+  text-align: left;
+}
+
+.soxx-fear-valuation-detail {
+  margin: 4px 0 16px;
+  background: #fafcff;
+}
+
+.soxx-fear-valuation-note {
+  display: block;
+  margin-top: 12px;
+}
+
 .soxx-fear-summary-footer span {
   min-width: 0;
   overflow: hidden;

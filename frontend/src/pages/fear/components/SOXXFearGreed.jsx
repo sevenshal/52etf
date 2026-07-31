@@ -73,6 +73,22 @@ const formatVolumeRatio = value => (
   isFiniteNumber(value) ? `${Number(value).toFixed(2)}×` : '-'
 );
 
+const valuationColor = rating => ({
+  低估: '#389e0d',
+  合理: '#1677ff',
+  高估: '#cf1322',
+}[rating] || '#8c8c8c');
+
+const formatGap = value => (
+  isFiniteNumber(value) ? `${Number(value) >= 0 ? '+' : ''}${Number(value).toFixed(1)}%` : '-'
+);
+
+const formatRange = (low, high) => (
+  isFiniteNumber(low) && isFiniteNumber(high)
+    ? `${Number(low).toFixed(0)}–${Number(high).toFixed(0)}`
+    : '-'
+);
+
 const formatDateTime = (value) => {
   if (!value) return '-';
   return new Date(value).toLocaleString();
@@ -316,6 +332,7 @@ const SOXXFearGreed = () => {
   const latestPrice = latest?.etf_price?.close;
   const displayPrice = realtimePrice ?? latestPrice;
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
+  const valuation = expandedDetail.valuation || expandedSummary?.valuation;
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
 
@@ -462,6 +479,48 @@ const SOXXFearGreed = () => {
                 </Col>
               </Row>
 
+              {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
+                <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
+                  <Row gutter={[12, 12]}>
+                    <Col xs={12} sm={6}>
+                      <Statistic
+                        title="当前估值区间"
+                        value={formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
+                        valueStyle={{ color: valuationColor(valuation.rating), fontSize: 20 }}
+                      />
+                      <Tag color={valuationColor(valuation.rating)}>
+                        {valuation.rating} · 中值空间 {formatGap(valuation.current_gap_pct)}
+                      </Tag>
+                    </Col>
+                    <Col xs={12} sm={6}>
+                      <Statistic
+                        title="下财年估值区间"
+                        value={formatRange(valuation.forward_next_fy_lo, valuation.forward_next_fy_hi)}
+                        valueStyle={{ color: valuationColor(valuation.forward_rating), fontSize: 20 }}
+                      />
+                      <Tag color={valuationColor(valuation.forward_rating)}>
+                        {valuation.forward_rating} · 中值空间 {formatGap(valuation.forward_gap_pct)}
+                      </Tag>
+                    </Col>
+                    <Col xs={12} sm={6}>
+                      <Statistic title="估值覆盖权重" value={(valuation.coverage_ratio || 0) * 100} precision={1} suffix="%" />
+                      <Text type="secondary">
+                        {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
+                      </Text>
+                    </Col>
+                    <Col xs={12} sm={6}>
+                      <Statistic title="估值数据日期" value={valuation.valuation_date_max || '-'} />
+                      <Text type="secondary">
+                        区间 {valuation.valuation_date_min || '-'} 至 {valuation.valuation_date_max || '-'}
+                      </Text>
+                    </Col>
+                  </Row>
+                  <Text type="secondary" className="soxx-fear-valuation-note">
+                    按指数成分权重聚合个股估值相对现价的倍率；缺失完整四档估值的成分不参与计算。
+                  </Text>
+                </Card>
+              )}
+
               {topHoldings.length > 0 && (
                 <Space wrap size={[8, 8]} className="soxx-fear-holdings">
                   {topHoldings.map(holding => (
@@ -504,6 +563,8 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
   const price = latest?.etf_price?.close;
+  const valuation = summary?.valuation;
+  const showValuation = option.market !== 'US' && option.market !== 'HK' && valuation?.status === 'available';
   return (
     <button
       type="button"
@@ -538,6 +599,17 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>
       </div>
+      {showValuation && (
+        <div className="soxx-fear-summary-valuation">
+          <span style={{ color: valuationColor(valuation.rating) }}>
+            当前{valuation.rating} {formatGap(valuation.current_gap_pct)}
+          </span>
+          <span style={{ color: valuationColor(valuation.forward_rating) }}>
+            下财年{valuation.forward_rating} {formatGap(valuation.forward_gap_pct)}
+          </span>
+          <span>覆盖 {(Number(valuation.coverage_ratio || 0) * 100).toFixed(0)}%</span>
+        </div>
+      )}
     </button>
   );
 };
