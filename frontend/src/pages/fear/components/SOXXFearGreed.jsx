@@ -26,6 +26,7 @@ const ETF_OPTIONS = [
   { symbol: '399006.SZ', ticker: '创业板指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399975.SZ', ticker: '证券公司', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: 'H30184.CSI', ticker: '半导体', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '399997.SZ', ticker: '中证白酒', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399989.SZ', ticker: '中证医疗', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '000819.SH', ticker: '有色金属', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: '399967.SZ', ticker: '中证军工', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
