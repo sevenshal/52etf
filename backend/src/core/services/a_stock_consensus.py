@@ -398,6 +398,81 @@ def load_a_stock_consensus_history(db: Any, symbol: str, *, limit: int = 1260) -
     return build_a_stock_consensus_history(rows, latest_trade_date, limit=limit)
 
 
+def load_a_stock_consensus_valuation_map(
+    db: Any,
+    symbols: Iterable[str],
+    *,
+    report_lookback_days: int = 180,
+) -> Dict[str, Dict[str, Any]]:
+    """Load latest A-share consensus target ranges for a constituent universe."""
+    normalized_symbols = list(dict.fromkeys(
+        normalize_a_stock_symbol(symbol) for symbol in symbols if normalize_a_stock_symbol(symbol)
+    ))
+    if not normalized_symbols:
+        return {}
+    latest_trade_date = db.execute(text("SELECT MAX(trade_date) FROM a_stock_market_daily")).scalar()
+    if latest_trade_date is None:
+        return {}
+    start_date = latest_trade_date - timedelta(days=max(1, min(int(report_lookback_days), 1095)))
+    rows: List[Mapping[str, Any]] = []
+    for offset in range(0, len(normalized_symbols), 500):
+        chunk = normalized_symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        rows.extend(db.execute(
+            text(
+                f"""
+                WITH latest_market AS (
+                    SELECT ts_code, trade_date, close
+                    FROM a_stock_market_daily
+                    WHERE trade_date = :latest_trade_date
+                )
+                SELECT
+                    r.ts_code, r.name AS report_name, r.report_date, r.report_title,
+                    r.org_name, r.author_name, r.quarter, r.eps, r.pe, r.np,
+                    r.rating, r.max_price, r.min_price,
+                    m.trade_date, m.close
+                FROM a_stock_report_rc r
+                JOIN latest_market m ON m.ts_code = r.ts_code
+                WHERE r.ts_code IN ({placeholders})
+                  AND r.report_date >= :start_date
+                ORDER BY r.ts_code, r.report_date DESC
+                """
+            ),
+            {**symbol_params, "latest_trade_date": latest_trade_date, "start_date": start_date},
+        ).mappings().all())
+
+    grouped: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("ts_code") or "").upper()].append(row)
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, symbol_rows in grouped.items():
+        aggregate = _aggregate_report_rows(symbol_rows, latest_trade_date)
+        close = _positive_float(symbol_rows[0].get("close"))
+        if aggregate is None or close is None:
+            continue
+        growth_pct = aggregate.get("growth_pct")
+        growth_factor = 1.0 + growth_pct / 100.0 if growth_pct is not None else None
+        result[symbol] = {
+            "symbol": symbol,
+            "date": aggregate.get("latest_report_date"),
+            "last_price": close,
+            "fair_value_lo": aggregate.get("target_price_min"),
+            "fair_value_hi": aggregate.get("target_price_max"),
+            "forward_next_fy_lo": (
+                aggregate["target_price_min"] * growth_factor if growth_factor is not None else None
+            ),
+            "forward_next_fy_hi": (
+                aggregate["target_price_max"] * growth_factor if growth_factor is not None else None
+            ),
+            "growth_pct": growth_pct,
+            "report_count": aggregate.get("report_count"),
+            "organization_count": aggregate.get("organization_count"),
+        }
+    return result
+
+
 def load_a_stock_klines(
     db: Any,
     symbol: str,

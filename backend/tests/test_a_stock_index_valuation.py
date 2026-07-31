@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
+from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation_map
 from src.core.services.a_stock_index_valuation import calculate_weighted_index_valuation
 
 
@@ -85,3 +86,64 @@ def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):
 
     assert holdings == [{"symbol": "600519.SH", "name": "贵州茅台", "weight": 0.05}]
     assert holdings_as_of == snapshot_day
+
+
+def test_load_a_stock_consensus_valuation_map_builds_forward_range():
+    report_rows = [{
+        "ts_code": "600519.SH",
+        "report_date": date(2026, 7, 20),
+        "report_title": "贵州茅台研报",
+        "org_name": "测试券商",
+        "author_name": "分析师",
+        "quarter": "2026",
+        "eps": 10,
+        "pe": 20,
+        "np": 100,
+        "rating": "买入",
+        "min_price": 120,
+        "max_price": 140,
+        "trade_date": date(2026, 7, 31),
+        "close": 100,
+    }, {
+        "ts_code": "600519.SH",
+        "report_date": date(2026, 7, 20),
+        "report_title": "贵州茅台研报",
+        "org_name": "测试券商",
+        "author_name": "分析师",
+        "quarter": "2027",
+        "eps": 12,
+        "pe": 18,
+        "np": 120,
+        "rating": "买入",
+        "min_price": 120,
+        "max_price": 140,
+        "trade_date": date(2026, 7, 31),
+        "close": 100,
+    }]
+
+    class Result:
+        def __init__(self, rows=None, scalar=None):
+            self._rows = rows or []
+            self._scalar = scalar
+
+        def scalar(self):
+            return self._scalar
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class FakeDb:
+        def execute(self, statement, params=None):
+            if params is None:
+                return Result(scalar=date(2026, 7, 31))
+            return Result(rows=report_rows)
+
+    result = load_a_stock_consensus_valuation_map(FakeDb(), ["600519.SH"])
+
+    assert result["600519.SH"]["fair_value_lo"] == pytest.approx(120)
+    assert result["600519.SH"]["fair_value_hi"] == pytest.approx(140)
+    assert result["600519.SH"]["forward_next_fy_lo"] == pytest.approx(144)
+    assert result["600519.SH"]["forward_next_fy_hi"] == pytest.approx(168)

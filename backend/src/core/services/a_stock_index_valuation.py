@@ -4,15 +4,10 @@ from datetime import date
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import and_, func
-
-from ..database import (
-    AStockIndexValuationSnapshot,
-    ETFFearGreedCloneHistory,
-    Session,
-    StockEVC,
-)
+from ..analytics_database import AnalyticsSession
+from ..database import AStockIndexValuationSnapshot, ETFFearGreedCloneHistory, Session
 from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
+from .a_stock_consensus import load_a_stock_consensus_valuation_map
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -131,35 +126,23 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     if not holding_symbols:
         return {"status": "unavailable", "reason": "constituent_weights_missing"}
 
-    db = Session()
+    analytics_db = AnalyticsSession()
     try:
-        latest_dates = (
-            db.query(StockEVC.symbol.label("symbol"), func.max(StockEVC.date).label("date"))
-            .filter(StockEVC.symbol.in_(holding_symbols))
-            .group_by(StockEVC.symbol)
-            .subquery()
-        )
-        valuation_rows = (
-            db.query(StockEVC)
-            .join(
-                latest_dates,
-                and_(
-                    StockEVC.symbol == latest_dates.c.symbol,
-                    StockEVC.date == latest_dates.c.date,
-                ),
-            )
-            .all()
-        )
+        valuation_payloads = load_a_stock_consensus_valuation_map(analytics_db, holding_symbols)
+        valuation_rows = {
+            symbol: SimpleNamespace(**payload)
+            for symbol, payload in valuation_payloads.items()
+        }
         result = calculate_weighted_index_valuation(
             index_level=latest.etf_close,
             holdings=holdings,
-            valuations={str(row.symbol).upper(): row for row in valuation_rows},
+            valuations=valuation_rows,
         )
         result["index_date"] = latest.date.isoformat()
         result["holdings_as_of"] = holdings_as_of.isoformat() if holdings_as_of else None
         return result
     finally:
-        Session.remove()
+        AnalyticsSession.remove()
 
 
 def refresh_a_stock_index_valuations(symbols: Iterable[str]) -> Dict[str, Any]:
