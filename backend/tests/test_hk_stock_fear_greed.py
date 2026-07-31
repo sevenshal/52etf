@@ -1,4 +1,8 @@
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pandas as pd
 from sqlalchemy import text
@@ -12,6 +16,7 @@ from src.robot.hk_stock_base_data_sync import (
     HKStockBaseDataSyncService,
     normalize_hk_symbol,
 )
+from src.robot import hk_stock_base_data_sync
 
 
 class HKStockBaseDataTest(unittest.TestCase):
@@ -35,6 +40,43 @@ class HKStockBaseDataTest(unittest.TestCase):
         invalid["weight"] = [40.0, 40.0]
         with self.assertRaises(ValueError):
             HKStockBaseDataSyncService._validate_weight_snapshots(invalid)
+
+    def test_hk_daily_rate_limit_waits_and_retries_with_persistent_state(self):
+        with self.subTest("explicit Tushare frequency error is retryable"):
+            pro = SimpleNamespace(
+                hk_daily=Mock(
+                    side_effect=[
+                        Exception("抱歉，您访问接口(hk_daily)频率超限(1次/分钟)"),
+                        pd.DataFrame(),
+                    ]
+                )
+            )
+            service = object.__new__(HKStockBaseDataSyncService)
+            service.tushare = SimpleNamespace(pro=pro)
+            with tempfile.TemporaryDirectory() as temporary:
+                state_path = Path(temporary) / "hk_daily.state"
+                with (
+                    patch.object(
+                        hk_stock_base_data_sync,
+                        "HK_DAILY_RATE_STATE_PATH",
+                        state_path,
+                    ),
+                    patch.object(
+                        hk_stock_base_data_sync,
+                        "HK_DAILY_MIN_INTERVAL_SECONDS",
+                        0,
+                    ),
+                    patch.object(
+                        hk_stock_base_data_sync,
+                        "HK_DAILY_MAX_ATTEMPTS",
+                        3,
+                    ),
+                ):
+                    result = service._call_hk_daily(trade_date="20260730")
+
+                self.assertTrue(result.empty)
+                self.assertEqual(2, pro.hk_daily.call_count)
+                self.assertTrue(state_path.read_text(encoding="utf-8").strip())
 
     def test_derived_qfq_applies_split_factor_to_prior_prices_only(self):
         db = AnalyticsSession()

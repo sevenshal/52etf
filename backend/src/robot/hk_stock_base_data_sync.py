@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,14 @@ from .hk_stock_base_data_config import (
 
 
 logger = logging.getLogger(__name__)
-HK_DAILY_MIN_INTERVAL_SECONDS = float(os.getenv("HK_DAILY_MIN_INTERVAL_SECONDS", "61"))
+HK_DAILY_MIN_INTERVAL_SECONDS = float(os.getenv("HK_DAILY_MIN_INTERVAL_SECONDS", "65"))
+HK_DAILY_MAX_ATTEMPTS = max(1, int(os.getenv("HK_DAILY_MAX_ATTEMPTS", "3")))
+HK_DAILY_RATE_STATE_PATH = Path(
+    os.getenv(
+        "HK_DAILY_RATE_STATE_PATH",
+        "/var/lib/quant_robot/cache/tushare_hk_daily_rate.state",
+    )
+)
 HK_REVIEW_CACHE_DIR = os.getenv(
     "HK_REVIEW_CACHE_DIR",
     "/var/lib/quant_robot/cache/hk_index_reviews",
@@ -88,7 +96,6 @@ class HKStockBaseDataSyncService:
     def __init__(self, tushare_service: Optional[TushareService] = None):
         ensure_analytics_schema()
         self.tushare = tushare_service or TushareService.getInstance()
-        self._last_hk_daily_request_at: Optional[float] = None
 
     def sync_basic(self) -> int:
         frame = self.tushare.pro.hk_basic(list_status="L")
@@ -121,34 +128,82 @@ class HKStockBaseDataSyncService:
         frame = frame[pd.to_numeric(frame["is_open"], errors="coerce") == 1]
         return sorted(item for item in _date_column(frame, "cal_date").dropna().tolist())
 
-    def _wait_for_hk_daily_quota(self):
-        if self._last_hk_daily_request_at is None:
-            return
-        elapsed = time.monotonic() - self._last_hk_daily_request_at
-        remaining = HK_DAILY_MIN_INTERVAL_SECONDS - elapsed
-        if remaining > 0:
-            time.sleep(remaining)
+    @staticmethod
+    def _is_hk_daily_rate_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in ("频率超限", "每分钟", "rate limit", "too many requests")
+        )
+
+    @contextmanager
+    def _hk_daily_rate_slot(self):
+        """Serialize hk_daily calls across tasks and service restarts."""
+        import fcntl
+
+        state_path = HK_DAILY_RATE_STATE_PATH
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with state_path.open("a+", encoding="utf-8") as state_file:
+            fcntl.flock(state_file.fileno(), fcntl.LOCK_EX)
+            try:
+                state_file.seek(0)
+                raw_value = state_file.read().strip()
+                try:
+                    last_request_at = float(raw_value) if raw_value else 0.0
+                except ValueError:
+                    last_request_at = 0.0
+                remaining = HK_DAILY_MIN_INTERVAL_SECONDS - (
+                    time.time() - last_request_at
+                )
+                if remaining > 0:
+                    logger.info(
+                        "Waiting %.1fs for persistent Tushare hk_daily quota",
+                        remaining,
+                    )
+                    time.sleep(remaining)
+                yield
+            finally:
+                state_file.seek(0)
+                state_file.truncate()
+                state_file.write(f"{time.time():.6f}")
+                state_file.flush()
+                os.fsync(state_file.fileno())
+                fcntl.flock(state_file.fileno(), fcntl.LOCK_UN)
+
+    def _call_hk_daily(self, **kwargs) -> pd.DataFrame:
+        last_error = None
+        for attempt in range(1, HK_DAILY_MAX_ATTEMPTS + 1):
+            try:
+                with self._hk_daily_rate_slot():
+                    return self.tushare.pro.hk_daily(**kwargs)
+            except Exception as exc:
+                last_error = exc
+                if (
+                    not self._is_hk_daily_rate_limit_error(exc)
+                    or attempt >= HK_DAILY_MAX_ATTEMPTS
+                ):
+                    raise
+                logger.warning(
+                    "Tushare hk_daily rate limited; retrying after persistent "
+                    "quota interval attempt=%s/%s error=%s",
+                    attempt,
+                    HK_DAILY_MAX_ATTEMPTS,
+                    exc,
+                )
+        raise last_error
 
     def sync_market_day(self, trade_date: date) -> int:
-        self._wait_for_hk_daily_quota()
-        try:
-            frame = self.tushare.pro.hk_daily(trade_date=trade_date.strftime("%Y%m%d"))
-        finally:
-            self._last_hk_daily_request_at = time.monotonic()
+        frame = self._call_hk_daily(trade_date=trade_date.strftime("%Y%m%d"))
         if frame is None or frame.empty:
             return 0
         return self._save_market_frame(frame)
 
     def sync_market_symbol(self, symbol: str, start_date: date, end_date: date) -> int:
-        self._wait_for_hk_daily_quota()
-        try:
-            frame = self.tushare.pro.hk_daily(
-                ts_code=normalize_hk_symbol(symbol),
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-            )
-        finally:
-            self._last_hk_daily_request_at = time.monotonic()
+        frame = self._call_hk_daily(
+            ts_code=normalize_hk_symbol(symbol),
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+        )
         if frame is None or frame.empty:
             return 0
         return self._save_market_frame(frame)
