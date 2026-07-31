@@ -215,6 +215,7 @@ class XueqiuTokenMonitorTest(TestCase):
                 "end_date",
                 "recent_days",
             },
+            "a_stock_index_valuation_refresh": set(),
             "hk_stock_base_data_sync": {
                 "start_date",
                 "end_date",

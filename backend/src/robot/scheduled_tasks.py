@@ -603,6 +603,27 @@ def _run_a_stock_etf_fear_greed_backfill(
     )
 
 
+def _run_a_stock_index_valuation_refresh():
+    from ..core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGETS
+    from ..core.services.a_stock_index_valuation import refresh_a_stock_index_valuations
+
+    result = refresh_a_stock_index_valuations(
+        target["symbol"] for target in A_STOCK_FEAR_GREED_TARGETS
+    )
+    errors = result.get("errors") or []
+    message = (
+        "A stock index valuation refresh "
+        f"saved={result.get('saved', 0)} errors={len(errors)}"
+    )
+    if errors:
+        preview = _format_error_preview(
+            errors,
+            lambda item: f"{item.get('symbol')}: {item.get('error')}",
+        )
+        logging.getLogger("ScheduledTaskManager").warning("%s: %s", message, preview)
+    return message
+
+
 def _run_hk_stock_base_data_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1249,6 +1270,15 @@ class ScheduledTaskManager:
                         description="未填写输出开始日期时，回写最近多少个自然日。",
                     ),
                 ),
+            ),
+            "a_stock_index_valuation_refresh": TaskDefinition(
+                task_key="a_stock_index_valuation_refresh",
+                name="A股指数估值更新",
+                description="按最新指数成分权重聚合个股当前及下财年估值，并保存指数估值快照。",
+                default_time="18:50",
+                default_enabled=True,
+                sort_order=77,
+                runner=_run_a_stock_index_valuation_refresh,
             ),
             "hk_stock_base_data_sync": TaskDefinition(
                 task_key="hk_stock_base_data_sync",

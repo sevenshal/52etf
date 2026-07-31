@@ -5,6 +5,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
+from ...core.services.a_stock_index_valuation import load_a_stock_index_valuation
+from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 
@@ -124,7 +126,7 @@ async def get_etf_fear_greed_clone_history(
     """从 SQLite 读取 ETF 恐贪复刻指数历史。"""
     try:
         calculator = ETFFearGreedCloneCalculator()
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             lambda: calculator.load_history_from_db(
                 symbol=symbol,
                 start_date=_parse_date(start_date),
@@ -133,6 +135,11 @@ async def get_etf_fear_greed_clone_history(
                 include_latest_holdings=include_latest_holdings,
             )
         )
+        if str(symbol or "").strip().upper() in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
+            result["valuation"] = await run_in_threadpool(
+                lambda: load_a_stock_index_valuation(symbol)
+            )
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪历史失败: {str(e)}")
 
@@ -149,9 +156,15 @@ async def get_etf_fear_greed_clone_summaries(
             if item.strip()
         ]
         calculator = ETFFearGreedCloneCalculator()
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             lambda: calculator.load_summaries_from_db(symbol_list)
         )
+        for item in result.get("data", []):
+            if item.get("symbol") in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
+                item["valuation"] = await run_in_threadpool(
+                    lambda current_symbol=item["symbol"]: load_a_stock_index_valuation(current_symbol)
+                )
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪摘要失败: {str(e)}")
 

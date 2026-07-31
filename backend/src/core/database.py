@@ -333,6 +333,16 @@ class ETFFearGreedCloneHolding(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class AStockIndexValuationSnapshot(Base):
+    """A股指数按成分股权重聚合后的每日估值快照。"""
+    __tablename__ = "a_stock_index_valuation_snapshots"
+
+    symbol = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class ETFPutCallRatio(Base):
     """Barchart ETF Put/Call Ratio 历史数据"""
     __tablename__ = 'etf_put_call_ratios'
