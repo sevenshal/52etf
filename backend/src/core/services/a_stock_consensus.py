@@ -529,18 +529,32 @@ def load_a_stock_consensus_valuation_history_map(
     result: Dict[date, Dict[str, Dict[str, Any]]] = defaultdict(dict)
     lookback = timedelta(days=max(1, min(int(report_lookback_days), 1095)))
     for symbol, report_rows in reports_by_symbol.items():
+        dated_rows = [
+            (report_day, row)
+            for row in report_rows
+            if (report_day := _row_to_date(row.get("report_date")))
+        ]
+        cursor = 0
+        active_rows: List[Mapping[str, Any]] = []
+        aggregate: Optional[Dict[str, Any]] = None
         for trade_day in normalized_dates:
             close = market_by_date.get(trade_day, {}).get(symbol)
-            if close is None:
-                continue
             window_start = trade_day - lookback
-            active_rows = [
-                row for row in report_rows
-                if (report_day := _row_to_date(row.get("report_date")))
-                and window_start <= report_day <= trade_day
+            changed = False
+            while cursor < len(dated_rows) and dated_rows[cursor][0] <= trade_day:
+                active_rows.append(dated_rows[cursor][1])
+                cursor += 1
+                changed = True
+            retained_rows = [
+                row for row in active_rows
+                if (_row_to_date(row.get("report_date")) or date.min) >= window_start
             ]
-            aggregate = _aggregate_report_rows(active_rows, trade_day)
-            if aggregate is None:
+            if len(retained_rows) != len(active_rows):
+                active_rows = retained_rows
+                changed = True
+            if changed:
+                aggregate = _aggregate_report_rows(active_rows, trade_day)
+            if close is None or aggregate is None:
                 continue
             growth_pct = aggregate.get("growth_pct")
             growth_factor = 1.0 + growth_pct / 100.0 if growth_pct is not None else None
