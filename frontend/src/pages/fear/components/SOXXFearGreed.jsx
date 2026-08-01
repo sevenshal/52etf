@@ -485,7 +485,7 @@ const SOXXFearGreed = () => {
               {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
                 <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
                   <Row gutter={[12, 12]}>
-                    <Col xs={12} sm={6}>
+                    <Col xs={12} sm={8}>
                       <Statistic
                         title="当前低估率"
                         value={formatGap(valuation.current_gap_pct)}
@@ -495,23 +495,39 @@ const SOXXFearGreed = () => {
                         目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
                       </Tag>
                     </Col>
-                    <Col xs={12} sm={6}>
+                    <Col xs={12} sm={8}>
                       <Statistic
-                        title="估值位置"
+                        title="中期估值位置"
                         value={valuation.valuation_position_label || '-'}
                         valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
                       />
                       <Tag color={valuationColor(valuation.valuation_position_label)}>
-                        近{valuation.valuation_history_days || 0}日百分位 {formatNumber(valuation.valuation_position_pct, 1)}%
+                        近{valuation.valuation_history_days || 0}日百分位{' '}
+                        {isFiniteNumber(valuation.valuation_position_pct)
+                          ? `${formatNumber(valuation.valuation_position_pct, 1)}%`
+                          : '样本不足'}
                       </Tag>
                     </Col>
-                    <Col xs={12} sm={6}>
+                    <Col xs={12} sm={8}>
+                      <Statistic
+                        title="近252日位置"
+                        value={valuation.valuation_position_252_label || '-'}
+                        valueStyle={{ color: valuationColor(valuation.valuation_position_252_label), fontSize: 20 }}
+                      />
+                      <Tag color={valuationColor(valuation.valuation_position_252_label)}>
+                        有效{valuation.valuation_history_252_days || 0}日百分位{' '}
+                        {isFiniteNumber(valuation.valuation_position_252_pct)
+                          ? `${formatNumber(valuation.valuation_position_252_pct, 1)}%`
+                          : '样本不足'}
+                      </Tag>
+                    </Col>
+                    <Col xs={12} sm={8}>
                       <Statistic title="估值覆盖权重" value={(valuation.coverage_ratio || 0) * 100} precision={1} suffix="%" />
                       <Text type="secondary">
                         {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
                       </Text>
                     </Col>
-                    <Col xs={12} sm={6}>
+                    <Col xs={12} sm={8}>
                       <Statistic title="估值数据日期" value={valuation.valuation_date_max || '-'} />
                       <Text type="secondary">
                         区间 {valuation.valuation_date_min || '-'} 至 {valuation.valuation_date_max || '-'}
@@ -519,7 +535,7 @@ const SOXXFearGreed = () => {
                     </Col>
                   </Row>
                   <Text type="secondary" className="soxx-fear-valuation-note">
-                    低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；估值位置为当前低估率在最近252个有效交易日中的历史百分位。
+                    低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
                   </Text>
                 </Card>
               )}
@@ -605,9 +621,14 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
           <span style={{ color: valuationColor(valuation.valuation_position_label) }}>
-            {valuation.valuation_position_label || '-'}
+            估值位置：{valuation.valuation_position_label || '-'}
           </span>
-          <span>{formatNumber(valuation.valuation_position_pct, 1)}%分位</span>
+          <span>
+            近{valuation.valuation_history_days || 0}日{' '}
+            {isFiniteNumber(valuation.valuation_position_pct)
+              ? `${formatNumber(valuation.valuation_position_pct, 1)}%分位`
+              : '样本不足'}
+          </span>
           <span>覆盖 {(Number(valuation.coverage_ratio || 0) * 100).toFixed(0)}%</span>
         </div>
       )}

@@ -109,7 +109,7 @@
 
 .soxx-fear-summary-valuation {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: 1.25fr 1fr auto;
   gap: 6px;
   margin-top: 8px;
   padding-top: 8px;
