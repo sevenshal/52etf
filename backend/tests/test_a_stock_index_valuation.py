@@ -5,7 +5,11 @@ import pytest
 
 from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation_map
-from src.core.services.a_stock_index_valuation import calculate_weighted_index_valuation
+from src.core.services.a_stock_index_valuation import (
+    _percentile_rank,
+    _valuation_position_label,
+    calculate_weighted_index_valuation,
+)
 
 
 def _holding(symbol, weight):
@@ -46,7 +50,7 @@ def test_calculate_weighted_index_valuation_normalizes_covered_weight():
     assert result["forward_rating"] == "合理"
 
 
-def test_calculate_weighted_index_valuation_excludes_incomplete_rows_and_reports_coverage():
+def test_calculate_weighted_index_valuation_tracks_current_and_forward_coverage_separately():
     holdings = [_holding("AAA.SH", 0.7), _holding("BBB.SZ", 0.3)]
     incomplete = _valuation("BBB.SZ", 20, 10, 30, 20, 40)
     incomplete.forward_next_fy_hi = None
@@ -60,12 +64,26 @@ def test_calculate_weighted_index_valuation_excludes_incomplete_rows_and_reports
         },
     )
 
-    assert result["coverage_ratio"] == pytest.approx(0.7)
-    assert result["covered_count"] == 1
-    assert result["fair_value_lo"] == pytest.approx(1200)
-    assert result["fair_value_hi"] == pytest.approx(1400)
-    assert result["rating"] == "低估"
+    assert result["coverage_ratio"] == pytest.approx(1)
+    assert result["forward_coverage_ratio"] == pytest.approx(0.7)
+    assert result["covered_count"] == 2
+    assert result["forward_covered_count"] == 1
+    assert result["fair_value_lo"] == pytest.approx(990)
+    assert result["fair_value_hi"] == pytest.approx(1430)
+    assert result["rating"] == "合理"
     assert result["forward_rating"] == "低估"
+
+
+@pytest.mark.parametrize(
+    ("position", "label"),
+    [(90, "极度低估"), (70, "低估"), (50, "合理"), (30, "高估"), (10, "极度高估")],
+)
+def test_valuation_position_labels(position, label):
+    assert _valuation_position_label(position) == label
+
+
+def test_percentile_rank_uses_midrank_for_current_value():
+    assert _percentile_rank([10, 20, 30, 40], 30) == pytest.approx(62.5)
 
 
 def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -215,6 +215,19 @@ class AStockInnovation100FearGreedCloneCalculator:
         return (
             holdings_by_date.get(timestamp, []),
             holdings_as_of_by_date.get(timestamp),
+        )
+
+    def load_holdings_history(
+        self,
+        days: Iterable[date],
+    ) -> Tuple[Dict[date, List[Dict[str, Any]]], Dict[date, date]]:
+        timestamps = pd.DatetimeIndex(sorted(set(pd.Timestamp(day) for day in days)), name="date")
+        if timestamps.empty:
+            return {}, {}
+        holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(timestamps)
+        return (
+            {timestamp.date(): rows for timestamp, rows in holdings_by_date.items()},
+            {timestamp.date(): value for timestamp, value in holdings_as_of_by_date.items()},
         )
 
     def backfill_to_db(

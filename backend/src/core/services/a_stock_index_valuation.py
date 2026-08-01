@@ -7,7 +7,10 @@ from typing import Any, Dict, Iterable, List, Optional
 from ..analytics_database import AnalyticsSession
 from ..database import AStockIndexValuationSnapshot, ETFFearGreedCloneHistory, Session
 from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
-from .a_stock_consensus import load_a_stock_consensus_valuation_map
+from .a_stock_consensus import load_a_stock_consensus_valuation_history_map
+
+
+VALUATION_POSITION_WINDOW = 252
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -28,13 +31,17 @@ def calculate_weighted_index_valuation(
     level = _positive_number(index_level)
     total_weight = 0.0
     covered_weight = 0.0
-    weighted_multiples = {
+    current_weighted_multiples = {
         "fair_value_lo": 0.0,
         "fair_value_hi": 0.0,
+    }
+    forward_weighted_multiples = {
         "forward_next_fy_lo": 0.0,
         "forward_next_fy_hi": 0.0,
     }
     covered_count = 0
+    forward_covered_weight = 0.0
+    forward_covered_count = 0
     valuation_dates: List[date] = []
 
     for holding in holdings:
@@ -46,17 +53,26 @@ def calculate_weighted_index_valuation(
         if valuation is None:
             continue
         price = _positive_number(getattr(valuation, "last_price", None))
-        values = {
+        current_values = {
             key: _positive_number(getattr(valuation, key, None))
-            for key in weighted_multiples
+            for key in current_weighted_multiples
         }
-        if price is None or any(value is None for value in values.values()):
+        if price is None or any(value is None for value in current_values.values()):
             continue
         covered_weight += weight
         covered_count += 1
         valuation_dates.append(valuation.date)
-        for key, value in values.items():
-            weighted_multiples[key] += weight * value / price
+        for key, value in current_values.items():
+            current_weighted_multiples[key] += weight * value / price
+        forward_values = {
+            key: _positive_number(getattr(valuation, key, None))
+            for key in forward_weighted_multiples
+        }
+        if all(value is not None for value in forward_values.values()):
+            forward_covered_weight += weight
+            forward_covered_count += 1
+            for key, value in forward_values.items():
+                forward_weighted_multiples[key] += weight * value / price
 
     coverage_ratio = covered_weight / total_weight if total_weight > 0 else 0.0
     result = {
@@ -64,17 +80,29 @@ def calculate_weighted_index_valuation(
         "index_level": level,
         "constituent_count": sum(1 for _ in holdings) if isinstance(holdings, list) else None,
         "covered_count": covered_count,
+        "forward_covered_count": forward_covered_count,
         "total_weight": round(total_weight, 8),
         "covered_weight": round(covered_weight, 8),
+        "forward_covered_weight": round(forward_covered_weight, 8),
         "coverage_ratio": round(coverage_ratio, 6),
+        "forward_coverage_ratio": round(
+            forward_covered_weight / total_weight if total_weight > 0 else 0.0,
+            6,
+        ),
         "valuation_date_min": min(valuation_dates).isoformat() if valuation_dates else None,
         "valuation_date_max": max(valuation_dates).isoformat() if valuation_dates else None,
         "method": "constituent_weighted_fair_value_multiple",
     }
-    for key, weighted_multiple in weighted_multiples.items():
+    for key, weighted_multiple in current_weighted_multiples.items():
         result[key] = (
             round(level * weighted_multiple / covered_weight, 4)
             if level is not None and covered_weight > 0
+            else None
+        )
+    for key, weighted_multiple in forward_weighted_multiples.items():
+        result[key] = (
+            round(level * weighted_multiple / forward_covered_weight, 4)
+            if level is not None and forward_covered_weight > 0
             else None
         )
     if level is not None:
@@ -102,41 +130,77 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
     db = Session()
     try:
-        latest_row = (
+        history_rows = (
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .first()
+            .limit(VALUATION_POSITION_WINDOW)
+            .all()
         )
-        if latest_row is None:
+        if not history_rows:
             return {"status": "unavailable", "reason": "fear_greed_history_missing"}
-        latest = SimpleNamespace(date=latest_row.date, etf_close=latest_row.etf_close)
+        history_rows.reverse()
+        index_levels = {row.date: row.etf_close for row in history_rows}
+        latest = SimpleNamespace(date=history_rows[-1].date, etf_close=history_rows[-1].etf_close)
     finally:
         Session.remove()
 
-    holding_rows, holdings_as_of = AStockInnovation100FearGreedCloneCalculator(
-        normalized_symbol
-    ).load_holdings_on_or_before(latest.date)
+    calculator = AStockInnovation100FearGreedCloneCalculator(normalized_symbol)
+    holdings_history, holdings_as_of_history = calculator.load_holdings_history(index_levels)
+    holding_rows = holdings_history.get(latest.date, [])
+    holdings_as_of = holdings_as_of_history.get(latest.date)
     holdings = [SimpleNamespace(holding_symbol=row["symbol"], **row) for row in holding_rows]
     holding_symbols = {
-        str(row.holding_symbol or "").strip().upper()
-        for row in holdings
-        if row.holding_symbol
+        str(row.get("symbol") or "").strip().upper()
+        for rows in holdings_history.values()
+        for row in rows
+        if row.get("symbol")
     }
     if not holding_symbols:
         return {"status": "unavailable", "reason": "constituent_weights_missing"}
 
     analytics_db = AnalyticsSession()
     try:
-        valuation_payloads = load_a_stock_consensus_valuation_map(analytics_db, holding_symbols)
-        valuation_rows = {
-            symbol: SimpleNamespace(**payload)
-            for symbol, payload in valuation_payloads.items()
-        }
-        result = calculate_weighted_index_valuation(
-            index_level=latest.etf_close,
-            holdings=holdings,
-            valuations=valuation_rows,
+        valuation_history = load_a_stock_consensus_valuation_history_map(
+            analytics_db,
+            holding_symbols,
+            index_levels,
+        )
+        daily_results = []
+        for trade_day, index_level in index_levels.items():
+            day_holdings = [
+                SimpleNamespace(holding_symbol=row["symbol"], **row)
+                for row in holdings_history.get(trade_day, [])
+            ]
+            day_valuations = {
+                valuation_symbol: SimpleNamespace(**payload)
+                for valuation_symbol, payload in valuation_history.get(trade_day, {}).items()
+            }
+            day_result = calculate_weighted_index_valuation(
+                index_level=index_level,
+                holdings=day_holdings,
+                valuations=day_valuations,
+            )
+            if day_result.get("status") != "available" or day_result.get("current_gap_pct") is None:
+                continue
+            day_result["index_date"] = trade_day.isoformat()
+            holdings_day = holdings_as_of_history.get(trade_day)
+            day_result["holdings_as_of"] = holdings_day.isoformat() if holdings_day else None
+            daily_results.append(day_result)
+        if not daily_results:
+            return {"status": "unavailable", "reason": "valuation_history_missing"}
+        result = daily_results[-1]
+        gaps = [item["current_gap_pct"] for item in daily_results]
+        position_pct = _percentile_rank(gaps, result["current_gap_pct"])
+        result.update(
+            valuation_position_pct=position_pct,
+            valuation_position_label=_valuation_position_label(position_pct),
+            valuation_history_days=len(gaps),
+            valuation_gap_min=round(min(gaps), 2),
+            valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
+            valuation_gap_max=round(max(gaps), 2),
+            method="252d_percentile_of_constituent_weighted_consensus_undervaluation",
+            _history=daily_results,
         )
         result["index_date"] = latest.date.isoformat()
         result["holdings_as_of"] = holdings_as_of.isoformat() if holdings_as_of else None
@@ -163,14 +227,16 @@ def refresh_a_stock_index_valuations(symbols: Iterable[str]) -> Dict[str, Any]:
     db = Session()
     try:
         for symbol, payload in calculated:
-            snapshot_date = date.fromisoformat(payload["index_date"])
-            db.merge(
-                AStockIndexValuationSnapshot(
+            history = payload.pop("_history", [])
+            for history_payload in history:
+                snapshot_date = date.fromisoformat(history_payload["index_date"])
+                db.merge(AStockIndexValuationSnapshot(
                     symbol=symbol,
                     date=snapshot_date,
-                    payload=payload,
-                )
-            )
+                    payload=history_payload,
+                ))
+            latest_date = date.fromisoformat(payload["index_date"])
+            db.merge(AStockIndexValuationSnapshot(symbol=symbol, date=latest_date, payload=payload))
         db.commit()
     except Exception:
         db.rollback()
@@ -224,3 +290,24 @@ def _valuation_rating(level: float, low: Optional[float], high: Optional[float])
     if level > high:
         return "高估"
     return "合理"
+
+
+def _percentile_rank(values: Iterable[float], current: float) -> float:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return 0.0
+    less = sum(value < current for value in clean)
+    equal = sum(value == current for value in clean)
+    return round((less + 0.5 * equal) / len(clean) * 100.0, 2)
+
+
+def _valuation_position_label(position_pct: float) -> str:
+    if position_pct >= 80:
+        return "极度低估"
+    if position_pct >= 60:
+        return "低估"
+    if position_pct >= 40:
+        return "合理"
+    if position_pct >= 20:
+        return "高估"
+    return "极度高估"

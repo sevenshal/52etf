@@ -473,6 +473,93 @@ def load_a_stock_consensus_valuation_map(
     return result
 
 
+def load_a_stock_consensus_valuation_history_map(
+    db: Any,
+    symbols: Iterable[str],
+    trade_dates: Iterable[date],
+    *,
+    report_lookback_days: int = 180,
+) -> Dict[date, Dict[str, Dict[str, Any]]]:
+    """Build point-in-time consensus valuation inputs for historical trade dates."""
+    normalized_symbols = list(dict.fromkeys(
+        normalized for symbol in symbols
+        if (normalized := normalize_a_stock_symbol(symbol))
+    ))
+    normalized_dates = sorted(set(day for day in trade_dates if day))
+    if not normalized_symbols or not normalized_dates:
+        return {}
+
+    start_date = normalized_dates[0]
+    end_date = normalized_dates[-1]
+    report_start = start_date - timedelta(days=max(1, min(int(report_lookback_days), 1095)))
+    market_by_date: Dict[date, Dict[str, float]] = defaultdict(dict)
+    reports_by_symbol: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+
+    for offset in range(0, len(normalized_symbols), 500):
+        chunk = normalized_symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        params = {**symbol_params, "start_date": start_date, "end_date": end_date}
+        market_rows = db.execute(text(f"""
+            SELECT ts_code, trade_date, close
+            FROM a_stock_market_daily
+            WHERE ts_code IN ({placeholders})
+              AND trade_date BETWEEN :start_date AND :end_date
+            ORDER BY trade_date, ts_code
+        """), params).mappings().all()
+        for row in market_rows:
+            row_date = _row_to_date(row.get("trade_date"))
+            close = _positive_float(row.get("close"))
+            if row_date and close is not None:
+                market_by_date[row_date][str(row.get("ts_code") or "").upper()] = close
+
+        report_rows = db.execute(text(f"""
+            SELECT
+                ts_code, name AS report_name, report_date, report_title,
+                org_name, author_name, quarter, eps, pe, np, rating,
+                max_price, min_price
+            FROM a_stock_report_rc
+            WHERE ts_code IN ({placeholders})
+              AND report_date BETWEEN :report_start AND :end_date
+            ORDER BY ts_code, report_date
+        """), {**symbol_params, "report_start": report_start, "end_date": end_date}).mappings().all()
+        for row in report_rows:
+            reports_by_symbol[str(row.get("ts_code") or "").upper()].append(row)
+
+    result: Dict[date, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    lookback = timedelta(days=max(1, min(int(report_lookback_days), 1095)))
+    for symbol, report_rows in reports_by_symbol.items():
+        for trade_day in normalized_dates:
+            close = market_by_date.get(trade_day, {}).get(symbol)
+            if close is None:
+                continue
+            window_start = trade_day - lookback
+            active_rows = [
+                row for row in report_rows
+                if (report_day := _row_to_date(row.get("report_date")))
+                and window_start <= report_day <= trade_day
+            ]
+            aggregate = _aggregate_report_rows(active_rows, trade_day)
+            if aggregate is None:
+                continue
+            growth_pct = aggregate.get("growth_pct")
+            growth_factor = 1.0 + growth_pct / 100.0 if growth_pct is not None else None
+            result[trade_day][symbol] = {
+                "symbol": symbol,
+                "date": aggregate.get("latest_report_date"),
+                "last_price": close,
+                "fair_value_lo": aggregate.get("target_price_min"),
+                "fair_value_hi": aggregate.get("target_price_max"),
+                "forward_next_fy_lo": (
+                    aggregate["target_price_min"] * growth_factor if growth_factor is not None else None
+                ),
+                "forward_next_fy_hi": (
+                    aggregate["target_price_max"] * growth_factor if growth_factor is not None else None
+                ),
+            }
+    return {day: values for day, values in result.items()}
+
+
 def load_a_stock_klines(
     db: Any,
     symbol: str,
