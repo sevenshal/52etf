@@ -75,9 +75,11 @@ const formatVolumeRatio = value => (
 );
 
 const valuationColor = rating => ({
+  极度低估: '#237804',
   低估: '#389e0d',
   合理: '#1677ff',
   高估: '#cf1322',
+  极度高估: '#820014',
 }[rating] || '#8c8c8c');
 
 const formatGap = value => (
@@ -485,22 +487,22 @@ const SOXXFearGreed = () => {
                   <Row gutter={[12, 12]}>
                     <Col xs={12} sm={6}>
                       <Statistic
-                        title="当前估值区间"
-                        value={formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
-                        valueStyle={{ color: valuationColor(valuation.rating), fontSize: 20 }}
+                        title="当前低估率"
+                        value={formatGap(valuation.current_gap_pct)}
+                        valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
                       />
-                      <Tag color={valuationColor(valuation.rating)}>
-                        {valuation.rating} · 中值空间 {formatGap(valuation.current_gap_pct)}
+                      <Tag>
+                        目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
                       </Tag>
                     </Col>
                     <Col xs={12} sm={6}>
                       <Statistic
-                        title="下财年估值区间"
-                        value={formatRange(valuation.forward_next_fy_lo, valuation.forward_next_fy_hi)}
-                        valueStyle={{ color: valuationColor(valuation.forward_rating), fontSize: 20 }}
+                        title="估值位置"
+                        value={valuation.valuation_position_label || '-'}
+                        valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
                       />
-                      <Tag color={valuationColor(valuation.forward_rating)}>
-                        {valuation.forward_rating} · 中值空间 {formatGap(valuation.forward_gap_pct)}
+                      <Tag color={valuationColor(valuation.valuation_position_label)}>
+                        近{valuation.valuation_history_days || 0}日百分位 {formatNumber(valuation.valuation_position_pct, 1)}%
                       </Tag>
                     </Col>
                     <Col xs={12} sm={6}>
@@ -517,7 +519,7 @@ const SOXXFearGreed = () => {
                     </Col>
                   </Row>
                   <Text type="secondary" className="soxx-fear-valuation-note">
-                    按指数成分权重聚合个股估值相对现价的倍率；缺失完整四档估值的成分不参与计算。
+                    低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；估值位置为当前低估率在最近252个有效交易日中的历史百分位。
                   </Text>
                 </Card>
               )}
@@ -602,12 +604,10 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       </div>
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
-          <span style={{ color: valuationColor(valuation.rating) }}>
-            当前{valuation.rating} {formatGap(valuation.current_gap_pct)}
+          <span style={{ color: valuationColor(valuation.valuation_position_label) }}>
+            估值位置：{valuation.valuation_position_label || '-'}
           </span>
-          <span style={{ color: valuationColor(valuation.forward_rating) }}>
-            下财年{valuation.forward_rating} {formatGap(valuation.forward_gap_pct)}
-          </span>
+          <span>{formatNumber(valuation.valuation_position_pct, 1)}%分位</span>
           <span>覆盖 {(Number(valuation.coverage_ratio || 0) * 100).toFixed(0)}%</span>
         </div>
       )}
