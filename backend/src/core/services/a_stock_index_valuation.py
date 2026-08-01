@@ -10,7 +10,9 @@ from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneC
 from .a_stock_consensus import load_a_stock_consensus_valuation_history_map
 
 
-VALUATION_POSITION_WINDOW = 252
+VALUATION_POSITION_MAX_WINDOW = 504
+VALUATION_POSITION_SHORT_WINDOW = 252
+VALUATION_POSITION_MIN_SAMPLES = 120
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -134,7 +136,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .limit(VALUATION_POSITION_WINDOW)
+            .limit(VALUATION_POSITION_MAX_WINDOW)
             .all()
         )
         if not history_rows:
@@ -191,15 +193,12 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             return {"status": "unavailable", "reason": "valuation_history_missing"}
         result = daily_results[-1]
         gaps = [item["current_gap_pct"] for item in daily_results]
-        position_pct = _percentile_rank(gaps, result["current_gap_pct"])
         result.update(
-            valuation_position_pct=position_pct,
-            valuation_position_label=_valuation_position_label(position_pct),
-            valuation_history_days=len(gaps),
+            **_build_valuation_position_fields(gaps, result["current_gap_pct"]),
             valuation_gap_min=round(min(gaps), 2),
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
             valuation_gap_max=round(max(gaps), 2),
-            method="252d_percentile_of_constituent_weighted_consensus_undervaluation",
+            method="adaptive_up_to_504d_percentile_of_constituent_weighted_consensus_undervaluation",
             _history=daily_results,
         )
         result["index_date"] = latest.date.isoformat()
@@ -299,6 +298,35 @@ def _percentile_rank(values: Iterable[float], current: float) -> float:
     less = sum(value < current for value in clean)
     equal = sum(value == current for value in clean)
     return round((less + 0.5 * equal) / len(clean) * 100.0, 2)
+
+
+def _build_valuation_position_fields(values: Iterable[float], current: float) -> Dict[str, Any]:
+    primary_values = [
+        float(value)
+        for value in values
+        if value is not None
+    ][-VALUATION_POSITION_MAX_WINDOW:]
+    short_values = primary_values[-VALUATION_POSITION_SHORT_WINDOW:]
+
+    def build_position(sample: List[float]) -> tuple[Optional[float], str]:
+        if len(sample) < VALUATION_POSITION_MIN_SAMPLES:
+            return None, "样本不足"
+        position_pct = _percentile_rank(sample, current)
+        return position_pct, _valuation_position_label(position_pct)
+
+    position_pct, position_label = build_position(primary_values)
+    short_position_pct, short_position_label = build_position(short_values)
+    return {
+        "valuation_position_pct": position_pct,
+        "valuation_position_label": position_label,
+        "valuation_history_days": len(primary_values),
+        "valuation_position_max_days": VALUATION_POSITION_MAX_WINDOW,
+        "valuation_position_min_days": VALUATION_POSITION_MIN_SAMPLES,
+        "valuation_position_is_full_window": len(primary_values) >= VALUATION_POSITION_MAX_WINDOW,
+        "valuation_position_252_pct": short_position_pct,
+        "valuation_position_252_label": short_position_label,
+        "valuation_history_252_days": len(short_values),
+    }
 
 
 def _valuation_position_label(position_pct: float) -> str:

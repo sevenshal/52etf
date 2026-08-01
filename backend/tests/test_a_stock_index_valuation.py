@@ -6,6 +6,7 @@ import pytest
 from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation_map
 from src.core.services.a_stock_index_valuation import (
+    _build_valuation_position_fields,
     _percentile_rank,
     _valuation_position_label,
     calculate_weighted_index_valuation,
@@ -84,6 +85,26 @@ def test_valuation_position_labels(position, label):
 
 def test_percentile_rank_uses_midrank_for_current_value():
     assert _percentile_rank([10, 20, 30, 40], 30) == pytest.approx(62.5)
+
+
+def test_valuation_position_uses_504_days_and_keeps_252_day_comparison():
+    result = _build_valuation_position_fields(range(1, 601), 600)
+
+    assert result["valuation_history_days"] == 504
+    assert result["valuation_history_252_days"] == 252
+    assert result["valuation_position_is_full_window"] is True
+    assert result["valuation_position_label"] == "极度低估"
+    assert result["valuation_position_252_label"] == "极度低估"
+
+
+def test_valuation_position_does_not_rate_fewer_than_120_days():
+    result = _build_valuation_position_fields(range(1, 101), 100)
+
+    assert result["valuation_history_days"] == 100
+    assert result["valuation_position_pct"] is None
+    assert result["valuation_position_label"] == "样本不足"
+    assert result["valuation_position_252_pct"] is None
+    assert result["valuation_position_252_label"] == "样本不足"
 
 
 def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):
