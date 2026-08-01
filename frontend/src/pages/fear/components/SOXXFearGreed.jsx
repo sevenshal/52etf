@@ -336,6 +336,12 @@ const SOXXFearGreed = () => {
   const displayPrice = realtimePrice ?? latestPrice;
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
   const valuation = expandedDetail.valuation || expandedSummary?.valuation;
+  const valuation252Label = valuation?.valuation_position_252_label || valuation?.valuation_position_label;
+  const valuation252Pct = isFiniteNumber(valuation?.valuation_position_252_pct)
+    ? valuation.valuation_position_252_pct
+    : valuation?.valuation_position_pct;
+  const valuation252Days = Number(valuation?.valuation_history_252_days)
+    || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
 
@@ -511,13 +517,13 @@ const SOXXFearGreed = () => {
                     <Col xs={12} sm={8}>
                       <Statistic
                         title="近252日位置"
-                        value={valuation.valuation_position_252_label || '-'}
-                        valueStyle={{ color: valuationColor(valuation.valuation_position_252_label), fontSize: 20 }}
+                        value={valuation252Label || '-'}
+                        valueStyle={{ color: valuationColor(valuation252Label), fontSize: 20 }}
                       />
-                      <Tag color={valuationColor(valuation.valuation_position_252_label)}>
-                        有效{valuation.valuation_history_252_days || 0}日百分位{' '}
-                        {isFiniteNumber(valuation.valuation_position_252_pct)
-                          ? `${formatNumber(valuation.valuation_position_252_pct, 1)}%`
+                      <Tag color={valuationColor(valuation252Label)}>
+                        有效{valuation252Days}日百分位{' '}
+                        {isFiniteNumber(valuation252Pct)
+                          ? `${formatNumber(valuation252Pct, 1)}%`
                           : '样本不足'}
                       </Tag>
                     </Col>
