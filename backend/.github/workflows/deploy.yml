@@ -62,10 +62,6 @@ jobs:
           cp -a "$DEPS_DIR"/. build_dist/
           cp -r src build_dist/src
           touch build_dist/src/__init__.py
-          mkdir -p build_dist/lab
-          cp lab/a_stock_fear_etf_range_backtest.py build_dist/lab/
-          touch build_dist/lab/__init__.py
-
           .flow-build-venv/bin/shiv \
             --site-packages ./build_dist \
             -p '/usr/bin/env python3' \

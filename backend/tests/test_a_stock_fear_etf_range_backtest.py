@@ -1,6 +1,6 @@
 import math
 
-from lab.a_stock_fear_etf_range_backtest import abnormal_volume, target_mapping
+from src.core.services.a_stock_fear_etf_backtest_engine import abnormal_volume, target_mapping
 
 
 def test_abnormal_volume_uses_strict_mean_plus_one_std():

@@ -12,7 +12,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 
-from lab.a_stock_fear_etf_range_backtest import (
+from ...core.services.a_stock_fear_etf_backtest_engine import (
     DEFAULT_EXCLUDED,
     build_signal_rows,
     load_etf_bars,
