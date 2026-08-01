@@ -627,7 +627,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
           <span style={{ color: valuationColor(valuation.valuation_position_label) }}>
-            估值位置：{valuation.valuation_position_label || '-'}
+            {valuation.valuation_position_label || '-'}
           </span>
           <span>
             近{valuation.valuation_history_days || 0}日{' '}
