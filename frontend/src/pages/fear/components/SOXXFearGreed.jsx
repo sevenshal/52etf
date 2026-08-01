@@ -605,7 +605,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
           <span style={{ color: valuationColor(valuation.valuation_position_label) }}>
-            估值位置：{valuation.valuation_position_label || '-'}
+            {valuation.valuation_position_label || '-'}
           </span>
           <span>{formatNumber(valuation.valuation_position_pct, 1)}%分位</span>
           <span>覆盖 {(Number(valuation.coverage_ratio || 0) * 100).toFixed(0)}%</span>
