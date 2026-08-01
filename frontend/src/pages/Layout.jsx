@@ -28,6 +28,7 @@ const PROFILE_ROUTES = [
   '/all-weather-backtest',
   '/fear/backtest',
   '/soxl-fear-backtest',
+  '/a-stock-fear-etf-backtest',
   '/monthly-analysis',
   '/scheduled-tasks',
   '/email-settings',

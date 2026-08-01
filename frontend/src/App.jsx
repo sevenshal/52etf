@@ -28,6 +28,7 @@ import FactorLab from './pages/FactorLab';
 import LiveTrading from './pages/LiveTrading';
 import EmailSettings from './pages/EmailSettings';
 import WebAccountManager from './pages/WebAccountManager';
+import AStockFearEtfBacktest from './pages/AStockFearEtfBacktest';
 
 const LiveTabRedirect = ({ tab }) => {
   const location = useLocation();
@@ -84,6 +85,7 @@ function App() {
           <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
           <Route path="/email-settings" element={<AdminRoute><EmailSettings /></AdminRoute>} />
           <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
+          <Route path="/a-stock-fear-etf-backtest" element={<AStockFearEtfBacktest />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
         </Route>
       </Routes>

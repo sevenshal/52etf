@@ -1,0 +1,29 @@
+.a-fear-etf-page {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 24px 20px 96px;
+}
+
+.a-fear-etf-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.a-fear-etf-heading h2 { margin-bottom: 4px; }
+.a-fear-etf-card { margin-bottom: 18px; }
+
+.a-fear-etf-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 4px;
+}
+
+@media (max-width: 767px) {
+  .a-fear-etf-page { padding: 16px 12px 88px; }
+  .a-fear-etf-heading, .a-fear-etf-actions { flex-direction: column; align-items: stretch; }
+}

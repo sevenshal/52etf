@@ -141,6 +141,11 @@ const Profile = () => {
           arrow: true
         },
         {
+          title: 'A股恐贪ETF震荡回测',
+          onClick: () => navigate('/a-stock-fear-etf-backtest'),
+          arrow: true
+        },
+        {
           title: '历史每月分析',
           onClick: () => navigate('/monthly-analysis'),
           arrow: true
