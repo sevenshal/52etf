@@ -236,6 +236,10 @@ const XueqiuTopHoldingsResearch = () => {
       || normalizeSearchText(item.raw_stock_symbol).includes(keyword)
       || normalizeSearchText(item.stock_name).includes(keyword)
       || normalizeSearchText(item.segment_name).includes(keyword)
+      || (item.fear_indexes || []).some(index => (
+        normalizeSearchText(index.symbol).includes(keyword)
+        || normalizeSearchText(index.label).includes(keyword)
+      ))
     ));
   }, [latestItems, searchText]);
 
@@ -397,6 +401,24 @@ const XueqiuTopHoldingsResearch = () => {
       ellipsis: true,
     },
     {
+      title: '所属指数',
+      dataIndex: 'fear_indexes',
+      width: 220,
+      filters: (latestData?.index_options || []).map(index => ({
+        text: `${index.label} (${index.symbol})`,
+        value: index.symbol,
+      })),
+      filterSearch: true,
+      onFilter: (value, record) => (
+        (record.fear_indexes || []).some(index => index.symbol === value)
+      ),
+      render: indexes => (
+        indexes?.length
+          ? <Space size={[4, 4]} wrap>{indexes.map(index => <Tag key={index.symbol}>{index.label}</Tag>)}</Space>
+          : '-'
+      ),
+    },
+    {
       title: '综合权重',
       dataIndex: 'composite_weight_pct',
       width: 116,
@@ -456,7 +478,7 @@ const XueqiuTopHoldingsResearch = () => {
       ellipsis: true,
       render: value => value || '-',
     },
-  ], [hasRankCompareSnapshot, latestData?.cube_count]);
+  ], [hasRankCompareSnapshot, latestData?.cube_count, latestData?.index_options]);
 
   const historyColumns = useMemo(() => [
     { title: '日期', dataIndex: 'snapshot_date', width: 118 },
@@ -578,7 +600,7 @@ const XueqiuTopHoldingsResearch = () => {
               columns={latestColumns}
               dataSource={filteredItems}
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
-              scroll={{ x: 980, y: 560 }}
+              scroll={{ x: 1200, y: 560 }}
               rowClassName={record => (record.stock_symbol === selectedSymbol ? 'xueqiu-holdings-row-selected' : '')}
               onRow={record => ({
                 onClick: () => setSelectedSymbol(record.stock_symbol),
