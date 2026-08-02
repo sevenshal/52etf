@@ -89,18 +89,22 @@ class ISharesETFFetcher(ETFDataFetcher):
         )
         response.raise_for_status()
         payload = response.json()
+        holdings_component = payload.get("componentsByNameMap", {}).get("holdings", {})
         data_points = (
-            payload.get("componentsByNameMap", {})
-            .get("holdings", {})
-            .get("containersByNameMap", {})
+            holdings_component.get("containersByNameMap", {})
             .get("all", {})
             .get("dataPointsByNameMap", {})
         )
         if not data_points:
             raise ValueError("iShares product-data 响应缺少 holdings.all 数据")
 
+        # BlackRock returns the rows under ``holdings.all``, but the current
+        # holdings date is a component-level data point (``holdings.asOfDate``).
+        # Keep the row-level lookup for compatibility with older responses.
+        component_data_points = holdings_component.get("dataPointsByNameMap", {})
         update_date = self._parse_product_data_date(
-            self._data_point_value(data_points, "asOfDate")
+            self._data_point_value(component_data_points, "asOfDate")
+            or self._data_point_value(data_points, "asOfDate")
         )
         if not update_date:
             raise ValueError("无法找到更新日期")
