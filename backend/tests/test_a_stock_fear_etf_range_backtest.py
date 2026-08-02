@@ -18,3 +18,4 @@ def test_mapping_excludes_csi500():
     mapping = target_mapping({"000905.SH"})
     assert "000905.SH" not in mapping
     assert mapping["000985.SH"] == "510300.SH"
+    assert mapping["980022.SZ"] == "159530.SZ"
