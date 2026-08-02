@@ -46,6 +46,24 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE a_stock_index_weight (
+                    index_code VARCHAR NOT NULL,
+                    trade_date DATE NOT NULL,
+                    con_code VARCHAR NOT NULL,
+                    weight DOUBLE
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO a_stock_index_weight VALUES (?, ?, ?, ?)",
+                [
+                    ("000510.SH", "2026-06-20", "600001.SH", 1.2),
+                    ("000905.SH", "2026-06-20", "600001.SH", 0.8),
+                    ("000905.SH", "2026-06-20", "600002.SH", 0.7),
+                ],
+            )
             rows = [
                 ("2026-06-21", "2026-06-21 14:50:00", 1, "ZH1", "组合一", True, "SH.600001", "SH600001", "股票A", 60.0),
                 ("2026-06-21", "2026-06-21 14:50:00", 1, "ZH1", "组合一", True, "SH.600002", "SH600002", "股票B", 20.0),
@@ -233,6 +251,14 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(30.0, by_symbol["SH.600003"]["composite_weight_pct"])
         self.assertEqual(15.0, by_symbol["CASH"]["composite_weight_pct"])
         self.assertEqual(2, by_symbol["CASH"]["holding_cube_count"])
+        self.assertCountEqual(
+            ["000510.SH", "000905.SH"],
+            [row["symbol"] for row in by_symbol["SH.600001"]["fear_indexes"]],
+        )
+        self.assertCountEqual(
+            ["000510.SH", "000905.SH"],
+            [row["symbol"] for row in result["index_options"]],
+        )
 
     def test_latest_includes_rank_change_vs_five_trading_days_ago(self):
         with TemporaryDirectory() as tmpdir:

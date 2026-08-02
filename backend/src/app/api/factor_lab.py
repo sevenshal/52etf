@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session as ORMSession
 
 from ...core.database import Session as DBSession
 from ...core.database import (
+    AStockInnovation100Constituent,
     AStockInnovation100Level,
     ETFFearGreedCloneHistory,
     FactorBacktestSearchResult,
@@ -1273,6 +1274,14 @@ def _raw_xueqiu_snapshot_symbol(symbol: str) -> str:
     return normalized.replace(".", "")
 
 
+def _xueqiu_symbol_to_ts_code(symbol: Any) -> str:
+    normalized = _normalize_xueqiu_snapshot_symbol(symbol)
+    match = re.fullmatch(r"(SH|SZ|BJ)\.(\d{6})", normalized)
+    if match:
+        return f"{match.group(2)}.{match.group(1)}"
+    return normalize_a_stock_symbol(normalized)
+
+
 def _xueqiu_top_holdings_snapshot_cte(active_only: bool) -> str:
     active_filter_sql = "WHERE COALESCE(is_active, FALSE)" if active_only else ""
     table = XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE
@@ -1372,8 +1381,97 @@ def _empty_xueqiu_top_holdings_latest(active_only: bool, limit: int, reason: str
         "source_cube_count": 0,
         "active_cube_count": 0,
         "active_rebalance_days": None,
+        "index_options": [],
         "items": [],
     }
+
+
+def _attach_xueqiu_fear_index_memberships(
+    connection,
+    items: List[Dict[str, Any]],
+    snapshot_date: Any,
+) -> List[Dict[str, str]]:
+    """Attach current memberships for A-share indexes with fear/greed calculations."""
+    targets = [
+        {
+            "symbol": str(target["symbol"]).upper(),
+            "label": str(target.get("ticker") or target.get("label") or target["symbol"]),
+        }
+        for target in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    ]
+    memberships: Dict[str, List[Dict[str, str]]] = {}
+
+    if items and targets and _duckdb_table_exists(connection, "a_stock_index_weight"):
+        target_symbols = [target["symbol"] for target in targets]
+        placeholders = ", ".join("?" for _ in target_symbols)
+        rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            WITH latest_dates AS (
+                SELECT index_code, MAX(trade_date) AS trade_date
+                FROM a_stock_index_weight
+                WHERE index_code IN ({placeholders})
+                  AND trade_date <= ?
+                GROUP BY index_code
+            )
+            SELECT weights.index_code, weights.con_code
+            FROM a_stock_index_weight weights
+            JOIN latest_dates
+              ON latest_dates.index_code = weights.index_code
+             AND latest_dates.trade_date = weights.trade_date
+            """,
+            [*target_symbols, snapshot_date],
+        )
+        target_by_symbol = {target["symbol"]: target for target in targets}
+        for row in rows:
+            target = target_by_symbol.get(str(row.get("index_code") or "").upper())
+            constituent = _xueqiu_symbol_to_ts_code(row.get("con_code"))
+            if target and constituent:
+                memberships.setdefault(constituent, []).append(target)
+
+    # A创100 is a locally maintained custom index rather than a Tushare index-weight series.
+    try:
+        snapshot_day = (
+            snapshot_date
+            if isinstance(snapshot_date, date)
+            else date.fromisoformat(str(snapshot_date))
+        )
+        with DBSession() as db:
+            latest_date = db.query(
+                AStockInnovation100Constituent.rebalance_date
+            ).filter(
+                AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                AStockInnovation100Constituent.rebalance_date <= snapshot_day,
+            ).order_by(
+                AStockInnovation100Constituent.rebalance_date.desc()
+            ).first()
+            if latest_date:
+                custom_target = {
+                    "symbol": A_STOCK_INNO100_SYMBOL,
+                    "label": "A创100",
+                }
+                custom_rows = db.query(AStockInnovation100Constituent.ts_code).filter(
+                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
+                    AStockInnovation100Constituent.rebalance_date == latest_date[0],
+                ).all()
+                for (ts_code,) in custom_rows:
+                    constituent = _xueqiu_symbol_to_ts_code(ts_code)
+                    if constituent:
+                        memberships.setdefault(constituent, []).append(custom_target)
+    except Exception as exc:
+        logger.warning("Unable to load A创100 membership for 雪球持仓: %s", exc)
+
+    used_options: Dict[str, Dict[str, str]] = {}
+    for item in items:
+        stock_symbol = _xueqiu_symbol_to_ts_code(item.get("stock_symbol"))
+        index_memberships = sorted(
+            memberships.get(stock_symbol, []),
+            key=lambda value: (value["label"], value["symbol"]),
+        )
+        item["fear_indexes"] = index_memberships
+        for membership in index_memberships:
+            used_options[membership["symbol"]] = membership
+    return sorted(used_options.values(), key=lambda value: (value["label"], value["symbol"]))
 
 
 def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) -> Dict[str, Any]:
@@ -1543,6 +1641,11 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             """,
             [normalized_limit],
         )
+        index_options = _attach_xueqiu_fear_index_memberships(
+            connection,
+            item_rows,
+            snapshot_date,
+        )
         return {
             "available": True,
             "active_only": active_only,
@@ -1556,6 +1659,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             "source_cube_count": metadata.get("source_cube_count") or 0,
             "active_cube_count": metadata.get("active_cube_count") or 0,
             "active_rebalance_days": metadata.get("active_rebalance_days"),
+            "index_options": index_options,
             "items": item_rows,
         }
     finally:
