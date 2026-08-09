@@ -236,7 +236,7 @@ const SOXXFearGreed = () => {
       if (currentMa5 > previousMa5 && currentScore < 25) {
         return [{
           name: '见底信号',
-          value: '低',
+          value: '底',
           coord: [item.date, currentMa5],
           symbolOffset: [0, 18],
           itemStyle: { color: '#389e0d' },
