@@ -99,7 +99,10 @@ def run_scheduled_task_now(
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
         if (
-            task_key == "a_stock_etf_fear_greed_backfill"
+            task_key in {
+                "a_stock_etf_fear_greed_backfill",
+                "a_stock_index_valuation_refresh",
+            }
             and payload
             and payload.symbols
         ):

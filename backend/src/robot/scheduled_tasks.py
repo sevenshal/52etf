@@ -619,12 +619,27 @@ def _run_a_stock_etf_fear_greed_backfill(
     )
 
 
-def _run_a_stock_index_valuation_refresh():
+def _run_a_stock_index_valuation_refresh(symbols: Optional[List[str]] = None):
     from ..core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGETS
     from ..core.services.a_stock_index_valuation import refresh_a_stock_index_valuations
 
+    requested_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or [])
+        if str(symbol or "").strip()
+    }
+    target_symbols = [
+        target["symbol"]
+        for target in A_STOCK_FEAR_GREED_TARGETS
+        if not requested_symbols or target["symbol"].upper() in requested_symbols
+    ]
+    resolved_symbols = {symbol.upper() for symbol in target_symbols}
+    unknown_symbols = sorted(requested_symbols - resolved_symbols)
+    if unknown_symbols:
+        raise ValueError(f"未知A股估值指数: {','.join(unknown_symbols)}")
+
     result = refresh_a_stock_index_valuations(
-        target["symbol"] for target in A_STOCK_FEAR_GREED_TARGETS
+        target_symbols
     )
     errors = result.get("errors") or []
     message = (
