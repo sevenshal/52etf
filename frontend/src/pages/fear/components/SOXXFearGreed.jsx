@@ -606,6 +606,20 @@ const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle
 const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
   const count = (group.options || []).length
     + (group.children || []).reduce((sum, child) => sum + (child.options || []).length, 0);
+  const options = [
+    ...(group.options || []).map(item => ({
+      ...item,
+      groupLabel: '一级指数',
+    })),
+    ...(group.children || []).flatMap(child => (
+      (child.options || []).map((item, index) => ({
+        ...item,
+        groupLabel: child.title,
+        groupCode: child.code,
+        groupStart: index === 0,
+      }))
+    )),
+  ];
   return (
     <details className="soxx-fear-industry-group" open>
       <summary>
@@ -614,33 +628,12 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
         <span className="soxx-fear-industry-count">{count} 个指数</span>
       </summary>
       <div className="soxx-fear-industry-content">
-        {(group.options || []).length > 0 && (
-          <div className="soxx-fear-subgroup is-primary">
-            <div className="soxx-fear-subgroup-title">
-              <span>一级指数</span>
-            </div>
-            <CardGrid
-              options={group.options}
-              summaryBySymbol={summaryBySymbol}
-              expandedSymbol={expandedSymbol}
-              onToggle={onToggle}
-            />
-          </div>
-        )}
-        {(group.children || []).map(child => (
-          <div className="soxx-fear-subgroup" key={`${group.key}-${child.code || child.title}`}>
-            <div className="soxx-fear-subgroup-title">
-              <span>{child.title}</span>
-              {child.code && <small>{child.code}</small>}
-            </div>
-            <CardGrid
-              options={child.options || []}
-              summaryBySymbol={summaryBySymbol}
-              expandedSymbol={expandedSymbol}
-              onToggle={onToggle}
-            />
-          </div>
-        ))}
+        <CardGrid
+          options={options}
+          summaryBySymbol={summaryBySymbol}
+          expandedSymbol={expandedSymbol}
+          onToggle={onToggle}
+        />
       </div>
     </details>
   );
@@ -659,14 +652,19 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   return (
     <button
       type="button"
-      className={`soxx-fear-summary-card${active ? ' is-active' : ''}`}
+      className={`soxx-fear-summary-card${active ? ' is-active' : ''}${option.groupStart ? ' is-subgroup-start' : ''}`}
       onClick={onToggle}
     >
       <div className="soxx-fear-summary-top">
         <div>
           <div className="soxx-fear-summary-name">{option.ticker}</div>
           <div className="soxx-fear-summary-meta">
-            {option.leafLabel || option.label} · {option.symbol}
+            {option.groupLabel && (
+              <span className="soxx-fear-group-marker" title={option.groupCode || undefined}>
+                {option.groupLabel}
+              </span>
+            )}
+            <span>{option.groupLabel ? option.symbol : `${option.leafLabel || option.label} · ${option.symbol}`}</span>
           </div>
         </div>
         {latest ? (

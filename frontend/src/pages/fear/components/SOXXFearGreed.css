@@ -116,34 +116,7 @@
 }
 
 .soxx-fear-industry-content {
-  display: grid;
-  gap: 10px;
   padding: 2px 10px 10px;
-}
-
-.soxx-fear-subgroup {
-  display: grid;
-  gap: 7px;
-}
-
-.soxx-fear-subgroup-title {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  color: #595959;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.soxx-fear-subgroup-title small {
-  color: #a0a0a0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 400;
-}
-
-.soxx-fear-subgroup.is-primary .soxx-fear-subgroup-title span {
-  color: #1677ff;
 }
 
 .soxx-fear-industry-group .soxx-fear-summary-grid {
@@ -176,6 +149,11 @@
   box-shadow: 0 8px 24px rgba(22, 119, 255, 0.08);
 }
 
+.soxx-fear-summary-card.is-subgroup-start {
+  border-left-color: #69b1ff;
+  border-left-width: 3px;
+}
+
 .soxx-fear-summary-card:active {
   transform: translateY(1px);
 }
@@ -196,10 +174,26 @@
 }
 
 .soxx-fear-summary-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin-top: 2px;
   color: #8c8c8c;
   font-size: 11px;
   line-height: 1.35;
+}
+
+.soxx-fear-group-marker {
+  flex: 0 0 auto;
+  max-width: 64px;
+  padding: 1px 4px;
+  overflow: hidden;
+  color: #1677ff;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #e6f4ff;
+  border-radius: 3px;
 }
 
 .soxx-fear-summary-score {
