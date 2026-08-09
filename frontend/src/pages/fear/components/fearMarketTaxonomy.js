@@ -23,8 +23,8 @@ export const HK_ETF_OPTIONS = [
 
 export const CN_GENERAL_GROUPS = [
   {
-    key: 'broad',
-    title: '宽基指数',
+    key: 'broad-and-style',
+    title: '宽基及风格指数',
     options: [
       cnOption('000985.SH', '中证全指', '宽基'),
       cnOption('899050.BJ', '北证50', '宽基'),
@@ -35,12 +35,8 @@ export const CN_GENERAL_GROUPS = [
       cnOption('000698.SH', '科创100', '宽基'),
       cnOption('000699.SH', '科创200', '宽基'),
       cnOption('399006.SZ', '创业板指', '宽基'),
+      cnOption('000015.SH', '上证红利', '风格'),
     ],
-  },
-  {
-    key: 'style',
-    title: '风格指数',
-    options: [cnOption('000015.SH', '上证红利', '风格')],
   },
 ];
 
