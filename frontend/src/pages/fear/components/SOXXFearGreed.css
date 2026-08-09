@@ -140,6 +140,10 @@
   grid-template-columns: minmax(0, 220px);
 }
 
+.soxx-fear-industry-group.is-compact.is-pair .soxx-fear-summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 220px));
+}
+
 .soxx-fear-industry-loading {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -377,7 +381,8 @@
 
   .soxx-fear-summary-grid,
   .soxx-fear-industry-group .soxx-fear-summary-grid,
-  .soxx-fear-industry-group.is-compact .soxx-fear-summary-grid {
+  .soxx-fear-industry-group.is-compact .soxx-fear-summary-grid,
+  .soxx-fear-industry-group.is-compact.is-pair .soxx-fear-summary-grid {
     grid-template-columns: 1fr;
   }
 

@@ -620,7 +620,13 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
       }))
     )),
   ];
-  const sizeClass = count >= 6 ? ' is-wide' : count <= 2 ? ' is-compact' : '';
+  const sizeClass = count >= 6
+    ? ' is-wide'
+    : count === 2
+      ? ' is-compact is-pair'
+      : count === 1
+        ? ' is-compact'
+        : '';
   return (
     <details className={`soxx-fear-industry-group${sizeClass}`} open>
       <summary>
