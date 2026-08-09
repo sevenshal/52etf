@@ -14,6 +14,14 @@ import './SOXXFearGreed.css';
 
 const { Text } = Typography;
 
+const industryOptionCount = group => (
+  (group.options || []).length
+  + (group.children || []).reduce((sum, child) => sum + (child.options || []).length, 0)
+);
+
+const SORTED_CN_INDUSTRY_GROUPS = [...CN_INDUSTRY_GROUPS]
+  .sort((left, right) => industryOptionCount(right) - industryOptionCount(left));
+
 const DEFAULT_DETAIL_STATE = {
   data: [],
   latest: null,
@@ -347,7 +355,7 @@ const SOXXFearGreed = () => {
           </div>
           <Divider className="soxx-fear-market-divider">A股</Divider>
           <div className="soxx-fear-industry-loading">
-            {CN_INDUSTRY_GROUPS.slice(0, 4).map(group => (
+            {SORTED_CN_INDUSTRY_GROUPS.slice(0, 4).map(group => (
               <div className="soxx-fear-summary-card" key={group.key}>
                 <Skeleton active paragraph={{ rows: 3 }} title={false} />
               </div>
@@ -401,7 +409,7 @@ const SOXXFearGreed = () => {
             </div>
 
             <div className="soxx-fear-industry-groups">
-              {CN_INDUSTRY_GROUPS.map(group => (
+              {SORTED_CN_INDUSTRY_GROUPS.map(group => (
                 <IndustryGroup
                   key={group.key}
                   group={group}
@@ -604,8 +612,7 @@ const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle
 );
 
 const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
-  const count = (group.options || []).length
-    + (group.children || []).reduce((sum, child) => sum + (child.options || []).length, 0);
+  const count = industryOptionCount(group);
   const options = [
     ...(group.options || []).map(item => ({
       ...item,
