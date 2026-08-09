@@ -198,7 +198,7 @@ ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {"symbol": "000989.SH", "ticker": "全指可选消费", "label": "可选消费", "index_name": "中证全指可选消费指数", "option_underlyings": [], "proxy_etf": "159936.SZ"},
     {"symbol": "000991.SH", "ticker": "全指医药", "label": "医药卫生", "index_name": "中证全指医药卫生指数", "option_underlyings": [], "proxy_etf": "159938.SZ"},
     {"symbol": "000993.SH", "ticker": "全指信息", "label": "信息技术", "index_name": "中证全指信息技术指数", "option_underlyings": [], "proxy_etf": "159939.SZ"},
-    {"symbol": "000995.SH", "ticker": "全指公用", "label": "公用事业", "index_name": "中证全指公用事业指数", "option_underlyings": [], "proxy_etf": "159301.SZ"},
+    {"symbol": "000995.CSI", "ticker": "全指公用", "label": "公用事业", "index_name": "中证全指公用事业指数", "option_underlyings": [], "proxy_etf": "159301.SZ"},
     {"symbol": "931775.CSI", "ticker": "房地产", "label": "房地产", "index_name": "中证全指房地产指数", "option_underlyings": [], "proxy_etf": "512200.SH"},
     # 二级行业
     {"symbol": "H30199.CSI", "ticker": "电力公用", "label": "电力", "index_name": "中证全指电力公用事业指数", "option_underlyings": [], "proxy_etf": "560580.SH"},
