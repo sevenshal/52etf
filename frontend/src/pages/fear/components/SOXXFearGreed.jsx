@@ -3,44 +3,16 @@ import { Alert, Button, Card, Col, Divider, Empty, Radio, Row, Skeleton, Space, 
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
 import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
+import {
+  CN_GENERAL_GROUPS,
+  CN_INDUSTRY_GROUPS,
+  ETF_OPTIONS,
+  HK_ETF_OPTIONS,
+  US_ETF_OPTIONS,
+} from './fearMarketTaxonomy';
 import './SOXXFearGreed.css';
 
 const { Text } = Typography;
-
-const ETF_OPTIONS = [
-  { symbol: 'SOXX.US', ticker: 'SOXX', label: '半导体', market: 'US' },
-  { symbol: 'SPY.US', ticker: 'SPY', label: '标普500', market: 'US' },
-  { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100', market: 'US' },
-  { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯', market: 'US' },
-  { symbol: 'HSI.HK', ticker: '恒生指数', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: 'HSCEI.HK', ticker: '国企指数', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: 'HSTECH.HK', ticker: '恒生科技', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000985.SH', ticker: '中证全指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '899050.BJ', ticker: '北证50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: 'INNO100.CN', ticker: 'A创100', label: '创新100', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000510.SH', ticker: '中证A500', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000905.SH', ticker: '中证500', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000688.SH', ticker: '科创50', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000698.SH', ticker: '科创100', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000699.SH', ticker: '科创200', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399006.SZ', ticker: '创业板指', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399975.SZ', ticker: '证券公司', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: 'H30184.CSI', ticker: '半导体', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '980022.SZ', ticker: '机器人产业', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399997.SZ', ticker: '中证白酒', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399989.SZ', ticker: '中证医疗', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000819.SH', ticker: '有色金属', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399967.SZ', ticker: '中证军工', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '930997.CSI', ticker: '新能源车', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000932.SH', ticker: '主要消费', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399986.SZ', ticker: '中证银行', label: '板块', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '399998.SZ', ticker: '中证煤炭', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-  { symbol: '000015.SH', ticker: '上证红利', label: '指数', realtime: false, priceLabel: '点位', pricePrecision: 2 },
-];
-
-const US_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market === 'US');
-const HK_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market === 'HK');
-const CN_ETF_OPTIONS = ETF_OPTIONS.filter(item => item.market !== 'US' && item.market !== 'HK');
 
 const DEFAULT_DETAIL_STATE = {
   data: [],
@@ -89,7 +61,7 @@ const formatGap = value => (
 
 const formatRange = (low, high) => (
   isFiniteNumber(low) && isFiniteNumber(high)
-    ? `${Number(low).toFixed(0)}–${Number(high).toFixed(0)}`
+    ? `${Number(low).toFixed(0)}-${Number(high).toFixed(0)}`
     : '-'
 );
 
@@ -373,10 +345,10 @@ const SOXXFearGreed = () => {
               </div>
             ))}
           </div>
-          <Divider className="soxx-fear-market-divider"></Divider>
-          <div className="soxx-fear-summary-grid">
-            {CN_ETF_OPTIONS.slice(0, 4).map(item => (
-              <div className="soxx-fear-summary-card" key={item.symbol}>
+          <Divider className="soxx-fear-market-divider">A股</Divider>
+          <div className="soxx-fear-industry-loading">
+            {CN_INDUSTRY_GROUPS.slice(0, 4).map(group => (
+              <div className="soxx-fear-summary-card" key={group.key}>
                 <Skeleton active paragraph={{ rows: 3 }} title={false} />
               </div>
             ))}
@@ -408,16 +380,37 @@ const SOXXFearGreed = () => {
             ))}
           </div>
           <Divider className="soxx-fear-market-divider">A股</Divider>
-          <div className="soxx-fear-summary-grid">
-            {CN_ETF_OPTIONS.map(item => (
-              <SummaryCard
-                key={item.symbol}
-                option={item}
-                summary={summaryBySymbol[item.symbol]}
-                active={expandedSymbol === item.symbol}
-                onToggle={() => toggleExpanded(item.symbol)}
+          <div className="soxx-fear-cn-groups">
+            {CN_GENERAL_GROUPS.map(group => (
+              <MarketGroup
+                key={group.key}
+                title={group.title}
+                options={group.options}
+                summaryBySymbol={summaryBySymbol}
+                expandedSymbol={expandedSymbol}
+                onToggle={toggleExpanded}
               />
             ))}
+
+            <div className="soxx-fear-industry-heading">
+              <div>
+                <Text strong>行业分类</Text>
+                <Text type="secondary">按通达信一二三级结构归组，卡片使用公开指数计算</Text>
+              </div>
+              <span>{CN_INDUSTRY_GROUPS.length} 个一级行业</span>
+            </div>
+
+            <div className="soxx-fear-industry-groups">
+              {CN_INDUSTRY_GROUPS.map(group => (
+                <IndustryGroup
+                  key={group.key}
+                  group={group}
+                  summaryBySymbol={summaryBySymbol}
+                  expandedSymbol={expandedSymbol}
+                  onToggle={toggleExpanded}
+                />
+              ))}
+            </div>
           </div>
         </>
       )}
@@ -581,6 +574,78 @@ const SOXXFearGreed = () => {
   );
 };
 
+const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle }) => (
+  <div className="soxx-fear-summary-grid">
+    {options.map(item => (
+      <SummaryCard
+        key={item.symbol}
+        option={item}
+        summary={summaryBySymbol[item.symbol]}
+        active={expandedSymbol === item.symbol}
+        onToggle={() => onToggle(item.symbol)}
+      />
+    ))}
+  </div>
+);
+
+const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle }) => (
+  <section className="soxx-fear-market-group">
+    <div className="soxx-fear-group-title">
+      <Text strong>{title}</Text>
+      <span>{options.length}</span>
+    </div>
+    <CardGrid
+      options={options}
+      summaryBySymbol={summaryBySymbol}
+      expandedSymbol={expandedSymbol}
+      onToggle={onToggle}
+    />
+  </section>
+);
+
+const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
+  const count = (group.options || []).length
+    + (group.children || []).reduce((sum, child) => sum + (child.options || []).length, 0);
+  return (
+    <details className="soxx-fear-industry-group" open>
+      <summary>
+        <span className="soxx-fear-industry-name">{group.title}</span>
+        <span className="soxx-fear-industry-code">{group.taxonomyCode}</span>
+        <span className="soxx-fear-industry-count">{count} 个指数</span>
+      </summary>
+      <div className="soxx-fear-industry-content">
+        {(group.options || []).length > 0 && (
+          <div className="soxx-fear-subgroup is-primary">
+            <div className="soxx-fear-subgroup-title">
+              <span>一级指数</span>
+            </div>
+            <CardGrid
+              options={group.options}
+              summaryBySymbol={summaryBySymbol}
+              expandedSymbol={expandedSymbol}
+              onToggle={onToggle}
+            />
+          </div>
+        )}
+        {(group.children || []).map(child => (
+          <div className="soxx-fear-subgroup" key={`${group.key}-${child.code || child.title}`}>
+            <div className="soxx-fear-subgroup-title">
+              <span>{child.title}</span>
+              {child.code && <small>{child.code}</small>}
+            </div>
+            <CardGrid
+              options={child.options || []}
+              summaryBySymbol={summaryBySymbol}
+              expandedSymbol={expandedSymbol}
+              onToggle={onToggle}
+            />
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+};
+
 const SummaryCard = ({ option, summary, active, onToggle }) => {
   const latest = summary?.latest;
   const score = latest?.score;
@@ -600,7 +665,9 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       <div className="soxx-fear-summary-top">
         <div>
           <div className="soxx-fear-summary-name">{option.ticker}</div>
-          <div className="soxx-fear-summary-meta">{option.label} · {option.symbol}</div>
+          <div className="soxx-fear-summary-meta">
+            {option.leafLabel || option.label} · {option.symbol}
+          </div>
         </div>
         {latest ? (
           <Tag color={scoreColor}>{fearStatus(score)}</Tag>
