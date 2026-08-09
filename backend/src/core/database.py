@@ -41,6 +41,17 @@ class WebAccount(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
+
+class WebAccountDailyUsage(Base):
+    """Web 账户按自然日聚合的 API 请求使用量。"""
+    __tablename__ = "web_account_daily_usage"
+
+    account_id = Column(String(128), primary_key=True)
+    usage_date = Column(Date, primary_key=True)
+    request_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
 # 股票-标签关联表
 stock_tags = Table(
     'stock_tags',

@@ -1,13 +1,18 @@
-from fastapi import APIRouter, HTTPException, Header, Depends
+from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 import os
+import logging
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from ...core.utils import read_json_file
-from sqlalchemy import inspect, text
-from ...core.database import SessionLocal, WebAccount, engine
+from sqlalchemy import func, inspect, text
+from ...core.database import SessionLocal, WebAccount, WebAccountDailyUsage, engine
 
 router = APIRouter(prefix="/api/profile")
 ADMIN_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+logger = logging.getLogger(__name__)
 
 class AccountValidation(BaseModel):
     valid: bool
@@ -31,8 +36,68 @@ class AccountItem(BaseModel):
     note: str
     enabled: bool
     is_admin: bool
+    today_request_count: int = 0
+    last_30_days_request_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class AccountUsageItem(BaseModel):
+    account_id: str
+    usage_date: str
+    request_count: int
+
+
+def _shanghai_today() -> date:
+    return datetime.now(SHANGHAI_TIMEZONE).date()
+
+
+def record_account_request(account_id: Optional[str]) -> None:
+    """Persist one valid account's API request in its daily aggregate.
+
+    This deliberately uses one short SQLite transaction and is safe to call from
+    middleware.  Aggregating in place keeps historical usage without retaining
+    an unbounded row for every individual request.
+    """
+    if not account_id or len(account_id) > 128:
+        return
+
+    usage_date = _shanghai_today()
+    recorded_at = datetime.now(SHANGHAI_TIMEZONE).replace(tzinfo=None)
+    db = SessionLocal()
+    try:
+        # Count only accounts that exist and remain enabled.  The UPSERT keeps
+        # the write atomic even when the same account makes concurrent requests.
+        db.execute(
+            text(
+                """
+                INSERT INTO web_account_daily_usage (
+                    account_id, usage_date, request_count, created_at, updated_at
+                )
+                SELECT :account_id, :usage_date, 1, :recorded_at, :recorded_at
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM web_accounts
+                    WHERE account_id = :account_id AND enabled = 1
+                )
+                ON CONFLICT(account_id, usage_date) DO UPDATE SET
+                    request_count = web_account_daily_usage.request_count + 1,
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "account_id": account_id,
+                "usage_date": usage_date,
+                "recorded_at": recorded_at,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Usage statistics must never make a normal API request fail.
+        logger.exception("Failed to record daily API usage for an account")
+    finally:
+        db.close()
 
 def get_accounts_file_path():
     """获取账户配置文件路径"""
@@ -111,12 +176,19 @@ async def validate_account(account_id: str):
         return AccountValidation(valid=False, message="无效或已停用的账户ID")
 
 
-def _account_item(account: WebAccount) -> AccountItem:
+def _account_item(
+    account: WebAccount,
+    *,
+    today_request_count: int = 0,
+    last_30_days_request_count: int = 0,
+) -> AccountItem:
     return AccountItem(
         account_id=account.account_id,
         note=account.note or "",
         enabled=account.enabled,
         is_admin=account.account_id == ADMIN_ACCOUNT_ID,
+        today_request_count=today_request_count,
+        last_30_days_request_count=last_30_days_request_count,
         created_at=account.created_at.isoformat() if account.created_at else None,
         updated_at=account.updated_at.isoformat() if account.updated_at else None,
     )
@@ -127,7 +199,72 @@ def list_accounts(_: str = Depends(valid_admin_account)):
     _seed_accounts_if_needed()
     db = SessionLocal()
     try:
-        return [_account_item(item) for item in db.query(WebAccount).order_by(WebAccount.created_at).all()]
+        today = _shanghai_today()
+        period_start = today - timedelta(days=29)
+        today_counts = dict(
+            db.query(
+                WebAccountDailyUsage.account_id,
+                WebAccountDailyUsage.request_count,
+            )
+            .filter(WebAccountDailyUsage.usage_date == today)
+            .all()
+        )
+        last_30_days_counts = dict(
+            db.query(
+                WebAccountDailyUsage.account_id,
+                func.sum(WebAccountDailyUsage.request_count),
+            )
+            .filter(WebAccountDailyUsage.usage_date >= period_start)
+            .filter(WebAccountDailyUsage.usage_date <= today)
+            .group_by(WebAccountDailyUsage.account_id)
+            .all()
+        )
+        return [
+            _account_item(
+                item,
+                today_request_count=int(today_counts.get(item.account_id, 0)),
+                last_30_days_request_count=int(last_30_days_counts.get(item.account_id, 0)),
+            )
+            for item in db.query(WebAccount).order_by(WebAccount.created_at).all()
+        ]
+    finally:
+        db.close()
+
+
+@router.get("/account-usage", response_model=List[AccountUsageItem])
+def list_account_usage(
+    account_id: Optional[str] = Query(None, max_length=128),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    _: str = Depends(valid_admin_account),
+):
+    """Return persisted per-day request counts for the selected date range."""
+    today = _shanghai_today()
+    start_date = start_date or today - timedelta(days=29)
+    end_date = end_date or today
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(WebAccountDailyUsage)
+            .filter(WebAccountDailyUsage.usage_date >= start_date)
+            .filter(WebAccountDailyUsage.usage_date <= end_date)
+        )
+        if account_id:
+            query = query.filter(WebAccountDailyUsage.account_id == account_id)
+        return [
+            AccountUsageItem(
+                account_id=item.account_id,
+                usage_date=item.usage_date.isoformat(),
+                request_count=item.request_count,
+            )
+            for item in query.order_by(
+                WebAccountDailyUsage.usage_date.desc(),
+                WebAccountDailyUsage.account_id,
+            ).all()
+        ]
     finally:
         db.close()
 

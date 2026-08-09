@@ -29,6 +29,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+
+@app.middleware("http")
+async def track_account_request_usage(request: Request, call_next):
+    """Record a completed API request with a short, best-effort write."""
+    try:
+        return await call_next(request)
+    finally:
+        if request.method != "OPTIONS" and request.url.path.startswith("/api/"):
+            account.record_account_request(request.headers.get("X-Account-ID"))
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     error_msg = f"API Interface Error:\nURL: {request.url}\nMethod: {request.method}\nException: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
