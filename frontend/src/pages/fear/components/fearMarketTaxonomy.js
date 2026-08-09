@@ -139,7 +139,7 @@ export const CN_INDUSTRY_GROUPS = [
     key: 'utilities',
     title: '公用事业',
     taxonomyCode: '880451',
-    options: [cnOption('000995.SH', '全指公用', '一级行业')],
+    options: [cnOption('000995.CSI', '全指公用', '一级行业')],
     children: [],
   },
   {
