@@ -216,9 +216,43 @@ const SOXXFearGreed = () => {
 
   const chartOption = useMemo(() => {
     const ticker = expandedETF?.ticker || '标的';
+    const fullData = expandedDetail?.data || [];
+    const fullScores = fullData.map(item => item.score ?? null);
+    const fullScoreMa5 = rollingAverage(fullScores, 5);
+    const fullIndexByDate = new Map(fullData.map((item, index) => [item.date, index]));
     const dates = filteredData.map(item => item.date);
     const scores = filteredData.map(item => item.score ?? null);
-    const scoreMa5 = rollingAverage(scores, 5);
+    const scoreMa5 = filteredData.map((item) => {
+      const index = fullIndexByDate.get(item.date);
+      return index === undefined ? null : fullScoreMa5[index];
+    });
+    const reversalSignals = filteredData.flatMap((item) => {
+      const index = fullIndexByDate.get(item.date);
+      if (index === undefined || index < 1) return [];
+      const currentMa5 = fullScoreMa5[index];
+      const previousMa5 = fullScoreMa5[index - 1];
+      const currentScore = fullScores[index];
+      if (![currentMa5, previousMa5, currentScore].every(isFiniteNumber)) return [];
+      if (currentMa5 > previousMa5 && currentScore < 25) {
+        return [{
+          name: '见底信号',
+          value: '低',
+          coord: [item.date, currentMa5],
+          symbolOffset: [0, 18],
+          itemStyle: { color: '#389e0d' },
+        }];
+      }
+      if (currentMa5 < previousMa5 && currentScore > 75) {
+        return [{
+          name: '见顶信号',
+          value: '顶',
+          coord: [item.date, currentMa5],
+          symbolOffset: [0, -18],
+          itemStyle: { color: '#cf1322' },
+        }];
+      }
+      return [];
+    });
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
     const priceValues = prices.filter(value => value !== null && value !== undefined);
@@ -297,6 +331,21 @@ const SOXXFearGreed = () => {
           data: scoreMa5,
           lineStyle: { width: 1.5, type: 'dashed', color: '#1677ff' },
           itemStyle: { color: '#1677ff' },
+          markPoint: {
+            symbol: 'roundRect',
+            symbolSize: [22, 20],
+            label: {
+              show: true,
+              color: '#ffffff',
+              fontSize: 12,
+              fontWeight: 700,
+              formatter: '{c}',
+            },
+            tooltip: {
+              formatter: params => `${params.data.coord[0]}<br/>${params.data.name}`,
+            },
+            data: reversalSignals,
+          },
         },
         {
           name: `${ticker}价格`,
@@ -320,7 +369,7 @@ const SOXXFearGreed = () => {
         },
       ],
     };
-  }, [expandedETF, filteredData]);
+  }, [expandedDetail, expandedETF, filteredData]);
 
   const toggleExpanded = (symbol) => {
     setExpandedSymbol(current => (current === symbol ? null : symbol));
