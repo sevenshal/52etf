@@ -73,6 +73,13 @@ const formatRange = (low, high) => (
     : '-'
 );
 
+const rollingAverage = (values, windowSize) => values.map((_, index) => {
+  if (index < windowSize - 1) return null;
+  const window = values.slice(index - windowSize + 1, index + 1);
+  if (!window.every(isFiniteNumber)) return null;
+  return Number((window.reduce((sum, value) => sum + Number(value), 0) / windowSize).toFixed(4));
+});
+
 const formatDateTime = (value) => {
   if (!value) return '-';
   return new Date(value).toLocaleString();
@@ -211,6 +218,7 @@ const SOXXFearGreed = () => {
     const ticker = expandedETF?.ticker || '标的';
     const dates = filteredData.map(item => item.date);
     const scores = filteredData.map(item => item.score ?? null);
+    const scoreMa5 = rollingAverage(scores, 5);
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
     const priceValues = prices.filter(value => value !== null && value !== undefined);
@@ -219,7 +227,7 @@ const SOXXFearGreed = () => {
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: [`${ticker}贪恐`, `${ticker}价格`, '成交量'], top: 0 },
+      legend: { data: [`${ticker}贪恐`, '贪恐5日均线', `${ticker}价格`, '成交量'], top: 0 },
       grid: [
         { left: 56, right: 64, top: 48, height: '57%' },
         { left: 56, right: 64, top: '72%', bottom: 58 },
@@ -280,6 +288,15 @@ const SOXXFearGreed = () => {
           data: scores,
           lineStyle: { width: 2, color: '#13c2c2' },
           itemStyle: { color: '#13c2c2' },
+        },
+        {
+          name: '贪恐5日均线',
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          data: scoreMa5,
+          lineStyle: { width: 1.5, type: 'dashed', color: '#1677ff' },
+          itemStyle: { color: '#1677ff' },
         },
         {
           name: `${ticker}价格`,
