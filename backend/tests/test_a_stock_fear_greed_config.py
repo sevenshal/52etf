@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.robot.a_stock_base_data_config import (
+    ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS,
     A_STOCK_ETF_DAILY_NAMES,
     A_STOCK_ETF_DAILY_SYMBOLS,
     A_STOCK_FACTOR_INDEX_POOLS,
@@ -158,4 +159,22 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("399986.SZ", "512800.SH"),
         ("399998.SZ", "515220.SH"),
         ("000015.SH", "510880.SH"),
+    ] + [
+        (str(item["symbol"]).upper(), str(item["proxy_etf"]).upper())
+        for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS
     ]
+
+
+def test_additional_industry_targets_are_complete_and_unique():
+    symbols = [str(item["symbol"]).upper() for item in A_STOCK_INDEX_FEAR_GREED_TARGETS]
+    additional_symbols = {
+        str(item["symbol"]).upper()
+        for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+
+    assert len(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS) == 31
+    assert len(symbols) == len(set(symbols))
+    assert additional_symbols <= set(symbols)
+    for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS:
+        assert item["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
+        assert A_STOCK_ETF_DAILY_NAMES[item["proxy_etf"]]
