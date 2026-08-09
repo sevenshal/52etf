@@ -620,8 +620,9 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
       }))
     )),
   ];
+  const sizeClass = count >= 6 ? ' is-wide' : count <= 2 ? ' is-compact' : '';
   return (
-    <details className="soxx-fear-industry-group" open>
+    <details className={`soxx-fear-industry-group${sizeClass}`} open>
       <summary>
         <span className="soxx-fear-industry-name">{group.title}</span>
         <span className="soxx-fear-industry-code">{group.taxonomyCode}</span>

@@ -48,9 +48,13 @@
 
 .soxx-fear-industry-groups {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: 8px;
+}
+
+.soxx-fear-industry-group.is-wide {
+  grid-column: 1 / -1;
 }
 
 .soxx-fear-industry-group {
@@ -120,7 +124,15 @@
 }
 
 .soxx-fear-industry-group .soxx-fear-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.soxx-fear-industry-group.is-wide .soxx-fear-summary-grid {
   grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.soxx-fear-industry-group.is-compact .soxx-fear-summary-grid {
+  grid-template-columns: minmax(0, 220px);
 }
 
 .soxx-fear-industry-loading {
@@ -307,21 +319,29 @@
 
 @media (max-width: 1440px) {
   .soxx-fear-summary-grid,
-  .soxx-fear-industry-group .soxx-fear-summary-grid {
+  .soxx-fear-industry-group.is-wide .soxx-fear-summary-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 1200px) {
   .soxx-fear-summary-grid,
-  .soxx-fear-industry-group .soxx-fear-summary-grid {
+  .soxx-fear-industry-group.is-wide .soxx-fear-summary-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 960px) {
+  .soxx-fear-industry-groups {
+    grid-template-columns: 1fr;
+  }
+
+  .soxx-fear-industry-group.is-wide {
+    grid-column: auto;
+  }
+
   .soxx-fear-summary-grid,
-  .soxx-fear-industry-group .soxx-fear-summary-grid {
+  .soxx-fear-industry-group.is-wide .soxx-fear-summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
@@ -333,7 +353,8 @@
   }
 
   .soxx-fear-summary-grid,
-  .soxx-fear-industry-group .soxx-fear-summary-grid {
+  .soxx-fear-industry-group .soxx-fear-summary-grid,
+  .soxx-fear-industry-group.is-compact .soxx-fear-summary-grid {
     grid-template-columns: 1fr;
   }
 
