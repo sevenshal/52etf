@@ -556,6 +556,7 @@ def _run_a_stock_etf_fear_greed_backfill(
     history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
     score_window: int = A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
     min_periods: int = A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS,
+    symbols: Optional[List[str]] = None,
 ):
     from ..core.services.a_stock_fear_greed_clone_service import (
         A_STOCK_FEAR_GREED_TARGETS,
@@ -569,10 +570,25 @@ def _run_a_stock_etf_fear_greed_backfill(
         output_start_date = end_value - timedelta(days=recent_days)
 
     calculation_start_date = output_start_date - timedelta(days=history_days)
+    requested_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or [])
+        if str(symbol or "").strip()
+    }
+    targets = [
+        target
+        for target in A_STOCK_FEAR_GREED_TARGETS
+        if not requested_symbols or target["symbol"].upper() in requested_symbols
+    ]
+    resolved_symbols = {target["symbol"].upper() for target in targets}
+    unknown_symbols = sorted(requested_symbols - resolved_symbols)
+    if unknown_symbols:
+        raise ValueError(f"未知A股贪恐指数: {','.join(unknown_symbols)}")
+
     logger = logging.getLogger("ScheduledTaskManager")
     results = []
     errors = []
-    for target in A_STOCK_FEAR_GREED_TARGETS:
+    for target in targets:
         symbol = target["symbol"]
         try:
             calculator = AStockInnovation100FearGreedCloneCalculator(symbol)

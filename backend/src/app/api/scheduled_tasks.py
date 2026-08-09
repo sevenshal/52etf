@@ -20,6 +20,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
 
 class ScheduledTaskRunRequest(BaseModel):
     start_date: Optional[str] = None
+    symbols: Optional[List[str]] = None
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -97,6 +98,12 @@ def run_scheduled_task_now(
             "hk_index_fear_greed_backfill",
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
+        if (
+            task_key == "a_stock_etf_fear_greed_backfill"
+            and payload
+            and payload.symbols
+        ):
+            runner_kwargs["symbols"] = payload.symbols
         scheduled_task_manager.trigger_task(
             task_key=task_key,
             trigger_source="manual",
