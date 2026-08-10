@@ -228,12 +228,12 @@ const SOXXFearGreed = () => {
     });
     const reversalSignals = filteredData.flatMap((item) => {
       const index = fullIndexByDate.get(item.date);
-      if (index === undefined || index < 1) return [];
+      if (index === undefined || index < 5) return [];
       const currentMa5 = fullScoreMa5[index];
       const previousMa5 = fullScoreMa5[index - 1];
-      const currentScore = fullScores[index];
-      if (![currentMa5, previousMa5, currentScore].every(isFiniteNumber)) return [];
-      if (currentMa5 > previousMa5 && currentScore < 25) {
+      const recentScores = fullScores.slice(index - 4, index + 1);
+      if (![currentMa5, previousMa5].every(isFiniteNumber)) return [];
+      if (currentMa5 > previousMa5 && recentScores.some(value => isFiniteNumber(value) && Number(value) < 25)) {
         return [{
           name: '见底信号',
           value: '底',
@@ -242,7 +242,7 @@ const SOXXFearGreed = () => {
           itemStyle: { color: '#389e0d' },
         }];
       }
-      if (currentMa5 < previousMa5 && currentScore > 75) {
+      if (currentMa5 < previousMa5 && recentScores.some(value => isFiniteNumber(value) && Number(value) > 75)) {
         return [{
           name: '见顶信号',
           value: '顶',
