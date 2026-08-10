@@ -2,7 +2,7 @@ import math
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import product
 from typing import Any, Dict, List, Optional
 
@@ -12,19 +12,20 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 
+from ...core.database import DB_PATH
+from ...core.duckdb_utils import ANALYTICS_DB_PATH
+from ...core.event_stream import publish_event
 from ...core.services.a_stock_fear_etf_backtest_engine import (
-    DEFAULT_EXCLUDED,
     build_signal_rows,
     load_etf_bars,
     load_fear,
     max_drawdown,
+    prepare_fear_features,
+    prepare_market_features,
     run_backtest,
     summarize,
     target_mapping,
 )
-from ...core.database import DB_PATH
-from ...core.duckdb_utils import ANALYTICS_DB_PATH
-from ...core.event_stream import publish_event
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from .account import valid_account
 
@@ -37,72 +38,143 @@ MAX_SEARCH_COMBINATIONS = 5000
 
 
 class StrategyParams(BaseModel):
-    fear_entry: float = 25.0
-    volume_std_multiplier: float = 1.0
-    no_new_high_days: int = 10
-    fear_exit: float = 70.0
+    extreme_fear_threshold: float = 25.0
+    volume_ratio_threshold: float = 1.1
+    volume_window: int = 20
+    bottom_fear_threshold: float = 25.0
+    bottom_ma_window: int = 5
+    extreme_buy_fraction: float = 1.0
+    bottom_buy_fraction: float = 0.5
+    greed_threshold: float = 75.0
+    greed_sell_fraction: float = 0.5
+    volatility_window: int = 20
+    volatility_baseline_window: int = 20
+    volatility_std_multiplier: float = 1.0
+    trailing_drawdown_pct: float = 7.0
+    momentum_window: int = 200
+    max_positions: int = 2
+    commission_pct: float = 0.03
+    min_commission: float = 5.0
+    slippage_pct: float = 0.02
+    stamp_duty_pct: float = 0.0
+    lot_size: int = 100
 
-    @validator("fear_entry", "fear_exit")
+    @validator("extreme_fear_threshold", "bottom_fear_threshold", "greed_threshold")
     def validate_fear(cls, value):
         if value < 0 or value > 100:
-            raise ValueError("恐贪阈值必须在 0 到 100 之间")
+            raise ValueError("恐贪阈值必须在0到100之间")
         return value
 
-    @validator("volume_std_multiplier")
+    @validator("extreme_buy_fraction", "bottom_buy_fraction", "greed_sell_fraction")
+    def validate_fraction(cls, value):
+        if value <= 0 or value > 1:
+            raise ValueError("仓位比例必须大于0且不超过1")
+        return value
+
+    @validator("volume_ratio_threshold")
+    def validate_volume_ratio(cls, value):
+        if value <= 0 or value > 20:
+            raise ValueError("量比阈值必须大于0且不超过20")
+        return value
+
+    @validator("volatility_std_multiplier")
     def validate_std_multiplier(cls, value):
         if value < 0 or value > 10:
-            raise ValueError("成交量标准差倍数必须在 0 到 10 之间")
+            raise ValueError("波动率标准差倍数必须在0到10之间")
         return value
 
-    @validator("no_new_high_days")
-    def validate_no_new_high_days(cls, value):
-        if value < 1 or value > 500:
-            raise ValueError("未创新高天数必须在 1 到 500 之间")
+    @validator("trailing_drawdown_pct")
+    def validate_drawdown(cls, value):
+        if value <= 0 or value >= 100:
+            raise ValueError("移动止盈回撤必须大于0且小于100%")
         return value
 
+    @validator(
+        "volume_window", "bottom_ma_window", "volatility_window",
+        "volatility_baseline_window", "momentum_window",
+    )
+    def validate_window(cls, value):
+        if value < 2 or value > 500:
+            raise ValueError("计算窗口必须在2到500个交易日之间")
+        return value
 
-class RunRequest(BaseModel):
-    start_date: str = "2020-01-02"
-    end_date: Optional[str] = None
-    initial_capital: float = 1_000_000.0
-    commission_pct: float = 0.03
-    slippage_pct: float = 0.02
-    stamp_duty_pct: float = 0.05
-    lot_size: int = 100
-    excluded_indexes: List[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDED))
-    params: StrategyParams = Field(default_factory=StrategyParams)
-
-    @validator("initial_capital")
-    def validate_capital(cls, value):
-        if value <= 0:
-            raise ValueError("初始资金必须大于 0")
+    @validator("max_positions")
+    def validate_max_positions(cls, value):
+        if value < 1 or value > 20:
+            raise ValueError("最大持仓数必须在1到20之间")
         return value
 
     @validator("commission_pct", "slippage_pct", "stamp_duty_pct")
     def validate_cost(cls, value):
         if value < 0 or value > 10:
-            raise ValueError("交易成本必须在 0 到 10% 之间")
+            raise ValueError("交易成本必须在0到10%之间")
+        return value
+
+    @validator("min_commission")
+    def validate_min_commission(cls, value):
+        if value < 0 or value > 1000:
+            raise ValueError("最低佣金必须在0到1000元之间")
         return value
 
     @validator("lot_size")
     def validate_lot_size(cls, value):
-        if value < 1:
-            raise ValueError("交易手数必须大于 0")
+        if value < 1 or value > 10000:
+            raise ValueError("每手份数必须在1到10000之间")
         return value
+
+
+class RunRequest(BaseModel):
+    start_date: str = "2023-01-01"
+    end_date: Optional[str] = None
+    initial_capital: float = 1_000_000.0
+    included_indexes: List[str] = Field(default_factory=list)
+    params: StrategyParams = Field(default_factory=StrategyParams)
+
+    @validator("initial_capital")
+    def validate_capital(cls, value):
+        if value <= 0:
+            raise ValueError("初始资金必须大于0")
+        return value
+
+
+SEARCH_FIELDS = (
+    "extreme_fear_threshold", "volume_ratio_threshold", "volume_window",
+    "bottom_fear_threshold", "bottom_ma_window", "extreme_buy_fraction",
+    "bottom_buy_fraction", "greed_threshold", "greed_sell_fraction",
+    "volatility_window", "volatility_baseline_window", "volatility_std_multiplier",
+    "trailing_drawdown_pct", "momentum_window", "max_positions",
+    "commission_pct", "min_commission", "slippage_pct", "stamp_duty_pct", "lot_size",
+)
 
 
 class SearchRequest(RunRequest):
     top_n: int = 20
     objective: str = "sharpe_zero_rf"
-    fear_entry_values: List[float] = Field(default_factory=lambda: [20.0, 25.0, 30.0])
-    volume_std_multiplier_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
-    no_new_high_days_values: List[int] = Field(default_factory=lambda: [5, 10, 20, 60])
-    fear_exit_values: List[float] = Field(default_factory=lambda: [65.0, 70.0, 75.0])
+    extreme_fear_threshold_values: List[float] = Field(default_factory=lambda: [20, 25, 30])
+    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.0, 1.1, 1.3])
+    volume_window_values: List[int] = Field(default_factory=lambda: [20])
+    bottom_fear_threshold_values: List[float] = Field(default_factory=lambda: [20, 25])
+    bottom_ma_window_values: List[int] = Field(default_factory=lambda: [5])
+    extreme_buy_fraction_values: List[float] = Field(default_factory=lambda: [1.0])
+    bottom_buy_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [70, 75, 80])
+    greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
+    volatility_window_values: List[int] = Field(default_factory=lambda: [20])
+    volatility_baseline_window_values: List[int] = Field(default_factory=lambda: [20])
+    volatility_std_multiplier_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
+    trailing_drawdown_pct_values: List[float] = Field(default_factory=lambda: [5, 7, 10])
+    momentum_window_values: List[int] = Field(default_factory=lambda: [120, 200])
+    max_positions_values: List[int] = Field(default_factory=lambda: [1, 2])
+    commission_pct_values: List[float] = Field(default_factory=lambda: [0.03])
+    min_commission_values: List[float] = Field(default_factory=lambda: [5])
+    slippage_pct_values: List[float] = Field(default_factory=lambda: [0.02])
+    stamp_duty_pct_values: List[float] = Field(default_factory=lambda: [0])
+    lot_size_values: List[int] = Field(default_factory=lambda: [100])
 
     @validator("top_n")
     def validate_top_n(cls, value):
         if value < 1 or value > 100:
-            raise ValueError("返回结果数必须在 1 到 100 之间")
+            raise ValueError("返回结果数必须在1到100之间")
         return value
 
     @validator("objective")
@@ -111,8 +183,8 @@ class SearchRequest(RunRequest):
             raise ValueError("不支持的搜索目标")
         return value
 
-    @validator("fear_entry_values", "volume_std_multiplier_values", "no_new_high_days_values", "fear_exit_values")
-    def validate_candidates(cls, value):
+    @validator(*(f"{field}_values" for field in SEARCH_FIELDS))
+    def validate_candidate_lists(cls, value):
         if not value:
             raise ValueError("每个参数至少需要一个候选值")
         return list(dict.fromkeys(value))
@@ -144,15 +216,28 @@ def _parse_date(value: Optional[str], fallback: Optional[date] = None) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def _normalize_excluded(values: List[str]) -> set[str]:
+def _normalize_symbols(values: List[str]) -> set[str]:
     return {str(value).strip().upper() for value in values if str(value).strip()}
 
 
 def _json_records(frame: pd.DataFrame) -> List[Dict[str, Any]]:
     if frame is None or frame.empty:
         return []
-    clean = frame.replace({np.nan: None})
-    return clean.to_dict(orient="records")
+    return frame.replace({np.nan: None}).to_dict(orient="records")
+
+
+def _max_lookback(request: RunRequest) -> int:
+    if isinstance(request, SearchRequest):
+        return max(
+            request.volume_window_values + request.bottom_ma_window_values
+            + request.volatility_window_values + request.volatility_baseline_window_values
+            + request.momentum_window_values
+        )
+    params = request.params
+    return max(
+        params.volume_window, params.bottom_ma_window, params.volatility_window,
+        params.volatility_baseline_window, params.momentum_window,
+    )
 
 
 def _prepare_data(request: RunRequest):
@@ -160,12 +245,18 @@ def _prepare_data(request: RunRequest):
     end = _parse_date(request.end_date, date.today())
     if start >= end:
         raise ValueError("开始日期必须早于结束日期")
-    excluded = _normalize_excluded(request.excluded_indexes)
-    mapping = target_mapping(excluded)
-    fear = load_fear(DB_PATH, list(mapping), start.isoformat(), end.isoformat())
+    included = _normalize_symbols(request.included_indexes)
+    mapping = target_mapping(included=included)
+    if included and not mapping:
+        raise ValueError("所选标的池没有配置可交易ETF")
+    padding_days = max(180, _max_lookback(request) * 3)
+    feature_start = start - timedelta(days=padding_days)
+    fear = load_fear(DB_PATH, list(mapping), feature_start.isoformat(), end.isoformat())
     mapping = {key: value for key, value in mapping.items() if key in set(fear["index_symbol"])}
     with duckdb.connect(ANALYTICS_DB_PATH, read_only=True) as connection:
-        bars = load_etf_bars(connection, sorted(set(mapping.values())), start.isoformat(), end.isoformat())
+        bars = load_etf_bars(
+            connection, sorted(set(mapping.values())), feature_start.isoformat(), end.isoformat()
+        )
         available = set(bars["etf_symbol"])
         mapping = {key: value for key, value in mapping.items() if value in available}
         fear = fear[fear["index_symbol"].isin(mapping)].copy()
@@ -177,7 +268,7 @@ def _prepare_data(request: RunRequest):
         ).fetch_df()
     if bars.empty or fear.empty:
         raise ValueError("所选区间没有可用的ETF行情或恐贪历史")
-    return start, end, excluded, mapping, fear, bars, benchmark
+    return start, end, included, mapping, fear, bars, benchmark
 
 
 def _attach_benchmark(curve: pd.DataFrame, benchmark: pd.DataFrame, initial_capital: float) -> pd.DataFrame:
@@ -194,21 +285,51 @@ def _attach_benchmark(curve: pd.DataFrame, benchmark: pd.DataFrame, initial_capi
     return result
 
 
-def _run_prepared(request: RunRequest, mapping, fear, bars, benchmark, params: StrategyParams, detailed=True):
+def _features(bars, fear, params: StrategyParams, cache: Optional[dict] = None):
+    market_key = (
+        params.volume_window, params.momentum_window, params.volatility_window,
+        params.volatility_baseline_window, params.volatility_std_multiplier,
+    )
+    fear_key = params.bottom_ma_window
+    cache = cache if cache is not None else {}
+    market_cache = cache.setdefault("market", {})
+    fear_cache = cache.setdefault("fear", {})
+    if market_key not in market_cache:
+        market_cache[market_key] = prepare_market_features(
+            bars, volume_window=params.volume_window, momentum_window=params.momentum_window,
+            volatility_window=params.volatility_window,
+            volatility_baseline_window=params.volatility_baseline_window,
+            volatility_std_multiplier=params.volatility_std_multiplier,
+        )
+    if fear_key not in fear_cache:
+        fear_cache[fear_key] = prepare_fear_features(fear, params.bottom_ma_window)
+    return market_cache[market_key], fear_cache[fear_key]
+
+
+def _run_prepared(
+    request: RunRequest, mapping, fear, bars, benchmark, params: StrategyParams,
+    detailed: bool = True, feature_cache: Optional[dict] = None,
+):
+    featured_bars, featured_fear = _features(bars, fear, params, feature_cache)
     signals = build_signal_rows(
-        bars, fear, mapping, params.fear_entry, params.volume_std_multiplier
+        featured_bars, featured_fear, mapping,
+        extreme_fear_threshold=params.extreme_fear_threshold,
+        volume_ratio_threshold=params.volume_ratio_threshold,
+        bottom_fear_threshold=params.bottom_fear_threshold,
+        extreme_buy_fraction=params.extreme_buy_fraction,
+        bottom_buy_fraction=params.bottom_buy_fraction,
+        start_date=request.start_date,
+        end_date=request.end_date or date.today().isoformat(),
     )
     curve, trades = run_backtest(
-        bars,
-        fear,
-        signals,
-        initial_capital=request.initial_capital,
-        fear_greed_exit=params.fear_exit,
-        no_new_high_days=params.no_new_high_days,
-        commission_pct=request.commission_pct,
-        slippage_pct=request.slippage_pct,
-        stamp_duty_pct=request.stamp_duty_pct,
-        lot_size=request.lot_size,
+        featured_bars, featured_fear, signals,
+        start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
+        initial_capital=request.initial_capital, greed_threshold=params.greed_threshold,
+        greed_sell_fraction=params.greed_sell_fraction,
+        trailing_drawdown=params.trailing_drawdown_pct / 100,
+        commission_pct=params.commission_pct, min_commission=params.min_commission,
+        slippage_pct=params.slippage_pct, stamp_duty_pct=params.stamp_duty_pct,
+        lot_size=params.lot_size, max_positions=params.max_positions,
     )
     curve = _attach_benchmark(curve, benchmark, request.initial_capital)
     summary = summarize(curve, trades, request.initial_capital)
@@ -223,34 +344,32 @@ def _run_prepared(request: RunRequest, mapping, fear, bars, benchmark, params: S
         ).reset_index()
         annual["return_pct"] = (annual["end_value"] / annual["start_value"] - 1) * 100
         payload.update({
-            "equity_curve": _json_records(curve),
-            "trades": _json_records(trades),
+            "equity_curve": _json_records(curve), "trades": _json_records(trades),
             "yearly_returns": _json_records(annual),
         })
     return payload
 
 
 def _run_request(request: RunRequest):
-    start, end, excluded, mapping, fear, bars, benchmark = _prepare_data(request)
+    start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
     result = _run_prepared(request, mapping, fear, bars, benchmark, request.params, detailed=True)
     result["meta"] = {
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "excluded_indexes": sorted(excluded),
-        "index_etf_mapping": mapping,
-        "trading_days": int(bars["trade_date"].nunique()),
+        "start_date": start.isoformat(), "end_date": end.isoformat(),
+        "included_indexes": sorted(included), "index_etf_mapping": mapping,
+        "trading_days": int(bars.loc[
+            (bars["trade_date"] >= start) & (bars["trade_date"] <= end), "trade_date"
+        ].nunique()),
         "fear_points": int(len(fear)),
     }
     return result
 
 
+def _candidate_lists(request: SearchRequest) -> list[list[Any]]:
+    return [getattr(request, f"{field}_values") for field in SEARCH_FIELDS]
+
+
 def _combination_count(request: SearchRequest) -> int:
-    return math.prod([
-        len(request.fear_entry_values),
-        len(request.volume_std_multiplier_values),
-        len(request.no_new_high_days_values),
-        len(request.fear_exit_values),
-    ])
+    return math.prod(len(values) for values in _candidate_lists(request))
 
 
 def _score(item: Dict[str, Any], objective: str):
@@ -278,51 +397,45 @@ def _update_job(task_id: str, **updates):
 def _search_job(task_id: str, request: SearchRequest):
     try:
         _update_job(task_id, status="running", message="正在加载ETF行情和恐贪历史")
-        start, end, excluded, mapping, fear, bars, benchmark = _prepare_data(request)
-        combinations = list(product(
-            request.fear_entry_values,
-            request.volume_std_multiplier_values,
-            request.no_new_high_days_values,
-            request.fear_exit_values,
-        ))
-        results = []
+        start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
+        combinations = product(*_candidate_lists(request))
+        total = _combination_count(request)
+        results: list[dict[str, Any]] = []
         skipped = 0
+        feature_cache: dict[str, dict] = {}
         for index, values in enumerate(combinations, start=1):
             try:
-                params = StrategyParams(
-                    fear_entry=values[0], volume_std_multiplier=values[1],
-                    no_new_high_days=values[2], fear_exit=values[3],
+                params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
+                item = _run_prepared(
+                    request, mapping, fear, bars, benchmark, params,
+                    detailed=False, feature_cache=feature_cache,
                 )
-                item = _run_prepared(request, mapping, fear, bars, benchmark, params, detailed=False)
                 results.append(item)
             except Exception:
                 skipped += 1
-            if index == len(combinations) or index % max(1, len(combinations) // 100) == 0:
+            if index == total or index % max(1, total // 100) == 0:
                 _update_job(
-                    task_id,
-                    progress=int(index * 100 / len(combinations)),
-                    processed_combinations=index,
-                    skipped_combinations=skipped,
-                    message=f"已完成 {index}/{len(combinations)} 组",
+                    task_id, progress=int(index * 100 / total), processed_combinations=index,
+                    skipped_combinations=skipped, message=f"已完成 {index}/{total} 组",
                 )
         results.sort(key=lambda item: _score(item, request.objective), reverse=True)
         top_results = results[: request.top_n]
-        best = top_results[0] if top_results else None
         best_detail = None
-        if best:
+        if top_results:
             best_detail = _run_prepared(
-                request, mapping, fear, bars, benchmark, StrategyParams(**best["params"]), detailed=True
+                request, mapping, fear, bars, benchmark,
+                StrategyParams(**top_results[0]["params"]), detailed=True,
+                feature_cache=feature_cache,
             )
             best_detail["meta"] = {
                 "start_date": start.isoformat(), "end_date": end.isoformat(),
-                "excluded_indexes": sorted(excluded), "index_etf_mapping": mapping,
+                "included_indexes": sorted(included), "index_etf_mapping": mapping,
             }
         _update_job(
-            task_id,
-            status="completed", progress=100, processed_combinations=len(combinations),
+            task_id, status="completed", progress=100, processed_combinations=total,
             skipped_combinations=skipped, message="参数搜索完成",
             result={
-                "meta": {"total_combinations": len(combinations), "objective": request.objective},
+                "meta": {"total_combinations": total, "objective": request.objective},
                 "results": top_results, "best_result": best_detail,
             },
         )
@@ -333,21 +446,23 @@ def _search_job(task_id: str, request: SearchRequest):
 @router.get("/options")
 def options(account_id: str = Depends(valid_account)):
     targets = []
+    seen: set[tuple[str, str]] = set()
     for item in A_STOCK_INDEX_FEAR_GREED_TARGETS:
         if not item.get("proxy_etf"):
             continue
+        index_symbol = str(item["symbol"]).upper()
         etf = str(item["proxy_etf"]).upper()
+        if (index_symbol, etf) in seen:
+            continue
+        seen.add((index_symbol, etf))
         targets.append({
-            "index_symbol": str(item["symbol"]).upper(),
-            "index_label": item.get("ticker") or item.get("label") or item["symbol"],
-            "etf_symbol": etf,
-            "etf_label": A_STOCK_ETF_DAILY_NAMES.get(etf, etf),
+            "index_symbol": index_symbol,
+            "index_label": item.get("ticker") or item.get("label") or index_symbol,
+            "etf_symbol": etf, "etf_label": A_STOCK_ETF_DAILY_NAMES.get(etf, etf),
         })
     return {
-        "targets": targets,
-        "default_excluded_indexes": list(DEFAULT_EXCLUDED),
-        "max_search_combinations": MAX_SEARCH_COMBINATIONS,
-        "default_request": RunRequest().dict(),
+        "targets": targets, "max_search_combinations": MAX_SEARCH_COMBINATIONS,
+        "default_request": RunRequest().dict(), "search_fields": list(SEARCH_FIELDS),
     }
 
 
@@ -363,7 +478,7 @@ def run(payload: RunRequest, account_id: str = Depends(valid_account)):
 def create_search_job(payload: SearchRequest, account_id: str = Depends(valid_account)):
     total = _combination_count(payload)
     if total <= 0 or total > MAX_SEARCH_COMBINATIONS:
-        raise HTTPException(status_code=400, detail=f"参数组合数必须在 1 到 {MAX_SEARCH_COMBINATIONS} 之间")
+        raise HTTPException(status_code=400, detail=f"参数组合数必须在1到{MAX_SEARCH_COMBINATIONS}之间")
     task_id = uuid.uuid4().hex
     with SEARCH_LOCK:
         SEARCH_JOBS[task_id] = {

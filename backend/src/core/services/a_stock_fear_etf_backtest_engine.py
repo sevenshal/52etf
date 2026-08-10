@@ -1,9 +1,8 @@
-"""Reusable engine for the A-share fear/greed ETF range backtest.
+"""Portfolio backtest engine for A-share fear/greed index ETF proxies.
 
-This module is production code and must stay self-contained under ``src`` so
-API imports do not depend on research scripts that are omitted from deploys.
-All database access is read-only; signals formed at the close execute at the
-next tradable open.
+Signals are formed after the close and orders execute at the next tradable
+open.  The engine is deliberately independent from API/Pydantic code so it can
+be tested and reused by scheduled research jobs.
 """
 
 from __future__ import annotations
@@ -21,7 +20,8 @@ import pandas as pd
 from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
 
 
-DEFAULT_EXCLUDED = ("INNO100.CN", "000905.SH")
+DEFAULT_EXCLUDED: tuple[str, ...] = ()
+TRADING_DAYS = 252
 
 
 @dataclass
@@ -33,9 +33,9 @@ class Position:
     entry_date: str
     entry_fear: float
     high_water: float
-    low_water: float
-    days_since_high: int = 0
-    exit_armed: bool = False
+    greed_reduced: bool = False
+    volatility_monitoring: bool = False
+    trailing_armed: bool = False
 
 
 def abnormal_volume(
@@ -44,6 +44,7 @@ def abnormal_volume(
     prior_std: float,
     std_multiplier: float = 1.0,
 ) -> tuple[bool, float]:
+    """Kept for compatibility with the original range-strategy tests."""
     values = (volume, prior_mean, prior_std)
     if not all(np.isfinite(value) for value in values) or prior_mean <= 0 or prior_std < 0:
         return False, math.nan
@@ -52,20 +53,19 @@ def abnormal_volume(
     return volume > threshold, score
 
 
-def target_mapping(excluded: set[str]) -> dict[str, str]:
+def target_mapping(excluded: set[str] | None = None, included: set[str] | None = None) -> dict[str, str]:
+    excluded = {str(value).upper() for value in (excluded or set())}
+    included = {str(value).upper() for value in (included or set())}
     return {
         str(item["symbol"]).upper(): str(item["proxy_etf"]).upper()
         for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
-        if item.get("proxy_etf") and str(item["symbol"]).upper() not in excluded
+        if item.get("proxy_etf")
+        and str(item["symbol"]).upper() not in excluded
+        and (not included or str(item["symbol"]).upper() in included)
     }
 
 
-def load_fear(
-    sqlite_path: Union[Path, str],
-    indexes: list[str],
-    start: str,
-    end: str,
-) -> pd.DataFrame:
+def load_fear(sqlite_path: Union[Path, str], indexes: list[str], start: str, end: str) -> pd.DataFrame:
     if not indexes:
         return pd.DataFrame(columns=["index_symbol", "date", "score"])
     with sqlite3.connect(f"file:{sqlite_path}?mode=ro&immutable=1", uri=True) as connection:
@@ -73,9 +73,8 @@ def load_fear(
             """
             SELECT upper(symbol) AS index_symbol, date, score
             FROM etf_fear_greed_clone_history
-            WHERE upper(symbol) IN ({})
-              AND date BETWEEN ? AND ?
-            ORDER BY date, symbol
+            WHERE upper(symbol) IN ({}) AND date BETWEEN ? AND ?
+            ORDER BY symbol, date
             """.format(",".join("?" for _ in indexes)),
             connection,
             params=(*indexes, start, end),
@@ -96,78 +95,182 @@ def load_etf_bars(
         return pd.DataFrame()
     frame = connection.execute(
         """
-        WITH featured AS (
-            SELECT trade_date, upper(symbol) AS etf_symbol,
-                   open, high, low, close, volume,
-                   avg(volume) OVER (
-                       PARTITION BY symbol ORDER BY trade_date
-                       ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
-                   ) AS prior_volume_mean,
-                   stddev_samp(volume) OVER (
-                       PARTITION BY symbol ORDER BY trade_date
-                       ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
-                   ) AS prior_volume_std,
-                   count(volume) OVER (
-                       PARTITION BY symbol ORDER BY trade_date
-                       ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
-                   ) AS prior_volume_count
-            FROM a_stock_fund_daily_qfq
-            WHERE upper(symbol) IN (SELECT * FROM unnest(?))
-              AND trade_date BETWEEN CAST(? AS DATE) - INTERVAL 40 DAY AND CAST(? AS DATE)
-        )
-        SELECT * FROM featured
-        WHERE trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-        ORDER BY trade_date, etf_symbol
+        SELECT trade_date, upper(symbol) AS etf_symbol, open, high, low, close, volume
+        FROM a_stock_fund_daily_qfq
+        WHERE upper(symbol) IN (SELECT * FROM unnest(?))
+          AND trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+        ORDER BY etf_symbol, trade_date
         """,
-        [etfs, start, end, start, end],
+        [etfs, start, end],
     ).fetch_df()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
-    for column in (
-        "open", "high", "low", "close", "volume",
-        "prior_volume_mean", "prior_volume_std",
-    ):
+    for column in ("open", "high", "low", "close", "volume"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    return frame
+    return frame.dropna(subset=["close"])
+
+
+def _risk_adjusted_momentum(close: pd.Series, window: int) -> pd.Series:
+    """Factor Lab-compatible log-price trend score: slope * R² / volatility."""
+    log_close = np.log(close.where(close > 0))
+    x = np.arange(window, dtype=float)
+    x_centered = x - x.mean()
+    denominator = float(np.square(x_centered).sum())
+
+    def score(values: np.ndarray) -> float:
+        if len(values) != window or not np.isfinite(values).all():
+            return math.nan
+        centered = values - values.mean()
+        slope = float(np.dot(x_centered, centered) / denominator)
+        fitted = values.mean() + slope * x_centered
+        total = float(np.square(centered).sum())
+        r_squared = 1.0 - float(np.square(values - fitted).sum()) / total if total > 0 else 0.0
+        daily = np.diff(np.exp(values)) / np.exp(values[:-1])
+        annual_vol = float(np.std(daily, ddof=1) * math.sqrt(TRADING_DAYS)) if len(daily) > 1 else 0.0
+        return slope * TRADING_DAYS * max(0.0, min(1.0, r_squared)) / annual_vol if annual_vol > 0 else math.nan
+
+    return log_close.rolling(window, min_periods=window).apply(score, raw=True)
+
+
+def prepare_market_features(
+    bars: pd.DataFrame,
+    *,
+    volume_window: int,
+    momentum_window: int,
+    volatility_window: int,
+    volatility_baseline_window: int,
+    volatility_std_multiplier: float,
+) -> pd.DataFrame:
+    result = bars.sort_values(["etf_symbol", "trade_date"]).copy()
+    grouped = result.groupby("etf_symbol", group_keys=False)
+    result["prior_volume_mean"] = grouped["volume"].transform(
+        lambda values: values.shift(1).rolling(volume_window, min_periods=volume_window).mean()
+    )
+    result["volume_ratio"] = result["volume"] / result["prior_volume_mean"]
+    result["daily_return"] = grouped["close"].pct_change(fill_method=None)
+    result["realized_volatility"] = grouped["daily_return"].transform(
+        lambda values: values.rolling(volatility_window, min_periods=volatility_window).std(ddof=1)
+        * math.sqrt(TRADING_DAYS)
+    )
+    vol_grouped = result.groupby("etf_symbol", group_keys=False)["realized_volatility"]
+    result["volatility_mean"] = vol_grouped.transform(
+        lambda values: values.shift(1).rolling(
+            volatility_baseline_window, min_periods=volatility_baseline_window
+        ).mean()
+    )
+    result["volatility_std"] = vol_grouped.transform(
+        lambda values: values.shift(1).rolling(
+            volatility_baseline_window, min_periods=volatility_baseline_window
+        ).std(ddof=1)
+    )
+    result["volatility_threshold"] = (
+        result["volatility_mean"] + volatility_std_multiplier * result["volatility_std"]
+    )
+    result["risk_adjusted_momentum"] = grouped["close"].transform(
+        lambda values: _risk_adjusted_momentum(values, momentum_window)
+    )
+    return result
+
+
+def prepare_fear_features(fear: pd.DataFrame, bottom_ma_window: int) -> pd.DataFrame:
+    result = fear.sort_values(["index_symbol", "date"]).copy()
+    grouped = result.groupby("index_symbol", group_keys=False)["score"]
+    result["fear_ma"] = grouped.transform(
+        lambda values: values.rolling(bottom_ma_window, min_periods=bottom_ma_window).mean()
+    )
+    result["recent_fear_min"] = grouped.transform(
+        lambda values: values.rolling(bottom_ma_window, min_periods=bottom_ma_window).min()
+    )
+    result["recent_fear_max"] = grouped.transform(
+        lambda values: values.rolling(bottom_ma_window, min_periods=bottom_ma_window).max()
+    )
+    result["prior_fear_ma"] = result.groupby("index_symbol")["fear_ma"].shift(1)
+    return result
+
+
+def fear_reversal_flags(
+    current_ma: float,
+    previous_ma: float,
+    recent_fear_min: float,
+    recent_fear_max: float,
+    *,
+    bottom_threshold: float = 25.0,
+    top_threshold: float = 75.0,
+) -> tuple[bool, bool]:
+    values = (current_ma, previous_ma, recent_fear_min, recent_fear_max)
+    if not all(np.isfinite(value) for value in values):
+        return False, False
+    is_bottom = current_ma > previous_ma and recent_fear_min < bottom_threshold
+    is_top = current_ma < previous_ma and recent_fear_max > top_threshold
+    return bool(is_bottom), bool(is_top)
 
 
 def build_signal_rows(
     bars: pd.DataFrame,
     fear: pd.DataFrame,
     mapping: dict[str, str],
-    fear_entry: float,
-    std_multiplier: float,
+    *,
+    extreme_fear_threshold: float,
+    volume_ratio_threshold: float,
+    bottom_fear_threshold: float,
+    extreme_buy_fraction: float,
+    bottom_buy_fraction: float,
+    start_date: str,
+    end_date: str,
 ) -> dict[Any, list[dict[str, Any]]]:
-    inverse = {etf: index for index, etf in mapping.items()}
-    working_bars = bars.copy()
-    working_bars["index_symbol"] = working_bars["etf_symbol"].map(inverse)
-    merged = working_bars.merge(
-        fear,
-        left_on=["trade_date", "index_symbol"],
-        right_on=["date", "index_symbol"],
-        how="inner",
+    pairs = pd.DataFrame(
+        [{"index_symbol": index, "etf_symbol": etf} for index, etf in mapping.items()]
     )
+    merged = pairs.merge(bars, on="etf_symbol").merge(
+        fear, left_on=["index_symbol", "trade_date"], right_on=["index_symbol", "date"]
+    )
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    merged = merged[(merged["trade_date"] >= start) & (merged["trade_date"] <= end)]
     signals: dict[Any, list[dict[str, Any]]] = {}
     for row in merged.itertuples(index=False):
-        if row.prior_volume_count < 20 or row.score >= fear_entry:
+        extreme = (
+            row.score < extreme_fear_threshold
+            and np.isfinite(row.volume_ratio)
+            and row.volume_ratio >= volume_ratio_threshold
+        )
+        bottom, _ = fear_reversal_flags(
+            row.fear_ma,
+            row.prior_fear_ma,
+            row.recent_fear_min,
+            row.recent_fear_max,
+            bottom_threshold=bottom_fear_threshold,
+        )
+        if not extreme and not bottom:
             continue
-        is_abnormal, z_score = abnormal_volume(
-            row.volume, row.prior_volume_mean, row.prior_volume_std, std_multiplier
-        )
-        if not is_abnormal:
-            continue
-        signals.setdefault(row.trade_date, []).append(
-            {
-                "index_symbol": row.index_symbol,
-                "etf_symbol": row.etf_symbol,
-                "fear_score": float(row.score),
-                "volume_z": float(z_score),
-                "signal_close": float(row.close),
-            }
-        )
-    for day in signals:
-        signals[day].sort(
-            key=lambda item: (-item["volume_z"], item["fear_score"], item["etf_symbol"])
-        )
+        reason = "extreme_fear_volume" if extreme else "fear_bottom_reversal"
+        fraction = extreme_buy_fraction if extreme else bottom_buy_fraction
+        signals.setdefault(row.trade_date, []).append({
+            "index_symbol": row.index_symbol,
+            "etf_symbol": row.etf_symbol,
+            "fear_score": float(row.score),
+            "fear_ma": float(row.fear_ma) if np.isfinite(row.fear_ma) else None,
+            "recent_fear_min": (
+                float(row.recent_fear_min) if np.isfinite(row.recent_fear_min) else None
+            ),
+            "recent_fear_max": (
+                float(row.recent_fear_max) if np.isfinite(row.recent_fear_max) else None
+            ),
+            "volume_ratio": float(row.volume_ratio) if np.isfinite(row.volume_ratio) else None,
+            "risk_adjusted_momentum": (
+                float(row.risk_adjusted_momentum)
+                if np.isfinite(row.risk_adjusted_momentum) else None
+            ),
+            "target_fraction": float(fraction),
+            "reason": reason,
+        })
+    for day, candidates in signals.items():
+        candidates.sort(key=lambda item: (
+            -(item["risk_adjusted_momentum"] if item["risk_adjusted_momentum"] is not None else -math.inf),
+            item["fear_score"], item["etf_symbol"],
+        ))
+        # Several indexes can share an ETF proxy; only the strongest candidate is actionable.
+        seen: set[str] = set()
+        signals[day] = [item for item in candidates if not (item["etf_symbol"] in seen or seen.add(item["etf_symbol"]))]
     return signals
 
 
@@ -175,202 +278,225 @@ def max_drawdown(values: pd.Series) -> float:
     return float((values / values.cummax() - 1).min()) if len(values) else 0.0
 
 
+def _commission(gross: float, rate: float, minimum: float) -> float:
+    return max(minimum, gross * rate) if gross > 0 else 0.0
+
+
 def run_backtest(
     bars: pd.DataFrame,
     fear: pd.DataFrame,
     signals: dict[Any, list[dict[str, Any]]],
     *,
+    start_date: str,
+    end_date: str,
     initial_capital: float,
-    fear_greed_exit: float,
-    no_new_high_days: int,
+    greed_threshold: float,
+    greed_sell_fraction: float,
+    trailing_drawdown: float,
     commission_pct: float,
+    min_commission: float,
     slippage_pct: float,
     stamp_duty_pct: float,
     lot_size: int,
+    max_positions: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    dates = sorted(bars["trade_date"].unique().tolist())
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    active_bars = bars[(bars["trade_date"] >= start) & (bars["trade_date"] <= end)].copy()
+    dates = sorted(active_bars["trade_date"].unique().tolist())
+    quote_columns = [
+        "open", "high", "low", "close", "realized_volatility", "volatility_threshold",
+    ]
     bars_by_date = {
-        day: group.set_index("etf_symbol")[["open", "high", "low", "close"]].to_dict(orient="index")
-        for day, group in bars.groupby("trade_date", sort=True)
+        day: group.set_index("etf_symbol")[quote_columns].to_dict(orient="index")
+        for day, group in active_bars.groupby("trade_date", sort=True)
     }
+    fear_active = fear[(fear["date"] >= start) & (fear["date"] <= end)]
     fear_by_date = {
         day: dict(zip(group["index_symbol"], group["score"]))
-        for day, group in fear.groupby("date")
+        for day, group in fear_active.groupby("date")
     }
-    commission = commission_pct / 100
+    commission_rate = commission_pct / 100
     slippage = slippage_pct / 100
-    stamp = stamp_duty_pct / 100
+    stamp_rate = stamp_duty_pct / 100
     cash = float(initial_capital)
-    position: Position | None = None
+    positions: dict[str, Position] = {}
     pending_buy: dict[str, Any] | None = None
-    pending_sell: dict[str, Any] | None = None
+    pending_sells: dict[str, dict[str, Any]] = {}
     last_close: dict[str, float] = {}
     trades: list[dict[str, Any]] = []
     curve: list[dict[str, Any]] = []
 
     for day in dates:
         day_bars = bars_by_date.get(day, {})
+
+        # Orders created after the previous close execute at today's open. Sells
+        # run first so their cash is available to a simultaneous buy.
+        for symbol, order in list(pending_sells.items()):
+            position = positions.get(symbol)
+            quote = day_bars.get(symbol)
+            if position is None:
+                pending_sells.pop(symbol, None)
+                continue
+            if not quote or not np.isfinite(quote.get("open", np.nan)):
+                continue
+            fraction = float(order["fraction"])
+            if fraction >= 1:
+                quantity = position.quantity
+            else:
+                quantity = int(position.quantity * fraction / lot_size) * lot_size
+                quantity = min(position.quantity, max(quantity, min(lot_size, position.quantity)))
+            price = float(quote["open"]) * (1 - slippage)
+            gross = quantity * price
+            fee = _commission(gross, commission_rate, min_commission) + gross * stamp_rate
+            allocated_cost = position.cost_basis * quantity / position.quantity
+            cash += gross - fee
+            position.quantity -= quantity
+            position.cost_basis -= allocated_cost
+            trades.append({
+                "date": str(day), "signal_date": order["signal_date"], "action": "sell",
+                "etf_symbol": symbol, "index_symbol": position.index_symbol,
+                "quantity": quantity, "price": price, "gross": gross, "fee": fee,
+                "pnl": gross - fee - allocated_cost, "reason": order["reason"],
+                "fear_score": order.get("fear_score"),
+                "realized_volatility": order.get("realized_volatility"),
+                "volatility_threshold": order.get("volatility_threshold"),
+                "drawdown_from_high_pct": order.get("drawdown_from_high_pct"),
+            })
+            if position.quantity <= 0:
+                positions.pop(symbol, None)
+            elif order["reason"] == "extreme_greed_partial":
+                position.greed_reduced = True
+                position.volatility_monitoring = True
+            pending_sells.pop(symbol, None)
+
+        if pending_buy is not None:
+            symbol = pending_buy["etf_symbol"]
+            quote = day_bars.get(symbol)
+            if quote and np.isfinite(quote.get("open", np.nan)):
+                if symbol not in positions and len(positions) < max_positions:
+                    nav = cash + sum(
+                        pos.quantity * last_close.get(pos.etf_symbol, 0.0)
+                        for pos in positions.values()
+                    )
+                    budget = min(cash, nav * float(pending_buy["target_fraction"]))
+                    price = float(quote["open"]) * (1 + slippage)
+                    quantity = int(budget / price / lot_size) * lot_size
+                    while quantity > 0:
+                        gross = quantity * price
+                        fee = _commission(gross, commission_rate, min_commission)
+                        if gross + fee <= budget + 1e-8:
+                            break
+                        quantity -= lot_size
+                    if quantity > 0:
+                        gross = quantity * price
+                        fee = _commission(gross, commission_rate, min_commission)
+                        cash -= gross + fee
+                        positions[symbol] = Position(
+                            etf_symbol=symbol, index_symbol=pending_buy["index_symbol"],
+                            quantity=quantity, cost_basis=gross + fee, entry_date=str(day),
+                            entry_fear=pending_buy["fear_score"], high_water=float(quote["high"]),
+                        )
+                        trades.append({
+                            "date": str(day), "signal_date": pending_buy["signal_date"],
+                            "action": "buy", "etf_symbol": symbol,
+                            "index_symbol": pending_buy["index_symbol"], "quantity": quantity,
+                            "price": price, "gross": gross, "fee": fee, "pnl": None,
+                            "reason": pending_buy["reason"],
+                            "fear_score": pending_buy["fear_score"],
+                            "fear_ma": pending_buy.get("fear_ma"),
+                            "recent_fear_min": pending_buy.get("recent_fear_min"),
+                            "recent_fear_max": pending_buy.get("recent_fear_max"),
+                            "volume_ratio": pending_buy.get("volume_ratio"),
+                            "risk_adjusted_momentum": pending_buy.get("risk_adjusted_momentum"),
+                            "target_fraction": pending_buy["target_fraction"],
+                        })
+                pending_buy = None
+
         for symbol, quote in day_bars.items():
             if np.isfinite(quote.get("close", np.nan)):
                 last_close[symbol] = float(quote["close"])
 
-        if position is not None and pending_sell is not None:
-            quote = day_bars.get(position.etf_symbol)
-            if quote and np.isfinite(quote.get("open", np.nan)):
-                price = float(quote["open"]) * (1 - slippage)
-                gross = position.quantity * price
-                fee = gross * (commission + stamp)
-                cash += gross - fee
-                trades.append(
-                    {
-                        "date": str(day), "action": "sell",
-                        "etf_symbol": position.etf_symbol,
-                        "index_symbol": position.index_symbol,
-                        "quantity": position.quantity, "price": price,
-                        "gross": gross, "fee": fee,
-                        "pnl": gross - fee - position.cost_basis,
-                        "reason": "range_midpoint_after_greed",
-                        **pending_sell,
-                    }
-                )
-                position = None
-                pending_sell = None
+        # Exit signals are evaluated at the close and queued for the next open.
+        for symbol, position in list(positions.items()):
+            quote = day_bars.get(symbol)
+            if not quote or position.entry_date == str(day) or symbol in pending_sells:
+                continue
+            position.high_water = max(position.high_water, float(quote["high"]))
+            fear_score = fear_by_date.get(day, {}).get(position.index_symbol)
+            if not position.greed_reduced and fear_score is not None and fear_score > greed_threshold:
+                pending_sells[symbol] = {
+                    "signal_date": str(day), "reason": "extreme_greed_partial",
+                    "fraction": greed_sell_fraction, "fear_score": float(fear_score),
+                }
+                continue
+            realized_vol = quote.get("realized_volatility")
+            vol_threshold = quote.get("volatility_threshold")
+            if (
+                position.volatility_monitoring and not position.trailing_armed
+                and np.isfinite(realized_vol) and np.isfinite(vol_threshold)
+                and float(realized_vol) > float(vol_threshold)
+            ):
+                position.trailing_armed = True
+            drawdown = float(quote["close"]) / position.high_water - 1
+            if position.trailing_armed and drawdown <= -trailing_drawdown:
+                pending_sells[symbol] = {
+                    "signal_date": str(day), "reason": "volatility_trailing_stop",
+                    "fraction": 1.0, "fear_score": float(fear_score) if fear_score is not None else None,
+                    "realized_volatility": float(realized_vol),
+                    "volatility_threshold": float(vol_threshold),
+                    "drawdown_from_high_pct": drawdown * 100,
+                }
 
-        if position is None and pending_buy is not None:
-            quote = day_bars.get(pending_buy["etf_symbol"])
-            if quote and np.isfinite(quote.get("open", np.nan)):
-                price = float(quote["open"]) * (1 + slippage)
-                quantity = int(cash / (price * (1 + commission)) / lot_size) * lot_size
-                if quantity > 0:
-                    gross = quantity * price
-                    fee = gross * commission
-                    cash -= gross + fee
-                    position = Position(
-                        etf_symbol=pending_buy["etf_symbol"],
-                        index_symbol=pending_buy["index_symbol"],
-                        quantity=quantity,
-                        cost_basis=gross + fee,
-                        entry_date=str(day),
-                        entry_fear=pending_buy["fear_score"],
-                        high_water=float(quote["high"]),
-                        low_water=float(quote["low"]),
-                    )
-                    trades.append(
-                        {
-                            "date": str(day), "action": "buy",
-                            "etf_symbol": position.etf_symbol,
-                            "index_symbol": position.index_symbol,
-                            "quantity": quantity, "price": price,
-                            "gross": gross, "fee": fee, "pnl": None,
-                            "reason": "fear_below_25_abnormal_volume",
-                            "fear_score": pending_buy["fear_score"],
-                            "volume_z": pending_buy["volume_z"],
-                        }
-                    )
-                pending_buy = None
-
-        if position is not None and position.entry_date != str(day):
-            quote = day_bars.get(position.etf_symbol)
-            if quote:
-                high = float(quote["high"])
-                low = float(quote["low"])
-                close = float(quote["close"])
-                if high > position.high_water:
-                    position.high_water = high
-                    position.days_since_high = 0
-                else:
-                    position.days_since_high += 1
-                position.low_water = min(position.low_water, low)
-                in_range = position.days_since_high >= no_new_high_days
-                fear_score = fear_by_date.get(day, {}).get(position.index_symbol)
-                if in_range and fear_score is not None and fear_score > fear_greed_exit:
-                    position.exit_armed = True
-                midpoint = (position.high_water + position.low_water) / 2
-                if position.exit_armed and close >= midpoint and pending_sell is None:
-                    pending_sell = {
-                        "signal_date": str(day),
-                        "fear_score": float(fear_score) if fear_score is not None else None,
-                        "range_high": position.high_water,
-                        "range_low": position.low_water,
-                        "range_midpoint": midpoint,
-                        "signal_close": close,
-                        "days_since_high": position.days_since_high,
-                    }
-
-        if position is None and pending_buy is None:
-            candidates = signals.get(day, [])
+        # At most one new ETF is selected each close. Ranking is strictly based
+        # on information available on that close.
+        if pending_buy is None and cash > 0 and len(positions) < max_positions:
+            candidates = [item for item in signals.get(day, []) if item["etf_symbol"] not in positions]
             if candidates:
-                pending_buy = candidates[0]
+                pending_buy = {**candidates[0], "signal_date": str(day)}
 
-        value = cash
-        if position is not None:
-            value += position.quantity * last_close.get(position.etf_symbol, 0)
-        curve.append(
-            {
-                "date": str(day), "value": value, "cash": cash,
-                "position": position.etf_symbol if position else None,
-                "index_symbol": position.index_symbol if position else None,
-                "exit_armed": position.exit_armed if position else False,
-                "days_since_high": position.days_since_high if position else None,
-            }
+        market_value = sum(
+            position.quantity * last_close.get(symbol, 0.0)
+            for symbol, position in positions.items()
         )
+        value = cash + market_value
+        curve.append({
+            "date": str(day), "value": value, "cash": cash,
+            "market_value": market_value,
+            "exposure_pct": market_value / value * 100 if value else 0.0,
+            "holding_count": len(positions),
+            "positions": ",".join(sorted(positions)),
+            "trailing_armed_count": sum(item.trailing_armed for item in positions.values()),
+        })
     return pd.DataFrame(curve), pd.DataFrame(trades)
 
 
 def summarize(curve: pd.DataFrame, trades: pd.DataFrame, initial_capital: float) -> dict[str, Any]:
+    if curve.empty:
+        raise ValueError("回测区间没有交易日")
     values = curve["value"].astype(float)
     start = pd.Timestamp(curve.iloc[0]["date"])
     end = pd.Timestamp(curve.iloc[-1]["date"])
     years = max((end - start).days / 365.25, 1 / 365.25)
     total_return = values.iloc[-1] / initial_capital - 1
     daily = values.pct_change().dropna()
+    daily_std = float(daily.std(ddof=1)) if len(daily) else math.nan
     sells = trades[trades["action"] == "sell"] if len(trades) else trades
-    result = {
-        "start_date": str(start.date()),
-        "end_date": str(end.date()),
-        "initial_capital": initial_capital,
-        "final_value": float(values.iloc[-1]),
+    gross_turnover = float(trades["gross"].sum()) if len(trades) else 0.0
+    return {
+        "start_date": str(start.date()), "end_date": str(end.date()),
+        "initial_capital": initial_capital, "final_value": float(values.iloc[-1]),
         "total_return_pct": total_return * 100,
         "annualized_return_pct": ((1 + total_return) ** (1 / years) - 1) * 100,
         "max_drawdown_pct": max_drawdown(values) * 100,
-        "annualized_volatility_pct": float(daily.std(ddof=1) * math.sqrt(252) * 100),
-        "sharpe_zero_rf": (
-            float(daily.mean() / daily.std(ddof=1) * math.sqrt(252))
-            if daily.std(ddof=1) else None
-        ),
+        "annualized_volatility_pct": daily_std * math.sqrt(TRADING_DAYS) * 100 if np.isfinite(daily_std) else None,
+        "sharpe_zero_rf": float(daily.mean() / daily_std * math.sqrt(TRADING_DAYS)) if daily_std > 0 else None,
         "buy_count": int((trades["action"] == "buy").sum()) if len(trades) else 0,
-        "closed_trade_count": int(len(sells)),
+        "sell_count": int(len(sells)),
         "closed_trade_win_rate_pct": float((sells["pnl"] > 0).mean() * 100) if len(sells) else None,
         "realized_pnl": float(sells["pnl"].sum()) if len(sells) else 0.0,
-        "ending_position": curve.iloc[-1]["position"],
+        "turnover_pct": gross_turnover / initial_capital * 100,
+        "average_exposure_pct": float(curve["exposure_pct"].mean()),
+        "average_holding_count": float(curve["holding_count"].mean()),
+        "ending_positions": [item for item in str(curve.iloc[-1]["positions"]).split(",") if item],
     }
-    buys = trades[trades["action"] == "buy"] if len(trades) else trades
-    if len(buys):
-        first_buy_date = str(buys.iloc[0]["date"])
-        active_curve = curve[curve["date"] >= first_buy_date]
-        result["first_buy_date"] = first_buy_date
-        result["active_period_return_pct"] = float((
-            active_curve.iloc[-1]["value"] / active_curve.iloc[0]["value"] - 1
-        ) * 100)
-        if result["ending_position"]:
-            latest_buy = buys.iloc[-1]
-            open_cost = float(latest_buy["gross"]) + float(latest_buy["fee"])
-            open_market_value = float(curve.iloc[-1]["value"]) - float(curve.iloc[-1]["cash"])
-            result["ending_position_cost_basis"] = open_cost
-            result["ending_position_unrealized_pnl"] = open_market_value - open_cost
-    if "benchmark_value" in curve and curve["benchmark_value"].notna().any():
-        benchmark = curve["benchmark_value"].dropna().astype(float)
-        benchmark_return = benchmark.iloc[-1] / benchmark.iloc[0] - 1
-        result.update(
-            {
-                "benchmark": "000300.SH",
-                "benchmark_total_return_pct": benchmark_return * 100,
-                "benchmark_max_drawdown_pct": max_drawdown(benchmark) * 100,
-            }
-        )
-        if len(buys):
-            active_benchmark = curve[curve["date"] >= first_buy_date]["benchmark_value"].dropna()
-            result["benchmark_active_period_return_pct"] = float((
-                active_benchmark.iloc[-1] / active_benchmark.iloc[0] - 1
-            ) * 100)
-    return result
