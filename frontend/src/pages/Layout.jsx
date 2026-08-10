@@ -83,7 +83,7 @@ const getActiveTabKey = (pathname, state) => {
 const AppLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { accountId } = useAccount();
+  const { accountId, isAdmin } = useAccount();
 
   const renderTabLabel = (icon, text) => (
     <span className="app-shell__tab-label">
@@ -108,16 +108,18 @@ const AppLayout = () => {
       label: renderTabLabel(<DollarOutlined />, '估值'),
       disabled: !accountId
     },
-    {
-      key: '/factor-lab',
-      label: renderTabLabel(<ExperimentOutlined />, '研究'),
-      disabled: !accountId
-    },
-    {
-      key: '/live',
-      label: renderTabLabel(<ThunderboltOutlined />, '实盘'),
-      disabled: !accountId
-    },
+    ...(accountId && isAdmin ? [
+      {
+        key: '/factor-lab',
+        label: renderTabLabel(<ExperimentOutlined />, '研究'),
+        disabled: false
+      },
+      {
+        key: '/live',
+        label: renderTabLabel(<ThunderboltOutlined />, '实盘'),
+        disabled: false
+      }
+    ] : []),
     {
       key: '/profile',
       label: renderTabLabel(<UserOutlined />, '我的')

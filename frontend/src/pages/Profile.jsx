@@ -33,9 +33,9 @@ const Profile = () => {
         throw new Error(response.data.message || '账户ID无效');
       }
 
-      // 验证成功后保存
+      // 验证成功后激活
       login(values.accountId, response.data.is_admin);
-      message.success('账户设置成功');
+      message.success('账户激活成功');
       navigate('/');
     } catch (error) {
       const errorMessage = error.response?.data?.message || error.message || '账户ID无效';
@@ -60,7 +60,7 @@ const Profile = () => {
     }
   };
 
-  const sections = [
+  const sections = isAdmin && accountId ? [
     {
       title: '交易与执行',
       icon: <RocketOutlined />,
@@ -92,11 +92,11 @@ const Profile = () => {
       icon: <WalletOutlined />,
       className: 'profile-section--accounts',
       items: [
-        ...(isAdmin ? [{
+        {
           title: '系统账户管理',
           onClick: () => navigate('/web-account-manager'),
           arrow: true
-        }] : []),
+        },
         {
           title: 'IBKR 账户管理',
           onClick: () => navigate('/ib-account-manager'),
@@ -152,7 +152,7 @@ const Profile = () => {
         },
       ]
     },
-    ...(isAdmin ? [{
+    {
       title: '系统管理',
       icon: <SettingOutlined />,
       className: 'profile-section--system',
@@ -173,8 +173,8 @@ const Profile = () => {
           arrow: true
         }
       ]
-    }] : [])
-  ];
+    }
+  ] : [];
 
   const renderMenu = (items, menuClassName = '') => (
     <div className={`profile-menu ${menuClassName}`.trim()}>
@@ -220,7 +220,7 @@ const Profile = () => {
         title={
           <span className="profile-section-title">
             <KeyOutlined />
-            <span>账户设置</span>
+            <span>{accountId ? '账户设置' : '账户激活'}</span>
           </span>
         }
       >
@@ -245,7 +245,7 @@ const Profile = () => {
             </Form.Item>
             <Form.Item>
               <Button type="primary" htmlType="submit" loading={loading} block>
-                保存
+                激活账户
               </Button>
             </Form.Item>
           </Form>
