@@ -26,6 +26,7 @@ export const CN_GENERAL_GROUPS = [
     key: 'broad-and-style',
     title: '宽基及风格指数',
     options: [
+      cnOption('000300.SH', '沪深300', '宽基'),
       cnOption('000985.SH', '中证全指', '宽基'),
       cnOption('899050.BJ', '北证50', '宽基'),
       cnOption('INNO100.CN', 'A创100', '创新100'),
@@ -67,6 +68,7 @@ export const CN_INDUSTRY_GROUPS = [
     key: 'industrials',
     title: '工业制造',
     taxonomyCode: '880360',
+    layout: 'wide',
     children: [
       { title: '工程机械', code: '880447', options: [cnOption('931752.CSI', '工程机械', '二级行业')] },
       { title: '专用设备', code: '880445', options: [cnOption('980022.SZ', '机器人产业', '二级行业')] },
@@ -79,6 +81,7 @@ export const CN_INDUSTRY_GROUPS = [
     key: 'discretionary',
     title: '可选消费',
     taxonomyCode: '880390',
+    layout: 'wide',
     options: [cnOption('000989.SH', '全指可选消费', '一级行业')],
     children: [
       { title: '家电', code: '880391', options: [cnOption('980028.SZ', '龙头家电', '二级行业')] },
@@ -125,7 +128,15 @@ export const CN_INDUSTRY_GROUPS = [
     taxonomyCode: '880992',
     options: [cnOption('000993.SH', '全指信息', '一级行业')],
     children: [
-      { title: '半导体', code: '880491', options: [cnOption('H30184.CSI', '半导体', '二级行业')] },
+      {
+        title: '半导体',
+        code: '880491',
+        options: [
+          cnOption('H30184.CSI', '半导体', '二级行业'),
+          cnOption('950162.CSI', '芯片设计', '三级行业'),
+          cnOption('931743.CSI', '材料与设备', '三级行业'),
+        ],
+      },
       { title: '通信设备', code: '880490', options: [cnOption('931160.CSI', '通信设备', '二级行业')] },
       { title: '电脑设备', code: '880489', options: [cnOption('930651.CSI', '中证计算机', '二级行业')] },
       { title: '软件服务', code: '880493', options: [cnOption('H30202.CSI', '全指软件', '二级行业'), cnOption('930851.CSI', '云计算', '三级行业')] },

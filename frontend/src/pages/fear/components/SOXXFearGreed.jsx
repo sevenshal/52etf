@@ -21,6 +21,10 @@ const industryOptionCount = group => (
 
 const SORTED_CN_INDUSTRY_GROUPS = [...CN_INDUSTRY_GROUPS]
   .sort((left, right) => industryOptionCount(right) - industryOptionCount(left));
+const MULTI_INDEX_CN_INDUSTRY_GROUPS = SORTED_CN_INDUSTRY_GROUPS
+  .filter(group => industryOptionCount(group) > 1);
+const SINGLE_INDEX_CN_INDUSTRY_GROUPS = SORTED_CN_INDUSTRY_GROUPS
+  .filter(group => industryOptionCount(group) === 1);
 
 const DEFAULT_DETAIL_STATE = {
   data: [],
@@ -475,7 +479,18 @@ const SOXXFearGreed = () => {
             </div>
 
             <div className="soxx-fear-industry-groups">
-              {SORTED_CN_INDUSTRY_GROUPS.map(group => (
+              {MULTI_INDEX_CN_INDUSTRY_GROUPS.map(group => (
+                <IndustryGroup
+                  key={group.key}
+                  group={group}
+                  summaryBySymbol={summaryBySymbol}
+                  expandedSymbol={expandedSymbol}
+                  onToggle={toggleExpanded}
+                />
+              ))}
+            </div>
+            <div className="soxx-fear-singleton-groups">
+              {SINGLE_INDEX_CN_INDUSTRY_GROUPS.map(group => (
                 <IndustryGroup
                   key={group.key}
                   group={group}
@@ -693,10 +708,10 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
       }))
     )),
   ];
-  const sizeClass = count >= 6
+  const sizeClass = group.layout === 'wide' || count >= 6
     ? ' is-wide'
     : count === 2
-      ? ' is-compact is-pair'
+      ? ' is-pair'
       : count === 1
         ? ' is-compact'
         : '';
