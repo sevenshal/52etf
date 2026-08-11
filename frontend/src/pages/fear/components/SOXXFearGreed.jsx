@@ -21,10 +21,12 @@ const industryOptionCount = group => (
 
 const SORTED_CN_INDUSTRY_GROUPS = [...CN_INDUSTRY_GROUPS]
   .sort((left, right) => industryOptionCount(right) - industryOptionCount(left));
-const MULTI_INDEX_CN_INDUSTRY_GROUPS = SORTED_CN_INDUSTRY_GROUPS
-  .filter(group => industryOptionCount(group) > 1);
-const SINGLE_INDEX_CN_INDUSTRY_GROUPS = SORTED_CN_INDUSTRY_GROUPS
-  .filter(group => industryOptionCount(group) === 1);
+const COMPACT_CN_INDUSTRY_KEYS = ['financials', 'utilities', 'defense', 'real-estate'];
+const COMPACT_CN_INDUSTRY_GROUPS = COMPACT_CN_INDUSTRY_KEYS
+  .map(key => CN_INDUSTRY_GROUPS.find(group => group.key === key))
+  .filter(Boolean);
+const MAIN_CN_INDUSTRY_GROUPS = SORTED_CN_INDUSTRY_GROUPS
+  .filter(group => !COMPACT_CN_INDUSTRY_KEYS.includes(group.key));
 
 const DEFAULT_DETAIL_STATE = {
   data: [],
@@ -479,7 +481,7 @@ const SOXXFearGreed = () => {
             </div>
 
             <div className="soxx-fear-industry-groups">
-              {MULTI_INDEX_CN_INDUSTRY_GROUPS.map(group => (
+              {MAIN_CN_INDUSTRY_GROUPS.map(group => (
                 <IndustryGroup
                   key={group.key}
                   group={group}
@@ -489,8 +491,8 @@ const SOXXFearGreed = () => {
                 />
               ))}
             </div>
-            <div className="soxx-fear-singleton-groups">
-              {SINGLE_INDEX_CN_INDUSTRY_GROUPS.map(group => (
+            <div className="soxx-fear-compact-groups">
+              {COMPACT_CN_INDUSTRY_GROUPS.map(group => (
                 <IndustryGroup
                   key={group.key}
                   group={group}
