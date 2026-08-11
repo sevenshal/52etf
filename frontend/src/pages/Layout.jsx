@@ -5,6 +5,7 @@ import {
   ExperimentOutlined,
   FireOutlined,
   HomeOutlined,
+  RobotOutlined,
   ThunderboltOutlined,
   UserOutlined,
 } from '@ant-design/icons';
@@ -14,7 +15,7 @@ import './Layout.css';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/live', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/ai-stock', '/live', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -33,6 +34,7 @@ const PROFILE_ROUTES = [
   '/scheduled-tasks',
   '/email-settings',
   '/web-account-manager',
+  '/tushare-account-manager',
   '/system-log',
 ];
 
@@ -77,6 +79,10 @@ const getActiveTabKey = (pathname, state) => {
     return '/factor-lab';
   }
 
+  if (isRouteOrChild(pathname, '/ai-stock')) {
+    return '/ai-stock';
+  }
+
   return '/profile';
 };
 
@@ -112,6 +118,11 @@ const AppLayout = () => {
       {
         key: '/factor-lab',
         label: renderTabLabel(<ExperimentOutlined />, '研究'),
+        disabled: false
+      },
+      {
+        key: '/ai-stock',
+        label: renderTabLabel(<RobotOutlined />, 'AI荐股'),
         disabled: false
       },
       {

@@ -29,6 +29,8 @@ import LiveTrading from './pages/LiveTrading';
 import EmailSettings from './pages/EmailSettings';
 import WebAccountManager from './pages/WebAccountManager';
 import AStockFearEtfBacktest from './pages/AStockFearEtfBacktest';
+import AIStock from './pages/AIStock';
+import TushareAccountManager from './pages/TushareAccountManager';
 
 const LiveTabRedirect = ({ tab }) => {
   const location = useLocation();
@@ -64,8 +66,10 @@ function App() {
           <Route path="/factor-lab/live" element={<LiveTabRedirect tab="factor" />} />
           <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
           <Route path="/factor-lab/xueqiu-holdings" element={<FactorLab initialTab="xueqiu-holdings" />} />
+          <Route path="/ai-stock" element={<AdminRoute><AIStock /></AdminRoute>} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/web-account-manager" element={<AdminRoute><WebAccountManager /></AdminRoute>} />
+          <Route path="/tushare-account-manager" element={<AdminRoute><TushareAccountManager /></AdminRoute>} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
           <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />

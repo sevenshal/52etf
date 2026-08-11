@@ -112,6 +112,11 @@ const Profile = () => {
           onClick: () => navigate('/evc-account-manager'),
           arrow: true
         },
+        {
+          title: 'Tushare账户',
+          onClick: () => navigate('/tushare-account-manager'),
+          arrow: true
+        },
       ]
     },
     {
