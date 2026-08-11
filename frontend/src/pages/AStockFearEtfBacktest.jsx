@@ -22,10 +22,11 @@ const PARAM_FIELDS = [
   { key: 'bottom_ma_window', label: '“底”均线窗口', value: '5', group: 'entry', integer: true, note: '与贪恐曲线的5日线同口径' },
   { key: 'extreme_buy_fraction', label: '放量恐慌买入仓位', value: '1.0', group: 'entry', note: '1 = 100%可用组合仓位' },
   { key: 'bottom_buy_fraction', label: '“底”信号买入仓位', value: '0.5', group: 'entry', note: '0.5 = 50%组合仓位' },
-  { key: 'momentum_window', label: '风险调整动量窗口', value: '120,200', group: 'entry', integer: true, note: '多信号时择优' },
-  { key: 'max_positions', label: '最大持仓数', value: '1,2', group: 'entry', integer: true, note: '同一天只选动量最高的一只' },
+  { key: 'max_positions', label: '最大持仓数', value: '1,2', group: 'entry', integer: true, note: '同一天只选量比最高的一只' },
   { key: 'greed_threshold', label: '极度贪婪阈值', value: '70,75,80', group: 'exit', note: '恐贪严格大于' },
   { key: 'greed_sell_fraction', label: '贪婪减仓比例', value: '0.5', group: 'exit', note: '首次触发只执行一次' },
+  { key: 'stop_loss_pct', label: '固定止损%', value: '10', group: 'exit', note: '收盘价较买入成交价跌幅严格超过阈值' },
+  { key: 'stop_cooldown_days', label: '止损冷静期', value: '20', group: 'exit', integer: true, note: '止损成交后N个交易日不再买入' },
   { key: 'volatility_window', label: '当前波动率窗口', value: '20', group: 'exit', integer: true },
   { key: 'volatility_baseline_window', label: '波动率基准窗口', value: '20', group: 'exit', integer: true, note: '不含信号日' },
   { key: 'volatility_std_multiplier', label: '波动率突破标准差', value: '0.5,1,1.5', group: 'exit', note: '当前波动率 > 均值 + Nσ' },
@@ -48,6 +49,7 @@ const reasonLabels = {
   extreme_fear_volume: '极恐放量买入',
   fear_bottom_reversal: '见底信号买入',
   extreme_greed_partial: '极贪减仓',
+  stop_loss: '固定止损',
   volatility_trailing_stop: '波动突破后移动止盈',
 };
 
@@ -71,20 +73,23 @@ const AStockFearEtfBacktest = () => {
   const [searchResults, setSearchResults] = useState([]);
   const [searchMeta, setSearchMeta] = useState(null);
   const [job, setJob] = useState(null);
+  const [formValues, setFormValues] = useState({});
   const pollRef = useRef(null);
-  const watched = Form.useWatch([], form);
 
   useEffect(() => {
     request.get('/api/a-stock-fear-etf-backtest/options')
       .then(({ data }) => {
         setOptions(data);
         const defaults = Object.fromEntries(PARAM_FIELDS.map(field => [`${field.key}_values`, field.value]));
-        form.setFieldsValue({
+        const initialValues = {
           ...defaults,
           date_range: [dayjs(data.default_request?.start_date || '2023-01-01'), dayjs()],
           initial_capital: data.default_request?.initial_capital || 1000000,
+          benchmark_symbol: data.default_request?.benchmark_symbol || '000300.SH',
           included_indexes: [], objective: 'sharpe_zero_rf', top_n: 20,
-        });
+        };
+        form.setFieldsValue(initialValues);
+        setFormValues(initialValues);
       })
       .catch(error => message.error(error.response?.data?.detail || '加载回测选项失败'));
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -92,10 +97,21 @@ const AStockFearEtfBacktest = () => {
 
   const candidateGroups = useMemo(() => Object.fromEntries(PARAM_FIELDS.map(field => [
     field.key,
-    parseNumbers(watched?.[`${field.key}_values`], field.integer),
-  ])), [watched]);
+    parseNumbers(formValues?.[`${field.key}_values`], field.integer),
+  ])), [formValues]);
   const combinationCount = Object.values(candidateGroups).reduce((total, values) => total * values.length, 1);
   const combinationInvalid = combinationCount < 1 || combinationCount > options.max_search_combinations;
+
+  const etfNames = useMemo(() => Object.fromEntries(
+    options.targets.map(item => [String(item.etf_symbol || '').toUpperCase(), item.etf_label])
+  ), [options.targets]);
+
+  const formatEtf = symbol => {
+    if (!symbol) return '-';
+    const normalized = String(symbol).toUpperCase();
+    const name = etfNames[normalized];
+    return name && name !== normalized ? `${name}（${normalized}）` : normalized;
+  };
 
   const targetOptions = options.targets.map(item => ({
     value: item.index_symbol,
@@ -106,6 +122,7 @@ const AStockFearEtfBacktest = () => {
     start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
     end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
     initial_capital: values.initial_capital,
+    benchmark_symbol: values.benchmark_symbol,
     included_indexes: values.included_indexes || [],
   });
 
@@ -201,9 +218,10 @@ const AStockFearEtfBacktest = () => {
     { title: '量比', dataIndex: ['params', 'volume_ratio_threshold'], width: 62 },
     { title: '底阈值', dataIndex: ['params', 'bottom_fear_threshold'], width: 70 },
     { title: '极贪', dataIndex: ['params', 'greed_threshold'], width: 62 },
+    { title: '止损', dataIndex: ['params', 'stop_loss_pct'], render: value => `${value}%`, width: 68 },
+    { title: '冷静期', dataIndex: ['params', 'stop_cooldown_days'], render: value => `${value}日`, width: 72 },
     { title: '波动σ', dataIndex: ['params', 'volatility_std_multiplier'], width: 68 },
     { title: '回撤止盈', dataIndex: ['params', 'trailing_drawdown_pct'], render: value => `${value}%`, width: 88 },
-    { title: '动量', dataIndex: ['params', 'momentum_window'], width: 62 },
     { title: '持仓', dataIndex: ['params', 'max_positions'], width: 62 },
     { title: '年化', dataIndex: ['summary', 'annualized_return_pct'], render: pct, sorter: (a, b) => a.summary.annualized_return_pct - b.summary.annualized_return_pct },
     { title: '回撤', dataIndex: ['summary', 'max_drawdown_pct'], render: pct },
@@ -215,29 +233,29 @@ const AStockFearEtfBacktest = () => {
     { title: '成交日', dataIndex: 'date', width: 108 },
     { title: '信号日', dataIndex: 'signal_date', width: 108 },
     { title: '动作', dataIndex: 'action', width: 66, render: value => <Tag color={value === 'buy' ? 'green' : 'red'}>{value === 'buy' ? '买' : '卖'}</Tag> },
-    { title: 'ETF', dataIndex: 'etf_symbol', width: 100 },
+    { title: 'ETF', dataIndex: 'etf_symbol', width: 190, render: formatEtf },
     { title: '指数', dataIndex: 'index_symbol', width: 104 },
     { title: '价格', dataIndex: 'price', render: value => num(value, 4) },
     { title: '数量', dataIndex: 'quantity', render: value => Number(value).toLocaleString() },
     { title: '恐贪', dataIndex: 'fear_score', render: value => num(value) },
     { title: '量比', dataIndex: 'volume_ratio', render: value => num(value) },
-    { title: '动量分', dataIndex: 'risk_adjusted_momentum', render: value => num(value) },
     { title: '盈亏', dataIndex: 'pnl', render: value => value == null ? '-' : money(value) },
     { title: '原因', dataIndex: 'reason', width: 170, render: value => reasonLabels[value] || value },
   ];
 
   const equityOption = useMemo(() => {
     const rows = result?.equity_curve || [];
+    const benchmarkLabel = result?.benchmark?.label || result?.benchmark?.symbol || '基准';
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['策略', '沪深300'] },
+      legend: { data: ['策略', benchmarkLabel] },
       grid: { left: 62, right: 24, top: 44, bottom: 50 },
       xAxis: { type: 'category', data: rows.map(item => item.date), boundaryGap: false },
       yAxis: { type: 'value', scale: true },
       dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18 }],
       series: [
         { name: '策略', type: 'line', showSymbol: false, data: rows.map(item => item.value), lineStyle: { color: '#1677ff', width: 2 } },
-        { name: '沪深300', type: 'line', showSymbol: false, data: rows.map(item => item.benchmark_value), lineStyle: { color: '#8c8c8c', width: 1.4 } },
+        { name: benchmarkLabel, type: 'line', showSymbol: false, data: rows.map(item => item.benchmark_value), lineStyle: { color: '#8c8c8c', width: 1.4 } },
       ],
     };
   }, [result]);
@@ -251,28 +269,33 @@ const AStockFearEtfBacktest = () => {
           <Text type="secondary">恐慌负责入场，贪婪先减仓，波动率突破后由移动止盈保护利润。</Text>
         </div>
         <div className="a-fear-etf-badges">
-          <Tag>全量ETF指数池</Tag><Tag>次日开盘成交</Tag><Tag>风险调整动量择优</Tag>
+          <Tag>全量ETF指数池</Tag><Tag>次日开盘成交</Tag><Tag>量比择优</Tag><Tag>10%固定止损</Tag>
         </div>
       </header>
 
       <div className="a-fear-etf-flow">
         <div><b>01</b><span>极恐放量买满<br />或“底”信号买半仓</span></div>
         <i />
-        <div><b>02</b><span>多信号比较<br />200日风险调整动量</span></div>
+        <div><b>02</b><span>多信号同时出现<br />优先选择量比最大</span></div>
         <i />
         <div><b>03</b><span>极贪卖出一半<br />开始观察波动率</span></div>
         <i />
-        <div><b>04</b><span>波动突破后<br />高点回撤7%止盈</span></div>
+        <div><b>04</b><span>亏损10%止损并冷静20日<br />波动突破后回撤7%止盈</span></div>
       </div>
 
       <Card className="a-fear-etf-card a-fear-etf-config" title={<span><ExperimentOutlined /> 参数搜索空间</span>}>
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" onValuesChange={(_, values) => setFormValues(values)}>
           <Row gutter={14}>
             <Col xs={24} md={12} xl={6}><Form.Item name="date_range" label="回测区间" rules={[{ required: true }]}><RangePicker style={{ width: '100%' }} /></Form.Item></Col>
             <Col xs={12} md={6} xl={4}><Form.Item name="initial_capital" label="初始资金"><InputNumber min={10000} step={100000} style={{ width: '100%' }} /></Form.Item></Col>
             <Col xs={12} md={6} xl={4}><Form.Item name="top_n" label="保留前N组"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item></Col>
             <Col xs={24} md={8} xl={4}><Form.Item name="objective" label="搜索目标"><Select options={objectiveOptions} /></Form.Item></Col>
-            <Col xs={24} md={16} xl={6}>
+            <Col xs={24} md={8} xl={6}>
+              <Form.Item name="benchmark_symbol" label="对比基准" rules={[{ required: true, message: '请选择对比基准' }]}>
+                <Select showSearch optionFilterProp="label" options={targetOptions} placeholder="从标的池选择基准" />
+              </Form.Item>
+            </Col>
+            <Col xs={24}>
               <Form.Item name="included_indexes" label="标的池" extra={`留空使用全部 ${options.targets.length} 个有ETF的指数`}>
                 <Select mode="multiple" allowClear showSearch optionFilterProp="label" options={targetOptions} maxTagCount="responsive" placeholder="全部可交易指数" />
               </Form.Item>
@@ -328,17 +351,19 @@ const AStockFearEtfBacktest = () => {
                 <Descriptions.Item label="极恐 + 量比">&lt; {result.params?.extreme_fear_threshold} / ≥ {result.params?.volume_ratio_threshold}</Descriptions.Item>
                 <Descriptions.Item label="见底条件">近{result.params?.bottom_ma_window}日曾 &lt; {result.params?.bottom_fear_threshold}，MA{result.params?.bottom_ma_window}转升</Descriptions.Item>
                 <Descriptions.Item label="极贪减仓">&gt; {result.params?.greed_threshold}，卖 {num(result.params?.greed_sell_fraction * 100, 0)}%</Descriptions.Item>
+                <Descriptions.Item label="固定止损">跌幅 &gt; {result.params?.stop_loss_pct}%，冷静 {result.params?.stop_cooldown_days} 个交易日</Descriptions.Item>
                 <Descriptions.Item label="移动止盈">波动 +{result.params?.volatility_std_multiplier}σ，回撤 {result.params?.trailing_drawdown_pct}%</Descriptions.Item>
+                <Descriptions.Item label="对比基准">{result.benchmark?.label || result.benchmark?.symbol || '-'}</Descriptions.Item>
                 <Descriptions.Item label="期末资产">{money(result.summary?.final_value)}</Descriptions.Item>
                 <Descriptions.Item label="换手率">{pct(result.summary?.turnover_pct)}</Descriptions.Item>
                 <Descriptions.Item label="卖出胜率">{pct(result.summary?.closed_trade_win_rate_pct)}</Descriptions.Item>
-                <Descriptions.Item label="期末持仓">{result.summary?.ending_positions?.join('、') || '现金'}</Descriptions.Item>
+                <Descriptions.Item label="期末持仓">{result.summary?.ending_positions?.map(formatEtf).join('、') || '现金'}</Descriptions.Item>
               </Descriptions>
             </Card>
             <Card className="a-fear-etf-card" title="资金曲线"><ReactECharts option={equityOption} style={{ height: 390 }} /></Card>
             <Row gutter={16}>
               <Col xs={24} lg={7}><Card className="a-fear-etf-card" title="年度收益"><Table rowKey="year" size="small" pagination={false} dataSource={result.yearly_returns || []} columns={[{ title: '年度', dataIndex: 'year' }, { title: '收益', dataIndex: 'return_pct', render: pct }]} /></Card></Col>
-              <Col xs={24} lg={17}><Card className="a-fear-etf-card" title="交易流水"><Table rowKey={(row, index) => `${row.date}-${row.action}-${row.etf_symbol}-${index}`} size="small" dataSource={result.trades || []} columns={tradeColumns} scroll={{ x: 1260 }} pagination={{ pageSize: 12 }} /></Card></Col>
+              <Col xs={24} lg={17}><Card className="a-fear-etf-card" title="交易流水"><Table rowKey={(row, index) => `${row.date}-${row.action}-${row.etf_symbol}-${index}`} size="small" dataSource={result.trades || []} columns={tradeColumns} scroll={{ x: 1350 }} pagination={{ pageSize: 12 }} /></Card></Col>
             </Row>
           </>
         )}

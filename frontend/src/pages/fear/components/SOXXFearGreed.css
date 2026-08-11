@@ -244,7 +244,7 @@
 
 .soxx-fear-summary-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 3fr) minmax(0, 3fr) minmax(0, 4fr);
   gap: 6px;
   margin-top: 9px;
 }
@@ -285,7 +285,7 @@
 
 .soxx-fear-summary-valuation {
   display: grid;
-  grid-template-columns: 1.25fr 1fr auto;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 4fr) minmax(0, 3fr);
   gap: 6px;
   margin-top: 6px;
   padding-top: 6px;
