@@ -415,6 +415,7 @@
 
   .soxx-fear-summary-grid,
   .soxx-fear-industry-group .soxx-fear-summary-grid,
+  .soxx-fear-industry-group.is-wide .soxx-fear-summary-grid,
   .soxx-fear-industry-group.is-compact .soxx-fear-summary-grid,
   .soxx-fear-industry-group.is-pair .soxx-fear-summary-grid {
     grid-template-columns: 1fr;
