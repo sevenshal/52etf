@@ -7,6 +7,7 @@ BENCHMARK_INDEXES = [
     {"ts_code": "000905.SH", "name": "中证500"},
 ]
 A_STOCK_FACTOR_INDEX_POOLS = [
+    {"index_code": "000300.SH", "name": "沪深300"},
     {"index_code": "000510.SH", "name": "中证A500"},
     {"index_code": "000905.SH", "name": "中证500"},
     {"index_code": "000985.SH", "name": "中证全指"},
@@ -17,6 +18,8 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "399006.SZ", "name": "创业板指"},
     {"index_code": "399975.SZ", "name": "证券公司"},
     {"index_code": "H30184.CSI", "name": "半导体"},
+    {"index_code": "950162.CSI", "name": "科创芯片设计"},
+    {"index_code": "931743.CSI", "name": "半导体材料设备"},
     {"index_code": "980022.SZ", "name": "机器人产业"},
     {"index_code": "399997.SZ", "name": "中证白酒"},
     {"index_code": "399989.SZ", "name": "中证医疗"},
@@ -29,6 +32,14 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000015.SH", "name": "上证红利"},
 ]
 A_STOCK_INDEX_FEAR_GREED_TARGETS = [
+    {
+        "symbol": "000300.SH",
+        "ticker": "沪深300",
+        "label": "沪深300",
+        "index_name": "沪深300指数",
+        "option_underlyings": ["OP510300.SH", "OP159919.SZ"],
+        "proxy_etf": "510300.SH",
+    },
     {
         "symbol": "000510.SH",
         "ticker": "中证A500",
@@ -107,6 +118,22 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "index_name": "中证全指半导体产品与设备指数",
         "option_underlyings": [],
         "proxy_etf": "512480.SH",
+    },
+    {
+        "symbol": "950162.CSI",
+        "ticker": "科创芯片设计",
+        "label": "芯片设计",
+        "index_name": "上证科创板芯片设计主题指数",
+        "option_underlyings": [],
+        "proxy_etf": "588780.SH",
+    },
+    {
+        "symbol": "931743.CSI",
+        "ticker": "半导体材料设备",
+        "label": "材料与设备",
+        "index_name": "中证半导体材料设备主题指数",
+        "option_underlyings": [],
+        "proxy_etf": "159516.SZ",
     },
     {
         "symbol": "980022.SZ",
@@ -236,6 +263,7 @@ A_STOCK_FACTOR_INDEX_POOLS.extend(
 )
 
 A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
+    "510300.SH",
     "563360.SH",
     "510500.SH",
     "510300.SH",
@@ -245,6 +273,8 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "159915.SZ",
     "512880.SH",
     "512480.SH",
+    "588780.SH",
+    "159516.SZ",
     "159530.SZ",
     "161725.SZ",
     "512170.SH",
@@ -296,6 +326,8 @@ A_STOCK_ETF_DAILY_NAMES = {
     "159915.SZ": "创业板ETF",
     "512880.SH": "证券ETF",
     "512480.SH": "半导体ETF",
+    "588780.SH": "芯片设计ETF",
+    "159516.SZ": "半导体设备ETF",
     "159530.SZ": "机器人ETF易方达",
     "161725.SZ": "中证白酒LOF",
     "512170.SH": "医疗ETF",
