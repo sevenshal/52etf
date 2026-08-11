@@ -37,6 +37,7 @@ export const CN_GENERAL_GROUPS = [
       cnOption('000699.SH', '科创200', '宽基'),
       cnOption('399006.SZ', '创业板指', '宽基'),
       cnOption('000015.SH', '上证红利', '风格'),
+      cnOption('H30269.CSI', '红利低波', '风格'),
     ],
   },
 ];
