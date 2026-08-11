@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import hashlib
 import threading
 import time
 from collections import deque
@@ -12,13 +13,9 @@ import pandas as pd
 import tushare as ts
 
 from .quote import QuoteObserver, QuoteProvider
+from .tushare_account import get_tushare_token_for_runtime
 
 
-DEFAULT_TUSHARE_TOKEN = (
-    os.getenv("TUSHARE_API_KEY")
-    or os.getenv("TUSHARE_TOKEN")
-    or "ab64214cee604266631006c89f6b0b5dffa4c661b3d59f4fe3ea50d8"
-)
 TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
@@ -37,6 +34,10 @@ TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE", "120")),
 )
+TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR = max(
+    1,
+    int(os.getenv("TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR", "27")),
+)
 
 # Tushare publishes CSI-owned indexes with the .CSI suffix even when the
 # application uses the familiar exchange-style symbol as its canonical key.
@@ -46,6 +47,11 @@ TUSHARE_INDEX_DAILY_CODE_ALIASES = {
 
 
 class TushareUnsupportedError(NotImplementedError):
+    pass
+
+
+class TushareRateLimitError(ValueError):
+    """A provider quota was exhausted and retrying now cannot succeed."""
     pass
 
 
@@ -69,6 +75,19 @@ class _SlidingWindowRateLimiter:
                     return
                 wait_seconds = self.period_seconds - (now - self._calls[0])
             time.sleep(max(wait_seconds, 0.01))
+
+    def try_acquire(self) -> tuple[bool, float]:
+        """Reserve one quota slot without ever blocking the caller."""
+        if self.max_calls <= 0:
+            return True, 0.0
+        with self._lock:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] >= self.period_seconds:
+                self._calls.popleft()
+            if len(self._calls) < self.max_calls:
+                self._calls.append(now)
+                return True, 0.0
+            return False, max(0.0, self.period_seconds - (now - self._calls[0]))
 
 
 class TushareService(QuoteProvider):
@@ -97,9 +116,13 @@ class TushareService(QuoteProvider):
         TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
+    _major_news_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR,
+        3600.0,
+    )
 
     def __init__(self, token: Optional[str] = None):
-        self.token = (token or DEFAULT_TUSHARE_TOKEN or "").strip()
+        self.token = (token or get_tushare_token_for_runtime() or "").strip()
         if not self.token:
             raise ValueError("Tushare token is required")
         self.logger = logging.getLogger("TushareService")
@@ -115,10 +138,15 @@ class TushareService(QuoteProvider):
 
     @classmethod
     def get_instance(cls, token: Optional[str] = None):
-        cache_key = (token or DEFAULT_TUSHARE_TOKEN or "").strip()
+        effective_token = (token or get_tushare_token_for_runtime() or "").strip()
+        cache_key = hashlib.sha256(effective_token.encode("utf-8")).hexdigest() if effective_token else ""
         if cache_key not in cls._instances:
-            cls._instances[cache_key] = cls(token)
+            cls._instances[cache_key] = cls(effective_token)
         return cls._instances[cache_key]
+
+    @classmethod
+    def clear_cached_instances(cls) -> None:
+        cls._instances.clear()
 
     @classmethod
     def getInstance(cls, token: Optional[str] = None):
@@ -357,6 +385,247 @@ class TushareService(QuoteProvider):
             if column in frame.columns:
                 frame[column] = pd.to_datetime(frame[column], format="%Y%m%d", errors="coerce").dt.date
         return frame.drop_duplicates()
+
+    def get_a_stock_news_frame(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        sources: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch every available short-news title in a time range.
+
+        ``news`` documents a 1,500-row response cap but not offset pagination.
+        Split saturated windows instead of relying on undocumented parameters.
+        """
+        if not start_at or not end_at or start_at >= end_at:
+            return pd.DataFrame()
+        frames = []
+        for source in sources or ["sina", "wallstreetcn", "10jqka", "eastmoney", "yuncaijing", "fenghuang", "jinrongjie", "cls", "yicai"]:
+            source_frames = []
+
+            def fetch_window(window_start: datetime, window_end: datetime):
+                try:
+                    frame = self.pro.news(
+                        src=source,
+                        start_date=window_start.strftime("%Y-%m-%d %H:%M:%S"),
+                        end_date=window_end.strftime("%Y-%m-%d %H:%M:%S"),
+                        fields="datetime,title,channels",
+                    )
+                except Exception as exc:
+                    self.logger.warning("Tushare news fetch failed for %s: %s", source, exc)
+                    return
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    return
+                if len(frame) >= 1500 and (window_end - window_start).total_seconds() > 1:
+                    midpoint = window_start + (window_end - window_start) / 2
+                    fetch_window(window_start, midpoint)
+                    fetch_window(midpoint, window_end)
+                    return
+                snapshot = frame.copy()
+                snapshot["source"] = source
+                snapshot["news_kind"] = "news"
+                source_frames.append(snapshot)
+
+            fetch_window(start_at, end_at)
+            frames.extend(source_frames)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        if "datetime" in result.columns:
+            result["datetime"] = pd.to_datetime(result["datetime"], errors="coerce")
+        return result.drop_duplicates(subset=["source", "datetime", "title"], keep="last")
+
+    def get_a_stock_major_news_frame(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        sources: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch every available long-news *title* without sending article bodies.
+
+        ``src`` is intentionally omitted so that Tushare returns all sources in one
+        call (capped at 800 items).  The time window is split only when the cap is
+        hit; per-source iteration is replaced by an optional post-fetch filter.
+        """
+        if not start_at or not end_at or start_at >= end_at:
+            return pd.DataFrame()
+        frames: List[pd.DataFrame] = []
+
+        def fetch_window(window_start: datetime, window_end: datetime):
+            acquired, retry_after = self._major_news_rate_limiter.try_acquire()
+            if not acquired:
+                retry_minutes = max(1, math.ceil(retry_after / 60.0))
+                raise TushareRateLimitError(
+                    "Tushare major_news 本地小时级限流已达到上限；"
+                    f"请约 {retry_minutes} 分钟后再试"
+                )
+            try:
+                frame = self.pro.major_news(
+                    start_date=window_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    end_date=window_end.strftime("%Y-%m-%d %H:%M:%S"),
+                    fields="title,pub_time,src",
+                )
+            except Exception as exc:
+                if "频率超限" in str(exc):
+                    raise TushareRateLimitError(
+                        f"Tushare major_news 频率超限：{exc}"
+                    ) from exc
+                self.logger.warning("Tushare major_news fetch failed: %s", exc)
+                return
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return
+            # Tushare caps major_news at 800 items; split when saturated.
+            if len(frame) >= 800 and (window_end - window_start).total_seconds() > 1:
+                midpoint = window_start + (window_end - window_start) / 2
+                fetch_window(window_start, midpoint)
+                fetch_window(midpoint, window_end)
+                return
+            snapshot = frame.copy()
+            snapshot["datetime"] = pd.to_datetime(snapshot.get("pub_time"), errors="coerce")
+            snapshot["source"] = snapshot.get("src", "")
+            snapshot["news_kind"] = "major_news"
+            frames.append(snapshot)
+
+        fetch_window(start_at, end_at)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        if sources:
+            result = result[result["source"].isin(sources)]
+            if result.empty:
+                return pd.DataFrame()
+        return result.drop_duplicates(subset=["source", "datetime", "title"], keep="last")
+
+    def get_ths_index_frame(self, index_type: str) -> pd.DataFrame:
+        normalized_type = str(index_type or "").strip().upper()
+        if normalized_type not in {"N", "TH", "I"}:
+            raise ValueError("THS 板块类型必须是 N、TH 或 I")
+        try:
+            frame = self.pro.ths_index(
+                exchange="A",
+                type=normalized_type,
+                fields="ts_code,name,count,exchange,list_date,type",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare ths_index fetch failed for %s: %s", normalized_type, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["list_date"] = pd.to_datetime(result.get("list_date"), format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "name"])
+
+    def get_ths_member_frame(self, ths_code: str) -> pd.DataFrame:
+        try:
+            frame = self.pro.ths_member(
+                ts_code=str(ths_code or "").upper(),
+                fields="ts_code,con_code,con_name,weight,in_date,out_date,is_new",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare ths_member fetch failed for %s: %s", ths_code, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        return frame.dropna(subset=["ts_code", "con_code", "con_name"])
+
+    def get_ths_daily_frame(self, trade_date: date) -> pd.DataFrame:
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.ths_daily(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields="ts_code,trade_date,open,close,high,low,pre_close,avg_price,change,pct_change,vol,turnover_rate,total_mv,float_mv",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare ths_daily fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def get_ths_moneyflow_frame(self, trade_date: date) -> pd.DataFrame:
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.moneyflow_cnt_ths(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields="trade_date,ts_code,name,lead_stock,close_price,pct_change,industry_index,company_num,pct_change_stock,net_buy_amount,net_sell_amount,net_amount",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare moneyflow_cnt_ths fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def get_a_stock_realtime_minute_frame(self, ts_code: str, freq: str = "1MIN") -> pd.DataFrame:
+        """Return Tushare intraday accumulated minute bars for one A-share."""
+        symbol = self.normalize_symbol(ts_code)
+        if not self.is_cn_equity_symbol(symbol):
+            return pd.DataFrame()
+        normalized_freq = str(freq or "1MIN").upper()
+        if normalized_freq not in {"1MIN", "5MIN", "15MIN", "30MIN", "60MIN"}:
+            raise ValueError("分钟频率必须为 1MIN、5MIN、15MIN、30MIN 或 60MIN")
+        try:
+            frame = self.pro.rt_min_daily(
+                ts_code=symbol,
+                freq=normalized_freq,
+                fields="ts_code,freq,time,open,close,high,low,vol,amount",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare rt_min_daily fetch failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["time"] = pd.to_datetime(result["time"], errors="coerce")
+        for column in ("open", "close", "high", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["time", "close"]).sort_values("time")
+
+    def get_a_stock_limit_concepts_frame(self, trade_date: date) -> pd.DataFrame:
+        """Fetch the daily strongest limit-up concepts for AI candidate discovery."""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        try:
+            frame = self.pro.limit_cpt_list(
+                trade_date=trade_value.strftime("%Y%m%d"),
+                fields="ts_code,name,trade_date,days,up_stat,cons_nums,up_nums,pct_chg,rank",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare limit_cpt_list fetch failed for %s: %s", trade_value, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "name"])
+
+    def get_a_stock_concept_components_frame(
+        self,
+        trade_date: date,
+        theme_code: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Fetch KPL concept constituents and their inclusion reason."""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        kwargs = {
+            "trade_date": trade_value.strftime("%Y%m%d"),
+            "fields": "ts_code,trade_date,name,theme_code,industry_code,industry,reason,hot_num",
+        }
+        if theme_code:
+            kwargs["theme_code"] = str(theme_code).strip().upper()
+        try:
+            frame = self.pro.dc_concept_cons(**kwargs)
+        except Exception as exc:
+            self.logger.warning("Tushare dc_concept_cons fetch failed for %s: %s", theme_code or "all", exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["ts_code", "name"])
 
     def get_a_stock_report_rc_range_frame(
         self,
@@ -1650,28 +1919,72 @@ class TushareService(QuoteProvider):
             if not self.is_cn_equity_symbol(symbol):
                 self._unsupported(f"realtime quote for non-CN symbol {symbol}")
 
-        codes = [self._strip_exchange(symbol) for symbol in normalized_symbols]
-        code_to_symbol = {self._strip_exchange(symbol): symbol for symbol in normalized_symbols}
+        # Primary source: Tushare Pro rt_min (official, batched, up to 100/call).
+        # rt_min returns the latest 1-minute bar per symbol; its `close` is the
+        # live price during trading and the session close after hours.  Legacy
+        # Sina quotes remain as a fallback when rt_min is unavailable.
+        quotes_by_symbol: Dict[str, Dict] = {}
+        for offset in range(0, len(normalized_symbols), 100):
+            batch = normalized_symbols[offset:offset + 100]
+            frame = None
+            try:
+                frame = self.pro.rt_min(
+                    ts_code=",".join(batch),
+                    freq="1MIN",
+                    fields="ts_code,time,open,close,high,low,vol,amount",
+                )
+            except Exception as exc:
+                self.logger.error("Tushare rt_min batch failed for %s: %s", batch, exc)
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                for _, row in frame.iterrows():
+                    data = self._row_to_dict(row)
+                    symbol = self.normalize_symbol(data.get("ts_code") or "")
+                    price = self._to_float(data.get("close"))
+                    if not symbol or price is None or price <= 0:
+                        continue
+                    timestamp = None
+                    time_text = str(data.get("time") or "").strip()
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                        try:
+                            timestamp = datetime.strptime(time_text, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    quotes_by_symbol[symbol] = {
+                        "symbol": symbol,
+                        "code": self._strip_exchange(symbol),
+                        "name": None,
+                        "name_cn": None,
+                        "price": price,
+                        "change": None,
+                        "percent_change": None,
+                        "high": self._to_float(data.get("high"), price),
+                        "low": self._to_float(data.get("low"), price),
+                        "open": self._to_float(data.get("open"), price),
+                        "prev_close": None,
+                        "volume": int(round(self._to_float(data.get("vol"), 0.0) or 0.0)),
+                        "turnover": self._to_float(data.get("amount"), 0.0) or 0.0,
+                        "timestamp": timestamp,
+                    }
+            else:
+                # Fallback: legacy Sina realtime quotes (no Tushare quota cost).
+                try:
+                    codes = [self._strip_exchange(s) for s in batch]
+                    code_to_symbol = {self._strip_exchange(s): s for s in batch}
+                    sina_frame = ts.get_realtime_quotes(codes)
+                    if isinstance(sina_frame, pd.DataFrame) and not sina_frame.empty:
+                        for _, row in sina_frame.iterrows():
+                            data = self._row_to_dict(row)
+                            code = (data.get("code") or "").strip().upper()
+                            if not code:
+                                continue
+                            quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
+                            if quote:
+                                quotes_by_symbol[quote["symbol"]] = quote
+                except Exception as exc:
+                    self.logger.error("Sina realtime quote fallback failed for %s: %s", batch, exc)
 
-        try:
-            frame = ts.get_realtime_quotes(codes)
-        except Exception as exc:
-            self.logger.error("Tushare realtime batch quote failed for %s: %s", codes, exc)
-            return []
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return []
-
-        quotes_by_code: Dict[str, Dict] = {}
-        for _, row in frame.iterrows():
-            data = self._row_to_dict(row)
-            code = (data.get("code") or "").strip().upper()
-            if not code:
-                continue
-            quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
-            if quote:
-                quotes_by_code[code] = quote
-
-        return [quotes_by_code[code] for code in codes if code in quotes_by_code]
+        return [quotes_by_symbol[s] for s in normalized_symbols if s in quotes_by_symbol]
 
     def get_quote(self, symbol: str) -> Dict:
         quotes = self.get_quote_batch([symbol])

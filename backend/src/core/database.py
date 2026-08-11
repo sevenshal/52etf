@@ -478,6 +478,221 @@ class StockCooldown(Base):
     until = Column(DateTime)  # 冷却结束时间
     reason = Column(String)   # 冷却原因
     created_at = Column(DateTime, default=datetime.now)
+
+
+class AIStockRecommendationRun(Base):
+    """A-share AI recommendation batch and its immutable input/output snapshots."""
+    __tablename__ = "ai_stock_recommendation_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    run_type = Column(String(16), nullable=False, index=True)  # PREOPEN / OPENING / INTRADAY
+    status = Column(String(16), nullable=False, default="RUNNING", index=True)
+    model_name = Column(String(100))
+    prompt_version = Column(String(32), nullable=False, default="ai-stock-v1")
+    market_snapshot = Column(JSON)
+    news_snapshot = Column(JSON)
+    candidate_snapshot = Column(JSON)
+    ai_raw_response = Column(JSON)
+    error_message = Column(String(2000))
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    completed_at = Column(DateTime)
+
+
+class AIStockRecommendation(Base):
+    """One validated DeepSeek-selected stock inside a recommendation batch."""
+    __tablename__ = "ai_stock_recommendations"
+    __table_args__ = (
+        UniqueConstraint("run_id", "ts_code", name="uniq_ai_stock_recommendation_run_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("ai_stock_recommendation_runs.id"), nullable=False, index=True)
+    ts_code = Column(String(16), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    industry = Column(String(128))
+    themes = Column(JSON)
+    recommendation_price = Column(Float, nullable=False)
+    target_return_pct = Column(Float, nullable=False)
+    target_price = Column(Float, nullable=False)
+    ai_confidence = Column(Float, nullable=False)
+    execution_score = Column(Float, nullable=False, default=0.0)
+    rank = Column(Integer, nullable=False)
+    reason = Column(Text, nullable=False)
+    risks = Column(Text)
+    evidence = Column(JSON)
+    candidate_snapshot = Column(JSON)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class AIStockPaperPortfolio(Base):
+    """The single, system-owned A-share paper portfolio."""
+    __tablename__ = "ai_stock_paper_portfolios"
+
+    id = Column(Integer, primary_key=True, default=1)
+    enabled = Column(Boolean, nullable=False, default=True)
+    initial_cash = Column(Float, nullable=False, default=1_000_000.0)
+    cash = Column(Float, nullable=False, default=1_000_000.0)
+    last_processed_minute = Column(DateTime)
+    last_execution_target = Column(Float)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class AIStockStrategyConfig(Base):
+    """Versioned, global defaults for the administrator-owned paper strategy."""
+    __tablename__ = "ai_stock_strategy_configs"
+
+    id = Column(Integer, primary_key=True, default=1)
+    enabled = Column(Boolean, nullable=False, default=True)
+    config_version = Column(String(32), nullable=False, default="ai-stock-v1")
+    parameters = Column(JSON)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class AIStockServiceConfig(Base):
+    """Administrator-managed integration credentials for the AI stock service.
+
+    Secret columns are write-only at the API layer and are intentionally never
+    included in response payloads or application logs.
+    """
+    __tablename__ = "ai_stock_service_configs"
+
+    id = Column(Integer, primary_key=True, default=1)
+    deepseek_api_key = Column(String(512))
+    deepseek_model = Column(String(100), nullable=False, default="deepseek-chat")
+    deepseek_base_url = Column(String(500), nullable=False, default="https://api.deepseek.com")
+    max_candidates = Column(Integer)
+    max_events = Column(Integer)
+    max_boards = Column(Integer)
+    max_candidates_per_board = Column(Integer)
+    min_market_cap = Column(Integer)
+    min_avg_turnover = Column(Integer)
+    max_recommendations = Column(Integer)
+    min_listing_days = Column(Integer)
+    target_return_pct_min = Column(Integer)
+    target_return_pct_max = Column(Integer)
+    updated_by = Column(String(128))
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class TushareAccountConfig(Base):
+    """Global Tushare credential, managed by administrators as write-only data."""
+    __tablename__ = "tushare_account_configs"
+
+    id = Column(Integer, primary_key=True, default=1)
+    api_token = Column(String(512))
+    updated_by = Column(String(128))
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class AIStockTHSIndexCache(Base):
+    """Daily cache of the immutable THS board catalogue used by AI-stock V3."""
+    __tablename__ = "ai_stock_ths_index_cache"
+    __table_args__ = (
+        UniqueConstraint("index_type", "ts_code", name="uniq_ai_stock_ths_index_type_code"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    index_type = Column(String(8), nullable=False, index=True)
+    ts_code = Column(String(24), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    constituent_count = Column(Integer)
+    exchange = Column(String(16))
+    list_date = Column(Date)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+
+
+class AIStockPaperLot(Base):
+    """Lot-level accounting is required for the A-share T+1 rule."""
+    __tablename__ = "ai_stock_paper_lots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id = Column(Integer, ForeignKey("ai_stock_paper_portfolios.id"), nullable=False, index=True)
+    recommendation_id = Column(Integer, ForeignKey("ai_stock_recommendations.id"), nullable=True, index=True)
+    ts_code = Column(String(16), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    bought_at = Column(DateTime, nullable=False, index=True)
+    buy_price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    remaining_quantity = Column(Integer, nullable=False)
+    target_price = Column(Float, nullable=False)
+    # A -8% reduction is permitted once per lot and is re-enabled only after
+    # recovery to -5%, which avoids repeated churn in a falling market.
+    stop_half_triggered = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class AIStockPaperTrade(Base):
+    """Auditable paper orders with the exact rule and state snapshot that triggered them."""
+    __tablename__ = "ai_stock_paper_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id = Column(Integer, ForeignKey("ai_stock_paper_portfolios.id"), nullable=False, index=True)
+    lot_id = Column(Integer, ForeignKey("ai_stock_paper_lots.id"), nullable=True, index=True)
+    recommendation_id = Column(Integer, ForeignKey("ai_stock_recommendations.id"), nullable=True, index=True)
+    executed_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    ts_code = Column(String(16), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    side = Column(String(8), nullable=False)  # BUY / SELL
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    amount = Column(Float, nullable=False)
+    fee = Column(Float, nullable=False, default=0.0)
+    realized_pnl = Column(Float)
+    reason_code = Column(String(64), nullable=False)
+    reason = Column(Text, nullable=False)
+    state_snapshot = Column(JSON)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class AIStockPaperEquity(Base):
+    __tablename__ = "ai_stock_paper_equity"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "recorded_at", name="uniq_ai_stock_paper_equity_time"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id = Column(Integer, ForeignKey("ai_stock_paper_portfolios.id"), nullable=False, index=True)
+    recorded_at = Column(DateTime, nullable=False, index=True)
+    cash = Column(Float, nullable=False)
+    market_value = Column(Float, nullable=False)
+    total_equity = Column(Float, nullable=False)
+    benchmark_close = Column(Float)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class AIStockBenchmarkSnapshot(Base):
+    """Read-only snapshots collected from the reference site for later comparison."""
+    __tablename__ = "ai_stock_benchmark_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    captured_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    trade_date = Column(Date, index=True)
+    snapshot_type = Column(String(32), nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+    status = Column(String(16), nullable=False, default="SUCCESS")
+    message = Column(String(1000))
+
+
+class AIStockEvaluation(Base):
+    __tablename__ = "ai_stock_evaluations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evaluated_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    window_start = Column(Date, nullable=False)
+    window_end = Column(Date, nullable=False)
+    theme_overlap_pct = Column(Float)
+    stock_overlap_pct = Column(Float)
+    system_return_pct = Column(Float)
+    benchmark_return_pct = Column(Float)
+    system_max_drawdown_pct = Column(Float)
+    benchmark_max_drawdown_pct = Column(Float)
+    passed = Column(Boolean, nullable=False, default=False)
+    details = Column(JSON)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AutomatedTradingConfig(Base):
@@ -1177,6 +1392,13 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_etf_put_call_ratios_date_symbol ON etf_put_call_ratios(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_snapshot_symbol ON etf_option_expirations(snapshot_date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_etf_option_expirations_expiration ON etf_option_expirations(expiration_date)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_runs_date_type ON ai_stock_recommendation_runs(trade_date, run_type, run_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_recommendations_run_rank ON ai_stock_recommendations(run_id, rank)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_recommendations_symbol_created ON ai_stock_recommendations(ts_code, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_ths_index_type_fetched ON ai_stock_ths_index_cache(index_type, fetched_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_lots_portfolio_symbol ON ai_stock_paper_lots(portfolio_id, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_trades_portfolio_time ON ai_stock_paper_trades(portfolio_id, executed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_stock_benchmark_type_time ON ai_stock_benchmark_snapshots(snapshot_type, captured_at)",
     ]
     with engine.begin() as conn:
         for sql in index_sqls:
@@ -1222,6 +1444,12 @@ def ensure_table_columns():
             "live_sub_account_id": "ALTER TABLE valuation_sim_configs ADD COLUMN live_sub_account_id INTEGER",
             "trailing_stop_atr_window": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_window INTEGER NOT NULL DEFAULT 20",
             "trailing_stop_atr_multiple": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_multiple FLOAT NOT NULL DEFAULT 2.5",
+        },
+        "ai_stock_paper_portfolios": {
+            "last_execution_target": "ALTER TABLE ai_stock_paper_portfolios ADD COLUMN last_execution_target FLOAT",
+        },
+        "ai_stock_paper_lots": {
+            "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",
         },
     }
 

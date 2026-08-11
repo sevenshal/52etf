@@ -1,6 +1,8 @@
 import logging
 import pandas as pd
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
@@ -17,6 +19,7 @@ _last_valuation_sim_automation_check = 0.0
 _last_external_trading_monitor_check = 0.0
 _last_external_trading_executor_check = 0.0
 _last_snowball_external_trading_sync_check = 0.0
+_last_ai_stock_automation_check = 0.0
 
 
 def _process_factor_live_trading_automation():
@@ -125,6 +128,25 @@ def _process_snowball_external_trading_sync():
     logging.exception("Snowball external trading sync failed")
 
 
+def _process_ai_stock_automation():
+  """Keep AI recommendation generation and the paper portfolio off request paths."""
+  global _last_ai_stock_automation_check
+  now_monotonic = time.time()
+  if now_monotonic - _last_ai_stock_automation_check < 30:
+    return
+  _last_ai_stock_automation_check = now_monotonic
+
+  try:
+    from ..core.services.ai_stock import process_ai_stock_automation_for_robot
+
+    shanghai_now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    automation_result = process_ai_stock_automation_for_robot(now=shanghai_now)
+    if automation_result.get("recommendation") or (automation_result.get("paper") or {}).get("trades"):
+      logging.info("AI stock automation result: %s", automation_result)
+  except Exception:
+    logging.exception("AI stock automation check failed")
+
+
 def robot():
   run_startup_tasks()
   logging.info("listening deal")
@@ -144,6 +166,7 @@ def robot():
       _process_factor_live_trading_automation()
       _process_valuation_sim_automation()
       _process_snowball_external_trading_sync()
+      _process_ai_stock_automation()
       _process_external_trading_executor()
       _process_external_trading_connection_monitor()
     except Exception as e:

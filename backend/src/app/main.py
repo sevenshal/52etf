@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_fund_flow, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_fund_flow, ai_stock, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest, tushare_account
 from ..robot.main import robot
 from ..core.utils import send_alert_email
 import traceback
@@ -99,11 +99,13 @@ app.include_router(soxl_fear_strategy.router)
 app.include_router(valuation_sim.router)
 app.include_router(a_stock_innovation100.router)
 app.include_router(a_stock_fund_flow.router)
+app.include_router(ai_stock.router)
 app.include_router(db_manager.router)
 app.include_router(factor_lab.router)
 app.include_router(events.router)
 app.include_router(email_settings.router)
 app.include_router(a_stock_fear_etf_backtest.router)
+app.include_router(tushare_account.router)
 
 def start_robot():
     global _robot_started
