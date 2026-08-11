@@ -152,6 +152,22 @@ def test_a_stock_fear_greed_targets_include_second_tier_sector_indexes():
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
 
 
+def test_a_stock_fear_greed_targets_include_dividend_low_volatility():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
+
+    target = targets_by_symbol["H30269.CSI"]
+    assert target["ticker"] == "红利低波"
+    assert target["index_name"] == "中证红利低波动指数"
+    assert target["proxy_etf"] == "512890.SH"
+    assert "H30269.CSI" in pools
+    assert target["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
+    assert A_STOCK_ETF_DAILY_NAMES[target["proxy_etf"]] == "红利低波ETF"
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [
@@ -184,6 +200,7 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("399986.SZ", "512800.SH"),
         ("399998.SZ", "515220.SH"),
         ("000015.SH", "510880.SH"),
+        ("H30269.CSI", "512890.SH"),
     ] + [
         (str(item["symbol"]).upper(), str(item["proxy_etf"]).upper())
         for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS

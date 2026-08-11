@@ -30,6 +30,7 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "399986.SZ", "name": "中证银行"},
     {"index_code": "399998.SZ", "name": "中证煤炭"},
     {"index_code": "000015.SH", "name": "上证红利"},
+    {"index_code": "H30269.CSI", "name": "红利低波"},
 ]
 A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {
@@ -215,6 +216,14 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
         "proxy_etf": "510880.SH",
     },
+    {
+        "symbol": "H30269.CSI",
+        "ticker": "红利低波",
+        "label": "红利低波",
+        "index_name": "中证红利低波动指数",
+        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        "proxy_etf": "512890.SH",
+    },
 ]
 
 # 通达信行业树仅作为展示分类。实际计算统一绑定可公开获取行情、成分权重，
@@ -285,6 +294,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "512800.SH",
     "515220.SH",
     "510880.SH",
+    "512890.SH",
     "159944.SZ",
     "159936.SZ",
     "159938.SZ",
@@ -338,6 +348,7 @@ A_STOCK_ETF_DAILY_NAMES = {
     "512800.SH": "银行ETF",
     "515220.SH": "煤炭ETF",
     "510880.SH": "红利ETF",
+    "512890.SH": "红利低波ETF",
     "159944.SZ": "原材料ETF",
     "159936.SZ": "可选消费ETF",
     "159938.SZ": "医药卫生ETF",
