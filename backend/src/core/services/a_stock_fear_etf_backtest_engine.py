@@ -30,6 +30,7 @@ class Position:
     index_symbol: str
     quantity: int
     cost_basis: float
+    entry_price: float
     entry_date: str
     entry_fear: float
     high_water: float
@@ -92,7 +93,9 @@ def load_etf_bars(
     end: str,
 ) -> pd.DataFrame:
     if not etfs:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "trade_date", "etf_symbol", "open", "high", "low", "close", "volume",
+        ])
     frame = connection.execute(
         """
         SELECT trade_date, upper(symbol) AS etf_symbol, open, high, low, close, volume
@@ -109,33 +112,10 @@ def load_etf_bars(
     return frame.dropna(subset=["close"])
 
 
-def _risk_adjusted_momentum(close: pd.Series, window: int) -> pd.Series:
-    """Factor Lab-compatible log-price trend score: slope * R² / volatility."""
-    log_close = np.log(close.where(close > 0))
-    x = np.arange(window, dtype=float)
-    x_centered = x - x.mean()
-    denominator = float(np.square(x_centered).sum())
-
-    def score(values: np.ndarray) -> float:
-        if len(values) != window or not np.isfinite(values).all():
-            return math.nan
-        centered = values - values.mean()
-        slope = float(np.dot(x_centered, centered) / denominator)
-        fitted = values.mean() + slope * x_centered
-        total = float(np.square(centered).sum())
-        r_squared = 1.0 - float(np.square(values - fitted).sum()) / total if total > 0 else 0.0
-        daily = np.diff(np.exp(values)) / np.exp(values[:-1])
-        annual_vol = float(np.std(daily, ddof=1) * math.sqrt(TRADING_DAYS)) if len(daily) > 1 else 0.0
-        return slope * TRADING_DAYS * max(0.0, min(1.0, r_squared)) / annual_vol if annual_vol > 0 else math.nan
-
-    return log_close.rolling(window, min_periods=window).apply(score, raw=True)
-
-
 def prepare_market_features(
     bars: pd.DataFrame,
     *,
     volume_window: int,
-    momentum_window: int,
     volatility_window: int,
     volatility_baseline_window: int,
     volatility_std_multiplier: float,
@@ -164,9 +144,6 @@ def prepare_market_features(
     )
     result["volatility_threshold"] = (
         result["volatility_mean"] + volatility_std_multiplier * result["volatility_std"]
-    )
-    result["risk_adjusted_momentum"] = grouped["close"].transform(
-        lambda values: _risk_adjusted_momentum(values, momentum_window)
     )
     return result
 
@@ -256,16 +233,12 @@ def build_signal_rows(
                 float(row.recent_fear_max) if np.isfinite(row.recent_fear_max) else None
             ),
             "volume_ratio": float(row.volume_ratio) if np.isfinite(row.volume_ratio) else None,
-            "risk_adjusted_momentum": (
-                float(row.risk_adjusted_momentum)
-                if np.isfinite(row.risk_adjusted_momentum) else None
-            ),
             "target_fraction": float(fraction),
             "reason": reason,
         })
     for day, candidates in signals.items():
         candidates.sort(key=lambda item: (
-            -(item["risk_adjusted_momentum"] if item["risk_adjusted_momentum"] is not None else -math.inf),
+            -(item["volume_ratio"] if item["volume_ratio"] is not None else -math.inf),
             item["fear_score"], item["etf_symbol"],
         ))
         # Several indexes can share an ETF proxy; only the strongest candidate is actionable.
@@ -292,6 +265,8 @@ def run_backtest(
     initial_capital: float,
     greed_threshold: float,
     greed_sell_fraction: float,
+    stop_loss: float,
+    stop_cooldown_days: int,
     trailing_drawdown: float,
     commission_pct: float,
     min_commission: float,
@@ -326,8 +301,9 @@ def run_backtest(
     last_close: dict[str, float] = {}
     trades: list[dict[str, Any]] = []
     curve: list[dict[str, Any]] = []
+    buy_blocked_until_index = -1
 
-    for day in dates:
+    for day_index, day in enumerate(dates):
         day_bars = bars_by_date.get(day, {})
 
         # Orders created after the previous close execute at today's open. Sells
@@ -362,7 +338,14 @@ def run_backtest(
                 "realized_volatility": order.get("realized_volatility"),
                 "volatility_threshold": order.get("volatility_threshold"),
                 "drawdown_from_high_pct": order.get("drawdown_from_high_pct"),
+                "drawdown_from_entry_pct": order.get("drawdown_from_entry_pct"),
             })
+            if order["reason"] == "stop_loss":
+                buy_blocked_until_index = max(
+                    buy_blocked_until_index,
+                    day_index + stop_cooldown_days,
+                )
+                pending_buy = None
             if position.quantity <= 0:
                 positions.pop(symbol, None)
             elif order["reason"] == "extreme_greed_partial":
@@ -394,7 +377,8 @@ def run_backtest(
                         cash -= gross + fee
                         positions[symbol] = Position(
                             etf_symbol=symbol, index_symbol=pending_buy["index_symbol"],
-                            quantity=quantity, cost_basis=gross + fee, entry_date=str(day),
+                            quantity=quantity, cost_basis=gross + fee, entry_price=price,
+                            entry_date=str(day),
                             entry_fear=pending_buy["fear_score"], high_water=float(quote["high"]),
                         )
                         trades.append({
@@ -408,7 +392,6 @@ def run_backtest(
                             "recent_fear_min": pending_buy.get("recent_fear_min"),
                             "recent_fear_max": pending_buy.get("recent_fear_max"),
                             "volume_ratio": pending_buy.get("volume_ratio"),
-                            "risk_adjusted_momentum": pending_buy.get("risk_adjusted_momentum"),
                             "target_fraction": pending_buy["target_fraction"],
                         })
                 pending_buy = None
@@ -424,6 +407,15 @@ def run_backtest(
                 continue
             position.high_water = max(position.high_water, float(quote["high"]))
             fear_score = fear_by_date.get(day, {}).get(position.index_symbol)
+            drawdown_from_entry = float(quote["close"]) / position.entry_price - 1
+            if drawdown_from_entry < -stop_loss:
+                pending_sells[symbol] = {
+                    "signal_date": str(day), "reason": "stop_loss",
+                    "fraction": 1.0,
+                    "fear_score": float(fear_score) if fear_score is not None else None,
+                    "drawdown_from_entry_pct": drawdown_from_entry * 100,
+                }
+                continue
             if not position.greed_reduced and fear_score is not None and fear_score > greed_threshold:
                 pending_sells[symbol] = {
                     "signal_date": str(day), "reason": "extreme_greed_partial",
@@ -448,9 +440,16 @@ def run_backtest(
                     "drawdown_from_high_pct": drawdown * 100,
                 }
 
-        # At most one new ETF is selected each close. Ranking is strictly based
-        # on information available on that close.
-        if pending_buy is None and cash > 0 and len(positions) < max_positions:
+        # At most one new ETF is selected each close. Candidates are already
+        # ranked by the signal day's volume ratio, using only data available then.
+        stop_loss_pending = any(
+            order["reason"] == "stop_loss" for order in pending_sells.values()
+        )
+        cooldown_active = day_index < buy_blocked_until_index
+        if (
+            pending_buy is None and not stop_loss_pending and not cooldown_active
+            and cash > 0 and len(positions) < max_positions
+        ):
             candidates = [item for item in signals.get(day, []) if item["etf_symbol"] not in positions]
             if candidates:
                 pending_buy = {**candidates[0], "signal_date": str(day)}
@@ -467,6 +466,7 @@ def run_backtest(
             "holding_count": len(positions),
             "positions": ",".join(sorted(positions)),
             "trailing_armed_count": sum(item.trailing_armed for item in positions.values()),
+            "buy_cooldown_days_remaining": max(0, buy_blocked_until_index - day_index),
         })
     return pd.DataFrame(curve), pd.DataFrame(trades)
 

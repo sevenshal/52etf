@@ -35,6 +35,54 @@ SEARCH_JOBS: Dict[str, Dict[str, Any]] = {}
 SEARCH_LOCK = threading.Lock()
 SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="a-fear-etf-search")
 MAX_SEARCH_COMBINATIONS = 5000
+DEFAULT_BENCHMARK_SYMBOL = "000300.SH"
+
+
+def _target_options() -> List[Dict[str, str]]:
+    targets = []
+    seen: set[tuple[str, str]] = set()
+    for item in A_STOCK_INDEX_FEAR_GREED_TARGETS:
+        if not item.get("proxy_etf"):
+            continue
+        index_symbol = str(item["symbol"]).upper()
+        etf = str(item["proxy_etf"]).upper()
+        if (index_symbol, etf) in seen:
+            continue
+        seen.add((index_symbol, etf))
+        targets.append({
+            "index_symbol": index_symbol,
+            "index_label": item.get("ticker") or item.get("label") or index_symbol,
+            "etf_symbol": etf,
+            "etf_label": A_STOCK_ETF_DAILY_NAMES.get(etf, etf),
+        })
+    return targets
+
+
+def _benchmark_label(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    return next(
+        (
+            str(item["index_label"])
+            for item in _target_options()
+            if item["index_symbol"] == normalized
+        ),
+        normalized,
+    )
+
+
+def _benchmark_payload(symbol: str, price_source: str = "index") -> Dict[str, str]:
+    normalized = str(symbol).strip().upper()
+    target = next(
+        (item for item in _target_options() if item["index_symbol"] == normalized),
+        None,
+    )
+    proxy_etf = target["etf_symbol"] if target else normalized
+    return {
+        "symbol": normalized,
+        "label": _benchmark_label(normalized),
+        "price_source": price_source,
+        "price_symbol": proxy_etf if price_source == "etf_proxy" else normalized,
+    }
 
 
 class StrategyParams(BaseModel):
@@ -47,11 +95,12 @@ class StrategyParams(BaseModel):
     bottom_buy_fraction: float = 0.5
     greed_threshold: float = 75.0
     greed_sell_fraction: float = 0.5
+    stop_loss_pct: float = 10.0
+    stop_cooldown_days: int = 20
     volatility_window: int = 20
     volatility_baseline_window: int = 20
     volatility_std_multiplier: float = 1.0
     trailing_drawdown_pct: float = 7.0
-    momentum_window: int = 200
     max_positions: int = 2
     commission_pct: float = 0.03
     min_commission: float = 5.0
@@ -89,9 +138,21 @@ class StrategyParams(BaseModel):
             raise ValueError("移动止盈回撤必须大于0且小于100%")
         return value
 
+    @validator("stop_loss_pct")
+    def validate_stop_loss(cls, value):
+        if value <= 0 or value >= 100:
+            raise ValueError("止损比例必须大于0且小于100%")
+        return value
+
+    @validator("stop_cooldown_days")
+    def validate_stop_cooldown_days(cls, value):
+        if value < 0 or value > 500:
+            raise ValueError("止损冷静期必须在0到500个交易日之间")
+        return value
+
     @validator(
         "volume_window", "bottom_ma_window", "volatility_window",
-        "volatility_baseline_window", "momentum_window",
+        "volatility_baseline_window",
     )
     def validate_window(cls, value):
         if value < 2 or value > 500:
@@ -128,6 +189,7 @@ class RunRequest(BaseModel):
     end_date: Optional[str] = None
     initial_capital: float = 1_000_000.0
     included_indexes: List[str] = Field(default_factory=list)
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL
     params: StrategyParams = Field(default_factory=StrategyParams)
 
     @validator("initial_capital")
@@ -136,13 +198,22 @@ class RunRequest(BaseModel):
             raise ValueError("初始资金必须大于0")
         return value
 
+    @validator("benchmark_symbol")
+    def validate_benchmark_symbol(cls, value):
+        symbol = str(value or "").strip().upper()
+        available = {item["index_symbol"] for item in _target_options()}
+        if symbol not in available:
+            raise ValueError("基准必须从当前可交易指数标的池中选择")
+        return symbol
+
 
 SEARCH_FIELDS = (
     "extreme_fear_threshold", "volume_ratio_threshold", "volume_window",
     "bottom_fear_threshold", "bottom_ma_window", "extreme_buy_fraction",
     "bottom_buy_fraction", "greed_threshold", "greed_sell_fraction",
+    "stop_loss_pct", "stop_cooldown_days",
     "volatility_window", "volatility_baseline_window", "volatility_std_multiplier",
-    "trailing_drawdown_pct", "momentum_window", "max_positions",
+    "trailing_drawdown_pct", "max_positions",
     "commission_pct", "min_commission", "slippage_pct", "stamp_duty_pct", "lot_size",
 )
 
@@ -159,11 +230,12 @@ class SearchRequest(RunRequest):
     bottom_buy_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
     greed_threshold_values: List[float] = Field(default_factory=lambda: [70, 75, 80])
     greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
+    stop_loss_pct_values: List[float] = Field(default_factory=lambda: [10])
+    stop_cooldown_days_values: List[int] = Field(default_factory=lambda: [20])
     volatility_window_values: List[int] = Field(default_factory=lambda: [20])
     volatility_baseline_window_values: List[int] = Field(default_factory=lambda: [20])
     volatility_std_multiplier_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
     trailing_drawdown_pct_values: List[float] = Field(default_factory=lambda: [5, 7, 10])
-    momentum_window_values: List[int] = Field(default_factory=lambda: [120, 200])
     max_positions_values: List[int] = Field(default_factory=lambda: [1, 2])
     commission_pct_values: List[float] = Field(default_factory=lambda: [0.03])
     min_commission_values: List[float] = Field(default_factory=lambda: [5])
@@ -231,12 +303,11 @@ def _max_lookback(request: RunRequest) -> int:
         return max(
             request.volume_window_values + request.bottom_ma_window_values
             + request.volatility_window_values + request.volatility_baseline_window_values
-            + request.momentum_window_values
         )
     params = request.params
     return max(
         params.volume_window, params.bottom_ma_window, params.volatility_window,
-        params.volatility_baseline_window, params.momentum_window,
+        params.volatility_baseline_window,
     )
 
 
@@ -253,6 +324,8 @@ def _prepare_data(request: RunRequest):
     feature_start = start - timedelta(days=padding_days)
     fear = load_fear(DB_PATH, list(mapping), feature_start.isoformat(), end.isoformat())
     mapping = {key: value for key, value in mapping.items() if key in set(fear["index_symbol"])}
+    if not mapping:
+        raise ValueError("所选标的在本地数据库中没有恐贪历史，请先同步最新数据")
     with duckdb.connect(ANALYTICS_DB_PATH, read_only=True) as connection:
         bars = load_etf_bars(
             connection, sorted(set(mapping.values())), feature_start.isoformat(), end.isoformat()
@@ -263,11 +336,26 @@ def _prepare_data(request: RunRequest):
         bars = bars[bars["etf_symbol"].isin(mapping.values())].copy()
         benchmark = connection.execute(
             "SELECT trade_date, close FROM a_stock_index_daily "
-            "WHERE ts_code='000300.SH' AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
-            [start.isoformat(), end.isoformat()],
+            "WHERE upper(ts_code)=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+            [request.benchmark_symbol, start.isoformat(), end.isoformat()],
         ).fetch_df()
+        benchmark_source = "index"
+        if benchmark.empty:
+            benchmark_etf = target_mapping(included={request.benchmark_symbol}).get(
+                request.benchmark_symbol
+            )
+            if benchmark_etf:
+                benchmark = connection.execute(
+                    "SELECT trade_date, close FROM a_stock_fund_daily_qfq "
+                    "WHERE upper(symbol)=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+                    [benchmark_etf, start.isoformat(), end.isoformat()],
+                ).fetch_df()
+                benchmark_source = "etf_proxy"
+        benchmark.attrs["price_source"] = benchmark_source
     if bars.empty or fear.empty:
         raise ValueError("所选区间没有可用的ETF行情或恐贪历史")
+    if benchmark.empty:
+        raise ValueError(f"所选区间没有可用的{_benchmark_label(request.benchmark_symbol)}基准行情")
     return start, end, included, mapping, fear, bars, benchmark
 
 
@@ -287,7 +375,7 @@ def _attach_benchmark(curve: pd.DataFrame, benchmark: pd.DataFrame, initial_capi
 
 def _features(bars, fear, params: StrategyParams, cache: Optional[dict] = None):
     market_key = (
-        params.volume_window, params.momentum_window, params.volatility_window,
+        params.volume_window, params.volatility_window,
         params.volatility_baseline_window, params.volatility_std_multiplier,
     )
     fear_key = params.bottom_ma_window
@@ -296,7 +384,7 @@ def _features(bars, fear, params: StrategyParams, cache: Optional[dict] = None):
     fear_cache = cache.setdefault("fear", {})
     if market_key not in market_cache:
         market_cache[market_key] = prepare_market_features(
-            bars, volume_window=params.volume_window, momentum_window=params.momentum_window,
+            bars, volume_window=params.volume_window,
             volatility_window=params.volatility_window,
             volatility_baseline_window=params.volatility_baseline_window,
             volatility_std_multiplier=params.volatility_std_multiplier,
@@ -326,6 +414,8 @@ def _run_prepared(
         start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
         initial_capital=request.initial_capital, greed_threshold=params.greed_threshold,
         greed_sell_fraction=params.greed_sell_fraction,
+        stop_loss=params.stop_loss_pct / 100,
+        stop_cooldown_days=params.stop_cooldown_days,
         trailing_drawdown=params.trailing_drawdown_pct / 100,
         commission_pct=params.commission_pct, min_commission=params.min_commission,
         slippage_pct=params.slippage_pct, stamp_duty_pct=params.stamp_duty_pct,
@@ -337,7 +427,15 @@ def _run_prepared(
         summary["annualized_return_pct"] / abs(summary["max_drawdown_pct"])
         if summary.get("max_drawdown_pct") else None
     )
-    payload = {"summary": summary, "params": params.dict(), "signal_days": len(signals)}
+    payload = {
+        "summary": summary,
+        "params": params.dict(),
+        "signal_days": len(signals),
+        "benchmark": _benchmark_payload(
+            request.benchmark_symbol,
+            benchmark.attrs.get("price_source", "index"),
+        ),
+    }
     if detailed:
         annual = curve.assign(year=pd.to_datetime(curve["date"]).dt.year).groupby("year").agg(
             start_value=("value", "first"), end_value=("value", "last")
@@ -356,6 +454,7 @@ def _run_request(request: RunRequest):
     result["meta"] = {
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "included_indexes": sorted(included), "index_etf_mapping": mapping,
+        "benchmark_symbol": request.benchmark_symbol,
         "trading_days": int(bars.loc[
             (bars["trade_date"] >= start) & (bars["trade_date"] <= end), "trade_date"
         ].nunique()),
@@ -430,6 +529,7 @@ def _search_job(task_id: str, request: SearchRequest):
             best_detail["meta"] = {
                 "start_date": start.isoformat(), "end_date": end.isoformat(),
                 "included_indexes": sorted(included), "index_etf_mapping": mapping,
+                "benchmark_symbol": request.benchmark_symbol,
             }
         _update_job(
             task_id, status="completed", progress=100, processed_combinations=total,
@@ -445,21 +545,7 @@ def _search_job(task_id: str, request: SearchRequest):
 
 @router.get("/options")
 def options(account_id: str = Depends(valid_account)):
-    targets = []
-    seen: set[tuple[str, str]] = set()
-    for item in A_STOCK_INDEX_FEAR_GREED_TARGETS:
-        if not item.get("proxy_etf"):
-            continue
-        index_symbol = str(item["symbol"]).upper()
-        etf = str(item["proxy_etf"]).upper()
-        if (index_symbol, etf) in seen:
-            continue
-        seen.add((index_symbol, etf))
-        targets.append({
-            "index_symbol": index_symbol,
-            "index_label": item.get("ticker") or item.get("label") or index_symbol,
-            "etf_symbol": etf, "etf_label": A_STOCK_ETF_DAILY_NAMES.get(etf, etf),
-        })
+    targets = _target_options()
     return {
         "targets": targets, "max_search_combinations": MAX_SEARCH_COMBINATIONS,
         "default_request": RunRequest().dict(), "search_fields": list(SEARCH_FIELDS),

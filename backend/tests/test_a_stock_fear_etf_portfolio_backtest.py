@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
 from src.core.services.a_stock_fear_etf_backtest_engine import (
     build_signal_rows,
@@ -24,7 +25,6 @@ def test_bottom_signal_uses_any_extreme_fear_day_in_recent_window():
         "trade_date": dates,
         "etf_symbol": ["ETF"] * 6,
         "volume_ratio": [1.0] * 6,
-        "risk_adjusted_momentum": [2.0] * 6,
     })
     signals = build_signal_rows(
         bars, featured_fear, {"IDX": "ETF"},
@@ -59,6 +59,45 @@ def test_top_signal_uses_any_extreme_greed_day_in_recent_window():
     assert row["recent_fear_max"] == 80
 
 
+def test_same_day_buy_signals_prioritize_highest_volume_ratio():
+    signal_date = date(2024, 3, 1)
+    fear = pd.DataFrame({
+        "index_symbol": ["IDX_LOW_VOLUME", "IDX_HIGH_VOLUME"],
+        "date": [signal_date, signal_date],
+        "score": [18, 22],
+        "fear_ma": [20, 23],
+        "prior_fear_ma": [21, 24],
+        "recent_fear_min": [18, 22],
+        "recent_fear_max": [23, 25],
+    })
+    bars = pd.DataFrame({
+        "trade_date": [signal_date, signal_date],
+        "etf_symbol": ["ETF_LOW_VOLUME", "ETF_HIGH_VOLUME"],
+        "volume_ratio": [1.4, 1.8],
+    })
+
+    signals = build_signal_rows(
+        bars,
+        fear,
+        {
+            "IDX_LOW_VOLUME": "ETF_LOW_VOLUME",
+            "IDX_HIGH_VOLUME": "ETF_HIGH_VOLUME",
+        },
+        extreme_fear_threshold=25,
+        volume_ratio_threshold=1.3,
+        bottom_fear_threshold=25,
+        extreme_buy_fraction=1,
+        bottom_buy_fraction=0.5,
+        start_date=str(signal_date),
+        end_date=str(signal_date),
+    )
+
+    assert [item["etf_symbol"] for item in signals[signal_date]] == [
+        "ETF_HIGH_VOLUME",
+        "ETF_LOW_VOLUME",
+    ]
+
+
 def test_orders_execute_next_open_and_trailing_stop_waits_for_greed_reduction():
     dates = [date(2024, 1, day) for day in range(2, 7)]
     bars = pd.DataFrame({
@@ -78,12 +117,13 @@ def test_orders_execute_next_open_and_trailing_stop_waits_for_greed_reduction():
     })
     signals = {dates[0]: [{
         "index_symbol": "IDX", "etf_symbol": "ETF", "fear_score": 20,
-        "fear_ma": 22, "volume_ratio": 1.3, "risk_adjusted_momentum": 3,
+        "fear_ma": 22, "volume_ratio": 1.3,
         "target_fraction": 0.5, "reason": "fear_bottom_reversal",
     }]}
     curve, trades = run_backtest(
         bars, fear, signals, start_date=str(dates[0]), end_date=str(dates[-1]),
         initial_capital=120_000, greed_threshold=75, greed_sell_fraction=0.5,
+        stop_loss=0.1, stop_cooldown_days=20,
         trailing_drawdown=0.07, commission_pct=0, min_commission=0,
         slippage_pct=0, stamp_duty_pct=0, lot_size=100, max_positions=2,
     )
@@ -95,3 +135,49 @@ def test_orders_execute_next_open_and_trailing_stop_waits_for_greed_reduction():
     assert trades.iloc[0]["quantity"] == 600
     assert trades.iloc[1]["quantity"] == 300
     assert curve.iloc[-1]["holding_count"] == 0
+
+
+def test_stop_loss_exits_next_open_and_blocks_new_buys_for_twenty_trading_days():
+    dates = [value.date() for value in pd.bdate_range("2024-04-01", periods=25)]
+    bars = pd.DataFrame({
+        "trade_date": dates,
+        "etf_symbol": ["ETF"] * len(dates),
+        "open": [100] * len(dates),
+        "high": [101] * len(dates),
+        "low": [98] * len(dates),
+        "close": [100, 100, 89] + [100] * (len(dates) - 3),
+        "realized_volatility": [0.1] * len(dates),
+        "volatility_threshold": [0.2] * len(dates),
+    })
+    fear = pd.DataFrame({
+        "date": dates,
+        "index_symbol": ["IDX"] * len(dates),
+        "score": [50] * len(dates),
+    })
+    buy_signal = {
+        "index_symbol": "IDX", "etf_symbol": "ETF", "fear_score": 20,
+        "fear_ma": 22, "volume_ratio": 1.5,
+        "target_fraction": 1.0, "reason": "extreme_fear_volume",
+    }
+    signals = {
+        dates[0]: [buy_signal],
+        dates[4]: [buy_signal],
+        dates[23]: [buy_signal],
+    }
+
+    curve, trades = run_backtest(
+        bars, fear, signals, start_date=str(dates[0]), end_date=str(dates[-1]),
+        initial_capital=100_000, greed_threshold=75, greed_sell_fraction=0.5,
+        stop_loss=0.1, stop_cooldown_days=20,
+        trailing_drawdown=0.07, commission_pct=0, min_commission=0,
+        slippage_pct=0, stamp_duty_pct=0, lot_size=100, max_positions=1,
+    )
+
+    assert trades[["date", "action", "reason"]].to_dict("records") == [
+        {"date": str(dates[1]), "action": "buy", "reason": "extreme_fear_volume"},
+        {"date": str(dates[3]), "action": "sell", "reason": "stop_loss"},
+        {"date": str(dates[24]), "action": "buy", "reason": "extreme_fear_volume"},
+    ]
+    stop_trade = trades.iloc[1]
+    assert stop_trade["drawdown_from_entry_pct"] == pytest.approx(-11)
+    assert curve.loc[curve["date"] == str(dates[3]), "buy_cooldown_days_remaining"].item() == 20

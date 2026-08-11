@@ -18,10 +18,19 @@ def test_api_imports_from_src_only_distribution(tmp_path):
             sys.executable,
             "-c",
             (
-                "from src.app.api.a_stock_fear_etf_backtest import router; "
+                "from src.app.api.a_stock_fear_etf_backtest import "
+                "RunRequest, _benchmark_payload, options, router; "
                 "assert any("
                 "r.path == '/api/a-stock-fear-etf-backtest/run' "
-                "for r in router.routes)"
+                "for r in router.routes); "
+                "data = options('local-test'); "
+                "low_vol = next("
+                "item for item in data['targets'] "
+                "if item['index_symbol'] == 'H30269.CSI'); "
+                "assert low_vol['etf_symbol'] == '512890.SH'; "
+                "assert RunRequest(benchmark_symbol='h30269.csi').benchmark_symbol == 'H30269.CSI'; "
+                "assert RunRequest().benchmark_symbol == '000300.SH'; "
+                "assert _benchmark_payload('H30269.CSI', 'etf_proxy')['price_symbol'] == '512890.SH'"
             ),
         ],
         cwd=tmp_path,

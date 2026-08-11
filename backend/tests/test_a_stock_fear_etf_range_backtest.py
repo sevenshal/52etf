@@ -1,6 +1,10 @@
 import math
 
-from src.core.services.a_stock_fear_etf_backtest_engine import abnormal_volume, target_mapping
+from src.core.services.a_stock_fear_etf_backtest_engine import (
+    abnormal_volume,
+    load_etf_bars,
+    target_mapping,
+)
 
 
 def test_abnormal_volume_uses_strict_mean_plus_one_std():
@@ -19,3 +23,11 @@ def test_mapping_excludes_csi500():
     assert "000905.SH" not in mapping
     assert mapping["000985.SH"] == "510300.SH"
     assert mapping["980022.SZ"] == "159530.SZ"
+
+
+def test_empty_etf_pool_keeps_standard_bar_columns():
+    bars = load_etf_bars(None, [], "2023-01-01", "2024-01-01")
+
+    assert list(bars.columns) == [
+        "trade_date", "etf_symbol", "open", "high", "low", "close", "volume",
+    ]
