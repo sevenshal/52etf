@@ -175,7 +175,7 @@ const recommendationColumns = [
   },
   { title: 'AI 信心', dataIndex: 'ai_confidence', width: 92, render: value => `${Number(value).toFixed(0)} / 100` },
   {
-    title: '新闻信号',
+    title: '错价机会',
     dataIndex: 'news_signal',
     width: 100,
     render: value => {
@@ -612,7 +612,7 @@ const AIStock = () => {
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益下限(%)</Text><Input type="number" value={targetReturnPctMin} onChange={e => setTargetReturnPctMin(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益上限(%)</Text><Input type="number" value={targetReturnPctMax} onChange={e => setTargetReturnPctMax(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>新闻信号权重(0关闭)</Text><Input type="number" value={newsSignalWeight} onChange={e => setNewsSignalWeight(Number(e.target.value) || 0)} min={0} max={1} step={0.1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>错价机会权重(0关闭)</Text><Input type="number" value={newsSignalWeight} onChange={e => setNewsSignalWeight(Number(e.target.value) || 0)} min={0} max={1} step={0.1} /></Col>
           </Row>
         </Space>
       </Modal>
