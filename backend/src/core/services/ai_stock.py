@@ -609,9 +609,9 @@ class AIStockDataProvider:
 
     def minute_entry_confirmed(self, ts_code: str) -> Tuple[bool, Dict[str, Any]]:
         bars = self.tushare.get_a_stock_realtime_minute_frame(ts_code, "1MIN")
-        if bars is None or len(bars) < 2:
+        if bars is None or len(bars) < 5:
             return False, {"reason": "分钟行情不足，无法确认入场"}
-        recent = bars.tail(2)
+        recent = bars.tail(5)
         latest = recent.iloc[-1]
         prior = recent.iloc[-2]
         latest_close = _safe_float(latest.get("close"), 0.0) or 0.0
@@ -1421,6 +1421,7 @@ class AIStockPaperTradingService:
                     "entry_price_cap_pct": 1.0,
                     "stop_loss_half_pct": -8.0,
                     "stop_loss_full_pct": -12.0,
+                    "trading_start_minute": 585,
                 },
             )
             db.add(config)
@@ -1477,8 +1478,15 @@ class AIStockPaperTradingService:
         timestamp = _now(now)
         if not _is_market_session(timestamp):
             return {"processed": False, "reason": "不在 A 股连续竞价时段"}
+        # 开盘初期 K 线不足，延迟到 trading_start_minute（默认 9:45=585）才执行交易，
+        # 避免开盘脉冲导致误入场/误止损。推荐生成不受影响（走 _is_recommendation_window）。
         state = self._snapshot(timestamp.date())
         portfolio = state["portfolio"]
+        minute_of_day = timestamp.hour * 60 + timestamp.minute
+        sp = portfolio.get("strategy_params") or {}
+        start_minute = int(_safe_float(sp.get("trading_start_minute"), 585.0))
+        if minute_of_day < start_minute:
+            return {"processed": False, "reason": f"未到交易开始时间（{start_minute // 60:02d}:{start_minute % 60:02d}）"}
         minute_key = timestamp.replace(second=0, microsecond=0)
         if not portfolio["enabled"] or not portfolio.get("strategy_enabled", True) or portfolio["last_processed_minute"] == minute_key:
             return {"processed": False, "reason": "模拟盘未启用或该分钟已处理"}
@@ -1724,6 +1732,7 @@ class AIStockPaperTradingService:
         allowed = {
             "max_positions", "slot_count", "single_stock_cap", "max_execution_target",
             "entry_price_cap_pct", "stop_loss_half_pct", "stop_loss_full_pct",
+            "trading_start_minute",
         }
         unknown = set(parameters) - allowed
         if unknown:
@@ -1739,6 +1748,9 @@ class AIStockPaperTradingService:
             elif name in {"stop_loss_half_pct", "stop_loss_full_pct"}:
                 if value < -100 or value > 0:
                     raise ValueError(f"{name} 必须是 -100~0 的百分比")
+            elif name == "trading_start_minute":
+                if value < 9 * 60 + 30 or value > 11 * 60 + 30 or value != int(value):
+                    raise ValueError(f"{name} 必须是 570(9:30)~690(11:30) 的整数分钟")
             else:
                 if value < 0 or value > 1.0:
                     raise ValueError(f"{name} 必须是 0-1 之间的比例")
