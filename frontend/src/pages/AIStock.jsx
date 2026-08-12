@@ -262,6 +262,7 @@ const AIStock = () => {
   const [paperEntryPriceCapPct, setPaperEntryPriceCapPct] = useState(1.0);
   const [paperStopLossHalfPct, setPaperStopLossHalfPct] = useState(-8.0);
   const [paperStopLossFullPct, setPaperStopLossFullPct] = useState(-12.0);
+  const [paperTradingStartMinute, setPaperTradingStartMinute] = useState(585);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -394,6 +395,7 @@ const AIStock = () => {
     setPaperEntryPriceCapPct(p.entry_price_cap_pct ?? 1.0);
     setPaperStopLossHalfPct(p.stop_loss_half_pct ?? -8.0);
     setPaperStopLossFullPct(p.stop_loss_full_pct ?? -12.0);
+    setPaperTradingStartMinute(p.trading_start_minute ?? 585);
     setPaperConfigOpen(true);
   }, [paperConfig]);
 
@@ -409,6 +411,7 @@ const AIStock = () => {
         entry_price_cap_pct: paperEntryPriceCapPct,
         stop_loss_half_pct: paperStopLossHalfPct,
         stop_loss_full_pct: paperStopLossFullPct,
+        trading_start_minute: paperTradingStartMinute,
       };
       const response = await request.put('/api/ai-stock/paper/config', payload);
       setPaperConfig(response.data);
@@ -419,7 +422,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct]);
+  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -624,6 +627,7 @@ const AIStock = () => {
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>半仓止损线(%)</Text><Input type="number" value={paperStopLossHalfPct} onChange={e => setPaperStopLossHalfPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>全仓止损线(%)</Text><Input type="number" value={paperStopLossFullPct} onChange={e => setPaperStopLossFullPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
           </Row>
         </Space>
       </Modal>
