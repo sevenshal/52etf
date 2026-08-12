@@ -36,6 +36,13 @@ SEARCH_JOBS: Dict[str, Dict[str, Any]] = {}
 SEARCH_LOCK = threading.Lock()
 SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="a-fear-etf-search")
 MAX_SEARCH_COMBINATIONS = 5000
+
+# 推荐标的池：默认参数（跷跷板轮动+见顶卖出）针对该组合优化
+# 红利与科创50/100/200恐贪相关性仅 0.03（跷跷板），叠加沪深300/中证500/创业板
+RECOMMENDED_INDEXES = [
+    "000015.SH", "000688.SH", "000698.SH", "000699.SH",
+    "000300.SH", "000905.SH", "399006.SZ",
+]
 DEFAULT_BENCHMARK_SYMBOL = "000300.SH"
 
 
@@ -572,9 +579,11 @@ def _search_job(task_id: str, request: SearchRequest):
 @router.get("/options")
 def options(account_id: str = Depends(valid_account)):
     targets = _target_options()
+    default_request = RunRequest().dict()
+    default_request["included_indexes"] = list(RECOMMENDED_INDEXES)
     return {
         "targets": targets, "max_search_combinations": MAX_SEARCH_COMBINATIONS,
-        "default_request": RunRequest().dict(), "search_fields": list(SEARCH_FIELDS),
+        "default_request": default_request, "search_fields": list(SEARCH_FIELDS),
     }
 
 
