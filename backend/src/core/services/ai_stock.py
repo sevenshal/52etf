@@ -918,17 +918,23 @@ class DeepSeekStockSelector:
         candidates = snapshot.get("candidates") or []
         if not candidates:
             raise AIStockModelError("已映射 THS 板块没有合格成分股")
-        compact_candidates = [{key: item.get(key) for key in ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d", "board_strength")} for item in candidates]
         _params = _load_strategy_params()
+        _news_enabled = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT)) > 0
+        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "board_strength")
+        if _news_enabled:
+            # 纯新闻信号开启时才把信号与窗口特征喂给模型；权重=0 时保持旧字段集
+            _compact_keys = _compact_keys + ("news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d")
+        compact_candidates = [{key: item.get(key) for key in _compact_keys} for item in candidates]
         _tr_min = float(_params.get("target_return_pct_min", TARGET_RETURN_PCT_MIN))
         _tr_max = float(_params.get("target_return_pct_max", TARGET_RETURN_PCT_MAX))
         instruction = {
             "task": "延续新闻事件和 THS 板块映射会话。以下是已验证板块的全部合格成分股及板块强弱数据。只能从成分股选择，新闻事件和 THS 板块关联优先；板块强弱只作排序与执行参考。每只股票只能出现一次，严禁重复。",
             "constraints": {"max_picks": min(max(int(top_n or 0), 1), int(_params.get("max_recommendations", MAX_RECOMMENDATIONS))), "confidence_range": [0, 100], "target_return_pct_range": [_tr_min, _tr_max], "must_return_json": True},
             "validated_events": event_stage["events"], "validated_board_mappings": board_stage["board_mappings"], "board_market_snapshot": snapshot.get("boards") or [], "candidates": compact_candidates,
-            "news_signal_guidance": "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。",
             "response_schema": {"picks": [{"ts_code": "候选列表完整 ts_code", "confidence": 0, "target_return_pct": 5, "reason": "新闻事件→THS板块→股票", "risks": "风险", "themes": ["THS板块"], "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885000.TI"}]}]},
         }
+        if _news_enabled:
+            instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。"
         second_messages = board_stage["transcript"]["request"]["messages"]
         messages = [*second_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
