@@ -193,6 +193,7 @@ def build_signal_rows(
     bottom_buy_fraction: float,
     start_date: str,
     end_date: str,
+    sort_by_fear: bool = False,
 ) -> dict[Any, list[dict[str, Any]]]:
     pairs = pd.DataFrame(
         [{"index_symbol": index, "etf_symbol": etf} for index, etf in mapping.items()]
@@ -237,10 +238,17 @@ def build_signal_rows(
             "reason": reason,
         })
     for day, candidates in signals.items():
-        candidates.sort(key=lambda item: (
-            -(item["volume_ratio"] if item["volume_ratio"] is not None else -math.inf),
-            item["fear_score"], item["etf_symbol"],
-        ))
+        if sort_by_fear:
+            # 恐慌优先：分数越低（越恐慌）越靠前，跷跷板轮动时买入最恐慌的标的
+            candidates.sort(key=lambda item: (
+                item["fear_score"], -(item["volume_ratio"] if item["volume_ratio"] is not None else -math.inf),
+                item["etf_symbol"],
+            ))
+        else:
+            candidates.sort(key=lambda item: (
+                -(item["volume_ratio"] if item["volume_ratio"] is not None else -math.inf),
+                item["fear_score"], item["etf_symbol"],
+            ))
         # Several indexes can share an ETF proxy; only the strongest candidate is actionable.
         seen: set[str] = set()
         signals[day] = [item for item in candidates if not (item["etf_symbol"] in seen or seen.add(item["etf_symbol"]))]
@@ -253,6 +261,46 @@ def max_drawdown(values: pd.Series) -> float:
 
 def _commission(gross: float, rate: float, minimum: float) -> float:
     return max(minimum, gross * rate) if gross > 0 else 0.0
+
+
+def build_top_signals(
+    fear: pd.DataFrame,
+    mapping: dict[str, str],
+    *,
+    top_threshold: float,
+    bottom_ma_window: int,
+    start_date: str,
+    end_date: str,
+) -> dict[Any, set[str]]:
+    """Fear-top reversal sell signals: MA rolls over after touching extreme greed.
+
+    Mirrors the bottom-reversal buy flag: is_top = fear_ma turning down while
+    recent_fear_max exceeded top_threshold within the MA window.
+    Returns {trade_date: {index_symbol}}.
+    """
+    pairs = pd.DataFrame(
+        [{"index_symbol": index} for index in mapping]
+    )
+    merged = pairs.merge(fear, on="index_symbol")
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    merged = merged[(merged["date"] >= start) & (merged["date"] <= end)]
+    result: dict[Any, set[str]] = {}
+    for index_symbol, group in merged.groupby("index_symbol"):
+        group = group.sort_values("date")
+        ma = group["score"].rolling(bottom_ma_window, min_periods=bottom_ma_window).mean()
+        recent_max = group["score"].rolling(bottom_ma_window, min_periods=bottom_ma_window).max()
+        prior_ma = ma.shift(1)
+        for row, ma_val, prior_val, rmax in zip(
+            group.itertuples(index=False), ma, prior_ma, recent_max
+        ):
+            if not all(
+                np.isfinite(v) for v in (ma_val, prior_val, rmax) if v is not None
+            ):
+                continue
+            if ma_val < prior_val and rmax > top_threshold:
+                result.setdefault(row.date, set()).add(index_symbol)
+    return result
 
 
 def run_backtest(
@@ -274,6 +322,8 @@ def run_backtest(
     stamp_duty_pct: float,
     lot_size: int,
     max_positions: int,
+    buy_when_flat_only: bool = False,
+    top_signals: dict[Any, set[str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
@@ -416,6 +466,17 @@ def run_backtest(
                     "drawdown_from_entry_pct": drawdown_from_entry * 100,
                 }
                 continue
+            if (
+                top_signals
+                and position.index_symbol in top_signals.get(day, set())
+            ):
+                # 恐贪见顶反转（MA 转跌 + 近期触及极端贪婪）→ 清仓逃顶
+                pending_sells[symbol] = {
+                    "signal_date": str(day), "reason": "fear_top_reversal",
+                    "fraction": 1.0,
+                    "fear_score": float(fear_score) if fear_score is not None else None,
+                }
+                continue
             if not position.greed_reduced and fear_score is not None and fear_score > greed_threshold:
                 pending_sells[symbol] = {
                     "signal_date": str(day), "reason": "extreme_greed_partial",
@@ -446,9 +507,12 @@ def run_backtest(
             order["reason"] == "stop_loss" for order in pending_sells.values()
         )
         cooldown_active = day_index < buy_blocked_until_index
+        slots_available = (
+            len(positions) == 0 if buy_when_flat_only else len(positions) < max_positions
+        )
         if (
             pending_buy is None and not stop_loss_pending and not cooldown_active
-            and cash > 0 and len(positions) < max_positions
+            and cash > 0 and slots_available
         ):
             candidates = [item for item in signals.get(day, []) if item["etf_symbol"] not in positions]
             if candidates:

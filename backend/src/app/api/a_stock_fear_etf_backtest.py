@@ -17,6 +17,7 @@ from ...core.duckdb_utils import ANALYTICS_DB_PATH
 from ...core.event_stream import publish_event
 from ...core.services.a_stock_fear_etf_backtest_engine import (
     build_signal_rows,
+    build_top_signals,
     load_etf_bars,
     load_fear,
     max_drawdown,
@@ -86,27 +87,32 @@ def _benchmark_payload(symbol: str, price_source: str = "index") -> Dict[str, st
 
 
 class StrategyParams(BaseModel):
-    extreme_fear_threshold: float = 25.0
-    volume_ratio_threshold: float = 1.1
+    extreme_fear_threshold: float = 30.0
+    volume_ratio_threshold: float = 1.0
     volume_window: int = 20
-    bottom_fear_threshold: float = 25.0
+    bottom_fear_threshold: float = 20.0
     bottom_ma_window: int = 5
     extreme_buy_fraction: float = 1.0
     bottom_buy_fraction: float = 0.5
-    greed_threshold: float = 75.0
-    greed_sell_fraction: float = 0.5
-    stop_loss_pct: float = 10.0
+    greed_threshold: float = 70.0
+    greed_sell_fraction: float = 1.0
+    stop_loss_pct: float = 12.0
     stop_cooldown_days: int = 20
     volatility_window: int = 20
     volatility_baseline_window: int = 20
-    volatility_std_multiplier: float = 1.0
-    trailing_drawdown_pct: float = 7.0
-    max_positions: int = 2
+    volatility_std_multiplier: float = 0.5
+    trailing_drawdown_pct: float = 5.0
+    max_positions: int = 1
     commission_pct: float = 0.03
     min_commission: float = 5.0
     slippage_pct: float = 0.02
     stamp_duty_pct: float = 0.0
     lot_size: int = 100
+    # 跷跷板轮动：空仓时才扫描全池买入最恐慌的指数（红利与科创等独立恐慌）
+    sort_by_fear: bool = True
+    buy_when_flat_only: bool = True
+    # 恐贪见顶反转卖出（MA 转跌 + 近期触及极端贪婪）→ 清仓
+    top_sell_threshold: Optional[float] = 70.0
 
     @validator("extreme_fear_threshold", "bottom_fear_threshold", "greed_threshold")
     def validate_fear(cls, value):
@@ -136,6 +142,12 @@ class StrategyParams(BaseModel):
     def validate_drawdown(cls, value):
         if value <= 0 or value >= 100:
             raise ValueError("移动止盈回撤必须大于0且小于100%")
+        return value
+
+    @validator("top_sell_threshold", allow_reuse=True)
+    def validate_top_sell(cls, value):
+        if value is not None and (value <= 0 or value >= 100):
+            raise ValueError("见顶卖出阈值必须在0到100之间，或留空关闭")
         return value
 
     @validator("stop_loss_pct")
@@ -215,6 +227,7 @@ SEARCH_FIELDS = (
     "volatility_window", "volatility_baseline_window", "volatility_std_multiplier",
     "trailing_drawdown_pct", "max_positions",
     "commission_pct", "min_commission", "slippage_pct", "stamp_duty_pct", "lot_size",
+    "sort_by_fear", "buy_when_flat_only", "top_sell_threshold",
 )
 
 
@@ -229,14 +242,17 @@ class SearchRequest(RunRequest):
     extreme_buy_fraction_values: List[float] = Field(default_factory=lambda: [1.0])
     bottom_buy_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
     greed_threshold_values: List[float] = Field(default_factory=lambda: [70, 75, 80])
-    greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
-    stop_loss_pct_values: List[float] = Field(default_factory=lambda: [10])
+    greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [0.5, 1.0])
+    stop_loss_pct_values: List[float] = Field(default_factory=lambda: [10, 12, 15])
     stop_cooldown_days_values: List[int] = Field(default_factory=lambda: [20])
     volatility_window_values: List[int] = Field(default_factory=lambda: [20])
     volatility_baseline_window_values: List[int] = Field(default_factory=lambda: [20])
     volatility_std_multiplier_values: List[float] = Field(default_factory=lambda: [0.5, 1.0, 1.5])
     trailing_drawdown_pct_values: List[float] = Field(default_factory=lambda: [5, 7, 10])
     max_positions_values: List[int] = Field(default_factory=lambda: [1, 2])
+    sort_by_fear_values: List[bool] = Field(default_factory=lambda: [True, False])
+    buy_when_flat_only_values: List[bool] = Field(default_factory=lambda: [True, False])
+    top_sell_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [70.0, 80.0])
     commission_pct_values: List[float] = Field(default_factory=lambda: [0.03])
     min_commission_values: List[float] = Field(default_factory=lambda: [5])
     slippage_pct_values: List[float] = Field(default_factory=lambda: [0.02])
@@ -408,7 +424,16 @@ def _run_prepared(
         bottom_buy_fraction=params.bottom_buy_fraction,
         start_date=request.start_date,
         end_date=request.end_date or date.today().isoformat(),
+        sort_by_fear=params.sort_by_fear,
     )
+    top_signals = None
+    if params.top_sell_threshold is not None:
+        top_signals = build_top_signals(
+            fear, mapping, top_threshold=params.top_sell_threshold,
+            bottom_ma_window=params.bottom_ma_window,
+            start_date=request.start_date,
+            end_date=request.end_date or date.today().isoformat(),
+        )
     curve, trades = run_backtest(
         featured_bars, featured_fear, signals,
         start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
@@ -420,6 +445,7 @@ def _run_prepared(
         commission_pct=params.commission_pct, min_commission=params.min_commission,
         slippage_pct=params.slippage_pct, stamp_duty_pct=params.stamp_duty_pct,
         lot_size=params.lot_size, max_positions=params.max_positions,
+        buy_when_flat_only=params.buy_when_flat_only, top_signals=top_signals,
     )
     curve = _attach_benchmark(curve, benchmark, request.initial_capital)
     summary = summarize(curve, trades, request.initial_capital)
