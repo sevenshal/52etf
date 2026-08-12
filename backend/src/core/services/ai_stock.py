@@ -1786,30 +1786,43 @@ class AIStockPaperTradingService:
         with get_db_ctx() as db:
             portfolio = self._ensure_portfolio(db)
             lots = db.query(AIStockPaperLot).filter(AIStockPaperLot.portfolio_id == portfolio.id, AIStockPaperLot.remaining_quantity > 0).order_by(AIStockPaperLot.bought_at).all()
-            grouped = defaultdict(list)
-            for lot in lots:
-                grouped[lot.ts_code].append(lot)
-            symbols = list(grouped)
+            # 短事务内复制成 dict 快照，避免 ORM 对象跨 session 访问（DetachedInstanceError）
+            rows = [
+                {
+                    "ts_code": lot.ts_code,
+                    "name": lot.name,
+                    "remaining_quantity": lot.remaining_quantity,
+                    "buy_price": lot.buy_price,
+                    "target_price": lot.target_price,
+                    "bought_at": lot.bought_at,
+                }
+                for lot in lots
+            ]
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[row["ts_code"]].append(row)
+        symbols = list(grouped)
         quotes = self.provider.quotes(symbols) if symbols else {}
         result = []
-        for symbol, rows in grouped.items():
-            quantity = sum(row.remaining_quantity for row in rows)
-            cost = sum(row.buy_price * row.remaining_quantity for row in rows) / quantity
+        today = datetime.now().date()
+        for symbol, items in grouped.items():
+            quantity = sum(item["remaining_quantity"] for item in items)
+            cost = sum(item["buy_price"] * item["remaining_quantity"] for item in items) / quantity
             quote = quotes.get(symbol) or {}
             price = _safe_float(quote.get("price"), cost) or cost
-            target_price = max(row.target_price for row in rows)
+            target_price = max(item["target_price"] for item in items)
             result.append(
                 {
                     "ts_code": symbol,
-                    "name": rows[0].name,
+                    "name": items[0]["name"],
                     "quantity": quantity,
-                    "sellable_quantity": sum(row.remaining_quantity for row in rows if row.bought_at.date() < datetime.now().date()),
+                    "sellable_quantity": sum(item["remaining_quantity"] for item in items if item["bought_at"].date() < today),
                     "cost": round(cost, 3),
                     "price": price,
                     "market_value": round(price * quantity, 2),
                     "pnl_pct": round((price / cost - 1) * 100, 3) if cost else 0.0,
                     "target_price": target_price,
-                    "held_days": max(_holding_days(row.bought_at, datetime.now().date()) for row in rows),
+                    "held_days": max(_holding_days(item["bought_at"], today) for item in items),
                 }
             )
         return sorted(result, key=lambda item: -item["market_value"])
