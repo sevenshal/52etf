@@ -95,7 +95,7 @@ const AStockFearEtfBacktest = () => {
           date_range: [dayjs(data.default_request?.start_date || '2023-01-01'), dayjs()],
           initial_capital: data.default_request?.initial_capital || 1000000,
           benchmark_symbol: data.default_request?.benchmark_symbol || '000300.SH',
-          included_indexes: [], objective: 'sharpe_zero_rf', top_n: 20,
+          included_indexes: data.default_request?.included_indexes || [], objective: 'sharpe_zero_rf', top_n: 20,
         };
         form.setFieldsValue(initialValues);
         setFormValues(initialValues);
