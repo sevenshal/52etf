@@ -174,6 +174,18 @@ const recommendationColumns = [
     ),
   },
   { title: 'AI 信心', dataIndex: 'ai_confidence', width: 92, render: value => `${Number(value).toFixed(0)} / 100` },
+  {
+    title: '新闻信号',
+    dataIndex: 'news_signal',
+    width: 100,
+    render: value => {
+      if (value === undefined || value === null) return '-';
+      const num = Number(value);
+      const label = num >= 65 ? '反应不足' : num <= 35 ? '反应过度' : '中性';
+      const color = num >= 65 ? 'red' : num <= 35 ? 'green' : 'default';
+      return <Tag color={color}>{label} {num.toFixed(0)}</Tag>;
+    },
+  },
   { title: '建议价', dataIndex: 'recommendation_price', width: 92, align: 'right', render: value => money(value) },
   { title: '目标价', dataIndex: 'target_price', width: 92, align: 'right', render: value => money(value) },
   { title: '建议收益', dataIndex: 'target_return_pct', width: 92, render: value => <Text className="is-up">{percent(value)}</Text> },
@@ -251,6 +263,7 @@ const AIStock = () => {
   const [minListingDays, setMinListingDays] = useState(183);
   const [targetReturnPctMin, setTargetReturnPctMin] = useState(5);
   const [targetReturnPctMax, setTargetReturnPctMax] = useState(10);
+  const [newsSignalWeight, setNewsSignalWeight] = useState(0.5);
   const [paperConfig, setPaperConfig] = useState(null);
   const [paperConfigOpen, setPaperConfigOpen] = useState(false);
   const [savingPaperConfig, setSavingPaperConfig] = useState(false);
@@ -355,6 +368,7 @@ const AIStock = () => {
     setMinListingDays(settings?.min_listing_days ?? 183);
     setTargetReturnPctMin(settings?.target_return_pct_min ?? 5);
     setTargetReturnPctMax(settings?.target_return_pct_max ?? 10);
+    setNewsSignalWeight(settings?.news_signal_weight ?? 0.5);
     setSettingsOpen(true);
   }, [settings]);
 
@@ -373,6 +387,7 @@ const AIStock = () => {
       payload.min_listing_days = minListingDays;
       payload.target_return_pct_min = targetReturnPctMin;
       payload.target_return_pct_max = targetReturnPctMax;
+      payload.news_signal_weight = newsSignalWeight;
       const response = await request.put('/api/ai-stock/settings', payload);
       setSettings(response.data);
       setDeepseekApiKey('');
@@ -383,7 +398,7 @@ const AIStock = () => {
     } finally {
       setSavingSettings(false);
     }
-  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax]);
+  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight]);
 
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
@@ -597,6 +612,7 @@ const AIStock = () => {
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益下限(%)</Text><Input type="number" value={targetReturnPctMin} onChange={e => setTargetReturnPctMin(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益上限(%)</Text><Input type="number" value={targetReturnPctMax} onChange={e => setTargetReturnPctMax(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>新闻信号权重(0关闭)</Text><Input type="number" value={newsSignalWeight} onChange={e => setNewsSignalWeight(Number(e.target.value) || 0)} min={0} max={1} step={0.1} /></Col>
           </Row>
         </Space>
       </Modal>
