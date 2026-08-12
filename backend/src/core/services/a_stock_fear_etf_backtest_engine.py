@@ -223,6 +223,9 @@ def build_signal_rows(
             continue
         reason = "extreme_fear_volume" if extreme else "fear_bottom_reversal"
         fraction = extreme_buy_fraction if extreme else bottom_buy_fraction
+        if fraction <= 0:
+            # 仓位 0 = 关闭该买入信号（不生成、不占位，给另一类信号留出机会）
+            continue
         signals.setdefault(row.trade_date, []).append({
             "index_symbol": row.index_symbol,
             "etf_symbol": row.etf_symbol,
