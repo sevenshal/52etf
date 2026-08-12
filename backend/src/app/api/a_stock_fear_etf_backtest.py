@@ -435,12 +435,18 @@ def _run_prepared(
     )
     top_signals = None
     if params.top_sell_threshold is not None:
-        top_signals = build_top_signals(
-            fear, mapping, top_threshold=params.top_sell_threshold,
-            bottom_ma_window=params.bottom_ma_window,
-            start_date=request.start_date,
-            end_date=request.end_date or date.today().isoformat(),
-        )
+        cache_key = ("top_signals", params.top_sell_threshold, params.bottom_ma_window)
+        if feature_cache and cache_key in feature_cache:
+            top_signals = feature_cache[cache_key]
+        else:
+            top_signals = build_top_signals(
+                fear, mapping, top_threshold=params.top_sell_threshold,
+                bottom_ma_window=params.bottom_ma_window,
+                start_date=request.start_date,
+                end_date=request.end_date or date.today().isoformat(),
+            )
+            if feature_cache is not None:
+                feature_cache[cache_key] = top_signals
     curve, trades = run_backtest(
         featured_bars, featured_fear, signals,
         start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
@@ -454,7 +460,9 @@ def _run_prepared(
         lot_size=params.lot_size, max_positions=params.max_positions,
         buy_when_flat_only=params.buy_when_flat_only, top_signals=top_signals,
     )
-    curve = _attach_benchmark(curve, benchmark, request.initial_capital)
+    if detailed:
+        # 搜索/快速评估不需要基准曲线，跳过以加速
+        curve = _attach_benchmark(curve, benchmark, request.initial_capital)
     summary = summarize(curve, trades, request.initial_capital)
     summary["calmar_ratio"] = (
         summary["annualized_return_pct"] / abs(summary["max_drawdown_pct"])
@@ -526,30 +534,68 @@ def _update_job(task_id: str, **updates):
     publish_event(account_id, "a_stock_fear_etf_search", payload)
 
 
+_SEARCH_WORKER_CTX: dict = {}
+
+
+def _search_worker_init(request: SearchRequest) -> None:
+    """每个 worker 进程只加载一次行情/恐贪数据（全局缓存）"""
+    _SEARCH_WORKER_CTX["request"] = request
+    _SEARCH_WORKER_CTX["data"] = _prepare_data(request)
+
+
+def _search_evaluate(values: tuple) -> tuple[tuple, Optional[dict]]:
+    """worker 进程内评估一组参数，返回 (values, item)"""
+    request = _SEARCH_WORKER_CTX["request"]
+    start, end, included, mapping, fear, bars, benchmark = _SEARCH_WORKER_CTX["data"]
+    try:
+        params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
+        item = _run_prepared(
+            request, mapping, fear, bars, benchmark, params,
+            detailed=False, feature_cache=_SEARCH_WORKER_CTX.setdefault("cache", {}),
+        )
+        return values, item
+    except Exception:
+        return values, None
+
+
 def _search_job(task_id: str, request: SearchRequest):
     try:
         _update_job(task_id, status="running", message="正在加载ETF行情和恐贪历史")
-        start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
-        combinations = product(*_candidate_lists(request))
         total = _combination_count(request)
+        combinations = list(product(*_candidate_lists(request)))
+        # 主进程加载一次（供 meta/best_detail 与单组合路径使用）
+        start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
         results: list[dict[str, Any]] = []
         skipped = 0
         feature_cache: dict[str, dict] = {}
-        for index, values in enumerate(combinations, start=1):
-            try:
+        if total == 1:
+            # 单组合直接本进程评估（避免进程池开销）
+            for values in combinations:
                 params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
                 item = _run_prepared(
                     request, mapping, fear, bars, benchmark, params,
                     detailed=False, feature_cache=feature_cache,
                 )
-                results.append(item)
-            except Exception:
-                skipped += 1
-            if index == total or index % max(1, total // 100) == 0:
-                _update_job(
-                    task_id, progress=int(index * 100 / total), processed_combinations=index,
-                    skipped_combinations=skipped, message=f"已完成 {index}/{total} 组",
-                )
+                if item is not None:
+                    results.append(item)
+        else:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(
+                max_workers=4, initializer=_search_worker_init, initargs=(request,),
+            ) as pool:
+                for index, (values, item) in enumerate(
+                    pool.map(_search_evaluate, combinations), start=1
+                ):
+                    if item is not None:
+                        results.append(item)
+                    else:
+                        skipped += 1
+                    if index == total or index % max(1, total // 100) == 0:
+                        _update_job(
+                            task_id, progress=int(index * 100 / total),
+                            processed_combinations=index, skipped_combinations=skipped,
+                            message=f"已完成 {index}/{total} 组",
+                        )
         results.sort(key=lambda item: _score(item, request.objective), reverse=True)
         top_results = results[: request.top_n]
         best_detail = None
