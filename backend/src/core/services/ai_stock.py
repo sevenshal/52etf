@@ -1145,6 +1145,7 @@ class AIStockRecommendationService:
             "target_price": row.target_price,
             "ai_confidence": row.ai_confidence,
             "execution_score": row.execution_score,
+            "news_signal": row.news_signal if row.news_signal is not None else 50.0,
             "rank": row.rank,
             "reason": row.reason,
             "risks": row.risks,
