@@ -15,10 +15,10 @@ const { RangePicker } = DatePicker;
 const { Text, Title } = Typography;
 
 const PARAM_FIELDS = [
-  { key: 'extreme_fear_threshold', label: '极度恐慌阈值', value: '20,30', group: 'entry', note: '恐贪严格小于' },
+  { key: 'extreme_fear_threshold', label: '极度恐慌阈值', value: '30,20', group: 'entry', note: '恐贪严格小于' },
   { key: 'volume_ratio_threshold', label: '放量量比', value: '1.0,1.3', group: 'entry', note: '当日量 ÷ 前N日均量' },
   { key: 'volume_window', label: '成交量均值窗口', value: '20', group: 'entry', integer: true, note: '不含信号日' },
-  { key: 'bottom_fear_threshold', label: '“底”恐贪阈值', value: '15,25', group: 'entry', note: '最近均线窗口内曾低于阈值，且均线转升' },
+  { key: 'bottom_fear_threshold', label: '“底”恐贪阈值', value: '20,15', group: 'entry', note: '最近均线窗口内曾低于阈值，且均线转升' },
   { key: 'bottom_ma_window', label: '“底”均线窗口', value: '5', group: 'entry', integer: true, note: '与贪恐曲线的5日线同口径' },
   { key: 'extreme_buy_fraction', label: '放量恐慌买入仓位', value: '1.0', group: 'entry', note: '1 = 100%可用组合仓位' },
   { key: 'bottom_buy_fraction', label: '“底”信号买入仓位', value: '0.5', group: 'entry', note: '0.5 = 50%组合仓位' },
@@ -26,8 +26,8 @@ const PARAM_FIELDS = [
   { key: 'sort_by_fear', label: '恐慌优先', value: 'true,false', group: 'entry', searchable: false, note: 'true=买入最恐慌的指数（跷跷板轮动）' },
   { key: 'buy_when_flat_only', label: '空仓才买', value: 'true,false', group: 'entry', searchable: false, note: 'true=仅空仓时扫描全池买入' },
   { key: 'greed_threshold', label: '极度贪婪阈值', value: '70,80', group: 'exit', note: '恐贪严格大于' },
-  { key: 'greed_sell_fraction', label: '贪婪减仓比例', value: '0.5,1.0', group: 'exit', note: '首次触发只执行一次；1.0=清仓' },
-  { key: 'stop_loss_pct', label: '固定止损%', value: '10,12', group: 'exit', note: '收盘价较买入成交价跌幅严格超过阈值' },
+  { key: 'greed_sell_fraction', label: '贪婪减仓比例', value: '1.0,0.5', group: 'exit', note: '首次触发只执行一次；1.0=清仓' },
+  { key: 'stop_loss_pct', label: '固定止损%', value: '12,10', group: 'exit', note: '收盘价较买入成交价跌幅严格超过阈值' },
   { key: 'stop_cooldown_days', label: '止损冷静期', value: '20', group: 'exit', integer: true, note: '止损成交后N个交易日不再买入' },
   { key: 'volatility_window', label: '当前波动率窗口', value: '20', group: 'exit', integer: true },
   { key: 'volatility_baseline_window', label: '波动率基准窗口', value: '20', group: 'exit', integer: true, note: '不含信号日' },
