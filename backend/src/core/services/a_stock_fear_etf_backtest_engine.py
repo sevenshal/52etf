@@ -37,6 +37,7 @@ class Position:
     greed_reduced: bool = False
     volatility_monitoring: bool = False
     trailing_armed: bool = False
+    is_baseline: bool = False
 
 
 def abnormal_volume(
@@ -324,6 +325,7 @@ def run_backtest(
     max_positions: int,
     buy_when_flat_only: bool = False,
     top_signals: dict[Any, set[str]] | None = None,
+    baseline_etf: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
@@ -430,6 +432,7 @@ def run_backtest(
                             quantity=quantity, cost_basis=gross + fee, entry_price=price,
                             entry_date=str(day),
                             entry_fear=pending_buy["fear_score"], high_water=float(quote["high"]),
+                            is_baseline=bool(pending_buy.get("is_baseline", False)),
                         )
                         trades.append({
                             "date": str(day), "signal_date": pending_buy["signal_date"],
@@ -452,6 +455,9 @@ def run_backtest(
 
         # Exit signals are evaluated at the close and queued for the next open.
         for symbol, position in list(positions.items()):
+            if position.is_baseline:
+                # 底仓（红利低波）不参与策略卖出评估，只在换仓时被卖出
+                continue
             quote = day_bars.get(symbol)
             if not quote or position.entry_date == str(day) or symbol in pending_sells:
                 continue
@@ -507,8 +513,9 @@ def run_backtest(
             order["reason"] == "stop_loss" for order in pending_sells.values()
         )
         cooldown_active = day_index < buy_blocked_until_index
+        active_count = sum(1 for pos in positions.values() if not pos.is_baseline)
         slots_available = (
-            len(positions) == 0 if buy_when_flat_only else len(positions) < max_positions
+            active_count == 0 if buy_when_flat_only else len(positions) < max_positions
         )
         if (
             pending_buy is None and not stop_loss_pending and not cooldown_active
@@ -516,7 +523,27 @@ def run_backtest(
         ):
             candidates = [item for item in signals.get(day, []) if item["etf_symbol"] not in positions]
             if candidates:
+                # 恐慌信号 → 若持有底仓先卖出换仓（同一天先卖后买）
+                baseline_pos = next(
+                    (pos for pos in positions.values() if pos.is_baseline), None
+                )
+                if baseline_pos is not None:
+                    pending_sells[baseline_pos.etf_symbol] = {
+                        "signal_date": str(day), "reason": "rotation_switch",
+                        "fraction": 1.0,
+                        "fear_score": fear_by_date.get(day, {}).get(
+                            baseline_pos.index_symbol
+                        ),
+                    }
                 pending_buy = {**candidates[0], "signal_date": str(day)}
+            elif baseline_etf and baseline_etf not in positions:
+                # 空仓且无恐慌信号 → 持有红利低波底仓（全天候防御）
+                pending_buy = {
+                    "etf_symbol": baseline_etf, "index_symbol": "BASELINE",
+                    "target_fraction": 1.0, "fraction": 1.0,
+                    "reason": "baseline_hold", "fear_score": None,
+                    "signal_date": str(day), "is_baseline": True,
+                }
 
         market_value = sum(
             position.quantity * last_close.get(symbol, 0.0)
