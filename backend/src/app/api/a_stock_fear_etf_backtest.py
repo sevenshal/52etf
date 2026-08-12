@@ -234,16 +234,16 @@ SEARCH_FIELDS = (
 class SearchRequest(RunRequest):
     top_n: int = 20
     objective: str = "sharpe_zero_rf"
-    extreme_fear_threshold_values: List[float] = Field(default_factory=lambda: [20, 30])
+    extreme_fear_threshold_values: List[float] = Field(default_factory=lambda: [30.0, 20.0])
     volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.0, 1.3])
     volume_window_values: List[int] = Field(default_factory=lambda: [20])
-    bottom_fear_threshold_values: List[float] = Field(default_factory=lambda: [15, 25])
+    bottom_fear_threshold_values: List[float] = Field(default_factory=lambda: [20.0, 15.0])
     bottom_ma_window_values: List[int] = Field(default_factory=lambda: [5])
     extreme_buy_fraction_values: List[float] = Field(default_factory=lambda: [1.0])
     bottom_buy_fraction_values: List[float] = Field(default_factory=lambda: [0.5])
     greed_threshold_values: List[float] = Field(default_factory=lambda: [70, 80])
-    greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [0.5, 1.0])
-    stop_loss_pct_values: List[float] = Field(default_factory=lambda: [10, 12])
+    greed_sell_fraction_values: List[float] = Field(default_factory=lambda: [1.0, 0.5])
+    stop_loss_pct_values: List[float] = Field(default_factory=lambda: [12.0, 10.0])
     stop_cooldown_days_values: List[int] = Field(default_factory=lambda: [20])
     volatility_window_values: List[int] = Field(default_factory=lambda: [20])
     volatility_baseline_window_values: List[int] = Field(default_factory=lambda: [20])
