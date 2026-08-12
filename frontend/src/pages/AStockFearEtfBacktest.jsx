@@ -61,8 +61,13 @@ const parseNumbers = (value, integer = false) => String(value ?? '')
   .split(',')
   .map(item => item.trim())
   .filter(Boolean)
-  .map(item => (integer ? parseInt(item, 10) : parseFloat(item)))
-  .filter(Number.isFinite);
+  .map(item => {
+    const lower = item.toLowerCase();
+    if (lower === 'true') return true;
+    if (lower === 'false') return false;
+    return integer ? parseInt(item, 10) : parseFloat(item);
+  })
+  .filter(item => typeof item === 'boolean' || Number.isFinite(item));
 
 const pct = value => (value === null || value === undefined ? '-' : `${Number(value).toFixed(2)}%`);
 const num = (value, digits = 2) => (value === null || value === undefined ? '-' : Number(value).toFixed(digits));
@@ -133,7 +138,11 @@ const AStockFearEtfBacktest = () => {
     included_indexes: values.included_indexes || [],
   });
 
-  const firstParams = () => Object.fromEntries(PARAM_FIELDS.map(field => [field.key, candidateGroups[field.key]?.[0]]));
+  const firstParams = () => Object.fromEntries(PARAM_FIELDS.map(field => [
+    field.key,
+    // 表单缺字段时（如热更新后旧表单状态）用候选默认值兜底
+    candidateGroups[field.key]?.[0] ?? parseNumbers(field.value, field.integer)[0],
+  ]));
 
   const runDetail = async params => {
     const values = await form.validateFields();
