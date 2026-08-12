@@ -252,28 +252,18 @@ const AStockFearEtfBacktest = () => {
     return value;
   };
 
-  // 动态参数列：只显示在搜索结果中存在差异的参数（相同的不占列）
-  const varyingParamKeys = useMemo(() => {
-    if (!searchResults.length) return [];
-    const keys = Object.keys(searchResults[0]?.params || {});
-    const order = PARAM_FIELDS.map(field => field.key);
-    return keys
-      .filter(key => new Set(searchResults.map(r => {
-        const v = r.params?.[key];
-        return typeof v === 'number' ? v.toFixed(4) : String(v);
-      })).size > 1)
-      .sort((a, b) => order.indexOf(a) - order.indexOf(b));
-  }, [searchResults]);
+  // 显示全部参数列（含无差异的），横向滚动查看完整参数组合
+  const allParamKeys = PARAM_FIELDS.map(field => field.key);
 
   const searchColumns = [
-    { title: '#', width: 48, render: (_, __, index) => index + 1 },
-    ...varyingParamKeys.map(key => ({
-      title: PARAM_SHORT[key] || key, width: 72,
+    { title: '#', width: 48, fixed: 'left', render: (_, __, index) => index + 1 },
+    ...allParamKeys.map(key => ({
+      title: PARAM_SHORT[key] || key, width: 78,
       render: (_, record) => renderParamValue(key, record.params?.[key]),
     })),
-    { title: '年化', dataIndex: ['summary', 'annualized_return_pct'], render: pct, sorter: (a, b) => a.summary.annualized_return_pct - b.summary.annualized_return_pct },
-    { title: '回撤', dataIndex: ['summary', 'max_drawdown_pct'], render: pct },
-    { title: '夏普', dataIndex: ['summary', 'sharpe_zero_rf'], render: value => num(value) },
+    { title: '年化', dataIndex: ['summary', 'annualized_return_pct'], render: pct, sorter: (a, b) => a.summary.annualized_return_pct - b.summary.annualized_return_pct, fixed: 'right', width: 90 },
+    { title: '回撤', dataIndex: ['summary', 'max_drawdown_pct'], render: pct, fixed: 'right', width: 90 },
+    { title: '夏普', dataIndex: ['summary', 'sharpe_zero_rf'], render: value => num(value), fixed: 'right', width: 80 },
     { title: '', width: 70, fixed: 'right', render: (_, record) => <Button type="link" onClick={() => runDetail(record.params)}>复盘</Button> },
   ];
 
@@ -379,7 +369,7 @@ const AStockFearEtfBacktest = () => {
 
       {searchResults.length > 0 && (
         <Card className="a-fear-etf-card" title={`搜索排名 · ${searchMeta?.total_combinations || searchResults.length}组`}>
-          <Table rowKey={record => JSON.stringify(record.params)} columns={searchColumns} dataSource={searchResults} size="small" scroll={{ x: 1120 }} pagination={{ pageSize: 20 }} />
+          <Table rowKey={record => JSON.stringify(record.params)} columns={searchColumns} dataSource={searchResults} size="small" scroll={{ x: 2200 }} pagination={{ pageSize: 20 }} />
         </Card>
       )}
 
