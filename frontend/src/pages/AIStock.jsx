@@ -276,6 +276,8 @@ const AIStock = () => {
   const [paperStopLossHalfPct, setPaperStopLossHalfPct] = useState(-8.0);
   const [paperStopLossFullPct, setPaperStopLossFullPct] = useState(-12.0);
   const [paperTradingStartMinute, setPaperTradingStartMinute] = useState(585);
+  const [paperHoldEvalEnabled, setPaperHoldEvalEnabled] = useState(false);
+  const [paperHoldSellThreshold, setPaperHoldSellThreshold] = useState(30);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -411,6 +413,8 @@ const AIStock = () => {
     setPaperStopLossHalfPct(p.stop_loss_half_pct ?? -8.0);
     setPaperStopLossFullPct(p.stop_loss_full_pct ?? -12.0);
     setPaperTradingStartMinute(p.trading_start_minute ?? 585);
+    setPaperHoldEvalEnabled(p.hold_evaluation_enabled ?? false);
+    setPaperHoldSellThreshold(p.hold_sell_threshold ?? 30);
     setPaperConfigOpen(true);
   }, [paperConfig]);
 
@@ -427,6 +431,8 @@ const AIStock = () => {
         stop_loss_half_pct: paperStopLossHalfPct,
         stop_loss_full_pct: paperStopLossFullPct,
         trading_start_minute: paperTradingStartMinute,
+        hold_evaluation_enabled: paperHoldEvalEnabled,
+        hold_sell_threshold: paperHoldSellThreshold,
       };
       const response = await request.put('/api/ai-stock/paper/config', payload);
       setPaperConfig(response.data);
@@ -437,7 +443,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute]);
+  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperHoldSellThreshold]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -644,6 +650,10 @@ const AIStock = () => {
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>半仓止损线(%)</Text><Input type="number" value={paperStopLossHalfPct} onChange={e => setPaperStopLossHalfPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>全仓止损线(%)</Text><Input type="number" value={paperStopLossFullPct} onChange={e => setPaperStopLossFullPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 持仓评估</Text><Switch checked={paperHoldEvalEnabled} onChange={setPaperHoldEvalEnabled} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 卖出阈值(0-100)</Text><Input type="number" value={paperHoldSellThreshold} onChange={e => setPaperHoldSellThreshold(Number(e.target.value) || 30)} min={0} max={100} disabled={!paperHoldEvalEnabled} /></Col>
           </Row>
         </Space>
       </Modal>
