@@ -233,17 +233,44 @@ const AStockFearEtfBacktest = () => {
     </Row>
   );
 
+  const PARAM_SHORT = {
+    extreme_fear_threshold: '极恐', volume_ratio_threshold: '量比', volume_window: '量窗',
+    bottom_fear_threshold: '底阈值', bottom_ma_window: '底窗', extreme_buy_fraction: '极恐仓位',
+    bottom_buy_fraction: '见底仓位', max_positions: '持仓', greed_threshold: '极贪',
+    greed_sell_fraction: '极贪卖', stop_loss_pct: '止损', stop_cooldown_days: '冷静',
+    volatility_window: '波动窗', volatility_baseline_window: '基准窗', volatility_std_multiplier: '波动σ',
+    trailing_drawdown_pct: '回撤止盈', top_sell_threshold: '见顶', sort_by_fear: '恐慌优先',
+    buy_when_flat_only: '空仓才买', commission_pct: '佣金', min_commission: '最低佣',
+    slippage_pct: '滑点', stamp_duty_pct: '印花税', lot_size: '手数',
+  };
+
+  const renderParamValue = (key, value) => {
+    if (value === null || value === undefined) return '-';
+    if (typeof value === 'boolean') return value ? '开' : '关';
+    if (key.endsWith('_pct')) return `${value}%`;
+    if (key.includes('fraction')) return `${Math.round(value * 100)}%`;
+    return value;
+  };
+
+  // 动态参数列：只显示在搜索结果中存在差异的参数（相同的不占列）
+  const varyingParamKeys = useMemo(() => {
+    if (!searchResults.length) return [];
+    const keys = Object.keys(searchResults[0]?.params || {});
+    const order = PARAM_FIELDS.map(field => field.key);
+    return keys
+      .filter(key => new Set(searchResults.map(r => {
+        const v = r.params?.[key];
+        return typeof v === 'number' ? v.toFixed(4) : String(v);
+      })).size > 1)
+      .sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }, [searchResults]);
+
   const searchColumns = [
     { title: '#', width: 48, render: (_, __, index) => index + 1 },
-    { title: '极恐', dataIndex: ['params', 'extreme_fear_threshold'], width: 62 },
-    { title: '量比', dataIndex: ['params', 'volume_ratio_threshold'], width: 62 },
-    { title: '底阈值', dataIndex: ['params', 'bottom_fear_threshold'], width: 70 },
-    { title: '极贪', dataIndex: ['params', 'greed_threshold'], width: 62 },
-    { title: '止损', dataIndex: ['params', 'stop_loss_pct'], render: value => `${value}%`, width: 68 },
-    { title: '冷静期', dataIndex: ['params', 'stop_cooldown_days'], render: value => `${value}日`, width: 72 },
-    { title: '波动σ', dataIndex: ['params', 'volatility_std_multiplier'], width: 68 },
-    { title: '回撤止盈', dataIndex: ['params', 'trailing_drawdown_pct'], render: value => `${value}%`, width: 88 },
-    { title: '持仓', dataIndex: ['params', 'max_positions'], width: 62 },
+    ...varyingParamKeys.map(key => ({
+      title: PARAM_SHORT[key] || key, width: 72,
+      render: (_, record) => renderParamValue(key, record.params?.[key]),
+    })),
     { title: '年化', dataIndex: ['summary', 'annualized_return_pct'], render: pct, sorter: (a, b) => a.summary.annualized_return_pct - b.summary.annualized_return_pct },
     { title: '回撤', dataIndex: ['summary', 'max_drawdown_pct'], render: pct },
     { title: '夏普', dataIndex: ['summary', 'sharpe_zero_rf'], render: value => num(value) },
