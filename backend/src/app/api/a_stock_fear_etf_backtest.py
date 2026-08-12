@@ -16,6 +16,8 @@ from ...core.database import DB_PATH
 from ...core.duckdb_utils import ANALYTICS_DB_PATH
 from ...core.event_stream import publish_event
 from ...core.services.a_stock_fear_etf_backtest_engine import (
+    build_bars_by_date,
+    build_fear_by_date,
     build_signal_rows,
     build_top_signals,
     load_etf_bars,
@@ -129,8 +131,9 @@ class StrategyParams(BaseModel):
 
     @validator("extreme_buy_fraction", "bottom_buy_fraction", "greed_sell_fraction")
     def validate_fraction(cls, value):
-        if value <= 0 or value > 1:
-            raise ValueError("仓位比例必须大于0且不超过1")
+        # 0 允许：extreme/bottom 买入仓位设 0 = 关闭该买入信号
+        if value < 0 or value > 1:
+            raise ValueError("仓位比例必须在0到1之间（0=关闭该信号）")
         return value
 
     @validator("volume_ratio_threshold")
@@ -447,6 +450,30 @@ def _run_prepared(
             )
             if feature_cache is not None:
                 feature_cache[cache_key] = top_signals
+    # 日线/恐贪按日索引：基于特征行情构建（含 realized_volatility 等列），
+    # 缓存键含特征参数（不同参数组合的特征列不同）
+    market_key = (
+        params.volume_window, params.volatility_window,
+        params.volatility_baseline_window, params.volatility_std_multiplier,
+    )
+    bd_key = ("bars_by_date",) + market_key
+    fd_key = ("fear_by_date", request.start_date, request.end_date or date.today().isoformat())
+    bars_by_date = fear_by_date = None
+    if feature_cache is not None:
+        if bd_key not in feature_cache:
+            _, bars_by_date = build_bars_by_date(
+                featured_bars, request.start_date, request.end_date or date.today().isoformat()
+            )
+            feature_cache[bd_key] = bars_by_date
+        else:
+            bars_by_date = feature_cache[bd_key]
+        if fd_key not in feature_cache:
+            fear_by_date = build_fear_by_date(
+                fear, request.start_date, request.end_date or date.today().isoformat()
+            )
+            feature_cache[fd_key] = fear_by_date
+        else:
+            fear_by_date = feature_cache[fd_key]
     curve, trades = run_backtest(
         featured_bars, featured_fear, signals,
         start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
@@ -459,6 +486,7 @@ def _run_prepared(
         slippage_pct=params.slippage_pct, stamp_duty_pct=params.stamp_duty_pct,
         lot_size=params.lot_size, max_positions=params.max_positions,
         buy_when_flat_only=params.buy_when_flat_only, top_signals=top_signals,
+        bars_by_date=bars_by_date, fear_by_date=fear_by_date,
     )
     if detailed:
         # 搜索/快速评估不需要基准曲线，跳过以加速
@@ -534,68 +562,32 @@ def _update_job(task_id: str, **updates):
     publish_event(account_id, "a_stock_fear_etf_search", payload)
 
 
-_SEARCH_WORKER_CTX: dict = {}
-
-
-def _search_worker_init(request: SearchRequest) -> None:
-    """每个 worker 进程只加载一次行情/恐贪数据（全局缓存）"""
-    _SEARCH_WORKER_CTX["request"] = request
-    _SEARCH_WORKER_CTX["data"] = _prepare_data(request)
-
-
-def _search_evaluate(values: tuple) -> tuple[tuple, Optional[dict]]:
-    """worker 进程内评估一组参数，返回 (values, item)"""
-    request = _SEARCH_WORKER_CTX["request"]
-    start, end, included, mapping, fear, bars, benchmark = _SEARCH_WORKER_CTX["data"]
-    try:
-        params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
-        item = _run_prepared(
-            request, mapping, fear, bars, benchmark, params,
-            detailed=False, feature_cache=_SEARCH_WORKER_CTX.setdefault("cache", {}),
-        )
-        return values, item
-    except Exception:
-        return values, None
-
-
 def _search_job(task_id: str, request: SearchRequest):
     try:
         _update_job(task_id, status="running", message="正在加载ETF行情和恐贪历史")
         total = _combination_count(request)
         combinations = list(product(*_candidate_lists(request)))
-        # 主进程加载一次（供 meta/best_detail 与单组合路径使用）
         start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
         results: list[dict[str, Any]] = []
         skipped = 0
         feature_cache: dict[str, dict] = {}
-        if total == 1:
-            # 单组合直接本进程评估（避免进程池开销）
-            for values in combinations:
+        for index, values in enumerate(combinations, start=1):
+            try:
                 params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
                 item = _run_prepared(
                     request, mapping, fear, bars, benchmark, params,
                     detailed=False, feature_cache=feature_cache,
                 )
-                if item is not None:
-                    results.append(item)
-        else:
-            from concurrent.futures import ProcessPoolExecutor
-            with ProcessPoolExecutor(
-                max_workers=4, initializer=_search_worker_init, initargs=(request,),
-            ) as pool:
-                for index, (values, item) in enumerate(
-                    pool.map(_search_evaluate, combinations), start=1
-                ):
-                    if item is not None:
-                        results.append(item)
-                    else:
-                        skipped += 1
-                    if index == total or index % max(1, total // 100) == 0:
-                        _update_job(
-                            task_id, progress=int(index * 100 / total),
-                            processed_combinations=index, skipped_combinations=skipped,
-                            message=f"已完成 {index}/{total} 组",
-                        )
+                results.append(item)
+            except Exception as exc:
+                import traceback
+                print(f"[search] 组合 {values} 失败: {exc}\n{traceback.format_exc()}", flush=True)
+                skipped += 1
+            if index == total or index % max(1, total // 100) == 0:
+                _update_job(
+                    task_id, progress=int(index * 100 / total), processed_combinations=index,
+                    skipped_combinations=skipped, message=f"已完成 {index}/{total} 组",
+                )
         results.sort(key=lambda item: _score(item, request.objective), reverse=True)
         top_results = results[: request.top_n]
         best_detail = None

@@ -307,6 +307,37 @@ def build_top_signals(
     return result
 
 
+def build_bars_by_date(
+    bars: pd.DataFrame, start_date: str, end_date: str,
+) -> tuple[list, dict[Any, dict]]:
+    """按交易日索引 ETF 行情（与参数无关，搜索时构建一次复用）"""
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    active = bars[(bars["trade_date"] >= start) & (bars["trade_date"] <= end)].copy()
+    dates = sorted(active["trade_date"].unique().tolist())
+    quote_columns = [
+        "open", "high", "low", "close", "realized_volatility", "volatility_threshold",
+    ]
+    by_date = {
+        day: group.set_index("etf_symbol")[quote_columns].to_dict(orient="index")
+        for day, group in active.groupby("trade_date", sort=True)
+    }
+    return dates, by_date
+
+
+def build_fear_by_date(
+    fear: pd.DataFrame, start_date: str, end_date: str,
+) -> dict[Any, dict]:
+    """按日期索引恐贪分数（与参数无关，搜索时构建一次复用）"""
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    active = fear[(fear["date"] >= start) & (fear["date"] <= end)]
+    return {
+        day: dict(zip(group["index_symbol"], group["score"]))
+        for day, group in active.groupby("date")
+    }
+
+
 def run_backtest(
     bars: pd.DataFrame,
     fear: pd.DataFrame,
@@ -329,23 +360,18 @@ def run_backtest(
     buy_when_flat_only: bool = False,
     top_signals: dict[Any, set[str]] | None = None,
     baseline_etf: str | None = None,
+    bars_by_date: dict[Any, dict] | None = None,
+    fear_by_date: dict[Any, dict] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
-    active_bars = bars[(bars["trade_date"] >= start) & (bars["trade_date"] <= end)].copy()
-    dates = sorted(active_bars["trade_date"].unique().tolist())
-    quote_columns = [
-        "open", "high", "low", "close", "realized_volatility", "volatility_threshold",
-    ]
-    bars_by_date = {
-        day: group.set_index("etf_symbol")[quote_columns].to_dict(orient="index")
-        for day, group in active_bars.groupby("trade_date", sort=True)
-    }
-    fear_active = fear[(fear["date"] >= start) & (fear["date"] <= end)]
-    fear_by_date = {
-        day: dict(zip(group["index_symbol"], group["score"]))
-        for day, group in fear_active.groupby("date")
-    }
+    if bars_by_date is None:
+        dates, bars_by_date = build_bars_by_date(bars, start_date, end_date)
+    else:
+        active_bars = bars[(bars["trade_date"] >= start) & (bars["trade_date"] <= end)].copy()
+        dates = sorted(active_bars["trade_date"].unique().tolist())
+    if fear_by_date is None:
+        fear_by_date = build_fear_by_date(fear, start_date, end_date)
     commission_rate = commission_pct / 100
     slippage = slippage_pct / 100
     stamp_rate = stamp_duty_pct / 100
