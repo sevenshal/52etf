@@ -106,7 +106,8 @@ const AStockFearEtfBacktest = () => {
 
   const candidateGroups = useMemo(() => Object.fromEntries(PARAM_FIELDS.map(field => [
     field.key,
-    parseNumbers(formValues?.[`${field.key}_values`], field.integer),
+    // 字段缺失/清空时用默认候选值兜底，避免组合数算成 0 导致按钮置灰
+    parseNumbers(formValues?.[`${field.key}_values`] || field.value, field.integer),
   ])), [formValues]);
   // 非搜索字段（轮动开关/见顶阈值）不参与组合爆炸：搜索时固定用候选第一个值
   const searchableCombinationCount = PARAM_FIELDS
