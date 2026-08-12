@@ -80,7 +80,7 @@ const WebAccountManager = () => {
     }
   };
 
-  const loadUsage = useCallback(async (accountId, range = usageRange) => {
+  const loadUsage = async (accountId, range = usageRange) => {
     if (!accountId || !range?.[0] || !range?.[1]) return;
     setUsageLoading(true);
     try {
@@ -106,7 +106,7 @@ const WebAccountManager = () => {
     } finally {
       setUsageLoading(false);
     }
-  }, [usageRange]);
+  };
 
   const showUsage = async (record) => {
     setUsageAccount(record);

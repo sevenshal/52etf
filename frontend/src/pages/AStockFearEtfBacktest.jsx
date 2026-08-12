@@ -23,14 +23,17 @@ const PARAM_FIELDS = [
   { key: 'extreme_buy_fraction', label: '放量恐慌买入仓位', value: '1.0', group: 'entry', note: '1 = 100%可用组合仓位' },
   { key: 'bottom_buy_fraction', label: '“底”信号买入仓位', value: '0.5', group: 'entry', note: '0.5 = 50%组合仓位' },
   { key: 'max_positions', label: '最大持仓数', value: '1,2', group: 'entry', integer: true, note: '同一天只选量比最高的一只' },
+  { key: 'sort_by_fear', label: '恐慌优先', value: 'true,false', group: 'entry', note: 'true=买入最恐慌的指数（跷跷板轮动）' },
+  { key: 'buy_when_flat_only', label: '空仓才买', value: 'true,false', group: 'entry', note: 'true=仅空仓时扫描全池买入' },
   { key: 'greed_threshold', label: '极度贪婪阈值', value: '70,75,80', group: 'exit', note: '恐贪严格大于' },
-  { key: 'greed_sell_fraction', label: '贪婪减仓比例', value: '0.5', group: 'exit', note: '首次触发只执行一次' },
-  { key: 'stop_loss_pct', label: '固定止损%', value: '10', group: 'exit', note: '收盘价较买入成交价跌幅严格超过阈值' },
+  { key: 'greed_sell_fraction', label: '贪婪减仓比例', value: '0.5,1.0', group: 'exit', note: '首次触发只执行一次；1.0=清仓' },
+  { key: 'stop_loss_pct', label: '固定止损%', value: '10,12,15', group: 'exit', note: '收盘价较买入成交价跌幅严格超过阈值' },
   { key: 'stop_cooldown_days', label: '止损冷静期', value: '20', group: 'exit', integer: true, note: '止损成交后N个交易日不再买入' },
   { key: 'volatility_window', label: '当前波动率窗口', value: '20', group: 'exit', integer: true },
   { key: 'volatility_baseline_window', label: '波动率基准窗口', value: '20', group: 'exit', integer: true, note: '不含信号日' },
   { key: 'volatility_std_multiplier', label: '波动率突破标准差', value: '0.5,1,1.5', group: 'exit', note: '当前波动率 > 均值 + Nσ' },
   { key: 'trailing_drawdown_pct', label: '移动止盈回撤%', value: '5,7,10', group: 'exit', note: '相对买入后最高价' },
+  { key: 'top_sell_threshold', label: '见顶卖出阈值', value: '70,80', group: 'exit', note: '恐贪MA转跌且近期触及阈值→清仓逃顶；留空=关闭' },
   { key: 'commission_pct', label: '佣金%', value: '0.03', group: 'cost' },
   { key: 'min_commission', label: '最低佣金（元）', value: '5', group: 'cost' },
   { key: 'slippage_pct', label: '单边滑点%', value: '0.02', group: 'cost' },
@@ -48,6 +51,7 @@ const objectiveOptions = [
 const reasonLabels = {
   extreme_fear_volume: '极恐放量买入',
   fear_bottom_reversal: '见底信号买入',
+  fear_top_reversal: '恐贪见顶清仓',
   extreme_greed_partial: '极贪减仓',
   stop_loss: '固定止损',
   volatility_trailing_stop: '波动突破后移动止盈',
@@ -344,20 +348,34 @@ const AStockFearEtfBacktest = () => {
                 <Col xs={12} sm={8} lg={4}><Statistic title="年化收益" value={result.summary?.annualized_return_pct} precision={2} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="最大回撤" value={result.summary?.max_drawdown_pct} precision={2} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="夏普" value={result.summary?.sharpe_zero_rf} precision={2} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="年化波动率" value={result.summary?.annualized_volatility_pct} precision={2} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="平均仓位" value={result.summary?.average_exposure_pct} precision={1} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="平均持仓" value={result.summary?.average_holding_count} precision={2} suffix="只" /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="买入次数" value={result.summary?.buy_count} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="卖出次数" value={result.summary?.sell_count} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="已实现盈亏" value={result.summary?.realized_pnl} precision={2} valueStyle={{ color: (result.summary?.realized_pnl || 0) >= 0 ? '#ef5350' : '#66bb6a' }} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="期末资产" value={result.summary?.final_value} precision={2} valueStyle={{ color: (result.summary?.final_value || 0) >= (result.summary?.initial_capital || 0) ? '#ef5350' : '#66bb6a' }} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="换手率" value={result.summary?.turnover_pct} precision={1} suffix="%" /></Col>
               </Row>
               <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} className="a-fear-etf-descriptions">
-                <Descriptions.Item label="极恐 + 量比">&lt; {result.params?.extreme_fear_threshold} / ≥ {result.params?.volume_ratio_threshold}</Descriptions.Item>
+                <Descriptions.Item label="极恐 + 量比">&lt; {result.params?.extreme_fear_threshold} / ≥ {result.params?.volume_ratio_threshold}（{result.params?.volume_window}日量比）</Descriptions.Item>
                 <Descriptions.Item label="见底条件">近{result.params?.bottom_ma_window}日曾 &lt; {result.params?.bottom_fear_threshold}，MA{result.params?.bottom_ma_window}转升</Descriptions.Item>
                 <Descriptions.Item label="极贪减仓">&gt; {result.params?.greed_threshold}，卖 {num(result.params?.greed_sell_fraction * 100, 0)}%</Descriptions.Item>
                 <Descriptions.Item label="固定止损">跌幅 &gt; {result.params?.stop_loss_pct}%，冷静 {result.params?.stop_cooldown_days} 个交易日</Descriptions.Item>
                 <Descriptions.Item label="移动止盈">波动 +{result.params?.volatility_std_multiplier}σ，回撤 {result.params?.trailing_drawdown_pct}%</Descriptions.Item>
+                <Descriptions.Item label="买入仓位">极恐买 {pct(result.params?.extreme_buy_fraction * 100)} / 见底买 {pct(result.params?.bottom_buy_fraction * 100)}</Descriptions.Item>
+                <Descriptions.Item label="波动率窗口">{result.params?.volatility_window}日 / 基线 {result.params?.volatility_baseline_window}日</Descriptions.Item>
+                <Descriptions.Item label="最大持仓">{result.params?.max_positions} 只</Descriptions.Item>
+                <Descriptions.Item label="轮动模式">恐慌优先 {result.params?.sort_by_fear ? '开' : '关'} / 空仓才买 {result.params?.buy_when_flat_only ? '开' : '关'}</Descriptions.Item>
+                <Descriptions.Item label="见顶卖出">恐贪MA转跌且近{result.params?.bottom_ma_window}日曾 &gt; {result.params?.top_sell_threshold ?? '-'} → 清仓</Descriptions.Item>
                 <Descriptions.Item label="对比基准">{result.benchmark?.label || result.benchmark?.symbol || '-'}</Descriptions.Item>
-                <Descriptions.Item label="期末资产">{money(result.summary?.final_value)}</Descriptions.Item>
-                <Descriptions.Item label="换手率">{pct(result.summary?.turnover_pct)}</Descriptions.Item>
+                <Descriptions.Item label="回测区间">{result.meta?.start_date || result.summary?.start_date} ~ {result.meta?.end_date || result.summary?.end_date}</Descriptions.Item>
+                <Descriptions.Item label="初始资金">{money(result.summary?.initial_capital)}</Descriptions.Item>
+                <Descriptions.Item label="交易成本">佣金 {pct(result.params?.commission_pct)} 最低 {money(result.params?.min_commission)} / 滑点 {pct(result.params?.slippage_pct)} / 印花税 {pct(result.params?.stamp_duty_pct)} / 手数 {result.params?.lot_size}</Descriptions.Item>
                 <Descriptions.Item label="卖出胜率">{pct(result.summary?.closed_trade_win_rate_pct)}</Descriptions.Item>
                 <Descriptions.Item label="期末持仓">{result.summary?.ending_positions?.map(formatEtf).join('、') || '现金'}</Descriptions.Item>
+                <Descriptions.Item label="恐贪点数">{result.meta?.fear_points}</Descriptions.Item>
+                <Descriptions.Item label="交易日数">{result.meta?.trading_days}</Descriptions.Item>
               </Descriptions>
             </Card>
             <Card className="a-fear-etf-card" title="资金曲线"><ReactECharts option={equityOption} style={{ height: 390 }} /></Card>
