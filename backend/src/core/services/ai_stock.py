@@ -820,6 +820,12 @@ class DeepSeekStockSelector:
                 "aliases": "用于下一轮理解新闻事件与同花顺板块目录关系的中文别名",
             },
             "news_headlines": headlines,
+            "field_guidance": {
+                "tone": "按标题措辞情绪方向判断: negative=利空措辞/positive=利好措辞/neutral=中性，不要用外部知识",
+                "quantitative": "0-100，标题包含多少具体可验证的量化信息(业绩数字/订单金额/增速/比例)，无数字=0",
+                "ambiguity": "0-100，信息模糊度('有望''或将''可能'等不确定措辞=高分；确定数字=低分)",
+                "text_surprise": "0-100，标题本身多大程度超出市场对该公司的普遍预期，仅凭常识判断，不需要个股数据",
+            },
             "response_schema": {
                 "events": [
                     {
@@ -920,6 +926,7 @@ class DeepSeekStockSelector:
             "task": "延续新闻事件和 THS 板块映射会话。以下是已验证板块的全部合格成分股及板块强弱数据。只能从成分股选择，新闻事件和 THS 板块关联优先；板块强弱只作排序与执行参考。每只股票只能出现一次，严禁重复。",
             "constraints": {"max_picks": min(max(int(top_n or 0), 1), int(_params.get("max_recommendations", MAX_RECOMMENDATIONS))), "confidence_range": [0, 100], "target_return_pct_range": [_tr_min, _tr_max], "must_return_json": True},
             "validated_events": event_stage["events"], "validated_board_mappings": board_stage["board_mappings"], "board_market_snapshot": snapshot.get("boards") or [], "candidates": compact_candidates,
+            "news_signal_guidance": "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。",
             "response_schema": {"picks": [{"ts_code": "候选列表完整 ts_code", "confidence": 0, "target_return_pct": 5, "reason": "新闻事件→THS板块→股票", "risks": "风险", "themes": ["THS板块"], "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885000.TI"}]}]},
         }
         second_messages = board_stage["transcript"]["request"]["messages"]
