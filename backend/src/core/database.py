@@ -518,6 +518,7 @@ class AIStockRecommendation(Base):
     target_price = Column(Float, nullable=False)
     ai_confidence = Column(Float, nullable=False)
     execution_score = Column(Float, nullable=False, default=0.0)
+    news_signal = Column(Float, nullable=False, default=50.0)
     rank = Column(Integer, nullable=False)
     reason = Column(Text, nullable=False)
     risks = Column(Text)
@@ -573,6 +574,7 @@ class AIStockServiceConfig(Base):
     min_listing_days = Column(Integer)
     target_return_pct_min = Column(Integer)
     target_return_pct_max = Column(Integer)
+    news_signal_weight = Column(Integer)
     updated_by = Column(String(128))
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 

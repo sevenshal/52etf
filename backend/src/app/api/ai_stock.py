@@ -44,6 +44,7 @@ class AIStockServiceSettingsUpdate(BaseModel):
     min_listing_days: Optional[int] = Field(default=None, ge=1, le=10000)
     target_return_pct_min: Optional[float] = Field(default=None, ge=0, le=100)
     target_return_pct_max: Optional[float] = Field(default=None, ge=0, le=100)
+    news_signal_weight: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 def _translate_error(exc: Exception) -> HTTPException:
@@ -79,6 +80,7 @@ def save_ai_stock_settings(
             min_listing_days=payload.min_listing_days,
             target_return_pct_min=payload.target_return_pct_min,
             target_return_pct_max=payload.target_return_pct_max,
+            news_signal_weight=payload.news_signal_weight,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

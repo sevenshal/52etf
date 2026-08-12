@@ -61,6 +61,7 @@ MAX_RECOMMENDATIONS = 10
 MIN_LISTING_DAYS = 183
 TARGET_RETURN_PCT_MIN = 5.0
 TARGET_RETURN_PCT_MAX = 10.0
+NEWS_SIGNAL_WEIGHT = 0.5  # 纯新闻信号在排序中的权重，0 = 关闭（回到纯 AI 信心排序）
 MAX_EVENTS = 8
 MAX_BOARDS = 8
 MAX_CANDIDATES_PER_BOARD = 200
@@ -84,11 +85,13 @@ def _load_strategy_params() -> Dict[str, int]:
             min_ld = config.min_listing_days if config and config.min_listing_days is not None else MIN_LISTING_DAYS
             tr_min = config.target_return_pct_min if config and config.target_return_pct_min is not None else TARGET_RETURN_PCT_MIN
             tr_max = config.target_return_pct_max if config and config.target_return_pct_max is not None else TARGET_RETURN_PCT_MAX
+            nsw = config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT
         return {
             "max_candidates": max_c, "max_events": max_e, "max_boards": max_b,
             "max_candidates_per_board": max_cpb, "min_market_cap": min_mc, "min_avg_turnover": min_to,
             "max_recommendations": max_r, "min_listing_days": min_ld,
             "target_return_pct_min": tr_min, "target_return_pct_max": tr_max,
+            "news_signal_weight": nsw,
         }
     except Exception:
         return {
@@ -96,6 +99,7 @@ def _load_strategy_params() -> Dict[str, int]:
             "max_candidates_per_board": MAX_CANDIDATES_PER_BOARD, "min_market_cap": MIN_MARKET_CAP, "min_avg_turnover": MIN_AVG_TURNOVER,
             "max_recommendations": MAX_RECOMMENDATIONS, "min_listing_days": MIN_LISTING_DAYS,
             "target_return_pct_min": TARGET_RETURN_PCT_MIN, "target_return_pct_max": TARGET_RETURN_PCT_MAX,
+            "news_signal_weight": NEWS_SIGNAL_WEIGHT,
         }
 
 
@@ -140,6 +144,7 @@ def get_ai_stock_service_settings() -> Dict[str, Any]:
             "min_listing_days": config.min_listing_days if config and config.min_listing_days is not None else MIN_LISTING_DAYS,
             "target_return_pct_min": config.target_return_pct_min if config and config.target_return_pct_min is not None else TARGET_RETURN_PCT_MIN,
             "target_return_pct_max": config.target_return_pct_max if config and config.target_return_pct_max is not None else TARGET_RETURN_PCT_MAX,
+            "news_signal_weight": config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT,
             "updated_at": config.updated_at if config else None,
             "updated_by": config.updated_by if config else None,
         }
@@ -171,6 +176,7 @@ def update_ai_stock_service_settings(
     min_listing_days: Optional[int] = None,
     target_return_pct_min: Optional[float] = None,
     target_return_pct_max: Optional[float] = None,
+    news_signal_weight: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Persist write-only DeepSeek key and strategy limits in one short transaction."""
     key = str(deepseek_api_key or "").strip()
@@ -187,6 +193,8 @@ def update_ai_stock_service_settings(
             raise ValueError(f"{name} 必须是 0-100 的百分比")
     if target_return_pct_min is not None and target_return_pct_max is not None and target_return_pct_min > target_return_pct_max:
         raise ValueError("目标收益下限不能大于上限")
+    if news_signal_weight is not None and (not isinstance(news_signal_weight, (int, float)) or news_signal_weight < 0 or news_signal_weight > 1):
+        raise ValueError("新闻信号权重必须是 0-1 之间的比例")
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
         if not config:
@@ -216,6 +224,8 @@ def update_ai_stock_service_settings(
             config.target_return_pct_min = target_return_pct_min
         if target_return_pct_max is not None:
             config.target_return_pct_max = target_return_pct_max
+        if news_signal_weight is not None:
+            config.news_signal_weight = news_signal_weight
         config.updated_by = updated_by
     return get_ai_stock_service_settings()
 
@@ -327,6 +337,12 @@ def _validated_events(raw_response: Dict[str, Any], headlines: List[Dict[str, An
                 "aliases": aliases[:8],
                 "direction": str(item.get("direction") or "中性")[:16],
                 "rationale": str(item.get("rationale") or "")[:500],
+                # 文本内在属性：tone/quantitative/ambiguity 不需要股票特征即可判断，
+                # text_surprise 是"标题本身出乎常识的程度"，与个股/板块特征无关
+                "tone": str(item.get("tone") or "neutral")[:16],
+                "quantitative": _clamp(item.get("quantitative"), 0.0, 100.0, 0.0),
+                "ambiguity": _clamp(item.get("ambiguity"), 0.0, 100.0, 0.0),
+                "text_surprise": _clamp(item.get("text_surprise"), 0.0, 100.0, 0.0),
             }
         )
     accepted = sorted(accepted, key=lambda item: (-item["score"], item["hotword"]))[:_load_strategy_params()["max_events"]]
@@ -371,6 +387,91 @@ def _listing_days(value: Any, as_of: date) -> Optional[int]:
             except ValueError:
                 continue
     return max(0, (as_of - listed_on).days) if listed_on and listed_on <= as_of else None
+
+
+def _window_features(rows: List[Tuple[Optional[float], Optional[float], Optional[float]]]) -> Dict[str, Any]:
+    """Trailing-window features from ascending daily bars.
+
+    rows: [(close, pct_chg, turnover_rate)] ordered by trade_date asc.
+    Returns mom_5d/mom_20d/mom_60d (percent returns), volatility_20d
+    (annualized percent), price_position (0-1 within the 20d range) and
+    turnover_avg_20d (percent).  Missing windows yield None values.
+    """
+    n = len(rows)
+    if n < 2:
+        return {}
+    closes = [row[0] for row in rows]
+    pct = [row[1] for row in rows]
+    turn = [row[2] for row in rows]
+    last_close = closes[-1] if closes[-1] else 0.0
+    feat: Dict[str, Any] = {}
+
+    def momentum(window: int) -> Optional[float]:
+        idx = n - 1 - window
+        base = closes[idx] if 0 <= idx < n else None
+        if base and base > 0 and last_close > 0:
+            return round((last_close / base - 1) * 100, 2)
+        return None
+
+    feat["mom_5d"] = momentum(5)
+    feat["mom_20d"] = momentum(20)
+    feat["mom_60d"] = momentum(60)
+
+    valid_pct = [v for v in pct[-20:] if v is not None]
+    if len(valid_pct) >= 5:
+        mean = sum(valid_pct) / len(valid_pct)
+        var = sum((v - mean) ** 2 for v in valid_pct) / (len(valid_pct) - 1)
+        feat["volatility_20d"] = round(math.sqrt(var) * math.sqrt(252), 2)
+    else:
+        feat["volatility_20d"] = None
+
+    win = [v for v in closes[-20:] if v is not None and v > 0]
+    if len(win) >= 2:
+        lo, hi = min(win), max(win)
+        feat["price_position"] = round((last_close - lo) / (hi - lo), 3) if hi > lo else 0.5
+    else:
+        feat["price_position"] = None
+
+    valid_turn = [v for v in turn[-20:] if v is not None]
+    feat["turnover_avg_20d"] = round(sum(valid_turn) / len(valid_turn), 3) if valid_turn else None
+    return feat
+
+
+def _news_signal_score(candidate: Dict[str, Any]) -> float:
+    """Pure-news signal 0-100 (The Inefficient Pricing of News, NBER w35093).
+
+    Combines LLM text attributes (tone / quantitative / ambiguity /
+    text_surprise) with a data-computed characteristic residual (momentum /
+    price position).  Underreaction setups — negative or neutral tone with
+    concrete numbers, price sitting low in its 20d range — score high
+    (market over-pessimism, drift opportunity).  Overreaction setups — vague
+    high-attention topics on extended momentum — score low (chase risk).
+    Neutral 50 when the candidate has no linked news.
+    """
+    events = candidate.get("events") or []
+    if not events:
+        return 50.0
+    scores = []
+    for ev in events:
+        tone = str(ev.get("tone") or "neutral").lower()
+        quantitative = _clamp(ev.get("quantitative"), 0.0, 100.0, 0.0) / 100.0
+        ambiguity = _clamp(ev.get("ambiguity"), 0.0, 100.0, 0.0) / 100.0
+        text_surprise = _clamp(ev.get("text_surprise"), 0.0, 100.0, 0.0) / 100.0
+        tone_bonus = 30.0 if tone == "negative" else (10.0 if tone == "neutral" else -10.0)
+        under_score = 50.0 + text_surprise * 30.0 + quantitative * 20.0 + tone_bonus
+        over_penalty = ambiguity * 25.0
+        mom20 = _safe_float(candidate.get("mom_20d"))
+        position = _safe_float(candidate.get("price_position"))
+        if mom20 is not None and mom20 > 15:
+            # extended momentum: news is largely expected content, not shock
+            over_penalty += min(25.0, (mom20 - 15) * 1.0)
+        if position is not None and position < 0.3 and tone == "negative":
+            # low price position + negative news -> market already pessimistic
+            under_score += 10.0
+        scores.append(max(0.0, min(100.0, under_score - over_penalty)))
+    if not scores:
+        return 50.0
+    return round(sum(scores) / len(scores), 1)
 
 
 def _execution_score(candidate: Dict[str, Any]) -> float:
@@ -520,6 +621,7 @@ class AIStockDataProvider:
         # Note: the DuckDB daily sync can lag the trade_cal-based market_date
         # by a day (T+1), so query the latest date actually present in DuckDB.
         daily_lookup: Dict[str, Dict[str, float]] = {}
+        window_lookup: Dict[str, Dict[str, Any]] = {}
         data_date: Optional[date] = None
         if pre_filtered:
             analytics_path = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
@@ -538,6 +640,31 @@ class AIStockDataProvider:
                         rows = []
                 for ts_code, total_mv, amount, close, pct_chg in rows:
                     daily_lookup[ts_code] = {"total_mv": float(total_mv or 0), "amount": float(amount or 0), "close": float(close or 0), "pct_chg": float(pct_chg or 0)}
+                # Trailing-window features (momentum/volatility/price position /
+                # avg turnover) used as the stock-characteristic baseline for the
+                # pure-news residual.  One batched read, computed in memory.
+                window_lookup: Dict[str, Dict[str, Any]] = {}
+                wrows = ddb.execute(
+                    f"SELECT ts_code, close, pct_chg, turnover_rate FROM a_stock_market_daily WHERE ts_code IN ({placeholders}) ORDER BY ts_code, trade_date",
+                    codes,
+                ).fetchall()
+                bucket: List[Tuple[Optional[float], Optional[float], Optional[float]]] = []
+                current_code: Optional[str] = None
+                for w_ts_code, w_close, w_pct, w_turn in wrows:
+                    if w_ts_code != current_code:
+                        if current_code is not None and bucket:
+                            window_lookup[current_code] = _window_features(bucket)
+                        current_code = w_ts_code
+                        bucket = []
+                    bucket.append(
+                        (
+                            float(w_close) if w_close is not None else None,
+                            float(w_pct) if w_pct is not None else None,
+                            float(w_turn) if w_turn is not None else None,
+                        )
+                    )
+                if current_code is not None and bucket:
+                    window_lookup[current_code] = _window_features(bucket)
             except Exception as exc:
                 logger.warning("DuckDB daily fetch failed, skipping size/liquidity filter: %s", exc)
                 data_date = None
@@ -584,6 +711,8 @@ class AIStockDataProvider:
             quotes = self.tushare.get_quote_batch([item["ts_code"] for item in filtered[offset:offset + 50]])
             for quote in quotes or []:
                 quote_map[_normalize_ts_code(quote.get("symbol"))] = quote
+        for candidate in filtered:
+            candidate.update(window_lookup.get(candidate["ts_code"]) or {})
         eligible = []
         for candidate in filtered:
             quote = quote_map.get(candidate["ts_code"])
@@ -700,6 +829,10 @@ class DeepSeekStockSelector:
                         "aliases": ["可用于理解题材的词"],
                         "direction": "利多/利空/中性",
                         "rationale": "仅基于标题的简要归因",
+                        "tone": "negative/positive/neutral",
+                        "quantitative": 0,
+                        "ambiguity": 0,
+                        "text_surprise": 0,
                     }
                 ]
             },
@@ -779,7 +912,7 @@ class DeepSeekStockSelector:
         candidates = snapshot.get("candidates") or []
         if not candidates:
             raise AIStockModelError("已映射 THS 板块没有合格成分股")
-        compact_candidates = [{key: item.get(key) for key in ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "board_strength")} for item in candidates]
+        compact_candidates = [{key: item.get(key) for key in ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d", "board_strength")} for item in candidates]
         _params = _load_strategy_params()
         _tr_min = float(_params.get("target_return_pct_min", TARGET_RETURN_PCT_MIN))
         _tr_max = float(_params.get("target_return_pct_max", TARGET_RETURN_PCT_MAX))
@@ -883,13 +1016,15 @@ def _validated_picks(
                 "target_return_pct": _clamp(target_return, _tr_min, _tr_max, _tr_min),
                 "ai_confidence": _clamp(confidence, 0.0, 100.0, 0.0),
                 "execution_score": _execution_score(candidate),
+                "news_signal": _news_signal_score(candidate),
                 "reason": reason[:1200],
                 "risks": str(pick.get("risks") or "")[:800],
                 "evidence": evidence or [str(value)[:400] for value in pick.get("evidence") or [] if str(value).strip()][:8],
                 "candidate_snapshot": candidate,
             }
         )
-    accepted.sort(key=lambda item: (-item["ai_confidence"], -item["execution_score"], item["ts_code"]))
+    _nsw = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT))
+    accepted.sort(key=lambda item: (-item["ai_confidence"], -item.get("news_signal", 50.0) * _nsw, -item["execution_score"], item["ts_code"]))
     for index, item in enumerate(accepted[:top_n], start=1):
         item["rank"] = index
         item["target_price"] = round(item["recommendation_price"] * (1 + item["target_return_pct"] / 100), 3)
