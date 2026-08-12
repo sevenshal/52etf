@@ -667,6 +667,26 @@ class AIStockPaperEquity(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
+class AIStockHoldEvaluation(Base):
+    """AI hold_score for a current paper position (low score = sell bias).
+
+    Written once per recommendation batch when the paper portfolio has open
+    lots; process_minute reads the latest evaluation and may use it as one
+    sell trigger (AI_SIGNAL) alongside the hard price rules.
+    """
+    __tablename__ = "ai_stock_hold_evaluations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id = Column(Integer, ForeignKey("ai_stock_paper_portfolios.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("ai_stock_recommendation_runs.id"), nullable=True, index=True)
+    ts_code = Column(String(16), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    hold_score = Column(Float, nullable=False)
+    reason = Column(Text)
+    evaluated_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class AIStockBenchmarkSnapshot(Base):
     """Read-only snapshots collected from the reference site for later comparison."""
     __tablename__ = "ai_stock_benchmark_snapshots"

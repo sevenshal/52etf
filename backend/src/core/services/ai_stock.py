@@ -24,6 +24,7 @@ from sqlalchemy import desc
 from ..database import (
     AIStockBenchmarkSnapshot,
     AIStockEvaluation,
+    AIStockHoldEvaluation,
     AIStockPaperEquity,
     AIStockPaperLot,
     AIStockPaperPortfolio,
@@ -942,6 +943,97 @@ class DeepSeekStockSelector:
             raise AIStockModelError("DeepSeek 返回不包含 picks 列表")
         return {"model": self.model, "response": raw_response, "transcript": {"stage": "THS_BOARDS_TO_STOCK_SELECTION", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
 
+    def evaluate_positions(
+        self,
+        event_stage: Dict[str, Any],
+        board_stage: Dict[str, Any],
+        positions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Round 4: score current paper positions (hold_score 0-100, low = sell).
+
+        Reuses the accumulated news/board context so the model judges each
+        open position against today's events and sector strength.  The score
+        is advisory only: process_minute still enforces the hard price rules.
+        """
+        if not positions:
+            raise AIStockModelError("没有持仓需要评估")
+        instruction = {
+            "task": "延续新闻事件、THS 板块映射和选股会话。以下是模拟盘当前持仓（成本/现价/盈亏/持有天数）。请结合今日新闻事件与板块强弱，为每只持仓给出 hold_score(0-100)：分数越低越倾向卖出，越高越倾向继续持有。只评估现有持仓，不得新增或推荐其他标的。",
+            "constraints": {
+                "score_meaning": "0-100：≥70=继续持有/加仓(错价机会大、事件与板块强势)；50=中性；≤30=倾向卖出(基本面恶化、过度反应追高风险、事件利空、板块转弱)",
+                "must_return_json": True,
+            },
+            "validated_events": event_stage["events"],
+            "board_market_snapshot": board_stage.get("boards") or [],
+            "positions": positions,
+            "response_schema": {
+                "evaluations": [
+                    {"ts_code": "持仓 ts_code", "hold_score": 0, "reason": "中文理由：结合新闻事件/板块/盈亏的一句话判断"}
+                ]
+            },
+        }
+        third_messages = board_stage["transcript"]["request"]["messages"]
+        messages = [*third_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
+        raw_response, content, request_body, metadata = self._call_json(messages)
+        if not isinstance(raw_response.get("evaluations"), list):
+            raise AIStockModelError("DeepSeek 返回不包含 evaluations 列表")
+        return {"model": self.model, "response": raw_response, "transcript": {"stage": "HOLD_EVALUATION", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
+
+def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict[str, Any], board_stage: Dict[str, Any], run_id: int, selector: Optional[DeepSeekStockSelector] = None) -> Dict[str, Any]:
+    """Advisory round-4 hold evaluation persisted to ai_stock_hold_evaluations.
+
+    Reads current paper positions as plain snapshots (short transaction),
+    asks the model to score each with hold_score (low = sell bias), then
+    persists valid evaluations.  Failures are reported but never raise: the
+    recommendation batch itself must not depend on this advisory step.
+    """
+    paper = AIStockPaperTradingService()
+    positions = paper.positions()
+    if not positions:
+        return {"evaluated": False, "reason": "无持仓"}
+    compact = [
+        {
+            "ts_code": item["ts_code"],
+            "name": item["name"],
+            "cost": item["cost"],
+            "price": item["price"],
+            "pnl_pct": item["pnl_pct"],
+            "held_days": item["held_days"],
+        }
+        for item in positions
+    ]
+    try:
+        selection = (selector or DeepSeekStockSelector()).evaluate_positions(event_stage, board_stage, compact)
+    except Exception as exc:
+        logger.warning("AI hold evaluation skipped: %s", exc)
+        return {"evaluated": False, "reason": str(exc)[:200]}
+    raw = selection["response"]
+    by_code = {_normalize_ts_code(item["ts_code"]): item for item in positions}
+    valid = []
+    for item in raw.get("evaluations") or []:
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_ts_code(item.get("ts_code"))
+        pos = by_code.get(code)
+        if not pos:
+            continue
+        valid.append(
+            {
+                "ts_code": code,
+                "name": pos["name"],
+                "hold_score": _clamp(item.get("hold_score"), 0.0, 100.0, 50.0),
+                "reason": str(item.get("reason") or "")[:500],
+            }
+        )
+    if not valid:
+        return {"evaluated": False, "reason": "AI 未返回有效评估"}
+    with get_db_ctx() as db:
+        portfolio = AIStockPaperTradingService._ensure_portfolio(db)
+        for item in valid:
+            db.add(AIStockHoldEvaluation(portfolio_id=portfolio.id, run_id=run_id, ts_code=item["ts_code"], name=item["name"], hold_score=item["hold_score"], reason=item["reason"]))
+    return {"evaluated": True, "count": len(valid)}
+
+
 def _validated_board_mappings(raw_response: Dict[str, Any], events: List[Dict[str, Any]], catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     event_ids = {item["event_id"] for item in events}
     catalog_map = {str(item.get("ts_code") or "").upper(): item for item in catalog}
@@ -1130,6 +1222,14 @@ class AIStockRecommendationService:
             run.ai_raw_response = transcript
             for pick in picks:
                 db.add(AIStockRecommendation(run_id=run.id, **pick))
+        # Round 4 (advisory): score current paper positions when the option is
+        # enabled.  Never allowed to fail the batch.
+        try:
+            hold_cfg = AIStockPaperTradingService().strategy_config()
+            if (hold_cfg.get("parameters") or {}).get("hold_evaluation_enabled"):
+                evaluate_paper_holdings(now=now, event_stage=event_stage, board_stage=board_stage, run_id=run.id)
+        except Exception as exc:
+            logger.warning("AI hold evaluation step skipped: %s", exc)
         return self.get_run(run_id)
 
     @staticmethod
@@ -1571,6 +1671,8 @@ class AIStockPaperTradingService:
                     "stop_loss_half_pct": -8.0,
                     "stop_loss_full_pct": -12.0,
                     "trading_start_minute": 585,
+                    "hold_evaluation_enabled": False,
+                    "hold_sell_threshold": 30.0,
                 },
             )
             db.add(config)
@@ -1595,6 +1697,16 @@ class AIStockPaperTradingService:
                 AIStockPaperTrade.side == "BUY",
                 AIStockPaperTrade.trade_date == snapshot_date,
             ).all()
+            eval_rows = (
+                db.query(AIStockHoldEvaluation)
+                .filter(AIStockHoldEvaluation.portfolio_id == portfolio.id)
+                .order_by(desc(AIStockHoldEvaluation.evaluated_at))
+                .all()
+            )
+            hold_scores: Dict[str, Dict[str, Any]] = {}
+            for ev in eval_rows:
+                if ev.ts_code not in hold_scores:
+                    hold_scores[ev.ts_code] = {"hold_score": float(ev.hold_score), "reason": ev.reason}
             return {
                 "portfolio": {
                     "id": portfolio.id,
@@ -1621,6 +1733,7 @@ class AIStockPaperTradingService:
                 ],
                 "recommendations": [AIStockRecommendationService._recommendation_payload(row) for row in recommendations],
                 "today_buys": {(row.ts_code, row.recommendation_id) for row in today_buys},
+                "hold_scores": hold_scores,
             }
 
     def process_minute(self, now: Optional[datetime] = None, fear_greed: Optional[float] = None) -> Dict[str, Any]:
@@ -1663,7 +1776,12 @@ class AIStockPaperTradingService:
             held_days = _holding_days(lot["bought_at"], timestamp.date())
             reason_code = None
             quantity = lot["remaining_quantity"]
-            if price >= lot["target_price"]:
+            hold_info = (state.get("hold_scores") or {}).get(lot["ts_code"])
+            hold_score = hold_info.get("hold_score") if hold_info else None
+            hold_enabled = bool(sp.get("hold_evaluation_enabled"))
+            hold_sell_threshold = float(_safe_float(sp.get("hold_sell_threshold"), 30.0))
+            if price >= lot["target_price"] and not (hold_enabled and hold_score is not None and hold_score >= 70):
+                # AI 高评分(≥70=继续持有)时可延迟止盈，让错价修复的利润奔跑
                 reason_code = "TARGET_PROFIT"
             elif pnl_pct <= stop_loss_full and fg >= 20:
                 reason_code = "STOP_LOSS_FULL"
@@ -1672,9 +1790,15 @@ class AIStockPaperTradingService:
                 quantity = max(100, (quantity // 2 // 100) * 100)
             elif fg >= 80:
                 reason_code = "EXTREME_GREED_EXIT"
+            elif hold_enabled and hold_score is not None and hold_score <= hold_sell_threshold:
+                # AI 低评分 = 倾向卖出（基本面/事件/板块转弱），作为规则外的补充信号
+                reason_code = "AI_SIGNAL"
             elif held_days >= 30:
                 reason_code = "MAX_HOLD_DAYS"
             if reason_code and quantity > 0:
+                reason_text = f"{reason_code}: 现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
+                if reason_code == "AI_SIGNAL" and hold_info and hold_info.get("reason"):
+                    reason_text += f"；AI评估(hold_score={hold_score:.0f}): {hold_info['reason']}"
                 plans.append(
                     PlannedTrade(
                         side="SELL",
@@ -1684,8 +1808,8 @@ class AIStockPaperTradingService:
                         quantity=min(quantity, lot["remaining_quantity"]),
                         lot_id=lot["id"],
                         reason_code=reason_code,
-                        reason=f"{reason_code}: 现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%",
-                        state_snapshot={"fear_greed": fg, "pnl_pct": pnl_pct, "held_days": held_days},
+                        reason=reason_text,
+                        state_snapshot={"fear_greed": fg, "pnl_pct": pnl_pct, "held_days": held_days, "hold_score": hold_score},
                     )
                 )
 
@@ -1881,7 +2005,7 @@ class AIStockPaperTradingService:
         allowed = {
             "max_positions", "slot_count", "single_stock_cap", "max_execution_target",
             "entry_price_cap_pct", "stop_loss_half_pct", "stop_loss_full_pct",
-            "trading_start_minute",
+            "trading_start_minute", "hold_evaluation_enabled", "hold_sell_threshold",
         }
         unknown = set(parameters) - allowed
         if unknown:
@@ -1900,6 +2024,11 @@ class AIStockPaperTradingService:
             elif name == "trading_start_minute":
                 if value < 9 * 60 + 30 or value > 11 * 60 + 30 or value != int(value):
                     raise ValueError(f"{name} 必须是 570(9:30)~690(11:30) 的整数分钟")
+            elif name == "hold_evaluation_enabled":
+                value = bool(value)
+            elif name == "hold_sell_threshold":
+                if value < 0 or value > 100:
+                    raise ValueError(f"{name} 必须是 0-100 的分数")
             else:
                 if value < 0 or value > 1.0:
                     raise ValueError(f"{name} 必须是 0-1 之间的比例")
