@@ -2,9 +2,9 @@
 """Local runner for ptrade_client.py with mocked PTrade APIs.
 
 Example:
-    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000
-    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --empty-positions
-    python 52etf_api/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --quote-provider longport
+    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000
+    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --empty-positions
+    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --quote-provider longport
 
 Create an enabled external trading account in the web UI with the printed
 identifier before starting the connection. The backend owns the account name.

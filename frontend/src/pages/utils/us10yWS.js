@@ -1,4 +1,4 @@
-// 52etf_fe/src/utils/us10yWS.js
+// frontend/src/utils/us10yWS.js
 // 封装Investing.com美债10Y收益率WebSocket行情推送
 
 function randomSockjsId(len = 8) {

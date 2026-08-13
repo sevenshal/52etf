@@ -1359,26 +1359,26 @@ A股账号：
 项目内已有 PTrade 示例客户端：
 
 ```text
-52etf_api/ptrade_robot/ptrade_client.py
+52etf/backend/ptrade_robot/ptrade_client.py
 ```
 
 本地模拟运行器：
 
 ```text
-52etf_api/ptrade_robot/ptrade_client_simulator.py
+52etf/backend/ptrade_robot/ptrade_client_simulator.py
 ```
 
 模拟器示例：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 ../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --host localhost:8001
 ```
 
 自检：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 ../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --self-test --log-level ERROR
 ```
 

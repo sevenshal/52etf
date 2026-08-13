@@ -4,7 +4,7 @@
 
 ```bash
 cd /Users/sevenshal/Dev/github/quant
-XUEQIU_COOKIE='...' ./.venv/bin/python 52etf_api/lab/xueqiu_cube_analysis.py --cube-symbol ZH1189922 --start-date 20160101
+XUEQIU_COOKIE='...' ./.venv/bin/python 52etf/backend/lab/xueqiu_cube_analysis.py --cube-symbol ZH1189922 --start-date 20160101
 ```
 
 ## 2023-01-01 批次
@@ -13,8 +13,8 @@ XUEQIU_COOKIE='...' ./.venv/bin/python 52etf_api/lab/xueqiu_cube_analysis.py --c
 
 - 回测区间：2023-01-01 至 2026-05-19
 - 滑点：单边 0.5%
-- 输出目录：`52etf_api/lab/output/batch_20230101/<组合ID>`
-- 排名汇总：`52etf_api/lab/output/batch_20230101/ranking_report.md`
+- 输出目录：`52etf/backend/lab/output/batch_20230101/<组合ID>`
+- 排名汇总：`52etf/backend/lab/output/batch_20230101/ranking_report.md`
 
 最近一次全量重跑结果（按滑点后总收益排序）：
 
@@ -41,9 +41,9 @@ XUEQIU_COOKIE='...' ./.venv/bin/python 52etf_api/lab/xueqiu_cube_analysis.py --c
 - 回测结束：2026-05-25
 - 滑点：单边 0.5%
 - 基准：中证500（000905.SH）
-- 输出目录：`52etf_api/lab/output/xueqiu_year_top100_20260525_slippage_0_5`
-- 最终汇总：`52etf_api/lab/output/xueqiu_year_top100_20260525_slippage_0_5/ranking_report.md`
-- 明细 CSV：`52etf_api/lab/output/xueqiu_year_top100_20260525_slippage_0_5/ranking_summary.csv`
+- 输出目录：`52etf/backend/lab/output/xueqiu_year_top100_20260525_slippage_0_5`
+- 最终汇总：`52etf/backend/lab/output/xueqiu_year_top100_20260525_slippage_0_5/ranking_report.md`
+- 明细 CSV：`52etf/backend/lab/output/xueqiu_year_top100_20260525_slippage_0_5/ranking_summary.csv`
 
 全部 100 个组合回测成功。按滑点后总收益排序，前 10 名：
 
@@ -70,9 +70,9 @@ XUEQIU_COOKIE='...' ./.venv/bin/python 52etf_api/lab/xueqiu_cube_analysis.py --c
 - 滑点：单边 0.5%
 - 基准：中证500（000905.SH）
 - 排序规则：先按滑点后夏普值向下取整分档降序，再按同档滑点后年化收益率降序
-- 输出目录：`52etf_api/lab/output/xueqiu_year_top1000_20260525_slippage_0_5`
-- 最终汇总：`52etf_api/lab/output/xueqiu_year_top1000_20260525_slippage_0_5/sharpe_bucket_report.md`
-- 明细 CSV：`52etf_api/lab/output/xueqiu_year_top1000_20260525_slippage_0_5/sharpe_bucket_summary.csv`
+- 输出目录：`52etf/backend/lab/output/xueqiu_year_top1000_20260525_slippage_0_5`
+- 最终汇总：`52etf/backend/lab/output/xueqiu_year_top1000_20260525_slippage_0_5/sharpe_bucket_report.md`
+- 明细 CSV：`52etf/backend/lab/output/xueqiu_year_top1000_20260525_slippage_0_5/sharpe_bucket_summary.csv`
 
 全部 1000 个组合回测成功；其中 11 个组合触达雪球历史调仓分页上限，报告里保留了 `page_limit_hit` 与可抓取到的最早调仓日期。按本批排序规则，前 10 名：
 

@@ -1,4 +1,4 @@
-# 52etf_api
+# backend
 
 
 uvicorn src.app.main:app --host 0.0.0.0 --port 8001 --reload
@@ -24,14 +24,14 @@ uvicorn src.app.main:app --host 0.0.0.0 --port 8001 --reload
 - 安装开发依赖（首次运行）：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 make deadcode-tools
 ```
 
 - 运行死代码扫描（会自动安装缺失工具）：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 make deadcode
 ```
 
@@ -40,14 +40,14 @@ make deadcode
 - 全量校验（更严格）：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 make deadcode-strict
 ```
 
 - 清理历史扫描结果：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf_api
+cd /Users/sevenshal/Dev/github/quant/52etf/backend
 make deadcode-clean
 ```
 
@@ -59,7 +59,7 @@ make deadcode-clean
 
 ### 扩展配置
 
-扫描规则支持在 [scripts/deadcode.config](/Users/sevenshal/Dev/github/quant/52etf_api/scripts/deadcode.config:1) 调整，例如：
+扫描规则支持在 [scripts/deadcode.config](/Users/sevenshal/Dev/github/quant/52etf/backend/scripts/deadcode.config:1) 调整，例如：
 
 - 改变 `VULTURE_MIN_CONFIDENCE`
 - 增加/减少 `VULTURE_EXCLUDE` 目录
@@ -74,5 +74,5 @@ make deadcode-clean
 运行结果会输出到：
 
 ```bash
-/Users/sevenshal/Dev/github/quant/52etf_api/.artifacts/deadcode
+/Users/sevenshal/Dev/github/quant/52etf/backend/.artifacts/deadcode
 ```
