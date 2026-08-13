@@ -96,6 +96,8 @@ const ensureBackendEventsConnection = () => {
 
   socket.onopen = () => {
     reconnectAttempt = 0;
+    // 通知各页面重连成功，便于重新注册实时行情股票池等会话级状态
+    dispatchEvent({ type: 'ws_connected', pushed_at: new Date().toISOString() });
   };
 
   socket.onmessage = (message) => {
@@ -118,6 +120,14 @@ const ensureBackendEventsConnection = () => {
   socket.onerror = () => {
     socket?.close();
   };
+};
+
+export const sendBackendEventMessage = (msg) => {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(msg));
+    return true;
+  }
+  return false;
 };
 
 export const subscribeBackendEvent = (type, handler) => {
