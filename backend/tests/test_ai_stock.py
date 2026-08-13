@@ -387,3 +387,19 @@ def test_paper_stop_loss_halves_once_and_t_plus_one_blocks_same_day_sell():
     same_day_service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
 
     assert same_day_service.captured_plans == []
+
+
+def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
+    # 回归：路由模型曾经缺 trading_start_minute / hold_evaluation_enabled /
+    # hold_sell_threshold，Pydantic 默认忽略未知字段导致前端保存被静默丢弃。
+    from src.app.api.ai_stock import PaperStrategyConfigUpdate
+
+    dumped = PaperStrategyConfigUpdate(
+        trading_start_minute=585,
+        hold_evaluation_enabled=True,
+        hold_sell_threshold=30,
+    ).model_dump(exclude_none=True)
+
+    assert dumped["trading_start_minute"] == 585
+    assert dumped["hold_evaluation_enabled"] is True
+    assert dumped["hold_sell_threshold"] == 30

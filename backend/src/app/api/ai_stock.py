@@ -200,6 +200,9 @@ class PaperStrategyConfigUpdate(BaseModel):
     entry_price_cap_pct: Optional[float] = Field(default=None, ge=0, le=20)
     stop_loss_half_pct: Optional[float] = Field(default=None, ge=-100, le=0)
     stop_loss_full_pct: Optional[float] = Field(default=None, ge=-100, le=0)
+    trading_start_minute: Optional[float] = Field(default=None, ge=570, le=690)
+    hold_evaluation_enabled: Optional[bool] = None
+    hold_sell_threshold: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 @router.put("/paper/config")
