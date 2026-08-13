@@ -70,12 +70,12 @@ jobs:
       - name: Upload bundle and replace remote web root
         run: |
           scp -i ~/.ssh/deploy_key -P "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            52etf_fe.tgz "${ECS_USER}@${ECS_HOST}:/tmp/52etf_fe.tgz"
+            52etf_fe.tgz "${ECS_USER}@${ECS_HOST}:/home/quantd/52etf_fe.tgz"
 
           ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" "set -e
           mkdir -p ${ECS_REMOTE_DIR}
           rm -rf ${ECS_REMOTE_DIR}/*
-          tar xzf /tmp/52etf_fe.tgz -C ${ECS_REMOTE_DIR}
+          tar xzf /home/quantd/52etf_fe.tgz -C ${ECS_REMOTE_DIR}
           find ${ECS_REMOTE_DIR} -type d -exec chmod 755 {} +
           find ${ECS_REMOTE_DIR} -type f -exec chmod 644 {} +
           "
