@@ -1229,7 +1229,9 @@ class AIStockRecommendationService:
         try:
             hold_cfg = AIStockPaperTradingService().strategy_config()
             if (hold_cfg.get("parameters") or {}).get("hold_evaluation_enabled"):
-                evaluate_paper_holdings(now=now, event_stage=event_stage, board_stage=board_stage, run_id=run.id)
+                # run 在 session 关闭后已脱离（expire_on_commit 会过期其属性），
+                # 必须使用先前捕获的 run_id，避免 DetachedInstanceError。
+                evaluate_paper_holdings(now=now, event_stage=event_stage, board_stage=board_stage, run_id=run_id)
         except Exception as exc:
             logger.warning("AI hold evaluation step skipped: %s", exc)
         return self.get_run(run_id)

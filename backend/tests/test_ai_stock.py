@@ -389,6 +389,34 @@ def test_paper_stop_loss_halves_once_and_t_plus_one_blocks_same_day_sell():
     assert same_day_service.captured_plans == []
 
 
+def test_hold_evaluation_receives_captured_run_id_after_session_close(monkeypatch):
+    # 回归：run_recommendation 在第 4 步（AI 持仓评估）前已关闭写 session，
+    # 曾用脱离的 run.id 触发 DetachedInstanceError 导致持仓评估被跳过，
+    # /paper/hold-evaluations 永远为空。这里断言第 4 步拿到的是整型 run_id。
+    from src.core.services import ai_stock as ai_stock_module
+
+    service = AIStockRecommendationService(provider=_TranscriptProvider(), selector=_TranscriptSelector())
+
+    class _StubPaperService:
+        def strategy_config(self):
+            return {"enabled": True, "parameters": {"hold_evaluation_enabled": True}}
+
+    # 替换掉会初始化 tushare provider 的真实 paper 服务，同时让开关生效。
+    monkeypatch.setattr(ai_stock_module, "AIStockPaperTradingService", _StubPaperService)
+
+    calls = []
+
+    def fake_evaluate_paper_holdings(**kwargs):
+        calls.append(kwargs)
+        return {"evaluated": True, "count": 1}
+
+    monkeypatch.setattr(ai_stock_module, "evaluate_paper_holdings", fake_evaluate_paper_holdings)
+
+    run = service.run_recommendation(now=datetime(2026, 8, 10, 16, 0), allow_after_hours=True)
+
+    assert [item["run_id"] for item in calls] == [run["id"]]
+
+
 def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
     # 回归：路由模型曾经缺 trading_start_minute / hold_evaluation_enabled /
     # hold_sell_threshold，Pydantic 默认忽略未知字段导致前端保存被静默丢弃。
