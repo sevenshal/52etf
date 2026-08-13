@@ -216,7 +216,10 @@ class IBKRService:
         clean_symbol = self._normalize_ib_equity_symbol(symbol)
         contract = await self._qualify_stock_contract(symbol, timeout=15.0)
         logger.info(f"[{self.port}] Placing {action} market order for {quantity} {clean_symbol}")
-        order = MarketOrder(action, quantity)
+        # 显式指定 tif='DAY'：账户有「订单预设 TIF=DAY」，若 TIF 为空，IBKR 会发一条
+        # 10349「Order TIF was set to DAY based on order preset」提示，而 ib_insync 0.9.86
+        # 会把这条提示误判为订单被取消（Cancelled），导致下单被误报为 FAILED（实际已成交）。
+        order = MarketOrder(action, quantity, tif='DAY')
         trade = self.ib.placeOrder(contract, order)
         return await self._await_order_submission(trade, clean_symbol, timeout=submission_timeout)
 
@@ -226,7 +229,7 @@ class IBKRService:
         clean_symbol = self._normalize_ib_equity_symbol(symbol)
         contract = await self._qualify_stock_contract(symbol, timeout=10.0)
         
-        order = LimitOrder(action, quantity, price)
+        order = LimitOrder(action, quantity, price, tif='DAY')
         if outside_rth:
             order.outsideRth = True
             
