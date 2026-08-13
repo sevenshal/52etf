@@ -18,8 +18,8 @@ jobs:
       # 服务已迁移到本机(Rich)：52etf.vip 域名不变，SSH 经 frps 6022 端口转发到本机
       ECS_HOST: 52etf.vip
       ECS_PORT: "6022"
-      ECS_USER: sevenshal
-      ECS_REMOTE_DIR: /home/sevenshal/quant_prod/www
+      ECS_USER: quantd
+      ECS_REMOTE_DIR: /home/quantd/quant_prod/www
     steps:
       - name: Checkout
         uses: actions/checkout@v4
