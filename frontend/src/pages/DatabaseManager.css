@@ -1,0 +1,269 @@
+.db-manager-page {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: calc(100vh - 112px);
+  overflow: hidden;
+}
+
+.db-sidebar,
+.db-editor-card,
+.db-result-card {
+  border-radius: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.db-sidebar .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 178px);
+  min-height: 560px;
+  overflow: hidden;
+}
+
+.db-table-list {
+  flex: 1;
+  min-height: 180px;
+  overflow: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
+
+.db-table-item {
+  cursor: pointer;
+  padding: 10px 12px !important;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.db-table-item:hover {
+  background: #f5f8ff;
+}
+
+.db-table-item.active {
+  background: #e6f4ff;
+  border-inline-start: 3px solid #1677ff;
+}
+
+.db-table-item-body {
+  width: 100%;
+}
+
+.db-table-item-title {
+  justify-content: space-between;
+  width: 100%;
+}
+
+.db-table-fields {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.db-column-panel {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.db-column-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.db-column-tags .ant-tag {
+  margin-inline-end: 0;
+}
+
+.db-workbench {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.db-query-alert {
+  margin-bottom: 12px;
+}
+
+.db-editor-toolbar {
+  justify-content: flex-end;
+}
+
+.db-favorite-select {
+  width: 180px;
+}
+
+.db-engine-select {
+  width: 130px;
+}
+
+.db-sql-editor textarea,
+.db-sql-editor {
+  font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
+  line-height: 1.55;
+}
+
+.db-suggestions {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #d9e8ff;
+  border-radius: 8px;
+  background: #f7fbff;
+}
+
+.db-suggestions button {
+  display: grid;
+  grid-template-columns: auto minmax(96px, 1fr) minmax(120px, 1.2fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.db-suggestions button.active,
+.db-suggestions button:hover {
+  background: #e6f4ff;
+}
+
+.db-suggestion-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
+  font-weight: 600;
+}
+
+.db-suggestion-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #667085;
+  font-size: 12px;
+}
+
+.db-result-card .ant-card-body {
+  min-height: 520px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.db-timing-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.db-timing-row .ant-tag {
+  margin-inline-end: 0;
+}
+
+.db-result-card .ant-card-head,
+.db-result-card .ant-card-head-wrapper,
+.db-result-card .ant-card-body,
+.db-editor-card .ant-card-head,
+.db-editor-card .ant-card-head-wrapper,
+.db-editor-card .ant-card-body {
+  min-width: 0;
+}
+
+.db-result-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.db-result-table {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.db-result-table .ant-table,
+.db-result-table .ant-table-container,
+.db-result-table .ant-table-content,
+.db-result-table .ant-table-header,
+.db-result-table .ant-table-body {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.db-result-table .ant-table-content,
+.db-result-table .ant-table-body {
+  overflow-x: auto !important;
+}
+
+.db-chart-view {
+  min-height: 500px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.db-chart-controls {
+  margin-bottom: 12px;
+}
+
+.db-favorite-modal {
+  width: 100%;
+}
+
+@media (max-width: 920px) {
+  .db-manager-page {
+    grid-template-columns: 1fr;
+  }
+
+  .db-sidebar .ant-card-body {
+    height: auto;
+    min-height: 0;
+  }
+
+  .db-table-list {
+    max-height: 260px;
+  }
+
+  .db-column-panel {
+    max-height: 140px;
+  }
+
+  .db-editor-toolbar {
+    max-width: 100%;
+  }
+
+  .db-favorite-select,
+  .db-engine-select {
+    width: 100%;
+    min-width: 180px;
+  }
+
+  .db-suggestions button {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .db-suggestion-detail {
+    grid-column: 2;
+  }
+}

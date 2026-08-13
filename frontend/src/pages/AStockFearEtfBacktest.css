@@ -1,0 +1,107 @@
+.a-fear-etf-page {
+  max-width: 1540px;
+  margin: 0 auto;
+  padding: 24px 20px 96px;
+}
+
+.a-fear-etf-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.a-fear-etf-heading h2 {
+  margin: 3px 0 2px;
+  letter-spacing: -0.03em;
+}
+
+.a-fear-etf-eyebrow {
+  color: #1677ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+.a-fear-etf-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.a-fear-etf-flow {
+  display: grid;
+  grid-template-columns: 1fr 28px 1fr 28px 1fr 28px 1fr;
+  align-items: center;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  border: 1px solid #e7eaf0;
+  border-radius: 14px;
+  background: #fafbfc;
+}
+
+.a-fear-etf-flow > div {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.a-fear-etf-flow b {
+  color: #1677ff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.a-fear-etf-flow span {
+  color: #363d4a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.a-fear-etf-flow i {
+  height: 1px;
+  background: #cfd5df;
+}
+
+.a-fear-etf-card { margin-bottom: 18px; }
+
+.a-fear-etf-card.ant-card {
+  border-color: #e5e8ee;
+  box-shadow: 0 1px 2px rgba(20, 30, 50, .025);
+}
+
+.a-fear-etf-config .ant-collapse-header {
+  padding-inline: 0 !important;
+  font-weight: 600;
+}
+
+.a-fear-etf-config .ant-collapse-content-box { padding: 2px 0 8px !important; }
+.a-fear-etf-config .ant-form-item { margin-bottom: 15px; }
+.a-fear-etf-config .ant-form-item-extra { min-height: 18px; font-size: 11px; }
+
+.a-fear-etf-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #f0f1f3;
+}
+
+.a-fear-etf-result .ant-statistic-content { font-variant-numeric: tabular-nums; }
+.a-fear-etf-descriptions { margin-top: 22px; padding-top: 18px; border-top: 1px solid #f0f1f3; }
+
+@media (max-width: 900px) {
+  .a-fear-etf-flow { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .a-fear-etf-flow i { display: none; }
+}
+
+@media (max-width: 767px) {
+  .a-fear-etf-page { padding: 16px 12px 88px; }
+  .a-fear-etf-heading, .a-fear-etf-actions { flex-direction: column; align-items: stretch; }
+  .a-fear-etf-badges { justify-content: flex-start; }
+  .a-fear-etf-flow { grid-template-columns: 1fr; }
+}

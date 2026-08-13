@@ -1,0 +1,77 @@
+.live-trading-page {
+  min-height: 100%;
+  background: #f5f7fa;
+}
+
+.live-trading-tabs {
+  min-height: 100%;
+}
+
+.live-trading-tabs > .ant-tabs-nav {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  margin: 0;
+  padding: 8px 16px 0;
+  background: rgba(245, 247, 250, 0.96);
+  backdrop-filter: blur(10px);
+}
+
+.live-trading-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane {
+  min-height: 0;
+}
+
+.live-trading-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 640px) {
+  .live-trading-tabs > .ant-tabs-nav {
+    padding: 4px 4px 0;
+  }
+
+  .live-trading-tabs > .ant-tabs-nav .ant-tabs-nav-wrap {
+    justify-content: stretch;
+    overflow: visible;
+  }
+
+  .live-trading-tabs > .ant-tabs-nav .ant-tabs-nav-list {
+    width: 100%;
+    display: flex !important;
+    transform: none !important;
+  }
+
+  .live-trading-tabs .ant-tabs-tab {
+    flex: 1 1 0 !important;
+    max-width: 25%;
+    justify-content: center;
+    min-width: 0;
+    margin: 0 !important;
+    padding: 5px 0 4px;
+  }
+
+  .live-trading-tabs .ant-tabs-tab-btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .live-trading-tabs .ant-tabs-nav-operations {
+    display: none !important;
+  }
+
+  .live-trading-tab-label {
+    display: grid;
+    justify-items: center;
+    gap: 2px;
+    width: 100%;
+    font-size: 11px;
+    line-height: 1.05;
+    white-space: nowrap;
+  }
+
+  .live-trading-tab-label .anticon {
+    font-size: 14px;
+  }
+}

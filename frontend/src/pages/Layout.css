@@ -1,0 +1,120 @@
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+}
+
+.app-shell__content {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.app-shell__scroll {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.app-shell__tabs {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 4px 12px calc(4px + env(safe-area-inset-bottom));
+  background: rgba(255, 255, 255, 0.98);
+  border-top: 1px solid #e8edf3;
+  box-shadow: 0 -6px 18px rgba(31, 41, 55, 0.05);
+}
+
+.app-shell__tabs .ant-tabs-nav {
+  width: min(620px, 100%);
+  margin: 0;
+}
+
+.app-shell__tabs .ant-tabs-nav::before {
+  border: 0;
+}
+
+.app-shell__tabs .ant-tabs-content-holder {
+  display: none;
+}
+
+.app-shell__tabs .ant-tabs-nav-wrap {
+  justify-content: stretch;
+}
+
+.app-shell__tabs .ant-tabs-nav-list {
+  width: 100%;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+}
+
+.app-shell__tabs .ant-tabs-tab {
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+  margin: 0;
+  padding: 5px 4px;
+  border-radius: 10px;
+  transition: background 0.18s ease;
+}
+
+.app-shell__tabs .ant-tabs-tab-active {
+  background: #eef6ff;
+}
+
+.app-shell__tabs .ant-tabs-tab-btn {
+  width: 100%;
+  color: #5f6b7a;
+}
+
+.app-shell__tabs .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #1677ff;
+}
+
+.app-shell__tabs .ant-tabs-ink-bar {
+  display: none;
+}
+
+.app-shell__tab-label {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.app-shell__tab-label .anticon {
+  font-size: 18px;
+}
+
+@media (min-width: 768px) {
+  .app-shell__tabs .ant-tabs-tab {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .app-shell__tab-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 14px;
+  }
+
+  .app-shell__tab-label .anticon {
+    font-size: 16px;
+  }
+}

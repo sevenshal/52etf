@@ -1,0 +1,144 @@
+.ai-stock-page {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  min-width: 0;
+}
+
+.ai-stock-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-stock-heading h3 {
+  margin: 0 0 2px;
+}
+
+.ai-stock-card,
+.ai-stock-stat {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(23, 36, 58, 0.06);
+}
+
+.ai-stock-card .ant-card-body {
+  min-width: 0;
+}
+
+.ai-stock-run-meta {
+  margin-bottom: 12px;
+}
+
+.ai-stock-table .is-up,
+.ai-stock-stat .is-up {
+  color: #cf1322;
+}
+
+.ai-stock-table .is-down,
+.ai-stock-stat .is-down {
+  color: #1677ff;
+}
+
+.ai-stock-chart {
+  min-width: 0;
+}
+
+.ai-stock-conversation {
+  margin-top: 14px;
+}
+
+.ai-stock-chat-log {
+  display: grid;
+  gap: 16px;
+}
+
+.ai-stock-chat-stage {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-stock-chat-stage-title {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.ai-stock-chat-bubble {
+  width: min(100%, 980px);
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.ai-stock-chat-system {
+  justify-self: start;
+  background: #f8fafc;
+}
+
+.ai-stock-chat-user {
+  justify-self: end;
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.ai-stock-chat-assistant {
+  justify-self: start;
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.ai-stock-chat-bubble-label {
+  margin-bottom: 6px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-stock-chat-bubble pre {
+  max-height: 460px;
+  margin: 0;
+  overflow: auto;
+  color: #172033;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-stock-chat-audit {
+  margin-top: 2px;
+}
+
+.ai-stock-transcript {
+  max-height: 560px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #e7edf5;
+  border-radius: 6px;
+  background: #f7f9fc;
+  color: #172033;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 760px) {
+  .ai-stock-page {
+    padding: 12px 0 0;
+  }
+
+  .ai-stock-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ai-stock-card .ant-card-head {
+    padding-inline: 12px;
+  }
+
+  .ai-stock-card .ant-card-body {
+    padding: 12px;
+  }
+}

@@ -1,0 +1,102 @@
+.soxl-fear-page {
+  padding: 24px;
+}
+
+.soxl-fear-page.is-embedded {
+  min-height: 100%;
+  padding: 14px;
+  background: #f5f7fa;
+}
+
+.soxl-fear-page.is-embedded .ant-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(23, 36, 58, 0.06);
+}
+
+.soxl-fear-page.is-embedded .ant-card-body {
+  padding: 12px;
+}
+
+.soxl-fear-detail-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.soxl-fear-detail-tabs > .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
+.soxl-fear-action-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.soxl-fear-action-title .ant-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+
+@media (max-width: 640px) {
+  .soxl-fear-page {
+    padding: 10px;
+  }
+
+  .soxl-fear-page.is-embedded {
+    padding: 10px;
+  }
+
+  .soxl-fear-page.is-embedded .ant-card-body {
+    padding: 10px;
+  }
+
+  .soxl-fear-detail-header {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .soxl-fear-detail-card .ant-card-body {
+    padding: 12px;
+  }
+
+  .soxl-fear-detail-tabs > .ant-tabs-nav {
+    margin-bottom: 12px;
+  }
+
+  .soxl-fear-detail-tabs > .ant-tabs-nav .ant-tabs-nav-wrap {
+    justify-content: stretch;
+  }
+
+  .soxl-fear-detail-tabs > .ant-tabs-nav .ant-tabs-nav-list {
+    width: 100%;
+    display: flex !important;
+    transform: none !important;
+  }
+
+  .soxl-fear-detail-tabs .ant-tabs-tab {
+    flex: 1 1 0 !important;
+    justify-content: center;
+    min-width: 0;
+    margin: 0 !important;
+    padding: 8px 0;
+  }
+
+  .soxl-fear-detail-tabs .ant-tabs-tab-btn {
+    min-width: 0;
+  }
+
+  .soxl-fear-detail-tab-label {
+    gap: 3px;
+    font-size: 13px;
+    line-height: 1.2;
+  }
+
+  .soxl-fear-detail-tab-label .anticon {
+    font-size: 14px;
+  }
+}
