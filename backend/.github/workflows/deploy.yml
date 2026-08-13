@@ -18,7 +18,7 @@ jobs:
       # 服务已迁移到本机(Rich)：52etf.vip 域名不变，SSH 经 frps 6022 端口转发到本机
       ECS_HOST: 52etf.vip
       ECS_PORT: "6022"
-      ECS_USER: sevenshal
+      ECS_USER: quantd
       ECS_TARGET: /tmp/quant_server.pyz
     steps:
       - name: Checkout
@@ -108,8 +108,8 @@ jobs:
       - name: Install and restart remote service
         run: |
           ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" 'set -e
-          BACKEND=/home/sevenshal/quant_prod/backend
-          PY=/home/sevenshal/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
+          BACKEND=/home/quantd/quant_prod/backend
+          PY=/home/quantd/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
           install -m 0755 /tmp/quant_server.pyz "$BACKEND/quant_server.pyz.new"
           rm -rf "$BACKEND/_pyz_extract.new"
           mkdir -p "$BACKEND/_pyz_extract.new"
