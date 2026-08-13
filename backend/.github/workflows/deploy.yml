@@ -19,7 +19,7 @@ jobs:
       ECS_HOST: 52etf.vip
       ECS_PORT: "6022"
       ECS_USER: quantd
-      ECS_TARGET: /tmp/quant_server.pyz
+      ECS_TARGET: /home/quantd/quant_server.pyz
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,7 +110,7 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" 'set -e
           BACKEND=/home/quantd/quant_prod/backend
           PY=/home/quantd/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
-          install -m 0755 /tmp/quant_server.pyz "$BACKEND/quant_server.pyz.new"
+          install -m 0755 /home/quantd/quant_server.pyz "$BACKEND/quant_server.pyz.new"
           rm -rf "$BACKEND/_pyz_extract.new"
           mkdir -p "$BACKEND/_pyz_extract.new"
           "$PY" -m zipfile -e "$BACKEND/quant_server.pyz.new" "$BACKEND/_pyz_extract.new/"
