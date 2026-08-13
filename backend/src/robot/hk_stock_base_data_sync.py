@@ -704,7 +704,6 @@ class HKStockBaseDataSyncService:
         download_review_documents: bool = False,
         review_cache_dir: Optional[str] = None,
         auto_process_reviews: bool = True,
-        codex_path: Optional[str] = None,
         review_discovery_lookback_days: int = 45,
     ) -> Dict:
         end_value = end_date or date.today()
@@ -736,7 +735,6 @@ class HKStockBaseDataSyncService:
             result["review_automation"] = HKIndexReviewAutomation(
                 sync_service=self,
                 cache_dir=review_cache_dir,
-                codex_path=codex_path,
                 discovery_lookback_days=review_discovery_lookback_days,
             ).run(as_of=end_value)
         return result
@@ -766,7 +764,6 @@ def sync_hk_stock_base_data(
     download_review_documents: bool = False,
     review_cache_dir: Optional[str] = None,
     auto_process_reviews: bool = True,
-    codex_path: Optional[str] = None,
     review_discovery_lookback_days: int = 45,
 ) -> Dict:
     service = HKStockBaseDataSyncService()
@@ -778,6 +775,5 @@ def sync_hk_stock_base_data(
         download_review_documents=download_review_documents,
         review_cache_dir=review_cache_dir,
         auto_process_reviews=auto_process_reviews,
-        codex_path=codex_path,
         review_discovery_lookback_days=review_discovery_lookback_days,
     )

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import date
@@ -53,7 +54,6 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
         self.automation = HKIndexReviewAutomation(
             sync_service=object(),
             cache_dir=self.temporary.name,
-            codex_path="/bin/false",
         )
 
     def tearDown(self):
@@ -94,7 +94,7 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
             manifest["snapshots"][0]["constituents"][0]["code"],
         )
         self.assertEqual(
-            "official_pdf_codex_schema_validated",
+            "official_pdf_deepseek_schema_validated",
             manifest["snapshots"][0]["extraction_method"],
         )
         self.assertEqual(
@@ -120,7 +120,61 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
                 as_of=date(2026, 8, 21),
             )
 
-    def test_existing_source_document_is_not_sent_to_codex(self):
+    def test_run_deepseek_writes_candidate_and_log(self):
+        text_path = Path(self.temporary.name) / "20260821.txt"
+        text_path.write_text("===== PAGE 1 =====\nreview text", encoding="utf-8")
+        candidate_path = Path(self.temporary.name) / "20260821.candidate.json"
+        candidate = _candidate()
+        with patch(
+            "src.core.services.ai_stock.DeepSeekStockSelector"
+        ) as selector_class:
+            selector = selector_class.return_value
+            selector._call_json.return_value = (
+                candidate,
+                json.dumps(candidate),
+                {},
+                {},
+            )
+            result = self.automation._run_deepseek(text_path, candidate_path)
+
+        self.assertEqual(candidate, result)
+        self.assertEqual(
+            candidate,
+            json.loads(candidate_path.read_text(encoding="utf-8")),
+        )
+        self.assertEqual(
+            json.dumps(candidate),
+            candidate_path.with_suffix(".deepseek.log").read_text(encoding="utf-8"),
+        )
+        call = selector._call_json.call_args
+        messages = call.args[0]
+        self.assertIn("review text", messages[1]["content"])
+        self.assertIn('"snapshots"', messages[1]["content"])
+        self.assertEqual(call.kwargs["max_tokens"], 8192)
+        self.assertEqual(
+            call.kwargs["read_timeout"],
+            self.automation.deepseek_timeout_seconds,
+        )
+
+    def test_run_deepseek_failure_is_wrapped_and_logged(self):
+        text_path = Path(self.temporary.name) / "20260821.txt"
+        text_path.write_text("review text", encoding="utf-8")
+        candidate_path = Path(self.temporary.name) / "20260821.candidate.json"
+        with (
+            patch(
+                "src.core.services.ai_stock.DeepSeekStockSelector"
+            ) as selector_class,
+            self.assertRaisesRegex(RuntimeError, "DeepSeek extraction failed"),
+        ):
+            selector_class.return_value._call_json.side_effect = ValueError("boom")
+            self.automation._run_deepseek(text_path, candidate_path)
+
+        self.assertEqual(
+            "boom",
+            candidate_path.with_suffix(".deepseek.log").read_text(encoding="utf-8"),
+        )
+
+    def test_existing_source_document_is_not_sent_to_deepseek(self):
         document = {
             "path": Path(self.temporary.name) / "20260522.pdf",
             "source_url": "https://www.hsi.com.hk/official.pdf",

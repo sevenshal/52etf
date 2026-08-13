@@ -224,7 +224,6 @@ class XueqiuTokenMonitorTest(TestCase):
                 "download_review_documents",
                 "review_cache_dir",
                 "auto_process_reviews",
-                "codex_path",
                 "review_discovery_lookback_days",
             },
             "hk_index_fear_greed_backfill": {

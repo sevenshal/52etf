@@ -768,7 +768,7 @@ class DeepSeekStockSelector:
         self.model = (model or (settings.get("deepseek_model") if settings else None) or os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL).strip()
         self.base_url = ((settings.get("deepseek_base_url") if settings else None) or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
 
-    def _call_json(self, messages: List[Dict[str, str]]) -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any]]:
+    def _call_json(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, read_timeout: Optional[int] = None) -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any]]:
         if not self.api_key:
             raise AIStockConfigurationError("未配置 DEEPSEEK_API_KEY，不能生成 AI 推荐")
         body = {
@@ -777,6 +777,8 @@ class DeepSeekStockSelector:
             "response_format": {"type": "json_object"},
             "messages": messages,
         }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         # Long read timeout: round-3 payloads (news + boards + hundreds of
         # candidates) can take DeepSeek well over a minute.  Transient network
         # errors get one retry; parse errors do not (a bad model reply will
@@ -788,7 +790,7 @@ class DeepSeekStockSelector:
                     f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json=body,
-                    timeout=(30, 180),
+                    timeout=(30, read_timeout or 180),
                 )
                 response.raise_for_status()
                 payload = response.json()

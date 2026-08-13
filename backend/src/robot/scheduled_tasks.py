@@ -663,7 +663,6 @@ def _run_hk_stock_base_data_sync(
     download_review_documents: bool = False,
     review_cache_dir: str = "",
     auto_process_reviews: bool = True,
-    codex_path: str = "",
     review_discovery_lookback_days: int = 45,
 ):
     from .hk_stock_base_data_sync import sync_hk_stock_base_data
@@ -676,7 +675,6 @@ def _run_hk_stock_base_data_sync(
         download_review_documents=download_review_documents,
         review_cache_dir=str(review_cache_dir or "").strip() or None,
         auto_process_reviews=auto_process_reviews,
-        codex_path=str(codex_path or "").strip() or None,
         review_discovery_lookback_days=review_discovery_lookback_days,
     )
     return (
@@ -1347,14 +1345,9 @@ class ScheduledTaskManager:
                         default="", description="可选；为空时使用服务端默认缓存目录。",
                     ),
                     TaskParameterDefinition(
-                        key="auto_process_reviews", label="Codex自动处理新检讨",
+                        key="auto_process_reviews", label="DeepSeek自动处理新检讨",
                         value_type="boolean", default=True,
-                        description="发现新的恒生季度检讨PDF后，由Codex只读解析，硬校验通过才补行情并导入权重。",
-                    ),
-                    TaskParameterDefinition(
-                        key="codex_path", label="Codex路径", value_type="string",
-                        default="/home/ecs-user/.local/bin/codex",
-                        description="线上Codex CLI绝对路径；Codex只生成候选JSON，不直接写数据库。",
+                        description="发现新的恒生季度检讨PDF后，由DeepSeek解析为候选JSON，硬校验通过才补行情并导入权重；API Key 使用 AI 选股页面的 DeepSeek 配置。",
                     ),
                     TaskParameterDefinition(
                         key="review_discovery_lookback_days", label="公告发现窗口",

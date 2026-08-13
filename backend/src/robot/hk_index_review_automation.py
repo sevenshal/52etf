@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -25,16 +24,17 @@ INDEX_LIMITS = {
     "HSCEI": (30, 80),
     "HSTECH": (25, 40),
 }
-DEFAULT_CODEX_PATH = os.getenv("HK_REVIEW_CODEX_PATH", "/home/ecs-user/.local/bin/codex")
 DEFAULT_DISCOVERY_LOOKBACK_DAYS = int(os.getenv("HK_REVIEW_DISCOVERY_LOOKBACK_DAYS", "45"))
-DEFAULT_CODEX_TIMEOUT_SECONDS = int(os.getenv("HK_REVIEW_CODEX_TIMEOUT_SECONDS", "900"))
+DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("HK_REVIEW_DEEPSEEK_TIMEOUT_SECONDS", "600"))
+# HSI+HSCEI+HSTECH 三个快照共约 160 行成分，JSON 输出需要接近 8K token。
+DEEPSEEK_MAX_OUTPUT_TOKENS = int(os.getenv("HK_REVIEW_DEEPSEEK_MAX_OUTPUT_TOKENS", "8192"))
 PRESS_RELEASE_URL = (
     "https://www.hsi.com.hk/static/uploads/contents/en/news/pressRelease/"
     "{release_stamp}.pdf"
 )
 
 
-CODEX_OUTPUT_SCHEMA = {
+REVIEW_OUTPUT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": ["snapshots"],
@@ -116,15 +116,14 @@ def _fridays_between(start: date, end: date) -> Iterable[date]:
 
 
 class HKIndexReviewAutomation:
-    """Discover official review PDFs and let Codex produce guarded candidates."""
+    """Discover official review PDFs and let DeepSeek produce guarded candidates."""
 
     def __init__(
         self,
         sync_service,
         cache_dir: Optional[str] = None,
-        codex_path: Optional[str] = None,
         discovery_lookback_days: int = DEFAULT_DISCOVERY_LOOKBACK_DAYS,
-        codex_timeout_seconds: int = DEFAULT_CODEX_TIMEOUT_SECONDS,
+        deepseek_timeout_seconds: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
     ):
         self.sync_service = sync_service
         self.cache_dir = Path(
@@ -134,9 +133,8 @@ class HKIndexReviewAutomation:
                 "/var/lib/quant_robot/cache/hk_index_reviews",
             )
         )
-        self.codex_path = str(codex_path or DEFAULT_CODEX_PATH)
         self.discovery_lookback_days = max(30, int(discovery_lookback_days))
-        self.codex_timeout_seconds = max(60, int(codex_timeout_seconds))
+        self.deepseek_timeout_seconds = max(60, int(deepseek_timeout_seconds))
 
     def run(self, as_of: Optional[date] = None) -> Dict:
         as_of_date = as_of or date.today()
@@ -269,8 +267,8 @@ class HKIndexReviewAutomation:
         candidate_path = pdf_path.with_suffix(".candidate.json")
         evidence_text = self._extract_text(pdf_path)
         text_path.write_text(evidence_text, encoding="utf-8")
-        _atomic_write_json(schema_path, CODEX_OUTPUT_SCHEMA)
-        candidate = self._run_codex(text_path, schema_path, candidate_path)
+        _atomic_write_json(schema_path, REVIEW_OUTPUT_SCHEMA)
+        candidate = self._run_deepseek(text_path, candidate_path)
         manifest = self._prepare_and_validate_manifest(candidate, document, as_of)
         new_symbols = self._new_constituent_symbols(manifest)
         history = self._bootstrap_new_symbols(new_symbols, as_of)
@@ -298,59 +296,56 @@ class HKIndexReviewAutomation:
             )
         return "".join(sections)
 
-    def _run_codex(
+    def _run_deepseek(
         self,
         text_path: Path,
-        schema_path: Path,
         candidate_path: Path,
     ) -> Dict:
-        if not Path(self.codex_path).is_file():
-            raise RuntimeError(f"Codex executable not found: {self.codex_path}")
+        from ..core.services.ai_stock import DeepSeekStockSelector
+
+        evidence_text = text_path.read_text(encoding="utf-8")
         prompt = (
-            "Read the official Hang Seng index review text file "
-            f"{text_path.name}. Extract the complete post-review constituent lists and "
-            "post-review weights for exactly HSI, HSCEI, and HSTECH from the appendices. "
-            "Only use security rows under each appendix's 'Constituent List'. Read the "
-            "rightmost 'After **' value from the 'Weighting (%)' columns; do not use the "
-            "'Before' value, FAF, sector subtotal, constituent count, or share-class table. "
-            "Use the document's stated effective date. Codes must contain digits only. "
-            "Weights must be the published percentage weights and must total approximately "
-            "100 for each index. Record the 1-based source page numbers. Never estimate, "
-            "normalize, or invent missing rows. Return only the schema-conforming JSON."
+            "The following is the full text of an official Hang Seng index review "
+            "press release, split into pages marked '===== PAGE N ====='. Extract the "
+            "complete post-review constituent lists and post-review weights for exactly "
+            "HSI, HSCEI, and HSTECH from the appendices. Only use security rows under "
+            "each appendix's 'Constituent List'. Read the rightmost 'After **' value "
+            "from the 'Weighting (%)' columns; do not use the 'Before' value, FAF, "
+            "sector subtotal, constituent count, or share-class table. Use the "
+            "document's stated effective date. Codes must contain digits only. Weights "
+            "must be the published percentage weights and must total approximately 100 "
+            "for each index. Record the 1-based PAGE numbers as source_pages. Set "
+            "free_float_factor to null. Never estimate, normalize, or invent missing "
+            "rows. Return only JSON conforming to this JSON Schema:\n"
+            f"{json.dumps(REVIEW_OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
+            f"Press release text:\n{evidence_text}"
         )
-        completed = subprocess.run(
-            [
-                self.codex_path,
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(candidate_path),
-                "--cd",
-                str(self.cache_dir),
-                prompt,
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=self.codex_timeout_seconds,
-            check=False,
-        )
-        log_path = candidate_path.with_suffix(".codex.log")
-        log_path.write_text(completed.stdout or "", encoding="utf-8")
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"Codex exited with {completed.returncode}; see {log_path.name}"
-            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You extract Hang Seng index review data and answer with "
+                    "schema-conforming JSON only."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        log_path = candidate_path.with_suffix(".deepseek.log")
+        selector = DeepSeekStockSelector()
         try:
-            return json.loads(candidate_path.read_text(encoding="utf-8"))
+            candidate, content, _, _ = selector._call_json(
+                messages,
+                max_tokens=DEEPSEEK_MAX_OUTPUT_TOKENS,
+                read_timeout=self.deepseek_timeout_seconds,
+            )
         except Exception as exc:
-            raise RuntimeError(f"Codex returned invalid JSON: {exc}") from exc
+            log_path.write_text(str(exc), encoding="utf-8")
+            raise RuntimeError(f"DeepSeek extraction failed: {exc}") from exc
+        log_path.write_text(content, encoding="utf-8")
+        if not isinstance(candidate.get("snapshots"), list):
+            raise RuntimeError("DeepSeek returned JSON without a snapshots array")
+        _atomic_write_json(candidate_path, candidate)
+        return candidate
 
     def _prepare_and_validate_manifest(
         self,
@@ -415,7 +410,7 @@ class HKIndexReviewAutomation:
                     "effective_date": effective_date.isoformat(),
                     "source_url": document["source_url"],
                     "source_document": document["path"].name,
-                    "extraction_method": "official_pdf_codex_schema_validated",
+                    "extraction_method": "official_pdf_deepseek_schema_validated",
                     "verified": True,
                 }
             )
