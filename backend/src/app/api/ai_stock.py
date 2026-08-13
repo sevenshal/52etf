@@ -186,6 +186,11 @@ def get_paper_equity_curve(_: str = Depends(valid_admin_account)):
     return AIStockPaperTradingService().equity_curve()
 
 
+@router.get("/paper/hold-evaluations")
+def get_paper_hold_evaluations(limit: int = Query(100, ge=1, le=500), _: str = Depends(valid_admin_account)):
+    return AIStockPaperTradingService().hold_evaluations(limit=limit)
+
+
 @router.get("/paper/config")
 def get_paper_strategy_config(_: str = Depends(valid_admin_account)):
     return AIStockPaperTradingService().strategy_config()

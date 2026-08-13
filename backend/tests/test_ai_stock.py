@@ -403,3 +403,32 @@ def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
     assert dumped["trading_start_minute"] == 585
     assert dumped["hold_evaluation_enabled"] is True
     assert dumped["hold_sell_threshold"] == 30
+
+
+def test_paper_hold_evaluations_returns_newest_first():
+    from src.core.database import get_db_ctx, AIStockHoldEvaluation
+
+    service = AIStockPaperTradingService(provider=object())
+    created_ids = []
+    with get_db_ctx() as db:
+        portfolio = AIStockPaperTradingService._ensure_portfolio(db)
+        for ts_code, score in (("600000.SH", 20.0), ("000001.SZ", 80.0)):
+            row = AIStockHoldEvaluation(
+                portfolio_id=portfolio.id, ts_code=ts_code, name="测试股",
+                hold_score=score, reason="测试理由",
+            )
+            db.add(row)
+            db.flush()
+            created_ids.append(row.id)
+    try:
+        mine = [item for item in service.hold_evaluations(limit=10) if item["id"] in created_ids]
+        # 新的排前面：后插入的 000001.SZ 在第一个
+        assert [item["ts_code"] for item in mine] == ["000001.SZ", "600000.SH"]
+        assert mine[0]["hold_score"] == 80.0
+        assert mine[0]["reason"] == "测试理由"
+    finally:
+        with get_db_ctx() as db:
+            for row_id in created_ids:
+                row = db.get(AIStockHoldEvaluation, row_id)
+                if row:
+                    db.delete(row)

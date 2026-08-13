@@ -2105,6 +2105,30 @@ class AIStockPaperTradingService:
             )
         return sorted(result, key=lambda item: -item["market_value"])
 
+    def hold_evaluations(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Recent AI hold evaluations, newest first (short read, no external IO)."""
+        safe_limit = min(max(1, int(limit)), 500)
+        with get_db_ctx() as db:
+            portfolio = self._ensure_portfolio(db)
+            rows = (
+                db.query(AIStockHoldEvaluation)
+                .filter(AIStockHoldEvaluation.portfolio_id == portfolio.id)
+                .order_by(desc(AIStockHoldEvaluation.evaluated_at), desc(AIStockHoldEvaluation.id))
+                .limit(safe_limit)
+                .all()
+            )
+            return [
+                {
+                    "id": row.id,
+                    "ts_code": row.ts_code,
+                    "name": row.name,
+                    "hold_score": row.hold_score,
+                    "reason": row.reason,
+                    "evaluated_at": row.evaluated_at,
+                }
+                for row in rows
+            ]
+
     def trades(self, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
         safe_page = max(1, int(page))
         safe_size = min(max(1, int(page_size)), 200)
