@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import traceback
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from functools import lru_cache
 from bisect import bisect_left
 from datetime import date, datetime, timedelta
@@ -312,6 +313,12 @@ def _ensure_backtest_search_cpu_capacity(total_cases: int) -> int:
             ),
         )
     return cpu_count
+
+
+def _backtest_search_worker_count() -> int:
+    """批量搜参并发数：可用 CPU 数量的 2/3（至少 1）。"""
+    cpu_count = _effective_cpu_count()
+    return max(1, int(cpu_count * 2 / 3))
 
 
 BACKTEST_POOL_KEYS = set(POOL_KEYS).union(CUSTOM_POOL_KEYS)
@@ -6101,15 +6108,33 @@ def _persist_active_backtest_search_job(
     _persist_backtest_search_job(db, snapshot)
 
 
+def _run_backtest_search_case(
+    index: int,
+    case_request: FactorBacktestRequest,
+    legs: List[Dict[str, Any]],
+    objective: str,
+    prepared_data: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """在线程池 worker 中执行单个搜参回测；每个 worker 使用独立的短事务 DB 会话。"""
+    db = DBSession()
+    try:
+        result = _run_factor_backtest(case_request, db, prepared_data=prepared_data)
+        return _search_row_from_backtest_result(index, case_request, legs, result, objective)
+    finally:
+        db.close()
+        DBSession.remove()
+
+
 def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: Dict[str, Any]):
     db = DBSession()
     prepared_data: Optional[Dict[str, Any]] = None
     try:
+        worker_count = _backtest_search_worker_count()
         with BACKTEST_SEARCH_JOBS_LOCK:
             job["status"] = "running"
             job["started_at"] = datetime.now()
             job["started_monotonic"] = time.time()
-            job["worker_count"] = 1
+            job["worker_count"] = worker_count
             job["current_case"] = "准备基础数据和基础因子"
             job["updated_at"] = datetime.now()
         _persist_active_backtest_search_job(db, job)
@@ -6119,56 +6144,86 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
         prepared_data = _prepare_factor_backtest_base_data(search_request.request, db, base_resolved_legs)
         _warm_backtest_search_factor_caches(search_request, prepared_data, db)
 
-        for index, (case_request, legs) in enumerate(_iter_backtest_search_requests(search_request), start=1):
-            with BACKTEST_SEARCH_JOBS_LOCK:
-                if job.get("cancel_requested"):
-                    job["status"] = "cancelled"
-                    job["finished_at"] = datetime.now()
-                    job["updated_at"] = datetime.now()
-                    job["current_case"] = None
-                    job["cancel_requested"] = False
-                    cancel_snapshot = _snapshot_backtest_search_job(job)
-                else:
-                    cancel_snapshot = None
-            if cancel_snapshot is not None:
-                _persist_backtest_search_job(db, cancel_snapshot)
-                _publish_backtest_search_job(cancel_snapshot)
-                return
+        cancelled = False
+        case_iter = _iter_backtest_search_requests(search_request)
+        pending: List[Tuple[int, Future]] = []
+        index = 0
+        in_flight_limit = max(worker_count * 2, 4)
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="factor-backtest-search") as executor:
+            while True:
+                while not cancelled and len(pending) < in_flight_limit:
+                    item = next(case_iter, None)
+                    if item is None:
+                        break
+                    case_request, legs = item
+                    index += 1
+                    with BACKTEST_SEARCH_JOBS_LOCK:
+                        job["submitted_cases"] = index
+                        job["updated_at"] = datetime.now()
+                        job["current_case"] = _format_backtest_search_params(case_request, legs)
+                    pending.append(
+                        (
+                            index,
+                            executor.submit(
+                                _run_backtest_search_case,
+                                index,
+                                case_request,
+                                legs,
+                                search_request.objective,
+                                prepared_data,
+                            ),
+                        )
+                    )
+                if not pending:
+                    break
 
-            with BACKTEST_SEARCH_JOBS_LOCK:
-                job["submitted_cases"] = index
-                job["updated_at"] = datetime.now()
-                job["current_case"] = _format_backtest_search_params(case_request, legs)
-            _persist_active_backtest_search_job(db, job)
-            _publish_backtest_search_job(job)
+                done, _ = wait([future for _, future in pending], return_when=FIRST_COMPLETED)
+                case_index_by_future = {id(future): case_index for case_index, future in pending}
+                for done_future in done:
+                    case_index = case_index_by_future[id(done_future)]
+                    pending = [(case_i, future) for case_i, future in pending if future is not done_future]
+                    try:
+                        row = done_future.result()
+                        _insert_backtest_search_result(db, row)
+                        with BACKTEST_SEARCH_JOBS_LOCK:
+                            job["completed_cases"] += 1
+                            job["result_count"] += 1
+                            job["updated_at"] = datetime.now()
+                    except Exception as exc:
+                        detail = getattr(exc, "detail", None)
+                        logger.warning("Factor backtest search case %s failed: %s", case_index, detail or exc)
+                        with BACKTEST_SEARCH_JOBS_LOCK:
+                            job["completed_cases"] += 1
+                            job["failed_cases"] += 1
+                            job["updated_at"] = datetime.now()
+                    _persist_active_backtest_search_job(db, job)
+                    _publish_backtest_search_job(job)
 
-            try:
-                result = _run_factor_backtest(case_request, db, prepared_data=prepared_data)
-                row = _search_row_from_backtest_result(index, case_request, legs, result, search_request.objective)
-                _insert_backtest_search_result(db, row)
                 with BACKTEST_SEARCH_JOBS_LOCK:
-                    job["completed_cases"] += 1
-                    job["result_count"] += 1
-                    job["updated_at"] = datetime.now()
-            except Exception as exc:
-                detail = getattr(exc, "detail", None)
-                logger.warning("Factor backtest search case %s failed: %s", index, detail or exc)
-                with BACKTEST_SEARCH_JOBS_LOCK:
-                    job["completed_cases"] += 1
-                    job["failed_cases"] += 1
-                    job["updated_at"] = datetime.now()
-            _persist_active_backtest_search_job(db, job)
-            _publish_backtest_search_job(job)
+                    if job.get("cancel_requested"):
+                        job["cancel_requested"] = False
+                        cancelled = True
+                        job["status"] = "cancelled"
+                        job["finished_at"] = datetime.now()
+                        job["updated_at"] = datetime.now()
+                        job["current_case"] = None
+                        cancel_snapshot = _snapshot_backtest_search_job(job)
+                    else:
+                        cancel_snapshot = None
+                if cancel_snapshot is not None:
+                    _persist_backtest_search_job(db, cancel_snapshot)
+                    _publish_backtest_search_job(cancel_snapshot)
+                    break
 
-        with BACKTEST_SEARCH_JOBS_LOCK:
-            if job.get("status") != "cancelled":
+        if not cancelled:
+            with BACKTEST_SEARCH_JOBS_LOCK:
                 job["status"] = "completed"
                 job["finished_at"] = datetime.now()
                 job["updated_at"] = datetime.now()
                 job["current_case"] = None
                 job["cancel_requested"] = False
-        _persist_active_backtest_search_job(db, job)
-        _publish_backtest_search_job(job)
+            _persist_active_backtest_search_job(db, job)
+            _publish_backtest_search_job(job)
     except Exception as exc:
         logger.exception("Factor backtest search job failed")
         with BACKTEST_SEARCH_JOBS_LOCK:
@@ -6228,7 +6283,7 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         "completed_cases": 0,
         "failed_cases": 0,
         "result_count": 0,
-        "worker_count": 1,
+        "worker_count": _backtest_search_worker_count(),
         "current_case": None,
         "error": None,
         "cancel_requested": False,
