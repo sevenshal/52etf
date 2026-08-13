@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_BIN="${ROOT_DIR}/../.venv/bin"
+VENV_BIN="${ROOT_DIR}/../../.venv/bin"
 VENV_PYTHON="${VENV_BIN}/python"
 CONFIG_FILE="${ROOT_DIR}/scripts/deadcode.config"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -78,20 +78,20 @@ run_check() {
 
 set +e
 run_check "1/3 vulture" "${ROOT_DIR}/.artifacts/deadcode/vulture_${TIMESTAMP}.log" \
-  ../.venv/bin/vulture src \
+  ../../.venv/bin/vulture src \
   --exclude "${VULTURE_EXCLUDE}" \
   --min-confidence "${VULTURE_MIN_CONFIDENCE}" \
   ${VULTURE_EXTRA_ARGS}
 VULTURE_STATUS=$?
 
 run_check "2/3 ruff" "${ROOT_DIR}/.artifacts/deadcode/ruff_${TIMESTAMP}.log" \
-  ../.venv/bin/ruff check src \
+  ../../.venv/bin/ruff check src \
   --select "${RUFF_SELECT}" \
   ${RUFF_EXTRA_ARGS}
 RUFF_STATUS=$?
 
 run_check "3/3 deptry" "${ROOT_DIR}/.artifacts/deadcode/deptry_${TIMESTAMP}.log" \
-  ../.venv/bin/deptry src \
+  ../../.venv/bin/deptry src \
   ${DEPTRY_EXTRA_ARGS}
 DEPTRY_STATUS=$?
 set -e

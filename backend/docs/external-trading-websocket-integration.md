@@ -1372,14 +1372,14 @@ A股账号：
 
 ```bash
 cd /Users/sevenshal/Dev/github/quant/52etf/backend
-../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --host localhost:8001
+../../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --host localhost:8001
 ```
 
 自检：
 
 ```bash
 cd /Users/sevenshal/Dev/github/quant/52etf/backend
-../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --self-test --log-level ERROR
+../../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --self-test --log-level ERROR
 ```
 
 PTrade 正式接入时需要修改示例客户端中的：

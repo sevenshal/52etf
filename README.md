@@ -24,7 +24,7 @@
 
 ```bash
 cd backend
-../.venv/bin/uvicorn src.app.main:app --host 127.0.0.1 --port 8001
+../../.venv/bin/uvicorn src.app.main:app --host 127.0.0.1 --port 8001
 ```
 
 ### 前端

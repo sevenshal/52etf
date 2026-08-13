@@ -13,7 +13,7 @@ deadcode-strict: $(DEADCODE_SCRIPT)
 	DEADCODE_PROFILE=strict ./$(DEADCODE_SCRIPT)
 
 deadcode-tools:
-	../.venv/bin/python -m pip install -r $(DEADCODE_REQUIREMENTS)
+	../../.venv/bin/python -m pip install -r $(DEADCODE_REQUIREMENTS)
 
 deadcode-clean:
 	rm -rf $(DEADCODE_ARTIFACTS)
