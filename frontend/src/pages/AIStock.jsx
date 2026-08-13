@@ -18,6 +18,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -245,6 +246,7 @@ const AIStock = () => {
   const [overview, setOverview] = useState(null);
   const [positions, setPositions] = useState([]);
   const [trades, setTrades] = useState([]);
+  const [holdEvals, setHoldEvals] = useState([]);
   const [curve, setCurve] = useState([]);
   const [benchmark, setBenchmark] = useState(null);
   const [evaluation, setEvaluation] = useState(null);
@@ -293,6 +295,7 @@ const AIStock = () => {
       request.get('/api/ai-stock/evaluation/latest'),
       request.get('/api/ai-stock/settings'),
       request.get('/api/ai-stock/paper/config'),
+      request.get('/api/ai-stock/paper/hold-evaluations'),
     ];
     const results = await Promise.allSettled(calls);
     const data = index => (results[index].status === 'fulfilled' ? results[index].value.data : null);
@@ -309,6 +312,7 @@ const AIStock = () => {
     setEvaluation(data(8));
     setSettings(data(9));
     setPaperConfig(data(10));
+    setHoldEvals(data(11) || []);
     setLoading(false);
   }, []);
 
@@ -466,6 +470,15 @@ const AIStock = () => {
     { title: '查看', key: 'action', width: 84, render: (_, row) => <Button size="small" onClick={() => loadRun(row.id)}>详情</Button> },
   ];
 
+  const latestHoldEval = useMemo(() => {
+    // 接口按 evaluated_at 倒序返回，每只股票取第一条即最新评估
+    const map = {};
+    for (const ev of holdEvals) {
+      if (!map[ev.ts_code]) map[ev.ts_code] = ev;
+    }
+    return map;
+  }, [holdEvals]);
+
   const positionColumns = [
     { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><Text type="secondary">{row.ts_code}</Text></Space> },
     { title: '持仓', dataIndex: 'quantity', width: 90, align: 'right' },
@@ -475,6 +488,18 @@ const AIStock = () => {
     { title: '盈亏', dataIndex: 'pnl_pct', width: 90, align: 'right', render: value => <Text className={valueClass(value)}>{percent(value)}</Text> },
     { title: '目标价', dataIndex: 'target_price', width: 90, align: 'right', render: money },
     { title: '持有天数', dataIndex: 'held_days', width: 95, align: 'right' },
+    {
+      title: 'AI 评分', key: 'hold_score', width: 95, align: 'right',
+      render: (_, row) => {
+        const ev = latestHoldEval[row.ts_code];
+        if (!ev) return <Text type="secondary">-</Text>;
+        return (
+          <Tooltip title={`${dateTime(ev.evaluated_at)} ${ev.reason || ''}`}>
+            <Text>{Number(ev.hold_score).toFixed(0)}</Text>
+          </Tooltip>
+        );
+      },
+    },
   ];
 
   const tradeColumns = [
