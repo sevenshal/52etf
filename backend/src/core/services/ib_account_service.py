@@ -7,6 +7,17 @@ from typing import Dict
 
 logger = logging.getLogger(__name__)
 
+# 注意：不要使用 :latest 标签（浮动标签）。2026-08-07 :latest 从 10.47.1b 被更新到
+# 10.49.1e 后，所有下单开始被 IBKR 以 Error 321（Read-Only mode）拒绝：新版 gateway
+# 会弹「API client needs write access action confirmation」安全弹窗，而随镜像打包的
+# IBC 无法自动点击确认，导致 API 客户端一直处于 Read-Only 模式。
+# 固定在已验证可正常交易的 10.47.1b（IB Gateway 10.47 + IBC 3.23.0）。
+# 升级前先在测试环境确认不再出现 write access 弹窗。
+IB_GATEWAY_IMAGE = os.getenv(
+    "IB_GATEWAY_IMAGE",
+    "ghcr.io/gnzsnz/ib-gateway:10.47.1b",
+)
+
 class IBAccountService:
     @staticmethod
     async def get_account_status(host: str, port: int, client_id: int) -> Dict:
@@ -177,7 +188,7 @@ class IBAccountService:
                 "-e", f"TWS_USERID={config.tws_userid}",
                 "-e", f"TWS_PASSWORD={config.tws_password}",
                 "-e", f"TRADING_MODE={config.trading_mode}",
-                "-e", f"TWS_ACCEPT_INCOMING=yes",
+                "-e", f"TWS_ACCEPT_INCOMING=accept",  # IBC 只接受 accept/reject/manual，旧值 yes 非法
                 "-e", "READ_ONLY_API=no",
                 "-e", f"TWOFA_TIMEOUT_ACTION={config.twofa_timeout_action}",
                 "-e", f"AUTO_RESTART_TIME={config.auto_restart_time}",
@@ -194,7 +205,7 @@ class IBAccountService:
             # 添加端口映射和镜像名 (镜像名必须放在最后，或者后面跟镜像的启动参数)
             cmd.extend([
                 "-p", f"{config.ib_port}:{internal_port}",
-                "ghcr.io/gnzsnz/ib-gateway:latest"
+                IB_GATEWAY_IMAGE
             ])
 
             # 3. 记录日志 (注意屏蔽密码)
