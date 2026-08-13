@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os  # 导入工具函数
 from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_fund_flow, ai_stock, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest, tushare_account
 from ..robot.main import robot
-from ..core.utils import send_alert_email
+from ..core.utils import send_alert_email, send_system_startup_email
 import traceback
 
 _robot_started = False
@@ -24,6 +24,8 @@ ENV = os.getenv("ENV", "dev")
 async def lifespan(app: FastAPI):
     # 启动机器人后台任务
     threading.Thread(target=start_robot, daemon=True).start()
+    # 发送系统启动通知（独立线程，避免阻塞启动）
+    threading.Thread(target=send_system_startup_email, daemon=True).start()
     yield
     # 清理工作（如果有）
 
@@ -115,6 +117,7 @@ def start_robot():
             return
         _robot_started = True
     robot()
+
 
 def start():
     import uvicorn

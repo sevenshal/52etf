@@ -138,6 +138,30 @@ def send_alert_email(subject: str, body: str, scenario_key: str = "system_alert"
         logging.error(f"Failed to send alert email: {e}")
         return False
 
+
+def send_system_startup_email() -> bool:
+    """发送系统启动通知（按 system_startup 场景收件人，未配置则回退默认邮箱）。"""
+    import socket
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    env = os.getenv("ENV", "dev")
+    started_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    robot_disabled = os.getenv("QUANT_ROBOT_DISABLED", "0") == "1"
+    body = (
+        "52etf 后端服务已启动。\n\n"
+        f"启动时间: {started_at} (Asia/Shanghai)\n"
+        f"环境: {env}\n"
+        f"主机: {socket.gethostname()}\n"
+        f"进程 PID: {os.getpid()}\n"
+        f"自动交易机器人: {'已禁用 (QUANT_ROBOT_DISABLED=1)' if robot_disabled else '已启用'}\n"
+    )
+    return send_configured_email(
+        "system_startup",
+        f"52etf 后端服务启动通知 [{env}]",
+        body,
+    )
+
 def mask_account_id(account_id: str) -> str:
     """脱敏显示账户ID"""
     if not account_id:

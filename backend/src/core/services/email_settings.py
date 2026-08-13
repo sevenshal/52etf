@@ -16,6 +16,12 @@ EMAIL_SCENARIOS = [
         "description": "未显式归类的后端告警邮件。",
     },
     {
+        "key": "system_startup",
+        "name": "系统启动通知",
+        "category": "系统",
+        "description": "后端服务每次启动成功时发送的通知。",
+    },
+    {
         "key": "api_service_error",
         "name": "API 服务异常",
         "category": "系统",
