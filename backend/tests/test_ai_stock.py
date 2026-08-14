@@ -10,6 +10,7 @@ from src.core.services.ai_stock import (
     AIStockRecommendationService,
     AIStockPaperTradingService,
     DeepSeekStockSelector,
+    _aggregate_hit_metrics,
     _buy_fee,
     get_ai_stock_service_settings,
     _scheduled_recommendation_type,
@@ -501,6 +502,25 @@ def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
     assert dumped["trading_start_minute"] == 585
     assert dumped["hold_evaluation_enabled"] is True
     assert dumped["hold_sell_threshold"] == 30
+
+
+def test_aggregate_hit_metrics_counts_hits_and_average_returns():
+    # 4 条推荐：当日/次日/触目标/一周分别命中一部分，验证命中率与等额平均收益
+    records = [
+        {"entry_price": 10.0, "target_price": 11.0, "same_day_close": 10.5, "next_day_close": 10.8, "window_high": 11.2, "week_close": 10.6},
+        {"entry_price": 10.0, "target_price": 11.0, "same_day_close": 9.5, "next_day_close": 9.8, "window_high": 10.5, "week_close": 9.9},
+        {"entry_price": 10.0, "target_price": 11.0, "same_day_close": 10.2, "next_day_close": None, "window_high": None, "week_close": None},
+        {"entry_price": 10.0, "target_price": 11.0, "same_day_close": None, "next_day_close": None, "window_high": None, "week_close": None},
+    ]
+    metrics = _aggregate_hit_metrics(records)
+    assert metrics["count"] == 4
+    assert metrics["same_day_hit_pct"] == round(2 / 3 * 100, 1)      # 3 条有当日数据，2 命中
+    assert metrics["next_day_hit_pct"] == 50.0                       # 2 条有次日数据，1 命中
+    assert metrics["target_hit_pct"] == 50.0                         # 2 条有5日数据，1 触目标
+    assert metrics["week_evaluable_count"] == 2
+    assert metrics["week_hit_pct"] == 50.0                           # 2 条有一周数据，1 命中
+    assert metrics["avg_next_day_return_pct"] == round((0.08 - 0.02) / 2 * 100, 2)
+    assert metrics["avg_week_return_pct"] == round((0.06 - 0.01) / 2 * 100, 2)
 
 
 def test_paper_hold_evaluations_returns_newest_first():

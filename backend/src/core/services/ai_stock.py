@@ -31,6 +31,7 @@ from ..database import (
     AIStockPaperTrade,
     AIStockRecommendation,
     AIStockRecommendationRun,
+    AIStockRecommendationHitRate,
     AIStockServiceConfig,
     AIStockStrategyConfig,
     AIStockTHSIndexCache,
@@ -1495,7 +1496,7 @@ def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dic
     sessions have closed.
     """
     timestamp = _now(now)
-    result: Dict[str, Any] = {"timestamp": timestamp.isoformat(), "recommendation": None, "paper": None, "benchmark": None, "review": None}
+    result: Dict[str, Any] = {"timestamp": timestamp.isoformat(), "recommendation": None, "paper": None, "benchmark": None, "review": None, "hit_rate": None}
     run_type = _scheduled_recommendation_type(timestamp)
     if run_type:
         minute_start = timestamp.replace(second=0, microsecond=0)
@@ -1554,6 +1555,21 @@ def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dic
             except Exception as exc:
                 logger.exception("AI stock closing review failed")
                 result["review"] = {"status": "FAILED", "message": str(exc)}
+    # 每交易日 16:20 评估推荐命中率（收盘后，当日数据已定）
+    if timestamp.weekday() < 5 and timestamp.hour == 16 and timestamp.minute == 20:
+        with get_db_ctx() as db:
+            done = (
+                db.query(AIStockRecommendationHitRate.id)
+                .filter(AIStockRecommendationHitRate.window_end == timestamp.date())
+                .first()
+                is not None
+            )
+        if not done:
+            try:
+                result["hit_rate"] = evaluate_recommendation_hit_rate(now=timestamp)
+            except Exception as exc:
+                logger.exception("AI stock hit-rate evaluation failed")
+                result["hit_rate"] = {"status": "FAILED", "message": str(exc)}
     return result
 
 
@@ -2426,6 +2442,150 @@ def ai_stock_runtime_logs(limit: int = 100) -> List[Dict[str, Any]]:
             for row in trades
         ]
     return sorted(events, key=lambda item: item["time"], reverse=True)[:safe_limit]
+
+
+RUN_TYPE_LABELS = {"PREOPEN": "竞价 9:26", "OPENING": "开盘 9:35", "INTRADAY": "盘中"}
+
+
+def _aggregate_hit_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """按绝对收益（未扣费、未对比大盘）聚合一批推荐的命中指标。"""
+    same_day_hits = same_day_total = 0
+    next_day_hits = next_day_total = 0
+    target_hits = target_total = 0
+    week_hits = week_total = 0
+    next_day_returns: List[float] = []
+    week_returns: List[float] = []
+    for rec in records:
+        if rec["same_day_close"] is not None:
+            same_day_total += 1
+            if rec["same_day_close"] > rec["entry_price"]:
+                same_day_hits += 1
+        if rec["next_day_close"] is not None:
+            next_day_total += 1
+            if rec["next_day_close"] > rec["entry_price"]:
+                next_day_hits += 1
+            next_day_returns.append(rec["next_day_close"] / rec["entry_price"] - 1)
+        if rec["window_high"] is not None:
+            target_total += 1
+            if rec["window_high"] >= rec["target_price"]:
+                target_hits += 1
+        if rec["week_close"] is not None:
+            week_total += 1
+            if rec["week_close"] > rec["entry_price"]:
+                week_hits += 1
+            week_returns.append(rec["week_close"] / rec["entry_price"] - 1)
+    return {
+        "count": len(records),
+        "same_day_hit_pct": round(same_day_hits / same_day_total * 100, 1) if same_day_total else None,
+        "next_day_hit_pct": round(next_day_hits / next_day_total * 100, 1) if next_day_total else None,
+        "target_hit_pct": round(target_hits / target_total * 100, 1) if target_total else None,
+        "week_hit_pct": round(week_hits / week_total * 100, 1) if week_total else None,
+        "week_evaluable_count": week_total,
+        "avg_next_day_return_pct": round(sum(next_day_returns) / len(next_day_returns) * 100, 2) if next_day_returns else None,
+        "avg_week_return_pct": round(sum(week_returns) / len(week_returns) * 100, 2) if week_returns else None,
+    }
+
+
+def evaluate_recommendation_hit_rate(window_days: int = 20, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """计算近 N 个交易日推荐命中率（当日/次日/触目标/一周），并持久化快照。"""
+    timestamp = _now(now)
+    window_start = timestamp.date() - timedelta(days=max(1, int(window_days)) * 2)
+    with get_db_ctx() as db:
+        rows = (
+            db.query(AIStockRecommendation, AIStockRecommendationRun)
+            .join(AIStockRecommendationRun, AIStockRecommendation.run_id == AIStockRecommendationRun.id)
+            .filter(
+                AIStockRecommendationRun.status == "SUCCESS",
+                AIStockRecommendationRun.trade_date >= window_start,
+                AIStockRecommendationRun.trade_date <= timestamp.date(),
+            )
+            .all()
+        )
+        recs = [
+            {
+                "ts_code": rec.ts_code,
+                "entry_price": _safe_float(rec.recommendation_price, 0.0) or 0.0,
+                "target_price": _safe_float(rec.target_price, 0.0) or 0.0,
+                "trade_date": run.trade_date,
+                "run_type": run.run_type,
+            }
+            for rec, run in rows
+        ]
+    if not recs:
+        return {"evaluated": False, "window_start": window_start.isoformat(), "window_end": timestamp.date().isoformat(), "total_count": 0, "summary": None, "by_type": []}
+
+    frame = AIStockDataProvider().tushare.get_a_stock_daily_range_frame(window_start, timestamp.date())
+    by_symbol: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    if frame is not None and not frame.empty:
+        for _, daily in frame.iterrows():
+            ts_code = _normalize_ts_code(daily.get("ts_code"))
+            if ts_code:
+                by_symbol[ts_code].append(
+                    {
+                        "trade_date": daily.get("trade_date"),
+                        "close": _safe_float(daily.get("close")),
+                        "high": _safe_float(daily.get("high")),
+                    }
+                )
+
+    evaluated: List[Dict[str, Any]] = []
+    for rec in recs:
+        entry = rec["entry_price"]
+        if entry <= 0:
+            continue
+        observations = sorted(
+            [r for r in by_symbol.get(rec["ts_code"], []) if r.get("trade_date") and r["trade_date"] >= rec["trade_date"]],
+            key=lambda r: r["trade_date"],
+        )
+        same_day = next((r for r in observations if r["trade_date"] == rec["trade_date"]), None)
+        later = [r for r in observations if r["trade_date"] > rec["trade_date"]]
+        five_day = observations[:5]
+        week = observations[5] if len(observations) >= 6 else None  # D+5 收盘
+        evaluated.append(
+            {
+                "run_type": rec["run_type"],
+                "entry_price": entry,
+                "target_price": rec["target_price"],
+                "same_day_close": same_day["close"] if same_day else None,
+                "next_day_close": later[0]["close"] if later else None,
+                "window_high": max((r["high"] for r in five_day if r["high"]), default=None),
+                "week_close": week["close"] if week else None,
+            }
+        )
+
+    by_type = []
+    for run_type, label in RUN_TYPE_LABELS.items():
+        type_records = [r for r in evaluated if r["run_type"] == run_type]
+        if type_records:
+            by_type.append({"run_type": run_type, "label": label, **_aggregate_hit_metrics(type_records)})
+
+    payload = {
+        "window_start": window_start.isoformat(),
+        "window_end": timestamp.date().isoformat(),
+        "evaluated_at": timestamp.isoformat(),
+        "total_count": len(evaluated),
+        "summary": _aggregate_hit_metrics(evaluated),
+        "by_type": by_type,
+    }
+    with get_db_ctx() as db:
+        db.add(
+            AIStockRecommendationHitRate(
+                evaluated_at=timestamp,
+                window_start=window_start,
+                window_end=timestamp.date(),
+                total_count=len(evaluated),
+                payload=payload,
+            )
+        )
+        db.flush()
+    return payload
+
+
+def latest_recommendation_hit_rate() -> Optional[Dict[str, Any]]:
+    """返回最近一次推荐命中率快照（供前端展示）。"""
+    with get_db_ctx() as db:
+        row = db.query(AIStockRecommendationHitRate).order_by(desc(AIStockRecommendationHitRate.evaluated_at)).first()
+        return row.payload if row else None
 
 
 def _shanghai_index_values(start_date: date, end_date: date) -> List[float]:

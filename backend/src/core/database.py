@@ -719,6 +719,20 @@ class AIStockEvaluation(Base):
     details = Column(JSON)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+
+class AIStockRecommendationHitRate(Base):
+    """推荐命中率快照（每交易日 16:20 自动评估更新）。"""
+    __tablename__ = "ai_stock_recommendation_hit_rates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evaluated_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    window_start = Column(Date, nullable=False)
+    window_end = Column(Date, nullable=False)
+    total_count = Column(Integer, nullable=False, default=0)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class AutomatedTradingConfig(Base):
     """自动化交易配置"""
     __tablename__ = "automated_trading_configs"

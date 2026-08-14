@@ -319,6 +319,46 @@ const todayColumns = (quotes, flashes) => [
   { title: 'AI 结论', dataIndex: 'reason', width: 260, ellipsis: true },
 ];
 
+const hitPct = value => (value === null || value === undefined ? '-' : `${Number(value).toFixed(1)}%`);
+const hitSignedPct = value => (value === null || value === undefined ? '-' : `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(2)}%`);
+
+const HitRateCard = ({ hitRate }) => {
+  if (!hitRate) return null;
+  const s = hitRate.summary || {};
+  const metrics = [
+    { label: '当日命中', value: hitPct(s.same_day_hit_pct), desc: '建议价→当日收盘上涨' },
+    { label: '次日命中', value: hitPct(s.next_day_hit_pct), desc: '→次日收盘上涨' },
+    { label: '触目标', value: hitPct(s.target_hit_pct), desc: '5日内触目标价' },
+    { label: '一周命中', value: hitPct(s.week_hit_pct), desc: `持仓一周(D+5)收盘上涨·${s.week_evaluable_count ?? 0}条` },
+    { label: '平均次日收益', value: hitSignedPct(s.avg_next_day_return_pct), desc: '每条等额参考' },
+    { label: '平均一周收益', value: hitSignedPct(s.avg_week_return_pct), desc: '持仓一周·每条等额参考' },
+  ];
+  const columns = [
+    { title: '版本', dataIndex: 'label', width: 110 },
+    { title: '条数', dataIndex: 'count', width: 64, align: 'right' },
+    { title: '当日命中', dataIndex: 'same_day_hit_pct', width: 86, align: 'right', render: hitPct },
+    { title: '次日命中', dataIndex: 'next_day_hit_pct', width: 86, align: 'right', render: hitPct },
+    { title: '触目标', dataIndex: 'target_hit_pct', width: 80, align: 'right', render: hitPct },
+    { title: '一周命中', key: 'week', width: 104, align: 'right', render: (_, row) => (row.week_evaluable_count ? `${hitPct(row.week_hit_pct)}/${row.week_evaluable_count}` : '-') },
+    { title: '平均次日', dataIndex: 'avg_next_day_return_pct', width: 86, align: 'right', render: hitSignedPct },
+    { title: '平均一周', dataIndex: 'avg_week_return_pct', width: 86, align: 'right', render: hitSignedPct },
+  ];
+  return (
+    <Card className="ai-stock-card" title="推荐命中率" extra={<Text type="secondary">近 20 个交易日 · 共评估 {hitRate.total_count} 条</Text>}>
+      <Row gutter={[16, 16]}>
+        {metrics.map(item => (
+          <Col xs={12} md={8} lg={4} key={item.label}>
+            <div style={{ fontSize: 24, fontWeight: 600, lineHeight: 1.2 }}>{item.value}</div>
+            <div><Text strong style={{ fontSize: 13 }}>{item.label}</Text></div>
+            <div><Text type="secondary" style={{ fontSize: 12 }}>{item.desc}</Text></div>
+          </Col>
+        ))}
+      </Row>
+      <Collapse ghost items={[{ key: 'detail', label: '明细（按版本）', children: <Table className="ai-stock-table" columns={columns} dataSource={hitRate.by_type || []} rowKey="run_type" size="small" pagination={false} scroll={{ x: 720 }} /> }]} />
+    </Card>
+  );
+};
+
 const AIStock = () => {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -331,6 +371,7 @@ const AIStock = () => {
   const [trades, setTrades] = useState([]);
   const [holdEvals, setHoldEvals] = useState([]);
   const [paperStats, setPaperStats] = useState(null);
+  const [hitRate, setHitRate] = useState(null);
   const [curve, setCurve] = useState([]);
   const [benchmark, setBenchmark] = useState(null);
   const [evaluation, setEvaluation] = useState(null);
@@ -400,6 +441,7 @@ const AIStock = () => {
       request.get('/api/ai-stock/paper/config'),
       request.get('/api/ai-stock/paper/hold-evaluations'),
       request.get('/api/ai-stock/paper/statistics'),
+      request.get('/api/ai-stock/recommendations/hit-rate'),
     ];
     const results = await Promise.allSettled(calls);
     const data = index => (results[index].status === 'fulfilled' ? results[index].value.data : null);
@@ -418,6 +460,7 @@ const AIStock = () => {
     setPaperConfig(data(10));
     setHoldEvals(data(11) || []);
     setPaperStats(data(12) || null);
+    setHitRate(data(13) || null);
     setLoading(false);
   }, []);
 
@@ -671,6 +714,7 @@ const AIStock = () => {
 
   const historyContent = (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <HitRateCard hitRate={hitRate} />
       <Card className="ai-stock-card" title="历史推荐批次">
         <Table className="ai-stock-table" columns={historyColumns} dataSource={history} rowKey="id" size="small" pagination={{ pageSize: 12 }} scroll={{ x: 720 }} />
       </Card>

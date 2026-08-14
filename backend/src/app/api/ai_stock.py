@@ -20,6 +20,8 @@ from ...core.services.ai_stock import (
     AIStockRecommendationService,
     ai_stock_runtime_logs,
     evaluate_ai_stock_benchmark,
+    evaluate_recommendation_hit_rate,
+    latest_recommendation_hit_rate,
     get_ai_stock_service_settings,
     trigger_recommendation_async,
     update_ai_stock_service_settings,
@@ -250,6 +252,11 @@ def run_benchmark_evaluation(
     _: str = Depends(valid_admin_account),
 ):
     return evaluate_ai_stock_benchmark(window_days=window_days)
+
+
+@router.get("/recommendations/hit-rate")
+def get_recommendation_hit_rate(_: str = Depends(valid_admin_account)):
+    return latest_recommendation_hit_rate()
 
 
 @router.get("/evaluation/latest")
