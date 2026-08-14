@@ -1161,6 +1161,11 @@ class AIStockRecommendationService:
         configured_top = int(_load_strategy_params().get("max_recommendations", MAX_RECOMMENDATIONS))
         top_n = min(max(int(top_n) if top_n is not None else configured_top, 1), configured_top)
 
+        run_id = self._reserve_run(timestamp, kind)
+        return self._execute_reserved_run(run_id, timestamp, kind, top_n)
+
+    def _reserve_run(self, timestamp: datetime, kind: str) -> int:
+        """同步占位一条 RUNNING 批次，供同步/异步两条路径复用，避免异步下重复触发。"""
         with get_db_ctx() as db:
             run = AIStockRecommendationRun(
                 trade_date=timestamp.date(),
@@ -1171,8 +1176,9 @@ class AIStockRecommendationService:
             )
             db.add(run)
             db.flush()
-            run_id = run.id
+            return run.id
 
+    def _execute_reserved_run(self, run_id: int, timestamp: datetime, kind: str, top_n: int) -> Dict[str, Any]:
         transcript: Dict[str, Any] = {"conversation_version": PROMPT_VERSION, "stages": []}
         try:
             news_snapshot = self.provider.build_news_snapshot(timestamp)
@@ -1232,10 +1238,45 @@ class AIStockRecommendationService:
             if (hold_cfg.get("parameters") or {}).get("hold_evaluation_enabled"):
                 # run 在 session 关闭后已脱离（expire_on_commit 会过期其属性），
                 # 必须使用先前捕获的 run_id，避免 DetachedInstanceError。
-                evaluate_paper_holdings(now=now, event_stage=event_stage, board_stage=board_stage, run_id=run_id)
+                evaluate_paper_holdings(now=timestamp, event_stage=event_stage, board_stage=board_stage, run_id=run_id)
         except Exception as exc:
             logger.warning("AI hold evaluation step skipped: %s", exc)
         return self.get_run(run_id)
+
+    def run_recommendation_async(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        run_type: Optional[str] = None,
+        top_n: Optional[int] = None,
+        allow_after_hours: bool = False,
+    ) -> int:
+        """同步占位一条 RUNNING 批次，然后在后台线程执行完整生成流程。
+
+        与 run_recommendation 的差别：占位后立即返回 run_id，不阻塞调用方
+        （机器人主循环 / HTTP 请求）。完成/失败通过 publish_event 推送。
+        """
+        timestamp = _now(now)
+        if not allow_after_hours and not _is_recommendation_window(timestamp):
+            raise AIStockError("收盘后仅做历史复盘，不生成新的可交易 AI 推荐")
+        kind = (run_type or _run_type_for_time(timestamp)).upper()
+        if kind not in {"PREOPEN", "OPENING", "INTRADAY"}:
+            raise ValueError("run_type 必须为 PREOPEN、OPENING 或 INTRADAY")
+        configured_top = int(_load_strategy_params().get("max_recommendations", MAX_RECOMMENDATIONS))
+        top_n = min(max(int(top_n) if top_n is not None else configured_top, 1), configured_top)
+
+        run_id = self._reserve_run(timestamp, kind)
+
+        def _worker() -> None:
+            try:
+                result = self._execute_reserved_run(run_id, timestamp, kind, top_n)
+                _publish_recommendation_result(result, "SUCCESS")
+            except Exception as exc:
+                logger.exception("Async AI stock recommendation failed")
+                _publish_recommendation_result({"id": run_id, "run_type": kind}, "FAILED", str(exc))
+
+        threading.Thread(target=_worker, daemon=True, name="ai-stock-run").start()
+        return run_id
 
     @staticmethod
     def _recommendation_payload(row: AIStockRecommendation) -> Dict[str, Any]:
@@ -1473,7 +1514,7 @@ def _scheduled_recommendation_type(timestamp: datetime) -> Optional[str]:
     minute = timestamp.hour * 60 + timestamp.minute
     if minute == 9 * 60 + 26:
         return "PREOPEN"
-    if minute == 9 * 60 + 35:
+    if minute == 9 * 60 + 40:
         return "OPENING"
     intraday_minutes = {
         10 * 60,
@@ -1515,22 +1556,16 @@ def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dic
             )
         if not already_started:
             try:
-                result["recommendation"] = AIStockRecommendationService().run_recommendation(now=timestamp, run_type=run_type)
-                _publish_recommendation_result(result["recommendation"], "SUCCESS")
+                # 异步：占位后立即返回，不阻塞机器人主循环（DeepSeek 多轮可能耗时数分钟），
+                # 避免卡住后续 OPENING/INTRADAY 的触发窗口。
+                AIStockRecommendationService().run_recommendation_async(now=timestamp, run_type=run_type)
+                result["recommendation"] = {"status": "RUNNING", "run_type": run_type}
                 # The reference service is optional and strictly read-only.
                 result["benchmark"] = AIStockBenchmarkCollector().collect(now=timestamp)
             except Exception as exc:
                 logger.exception("AI stock scheduled recommendation failed")
                 result["recommendation"] = {"status": "FAILED", "message": str(exc)}
-                with get_db_ctx() as db:
-                    latest = (
-                        db.query(AIStockRecommendationRun)
-                        .filter(AIStockRecommendationRun.status == "FAILED")
-                        .order_by(desc(AIStockRecommendationRun.id))
-                        .first()
-                    )
-                    run_id = latest.id if latest else None
-                _publish_recommendation_result({"id": run_id, "run_type": run_type}, "FAILED", str(exc))
+                _publish_recommendation_result({"id": None, "run_type": run_type}, "FAILED", str(exc))
 
     if _is_market_session(timestamp) and timestamp.weekday() < 5:
         try:
@@ -1601,29 +1636,15 @@ def trigger_recommendation_async(
     connected frontend via the shared backend event stream
     (``ai_stock_run_updated``).
     """
-
-    def _worker() -> None:
-        try:
-            result = AIStockRecommendationService().run_recommendation(
-                run_type=run_type,
-                top_n=top_n,
-                allow_after_hours=True,
-            )
-            _publish_recommendation_result(result, "SUCCESS")
-        except Exception as exc:
-            logger.exception("Async AI stock recommendation failed")
-            with get_db_ctx() as db:
-                latest = (
-                    db.query(AIStockRecommendationRun)
-                    .filter(AIStockRecommendationRun.status == "FAILED")
-                    .order_by(desc(AIStockRecommendationRun.id))
-                    .first()
-                )
-                run_id = latest.id if latest else None
-                failed_run_type = latest.run_type if latest else run_type
-            _publish_recommendation_result({"id": run_id, "run_type": failed_run_type}, "FAILED", str(exc))
-
-    threading.Thread(target=_worker, daemon=True, name="ai-stock-run").start()
+    try:
+        AIStockRecommendationService().run_recommendation_async(
+            run_type=run_type,
+            top_n=top_n,
+            allow_after_hours=True,
+        )
+    except Exception as exc:
+        logger.exception("Failed to start async AI stock recommendation")
+        return {"status": "FAILED", "message": str(exc)}
     return {"status": "RUNNING", "message": "AI 荐股已触发，结果将通过事件推送更新"}
 
 
@@ -2444,7 +2465,7 @@ def ai_stock_runtime_logs(limit: int = 100) -> List[Dict[str, Any]]:
     return sorted(events, key=lambda item: item["time"], reverse=True)[:safe_limit]
 
 
-RUN_TYPE_LABELS = {"PREOPEN": "竞价 9:26", "OPENING": "开盘 9:35", "INTRADAY": "盘中"}
+RUN_TYPE_LABELS = {"PREOPEN": "竞价 9:26", "OPENING": "开盘 9:40", "INTRADAY": "盘中"}
 
 
 def _aggregate_hit_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:

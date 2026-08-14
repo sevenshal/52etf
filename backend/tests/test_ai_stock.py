@@ -130,7 +130,7 @@ def test_a_share_costs_include_minimum_commission_transfer_and_stamp_duty():
 
 def test_recommendation_schedule_has_preopen_opening_and_half_hour_intraday_batches():
     assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 26)) == "PREOPEN"
-    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 35)) == "OPENING"
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 40)) == "OPENING"
     assert _scheduled_recommendation_type(datetime(2026, 8, 10, 10, 30)) == "INTRADAY"
     assert _scheduled_recommendation_type(datetime(2026, 8, 10, 10, 15)) is None
 
