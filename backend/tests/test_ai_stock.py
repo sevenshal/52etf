@@ -523,6 +523,44 @@ def test_aggregate_hit_metrics_counts_hits_and_average_returns():
     assert metrics["avg_week_return_pct"] == round((0.06 - 0.01) / 2 * 100, 2)
 
 
+def test_paper_statistics_returns_without_detached_instance_error():
+    # 回归：paper_statistics 曾在 get_db_ctx 关闭后访问 ORM 属性，触发 DetachedInstanceError。
+    from src.core.database import get_db_ctx, AIStockPaperTrade, AIStockPaperLot
+
+    service = AIStockPaperTradingService(provider=object())
+    with get_db_ctx() as db:
+        portfolio = AIStockPaperTradingService._ensure_portfolio(db)
+        lot = AIStockPaperLot(
+            portfolio_id=portfolio.id, ts_code="600000.SH", name="测试股",
+            bought_at=datetime(2026, 8, 10, 10, 0), buy_price=10.0, quantity=100,
+            remaining_quantity=0, target_price=11.0,
+        )
+        db.add(lot)
+        db.flush()
+        db.add(AIStockPaperTrade(
+            portfolio_id=portfolio.id, lot_id=lot.id, trade_date=datetime(2026, 8, 11).date(),
+            ts_code="600000.SH", name="测试股", side="SELL", price=11.0, quantity=100,
+            amount=1100.0, fee=5.0, realized_pnl=95.0, reason_code="TARGET_PROFIT", reason="测试",
+        ))
+        db.flush()
+        trade_ids = [t.id for t in db.query(AIStockPaperTrade).filter(AIStockPaperTrade.lot_id == lot.id).all()]
+
+    try:
+        stats = service.paper_statistics()
+        assert stats["closed_trades"] >= 1
+        assert stats["total_realized_pnl"] >= 95.0
+        assert stats["win_rate_pct"] is not None
+    finally:
+        with get_db_ctx() as db:
+            for tid in trade_ids:
+                row = db.get(AIStockPaperTrade, tid)
+                if row:
+                    db.delete(row)
+            lot = db.query(AIStockPaperLot).filter(AIStockPaperLot.ts_code == "600000.SH", AIStockPaperLot.remaining_quantity == 0).first()
+            if lot:
+                db.delete(lot)
+
+
 def test_paper_hold_evaluations_returns_newest_first():
     from src.core.database import get_db_ctx, AIStockHoldEvaluation
 

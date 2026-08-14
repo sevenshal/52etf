@@ -2248,17 +2248,22 @@ class AIStockPaperTradingService:
             )
             lots = db.query(AIStockPaperLot).filter(AIStockPaperLot.portfolio_id == portfolio.id).all()
             bought_at = {lot.id: lot.bought_at for lot in lots}
+            # 短事务内复制成普通快照，避免 ORM 对象跨 session 访问（DetachedInstanceError）
+            sells_snapshot = [
+                {"realized_pnl": s.realized_pnl, "executed_at": s.executed_at, "lot_id": s.lot_id}
+                for s in sells
+            ]
 
-        total = len(sells)
-        wins = [s for s in sells if (s.realized_pnl or 0) > 0]
-        losses = [s for s in sells if (s.realized_pnl or 0) < 0]
-        total_pnl = round(sum((s.realized_pnl or 0) for s in sells), 2)
-        gross_win = sum((s.realized_pnl or 0) for s in wins)
-        gross_loss = abs(sum((s.realized_pnl or 0) for s in losses))
+        total = len(sells_snapshot)
+        wins = [s for s in sells_snapshot if (s["realized_pnl"] or 0) > 0]
+        losses = [s for s in sells_snapshot if (s["realized_pnl"] or 0) < 0]
+        total_pnl = round(sum((s["realized_pnl"] or 0) for s in sells_snapshot), 2)
+        gross_win = sum((s["realized_pnl"] or 0) for s in wins)
+        gross_loss = abs(sum((s["realized_pnl"] or 0) for s in losses))
         holding_days = [
-            max(0, (s.executed_at.date() - bought_at[s.lot_id].date()).days)
-            for s in sells
-            if s.lot_id and s.lot_id in bought_at
+            max(0, (s["executed_at"].date() - bought_at[s["lot_id"]].date()).days)
+            for s in sells_snapshot
+            if s["lot_id"] and s["lot_id"] in bought_at
         ]
         return {
             "closed_trades": total,
@@ -2266,8 +2271,8 @@ class AIStockPaperTradingService:
             "loss_trades": len(losses),
             "win_rate_pct": round(len(wins) / total * 100, 2) if total else None,
             "total_realized_pnl": total_pnl,
-            "avg_win_pnl": round(sum((s.realized_pnl or 0) for s in wins) / len(wins), 2) if wins else None,
-            "avg_loss_pnl": round(sum((s.realized_pnl or 0) for s in losses) / len(losses), 2) if losses else None,
+            "avg_win_pnl": round(sum((s["realized_pnl"] or 0) for s in wins) / len(wins), 2) if wins else None,
+            "avg_loss_pnl": round(sum((s["realized_pnl"] or 0) for s in losses) / len(losses), 2) if losses else None,
             "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else None,
             "avg_holding_days": round(sum(holding_days) / len(holding_days), 1) if holding_days else None,
         }
