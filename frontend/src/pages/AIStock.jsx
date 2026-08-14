@@ -192,6 +192,9 @@ const targetDistancePct = (item, quote) => {
 // 最多两行，超出用省略号（并保留悬停看全文）
 const clamp2 = value => <span className="ai-stock-clamp-2" title={value || '-'}>{value || '-'}</span>;
 
+// 主题生命周期阶段标签颜色
+const stageColor = stage => ({ '启动': 'green', '扩散': 'cyan', '主线': 'red', '拥挤': 'orange' }[stage] || 'default');
+
 const recommendationColumns = (quotes, flashes) => [
   { title: '#', dataIndex: 'rank', width: 48, align: 'center' },
   {
@@ -375,6 +378,9 @@ const AIStock = () => {
   const [holdEvals, setHoldEvals] = useState([]);
   const [paperStats, setPaperStats] = useState(null);
   const [hitRate, setHitRate] = useState(null);
+  const [fearGreedRef, setFearGreedRef] = useState([]);
+  const [showInfoAlert, setShowInfoAlert] = useState(false);
+  const [showStages, setShowStages] = useState(true);
   const [curve, setCurve] = useState([]);
   const [benchmark, setBenchmark] = useState(null);
   const [evaluation, setEvaluation] = useState(null);
@@ -445,6 +451,7 @@ const AIStock = () => {
       request.get('/api/ai-stock/paper/hold-evaluations'),
       request.get('/api/ai-stock/paper/statistics'),
       request.get('/api/ai-stock/recommendations/hit-rate'),
+      request.get('/api/ai-stock/fear-greed-reference'),
     ];
     const results = await Promise.allSettled(calls);
     const data = index => (results[index].status === 'fulfilled' ? results[index].value.data : null);
@@ -464,6 +471,7 @@ const AIStock = () => {
     setHoldEvals(data(11) || []);
     setPaperStats(data(12) || null);
     setHitRate(data(13) || null);
+    setFearGreedRef(data(14) || []);
     setLoading(false);
   }, []);
 
@@ -683,12 +691,30 @@ const AIStock = () => {
 
   const recommendationContent = (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Alert
-        type="info"
-        showIcon
-        message="AI 仅从受控候选池选择股票；分钟策略决定是否实际进入模拟盘。"
-        description={`${settings?.deepseek_configured ? `DeepSeek 已配置（${settings.deepseek_model}）` : '尚未配置 DeepSeek API Key；请点击“设置”。'} ${benchmark?.configured ? `目标站对标：最近采集 ${dateTime(benchmark.last_captured_at)}` : '目标站对标尚未配置运行环境凭据。'}`}
-      />
+      {showInfoAlert && (
+        <Alert
+          type="info"
+          showIcon
+          message="AI 仅从受控候选池选择股票；分钟策略决定是否实际进入模拟盘。"
+          description={`${settings?.deepseek_configured ? `DeepSeek 已配置（${settings.deepseek_model}）` : '尚未配置 DeepSeek API Key；请点击“设置”。'} ${benchmark?.configured ? `目标站对标：最近采集 ${dateTime(benchmark.last_captured_at)}` : '目标站对标尚未配置运行环境凭据。'}`}
+        />
+      )}
+      <Card
+        className="ai-stock-card"
+        size="small"
+        title="板块生命周期"
+        extra={<Button size="small" type="link" onClick={() => setShowStages(v => !v)}>{showStages ? '收起' : '展开'}</Button>}
+      >
+        {showStages ? (
+          fearGreedRef.length ? (
+            <Space size={[4, 8]} wrap>
+              {fearGreedRef.map(item => (
+                <Tag key={item.name} color={stageColor(item.stage)}>{item.name}：{item.stage}</Tag>
+              ))}
+            </Space>
+          ) : <Text type="secondary">暂无板块生命周期数据</Text>
+        ) : null}
+      </Card>
       <Card className="ai-stock-card" title="当前 AI 推荐" extra={<Space><Button icon={<SettingOutlined />} onClick={openSettings}>设置</Button><Button icon={<ReloadOutlined />} onClick={loadAll}>刷新</Button><Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={runNow}>立即生成</Button></Space>}>
         {current.run ? (
           <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} className="ai-stock-run-meta">
@@ -772,7 +798,7 @@ const AIStock = () => {
 
   return (
     <div className="ai-stock-page">
-      <div className="ai-stock-heading"><div><Title level={3}>AI荐股</Title><Text type="secondary">AI 选股、历史复盘与自动模拟盘</Text></div>{evaluation ? <Tag color={evaluation.passed ? 'success' : 'default'}>对标门槛：{evaluation.passed ? '已达到' : '尚未达到'}</Tag> : null}</div>
+      <div className="ai-stock-heading"><div><Title level={3}>AI荐股</Title><Text type="secondary">AI 选股、历史复盘与自动模拟盘</Text></div><Space size={8}>{evaluation ? <Tag color={evaluation.passed ? 'success' : 'default'}>对标门槛：{evaluation.passed ? '已达到' : '尚未达到'}</Tag> : null}<Button size="small" type="text" onClick={() => setShowInfoAlert(v => !v)}>{showInfoAlert ? '隐藏提示' : '提示'}</Button></Space></div>
       <Spin spinning={loading}>
         <Tabs items={[{ key: 'recommendations', label: 'AI 推荐', children: recommendationContent }, { key: 'today', label: '今日推荐', children: todayContent }, { key: 'history', label: '历史推荐', children: historyContent }, { key: 'paper', label: '模拟盘交易', children: paperContent }]} />
       </Spin>

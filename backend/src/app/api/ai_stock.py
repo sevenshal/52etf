@@ -18,6 +18,7 @@ from ...core.services.ai_stock import (
     AIStockModelError,
     AIStockPaperTradingService,
     AIStockRecommendationService,
+    _a_stock_fear_greed_reference,
     ai_stock_runtime_logs,
     evaluate_ai_stock_benchmark,
     evaluate_recommendation_hit_rate,
@@ -257,6 +258,11 @@ def run_benchmark_evaluation(
 @router.get("/recommendations/hit-rate")
 def get_recommendation_hit_rate(_: str = Depends(valid_admin_account)):
     return latest_recommendation_hit_rate()
+
+
+@router.get("/fear-greed-reference")
+def get_fear_greed_reference(_: str = Depends(valid_admin_account)):
+    return _a_stock_fear_greed_reference()
 
 
 @router.get("/evaluation/latest")
