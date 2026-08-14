@@ -404,15 +404,20 @@ def test_paper_max_buys_per_day_caps_entries():
     assert buys[0].ts_code == "600000.SH"
 
 
-def test_paper_trailing_take_profit_sells_on_pullback():
+def test_paper_trailing_take_profit_sells_on_ma10_break(monkeypatch):
+    # 移动止盈（参考系统那种）：目标价已触及 + 现价跌破 MA10 + 当日未获再推荐
+    from src.core.services import ai_stock as ai_stock_module
+
     lot = {
         "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "测试股",
         "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 100.0,
-        "remaining_quantity": 1000, "target_price": 130.0, "stop_half_triggered": False,
-        "peak_price": 120.0,
+        "remaining_quantity": 1000, "target_price": 120.0, "stop_half_triggered": False,
+        "peak_price": 121.0,  # 曾触及目标价
     }
-    # 现价 113.5 从峰值 120 回撤 5.4% > 默认 5% → 移动止盈
-    service = _CapturingPaperService(_paper_state(lot), price=113.5)
+    state = _paper_state(lot)
+    state["last_recommended_dates"] = {"600000.SH": datetime(2026, 8, 10).date()}  # 昨日推荐，今日未再推荐
+    monkeypatch.setattr(ai_stock_module, "_ma10_by_symbol", lambda codes, as_of: {"600000.SH": 118.0})
+    service = _CapturingPaperService(state, price=113.0)  # 现价 113 < MA10 118
     service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
     assert [(p.side, p.quantity, p.reason_code) for p in service.captured_plans] == [("SELL", 1000, "TRAILING_STOP")]
 
@@ -431,12 +436,39 @@ def test_paper_rotation_sells_low_score_and_buys_high_confidence():
         "today_buys": set(),
         "today_buy_count": 0,
         "hold_scores": {"600000.SH": {"hold_score": 40.0, "reason": "走弱"}},
+        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 11, 9, 0).date()},
     }
     service = _CapturingPaperService(state, price=10.0)
     service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
     sells = [p for p in service.captured_plans if p.side == "SELL"]
     buys = [p for p in service.captured_plans if p.side == "BUY"]
     assert [(s.reason_code, s.quantity) for s in sells] == [("ROTATION_OUT", 1000)]
+    assert [b.ts_code for b in buys] == ["000001.SZ"]
+
+
+def test_paper_rotation_sells_stale_position_without_hold_score():
+    # 信号1：持仓多日未获再推荐（无需 hold_score/持仓评估）→ 轮换让位
+    held_lot = {
+        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
+        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 10.0,
+        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
+        "peak_price": 10.0,
+    }
+    state = {
+        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "rotation_stale_days": 3}},
+        "lots": [held_lot],
+        "recommendations": [_recommendation("000001.SZ", 1, confidence=70.0, rec_price=10.0)],
+        "today_buys": set(),
+        "today_buy_count": 0,
+        "hold_scores": {},
+        "last_recommended_dates": {"600000.SH": datetime(2026, 7, 20).date()},
+    }
+    service = _CapturingPaperService(state, price=10.0)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    sells = [p for p in service.captured_plans if p.side == "SELL"]
+    buys = [p for p in service.captured_plans if p.side == "BUY"]
+    assert [(s.reason_code, s.quantity) for s in sells] == [("ROTATION_OUT", 1000)]
+    assert "未获再推荐" in sells[0].reason
     assert [b.ts_code for b in buys] == ["000001.SZ"]
 
 

@@ -216,8 +216,8 @@ class PaperStrategyConfigUpdate(BaseModel):
     hold_evaluation_enabled: Optional[bool] = None
     hold_sell_threshold: Optional[float] = Field(default=None, ge=0, le=100)
     max_buys_per_day: Optional[float] = Field(default=None, ge=1, le=1000)
-    trailing_take_profit_pct: Optional[float] = Field(default=None, ge=0, le=100)
     rotation_confidence_gap: Optional[float] = Field(default=None, ge=0, le=100)
+    rotation_stale_days: Optional[float] = Field(default=None, ge=1, le=1000)
 
 
 @router.put("/paper/config")

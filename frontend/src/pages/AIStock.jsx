@@ -406,8 +406,8 @@ const AIStock = () => {
   const [paperHoldEvalEnabled, setPaperHoldEvalEnabled] = useState(false);
   const [paperHoldSellThreshold, setPaperHoldSellThreshold] = useState(30);
   const [paperMaxBuysPerDay, setPaperMaxBuysPerDay] = useState(3);
-  const [paperTrailingTakeProfitPct, setPaperTrailingTakeProfitPct] = useState(5.0);
   const [paperRotationConfidenceGap, setPaperRotationConfidenceGap] = useState(20.0);
+  const [paperRotationStaleDays, setPaperRotationStaleDays] = useState(3);
   const [todayPage, setTodayPage] = useState(1);
 
   // 实时行情：订阅 tick 推送 + 通过长连接注册当前展示代码（断线自动清理、重连自动重注册）
@@ -568,8 +568,8 @@ const AIStock = () => {
     setPaperHoldEvalEnabled(p.hold_evaluation_enabled ?? false);
     setPaperHoldSellThreshold(p.hold_sell_threshold ?? 30);
     setPaperMaxBuysPerDay(p.max_buys_per_day ?? 3);
-    setPaperTrailingTakeProfitPct(p.trailing_take_profit_pct ?? 5.0);
     setPaperRotationConfidenceGap(p.rotation_confidence_gap ?? 20.0);
+    setPaperRotationStaleDays(p.rotation_stale_days ?? 3);
     setPaperConfigOpen(true);
   }, [paperConfig]);
 
@@ -589,8 +589,8 @@ const AIStock = () => {
         hold_evaluation_enabled: paperHoldEvalEnabled,
         hold_sell_threshold: paperHoldSellThreshold,
         max_buys_per_day: paperMaxBuysPerDay,
-        trailing_take_profit_pct: paperTrailingTakeProfitPct,
         rotation_confidence_gap: paperRotationConfidenceGap,
+        rotation_stale_days: paperRotationStaleDays,
       };
       const response = await request.put('/api/ai-stock/paper/config', payload);
       setPaperConfig(response.data);
@@ -601,7 +601,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperHoldSellThreshold, paperMaxBuysPerDay, paperTrailingTakeProfitPct, paperRotationConfidenceGap]);
+  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperHoldSellThreshold, paperMaxBuysPerDay, paperRotationConfidenceGap, paperRotationStaleDays]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -850,8 +850,8 @@ const AIStock = () => {
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
           </Row>
           <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>移动止盈回撤(%)</Text><Input type="number" value={paperTrailingTakeProfitPct} onChange={e => setPaperTrailingTakeProfitPct(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>换仓信心差(0-100)</Text><Input type="number" value={paperRotationConfidenceGap} onChange={e => setPaperRotationConfidenceGap(Number(e.target.value) || 0)} min={0} max={100} disabled={!paperHoldEvalEnabled} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>换仓未推荐天数</Text><Input type="number" value={paperRotationStaleDays} onChange={e => setPaperRotationStaleDays(Number(e.target.value) || 1)} min={1} step={1} /></Col>
           </Row>
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 持仓评估</Text><Switch checked={paperHoldEvalEnabled} onChange={setPaperHoldEvalEnabled} /></Col>
