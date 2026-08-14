@@ -242,15 +242,43 @@
   letter-spacing: 0;
 }
 
+.soxx-fear-summary-score.is-dual {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.soxx-fear-score-duo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.soxx-fear-score-duo-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #8c8c8c;
+  line-height: 1;
+}
+
+.soxx-fear-score-duo-value {
+  font-size: 30px;
+  font-weight: 720;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.soxx-fear-score-duo-secondary .soxx-fear-score-duo-value {
+  font-size: 19px;
+  font-weight: 650;
+}
+
 .soxx-fear-summary-metrics {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 3fr) minmax(0, 4fr);
   gap: 6px;
   margin-top: 9px;
-}
-
-.soxx-fear-summary-card.is-intraday .soxx-fear-summary-metrics {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .soxx-fear-metric-cell {

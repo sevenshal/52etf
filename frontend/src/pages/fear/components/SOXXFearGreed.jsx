@@ -95,7 +95,7 @@ const formatIntradayTime = (value) => {
   if (!value) return '-';
   const d = new Date(value);
   const pad = n => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
 const SOXXFearGreed = () => {
@@ -758,7 +758,6 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   const isIntraday = isFiniteNumber(intraday?.score);
   const score = isIntraday ? intraday.score : latest?.score;
   const scoreColor = fearColor(score);
-  const scoreTextColor = fearTextColor(score);
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
   const price = isIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
@@ -767,7 +766,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   return (
     <button
       type="button"
-      className={`soxx-fear-summary-card${active ? ' is-active' : ''}${option.groupStart ? ' is-subgroup-start' : ''}${isIntraday ? ' is-intraday' : ''}`}
+      className={`soxx-fear-summary-card${active ? ' is-active' : ''}${option.groupStart ? ' is-subgroup-start' : ''}`}
       onClick={onToggle}
     >
       <div className="soxx-fear-summary-top">
@@ -783,22 +782,41 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
           </div>
         </div>
         {latest ? (
-          <Tag color={scoreColor}>{isIntraday ? '盘中 ' : ''}{fearStatus(score)}</Tag>
+          <Tag color={scoreColor}>{fearStatus(score)}</Tag>
         ) : (
           <Tag>未入库</Tag>
         )}
       </div>
 
-      <div className="soxx-fear-summary-score" style={{ color: scoreTextColor }}>
-        {formatNumber(score, 1)}
+      <div className={`soxx-fear-summary-score${isIntraday ? ' is-dual' : ''}`}>
+        {isIntraday ? (
+          <>
+            <span className="soxx-fear-score-duo">
+              <span className="soxx-fear-score-duo-label">盘中</span>
+              <span className="soxx-fear-score-duo-value" style={{ color: fearTextColor(intraday.score) }}>
+                {formatNumber(intraday.score, 1)}
+              </span>
+            </span>
+            <span className="soxx-fear-score-duo soxx-fear-score-duo-secondary">
+              <span className="soxx-fear-score-duo-label">收盘</span>
+              <span className="soxx-fear-score-duo-value" style={{ color: fearTextColor(latest?.score) }}>
+                {formatNumber(latest?.score, 1)}
+              </span>
+            </span>
+          </>
+        ) : (
+          <span className="soxx-fear-score-duo">
+            <span className="soxx-fear-score-duo-label">收盘</span>
+            <span className="soxx-fear-score-duo-value" style={{ color: fearTextColor(latest?.score) }}>
+              {formatNumber(latest?.score, 1)}
+            </span>
+          </span>
+        )}
       </div>
 
       <div className="soxx-fear-summary-metrics">
         <MetricCell label="7天前" value={formatNumber(sevenDayScore, 1)} color={fearTextColor(sevenDayScore)} />
         <MetricCell label="1月前" value={formatNumber(oneMonthScore, 1)} color={fearTextColor(oneMonthScore)} />
-        {isIntraday && (
-          <MetricCell label="收盘" value={formatNumber(latest?.score, 1)} color={fearTextColor(latest?.score)} />
-        )}
         <MetricCell label={option.priceLabel || '价格'} value={formatNumber(price, option.pricePrecision ?? 2)} />
       </div>
 
