@@ -3,9 +3,13 @@
 回归背景：搜参循环原来写死 worker_count=1（串行执行），本次改为
 ThreadPoolExecutor 并行执行，每个 worker 使用独立 DB 会话。
 """
+import json
+import subprocess
+import sys
 import threading
 import time
 from contextlib import ExitStack
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -41,6 +45,12 @@ def _make_search_request() -> SimpleNamespace:
     return SimpleNamespace(
         request=SimpleNamespace(legs=[object()]),
         objective="annualized_return",
+        window_weight_bucket_count=20,
+        factor_weight_bucket_count=20,
+        max_positions_candidates=None,
+        position_weight_candidates=None,
+        sell_rank_multiplier_candidates=None,
+        rotation_mode_candidates=None,
     )
 
 
@@ -126,3 +136,83 @@ class FactorBacktestSearchParallelTest(TestCase):
         self.assertEqual(job["completed_cases"], job["result_count"])
         self.assertEqual(0, job["failed_cases"])
         self.assertFalse(job["cancel_requested"])
+
+    def test_build_search_job_shape(self):
+        with patch.object(factor_lab, "_effective_cpu_count", return_value=8), \
+             patch.object(factor_lab, "_estimate_backtest_search_cases", return_value=12), \
+             patch.object(factor_lab, "_backtest_request_payload", return_value={"legs": []}):
+            job = factor_lab._build_backtest_search_job(_make_search_request(), "acct-1")
+        self.assertEqual("queued", job["status"])
+        self.assertEqual("acct-1", job["account_id"])
+        self.assertEqual(12, job["total_cases"])
+        # 8 核 → 并发数 = int(8 * 2 / 3) = 5
+        self.assertEqual(5, job["worker_count"])
+        self.assertIn("search_params", job)
+        self.assertIn("request_payload", job)
+        self.assertEqual(0, job["completed_cases"])
+
+    def test_spawn_builds_worker_command(self):
+        search_request = SimpleNamespace(
+            request=SimpleNamespace(legs=[object()]),
+            objective="annualized_return",
+            window_weight_bucket_count=20,
+            factor_weight_bucket_count=20,
+            max_positions_candidates=None,
+            position_weight_candidates=None,
+            sell_rank_multiplier_candidates=None,
+            rotation_mode_candidates=None,
+            model_dump=lambda: {"legs": []},
+        )
+        with patch.object(factor_lab.subprocess, "Popen") as mock_popen, \
+             patch.object(factor_lab, "jsonable_encoder", return_value={"legs": []}), \
+             patch.object(factor_lab, "_effective_cpu_count", return_value=8):
+            process = factor_lab._spawn_backtest_search_process(search_request, "acct-1")
+        self.assertIsNotNone(process)
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        command = args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1], "-c")
+        self.assertIn("src.scripts.factor_backtest_search_worker", command[2])
+        self.assertEqual(subprocess.DEVNULL, kwargs.get("stdout"))
+        mock_popen.return_value.stdin.write.assert_called_once()
+        payload = json.loads(mock_popen.return_value.stdin.write.call_args[0][0])
+        self.assertEqual("acct-1", payload["account_id"])
+        self.assertIn("request", payload)
+        mock_popen.return_value.stdin.close.assert_called_once()
+
+    def test_relay_forwards_state_and_finalizes(self):
+        process = SimpleNamespace()
+        poll_results = iter([None, None, 0])  # alive x2，然后退出
+        process.poll = lambda: next(poll_results)
+        running_snapshot = {
+            "account_id": "acct-1",
+            "status": "running",
+            "updated_at": datetime(2024, 1, 1),
+            "submitted_cases": 1,
+            "completed_cases": 0,
+            "failed_cases": 0,
+            "current_case": "case-1",
+            "error": None,
+            "cancel_requested": False,
+            "payload": {"status": "running"},
+        }
+        fake_state = SimpleNamespace(account_id="acct-1", status="completed")
+        with patch.object(factor_lab, "BACKTEST_SEARCH_ACTIVE_PROCESS", process), \
+             patch.object(
+                 factor_lab,
+                 "_snapshot_backtest_search_state",
+                 side_effect=[running_snapshot, None] + [None] * 5,
+             ), \
+             patch.object(factor_lab, "_get_backtest_search_state", return_value=fake_state), \
+             patch.object(
+                 factor_lab,
+                 "_serialize_backtest_search_status_from_record",
+                 return_value={"status": "completed"},
+             ), \
+             patch.object(factor_lab, "publish_event") as mock_pub:
+            factor_lab._relay_backtest_search_state(process)
+        events = [call.args for call in mock_pub.call_args_list]
+        self.assertIn(("acct-1", "factor_backtest_search", {"status": "running"}), events)
+        # 进程退出后转发最终 completed 状态
+        self.assertIn(("acct-1", "factor_backtest_search", {"status": "completed"}), events)

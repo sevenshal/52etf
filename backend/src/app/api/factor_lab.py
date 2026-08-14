@@ -4,6 +4,8 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -282,8 +284,8 @@ BACKTEST_SEARCH_MIN_CPU_CORES = 4
 BACKTEST_SEARCH_LOW_CPU_MAX_CASES_PER_CORE = 4
 BACKTEST_SEARCH_JOBS_LOCK = threading.Lock()
 BACKTEST_SEARCH_STATE_ID = 1
-BACKTEST_SEARCH_ACTIVE_JOB: Optional[Dict[str, Any]] = None
-BACKTEST_SEARCH_ACTIVE_THREAD: Optional[threading.Thread] = None
+# 批量搜参在独立子进程中执行（CPU 密集回测不占用 uvicorn 主进程）
+BACKTEST_SEARCH_ACTIVE_PROCESS: Optional[subprocess.Popen] = None
 
 
 POOL_OPTIONS = SHARED_POOL_OPTIONS
@@ -5947,19 +5949,10 @@ def _publish_backtest_search_job(job: Optional[Dict[str, Any]]) -> None:
 
 def _serialize_backtest_search_status(db: ORMSession) -> Dict[str, Any]:
     with BACKTEST_SEARCH_JOBS_LOCK:
-        active_job = BACKTEST_SEARCH_ACTIVE_JOB
-        active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
-        if active_job and active_job.get("status") not in {"queued", "running"}:
-            return _serialize_backtest_search_status_from_job(dict(active_job))
-        if (
-            active_job
-            and active_job.get("status") in {"queued", "running"}
-            and active_thread
-            and active_thread.is_alive()
-        ):
-            return _serialize_backtest_search_status_from_job(dict(active_job))
+        active_process = BACKTEST_SEARCH_ACTIVE_PROCESS
+        process_alive = bool(active_process and active_process.poll() is None)
     state = _get_backtest_search_state(db)
-    if state and state.status in {"queued", "running"}:
+    if state and state.status in {"queued", "running"} and not process_alive:
         now = datetime.now()
         state.status = "interrupted"
         state.cancel_requested = False
@@ -6125,9 +6118,17 @@ def _run_backtest_search_case(
         DBSession.remove()
 
 
-def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: Dict[str, Any]):
+def _run_backtest_search_job(
+    search_request: FactorBacktestSearchRequest,
+    job: Dict[str, Any],
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    publish: Optional[Callable[[Dict[str, Any]], None]] = None,
+):
     db = DBSession()
     prepared_data: Optional[Dict[str, Any]] = None
+    cancel_check = cancel_check or (lambda: bool(job.get("cancel_requested")))
+    publish = publish or _publish_backtest_search_job
     try:
         worker_count = _backtest_search_worker_count()
         with BACKTEST_SEARCH_JOBS_LOCK:
@@ -6138,11 +6139,23 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
             job["current_case"] = "准备基础数据和基础因子"
             job["updated_at"] = datetime.now()
         _persist_active_backtest_search_job(db, job)
-        _publish_backtest_search_job(job)
+        publish(job)
 
         base_resolved_legs = _resolve_factor_legs(search_request.request.legs)
         prepared_data = _prepare_factor_backtest_base_data(search_request.request, db, base_resolved_legs)
         _warm_backtest_search_factor_caches(search_request, prepared_data, db)
+
+        if cancel_check():
+            with BACKTEST_SEARCH_JOBS_LOCK:
+                job["status"] = "cancelled"
+                job["cancel_requested"] = False
+                job["finished_at"] = datetime.now()
+                job["updated_at"] = datetime.now()
+                job["current_case"] = None
+                cancel_snapshot = _snapshot_backtest_search_job(job)
+            _persist_backtest_search_job(db, cancel_snapshot)
+            publish(cancel_snapshot)
+            return
 
         cancelled = False
         case_iter = _iter_backtest_search_requests(search_request)
@@ -6197,10 +6210,10 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                             job["failed_cases"] += 1
                             job["updated_at"] = datetime.now()
                     _persist_active_backtest_search_job(db, job)
-                    _publish_backtest_search_job(job)
+                    publish(job)
 
                 with BACKTEST_SEARCH_JOBS_LOCK:
-                    if job.get("cancel_requested"):
+                    if cancel_check():
                         job["cancel_requested"] = False
                         cancelled = True
                         job["status"] = "cancelled"
@@ -6212,7 +6225,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                         cancel_snapshot = None
                 if cancel_snapshot is not None:
                     _persist_backtest_search_job(db, cancel_snapshot)
-                    _publish_backtest_search_job(cancel_snapshot)
+                    publish(cancel_snapshot)
                     break
 
         if not cancelled:
@@ -6223,7 +6236,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
                 job["current_case"] = None
                 job["cancel_requested"] = False
             _persist_active_backtest_search_job(db, job)
-            _publish_backtest_search_job(job)
+            publish(job)
     except Exception as exc:
         logger.exception("Factor backtest search job failed")
         with BACKTEST_SEARCH_JOBS_LOCK:
@@ -6235,7 +6248,7 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
             job["cancel_requested"] = False
         try:
             _persist_active_backtest_search_job(db, job)
-            _publish_backtest_search_job(job)
+            publish(job)
         except Exception:
             logger.exception("Persist factor backtest search failure state failed")
     finally:
@@ -6245,23 +6258,12 @@ def _run_backtest_search_job(search_request: FactorBacktestSearchRequest, job: D
         DBSession.remove()
 
 
-def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, account_id: str) -> Dict[str, Any]:
-    global BACKTEST_SEARCH_ACTIVE_JOB, BACKTEST_SEARCH_ACTIVE_THREAD
-
+def _build_backtest_search_job(
+    search_request: FactorBacktestSearchRequest,
+    account_id: str,
+) -> Dict[str, Any]:
     total_cases = _estimate_backtest_search_cases(search_request)
-    available_cpu_cores = _ensure_backtest_search_cpu_capacity(total_cases)
-    with BACKTEST_SEARCH_JOBS_LOCK:
-        active_job = BACKTEST_SEARCH_ACTIVE_JOB
-        active_thread = BACKTEST_SEARCH_ACTIVE_THREAD
-        if (
-            active_job
-            and active_job.get("status") in {"queued", "running"}
-            and active_thread
-            and active_thread.is_alive()
-        ):
-            raise HTTPException(status_code=409, detail="批量搜索正在运行，请先取消或等待完成")
-
-    job = {
+    return {
         "account_id": account_id,
         "status": "queued",
         "created_at": datetime.now(),
@@ -6287,8 +6289,136 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         "current_case": None,
         "error": None,
         "cancel_requested": False,
-        "available_cpu_cores": available_cpu_cores,
+        "available_cpu_cores": _ensure_backtest_search_cpu_capacity(total_cases),
     }
+
+
+def _spawn_backtest_search_process(
+    search_request: FactorBacktestSearchRequest,
+    account_id: str,
+) -> subprocess.Popen:
+    """启动独立搜参子进程：CPU 密集回测在子进程内执行，不占用 uvicorn 主进程。
+
+    用 subprocess（全新解释器）而不是 multiprocessing：uvicorn 是多线程进程，
+    fork 可能继承被其它线程持有的锁导致子进程死锁；spawn 则会重跑入口
+    （shiv -e src.app.main:start）再起一个 uvicorn。
+    """
+    payload = {
+        "account_id": account_id,
+        "request": jsonable_encoder(search_request.model_dump()),
+    }
+    factor_lab_file = os.path.abspath(__file__)
+    src_root = os.path.dirname(os.path.dirname(os.path.dirname(factor_lab_file)))
+    src_parent = os.path.dirname(src_root)
+    bootstrap = (
+        "import sys, json; "
+        f"sys.path.insert(0, {src_parent!r}); "
+        "from src.scripts.factor_backtest_search_worker import main; "
+        "main()"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", bootstrap],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=None,
+    )
+    if process.stdin is not None:
+        process.stdin.write(json.dumps(payload).encode("utf-8"))
+        process.stdin.close()
+    return process
+
+
+def _snapshot_backtest_search_state(db: ORMSession) -> Optional[Dict[str, Any]]:
+    state = _get_backtest_search_state(db)
+    if state is None:
+        return None
+    return {
+        "account_id": state.account_id,
+        "status": state.status,
+        "updated_at": state.updated_at,
+        "submitted_cases": state.submitted_cases,
+        "completed_cases": state.completed_cases,
+        "failed_cases": state.failed_cases,
+        "current_case": state.current_case,
+        "error": state.error,
+        "cancel_requested": state.cancel_requested,
+        "payload": _serialize_backtest_search_status_from_record(state),
+    }
+
+
+def _relay_backtest_search_state(process: subprocess.Popen) -> None:
+    """轮询 DB 中的搜参状态并转发 WS 事件；进程退出时做最终状态收尾。
+
+    子进程写 SQLite，本线程（uvicorn 主进程内）轮询变化并 publish_event，
+    前端 WS 事件流因此仍能实时收到进度。
+    """
+    last_signature: Optional[Tuple[Any, ...]] = None
+    poll_interval = 0.5
+    try:
+        while process.poll() is None:
+            with BACKTEST_SEARCH_JOBS_LOCK:
+                if BACKTEST_SEARCH_ACTIVE_PROCESS is not process:
+                    return
+            time.sleep(poll_interval)
+            db = DBSession()
+            try:
+                snapshot = _snapshot_backtest_search_state(db)
+            finally:
+                db.close()
+                DBSession.remove()
+            if not snapshot:
+                continue
+            signature = (
+                snapshot["status"],
+                snapshot["updated_at"],
+                snapshot["submitted_cases"],
+                snapshot["completed_cases"],
+                snapshot["failed_cases"],
+                snapshot["current_case"],
+                snapshot["error"],
+                snapshot["cancel_requested"],
+            )
+            if signature != last_signature:
+                last_signature = signature
+                publish_event(snapshot["account_id"], "factor_backtest_search", snapshot["payload"])
+    finally:
+        db = DBSession()
+        try:
+            state = _get_backtest_search_state(db)
+            if state is None:
+                return
+            with BACKTEST_SEARCH_JOBS_LOCK:
+                is_current = BACKTEST_SEARCH_ACTIVE_PROCESS is process
+            if not is_current:
+                return
+            if state.status in {"queued", "running"}:
+                now = datetime.now()
+                state.status = "interrupted"
+                state.cancel_requested = False
+                state.current_case = None
+                state.finished_at = state.finished_at or now
+                state.updated_at = now
+                state.error = state.error or "搜参进程已退出，请重新启动搜索"
+                db.commit()
+            publish_event(
+                state.account_id,
+                "factor_backtest_search",
+                _serialize_backtest_search_status_from_record(state),
+            )
+        finally:
+            db.close()
+            DBSession.remove()
+
+
+def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, account_id: str) -> Dict[str, Any]:
+    global BACKTEST_SEARCH_ACTIVE_PROCESS
+
+    job = _build_backtest_search_job(search_request, account_id)  # 内部含 CPU 容量校验（409）
+    with BACKTEST_SEARCH_JOBS_LOCK:
+        active_process = BACKTEST_SEARCH_ACTIVE_PROCESS
+        if active_process and active_process.poll() is None:
+            raise HTTPException(status_code=409, detail="批量搜索正在运行，请先取消或等待完成")
+
     db = DBSession()
     try:
         _persist_backtest_search_job(db, job)
@@ -6298,17 +6428,17 @@ def _start_backtest_search_job(search_request: FactorBacktestSearchRequest, acco
         db.close()
         DBSession.remove()
 
-    thread = threading.Thread(
-        target=_run_backtest_search_job,
-        args=(search_request, job),
-        daemon=True,
-        name="factor-backtest-search",
-    )
+    process = _spawn_backtest_search_process(search_request, account_id)
     with BACKTEST_SEARCH_JOBS_LOCK:
-        BACKTEST_SEARCH_ACTIVE_JOB = job
-        BACKTEST_SEARCH_ACTIVE_THREAD = thread
-    thread.start()
-    _publish_backtest_search_job(job)
+        BACKTEST_SEARCH_ACTIVE_PROCESS = process
+    relay = threading.Thread(
+        target=_relay_backtest_search_state,
+        args=(process,),
+        daemon=True,
+        name="factor-backtest-search-relay",
+    )
+    relay.start()
+    publish_event(account_id, "factor_backtest_search", response)
     return response
 
 
@@ -7207,20 +7337,14 @@ async def cancel_factor_backtest_search_job(
     _: str = Depends(valid_account),
     db: ORMSession = Depends(get_db),
 ):
-    active_thread_alive = False
     with BACKTEST_SEARCH_JOBS_LOCK:
-        if BACKTEST_SEARCH_ACTIVE_THREAD:
-            active_thread_alive = BACKTEST_SEARCH_ACTIVE_THREAD.is_alive()
-        if (
-            BACKTEST_SEARCH_ACTIVE_JOB
-            and BACKTEST_SEARCH_ACTIVE_JOB.get("status") in {"queued", "running"}
-            and active_thread_alive
-        ):
-            BACKTEST_SEARCH_ACTIVE_JOB["cancel_requested"] = True
+        active_process = BACKTEST_SEARCH_ACTIVE_PROCESS
+        process_alive = bool(active_process and active_process.poll() is None)
 
     state = _get_backtest_search_state(db)
     if state and state.status in {"queued", "running"}:
-        if active_thread_alive:
+        if process_alive:
+            # 子进程每轮轮询 DB 中的取消标记
             state.cancel_requested = True
         else:
             state.status = "cancelled"
