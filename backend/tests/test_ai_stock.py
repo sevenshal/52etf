@@ -544,6 +544,20 @@ def test_fear_greed_reference_returns_list_without_crash():
     assert isinstance(ref, list)
 
 
+def test_classify_theme_stage():
+    from src.core.services.ai_stock import _classify_theme_stage
+
+    assert _classify_theme_stage(80.0, 5.0) == "拥挤"
+    assert _classify_theme_stage(30.0, 8.0) == "启动"     # 恐慌 + 回升
+    assert _classify_theme_stage(30.0, -8.0) == "探底"    # 恐慌 + 继续走弱（不是退潮）
+    assert _classify_theme_stage(60.0, 10.0) == "主线"    # 中高位 + 上行
+    assert _classify_theme_stage(40.0, 10.0) == "扩散"    # 中位 + 上行
+    assert _classify_theme_stage(60.0, -10.0) == "退潮"   # 从非恐慌区回落
+    assert _classify_theme_stage(40.0, -10.0) == "退潮"   # 中位明显回落
+    assert _classify_theme_stage(50.0, 2.0) == "中性"     # 无明确方向
+    assert _classify_theme_stage(None, 0.0) is None
+
+
 def test_aggregate_hit_metrics_counts_hits_and_average_returns():
     # 4 条推荐：当日/次日/触目标/一周分别命中一部分，验证命中率与等额平均收益
     records = [

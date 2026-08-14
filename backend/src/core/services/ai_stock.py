@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -35,7 +36,7 @@ from ..database import (
     AIStockServiceConfig,
     AIStockStrategyConfig,
     AIStockTHSIndexCache,
-    AStockFearGreedIntraday,
+    ETFFearGreedCloneHistory,
     get_db_ctx,
 )
 from .a_stock_fund_flow import (
@@ -672,14 +673,24 @@ class AIStockDataProvider:
                 logger.warning("DuckDB daily fetch failed, skipping size/liquidity filter: %s", exc)
                 data_date = None
 
-        # Per-board: sort by market cap, take top N.
+        # RPS（相对强度）：20 日动量的横截面百分位排名（0-100，越高越强）。
+        # 用于每板块候选截取（配合 max_candidates_per_board），避免只按市值取头部。
+        rps_sorted = sorted(
+            v for v in (_safe_float((window_lookup.get(c["ts_code"]) or {}).get("mom_20d")) for c in pre_filtered) if v is not None
+        )
+        rps_n = len(rps_sorted)
+        for candidate in pre_filtered:
+            mom = _safe_float((window_lookup.get(candidate["ts_code"]) or {}).get("mom_20d"))
+            candidate["rps"] = round(bisect_left(rps_sorted, mom) / rps_n * 100, 1) if (mom is not None and rps_n) else 50.0
+
+        # Per-board: sort by RPS desc (tiebreak market cap), take top N.
         board_candidates: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for candidate in pre_filtered:
             for board_code in candidate.get("board_codes") or []:
                 board_candidates[board_code].append(candidate)
         capped: Dict[str, Dict[str, Any]] = {}
         for board_code, members in board_candidates.items():
-            members.sort(key=lambda c: daily_lookup.get(c["ts_code"], {}).get("total_mv", 0), reverse=True)
+            members.sort(key=lambda c: (c.get("rps", 0.0), daily_lookup.get(c["ts_code"], {}).get("total_mv", 0)), reverse=True)
             for member in members[:params["max_candidates_per_board"]]:
                 capped[member["ts_code"]] = member
 
@@ -925,7 +936,7 @@ class DeepSeekStockSelector:
             raise AIStockModelError("已映射 THS 板块没有合格成分股")
         _params = _load_strategy_params()
         _news_enabled = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT)) > 0
-        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "board_strength")
+        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "rps", "board_strength")
         if _news_enabled:
             # 纯新闻信号开启时才把信号与窗口特征喂给模型；权重=0 时保持旧字段集
             _compact_keys = _compact_keys + ("news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d")
@@ -942,7 +953,7 @@ class DeepSeekStockSelector:
             instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。"
         if fear_greed_ref:
             instruction["fear_greed_reference"] = fear_greed_ref
-            instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)，与 board_market_snapshot 里的板块按名称对应。请把它作为选股信心的参考：所属板块恐慌(≤30)可能是错杀后的低位机会，可适度提高置信度；所属板块贪婪(≥70)拥挤追高风险大，应更谨慎、适当降低置信度或要求更强的新闻证据。与 news_signal、板块强弱、技术面综合判断，不要机械套用。"
+            instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)及其生命周期阶段 stage，与 board_market_snapshot 里的板块按名称对应。阶段含义：启动(恐慌错杀后修复，敢买，可适度提高置信度)、扩散(资金流入、上涨扩散，可参与)、主线(持续强势、健康上涨，正常买)、拥挤(贪婪过热，应降低置信度或要求更强新闻证据)、退潮(从高位回落，回避或减仓)、探底(恐慌延续、尚未企稳，回避等企稳)、中性(无明确方向)。请结合 news_signal、板块强弱、技术面综合判断，不要机械套用。"
         second_messages = board_stage["transcript"]["request"]["messages"]
         messages = [*second_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
@@ -2733,10 +2744,32 @@ A_STOCK_FEAR_GREED_EXCLUDED_SYMBOLS = {
 }
 
 
-def _a_stock_fear_greed_reference() -> List[Dict[str, Any]]:
-    """各行业/主题/板块最新恐慌贪婪指数（0-100，越低越恐慌/超卖，越高越贪婪/拥挤）。
+def _classify_theme_stage(score: Optional[float], trend_5d: Optional[float]) -> Optional[str]:
+    """按贪恐值(0-100) + 近5日变化分类主题生命周期阶段。
 
-    供 AI 在"新闻事件→板块"步骤参考：恐惧(≤30)可能是错杀机会，贪婪(≥70)追高风险。
+    启动(恐慌错杀后修复)/扩散(资金流入、上涨扩散)/主线(持续强势)/拥挤(贪婪过热)/
+    退潮(从高位回落)/探底(恐慌延续、尚未企稳)/中性(无明确方向)。
+    """
+    if score is None:
+        return None
+    trend = trend_5d if trend_5d is not None else 0.0
+    if score >= 70:
+        return "拥挤"
+    if score <= 35:
+        # 恐慌区：回升=启动；继续走弱=探底（不是退潮）
+        return "启动" if trend >= 0 else "探底"
+    if trend > 5:
+        return "主线" if score >= 50 else "扩散"
+    if trend < -5:
+        # 从非恐慌区明显回落才是退潮
+        return "退潮"
+    return "中性"
+
+
+def _a_stock_fear_greed_reference() -> List[Dict[str, Any]]:
+    """各行业/主题/板块最新恐慌贪婪指数 + 生命周期阶段。
+
+    供 AI 在选股步骤参考：启动/主线敢买，拥挤谨慎，退潮回避。
     只取行业/主题/板块类指数，排除宽基与策略指数。
     """
     try:
@@ -2753,20 +2786,39 @@ def _a_stock_fear_greed_reference() -> List[Dict[str, Any]]:
     try:
         with get_db_ctx() as db:
             rows = (
-                db.query(AStockFearGreedIntraday)
-                .filter(AStockFearGreedIntraday.symbol.in_(symbols))
-                .order_by(desc(AStockFearGreedIntraday.snapshot_time))
+                db.query(ETFFearGreedCloneHistory)
+                .filter(ETFFearGreedCloneHistory.symbol.in_(symbols))
+                .order_by(ETFFearGreedCloneHistory.symbol, desc(ETFFearGreedCloneHistory.date))
                 .all()
             )
-            latest: Dict[str, Dict[str, Any]] = {}
+            # 短事务内取每个 symbol 最近 6 个日频分（date 已倒序）
+            series: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for row in rows:
-                if row.symbol not in latest:
-                    latest[row.symbol] = {"score": float(row.score), "rating": row.rating}
-        reference = [
-            {"name": label_by_symbol[sym], "fear_greed": round(latest[sym]["score"], 1), "rating": latest[sym]["rating"]}
-            for sym in latest
-            if sym in label_by_symbol
-        ]
+                if len(series[row.symbol]) < 6:
+                    series[row.symbol].append({"score": float(row.score), "rating": row.rating})
+        reference = []
+        for sym in symbols:
+            if sym not in series:
+                continue
+            items = series[sym]
+            current = items[0]["score"]
+            prev_score = items[1]["score"] if len(items) >= 2 else None
+            if len(items) >= 6:
+                trend_5d = round(current - items[5]["score"], 2)
+            elif len(items) >= 2:
+                trend_5d = round(current - items[-1]["score"], 2)
+            else:
+                trend_5d = None
+            reference.append(
+                {
+                    "name": label_by_symbol[sym],
+                    "fear_greed": round(current, 1),
+                    "rating": items[0]["rating"],
+                    "prev_score": round(prev_score, 1) if prev_score is not None else None,
+                    "trend_5d": trend_5d,
+                    "stage": _classify_theme_stage(current, trend_5d),
+                }
+            )
         return sorted(reference, key=lambda item: item["name"])
     except Exception as exc:
         logger.warning("Failed to load A-share fear-greed reference: %s", exc)
