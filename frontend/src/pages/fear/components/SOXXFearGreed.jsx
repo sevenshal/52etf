@@ -21,7 +21,7 @@ const industryOptionCount = group => (
 
 const SORTED_CN_INDUSTRY_GROUPS = [...CN_INDUSTRY_GROUPS]
   .sort((left, right) => industryOptionCount(right) - industryOptionCount(left));
-const COMPACT_CN_INDUSTRY_KEYS = ['financials', 'utilities', 'defense', 'real-estate'];
+const COMPACT_CN_INDUSTRY_KEYS = ['utilities', 'defense', 'real-estate'];
 const COMPACT_CN_INDUSTRY_GROUPS = COMPACT_CN_INDUSTRY_KEYS
   .map(key => CN_INDUSTRY_GROUPS.find(group => group.key === key))
   .filter(Boolean);

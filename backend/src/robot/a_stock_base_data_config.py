@@ -239,6 +239,7 @@ ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {"symbol": "931775.CSI", "ticker": "房地产", "label": "房地产", "index_name": "中证全指房地产指数", "option_underlyings": [], "proxy_etf": "512200.SH"},
     # 二级行业
     {"symbol": "H30199.CSI", "ticker": "电力公用", "label": "电力", "index_name": "中证全指电力公用事业指数", "option_underlyings": [], "proxy_etf": "560580.SH"},
+    {"symbol": "931994.CSI", "ticker": "电网设备", "label": "电网设备", "index_name": "中证电网设备主题指数", "option_underlyings": [], "proxy_etf": "159326.SZ"},
     {"symbol": "H30198.CSI", "ticker": "油气产业", "label": "石油石化", "index_name": "中证油气产业指数", "option_underlyings": [], "proxy_etf": "561360.SH"},
     {"symbol": "930606.CSI", "ticker": "中证钢铁", "label": "钢铁", "index_name": "中证钢铁指数", "option_underlyings": [], "proxy_etf": "515210.SH"},
     {"symbol": "000813.CSI", "ticker": "细分化工", "label": "化工", "index_name": "中证细分化工产业主题指数", "option_underlyings": [], "proxy_etf": "516020.SH"},
@@ -307,6 +308,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "159301.SZ",
     "512200.SH",
     "560580.SH",
+    "159326.SZ",
     "561360.SH",
     "515210.SH",
     "516020.SH",
@@ -364,6 +366,7 @@ A_STOCK_ETF_DAILY_NAMES = {
     "159301.SZ": "公用事业ETF",
     "512200.SH": "房地产ETF",
     "560580.SH": "电力ETF",
+    "159326.SZ": "电网设备ETF",
     "561360.SH": "油气ETF",
     "515210.SH": "钢铁ETF",
     "516020.SH": "化工ETF",

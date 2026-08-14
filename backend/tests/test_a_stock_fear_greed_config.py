@@ -214,7 +214,7 @@ def test_additional_industry_targets_are_complete_and_unique():
         for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS
     }
 
-    assert len(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS) == 35
+    assert len(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS) == 36
     assert len(symbols) == len(set(symbols))
     assert additional_symbols <= set(symbols)
     for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS:
