@@ -48,6 +48,7 @@ export const CN_INDUSTRY_GROUPS = [
     key: 'energy',
     title: '能源',
     taxonomyCode: '880300',
+    layout: 'wide',
     children: [
       { title: '煤炭', code: '880301', options: [cnOption('399998.SZ', '中证煤炭', '二级行业')] },
       { title: '电力', code: '880305', options: [cnOption('H30199.CSI', '电力公用', '二级行业'), cnOption('931151.CSI', '光伏产业', '三级行业', { leafLabel: '新型电力' })] },
