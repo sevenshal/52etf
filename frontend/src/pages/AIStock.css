@@ -37,7 +37,7 @@
 
 .ai-stock-table .is-down,
 .ai-stock-stat .is-down {
-  color: #1677ff;
+  color: #389e0d;
 }
 
 .ai-stock-chart {
@@ -140,5 +140,22 @@
 
   .ai-stock-card .ant-card-body {
     padding: 12px;
+  }
+}
+
+/* 实时价格变动提示：淡黄背景渐隐 */
+.ai-stock-price-flash {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 2px;
+  animation: ai-stock-price-flash 1.6s ease-out;
+}
+
+@keyframes ai-stock-price-flash {
+  0% {
+    background-color: #fff3bf;
+  }
+  100% {
+    background-color: transparent;
   }
 }

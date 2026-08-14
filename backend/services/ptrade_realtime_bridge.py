@@ -46,6 +46,17 @@ def _to_backend_code(code):
     return str(code or "").strip().upper()
 
 
+def _number(value):
+    """numpy 标量转 Python float（json 可序列化），NaN/Inf 归 0 避免污染整批 JSON。"""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if result != result or result == float("inf") or result == float("-inf"):
+        return 0.0
+    return result
+
+
 def _sync_pool(context, quotes):
     """上报报价，并从响应里取最新股票池；池变化时 set_universe 增量更新订阅。"""
     payload = json.dumps({
@@ -73,8 +84,8 @@ def _sync_pool(context, quotes):
             g.pool = ptrade_pool
             if ptrade_pool:
                 set_universe(ptrade_pool)
-                log.info("realtime bridge pool updated: %d codes, version %s",
-                         len(ptrade_pool), str(new_version))
+                log.info("realtime bridge pool updated: %d codes, version %s" %
+                         (len(ptrade_pool), str(new_version)))
     except Exception as exc:
         # 上报失败不中断策略，等下一个 tick 再试
         log.error("realtime bridge sync failed: %s", str(exc))
@@ -107,13 +118,13 @@ def tick_data(context, data):
             continue
         row = tick.iloc[-1]
         quotes[_to_backend_code(code)] = {
-            "last_px": row["last_px"],
-            "preclose_px": row["preclose_px"],
-            "open_px": row["open_px"],
-            "high_px": row["high_px"],
-            "low_px": row["low_px"],
-            "amount": row["amount"],
+            "last_px": _number(row["last_px"]),
+            "preclose_px": _number(row["preclose_px"]),
+            "open_px": _number(row["open_px"]),
+            "high_px": _number(row["high_px"]),
+            "low_px": _number(row["low_px"]),
+            "amount": _number(row["amount"]),
             "hs_time": str(row["hsTimeStamp"]),
-            "trade_status": row["trade_status"],
+            "trade_status": str(row["trade_status"]),
         }
     _sync_pool(context, quotes)

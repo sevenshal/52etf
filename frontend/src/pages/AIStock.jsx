@@ -162,24 +162,93 @@ const EvidenceChain = ({ runId }) => {
   return <Table className="ai-stock-table" columns={columns} dataSource={rows} rowKey="event_id" size="small" pagination={false} scroll={{ x: 1120 }} />;
 };
 
-const livePriceCell = (quotes, tsCode, fallback) => {
+const livePriceCell = (quotes, flashes, tsCode, fallback) => {
   const quote = quotes?.[tsCode];
-  if (quote && quote.last_px) return money(quote.last_px);
+  if (quote && quote.last_px) {
+    const flashKey = flashes?.[tsCode] || 0;
+    return (
+      <span key={flashKey} className={flashKey > 0 ? 'ai-stock-price-flash' : undefined}>
+        {money(quote.last_px)}
+      </span>
+    );
+  }
   return fallback !== undefined ? money(fallback) : <Text type="secondary">-</Text>;
 };
 
-const recommendationColumns = quotes => [
+// 今日涨幅 = (实时价 - 昨收) / 昨收
+const quoteChangePct = quote => {
+  const live = quote?.last_px;
+  const preclose = quote?.preclose_px;
+  if (!live || !preclose || !Number(preclose)) return null;
+  return ((Number(live) - Number(preclose)) / Number(preclose)) * 100;
+};
+
+// 目标价相对实时价的距离
+const targetDistancePct = (item, quote) => {
+  const live = quote?.last_px;
+  if (!live || !item?.target_price) return null;
+  return ((Number(item.target_price) - Number(live)) / Number(live)) * 100;
+};
+
+const recommendationColumns = (quotes, flashes) => [
   { title: '#', dataIndex: 'rank', width: 48, align: 'center' },
   {
     title: '股票',
     key: 'stock',
-    width: 142,
+    width: 152,
     render: (_, item) => (
       <Space direction="vertical" size={0}>
         <Text strong>{item.name}</Text>
         <Text type="secondary">{item.ts_code}</Text>
+        {item.industry ? <Text type="secondary" style={{ fontSize: 12 }}>{item.industry}</Text> : null}
       </Space>
     ),
+  },
+  {
+    title: '实时价',
+    key: 'live_price',
+    width: 108,
+    align: 'right',
+    render: (_, item) => {
+      const quote = quotes?.[item.ts_code];
+      const live = quote?.last_px;
+      if (!live) return <Text type="secondary">-</Text>;
+      const flashKey = flashes?.[item.ts_code] || 0;
+      const chg = quoteChangePct(quote);
+      return (
+        <Space direction="vertical" size={0} align="end">
+          <span key={flashKey} className={flashKey > 0 ? 'ai-stock-price-flash' : undefined}>{money(live)}</span>
+          {chg !== null && <Text className={valueClass(chg)} style={{ fontSize: 12 }}>{percent(chg)}</Text>}
+        </Space>
+      );
+    },
+  },
+  { title: '建议买入价', dataIndex: 'recommendation_price', width: 96, align: 'right', render: value => money(value) },
+  {
+    title: '今日开盘价',
+    key: 'open_price',
+    width: 96,
+    align: 'right',
+    render: (_, item) => {
+      const quote = quotes?.[item.ts_code];
+      return quote?.open_px ? money(quote.open_px) : <Text type="secondary">-</Text>;
+    },
+  },
+  {
+    title: '目标盈利点',
+    key: 'target',
+    width: 132,
+    align: 'right',
+    render: (_, item) => {
+      const dist = targetDistancePct(item, quotes?.[item.ts_code]);
+      return (
+        <Space direction="vertical" size={0} align="end">
+          <Text>{money(item.target_price)}</Text>
+          <Text className="is-up" style={{ fontSize: 12 }}>目标 {percent(item.target_return_pct)}</Text>
+          {dist !== null && <Text className={valueClass(dist)} style={{ fontSize: 12 }}>距现价 {percent(dist)}</Text>}
+        </Space>
+      );
+    },
   },
   { title: 'AI 信心', dataIndex: 'ai_confidence', width: 92, render: value => `${Number(value).toFixed(0)} / 100` },
   {
@@ -194,10 +263,6 @@ const recommendationColumns = quotes => [
       return <Tag color={color}>{label} {num.toFixed(0)}</Tag>;
     },
   },
-  { title: '建议价', dataIndex: 'recommendation_price', width: 92, align: 'right', render: value => money(value) },
-  { title: '现价', key: 'live_price', width: 92, align: 'right', render: (_, item) => livePriceCell(quotes, item.ts_code) },
-  { title: '目标价', dataIndex: 'target_price', width: 92, align: 'right', render: value => money(value) },
-  { title: '建议收益', dataIndex: 'target_return_pct', width: 92, render: value => <Text className="is-up">{percent(value)}</Text> },
   {
     title: '题材',
     dataIndex: 'themes',
@@ -217,7 +282,7 @@ const clockTime = value => {
   }
 };
 
-const todayColumns = quotes => [
+const todayColumns = (quotes, flashes) => [
   { title: '时间', dataIndex: 'run_at', width: 76, render: clockTime },
   {
     title: '股票',
@@ -233,7 +298,7 @@ const todayColumns = quotes => [
   { title: '次数', dataIndex: 'recommendation_count', width: 58, align: 'center', render: value => (value > 1 ? <Tag color="orange">{value}</Tag> : value) },
   { title: 'AI 信心', dataIndex: 'ai_confidence', width: 84, render: value => `${Number(value).toFixed(0)} / 100` },
   { title: '建议价', dataIndex: 'recommendation_price', width: 84, align: 'right', render: value => money(value) },
-  { title: '现价', key: 'live_price', width: 84, align: 'right', render: (_, item) => livePriceCell(quotes, item.ts_code) },
+  { title: '现价', key: 'live_price', width: 84, align: 'right', render: (_, item) => livePriceCell(quotes, flashes, item.ts_code) },
   { title: '目标价', dataIndex: 'target_price', width: 84, align: 'right', render: value => money(value) },
   { title: '建议收益', dataIndex: 'target_return_pct', width: 84, render: value => <Text className="is-up">{percent(value)}</Text> },
   {
@@ -292,7 +357,7 @@ const AIStock = () => {
   const [todayPage, setTodayPage] = useState(1);
 
   // 实时行情：订阅 tick 推送 + 通过长连接注册当前展示代码（断线自动清理、重连自动重注册）
-  const { quotes, register } = useRealtimeQuotes('ai_stock_page');
+  const { quotes, flashes, register } = useRealtimeQuotes('ai_stock_page');
 
   // 注册当前渲染的代码：AI推荐 + 今日当前页 + 历史批次详情 + 模拟仓持仓
   useEffect(() => {
@@ -509,7 +574,7 @@ const AIStock = () => {
     { title: '持仓', dataIndex: 'quantity', width: 90, align: 'right' },
     { title: '可卖', dataIndex: 'sellable_quantity', width: 90, align: 'right' },
     { title: '成本', dataIndex: 'cost', width: 90, align: 'right', render: money },
-    { title: '现价', dataIndex: 'price', width: 90, align: 'right', render: (value, row) => livePriceCell(quotes, row.ts_code, value) },
+    { title: '现价', dataIndex: 'price', width: 90, align: 'right', render: (value, row) => livePriceCell(quotes, flashes, row.ts_code, value) },
     { title: '盈亏', dataIndex: 'pnl_pct', width: 90, align: 'right', render: (value, row) => {
       const quote = quotes?.[row.ts_code];
       const live = quote?.last_px ? Number(quote.last_px) : null;
@@ -566,7 +631,7 @@ const AIStock = () => {
             <Descriptions.Item label="候选池">{current.run.candidate_count} 只</Descriptions.Item>
           </Descriptions>
         ) : <Empty description="尚无成功的 AI 推荐批次" />}
-        <Table className="ai-stock-table" columns={recommendationColumns(quotes)} dataSource={current.recommendations} rowKey="id" size="small" pagination={false} scroll={{ x: 1380 }} />
+        <Table className="ai-stock-table" columns={recommendationColumns(quotes, flashes)} dataSource={current.recommendations} rowKey="id" size="small" pagination={false} scroll={{ x: 1560 }} />
         {current.run ? <Collapse className="ai-stock-conversation" items={[
           { key: 'current-evidence', label: '查看新闻 → THS 板块 → 成分股证据链', children: <EvidenceChain runId={current.run.id} /> },
           { key: 'current-conversation', label: '查看本批次完整 AI 会话', children: <ConversationViewer runId={current.run.id} /> },
@@ -578,7 +643,7 @@ const AIStock = () => {
   const todayContent = (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Card className="ai-stock-card" title={`今日推荐（${todayRecs.length} 只）`} extra={<Text type="secondary">今日全部批次 · 重复股票已合并，按平均 AI 信心排序</Text>}>
-        <Table className="ai-stock-table" columns={todayColumns(quotes)} dataSource={todayRecs} rowKey="ts_code" size="small" pagination={{ pageSize: 50, current: todayPage, onChange: setTodayPage, showSizeChanger: false }} scroll={{ x: 1100 }} />
+        <Table className="ai-stock-table" columns={todayColumns(quotes, flashes)} dataSource={todayRecs} rowKey="ts_code" size="small" pagination={{ pageSize: 50, current: todayPage, onChange: setTodayPage, showSizeChanger: false }} scroll={{ x: 1100 }} />
       </Card>
     </Space>
   );
@@ -595,7 +660,7 @@ const AIStock = () => {
             <Descriptions.Item label="提示词版本">{selectedRun.prompt_version || '-'}</Descriptions.Item>
             <Descriptions.Item label="新闻快照">{selectedRun.news_count ?? 0} 条</Descriptions.Item>
           </Descriptions>
-          <Table className="ai-stock-table" columns={[...recommendationColumns(quotes), ...performanceColumns]} dataSource={selectedRun.recommendations || []} rowKey="id" size="small" pagination={false} scroll={{ x: 1800 }} />
+          <Table className="ai-stock-table" columns={[...recommendationColumns(quotes, flashes), ...performanceColumns]} dataSource={selectedRun.recommendations || []} rowKey="id" size="small" pagination={false} scroll={{ x: 2000 }} />
           <Collapse className="ai-stock-conversation" items={[
             { key: 'history-evidence', label: '查看新闻 → THS 板块 → 成分股证据链', children: <EvidenceChain runId={selectedRun.id} /> },
             { key: 'history-conversation', label: '查看本批次完整 AI 会话', children: <ConversationViewer runId={selectedRun.id} /> },

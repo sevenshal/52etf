@@ -14,6 +14,10 @@ import { subscribeBackendEvent, sendBackendEventMessage } from '../utils/backend
  */
 const useRealtimeQuotes = (source = 'realtime_page') => {
   const [quotes, setQuotes] = useState({});
+  // code -> 递增序号；每次 last_px 真实变化时 +1，用于前端价格变动闪烁提示
+  const [flashes, setFlashes] = useState({});
+  const quotesRef = useRef({});
+  const flashRef = useRef({});
   const sourceRef = useRef(source);
   sourceRef.current = source;
   const registerRef = useRef(() => {});
@@ -37,8 +41,30 @@ const useRealtimeQuotes = (source = 'realtime_page') => {
   useEffect(() => {
     const unsubQuote = subscribeBackendEvent('realtime_quotes', event => {
       const batch = event.quotes;
-      if (batch && typeof batch === 'object') {
-        setQuotes(prev => ({ ...prev, ...batch }));
+      if (!batch || typeof batch !== 'object') return;
+
+      const prev = quotesRef.current;
+      const next = { ...prev, ...batch };
+      quotesRef.current = next;
+
+      // 检测真实价格变化：仅当该 code 之前已有价格且与最新价不同才触发闪烁
+      const changed = {};
+      Object.keys(batch).forEach(code => {
+        const prevPrice = prev[code] ? prev[code].last_px : null;
+        const newPrice = batch[code] ? batch[code].last_px : null;
+        if (
+          prevPrice !== null && prevPrice !== undefined
+          && newPrice !== null && newPrice !== undefined
+          && Number(prevPrice) !== Number(newPrice)
+        ) {
+          changed[code] = (flashRef.current[code] || 0) + 1;
+        }
+      });
+
+      setQuotes(next);
+      if (Object.keys(changed).length) {
+        flashRef.current = { ...flashRef.current, ...changed };
+        setFlashes({ ...flashRef.current });
       }
     });
     const unsubConnected = subscribeBackendEvent('ws_connected', () => {
@@ -54,7 +80,7 @@ const useRealtimeQuotes = (source = 'realtime_page') => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unregister]);
 
-  return { quotes, register, unregister };
+  return { quotes, flashes, register, unregister };
 };
 
 export default useRealtimeQuotes;
