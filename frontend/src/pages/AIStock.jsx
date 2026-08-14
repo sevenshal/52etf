@@ -189,6 +189,9 @@ const targetDistancePct = (item, quote) => {
   return ((Number(item.target_price) - Number(live)) / Number(live)) * 100;
 };
 
+// 最多两行，超出用省略号（并保留悬停看全文）
+const clamp2 = value => <span className="ai-stock-clamp-2" title={value || '-'}>{value || '-'}</span>;
+
 const recommendationColumns = (quotes, flashes) => [
   { title: '#', dataIndex: 'rank', width: 48, align: 'center' },
   {
@@ -278,8 +281,8 @@ const recommendationColumns = (quotes, flashes) => [
     width: 160,
     render: themes => <Space size={[4, 4]} wrap>{(themes || []).slice(0, 3).map(theme => <Tag key={theme}>{theme}</Tag>)}</Space>,
   },
-  { title: 'AI 结论', dataIndex: 'reason', width: 360, ellipsis: true },
-  { title: '风险', dataIndex: 'risks', width: 220, ellipsis: true },
+  { title: 'AI 结论', dataIndex: 'reason', width: 360, render: clamp2 },
+  { title: '风险', dataIndex: 'risks', width: 220, render: clamp2 },
 ];
 
 const clockTime = value => {
@@ -316,7 +319,7 @@ const todayColumns = (quotes, flashes) => [
     width: 150,
     render: themes => <Space size={[4, 4]} wrap>{(themes || []).slice(0, 3).map(theme => <Tag key={theme}>{theme}</Tag>)}</Space>,
   },
-  { title: 'AI 结论', dataIndex: 'reason', width: 260, ellipsis: true },
+  { title: 'AI 结论', dataIndex: 'reason', width: 260, render: clamp2 },
 ];
 
 const hitPct = value => (value === null || value === undefined ? '-' : `${Number(value).toFixed(1)}%`);
