@@ -4,7 +4,7 @@
 
 | 目录 | 说明 |
 | --- | --- |
-| `backend/` | 后端服务（Python / FastAPI），部署产物为 `quant_server.pyz` |
+| `backend/` | 后端服务（Python / FastAPI），部署产物为 `src.tgz`（源码）+ `deps.tgz`（依赖，仅依赖变化时上传） |
 | `frontend/` | 前端（React），构建产物为静态文件 `build/` |
 
 ## 部署

@@ -44,7 +44,6 @@ jobs:
       ECS_HOST: 52etf.vip
       ECS_PORT: "6022"
       ECS_USER: quantd
-      ECS_TARGET: /home/quantd/quant_server.pyz
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,9 +56,10 @@ jobs:
       - name: Install build tools
         run: |
           python -m venv .flow-build-venv
-          ./.flow-build-venv/bin/pip install -U pip shiv
+          ./.flow-build-venv/bin/pip install -U pip
 
-      - name: Build quant_server.pyz
+      # 拆成两个产物：源码（小，每次上传）+ 依赖（大，仅 requirements.txt 变化时上传）。
+      - name: Build deploy artifacts
         id: build-package
         run: |
           set -euo pipefail
@@ -84,19 +84,19 @@ jobs:
             echo "[build] dependency cache hit: $DEPS_DIR"
           fi
 
-          rm -rf build_dist quant_server.pyz
-          mkdir -p build_dist
-          cp -a "$DEPS_DIR"/. build_dist/
-          cp -r src build_dist/src
-          touch build_dist/src/__init__.py
-          .flow-build-venv/bin/shiv \
-            --site-packages ./build_dist \
-            -p '/usr/bin/env python3' \
-            -o quant_server.pyz \
-            -e src.app.main:start \
-            --build-id "$(date +%s)"
+          # 依赖包（体积大，仅当 requirements.txt 变化时才上传）
+          tar czf deps.tgz -C "$DEPS_DIR" .
 
-          ls -lh quant_server.pyz
+          # 源码（体积小，每次部署都上传）
+          rm -rf src_stage
+          mkdir -p src_stage
+          cp -r src src_stage/src
+          touch src_stage/src/__init__.py
+          tar czf src.tgz -C src_stage src
+          rm -rf src_stage
+
+          echo "req_hash=${REQ_HASH}" >> "$GITHUB_OUTPUT"
+          ls -lh deps.tgz src.tgz
 
       - name: Prepare SSH key
         shell: bash
@@ -125,30 +125,62 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
             "${ECS_USER}@${ECS_HOST}" 'echo SSH_OK'
 
-      - name: Upload package to server
+      # 服务器上记录了已部署的 requirements.txt 哈希（.deps-hash），只有哈希不一致才上传大体积依赖。
+      - name: Check whether dependencies changed on server
+        id: check-deps
+        run: |
+          REMOTE_HASH="$(ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            "${ECS_USER}@${ECS_HOST}" 'cat /home/quantd/quant_prod/backend/.deps-hash 2>/dev/null || true')"
+          LOCAL_HASH="${{ steps.build-package.outputs.req_hash }}"
+          echo "remote_hash=${REMOTE_HASH:-<none>}"
+          echo "local_hash=${LOCAL_HASH}"
+          if [ -n "$LOCAL_HASH" ] && [ "$REMOTE_HASH" = "$LOCAL_HASH" ]; then
+            echo "deps_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Dependencies unchanged on server; only uploading source."
+          else
+            echo "deps_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Dependencies changed (or first deploy); uploading dependencies too."
+          fi
+
+      - name: Upload artifacts to server
         run: |
           scp -i ~/.ssh/deploy_key -P "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            quant_server.pyz "${ECS_USER}@${ECS_HOST}:${ECS_TARGET}"
+            src.tgz "${ECS_USER}@${ECS_HOST}:/home/quantd/src.tgz"
+          if [ "${{ steps.check-deps.outputs.deps_changed }}" = "true" ]; then
+            scp -i ~/.ssh/deploy_key -P "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+              deps.tgz "${ECS_USER}@${ECS_HOST}:/home/quantd/deps.tgz"
+          fi
 
       - name: Install and restart remote service
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${ECS_USER}@${ECS_HOST}" 'set -e
+          ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            "${ECS_USER}@${ECS_HOST}" bash -s -- "${{ steps.build-package.outputs.req_hash }}" <<'REMOTE'
+          set -e
+          REQ_HASH="$1"
           BACKEND=/home/quantd/quant_prod/backend
-          PY=/home/quantd/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
-          install -m 0755 /home/quantd/quant_server.pyz "$BACKEND/quant_server.pyz.new"
-          rm -rf "$BACKEND/_pyz_extract.new"
-          mkdir -p "$BACKEND/_pyz_extract.new"
-          "$PY" -m zipfile -e "$BACKEND/quant_server.pyz.new" "$BACKEND/_pyz_extract.new/"
-          rm -rf "$BACKEND/site-packages.old"
-          if [ -d "$BACKEND/site-packages" ]; then mv "$BACKEND/site-packages" "$BACKEND/site-packages.old"; fi
-          mv "$BACKEND/_pyz_extract.new/site-packages" "$BACKEND/site-packages"
-          rm -rf "$BACKEND/_pyz_extract.new"
-          mv "$BACKEND/quant_server.pyz.new" "$BACKEND/quant_server.pyz"
+          if [ -f /home/quantd/deps.tgz ]; then
+            echo "[deploy] replacing dependencies..."
+            rm -rf "$BACKEND/site-packages.old"
+            if [ -d "$BACKEND/site-packages" ]; then mv "$BACKEND/site-packages" "$BACKEND/site-packages.old"; fi
+            mkdir -p "$BACKEND/site-packages"
+            tar xzf /home/quantd/deps.tgz -C "$BACKEND/site-packages"
+            rm -f "$BACKEND/.deps-hash"
+            printf '%s' "$REQ_HASH" > "$BACKEND/.deps-hash"
+            rm -f /home/quantd/deps.tgz
+          fi
+          echo "[deploy] replacing source..."
+          rm -rf "$BACKEND/_src_extract"
+          mkdir -p "$BACKEND/_src_extract"
+          tar xzf /home/quantd/src.tgz -C "$BACKEND/_src_extract"
+          rm -rf "$BACKEND/site-packages/src"
+          mv "$BACKEND/_src_extract/src" "$BACKEND/site-packages/src"
+          rmdir "$BACKEND/_src_extract" 2>/dev/null || true
+          rm -f /home/quantd/src.tgz
           systemctl --user restart quant-server
           sleep 5
           systemctl --user --no-pager --lines=8 status quant-server
-          rm -rf "$BACKEND/site-packages.old"
-          '
+          if [ -d "$BACKEND/site-packages.old" ]; then rm -rf "$BACKEND/site-packages.old"; fi
+          REMOTE
 
       - name: Cleanup SSH key
         if: always()
