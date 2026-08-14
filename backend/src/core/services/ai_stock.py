@@ -35,6 +35,7 @@ from ..database import (
     AIStockServiceConfig,
     AIStockStrategyConfig,
     AIStockTHSIndexCache,
+    AStockFearGreedIntraday,
     get_db_ctx,
 )
 from .a_stock_fund_flow import (
@@ -878,7 +879,7 @@ class DeepSeekStockSelector:
             }
             for item in catalog.get("items") or []
         ]
-        instruction = {
+        instruction: Dict[str, Any] = {
             "task": "延续上一步新闻事件会话。以下是 Tushare 全量同花顺概念(N)、主题(TH)、行业(I)目录。请为每个事件选择最具直接产业关联的板块代码；只能从目录返回代码，不能选择股票；优先选择包含行业龙头股的板块。",
             "constraints": {
                 "max_boards_per_event": 2,
@@ -918,7 +919,7 @@ class DeepSeekStockSelector:
             },
         }
 
-    def select_from_ths_conversation(self, event_stage: Dict[str, Any], board_stage: Dict[str, Any], snapshot: Dict[str, Any], top_n: Optional[int] = None) -> Dict[str, Any]:
+    def select_from_ths_conversation(self, event_stage: Dict[str, Any], board_stage: Dict[str, Any], snapshot: Dict[str, Any], top_n: Optional[int] = None, fear_greed_ref: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         candidates = snapshot.get("candidates") or []
         if not candidates:
             raise AIStockModelError("已映射 THS 板块没有合格成分股")
@@ -939,6 +940,9 @@ class DeepSeekStockSelector:
         }
         if _news_enabled:
             instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。"
+        if fear_greed_ref:
+            instruction["fear_greed_reference"] = fear_greed_ref
+            instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)，与 board_market_snapshot 里的板块按名称对应。请把它作为选股信心的参考：所属板块恐慌(≤30)可能是错杀后的低位机会，可适度提高置信度；所属板块贪婪(≥70)拥挤追高风险大，应更谨慎、适当降低置信度或要求更强的新闻证据。与 news_signal、板块强弱、技术面综合判断，不要机械套用。"
         second_messages = board_stage["transcript"]["request"]["messages"]
         messages = [*second_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
@@ -1188,7 +1192,7 @@ class AIStockRecommendationService:
             board_stage = self.selector.map_events_to_ths(event_stage, catalog)
             transcript["stages"].append(board_stage["transcript"])
             snapshot = self.provider.build_candidate_snapshot(timestamp, event_stage["events"], board_stage["board_mappings"], catalog)
-            selection = self.selector.select_from_ths_conversation(event_stage, board_stage, snapshot, top_n=top_n)
+            selection = self.selector.select_from_ths_conversation(event_stage, board_stage, snapshot, top_n=top_n, fear_greed_ref=_a_stock_fear_greed_reference())
             transcript["stages"].append(selection["transcript"])
             picks = _validated_picks(
                 snapshot,
@@ -2710,6 +2714,63 @@ def _ma10_by_symbol(codes: Iterable[str], as_of: date) -> Dict[str, float]:
         if len(closes) >= 10:
             result[ts_code] = round(sum(closes[-10:]) / 10, 3)
     return result
+
+
+# 只取行业/主题/板块类贪恐：排除宽基、策略(红利/低波)指数。
+# 注：自编指数 A创100(INNO100.CN) 在服务层单独定义，不在 A_STOCK_INDEX_FEAR_GREED_TARGETS 里。
+A_STOCK_FEAR_GREED_EXCLUDED_SYMBOLS = {
+    "000300.SH",    # 沪深300
+    "000510.SH",    # 中证A500
+    "000905.SH",    # 中证500
+    "000985.SH",    # 中证全指
+    "899050.BJ",    # 北证50
+    "000688.SH",    # 科创50
+    "000698.SH",    # 科创100
+    "000699.SH",    # 科创200
+    "399006.SZ",    # 创业板指
+    "000015.SH",    # 上证红利（策略/风格）
+    "H30269.CSI",   # 红利低波（策略/风格）
+}
+
+
+def _a_stock_fear_greed_reference() -> List[Dict[str, Any]]:
+    """各行业/主题/板块最新恐慌贪婪指数（0-100，越低越恐慌/超卖，越高越贪婪/拥挤）。
+
+    供 AI 在"新闻事件→板块"步骤参考：恐惧(≤30)可能是错杀机会，贪婪(≥70)追高风险。
+    只取行业/主题/板块类指数，排除宽基与策略指数。
+    """
+    try:
+        from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
+    except Exception as exc:
+        logger.warning("Failed to import A-share fear-greed targets: %s", exc)
+        return []
+    label_by_symbol = {
+        str(item["symbol"]).upper(): (item.get("ticker") or item.get("label") or item.get("index_name") or str(item["symbol"]))
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+        if str(item["symbol"]).upper() not in A_STOCK_FEAR_GREED_EXCLUDED_SYMBOLS
+    }
+    symbols = list(label_by_symbol)
+    try:
+        with get_db_ctx() as db:
+            rows = (
+                db.query(AStockFearGreedIntraday)
+                .filter(AStockFearGreedIntraday.symbol.in_(symbols))
+                .order_by(desc(AStockFearGreedIntraday.snapshot_time))
+                .all()
+            )
+            latest: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                if row.symbol not in latest:
+                    latest[row.symbol] = {"score": float(row.score), "rating": row.rating}
+        reference = [
+            {"name": label_by_symbol[sym], "fear_greed": round(latest[sym]["score"], 1), "rating": latest[sym]["rating"]}
+            for sym in latest
+            if sym in label_by_symbol
+        ]
+        return sorted(reference, key=lambda item: item["name"])
+    except Exception as exc:
+        logger.warning("Failed to load A-share fear-greed reference: %s", exc)
+        return []
 
 
 def evaluate_ai_stock_benchmark(window_days: int = 20, now: Optional[datetime] = None) -> Dict[str, Any]:

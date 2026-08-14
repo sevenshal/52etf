@@ -314,7 +314,7 @@ class _TranscriptSelector:
             "transcript": {"stage": "EVENTS_TO_THS_BOARDS", "request": {"messages": [{"role": "user", "content": "THS目录"}]}, "response_content": "{板块回复}", "response_json": {}},
         }
 
-    def select_from_ths_conversation(self, _event_stage, _board_stage, _snapshot, top_n):
+    def select_from_ths_conversation(self, _event_stage, _board_stage, _snapshot, top_n, fear_greed_ref=None):
         return {
             "model": "fake-deepseek",
             "response": {"picks": [{"ts_code": "600000.SH", "confidence": 80, "target_return_pct": 8, "reason": "新闻到股票", "risks": "波动", "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885728.TI"}]}]},
@@ -534,6 +534,14 @@ def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
     assert dumped["trading_start_minute"] == 585
     assert dumped["hold_evaluation_enabled"] is True
     assert dumped["hold_sell_threshold"] == 30
+
+
+def test_fear_greed_reference_returns_list_without_crash():
+    # 恐慌贪婪参考在无数据时应安全返回空列表，不抛异常
+    from src.core.services.ai_stock import _a_stock_fear_greed_reference
+
+    ref = _a_stock_fear_greed_reference()
+    assert isinstance(ref, list)
 
 
 def test_aggregate_hit_metrics_counts_hits_and_average_returns():
