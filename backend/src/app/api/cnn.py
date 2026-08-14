@@ -12,6 +12,7 @@ from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalcu
 from ...core.services.a_stock_index_valuation import load_a_stock_index_valuation
 from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
+from ...core.services.market import MarketService
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 
 router = APIRouter(prefix="/api/cnn")
@@ -199,7 +200,8 @@ async def get_etf_fear_greed_clone_summaries(
                 )
             )
         realtime_map = {}
-        # 港股：盘中实时版贪恐（轻量模式：只取指数+TLT 实时价，不拉成分股行情）；
+        # 港股：盘中实时版贪恐（轻量模式：只取指数+TLT 实时价，不拉成分股行情）。
+        # 仅港股交易时段才取，开盘前/收盘后/非交易日不取（避免显示昨收的陈旧盘中值）；
         # 美股暂不叠加盘中，卡片仍显示最新收盘。
         realtime_symbols = [
             symbol.upper()
@@ -207,6 +209,8 @@ async def get_etf_fear_greed_clone_summaries(
             if symbol.upper() not in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
             and symbol.upper().endswith(".HK")
         ]
+        if realtime_symbols and not MarketService.is_hk_market_open():
+            realtime_symbols = []
         if realtime_symbols:
             async def _load_realtime(current_symbol: str):
                 try:

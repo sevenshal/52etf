@@ -54,7 +54,8 @@ class CnnFearGreedSummariesRealtimeTest(TestCase):
         async def run():
             with patch.object(cnn, "ETFFearGreedCloneCalculator") as mock_calc_cls, \
                  patch.object(cnn, "_load_intraday_snapshot_map", return_value={"000300.SH": {"score": 45.0}}), \
-                 patch.object(cnn, "load_a_stock_index_valuation", return_value={"status": "available"}):
+                 patch.object(cnn, "load_a_stock_index_valuation", return_value={"status": "available"}), \
+                 patch.object(cnn.MarketService, "is_hk_market_open", return_value=True):
                 calculator = mock_calc_cls.return_value
                 calculator.load_summaries_from_db.return_value = {
                     "data": [
@@ -89,5 +90,23 @@ class CnnFearGreedSummariesRealtimeTest(TestCase):
             _, kwargs = calculator.calculate_realtime_cached.call_args
             self.assertFalse(kwargs.get("include_holdings_quotes"))
             self.assertFalse(kwargs.get("fetch_holdings_quotes"))
+
+        asyncio.run(run())
+
+    def test_hk_realtime_skipped_when_market_closed(self):
+        async def run():
+            with patch.object(cnn, "ETFFearGreedCloneCalculator") as mock_calc_cls, \
+                 patch.object(cnn, "_load_intraday_snapshot_map", return_value={}), \
+                 patch.object(cnn, "load_a_stock_index_valuation", return_value={"status": "available"}), \
+                 patch.object(cnn.MarketService, "is_hk_market_open", return_value=False):
+                calculator = mock_calc_cls.return_value
+                calculator.load_summaries_from_db.return_value = {
+                    "data": [_summary_item("HSI.HK")]
+                }
+                result = await cnn.get_etf_fear_greed_clone_summaries(symbols="HSI.HK")
+
+            # 港股未开盘：不计算实时，卡片只显示收盘
+            self.assertNotIn("intraday", result["data"][0])
+            calculator.calculate_realtime_cached.assert_not_called()
 
         asyncio.run(run())

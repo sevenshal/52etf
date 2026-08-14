@@ -135,6 +135,18 @@ class MarketService:
         return (morning_open <= t <= morning_close) or (afternoon_open <= t <= afternoon_close)
 
     @classmethod
+    def is_hk_market_open(cls) -> bool:
+        """判断当前港股是否可能处于交易时段（简单判断：周一至周五，9:30-12:00, 13:00-16:00）。
+
+        不区分港股节假日，仅作盘中数据是否可取的粗粒度闸门。
+        """
+        now = datetime.now(ZoneInfo('Asia/Hong_Kong'))
+        if now.weekday() >= 5:
+            return False
+        t = now.time()
+        return (dtime(9, 30) <= t <= dtime(12, 0)) or (dtime(13, 0) <= t <= dtime(16, 0))
+
+    @classmethod
     def is_market_closing_soon(cls, seconds_before_close: int = 10) -> bool:
         """判断是否接近美股收盘"""
         now = cls.get_eastern_now()
