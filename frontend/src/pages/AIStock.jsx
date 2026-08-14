@@ -175,12 +175,11 @@ const livePriceCell = (quotes, flashes, tsCode, fallback) => {
   return fallback !== undefined ? money(fallback) : <Text type="secondary">-</Text>;
 };
 
-// 今日涨幅 = (实时价 - 昨收) / 昨收
-const quoteChangePct = quote => {
+// 现价相对建议买入价的偏离度 = (实时价 - 建议买入价) / 建议买入价
+const recommendationDistancePct = (item, quote) => {
   const live = quote?.last_px;
-  const preclose = quote?.preclose_px;
-  if (!live || !preclose || !Number(preclose)) return null;
-  return ((Number(live) - Number(preclose)) / Number(preclose)) * 100;
+  if (!live || !item?.recommendation_price || !Number(item.recommendation_price)) return null;
+  return ((Number(live) - Number(item.recommendation_price)) / Number(item.recommendation_price)) * 100;
 };
 
 // 目标价相对实时价的距离
@@ -214,11 +213,11 @@ const recommendationColumns = (quotes, flashes) => [
       const live = quote?.last_px;
       if (!live) return <Text type="secondary">-</Text>;
       const flashKey = flashes?.[item.ts_code] || 0;
-      const chg = quoteChangePct(quote);
+      const chg = recommendationDistancePct(item, quote);
       return (
         <Space direction="vertical" size={0} align="end">
           <span key={flashKey} className={flashKey > 0 ? 'ai-stock-price-flash' : undefined}>{money(live)}</span>
-          {chg !== null && <Text className={valueClass(chg)} style={{ fontSize: 12 }}>{percent(chg)}</Text>}
+          {chg !== null && <Text className={valueClass(chg)} style={{ fontSize: 12 }}>距买入 {percent(chg)}</Text>}
         </Space>
       );
     },
