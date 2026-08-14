@@ -2,9 +2,9 @@
 """Local runner for ptrade_client.py with mocked PTrade APIs.
 
 Example:
-    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000
-    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --empty-positions
-    python 52etf/backend/ptrade_robot/ptrade_client_simulator.py --host localhost:8000 --quote-provider longport
+    python 52etf/ptrade/ptrade_client_simulator.py --host localhost:8000
+    python 52etf/ptrade/ptrade_client_simulator.py --host localhost:8000 --empty-positions
+    python 52etf/ptrade/ptrade_client_simulator.py --host localhost:8000 --quote-provider longport
 
 Create an enabled external trading account in the web UI with the printed
 identifier before starting the connection. The backend owns the account name.
@@ -133,9 +133,9 @@ class LongPortMarketDataProvider:
         self._init_service()
 
     def _init_service(self):
-        api_root = Path(__file__).resolve().parents[1]
-        repo_root = api_root.parent
-        for path in (str(api_root), str(repo_root)):
+        repo_root = Path(__file__).resolve().parents[1]  # 52etf/
+        backend_root = repo_root / "backend"
+        for path in (str(backend_root), str(repo_root)):
             if path not in sys.path:
                 sys.path.insert(0, path)
 

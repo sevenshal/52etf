@@ -7,9 +7,14 @@
 """
 
 import os
+import sys
 import tempfile
 
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="quant_pytest_")
+
+# ptrade/ 已从 backend/ 迁到 monorepo 根（与 backend 同层），测试要 import ptrade
+# 需要把 52etf/ 根目录加进 sys.path（ptrade 是 namespace package）。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 os.environ.setdefault(
     "QUANT_SQLITE_PATH", os.path.join(_TEST_DATA_DIR, "evc_stocks.db")

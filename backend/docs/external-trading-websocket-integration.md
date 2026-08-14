@@ -1359,27 +1359,27 @@ A股账号：
 项目内已有 PTrade 示例客户端：
 
 ```text
-52etf/backend/ptrade_robot/ptrade_client.py
+52etf/ptrade/ptrade_client.py
 ```
 
 本地模拟运行器：
 
 ```text
-52etf/backend/ptrade_robot/ptrade_client_simulator.py
+52etf/ptrade/ptrade_client_simulator.py
 ```
 
 模拟器示例：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf/backend
-../../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --host localhost:8001
+cd /Users/sevenshal/Dev/github/quant/52etf/ptrade
+../../.venv/bin/python ptrade_client_simulator.py --host localhost:8001
 ```
 
 自检：
 
 ```bash
-cd /Users/sevenshal/Dev/github/quant/52etf/backend
-../../.venv/bin/python ptrade_robot/ptrade_client_simulator.py --self-test --log-level ERROR
+cd /Users/sevenshal/Dev/github/quant/52etf/ptrade
+../../.venv/bin/python ptrade_client_simulator.py --self-test --log-level ERROR
 ```
 
 PTrade 正式接入时需要修改示例客户端中的：

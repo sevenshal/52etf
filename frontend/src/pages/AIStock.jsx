@@ -240,12 +240,22 @@ const recommendationColumns = (quotes, flashes) => [
     width: 132,
     align: 'right',
     render: (_, item) => {
-      const dist = targetDistancePct(item, quotes?.[item.ts_code]);
+      const quote = quotes?.[item.ts_code];
+      const dist = targetDistancePct(item, quote);
+      const flashKey = flashes?.[item.ts_code] || 0;
       return (
         <Space direction="vertical" size={0} align="end">
           <Text>{money(item.target_price)}</Text>
           <Text className="is-up" style={{ fontSize: 12 }}>目标 {percent(item.target_return_pct)}</Text>
-          {dist !== null && <Text className={valueClass(dist)} style={{ fontSize: 12 }}>距现价 {percent(dist)}</Text>}
+          {dist !== null && (
+            <Text
+              key={flashKey}
+              className={flashKey > 0 ? `${valueClass(dist)} ai-stock-price-flash` : valueClass(dist)}
+              style={{ fontSize: 12 }}
+            >
+              距现价 {percent(dist)}
+            </Text>
+          )}
         </Space>
       );
     },

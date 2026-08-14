@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from ptrade_robot import ptrade_client
-from ptrade_robot.ptrade_client import get_order_filled_quantity, normalize_trade
+from ptrade import ptrade_client
+from ptrade.ptrade_client import get_order_filled_quantity, normalize_trade
 from src.app.api.external_trading_accounts import (
     _apply_event_sub_account_filter,
     _attach_parent_order_repair_summary,
