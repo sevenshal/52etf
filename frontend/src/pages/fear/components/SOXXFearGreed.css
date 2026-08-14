@@ -249,6 +249,10 @@
   margin-top: 9px;
 }
 
+.soxx-fear-summary-card.is-intraday .soxx-fear-summary-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .soxx-fear-metric-cell {
   min-width: 0;
   padding-top: 6px;

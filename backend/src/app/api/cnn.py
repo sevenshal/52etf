@@ -1,5 +1,7 @@
+import asyncio
+import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
@@ -13,6 +15,7 @@ from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 
 router = APIRouter(prefix="/api/cnn")
+logger = logging.getLogger(__name__)
 
 @router.get("/fear-greed")
 async def get_fear_greed_index():
@@ -167,7 +170,11 @@ async def get_etf_fear_greed_clone_history(
 async def get_etf_fear_greed_clone_summaries(
     symbols: str,
 ):
-    """批量读取 ETF/指数恐贪复刻值摘要；A股指数叠加当日盘中快照。"""
+    """批量读取 ETF/指数恐贪复刻值摘要。
+
+    A股指数叠加当日盘中快照；港股附加盘中实时版贪恐（轻量模式，进程内 5 分钟缓存，
+    计算失败自动跳过，卡片仍显示最新收盘）。美股暂不叠加盘中。
+    """
     try:
         symbol_list = [
             item.strip()
@@ -191,6 +198,43 @@ async def get_etf_fear_greed_clone_summaries(
                     a_stock_symbols, trade_date=today_shanghai
                 )
             )
+        realtime_map = {}
+        # 港股：盘中实时版贪恐（轻量模式：只取指数+TLT 实时价，不拉成分股行情）；
+        # 美股暂不叠加盘中，卡片仍显示最新收盘。
+        realtime_symbols = [
+            symbol.upper()
+            for symbol in symbol_list
+            if symbol.upper() not in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
+            and symbol.upper().endswith(".HK")
+        ]
+        if realtime_symbols:
+            async def _load_realtime(current_symbol: str):
+                try:
+                    payload = await asyncio.wait_for(
+                        run_in_threadpool(
+                            lambda: calculator.calculate_realtime_cached(
+                                symbol=current_symbol,
+                                include_holdings_quotes=False,
+                                include_extended=True,
+                                # 摘要卡片只取 ETF+TLT 实时价，不批量拉成分股行情
+                                fetch_holdings_quotes=False,
+                            )
+                        ),
+                        timeout=15.0,
+                    )
+                    return current_symbol, _serialize_realtime_snapshot(payload)
+                except Exception as exc:
+                    logger.warning("ETF 实时贪恐 %s 计算失败: %s", current_symbol, exc)
+                    return current_symbol, None
+
+            realtime_results = await asyncio.gather(
+                *(_load_realtime(symbol) for symbol in realtime_symbols)
+            )
+            realtime_map = {
+                symbol: snapshot
+                for symbol, snapshot in realtime_results
+                if snapshot
+            }
         for item in result.get("data", []):
             symbol = item.get("symbol")
             if symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
@@ -200,6 +244,10 @@ async def get_etf_fear_greed_clone_summaries(
             intraday = intraday_map.get(symbol)
             if intraday:
                 item["intraday"] = intraday
+            else:
+                realtime = realtime_map.get(symbol)
+                if realtime:
+                    item["intraday"] = realtime
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪摘要失败: {str(e)}")
@@ -247,6 +295,32 @@ def _parse_symbols(symbol: Optional[str], symbols: Optional[str]):
             if text and text not in parts:
                 parts.append(text)
     return parts
+
+
+def _serialize_realtime_snapshot(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把美股/港股 ETF 实时贪恐计算结果映射成摘要卡通用的 intraday 结构。"""
+    meta = payload.get("fear_and_greed_clone") or {}
+    score = meta.get("score")
+    if score is None:
+        return None
+    etf_price = payload.get("etf_price") or {}
+    quote = etf_price.get("quote") or {}
+    quote_time = quote.get("timestamp") or meta.get("timestamp")
+    return {
+        "symbol": meta.get("symbol"),
+        "score": score,
+        "rating": meta.get("rating"),
+        "mode": "realtime",
+        "snapshot_time": quote_time,
+        "trade_date": meta.get("date"),
+        "component_count": meta.get("component_count"),
+        "components_used": meta.get("components_used") or [],
+        "index_level": etf_price.get("close") or quote.get("price"),
+        "quote_source": quote.get("source") or "longport",
+        "quote_time": quote_time,
+        "market_open": bool(meta.get("market_open")),
+        "warnings": payload.get("warnings") or [],
+    }
 
 
 def _serialize_intraday_snapshot(row: AStockFearGreedIntraday) -> dict:

@@ -334,6 +334,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         max_holdings: int = 0,
         include_extended: bool = True,
         include_holdings_quotes: bool = True,
+        fetch_holdings_quotes: bool = True,
         cache_ttl_seconds: int = REALTIME_CACHE_TTL_SECONDS,
     ) -> Dict[str, Any]:
         etf_symbol = self._normalize_etf_symbol(symbol)
@@ -345,6 +346,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             int(max_holdings),
             bool(include_extended),
             bool(include_holdings_quotes),
+            bool(fetch_holdings_quotes),
         )
         now = time.monotonic()
         with self._realtime_cache_lock:
@@ -369,6 +371,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 max_holdings=max_holdings,
                 include_extended=include_extended,
                 include_holdings_quotes=include_holdings_quotes,
+                fetch_holdings_quotes=fetch_holdings_quotes,
             )
             self._realtime_cache[cache_key] = (time.monotonic(), copy.deepcopy(response))
             response["cache"] = self._cache_payload(
@@ -387,6 +390,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         max_holdings: int = 0,
         include_extended: bool = True,
         include_holdings_quotes: bool = True,
+        fetch_holdings_quotes: bool = True,
     ) -> Dict[str, Any]:
         """Calculate a price-driven intraday ETF Fear & Greed clone.
 
@@ -394,6 +398,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         row is rebuilt from LongPort realtime quotes for the ETF, TLT and the
         latest DB holdings snapshot. Daily-only components are carried forward
         from the latest stored row and are marked in the response.
+
+        fetch_holdings_quotes=False 时只取 ETF + TLT 两个实时价（轻量模式），
+        依赖成分股行情的强度/宽度分量沿用最近入库日线值，用于摘要卡片这类
+        需要快速出值的场景，避免为几百只成分股批量拉实时行情。
         """
         etf_symbol = self._normalize_etf_symbol(symbol)
         if min_periods > score_window:
@@ -409,9 +417,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             etf_symbol, realtime_date, max_holdings=max_holdings
         )
         holdings_weight_used = sum(item.weight for item in holdings)
-        holding_quote_map = self._fetch_realtime_quote_map([holding.symbol for holding in holdings])
-        quote_map.update(holding_quote_map)
-        quote_symbols = [etf_symbol, "TLT.US"] + [holding.symbol for holding in holdings]
+        if fetch_holdings_quotes:
+            holding_quote_map = self._fetch_realtime_quote_map([holding.symbol for holding in holdings])
+            quote_map.update(holding_quote_map)
+        quote_symbols = [etf_symbol, "TLT.US"]
+        if fetch_holdings_quotes:
+            quote_symbols += [holding.symbol for holding in holdings]
         previous_trading_day = MarketService.get_previous_us_trading_day(realtime_date)
         history_start = realtime_date - timedelta(days=history_days)
 
@@ -433,6 +444,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             current_date=realtime_date,
             previous_trading_day=previous_trading_day,
             price_history_count=max(history_days, 320),
+            fetch_holdings_quotes=fetch_holdings_quotes,
         )
 
         latest_daily = raw_history.iloc[-1]
@@ -440,10 +452,15 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "put_call_options": "latest stored option put/call component",
             "junk_bond_demand": "latest stored FRED credit-spread component",
         }
+        if not fetch_holdings_quotes:
+            stale_components["stock_price_strength"] = "latest stored constituent strength component"
+            stale_components["stock_price_breadth"] = "latest stored constituent breadth component"
         for key in stale_components:
             if pd.isna(current_raw.get(key)):
-                current_raw[key] = float(latest_daily[key])
-                raw_freshness[key] = stale_components[key]
+                latest_value = latest_daily.get(key)
+                if latest_value is not None and pd.notna(latest_value):
+                    current_raw[key] = float(latest_value)
+                    raw_freshness[key] = stale_components[key]
 
         raw_for_score = raw_history.copy()
         raw_for_score = raw_for_score[raw_for_score.index < current_timestamp]
@@ -474,8 +491,15 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         quote_timestamp = self._quote_timestamp(etf_quote)
         warnings = self._warnings(etf_symbol, use_historical_holdings=True) + [
             (
-                "Realtime mode is price-driven: the ETF, TLT and holding price "
-                "components use LongPort realtime quotes."
+                "Realtime mode is price-driven: the ETF and TLT price components "
+                "use LongPort realtime quotes"
+                + (
+                    "; holding price components use LongPort realtime quotes too"
+                    if fetch_holdings_quotes
+                    else "; constituent strength/breadth components carry forward the "
+                    "latest stored daily values (quote-light mode)"
+                )
+                + "."
             ),
             (
                 "Put/call uses Barchart's live expiration snapshot first, then "
@@ -1290,6 +1314,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         current_date: date,
         previous_trading_day: date,
         price_history_count: int,
+        fetch_holdings_quotes: bool = True,
     ) -> Tuple[Dict[str, float], Dict[str, Optional[float]], Dict[str, str]]:
         index = pd.bdate_range(
             previous_trading_day - timedelta(days=max(price_history_count * 2, 420)),
@@ -1318,25 +1343,26 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         ).reindex(index).ffill()
 
         holding_frames: Dict[str, pd.DataFrame] = {}
-        for holding in holdings:
-            try:
-                frame = self._fetch_recent_price_history(
-                    holding.symbol,
-                    count=price_history_count,
-                    end_date=previous_trading_day,
-                )
-                frame = self._append_realtime_quote(
-                    frame,
-                    current_date,
-                    quote_map.get(holding.symbol),
-                ).reindex(index).ffill()
-            except Exception:
-                continue
-            if frame["close"].notna().sum() >= 120:
-                holding_frames[holding.symbol] = frame
+        if fetch_holdings_quotes:
+            for holding in holdings:
+                try:
+                    frame = self._fetch_recent_price_history(
+                        holding.symbol,
+                        count=price_history_count,
+                        end_date=previous_trading_day,
+                    )
+                    frame = self._append_realtime_quote(
+                        frame,
+                        current_date,
+                        quote_map.get(holding.symbol),
+                    ).reindex(index).ffill()
+                except Exception:
+                    continue
+                if frame["close"].notna().sum() >= 120:
+                    holding_frames[holding.symbol] = frame
 
-        if not holding_frames:
-            raise FearGreedCloneError(f"LongPort returned no usable holding history for {etf_symbol}")
+            if not holding_frames:
+                raise FearGreedCloneError(f"LongPort returned no usable holding history for {etf_symbol}")
 
         holdings_by_date = {timestamp: holdings for timestamp in index}
         etf_close = etf_prices["close"]
@@ -1345,12 +1371,17 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         raw = pd.DataFrame(index=index)
         raw["market_momentum"] = etf_close / etf_close.rolling(125).mean() - 1.0
-        raw["stock_price_strength"] = self._weighted_range_position(
-            holding_frames, holdings_by_date, index
-        )
-        raw["stock_price_breadth"] = self._weighted_advancing_volume_ratio(
-            holding_frames, holdings_by_date, index
-        )
+        if holding_frames:
+            raw["stock_price_strength"] = self._weighted_range_position(
+                holding_frames, holdings_by_date, index
+            )
+            raw["stock_price_breadth"] = self._weighted_advancing_volume_ratio(
+                holding_frames, holdings_by_date, index
+            )
+        else:
+            # 轻量模式：不取成分股行情，强度/宽度在调用方沿用最近入库日线值
+            raw["stock_price_strength"] = np.nan
+            raw["stock_price_breadth"] = np.nan
         raw["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
         raw["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
 
@@ -1359,8 +1390,16 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         raw["junk_bond_demand"] = np.nan
         raw_freshness = {
             "market_momentum": "LongPort realtime quote",
-            "stock_price_strength": "LongPort realtime holding quotes",
-            "stock_price_breadth": "LongPort realtime holding quotes",
+            "stock_price_strength": (
+                "LongPort realtime holding quotes"
+                if fetch_holdings_quotes
+                else "latest stored constituent strength component"
+            ),
+            "stock_price_breadth": (
+                "LongPort realtime holding quotes"
+                if fetch_holdings_quotes
+                else "latest stored constituent breadth component"
+            ),
             "market_volatility": "LongPort realtime quote",
             "safe_haven_demand": "LongPort realtime quote",
         }

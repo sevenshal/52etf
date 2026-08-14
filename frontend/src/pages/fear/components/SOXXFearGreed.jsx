@@ -767,7 +767,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   return (
     <button
       type="button"
-      className={`soxx-fear-summary-card${active ? ' is-active' : ''}${option.groupStart ? ' is-subgroup-start' : ''}`}
+      className={`soxx-fear-summary-card${active ? ' is-active' : ''}${option.groupStart ? ' is-subgroup-start' : ''}${isIntraday ? ' is-intraday' : ''}`}
       onClick={onToggle}
     >
       <div className="soxx-fear-summary-top">
@@ -796,11 +796,16 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       <div className="soxx-fear-summary-metrics">
         <MetricCell label="7天前" value={formatNumber(sevenDayScore, 1)} color={fearTextColor(sevenDayScore)} />
         <MetricCell label="1月前" value={formatNumber(oneMonthScore, 1)} color={fearTextColor(oneMonthScore)} />
+        {isIntraday && (
+          <MetricCell label="收盘" value={formatNumber(latest?.score, 1)} color={fearTextColor(latest?.score)} />
+        )}
         <MetricCell label={option.priceLabel || '价格'} value={formatNumber(price, option.pricePrecision ?? 2)} />
       </div>
 
       <div className="soxx-fear-summary-footer">
-        <span>{isIntraday ? `盘中 ${formatIntradayTime(intraday.snapshot_time)}` : (latest?.date || '-')}</span>
+        <span>
+          {isIntraday ? `盘中 ${formatIntradayTime(intraday.snapshot_time)} · 收盘 ${latest?.date || '-'}` : (latest?.date || '-')}
+        </span>
         <span title="恐贪日期成交量 ÷ 不含当日的前20个交易日平均成交量">
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>
