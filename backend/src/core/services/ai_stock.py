@@ -1677,6 +1677,9 @@ class AIStockPaperTradingService:
                     "trading_start_minute": 585,
                     "hold_evaluation_enabled": False,
                     "hold_sell_threshold": 30.0,
+                    "max_buys_per_day": 3,
+                    "trailing_take_profit_pct": 5.0,
+                    "rotation_confidence_gap": 20.0,
                 },
             )
             db.add(config)
@@ -1731,12 +1734,14 @@ class AIStockPaperTradingService:
                         "buy_price": row.buy_price,
                         "remaining_quantity": row.remaining_quantity,
                         "target_price": row.target_price,
+                        "peak_price": row.peak_price if row.peak_price is not None else row.buy_price,
                         "stop_half_triggered": row.stop_half_triggered,
                     }
                     for row in lots
                 ],
                 "recommendations": [AIStockRecommendationService._recommendation_payload(row) for row in recommendations],
                 "today_buys": {(row.ts_code, row.recommendation_id) for row in today_buys},
+                "today_buy_count": len(today_buys),
                 "hold_scores": hold_scores,
             }
 
@@ -1768,6 +1773,10 @@ class AIStockPaperTradingService:
         execution_target = min(_safe_float(sp.get("max_execution_target"), 0.90), _fear_greed_target(fg) * 1.4)
         stop_loss_full = _safe_float(sp.get("stop_loss_full_pct"), -12.0)
         stop_loss_half = _safe_float(sp.get("stop_loss_half_pct"), -8.0)
+        trailing_pct = _safe_float(sp.get("trailing_take_profit_pct"), 5.0)
+        rotation_gap = _safe_float(sp.get("rotation_confidence_gap"), 20.0)
+        max_buys_per_day = int(_safe_float(sp.get("max_buys_per_day"), 3.0))
+        hold_enabled = bool(sp.get("hold_evaluation_enabled"))
         plans: List[PlannedTrade] = []
         lot_by_symbol: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for lot in state["lots"]:
@@ -1782,11 +1791,14 @@ class AIStockPaperTradingService:
             quantity = lot["remaining_quantity"]
             hold_info = (state.get("hold_scores") or {}).get(lot["ts_code"])
             hold_score = hold_info.get("hold_score") if hold_info else None
-            hold_enabled = bool(sp.get("hold_evaluation_enabled"))
             hold_sell_threshold = float(_safe_float(sp.get("hold_sell_threshold"), 30.0))
+            peak = _safe_float(lot.get("peak_price"), lot["buy_price"]) or lot["buy_price"]
             if price >= lot["target_price"] and not (hold_enabled and hold_score is not None and hold_score >= 70):
                 # AI 高评分(≥70=继续持有)时可延迟止盈，让错价修复的利润奔跑
                 reason_code = "TARGET_PROFIT"
+            elif peak > lot["buy_price"] and price <= peak * (1 - trailing_pct / 100):
+                # 移动止盈：曾创下高于成本价的峰值后，从峰值回撤超阈值则锁定利润
+                reason_code = "TRAILING_STOP"
             elif pnl_pct <= stop_loss_full and fg >= 20:
                 reason_code = "STOP_LOSS_FULL"
             elif pnl_pct <= stop_loss_half and not lot.get("stop_half_triggered"):
@@ -1800,9 +1812,12 @@ class AIStockPaperTradingService:
             elif held_days >= 30:
                 reason_code = "MAX_HOLD_DAYS"
             if reason_code and quantity > 0:
-                reason_text = f"{reason_code}: 现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
-                if reason_code == "AI_SIGNAL" and hold_info and hold_info.get("reason"):
-                    reason_text += f"；AI评估(hold_score={hold_score:.0f}): {hold_info['reason']}"
+                if reason_code == "TRAILING_STOP":
+                    reason_text = f"TRAILING_STOP: 现价 {price:.3f} 从峰值 {peak:.3f} 回撤超 {trailing_pct:.1f}%，止盈"
+                else:
+                    reason_text = f"{reason_code}: 现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
+                    if reason_code == "AI_SIGNAL" and hold_info and hold_info.get("reason"):
+                        reason_text += f"；AI评估(hold_score={hold_score:.0f}): {hold_info['reason']}"
                 plans.append(
                     PlannedTrade(
                         side="SELL",
@@ -1864,7 +1879,11 @@ class AIStockPaperTradingService:
         entry_price_cap = 1.0 + _safe_float(sp.get("entry_price_cap_pct"), 1.0) / 100.0
         max_positions = max(int(sp.get("max_positions", 10)), 1)
         single_stock_cap = _safe_float(sp.get("single_stock_cap"), 0.20)
+        # 分批建仓：当日买入次数上限（新建仓与加仓都计入）
+        buys_today = int(state.get("today_buy_count", 0)) + len([p for p in plans if p.side == "BUY"])
         for recommendation in state["recommendations"]:
+            if buys_today >= max_buys_per_day:
+                break
             ts_code = recommendation["ts_code"]
             if ts_code in planned_codes or (ts_code, recommendation["id"]) in state["today_buys"]:
                 continue
@@ -1877,7 +1896,41 @@ class AIStockPaperTradingService:
             if is_add and current_value >= slot_value / 2:
                 continue
             if not is_add and position_count >= max_positions:
-                continue
+                # 满仓换仓：新推荐信心与最低 hold_score 可卖持仓的差值超阈值才换
+                selling_lots = {plan.lot_id for plan in plans if plan.side == "SELL" and plan.lot_id}
+                rotation_candidates = []
+                for held in state["lots"]:
+                    if held["bought_at"].date() >= timestamp.date() or held["id"] in selling_lots:
+                        continue
+                    hs = (state.get("hold_scores") or {}).get(held["ts_code"])
+                    if hs is None:
+                        continue
+                    rotation_candidates.append((hs["hold_score"], held))
+                if not rotation_candidates:
+                    continue
+                rotation_candidates.sort(key=lambda item: item[0])
+                out_score, out_lot = rotation_candidates[0]
+                if recommendation["ai_confidence"] - out_score < rotation_gap:
+                    continue
+                out_price = _safe_float((quotes.get(out_lot["ts_code"]) or {}).get("price"), 0.0) or 0.0
+                if out_price <= 0:
+                    continue
+                plans.append(
+                    PlannedTrade(
+                        side="SELL",
+                        ts_code=out_lot["ts_code"],
+                        name=out_lot["name"],
+                        price=out_price,
+                        quantity=out_lot["remaining_quantity"],
+                        lot_id=out_lot["id"],
+                        reason_code="ROTATION_OUT",
+                        reason=f"换仓：新推荐 {recommendation['name']} 信心 {recommendation['ai_confidence']:.1f} 高于 {out_lot['name']} hold_score {out_score:.0f}",
+                        state_snapshot={"fear_greed": fg, "hold_score": out_score, "incoming_confidence": recommendation["ai_confidence"]},
+                    )
+                )
+                projected_cash += out_price * out_lot["remaining_quantity"] - _sell_fee(out_price * out_lot["remaining_quantity"])
+                projected_positions.pop(out_lot["ts_code"], None)
+                position_count -= 1
             try:
                 confirmed, minute_state = self.provider.minute_entry_confirmed(ts_code)
             except Exception as exc:
@@ -1914,6 +1967,7 @@ class AIStockPaperTradingService:
             projected_positions[ts_code] = current_value + amount
             if not is_add:
                 position_count += 1
+            buys_today += 1
 
         return self._commit_minute(timestamp, minute_key, fg, execution_target, quotes, plans)
 
@@ -1943,6 +1997,7 @@ class AIStockPaperTradingService:
                         quantity=plan.quantity,
                         remaining_quantity=plan.quantity,
                         target_price=recommendation.target_price if recommendation else plan.price * 1.05,
+                        peak_price=plan.price,
                     )
                     db.add(lot)
                     db.flush()
@@ -1981,6 +2036,10 @@ class AIStockPaperTradingService:
                 current_price = _safe_float((quotes.get(active_lot.ts_code) or {}).get("price"), active_lot.buy_price) or active_lot.buy_price
                 if active_lot.stop_half_triggered and current_price >= active_lot.buy_price * 0.95:
                     active_lot.stop_half_triggered = False
+                # 移动止盈基准：逐分钟抬升已见最高价（初始等于成本价）
+                current_peak = active_lot.peak_price if active_lot.peak_price is not None else active_lot.buy_price
+                if current_price > current_peak:
+                    active_lot.peak_price = current_price
             market_value = sum(((_safe_float(quotes.get(lot.ts_code, {}).get("price"), lot.buy_price) or lot.buy_price) * lot.remaining_quantity) for lot in active_lots)
             db.add(
                 AIStockPaperEquity(
@@ -2010,6 +2069,7 @@ class AIStockPaperTradingService:
             "max_positions", "slot_count", "single_stock_cap", "max_execution_target",
             "entry_price_cap_pct", "stop_loss_half_pct", "stop_loss_full_pct",
             "trading_start_minute", "hold_evaluation_enabled", "hold_sell_threshold",
+            "max_buys_per_day", "trailing_take_profit_pct", "rotation_confidence_gap",
         }
         unknown = set(parameters) - allowed
         if unknown:
@@ -2019,7 +2079,7 @@ class AIStockPaperTradingService:
                 value = float(value)
             except (TypeError, ValueError):
                 raise ValueError(f"{name} 必须是数字")
-            if name in {"max_positions", "slot_count"}:
+            if name in {"max_positions", "slot_count", "max_buys_per_day"}:
                 if value < 1 or value > 1000 or value != int(value):
                     raise ValueError(f"{name} 必须是 1-1000 的整数")
             elif name in {"stop_loss_half_pct", "stop_loss_full_pct"}:
@@ -2033,6 +2093,12 @@ class AIStockPaperTradingService:
             elif name == "hold_sell_threshold":
                 if value < 0 or value > 100:
                     raise ValueError(f"{name} 必须是 0-100 的分数")
+            elif name == "trailing_take_profit_pct":
+                if value < 0 or value > 100:
+                    raise ValueError(f"{name} 必须是 0-100 的回撤百分比")
+            elif name == "rotation_confidence_gap":
+                if value < 0 or value > 100:
+                    raise ValueError(f"{name} 必须是 0-100 的分数差")
             else:
                 if value < 0 or value > 1.0:
                     raise ValueError(f"{name} 必须是 0-1 之间的比例")
@@ -2132,6 +2198,42 @@ class AIStockPaperTradingService:
                 }
                 for row in rows
             ]
+
+    def paper_statistics(self) -> Dict[str, Any]:
+        """胜率统计：按已平仓卖出事件汇总（每笔 SELL 为一个已实现盈亏事件）。"""
+        with get_db_ctx() as db:
+            portfolio = self._ensure_portfolio(db)
+            sells = (
+                db.query(AIStockPaperTrade)
+                .filter(AIStockPaperTrade.portfolio_id == portfolio.id, AIStockPaperTrade.side == "SELL")
+                .order_by(AIStockPaperTrade.executed_at)
+                .all()
+            )
+            lots = db.query(AIStockPaperLot).filter(AIStockPaperLot.portfolio_id == portfolio.id).all()
+            bought_at = {lot.id: lot.bought_at for lot in lots}
+
+        total = len(sells)
+        wins = [s for s in sells if (s.realized_pnl or 0) > 0]
+        losses = [s for s in sells if (s.realized_pnl or 0) < 0]
+        total_pnl = round(sum((s.realized_pnl or 0) for s in sells), 2)
+        gross_win = sum((s.realized_pnl or 0) for s in wins)
+        gross_loss = abs(sum((s.realized_pnl or 0) for s in losses))
+        holding_days = [
+            max(0, (s.executed_at.date() - bought_at[s.lot_id].date()).days)
+            for s in sells
+            if s.lot_id and s.lot_id in bought_at
+        ]
+        return {
+            "closed_trades": total,
+            "win_trades": len(wins),
+            "loss_trades": len(losses),
+            "win_rate_pct": round(len(wins) / total * 100, 2) if total else None,
+            "total_realized_pnl": total_pnl,
+            "avg_win_pnl": round(sum((s.realized_pnl or 0) for s in wins) / len(wins), 2) if wins else None,
+            "avg_loss_pnl": round(sum((s.realized_pnl or 0) for s in losses) / len(losses), 2) if losses else None,
+            "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else None,
+            "avg_holding_days": round(sum(holding_days) / len(holding_days), 1) if holding_days else None,
+        }
 
     def trades(self, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
         safe_page = max(1, int(page))
@@ -2326,87 +2428,62 @@ def ai_stock_runtime_logs(limit: int = 100) -> List[Dict[str, Any]]:
     return sorted(events, key=lambda item: item["time"], reverse=True)[:safe_limit]
 
 
+def _shanghai_index_values(start_date: date, end_date: date) -> List[float]:
+    """上证指数(000001.SH)日收盘价序列，用于对标。"""
+    try:
+        frame = TushareService.get_instance().get_index_daily_range_frame("000001.SH", start_date, end_date)
+        if frame is None or frame.empty or "close" not in frame.columns:
+            return []
+        return [float(value) for value in frame["close"] if _safe_float(value)]
+    except Exception as exc:
+        logger.warning("Benchmark 上证指数 fetch failed: %s", exc)
+        return []
+
+
 def evaluate_ai_stock_benchmark(window_days: int = 20, now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Persist the dual benchmark gate without fabricating missing performance."""
+    """对标上证指数：对比模拟盘净值与 000001.SH 同窗收益率/回撤。"""
     timestamp = _now(now)
     window_start = timestamp.date() - timedelta(days=max(1, int(window_days)) - 1)
+    curve_start = timestamp - timedelta(days=max(10, int(window_days) * 2))
     with get_db_ctx() as db:
-        system = db.query(AIStockRecommendation).join(AIStockRecommendationRun).filter(AIStockRecommendationRun.trade_date >= window_start, AIStockRecommendationRun.status == "SUCCESS").all()
-        reference = db.query(AIStockBenchmarkSnapshot).filter(AIStockBenchmarkSnapshot.snapshot_type == "recommendations", AIStockBenchmarkSnapshot.trade_date >= window_start, AIStockBenchmarkSnapshot.status == "SUCCESS").all()
-        system_codes = {row.ts_code for row in system}
-        system_themes = {theme for row in system for theme in (row.themes or [])}
-        reference_codes, reference_themes = set(), set()
-        for snapshot in reference:
-            rows = _nested_payload_rows(snapshot.payload, ("recommendations", "items", "data", "list"))
-            for row in rows:
-                ts_code = _normalize_ts_code(row.get("ts_code") or row.get("symbol") or row.get("code"))
-                if CODE_PATTERN.fullmatch(ts_code):
-                    reference_codes.add(ts_code)
-                themes = row.get("themes") or row.get("theme") or row.get("concepts") or []
-                if isinstance(themes, str):
-                    themes = [themes]
-                reference_themes.update(str(theme) for theme in themes if str(theme).strip())
-        stock_overlap = (len(system_codes & reference_codes) / len(reference_codes) * 100) if reference_codes else None
-        theme_overlap = (len(system_themes & reference_themes) / len(reference_themes) * 100) if reference_themes else None
-        curve_start = timestamp - timedelta(days=max(10, int(window_days) * 2))
         system_curve_rows = (
             db.query(AIStockPaperEquity)
             .filter(AIStockPaperEquity.portfolio_id == 1, AIStockPaperEquity.recorded_at >= curve_start)
             .order_by(AIStockPaperEquity.recorded_at)
             .all()
         )
-        system_values = [row.total_equity for row in system_curve_rows]
         portfolio = db.get(AIStockPaperPortfolio, 1)
-        if len(system_values) == 1 and portfolio:
-            system_values.insert(0, portfolio.initial_cash)
-        system_return, system_drawdown = _return_and_drawdown(system_values)
+    # 系统净值按交易日对齐（取每日最后一个点），与指数日频可比
+    system_daily: Dict[date, float] = {}
+    for row in system_curve_rows:
+        system_daily[row.recorded_at.date()] = row.total_equity
+    system_values = [system_daily[day] for day in sorted(system_daily)]
+    if len(system_values) == 1 and portfolio:
+        system_values.insert(0, portfolio.initial_cash)
+    system_return, system_drawdown = _return_and_drawdown(system_values)
 
-        benchmark_curve_snapshots = (
-            db.query(AIStockBenchmarkSnapshot)
-            .filter(AIStockBenchmarkSnapshot.snapshot_type == "sim_equity_curve", AIStockBenchmarkSnapshot.status == "SUCCESS")
-            .order_by(desc(AIStockBenchmarkSnapshot.captured_at))
-            .all()
-        )
-        benchmark_values: List[float] = []
-        if benchmark_curve_snapshots:
-            curve_rows = _nested_payload_rows(benchmark_curve_snapshots[0].payload, ("equity_curve", "curve", "items", "data", "list"))
-            benchmark_values = [
-                value for value in (
-                    _safe_float(row.get("total_equity") or row.get("equity") or row.get("total_assets") or row.get("total_value") or row.get("nav"))
-                    for row in curve_rows
-                ) if value and value > 0
-            ]
-        benchmark_return, benchmark_drawdown = _return_and_drawdown(benchmark_values)
-        if benchmark_return is None:
-            overview = (
-                db.query(AIStockBenchmarkSnapshot)
-                .filter(AIStockBenchmarkSnapshot.snapshot_type == "sim_overview", AIStockBenchmarkSnapshot.status == "SUCCESS")
-                .order_by(desc(AIStockBenchmarkSnapshot.captured_at))
-                .first()
-            )
-            benchmark_return = _nested_numeric(overview.payload, ("total_return_pct", "total_return_percent", "return_pct", "profit_pct")) if overview else None
+    benchmark_values = _shanghai_index_values(curve_start.date(), timestamp.date())
+    benchmark_return, benchmark_drawdown = _return_and_drawdown(benchmark_values)
 
-        gates = {
-            "theme_overlap": theme_overlap is not None and theme_overlap >= 40,
-            "stock_overlap": stock_overlap is not None and stock_overlap >= 30,
-            "net_return": system_return is not None and benchmark_return is not None and system_return >= benchmark_return,
-            "drawdown": system_drawdown is not None and benchmark_drawdown is not None and system_drawdown <= benchmark_drawdown + 2,
-        }
-        passed = all(gates.values())
+    gates = {
+        "net_return": system_return is not None and benchmark_return is not None and system_return >= benchmark_return,
+        "drawdown": system_drawdown is not None and benchmark_drawdown is not None and system_drawdown <= benchmark_drawdown + 2,
+    }
+    passed = all(gates.values()) if gates else False
+    with get_db_ctx() as db:
         evaluation = AIStockEvaluation(
             evaluated_at=timestamp,
             window_start=window_start,
             window_end=timestamp.date(),
-            theme_overlap_pct=theme_overlap,
-            stock_overlap_pct=stock_overlap,
+            theme_overlap_pct=None,
+            stock_overlap_pct=None,
             system_return_pct=system_return,
             benchmark_return_pct=benchmark_return,
             system_max_drawdown_pct=system_drawdown,
             benchmark_max_drawdown_pct=benchmark_drawdown,
             passed=passed,
             details={
-                "system_recommendations": len(system),
-                "benchmark_snapshots": len(reference),
+                "benchmark": "上证指数(000001.SH)",
                 "system_curve_points": len(system_values),
                 "benchmark_curve_points": len(benchmark_values),
                 "gates": gates,
@@ -2415,4 +2492,4 @@ def evaluate_ai_stock_benchmark(window_days: int = 20, now: Optional[datetime] =
         )
         db.add(evaluation)
         db.flush()
-        return {"id": evaluation.id, "window_start": window_start, "window_end": timestamp.date(), "theme_overlap_pct": theme_overlap, "stock_overlap_pct": stock_overlap, "passed": passed, "details": evaluation.details}
+        return {"id": evaluation.id, "window_start": window_start, "window_end": timestamp.date(), "theme_overlap_pct": None, "stock_overlap_pct": None, "passed": passed, "details": evaluation.details}

@@ -620,6 +620,8 @@ class AIStockPaperLot(Base):
     quantity = Column(Integer, nullable=False)
     remaining_quantity = Column(Integer, nullable=False)
     target_price = Column(Float, nullable=False)
+    # 买入后已见到的最高价（移动止盈基准），创建时等于 buy_price，逐分钟抬升
+    peak_price = Column(Float)
     # A -8% reduction is permitted once per lot and is re-enabled only after
     # recovery to -5%, which avoids repeated churn in a falling market.
     stop_half_triggered = Column(Boolean, nullable=False, default=False)
@@ -1472,6 +1474,7 @@ def ensure_table_columns():
         },
         "ai_stock_paper_lots": {
             "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",
+            "peak_price": "ALTER TABLE ai_stock_paper_lots ADD COLUMN peak_price FLOAT",
         },
     }
 

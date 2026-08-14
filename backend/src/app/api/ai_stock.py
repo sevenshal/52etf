@@ -191,6 +191,11 @@ def get_paper_hold_evaluations(limit: int = Query(100, ge=1, le=500), _: str = D
     return AIStockPaperTradingService().hold_evaluations(limit=limit)
 
 
+@router.get("/paper/statistics")
+def get_paper_statistics(_: str = Depends(valid_admin_account)):
+    return AIStockPaperTradingService().paper_statistics()
+
+
 @router.get("/paper/config")
 def get_paper_strategy_config(_: str = Depends(valid_admin_account)):
     return AIStockPaperTradingService().strategy_config()
@@ -208,6 +213,9 @@ class PaperStrategyConfigUpdate(BaseModel):
     trading_start_minute: Optional[float] = Field(default=None, ge=570, le=690)
     hold_evaluation_enabled: Optional[bool] = None
     hold_sell_threshold: Optional[float] = Field(default=None, ge=0, le=100)
+    max_buys_per_day: Optional[float] = Field(default=None, ge=1, le=1000)
+    trailing_take_profit_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    rotation_confidence_gap: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 @router.put("/paper/config")
