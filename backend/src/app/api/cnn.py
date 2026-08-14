@@ -1,9 +1,11 @@
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
+from ...core.database import AStockFearGreedIntraday, Session
 from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
 from ...core.services.a_stock_index_valuation import load_a_stock_index_valuation
 from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
@@ -115,6 +117,23 @@ async def get_etf_fear_greed_clone_realtime(
         raise HTTPException(status_code=500, detail=f"获取ETF实时恐贪指数失败: {str(e)}")
 
 
+@router.get("/etf-fear-greed-clone/intraday")
+async def get_a_stock_fear_greed_intraday(
+    symbol: Optional[str] = None,
+    symbols: Optional[str] = None,
+):
+    """读取 A股盘中贪恐快照（独立盘中历史库，不入日频最终历史库）。"""
+    try:
+        symbol_list = _parse_symbols(symbol, symbols)
+        if not symbol_list:
+            raise HTTPException(status_code=400, detail="请提供 symbol 或 symbols 参数")
+        return await run_in_threadpool(lambda: _load_intraday_snapshots(symbol_list))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取A股盘中贪恐快照失败: {str(e)}")
+
+
 @router.get("/etf-fear-greed-clone/history")
 async def get_etf_fear_greed_clone_history(
     symbol: str = "SOXX.US",
@@ -148,7 +167,7 @@ async def get_etf_fear_greed_clone_history(
 async def get_etf_fear_greed_clone_summaries(
     symbols: str,
 ):
-    """批量读取 ETF/指数恐贪复刻值摘要。"""
+    """批量读取 ETF/指数恐贪复刻值摘要；A股指数叠加当日盘中快照。"""
     try:
         symbol_list = [
             item.strip()
@@ -159,11 +178,28 @@ async def get_etf_fear_greed_clone_summaries(
         result = await run_in_threadpool(
             lambda: calculator.load_summaries_from_db(symbol_list)
         )
-        for item in result.get("data", []):
-            if item.get("symbol") in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
-                item["valuation"] = await run_in_threadpool(
-                    lambda current_symbol=item["symbol"]: load_a_stock_index_valuation(current_symbol)
+        a_stock_symbols = [
+            symbol.upper()
+            for symbol in symbol_list
+            if symbol.upper() in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
+        ]
+        intraday_map = {}
+        if a_stock_symbols:
+            today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            intraday_map = await run_in_threadpool(
+                lambda: _load_intraday_snapshot_map(
+                    a_stock_symbols, trade_date=today_shanghai
                 )
+            )
+        for item in result.get("data", []):
+            symbol = item.get("symbol")
+            if symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
+                item["valuation"] = await run_in_threadpool(
+                    lambda current_symbol=symbol: load_a_stock_index_valuation(current_symbol)
+                )
+            intraday = intraday_map.get(symbol)
+            if intraday:
+                item["intraday"] = intraday
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪摘要失败: {str(e)}")
@@ -201,6 +237,101 @@ def _parse_date(value: Optional[str]):
     if not value:
         return None
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _parse_symbols(symbol: Optional[str], symbols: Optional[str]):
+    parts = []
+    for value in (symbol, symbols):
+        for item in str(value or "").split(","):
+            text = item.strip().upper()
+            if text and text not in parts:
+                parts.append(text)
+    return parts
+
+
+def _serialize_intraday_snapshot(row: AStockFearGreedIntraday) -> dict:
+    etf_price = row.etf_price or {}
+    if row.index_level is not None and not etf_price.get("close"):
+        etf_price = {**etf_price, "close": row.index_level}
+    return {
+        "symbol": row.symbol,
+        "score": row.score,
+        "rating": row.rating,
+        "method": row.method,
+        "mode": "intraday",
+        "snapshot_time": row.snapshot_time.isoformat() if row.snapshot_time else None,
+        "trade_date": row.trade_date.isoformat() if row.trade_date else None,
+        "component_count": row.component_count,
+        "components_used": row.components_used or [],
+        "index_level": row.index_level,
+        "quote_source": row.quote_source,
+        "quote_time": row.quote_time.isoformat() if row.quote_time else None,
+        "market_open": bool(row.market_open),
+        "etf_price": etf_price,
+        "components": row.components or {},
+        "warnings": row.warnings or [],
+        "fear_and_greed_clone": {
+            "symbol": row.symbol,
+            "score": row.score,
+            "rating": row.rating,
+            "date": row.trade_date.isoformat() if row.trade_date else None,
+            "timestamp": row.snapshot_time.isoformat() if row.snapshot_time else None,
+            "method": row.method,
+            "mode": "intraday",
+            "component_count": row.component_count,
+            "market_open": bool(row.market_open),
+        },
+    }
+
+
+def _load_intraday_snapshots(symbol_list):
+    db = Session()
+    try:
+        rows = (
+            db.query(AStockFearGreedIntraday)
+            .filter(AStockFearGreedIntraday.symbol.in_(symbol_list))
+            .order_by(AStockFearGreedIntraday.snapshot_time.desc())
+            .all()
+        )
+        latest_by_symbol = {}
+        for row in rows:
+            if row.symbol not in latest_by_symbol:
+                latest_by_symbol[row.symbol] = row
+        data = [
+            _serialize_intraday_snapshot(latest_by_symbol[symbol])
+            for symbol in symbol_list
+            if symbol in latest_by_symbol
+        ]
+        return {"data": data}
+    finally:
+        Session.remove()
+
+
+def _load_intraday_snapshot_map(symbol_list, trade_date=None):
+    """Return {symbol: serialized intraday snapshot} for the latest snapshot.
+
+    When trade_date is given, only snapshots for that trading day are returned,
+    so a stale snapshot from a previous noon run is not overlaid on the summary.
+    """
+    db = Session()
+    try:
+        query = db.query(AStockFearGreedIntraday).filter(
+            AStockFearGreedIntraday.symbol.in_(symbol_list)
+        )
+        if trade_date is not None:
+            query = query.filter(AStockFearGreedIntraday.trade_date == trade_date)
+        rows = query.order_by(AStockFearGreedIntraday.snapshot_time.desc()).all()
+        latest_by_symbol = {}
+        for row in rows:
+            if row.symbol not in latest_by_symbol:
+                latest_by_symbol[row.symbol] = row
+        return {
+            symbol: _serialize_intraday_snapshot(latest_by_symbol[symbol])
+            for symbol in symbol_list
+            if symbol in latest_by_symbol
+        }
+    finally:
+        Session.remove()
 
 
 def _fetch_cnn_fear_greed():

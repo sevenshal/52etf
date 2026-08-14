@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
 from .fear_greed_clone_service import ComponentSpec, FearGreedCloneCalculator, FearGreedCloneError
+from .tushare import TushareService
 from ..analytics_database import AnalyticsSession
 from ..database import (
+    AStockFearGreedIntraday,
     AStockInnovation100Constituent,
     AStockInnovation100Level,
     AStockInnovation100Rebalance,
@@ -317,6 +321,322 @@ class AStockInnovation100FearGreedCloneCalculator:
             "saved": saved,
         }
 
+    # ------------------------------------------------------------------ #
+    # 盘中（intraday）计算：不入日频最终历史库，落独立盘中历史表
+    # ------------------------------------------------------------------ #
+    _quote_cache: Dict[str, Dict[str, Any]] = {}
+    _quote_cache_filled_at: float = 0.0
+
+    @classmethod
+    def _realtime_quotes(cls, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch Tushare realtime quotes with a short-lived process cache.
+
+        The 12:00 batch iterates many indexes whose constituents overlap; the
+        cache avoids re-fetching the same stock for every index within a run.
+        """
+        now = time.monotonic()
+        if now - cls._quote_cache_filled_at > 60.0:
+            cls._quote_cache = {}
+            cls._quote_cache_filled_at = now
+        unique = list(dict.fromkeys(str(s) for s in symbols if s))
+        missing = [s for s in unique if s not in cls._quote_cache]
+        if missing:
+            tushare = TushareService.get_instance()
+            for quote in tushare.get_quote_batch(missing):
+                symbol = str(quote.get("symbol") or "").upper()
+                if symbol:
+                    cls._quote_cache[symbol] = quote
+        return {s: cls._quote_cache.get(s) for s in unique}
+
+    def calculate_intraday(
+        self,
+        now: Optional[datetime] = None,
+        history_days: int = 550,
+        score_window: int = 252,
+        min_periods: int = 120,
+    ) -> Dict[str, Any]:
+        """Compute a noon (or any intraday) Fear & Greed value for an A-share index.
+
+        Reuses the exact same signal/scoring math as the daily backfill, but
+        injects today's intraday index level (rt_idx_k, falling back to the proxy
+        ETF) and constituent realtime quotes. Daily-only components (option PCR,
+        credit spread, bond safe-haven) are carried forward from the latest daily
+        row via the same ffill logic used in daily recalculation.
+        """
+        shanghai = ZoneInfo("Asia/Shanghai")
+        now_value = now or datetime.now(shanghai)
+        if now_value.tzinfo is None:
+            now_value = now_value.replace(tzinfo=shanghai)
+        else:
+            now_value = now_value.astimezone(shanghai)
+        today = now_value.date()
+
+        if self.custom_inno100:
+            raise FearGreedCloneError(f"{self.label} 无实时指数源，暂不支持盘中计算")
+
+        end_value = today
+        calc_start = end_value - timedelta(days=history_days)
+
+        levels = self._load_levels(calc_start, end_value)
+        if levels.empty:
+            raise FearGreedCloneError(f"{self.label} 指数历史行情为空，请先执行 A股基础数据同步")
+
+        intraday_level = self._fetch_intraday_index_level(levels)
+        if intraday_level is None:
+            raise FearGreedCloneError(f"{self.label} 盘中指数行情为空")
+        levels = self._append_intraday_level(levels, intraday_level, today)
+        if len(levels) < min_periods:
+            raise FearGreedCloneError(
+                f"{self.label} 指数行情可用交易日不足: {len(levels)}/{min_periods}"
+            )
+
+        index = pd.DatetimeIndex(levels.index, name="date")
+        holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(index)
+        market_frames = self._load_constituent_market_frames(
+            holdings_by_date, index, calc_start, end_value
+        )
+        market_frames = self._patch_intraday_constituent_quotes(
+            market_frames, holdings_by_date, today
+        )
+
+        raw = self._build_raw_signals(
+            levels, holdings_by_date, calc_start, end_value, market_frames=market_frames
+        )
+        score_df = self._score_raw_signals(raw, score_window, min_periods)
+        score_columns = [f"{key}_score" for key in A_STOCK_COMPONENTS]
+        score_df["component_count"] = score_df[score_columns].notna().sum(axis=1)
+        score_df["fear_greed_clone"] = score_df[score_columns].mean(axis=1)
+
+        timestamp = pd.Timestamp(today)
+        if timestamp not in score_df.index:
+            raise FearGreedCloneError(f"{self.label} 盘中时点无有效计算结果")
+        row = score_df.loc[timestamp]
+        score = float(row["fear_greed_clone"])
+        if not math.isfinite(score):
+            raise FearGreedCloneError(f"{self.label} 盘中贪恐无有效分数")
+
+        holdings = holdings_by_date.get(timestamp, [])
+        holdings_as_of = holdings_as_of_by_date.get(timestamp)
+        components = self._component_payload(raw, score_df, timestamp)
+        components_used = [
+            key for key, value in components.items() if value.get("used_in_score")
+        ]
+        return {
+            "symbol": self.target_symbol,
+            "snapshot_time": now_value,
+            "trade_date": today,
+            "score": round(score, 4),
+            "rating": FearGreedCloneCalculator.rating(score),
+            "method": "available-component equal-weighted rolling z-score normal CDF (intraday)",
+            "history_days": history_days,
+            "score_window": score_window,
+            "min_periods": min_periods,
+            "min_component_count": A_STOCK_MIN_COMPONENT_COUNT,
+            "component_count": int(row["component_count"]),
+            "components_used": components_used,
+            "index_level": intraday_level["level"],
+            "quote_source": intraday_level["quote_source"],
+            "quote_time": intraday_level.get("quote_time"),
+            "market_open": True,
+            "etf_price": self._price_payload(raw.loc[timestamp]),
+            "holdings_as_of": holdings_as_of.isoformat() if holdings_as_of else None,
+            "holdings_count": len(holdings),
+            "holdings_weight_used": round(sum(item["weight"] for item in holdings), 6),
+            "components": components,
+            "warnings": self._warnings() + [
+                (
+                    "Intraday mode: price-driven components use rt_idx_k index realtime "
+                    "and Tushare realtime constituent quotes; option PCR, ChinaBond credit "
+                    "spread and bond safe-haven are daily data carried forward from the "
+                    "latest daily row."
+                )
+            ],
+        }
+
+    def save_intraday_to_db(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist an intraday snapshot to the separate intraday history table."""
+        snapshot_time = result["snapshot_time"]
+        if getattr(snapshot_time, "tzinfo", None) is not None:
+            snapshot_time = snapshot_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+        quote_time = result.get("quote_time")
+        if isinstance(quote_time, pd.Timestamp):
+            quote_time = quote_time.to_pydatetime()
+        elif hasattr(quote_time, "to_pydatetime"):
+            quote_time = quote_time.to_pydatetime()
+
+        db = Session()
+        try:
+            row = (
+                db.query(AStockFearGreedIntraday)
+                .filter(
+                    AStockFearGreedIntraday.symbol == result["symbol"],
+                    AStockFearGreedIntraday.snapshot_time == snapshot_time,
+                )
+                .first()
+            )
+            if not row:
+                row = AStockFearGreedIntraday(
+                    symbol=result["symbol"],
+                    snapshot_time=snapshot_time,
+                )
+                db.add(row)
+            row.trade_date = result["trade_date"]
+            row.score = result["score"]
+            row.rating = result["rating"]
+            row.method = result["method"]
+            row.history_days = result["history_days"]
+            row.score_window = result["score_window"]
+            row.min_periods = result["min_periods"]
+            row.component_count = result["component_count"]
+            row.components_used = result["components_used"]
+            row.index_level = result["index_level"]
+            row.etf_price = result["etf_price"]
+            row.quote_source = result["quote_source"]
+            row.quote_time = quote_time
+            row.market_open = result.get("market_open", True)
+            row.components = result["components"]
+            row.warnings = result["warnings"]
+            db.commit()
+            return {
+                "symbol": result["symbol"],
+                "saved": 1,
+                "snapshot_time": snapshot_time.isoformat(),
+                "score": result["score"],
+                "quote_source": result["quote_source"],
+            }
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            Session.remove()
+
+    def _fetch_intraday_index_level(self, levels: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """Fetch today's intraday index level via rt_idx_k, with proxy ETF fallback."""
+        tushare = TushareService.get_instance()
+        frame = tushare.get_a_stock_realtime_index_frame([self.index_code])
+        if not frame.empty:
+            latest = frame.sort_values("trade_time").iloc[-1]
+            close = self._finite_float_or_none(latest.get("close"))
+            if close is not None and close > 0:
+                pre_close = self._finite_float_or_none(latest.get("pre_close"))
+                daily_return_pct = None
+                if pre_close and pre_close > 0:
+                    daily_return_pct = (close - pre_close) / pre_close * 100.0
+                quote_time = latest.get("trade_time")
+                if isinstance(quote_time, pd.Timestamp):
+                    quote_time = quote_time.to_pydatetime()
+                return {
+                    "level": close,
+                    "daily_return_pct": daily_return_pct,
+                    "open": self._finite_float_or_none(latest.get("open")) or close,
+                    "high": self._finite_float_or_none(latest.get("high")) or close,
+                    "low": self._finite_float_or_none(latest.get("low")) or close,
+                    "volume": self._finite_float_or_none(latest.get("vol")) or 0.0,
+                    "turnover": self._finite_float_or_none(latest.get("amount")) or 0.0,
+                    "quote_source": "rt_idx_k",
+                    "quote_time": quote_time,
+                }
+
+        # .CSI 等非交易所指数：用代理 ETF 实时价按昨收比例映射成指数点位
+        proxy = self.target.get("proxy_etf")
+        if proxy:
+            prev_close_etf, prev_level = self._proxy_etf_prev_close(proxy, levels)
+            quote = self._realtime_quotes([proxy]).get(str(proxy).upper())
+            price = (quote or {}).get("price") or (quote or {}).get("close")
+            if price and prev_close_etf and prev_close_etf > 0 and prev_level:
+                ratio = price / prev_close_etf
+                quote_time = (quote or {}).get("timestamp")
+                if isinstance(quote_time, pd.Timestamp):
+                    quote_time = quote_time.to_pydatetime()
+                return {
+                    "level": prev_level * ratio,
+                    "daily_return_pct": (ratio - 1.0) * 100.0,
+                    "open": prev_level * (((quote or {}).get("open") or price) / prev_close_etf),
+                    "high": prev_level * (((quote or {}).get("high") or price) / prev_close_etf),
+                    "low": prev_level * (((quote or {}).get("low") or price) / prev_close_etf),
+                    "volume": (quote or {}).get("volume") or 0.0,
+                    "turnover": (quote or {}).get("turnover") or 0.0,
+                    "quote_source": "proxy_etf",
+                    "quote_time": quote_time,
+                }
+        return None
+
+    def _proxy_etf_prev_close(
+        self, proxy: str, levels: pd.DataFrame
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Return (ETF previous close, latest stored index level) for proxy mapping."""
+        prev_level = (
+            float(levels["level"].iloc[-1])
+            if not levels.empty and "level" in levels.columns
+            else None
+        )
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(
+                text(
+                    """
+                    SELECT close FROM a_stock_fund_daily
+                    WHERE ts_code = :ts_code
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                    """
+                ),
+                {"ts_code": proxy},
+            ).fetchall()
+        finally:
+            AnalyticsSession.remove()
+        prev_close = float(rows[0][0]) if rows and rows[0][0] is not None else None
+        return prev_close, prev_level
+
+    def _append_intraday_level(
+        self, levels: pd.DataFrame, intraday: Dict[str, Any], today: date
+    ) -> pd.DataFrame:
+        """Append today's intraday index level as one row to the daily levels frame."""
+        frame = levels.copy()
+        timestamp = pd.Timestamp(today)
+        if timestamp in frame.index:
+            frame = frame.drop(timestamp)
+        row: Dict[str, Any] = {}
+        for column in frame.columns:
+            if column == "level":
+                row[column] = intraday["level"]
+            elif column in ("open", "high", "low", "volume", "turnover", "daily_return_pct"):
+                row[column] = intraday.get(column)
+            else:
+                row[column] = np.nan
+        frame.loc[timestamp] = row
+        return frame.sort_index()
+
+    def _patch_intraday_constituent_quotes(
+        self,
+        market_frames: Dict[str, pd.DataFrame],
+        holdings_by_date: Dict[pd.Timestamp, List[Dict[str, Any]]],
+        today: date,
+    ) -> Dict[str, pd.DataFrame]:
+        """Patch today's intraday realtime quotes into constituent daily frames."""
+        if not market_frames:
+            return market_frames
+        timestamp = pd.Timestamp(today)
+        quotes = self._realtime_quotes(sorted(market_frames.keys()))
+        for symbol, frame in market_frames.items():
+            quote = quotes.get(str(symbol).upper())
+            if not quote or timestamp not in frame.index:
+                continue
+            price = quote.get("price") or quote.get("close")
+            if price is None or price <= 0:
+                continue
+            prev_close = float(frame.loc[timestamp, "close"]) if pd.notna(frame.loc[timestamp, "close"]) else None
+            frame.loc[timestamp, "close"] = price
+            frame.loc[timestamp, "high"] = quote.get("high") or max(price, prev_close or price)
+            frame.loc[timestamp, "low"] = quote.get("low") or min(price, prev_close or price)
+            pct_chg = quote.get("percent_change")
+            if pct_chg is None and prev_close and prev_close > 0:
+                pct_chg = (price - prev_close) / prev_close * 100.0
+            frame.loc[timestamp, "pct_chg"] = pct_chg if pct_chg is not None else np.nan
+            amount = quote.get("turnover")
+            frame.loc[timestamp, "amount"] = amount if amount is not None else np.nan
+        return market_frames
+
     def _load_levels(self, start_date: date, end_date: date) -> pd.DataFrame:
         if not self.custom_inno100:
             return self._load_duckdb_index_levels(start_date, end_date)
@@ -536,13 +856,15 @@ class AStockInnovation100FearGreedCloneCalculator:
         holdings_by_date: Dict[pd.Timestamp, List[Dict[str, Any]]],
         start_date: date,
         end_date: date,
+        market_frames: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> pd.DataFrame:
         index = pd.DatetimeIndex(levels.index, name="date")
         level = levels["level"].astype(float).reindex(index).ffill()
         level_returns = level.pct_change()
         realized_vol = level_returns.rolling(20).std() * np.sqrt(252)
 
-        market_frames = self._load_constituent_market_frames(holdings_by_date, index, start_date, end_date)
+        if market_frames is None:
+            market_frames = self._load_constituent_market_frames(holdings_by_date, index, start_date, end_date)
         bond_close = self._load_index_close(A_STOCK_INNO100_SAFE_HAVEN_INDEX, start_date, end_date).reindex(index).ffill()
         option_pcr = self._load_option_volume_pcr(start_date, end_date).reindex(index).ffill(limit=3)
         credit_spread = self._load_credit_spread(start_date, end_date).reindex(index).ffill(limit=3)

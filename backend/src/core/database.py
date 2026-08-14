@@ -354,6 +354,31 @@ class AStockIndexValuationSnapshot(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class AStockFearGreedIntraday(Base):
+    """A股盘中贪恐快照（12:00 等盘中时点），独立于日频最终历史库 etf_fear_greed_clone_history。"""
+    __tablename__ = "a_stock_fear_greed_intraday"
+
+    symbol = Column(String(32), primary_key=True)
+    snapshot_time = Column(DateTime, primary_key=True)  # 盘中快照时点（含时分秒）
+    trade_date = Column(Date, nullable=False, index=True)
+    score = Column(Float, nullable=False)
+    rating = Column(String(32))
+    method = Column(String(128))
+    history_days = Column(Integer)
+    score_window = Column(Integer)
+    min_periods = Column(Integer)
+    component_count = Column(Integer)
+    components_used = Column(JSON)
+    index_level = Column(Float)  # 盘中指数点位（rt_idx_k 现价，或代理ETF映射值）
+    etf_price = Column(JSON)  # 盘中指数 OHLC/量额快照
+    quote_source = Column(String(32))  # rt_idx_k / proxy_etf
+    quote_time = Column(DateTime)  # 实时行情时间戳
+    market_open = Column(Boolean)
+    components = Column(JSON)
+    warnings = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class ETFPutCallRatio(Base):
     """Barchart ETF Put/Call Ratio 历史数据"""
     __tablename__ = 'etf_put_call_ratios'

@@ -730,6 +730,67 @@ def _run_hk_index_fear_greed_backfill(
     )
 
 
+def _run_a_stock_fear_greed_intraday(
+    symbols: Optional[List[str]] = None,
+    history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
+    score_window: int = A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
+    min_periods: int = A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS,
+):
+    from ..core.services.a_stock_fear_greed_clone_service import (
+        A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL,
+        AStockInnovation100FearGreedCloneCalculator,
+    )
+
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过A股盘中贪恐快照: {today_shanghai} 不是A股交易日"
+
+    requested_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in (symbols or [])
+        if str(symbol or "").strip()
+    }
+    all_symbols = sorted(A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL)
+    # 无实时指数源且无场内代理ETF的标的（创新100自定义指数、北证50）不做盘中计算。
+    intraday_unsupported_symbols = {"INNO100.CN", "899050.BJ"}
+    target_symbols = [
+        symbol
+        for symbol in all_symbols
+        if symbol not in intraday_unsupported_symbols
+        and (not requested_symbols or symbol in requested_symbols)
+    ]
+    unknown = sorted(requested_symbols - set(all_symbols))
+    if unknown:
+        raise ValueError(f"未知A股贪恐指数: {','.join(unknown)}")
+
+    logger = logging.getLogger("ScheduledTaskManager")
+    now_value = datetime.now(ZoneInfo("Asia/Shanghai"))
+    results = []
+    errors = []
+    for symbol in target_symbols:
+        try:
+            calculator = AStockInnovation100FearGreedCloneCalculator(symbol)
+            result = calculator.calculate_intraday(
+                now=now_value,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
+            )
+            saved = calculator.save_intraday_to_db(result)
+            results.append(saved)
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+            logger.warning("A股盘中贪恐 %s 计算失败: %s", symbol, exc)
+
+    saved = sum(int(item.get("saved") or 0) for item in results)
+    saved_symbols = ",".join(str(item.get("symbol")) for item in results)
+    return (
+        "A股盘中贪恐快照 "
+        f"symbols={saved_symbols} saved={saved} errors={len(errors)} "
+        f"error_detail={errors[:5]}"
+    )
+
+
 def _format_external_trading_fee_reconcile_result(result: Dict) -> str:
     if result.get("status") == "SKIPPED":
         return (
@@ -1308,6 +1369,25 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=77,
                 runner=_run_a_stock_index_valuation_refresh,
+            ),
+            "a_stock_fear_greed_intraday": TaskDefinition(
+                task_key="a_stock_fear_greed_intraday",
+                name="A股盘中贪恐快照",
+                description="12:00 盘中时点用 rt_idx_k 指数实时价 + 实时成分股行情计算 A股指数贪恐盘中值，写入独立盘中历史库 a_stock_fear_greed_intraday，不写入日频最终历史库。",
+                default_time="12:00",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_a_stock_fear_greed_intraday,
+                default_cron_rule="0 12 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="symbols",
+                        label="指数列表",
+                        value_type="string",
+                        default="",
+                        description="可选，逗号/空格分隔；为空时计算全部非创新100的A股指数。",
+                    ),
+                ),
             ),
             "hk_stock_base_data_sync": TaskDefinition(
                 task_key="hk_stock_base_data_sync",

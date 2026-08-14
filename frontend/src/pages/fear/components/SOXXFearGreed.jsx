@@ -91,6 +91,13 @@ const formatDateTime = (value) => {
   return new Date(value).toLocaleString();
 };
 
+const formatIntradayTime = (value) => {
+  if (!value) return '-';
+  const d = new Date(value);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
 const SOXXFearGreed = () => {
   const [summaries, setSummaries] = useState([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -182,19 +189,28 @@ const SOXXFearGreed = () => {
   useEffect(() => {
     if (!expandedSymbol || !expandedETF || expandedETF.realtime === false || realtimeBySymbol[expandedSymbol]) return undefined;
     let cancelled = false;
+    const isCnIntraday = expandedETF.market === 'CN';
     const fetchRealtime = async () => {
       setRealtimeLoadingSymbol(expandedSymbol);
       setRealtimeErrorBySymbol(prev => ({ ...prev, [expandedSymbol]: null }));
       try {
-        const { data } = await request.get('/api/cnn/etf-fear-greed-clone/realtime', {
-          params: {
-            symbol: expandedSymbol,
-            include_holdings_quotes: false,
-          },
-        });
-        if (!cancelled) {
-          setRealtimeBySymbol(prev => ({ ...prev, [expandedSymbol]: data || null }));
+        const url = isCnIntraday
+          ? '/api/cnn/etf-fear-greed-clone/intraday'
+          : '/api/cnn/etf-fear-greed-clone/realtime';
+        const params = isCnIntraday
+          ? { symbol: expandedSymbol }
+          : { symbol: expandedSymbol, include_holdings_quotes: false };
+        const { data } = await request.get(url, { params });
+        if (cancelled) return;
+        const payload = isCnIntraday ? (data?.data?.[0] || null) : data;
+        if (isCnIntraday && !payload) {
+          setRealtimeErrorBySymbol(prev => ({
+            ...prev,
+            [expandedSymbol]: '盘中贪恐快照尚未生成（每日 12:00 盘中时点生成）',
+          }));
+          return;
         }
+        setRealtimeBySymbol(prev => ({ ...prev, [expandedSymbol]: payload }));
       } catch (error) {
         if (!cancelled) {
           setRealtimeErrorBySymbol(prev => ({
@@ -738,12 +754,14 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
 
 const SummaryCard = ({ option, summary, active, onToggle }) => {
   const latest = summary?.latest;
-  const score = latest?.score;
+  const intraday = summary?.intraday;
+  const isIntraday = isFiniteNumber(intraday?.score);
+  const score = isIntraday ? intraday.score : latest?.score;
   const scoreColor = fearColor(score);
   const scoreTextColor = fearTextColor(score);
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
-  const price = latest?.etf_price?.close;
+  const price = isIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
   const valuation = summary?.valuation;
   const showValuation = option.market !== 'US' && option.market !== 'HK' && valuation?.status === 'available';
   return (
@@ -765,7 +783,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
           </div>
         </div>
         {latest ? (
-          <Tag color={scoreColor}>{fearStatus(score)}</Tag>
+          <Tag color={scoreColor}>{isIntraday ? '盘中 ' : ''}{fearStatus(score)}</Tag>
         ) : (
           <Tag>未入库</Tag>
         )}
@@ -782,7 +800,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
       </div>
 
       <div className="soxx-fear-summary-footer">
-        <span>{latest?.date || '-'}</span>
+        <span>{isIntraday ? `盘中 ${formatIntradayTime(intraday.snapshot_time)}` : (latest?.date || '-')}</span>
         <span title="恐贪日期成交量 ÷ 不含当日的前20个交易日平均成交量">
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>

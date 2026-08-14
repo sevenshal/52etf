@@ -582,6 +582,42 @@ class TushareService(QuoteProvider):
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["time", "close"]).sort_values("time")
 
+    def get_a_stock_realtime_index_frame(
+        self, ts_codes, fields: Optional[str] = None
+    ) -> pd.DataFrame:
+        """Return Tushare rt_idx_k realtime daily bars for one or more exchange indexes.
+
+        rt_idx_k (指数实时日线) is the economical choice: up to 50 calls/minute,
+        and a single call can fetch the whole market (wildcard) or many
+        comma-separated codes. Output includes close (现价), pre_close (昨收),
+        high/open/low, vol and amount.
+        """
+        if isinstance(ts_codes, str):
+            codes = [item for item in ts_codes.split(",") if item.strip()]
+        else:
+            codes = [item for item in (ts_codes or []) if item]
+        codes = [self.normalize_symbol(str(code).strip()) for code in codes]
+        if not codes:
+            return pd.DataFrame()
+        field_text = (
+            fields
+            or "ts_code,name,trade_time,close,pre_close,high,open,low,vol,amount"
+        )
+        try:
+            frame = self.pro.rt_idx_k(ts_code=",".join(codes), fields=field_text)
+        except Exception as exc:
+            self.logger.warning("Tushare rt_idx_k failed for %s: %s", codes, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("close", "pre_close", "high", "open", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"]).sort_values("ts_code")
+
     def get_a_stock_limit_concepts_frame(self, trade_date: date) -> pd.DataFrame:
         """Fetch the daily strongest limit-up concepts for AI candidate discovery."""
         trade_value = self._to_date(trade_date)
