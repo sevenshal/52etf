@@ -98,6 +98,18 @@ const formatIntradayTime = (value) => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
+// 服务端按 Asia/Shanghai 计算收盘日期，前端也用同一时区判断“今天”
+const chinaToday = (() => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = type => (parts.find(p => p.type === type) || {}).value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+})();
+
 const SOXXFearGreed = () => {
   const [summaries, setSummaries] = useState([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -755,12 +767,16 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
 const SummaryCard = ({ option, summary, active, onToggle }) => {
   const latest = summary?.latest;
   const intraday = summary?.intraday;
-  const isIntraday = isFiniteNumber(intraday?.score);
-  const score = isIntraday ? intraday.score : latest?.score;
+  const hasIntraday = isFiniteNumber(intraday?.score);
+  // 收盘日期等于今天时视为已收盘，隐藏盘中只显收盘；早于今天统一标“昨收”
+  const closeIsToday = latest?.date === chinaToday;
+  const showIntraday = hasIntraday && !closeIsToday;
+  const score = showIntraday ? intraday.score : latest?.score;
   const scoreColor = fearColor(score);
+  const closeLabel = closeIsToday ? '收盘' : '昨收';
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
-  const price = isIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
+  const price = showIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
   const valuation = summary?.valuation;
   const showValuation = option.market !== 'US' && option.market !== 'HK' && valuation?.status === 'available';
   return (
@@ -788,8 +804,8 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
         )}
       </div>
 
-      <div className={`soxx-fear-summary-score${isIntraday ? ' is-dual' : ''}`}>
-        {isIntraday ? (
+      <div className={`soxx-fear-summary-score${showIntraday ? ' is-dual' : ''}`}>
+        {showIntraday ? (
           <>
             <span className="soxx-fear-score-duo">
               <span className="soxx-fear-score-duo-label">盘中</span>
@@ -798,7 +814,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
               </span>
             </span>
             <span className="soxx-fear-score-duo soxx-fear-score-duo-secondary">
-              <span className="soxx-fear-score-duo-label">收盘</span>
+              <span className="soxx-fear-score-duo-label">{closeLabel}</span>
               <span className="soxx-fear-score-duo-value" style={{ color: fearTextColor(latest?.score) }}>
                 {formatNumber(latest?.score, 1)}
               </span>
@@ -806,7 +822,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
           </>
         ) : (
           <span className="soxx-fear-score-duo">
-            <span className="soxx-fear-score-duo-label">收盘</span>
+            <span className="soxx-fear-score-duo-label">{closeLabel}</span>
             <span className="soxx-fear-score-duo-value" style={{ color: fearTextColor(latest?.score) }}>
               {formatNumber(latest?.score, 1)}
             </span>
@@ -822,7 +838,7 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
 
       <div className="soxx-fear-summary-footer">
         <span>
-          {isIntraday ? `盘中 ${formatIntradayTime(intraday.snapshot_time)} · 收盘 ${latest?.date || '-'}` : (latest?.date || '-')}
+          {showIntraday ? `盘中 ${formatIntradayTime(intraday.snapshot_time)} · ${closeLabel} ${latest?.date || '-'}` : (latest?.date || '-')}
         </span>
         <span title="恐贪日期成交量 ÷ 不含当日的前20个交易日平均成交量">
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
