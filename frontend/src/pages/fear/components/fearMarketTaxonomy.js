@@ -73,6 +73,7 @@ export const CN_INDUSTRY_GROUPS = [
     layout: 'wide',
     children: [
       { title: '工程机械', code: '880447', options: [cnOption('931752.CSI', '工程机械', '二级行业')] },
+      { title: '基建', options: [cnOption('399995.SZ', '基建工程', '二级行业')] },
       { title: '专用设备', code: '880445', options: [cnOption('980022.SZ', '机器人产业', '二级行业')] },
       { title: '汽车整车', code: '880361', options: [cnOption('930997.CSI', '新能源车', '二级行业')] },
       { title: '汽车零部件', code: '880365', options: [cnOption('931230.CSI', '汽车零部件', '三级行业')] },
@@ -122,6 +123,8 @@ export const CN_INDUSTRY_GROUPS = [
     children: [
       { title: '银行', code: '880471', options: [cnOption('399986.SZ', '中证银行', '二级行业')] },
       { title: '证券', code: '880472', options: [cnOption('399975.SZ', '证券公司', '二级行业')] },
+      { title: '保险', code: '880473', options: [cnOption('930618.CSI', '中证保险', '二级行业')] },
+      { title: '证券保险', options: [cnOption('H30588.CSI', '中证证保', '二级行业')] },
     ],
   },
   {
@@ -140,6 +143,7 @@ export const CN_INDUSTRY_GROUPS = [
         ],
       },
       { title: '通信设备', code: '880490', options: [cnOption('931160.CSI', '通信设备', '二级行业')] },
+      { title: '通信服务', options: [cnOption('000994.CSI', '全指通信服务', '二级行业')] },
       { title: '电脑设备', code: '880489', options: [cnOption('930651.CSI', '中证计算机', '二级行业')] },
       { title: '软件服务', code: '880493', options: [cnOption('H30202.CSI', '全指软件', '二级行业'), cnOption('930851.CSI', '云计算', '三级行业')] },
     ],
