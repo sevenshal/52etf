@@ -277,7 +277,6 @@ def _load_accounts(
                 "executor_max_replace_count": row.executor_max_replace_count,
                 "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
                 "executor_min_order_amount": getattr(row, "executor_min_order_amount", 0.0),
-                "executor_max_single_order_amount": getattr(row, "executor_max_single_order_amount", None),
                 "executor_max_batch_amount": getattr(row, "executor_max_batch_amount", None),
                 "executor_batch_interval_seconds": getattr(row, "executor_batch_interval_seconds", None),
                 "commission_rate_pct": row.commission_rate_pct,

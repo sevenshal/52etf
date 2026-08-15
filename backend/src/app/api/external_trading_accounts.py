@@ -49,7 +49,6 @@ from ...core.services.external_trading_execution_policy import (
     DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT,
     DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
-    DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
     DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
@@ -158,11 +157,6 @@ class ExternalTradingAccountBase(BaseModel):
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
     executor_max_slippage_pct: float = Field(default=DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT, ge=0)
     executor_min_order_amount: float = Field(default=DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT, ge=0)
-    executor_max_single_order_amount: float = Field(
-        default=DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
-        ge=0,
-        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
-    )
     executor_max_batch_amount: float = Field(
         default=DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
         ge=0,
@@ -253,11 +247,6 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_min_order_amount: Optional[float] = Field(default=None, ge=0)
-    executor_max_single_order_amount: Optional[float] = Field(
-        default=None,
-        ge=0,
-        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
-    )
     executor_max_batch_amount: Optional[float] = Field(
         default=None,
         ge=0,
@@ -438,11 +427,6 @@ class ExternalTradingSubAccountPayload(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_min_order_amount: Optional[float] = Field(default=None, ge=0)
-    executor_max_single_order_amount: Optional[float] = Field(
-        default=None,
-        ge=0,
-        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
-    )
     executor_max_batch_amount: Optional[float] = Field(
         default=None,
         ge=0,
@@ -542,7 +526,6 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_max_replace_count": executor_max_replace_count,
         "executor_max_slippage_pct": executor_max_slippage_pct,
         "executor_min_order_amount": executor_min_order_amount,
-        "executor_max_single_order_amount": getattr(account, "executor_max_single_order_amount", None),
         "executor_max_batch_amount": getattr(account, "executor_max_batch_amount", None),
         "executor_batch_interval_seconds": getattr(account, "executor_batch_interval_seconds", None),
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
@@ -2248,7 +2231,6 @@ async def create_external_trading_sub_account(
         executor_max_replace_count=payload.executor_max_replace_count,
         executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_min_order_amount=payload.executor_min_order_amount,
-        executor_max_single_order_amount=payload.executor_max_single_order_amount,
         executor_max_batch_amount=payload.executor_max_batch_amount,
         executor_batch_interval_seconds=payload.executor_batch_interval_seconds,
         executor_clip_sell_to_available=None,
@@ -2320,7 +2302,6 @@ async def update_external_trading_sub_account(
     sub_account.executor_max_replace_count = payload.executor_max_replace_count
     sub_account.executor_max_slippage_pct = payload.executor_max_slippage_pct
     sub_account.executor_min_order_amount = payload.executor_min_order_amount
-    sub_account.executor_max_single_order_amount = payload.executor_max_single_order_amount
     sub_account.executor_max_batch_amount = payload.executor_max_batch_amount
     sub_account.executor_batch_interval_seconds = payload.executor_batch_interval_seconds
     sub_account.executor_clip_sell_to_available = None

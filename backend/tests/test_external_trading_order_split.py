@@ -11,32 +11,20 @@ from src.core.external_trading_database import (
     ExternalTradingTargetPosition,
 )
 from src.core.services.external_trading_execution_policy import (
-    DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
     aggregate_execution_policy,
     compute_fee_break_even_amount,
     resolve_execution_policy,
 )
-from src.core.services.external_trading_ledger import (
-    build_netted_target_execution_plan,
-    _split_quantity_for_amount,
-)
+from src.core.services.external_trading_ledger import build_netted_target_execution_plan
 
 
-class ExternalTradingOrderSplitTest(TestCase):
+class ExternalTradingBatchAmountTest(TestCase):
     def _db_session(self):
         engine = create_engine("sqlite:///:memory:")
         ExternalTradingBase.metadata.create_all(engine)
         return sessionmaker(bind=engine)()
 
-    def _add_account(
-        self,
-        db,
-        *,
-        max_single_order_amount=None,
-        max_batch_amount=None,
-        batch_interval_seconds=None,
-        min_commission=5.0,
-    ):
+    def _add_account(self, db, *, max_batch_amount=None, batch_interval_seconds=None, min_commission=5.0):
         account = ExternalTradingAccount(
             id=1,
             account_id="acct",
@@ -48,23 +36,13 @@ class ExternalTradingOrderSplitTest(TestCase):
             commission_rate_pct=0.025,
             min_commission=min_commission,
             stamp_tax_rate_pct=0.05,
-            executor_max_single_order_amount=max_single_order_amount,
             executor_max_batch_amount=max_batch_amount,
             executor_batch_interval_seconds=batch_interval_seconds,
         )
         db.add(account)
         return account
 
-    def _add_sub_account(
-        self,
-        db,
-        *,
-        sub_account_id,
-        name,
-        max_single_order_amount=None,
-        max_batch_amount=None,
-        batch_interval_seconds=None,
-    ):
+    def _add_sub_account(self, db, *, sub_account_id, name, max_batch_amount=None, batch_interval_seconds=None):
         sub_account = ExternalTradingSubAccount(
             id=sub_account_id,
             account_id="acct",
@@ -72,7 +50,6 @@ class ExternalTradingOrderSplitTest(TestCase):
             name=name,
             enabled=True,
             executor_lot_size=100,
-            executor_max_single_order_amount=max_single_order_amount,
             executor_max_batch_amount=max_batch_amount,
             executor_batch_interval_seconds=batch_interval_seconds,
         )
@@ -120,27 +97,14 @@ class ExternalTradingOrderSplitTest(TestCase):
 
     def test_resolve_execution_policy_sub_account_overrides_account(self):
         db = self._db_session()
-        self._add_account(
-            db,
-            max_single_order_amount=500000.0,
-            max_batch_amount=300000.0,
-            batch_interval_seconds=30,
-        )
-        self._add_sub_account(
-            db,
-            sub_account_id=11,
-            name="Growth",
-            max_single_order_amount=200000.0,
-            max_batch_amount=100000.0,
-            batch_interval_seconds=60,
-        )
+        self._add_account(db, max_batch_amount=300000.0, batch_interval_seconds=30)
+        self._add_sub_account(db, sub_account_id=11, name="Growth", max_batch_amount=100000.0, batch_interval_seconds=60)
         db.flush()
         account = db.query(ExternalTradingAccount).first()
         sub_account = db.query(ExternalTradingSubAccount).first()
 
         policy = resolve_execution_policy(account, sub_account)
 
-        self.assertEqual(200000.0, policy["max_single_order_amount"])
         self.assertEqual(100000.0, policy["max_batch_amount"])
         self.assertEqual(60, policy["batch_interval_seconds"])
         self.assertAlmostEqual(20000.0, policy["fee_break_even_amount"])
@@ -148,28 +112,17 @@ class ExternalTradingOrderSplitTest(TestCase):
 
     def test_aggregate_execution_policy_takes_most_conservative(self):
         policies = [
-            {
-                "max_single_order_amount": 500000.0,
-                "max_batch_amount": 300000.0,
-                "batch_interval_seconds": 30,
-                "fee_break_even_amount": 20000.0,
-            },
-            {
-                "max_single_order_amount": 200000.0,
-                "max_batch_amount": 100000.0,
-                "batch_interval_seconds": 60,
-                "fee_break_even_amount": 20000.0,
-            },
+            {"max_batch_amount": 300000.0, "batch_interval_seconds": 30, "fee_break_even_amount": 20000.0},
+            {"max_batch_amount": 100000.0, "batch_interval_seconds": 60, "fee_break_even_amount": 20000.0},
         ]
         aggregated = aggregate_execution_policy(policies)
-        self.assertEqual(200000.0, aggregated["max_single_order_amount"])
         self.assertEqual(100000.0, aggregated["max_batch_amount"])
         self.assertEqual(60, aggregated["batch_interval_seconds"])
         self.assertAlmostEqual(20000.0, aggregated["fee_break_even_amount"])
 
-    # ---- 拆单 ----
+    # ---- 批次金额上限（跨轮分批） ----
 
-    def test_plan_does_not_split_when_disabled(self):
+    def test_plan_does_not_defer_when_batch_limit_disabled(self):
         db = self._db_session()
         self._add_account(db)
         self._add_sub_account(db, sub_account_id=11, name="Growth")
@@ -185,122 +138,7 @@ class ExternalTradingOrderSplitTest(TestCase):
 
         self.assertEqual(1, len(plan["external_orders"]))
         self.assertEqual(100000, plan["external_orders"][0]["quantity"])
-        self.assertEqual([], plan["splits"])
-
-    def test_plan_does_not_split_when_amount_below_limit(self):
-        db = self._db_session()
-        self._add_account(db, max_single_order_amount=500000.0)
-        self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_target(db, sub_account_id=11, target_quantity=10000, reference_price=10.0)
-        db.commit()
-
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id="acct",
-            external_trading_account_id=1,
-            reference_prices={"510300.SH": 10.0},
-        )
-
-        self.assertEqual(1, len(plan["external_orders"]))
-        self.assertEqual(10000, plan["external_orders"][0]["quantity"])
-        self.assertEqual([], plan["splits"])
-
-    def test_plan_splits_large_order_into_multiple_pieces(self):
-        db = self._db_session()
-        self._add_account(db, max_single_order_amount=500000.0)
-        self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_sub_account(db, sub_account_id=12, name="Value")
-        self._add_target(db, sub_account_id=11, target_quantity=60000, reference_price=10.0)
-        self._add_target(db, sub_account_id=12, target_quantity=40000, reference_price=10.0)
-        db.commit()
-
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id="acct",
-            external_trading_account_id=1,
-            reference_prices={"510300.SH": 10.0},
-        )
-
-        orders = plan["external_orders"]
-        self.assertEqual(2, len(orders))
-        total_quantity = sum(safe_quantity(o) for o in orders)
-        self.assertEqual(100000, total_quantity)
-        for order in orders:
-            # 每笔金额 ≤ 上限且 ≥ 佣金门槛（拆单不产生额外佣金）
-            self.assertLessEqual(order["quantity"] * 10.0, 500000.0 + 1)
-            self.assertGreaterEqual(order["quantity"] * 10.0, 20000.0)
-        # allocations 守恒
-        total_allocations = sum(
-            safe_quantity(alloc)
-            for order in orders
-            for alloc in order.get("allocations") or []
-        )
-        self.assertEqual(100000, total_allocations)
-        # splits 统计
-        self.assertEqual(1, len(plan["splits"]))
-        self.assertEqual(2, plan["splits"][0]["piece_count"])
         self.assertEqual([], plan["deferred"])
-
-    def test_plan_does_not_split_when_amount_cannot_cover_fee_break_even(self):
-        db = self._db_session()
-        # 2.5 万元 > 1 万元上限，但最多只能拆 1 笔不亏费（2.5万/2万=1）
-        self._add_account(db, max_single_order_amount=10000.0)
-        self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_target(db, sub_account_id=11, target_quantity=2500, reference_price=10.0)
-        db.commit()
-
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id="acct",
-            external_trading_account_id=1,
-            reference_prices={"510300.SH": 10.0},
-        )
-
-        self.assertEqual(1, len(plan["external_orders"]))
-        self.assertEqual(2500, plan["external_orders"][0]["quantity"])
-        self.assertEqual([], plan["splits"])
-
-    def test_plan_star_market_each_piece_at_least_200_shares(self):
-        db = self._db_session()
-        # 688xxx.SH 科创板：每笔必须 ≥ 200 股，否则触发 INVALID_LOT_SIZE 阻塞。
-        # 无最低佣金（min_commission=0）排除费用约束干扰，专注股数下限。
-        self._add_account(db, max_single_order_amount=2000.0, min_commission=0)
-        self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_target(db, sub_account_id=11, symbol="688001.SH", target_quantity=1000, reference_price=10.0)
-        db.commit()
-
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id="acct",
-            external_trading_account_id=1,
-            reference_prices={"688001.SH": 10.0},
-        )
-
-        orders = plan["external_orders"]
-        # 1 万元 → n_target=5，n_cap=1000//200=5 → 5 笔 200 股
-        self.assertEqual(5, len(orders))
-        for order in orders:
-            self.assertGreaterEqual(order["quantity"], 200)
-
-    def test_star_market_quantity_below_two_chunks_not_split(self):
-        db = self._db_session()
-        # 350 股被 lot_size 取整为 300 股，无法拆成两笔都 ≥ 200 股 → 不拆
-        self._add_account(db, max_single_order_amount=1000.0, min_commission=0)
-        self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_target(db, sub_account_id=11, symbol="688001.SH", target_quantity=350, reference_price=10.0)
-        db.commit()
-
-        plan = build_netted_target_execution_plan(
-            db,
-            account_id="acct",
-            external_trading_account_id=1,
-            reference_prices={"688001.SH": 10.0},
-        )
-
-        self.assertEqual(1, len(plan["external_orders"]))
-        self.assertEqual(300, plan["external_orders"][0]["quantity"])
-
-    # ---- 跨轮分批（批次金额上限） ----
 
     def test_plan_batch_amount_cap_defers_overflow_to_next_round(self):
         db = self._db_session()
@@ -325,9 +163,30 @@ class ExternalTradingOrderSplitTest(TestCase):
         self.assertEqual(70000, deferred[0]["quantity"])
         self.assertEqual(700000.0, deferred[0]["estimated_amount"])
 
-    def test_batch_amount_cap_lower_than_one_lot_defers_all(self):
+    def test_batch_amount_cap_keeps_whole_order_when_cut_below_fee_break_even(self):
         db = self._db_session()
-        # 上限 500 元 < 1 手（1000 元）→ 本轮无法提交，全部推迟
+        # 单轮上限 1.5 万 < 佣金门槛 2 万：截断出来的每笔都会被最低佣金吃掉
+        # → 整笔提交（宁可不分批也不额外亏费）
+        self._add_account(db, max_batch_amount=15000.0)
+        self._add_sub_account(db, sub_account_id=11, name="Growth")
+        self._add_target(db, sub_account_id=11, target_quantity=10000, reference_price=10.0)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"510300.SH": 10.0},
+        )
+
+        orders = plan["external_orders"]
+        self.assertEqual(1, len(orders))
+        self.assertEqual(10000, orders[0]["quantity"])  # 整笔 10 万全提交
+        self.assertEqual([], plan["deferred"])
+
+    def test_batch_amount_cap_lower_than_one_lot_keeps_whole_order(self):
+        db = self._db_session()
+        # 上限 500 元 < 1 手（1000 元）：截断部分不足一个最小交易单位 → 整笔提交
         self._add_account(db, max_batch_amount=500.0)
         self._add_sub_account(db, sub_account_id=11, name="Growth")
         self._add_target(db, sub_account_id=11, target_quantity=10000, reference_price=10.0)
@@ -340,53 +199,30 @@ class ExternalTradingOrderSplitTest(TestCase):
             reference_prices={"510300.SH": 10.0},
         )
 
-        self.assertEqual([], plan["external_orders"])
-        self.assertEqual(1, len(plan["deferred"]))
-        self.assertEqual("batch_amount_cap", plan["deferred"][0]["reason"])
+        self.assertEqual(1, len(plan["external_orders"]))
+        self.assertEqual(10000, plan["external_orders"][0]["quantity"])
+        self.assertEqual([], plan["deferred"])
 
-    def test_plan_combines_split_and_batch_cap(self):
+    def test_batch_amount_cap_shares_capacity_across_symbols(self):
         db = self._db_session()
-        # 单笔上限 50 万，单轮提交上限 80 万：100 万股 → 拆 2 笔 50 万股
-        # 第一笔 50 万 + 第二笔最多 30 万（合计 80 万），剩余 20 万推迟到下一轮
-        self._add_account(db, max_single_order_amount=500000.0, max_batch_amount=800000.0)
+        # 两个 symbol 各自独立额度
+        self._add_account(db, max_batch_amount=300000.0)
         self._add_sub_account(db, sub_account_id=11, name="Growth")
-        self._add_target(db, sub_account_id=11, target_quantity=100000, reference_price=10.0)
+        self._add_target(db, sub_account_id=11, symbol="510300.SH", target_quantity=100000, reference_price=10.0)
+        self._add_target(db, sub_account_id=11, symbol="159915.SZ", target_quantity=50000, reference_price=10.0)
         db.commit()
 
         plan = build_netted_target_execution_plan(
             db,
             account_id="acct",
             external_trading_account_id=1,
-            reference_prices={"510300.SH": 10.0},
+            reference_prices={"510300.SH": 10.0, "159915.SZ": 10.0},
         )
 
-        orders = plan["external_orders"]
-        self.assertEqual(2, len(orders))
-        self.assertEqual([50000, 30000], [o["quantity"] for o in orders])
-        self.assertEqual(1, len(plan["deferred"]))
-        self.assertEqual(20000, plan["deferred"][0]["quantity"])
-        self.assertEqual("batch_amount_cap", plan["deferred"][0]["reason"])
-
-    # ---- 拆单单元（数量切分） ----
-
-    def test_split_quantity_preserves_total_and_lot_size(self):
-        chunks = _split_quantity_for_amount(
-            quantity=100001,
-            price=10.0,
-            lot_size=100,
-            max_single_amount=300000.0,
-            fee_break_even_amount=20000.0,
-        )
-        self.assertEqual(sum(chunks), 100001)
-        for index, chunk in enumerate(chunks[:-1]):
-            self.assertEqual(0, chunk % 100)
-            self.assertLessEqual(chunk * 10.0, 300000.0 + 1)
-        # 末笔补齐零头
-        self.assertEqual(chunks[-1] * 10.0, 1000010.0 - sum(chunks[:-1]) * 10.0)
-
-
-def safe_quantity(order):
-    return int(order.get("quantity") or 0)
+        orders = {o["symbol"]: o for o in plan["external_orders"]}
+        self.assertEqual(30000, orders["510300.SH"]["quantity"])
+        self.assertEqual(30000, orders["159915.SZ"]["quantity"])
+        self.assertEqual(2, len(plan["deferred"]))
 
 
 class ExternalTradingBatchIntervalTest(TestCase):

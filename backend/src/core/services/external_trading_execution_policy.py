@@ -9,7 +9,6 @@ MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS = 86400
 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT = 3
 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT = 0.5
 DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT = 0.0
-DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT = 0.0
 DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT = 0.0
 DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS = 0
 DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE = [1, 2, 3, 5, -1]
@@ -84,22 +83,6 @@ def normalize_max_slippage_pct(value: Any, default: float = DEFAULT_EXECUTOR_MAX
 
 
 def normalize_min_order_amount(value: Any, default: float = DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT) -> float:
-    try:
-        if value is None or value == "":
-            return float(default)
-        parsed = float(value)
-        if parsed >= 0:
-            return parsed
-    except Exception:
-        pass
-    return float(default)
-
-
-def normalize_max_single_order_amount(
-    value: Any,
-    default: float = DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
-) -> float:
-    """单笔净额委托最大金额（元）。0/None 表示不拆单。"""
     try:
         if value is None or value == "":
             return float(default)
@@ -283,13 +266,6 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
         "clip_sell_to_available": True,
         "price_level_sequence": account_sequence,
         "order_timeout_seconds_sequence": account_timeout_sequence,
-        "max_single_order_amount": normalize_max_single_order_amount(
-            getattr(account, "executor_max_single_order_amount", None),
-            normalize_max_single_order_amount(
-                fallback.get("max_single_order_amount"),
-                DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
-            ),
-        ),
         "max_batch_amount": normalize_max_batch_amount(
             getattr(account, "executor_max_batch_amount", None),
             normalize_max_batch_amount(
@@ -327,7 +303,6 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             ("max_replace_count", normalize_max_replace_count),
             ("max_slippage_pct", normalize_max_slippage_pct),
             ("min_order_amount", normalize_min_order_amount),
-            ("max_single_order_amount", normalize_max_single_order_amount),
             ("max_batch_amount", normalize_max_batch_amount),
             ("batch_interval_seconds", normalize_batch_interval_seconds),
         ):
@@ -389,10 +364,6 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
             "clip_sell_to_available": True,
             "price_level_sequence": sequence,
             "order_timeout_seconds_sequence": timeout_sequence,
-            "max_single_order_amount": normalize_max_single_order_amount(
-                fallback.get("max_single_order_amount"),
-                DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
-            ),
             "max_batch_amount": normalize_max_batch_amount(
                 fallback.get("max_batch_amount"),
                 DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
@@ -430,10 +401,6 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         "clip_sell_to_available": True,
         "price_level_sequence": normalize_price_level_sequence(base_sequence),
         "order_timeout_seconds_sequence": timeout_sequence,
-        "max_single_order_amount": min(
-            normalize_max_single_order_amount(item.get("max_single_order_amount"))
-            for item in policies
-        ),
         "max_batch_amount": min(
             normalize_max_batch_amount(item.get("max_batch_amount"))
             for item in policies
