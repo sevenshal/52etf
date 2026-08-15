@@ -1233,8 +1233,8 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="slippage_pct" label="滑点%(-1=最悲观)">
-                <InputNumber min={-1} max={10} step={0.1} placeholder="0=无滑点；-1=买最高卖最低" style={{ width: '100%' }} />
+              <Form.Item name="slippage_pct" label="滑点%(-2=最乐观/-1=最悲观)">
+                <InputNumber min={-2} max={10} step={0.1} placeholder="0=无滑点；-1=买最高卖最低；-2=买最低卖最高" style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -1444,7 +1444,7 @@ const SoxlFearBacktest = () => {
                 </>
               )}
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
-              <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct === -1 ? '-1（最悲观：买最高卖最低）' : `${detailedResult.params?.slippage_pct ?? 0}%`}</Descriptions.Item>
+              <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct === -2 ? '-2（最乐观：买最低卖最高）' : detailedResult.params?.slippage_pct === -1 ? '-1（最悲观：买最高卖最低）' : `${detailedResult.params?.slippage_pct ?? 0}%`}</Descriptions.Item>
               <Descriptions.Item label="印花税%(卖出)">{detailedResult.params?.stamp_duty_pct ?? 0}%</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>

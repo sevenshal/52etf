@@ -187,10 +187,10 @@ class SOXLFearStrategyParams(BaseModel):
 
     @validator("slippage_pct")
     def validate_slippage_pct(cls, value):
-        if value == -1.0:
+        if value in (-1.0, -2.0):
             return value
         if value < 0 or value > 10:
-            raise ValueError("滑点必须为 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
+            raise ValueError("滑点必须为 -2（最乐观）或 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
         return value
 
     @validator("stamp_duty_pct")
@@ -330,10 +330,10 @@ class SOXLFearSearchParams(BaseModel):
 
     @validator("slippage_pct")
     def validate_search_slippage_pct(cls, value):
-        if value == -1.0:
+        if value in (-1.0, -2.0):
             return value
         if value < 0 or value > 10:
-            raise ValueError("滑点必须为 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
+            raise ValueError("滑点必须为 -2（最乐观）或 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
         return value
 
     @validator("stamp_duty_pct")
@@ -1348,10 +1348,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         close_price = float(close_prices[index])
         high_price = float(decision_high_prices[index])
         execution_price = float(execution_prices[index])
-        # 成交价：滑点<0 悲观（买=当日最高 卖=当日最低）；>=0 按成交价滑点%
+        # 成交价：滑点 -2=最乐观（买=当日最低 卖=当日最高）；-1=最悲观（买=当日最高 卖=当日最低）；>=0 按成交价滑点%
         if float(params.slippage_pct) < 0:
-            buy_fill_price = float(high_prices[index]) if np.isfinite(high_prices[index]) else execution_price
-            sell_fill_price = float(low_prices[index]) if np.isfinite(low_prices[index]) else execution_price
+            if float(params.slippage_pct) <= -1.5:
+                buy_fill_price = float(low_prices[index]) if np.isfinite(low_prices[index]) else execution_price
+                sell_fill_price = float(high_prices[index]) if np.isfinite(high_prices[index]) else execution_price
+            else:
+                buy_fill_price = float(high_prices[index]) if np.isfinite(high_prices[index]) else execution_price
+                sell_fill_price = float(low_prices[index]) if np.isfinite(low_prices[index]) else execution_price
         else:
             slip_rate = float(params.slippage_pct) / 100.0
             buy_fill_price = execution_price * (1 + slip_rate)
@@ -1758,6 +1762,10 @@ def _run_seesaw_backtest(
         if float(params.slippage_pct) < 0:
             if info is None or base <= 0:
                 return base
+            if float(params.slippage_pct) <= -1.5:
+                # -2 最乐观：买=当日最低 卖=当日最高
+                return float(info["low"]) if side == "buy" else float(info["high"])
+            # -1 最悲观：买=当日最高 卖=当日最低
             return float(info["high"]) if side == "buy" else float(info["low"])
         slip = float(params.slippage_pct) / 100.0
         return base * (1 + slip) if side == "buy" else base * (1 - slip)

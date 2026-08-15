@@ -407,6 +407,32 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         expected_fee = sells[0]["amount"] * 0.0005
         self.assertAlmostEqual(expected_fee, sells[0].get("stamp_duty"))
 
+    def test_slippage_optimistic_buys_low_sells_high(self):
+        """滑点=-2 最乐观：买入按当日最低价、卖出按当日最高价。"""
+        dates = pd.bdate_range("2024-01-01", periods=3).date
+        base_df = pd.DataFrame({
+            "date": dates, "open": [100.0, 101.0, 102.0], "high": [110.0, 111.0, 112.0],
+            "low": [90.0, 91.0, 92.0], "close": [105.0, 106.0, 107.0],
+            "execution_price": [100.0, 101.0, 102.0], "volume": [1000.0] * 3,
+            "ma20": [100.0] * 3, "volume_ma20": [100.0] * 3, "volume_ratio": [2.0, 1.0, 1.0],
+            "volume_ma20_excluding_recent_1": [100.0] * 3, "volume_ratio_consecutive_1": [2.0, 1.0, 1.0],
+            "fear_greed": [20.0, 90.0, 90.0], "signal_volume": [200.0, 100.0, 100.0],
+            "signal_date": dates, "fear_date": dates,
+        })
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0, greed_threshold=80.0, volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1, buy_position_pct=100.0, cooldown_days=0,
+            trailing_stop_pct=0.0, sell_position_pct=100.0, sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=False, min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=-2.0,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+        buys = [t for t in result["trades"] if t["action"] == "BUY"]
+        sells = [t for t in result["trades"] if t["action"] == "SELL"]
+        # 乐观买入 = 当日最低价 90，乐观卖出 = 当日最高价 111
+        self.assertAlmostEqual(90.0, buys[0]["price"])
+        self.assertAlmostEqual(111.0, sells[0]["price"])
+
     def test_execute_next_open_default_keeps_same_day_close(self):
         """默认 execute_next_open=False：维持信号日收盘价成交。"""
         dates = pd.bdate_range("2024-01-01", periods=3).date
