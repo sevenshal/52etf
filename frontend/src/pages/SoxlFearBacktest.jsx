@@ -764,10 +764,10 @@ const SoxlFearBacktest = () => {
     const firstSub2 = detailedResult.daily_data.find(item => item.sub2_symbol);
     const sub2Symbol = firstSub2?.sub2_symbol || null;
     const subKlineData = detailedResult.daily_data.map(item => (
-      item.sub_open == null ? null : [item.sub_open, item.sub_close, item.sub_low, item.sub_high]
+      item.sub_open == null ? '-' : [item.sub_open, item.sub_close, item.sub_low, item.sub_high]
     ));
     const subVolumeData = detailedResult.daily_data.map(item => ({
-      value: item.sub_volume,
+      value: Number.isFinite(item.sub_volume) ? item.sub_volume : 0,
       itemStyle: { color: '#13c2c2' },
     }));
 
@@ -810,11 +810,11 @@ const SoxlFearBacktest = () => {
         itemStyle: { color: '#13c2c2' },
       })) : [];
     const sub2KlineData = sub2Symbol ? detailedResult.daily_data.map(item => (
-      item.sub2_open == null ? null : [item.sub2_open, item.sub2_close, item.sub2_low, item.sub2_high]
+      item.sub2_open == null ? '-' : [item.sub2_open, item.sub2_close, item.sub2_low, item.sub2_high]
     )) : [];
     const sub2HasData = sub2KlineData.some(d => d != null);
     const sub2VolumeData = sub2Symbol ? detailedResult.daily_data.map(item => ({
-      value: Number.isFinite(item.sub2_volume) ? item.sub2_volume : null,
+      value: Number.isFinite(item.sub2_volume) ? item.sub2_volume : 0,
       itemStyle: { color: '#eb2f96' },
     })) : [];
     const sub2BuyMarkers = sub2Symbol ? (detailedResult.trades || [])
