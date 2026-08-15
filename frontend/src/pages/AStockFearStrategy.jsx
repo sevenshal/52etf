@@ -474,22 +474,27 @@ const AStockFearStrategy = ({ embedded = false }) => {
     {
       title: '标的',
       dataIndex: 'symbol',
+      width: 110,
       render: (value) => <Tag color="orange">{value}</Tag>,
     },
     {
       title: '恐贪来源',
       dataIndex: 'fear_source',
+      width: 150,
+      ellipsis: true,
       render: (value) => getFearSourceLabel(value),
     },
     {
       title: '量比来源',
       dataIndex: 'volume_signal_symbol',
+      width: 110,
       render: (value) => value || '自身',
     },
     {
       title: '跷跷板候补',
       dataIndex: 'sub_symbol',
-      width: 210,
+      width: 240,
+      ellipsis: true,
       render: (value, record) => (value
         ? `${value} 恐慌≤${record.sub_buy_threshold}/量比≥${record.sub_volume_ratio_threshold}`
         : '-'),
@@ -503,6 +508,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
     {
       title: '账户',
       dataIndex: 'external_trading_account_name',
+      width: 250,
+      ellipsis: true,
       render: (value, record) => value || `${record.external_trading_account_id || '-'} / 子账户: ${record.live_sub_account_id || '-'}`,
     },
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
@@ -623,7 +630,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
             dataSource={configs}
             columns={columns}
             loading={listLoading}
-            scroll={{ x: 1400 }}
+            scroll={{ x: 2200 }}
             onRow={(record) => ({
               onClick: () => openConfig(record),
               style: { cursor: 'pointer' },
