@@ -213,9 +213,6 @@ const AStockFearStrategy = ({ embedded = false }) => {
       const merged = normalizeConfig(data);
       setSelectedConfig(merged);
       form.setFieldsValue(merged);
-      if (merged.external_trading_account_id) {
-        await fetchLiveSubAccounts(merged.external_trading_account_id);
-      }
       return merged;
     } catch (error) {
       message.error(error.response?.data?.detail || '加载策略配置失败');
@@ -223,7 +220,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     } finally {
       setConfigLoading(false);
     }
-  }, [form, fetchLiveSubAccounts]);
+  }, [form]);
 
   const fetchLogs = useCallback(async (configId = selectedConfig?.id) => {
     if (!configId) {
