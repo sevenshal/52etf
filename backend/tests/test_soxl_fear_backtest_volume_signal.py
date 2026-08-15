@@ -475,3 +475,17 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         self.assertEqual(1, len(sells))
         self.assertEqual("588000.SH", sells[0]["symbol"])
         self.assertEqual(dates[2].isoformat(), sells[0]["date"])
+
+    def test_seesaw_daily_data_includes_sub_kline_fields(self):
+        """跷跷板 daily_data 输出候补 OHLCV 字段供前端叠加展示"""
+        main_df, sub_df, dates = self._seesaw_frames()
+        result = _run_seesaw_backtest(main_df, sub_df, self._seesaw_params(), 10000.0, detailed=True)
+        daily = result["daily_data"]
+        self.assertGreaterEqual(len(daily), 1)
+        first = daily[0]
+        self.assertEqual("588000.SH", first["sub_symbol"])
+        self.assertIsNotNone(first["sub_open"])
+        self.assertIsNotNone(first["sub_high"])
+        self.assertIsNotNone(first["sub_low"])
+        self.assertIsNotNone(first["sub_close"])
+        self.assertIsNotNone(first["sub_volume"])

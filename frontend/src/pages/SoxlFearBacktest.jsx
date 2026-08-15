@@ -554,6 +554,7 @@ const SoxlFearBacktest = () => {
 
   const tradeColumns = [
     { title: '日期', dataIndex: 'date', width: 110 },
+    { title: '标的', dataIndex: 'symbol', width: 110, render: value => (value ? <Tag color={value === '510880.SH' ? 'orange' : 'purple'}>{value}</Tag> : '-') },
     {
       title: '方向',
       dataIndex: 'action',
@@ -721,8 +722,19 @@ const SoxlFearBacktest = () => {
     }));
     const volumeMA20Data = detailedResult.daily_data.map(item => item.volume_ma20);
 
+    // 跷跷板候补：K线/成交量叠加到同一图（蓝色系区分主次）
+    const firstSub = detailedResult.daily_data.find(item => item.sub_symbol);
+    const subSymbol = firstSub?.sub_symbol || null;
+    const subKlineData = detailedResult.daily_data.map(item => (
+      item.sub_open == null ? null : [item.sub_open, item.sub_close, item.sub_low, item.sub_high]
+    ));
+    const subVolumeData = detailedResult.daily_data.map(item => ({
+      value: item.sub_volume,
+      itemStyle: { color: '#13c2c2' },
+    }));
+
     const buyMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'BUY')
+      .filter(item => item.action === 'BUY' && (!subSymbol || item.symbol !== subSymbol))
       .map(item => ({
         name: '买',
         value: 'B',
@@ -731,7 +743,7 @@ const SoxlFearBacktest = () => {
         itemStyle: { color: '#cf1322' },
       }));
     const sellMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'SELL')
+      .filter(item => item.action === 'SELL' && (!subSymbol || item.symbol !== subSymbol))
       .map(item => ({
         name: '卖',
         value: 'S',
@@ -739,10 +751,108 @@ const SoxlFearBacktest = () => {
         yAxis: item.price,
         itemStyle: { color: '#1677ff' },
       }));
+    const subBuyMarkers = subSymbol ? (detailedResult.trades || [])
+      .filter(item => item.action === 'BUY' && item.symbol === subSymbol)
+      .map(item => ({
+        name: '候补买',
+        value: 'B',
+        xAxis: dates.indexOf(item.date),
+        yAxis: item.price,
+        itemStyle: { color: '#722ed1' },
+      })) : [];
+    const subSellMarkers = subSymbol ? (detailedResult.trades || [])
+      .filter(item => item.action === 'SELL' && item.symbol === subSymbol)
+      .map(item => ({
+        name: '候补卖',
+        value: 'S',
+        xAxis: dates.indexOf(item.date),
+        yAxis: item.price,
+        itemStyle: { color: '#13c2c2' },
+      })) : [];
+
+    const legendData = [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'];
+    if (subSymbol) {
+      legendData.push(`${subSymbol} K线`, `${subSymbol} 成交量`);
+    }
+
+    const series = [
+      {
+        name: `${selectedSymbol} K线`,
+        type: 'candlestick',
+        data: klineData,
+        itemStyle: {
+          color: '#cf1322',
+          color0: '#1677ff',
+          borderColor: '#cf1322',
+          borderColor0: '#1677ff',
+        },
+        markPoint: {
+          data: [...buyMarkers, ...sellMarkers],
+          symbolSize: 26,
+          label: { color: '#fff', fontWeight: 'bold' },
+        },
+      },
+    ];
+    if (subSymbol) {
+      series.push({
+        name: `${subSymbol} K线`,
+        type: 'candlestick',
+        data: subKlineData,
+        barWidth: 6,
+        itemStyle: {
+          color: 'rgba(19,194,194,0.55)',
+          color0: 'rgba(47,84,235,0.45)',
+          borderColor: '#13c2c2',
+          borderColor0: '#2f54eb',
+        },
+        markPoint: {
+          data: [...subBuyMarkers, ...subSellMarkers],
+          symbolSize: 24,
+          symbol: 'pin',
+          label: { color: '#fff', fontWeight: 'bold' },
+        },
+      });
+    }
+    series.push(
+      {
+        name: 'MA20',
+        type: 'line',
+        data: ma20Data,
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { width: 2, color: '#faad14' },
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumeData,
+      },
+      {
+        name: '成交量MA20',
+        type: 'line',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumeMA20Data,
+        showSymbol: false,
+        lineStyle: { width: 2, color: '#52c41a' },
+      },
+    );
+    if (subSymbol) {
+      series.push({
+        name: `${subSymbol} 成交量`,
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 2,
+        data: subVolumeData,
+        barWidth: 5,
+      });
+    }
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'] },
+      legend: { data: legendData },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
         { left: '8%', right: '8%', top: 40, height: '54%' },
@@ -755,53 +865,13 @@ const SoxlFearBacktest = () => {
       yAxis: [
         { scale: true, splitArea: { show: true } },
         { scale: true, gridIndex: 1, splitNumber: 2 },
+        ...(subSymbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
         { show: true, xAxisIndex: [0, 1], type: 'slider', bottom: 10, start: 60, end: 100 },
       ],
-      series: [
-        {
-          name: `${selectedSymbol} K线`,
-          type: 'candlestick',
-          data: klineData,
-          itemStyle: {
-            color: '#cf1322',
-            color0: '#1677ff',
-            borderColor: '#cf1322',
-            borderColor0: '#1677ff',
-          },
-          markPoint: {
-            data: [...buyMarkers, ...sellMarkers],
-            symbolSize: 26,
-            label: { color: '#fff', fontWeight: 'bold' },
-          },
-        },
-        {
-          name: 'MA20',
-          type: 'line',
-          data: ma20Data,
-          smooth: true,
-          showSymbol: false,
-          lineStyle: { width: 2, color: '#faad14' },
-        },
-        {
-          name: '成交量',
-          type: 'bar',
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          data: volumeData,
-        },
-        {
-          name: '成交量MA20',
-          type: 'line',
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          data: volumeMA20Data,
-          showSymbol: false,
-          lineStyle: { width: 2, color: '#52c41a' },
-        },
-      ],
+      series,
     };
   }, [detailedResult, selectedSymbol]);
 

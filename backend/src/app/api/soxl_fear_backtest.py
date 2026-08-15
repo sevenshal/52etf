@@ -1614,7 +1614,28 @@ def _run_seesaw_backtest(
             benchmark_value = benchmark_cash + benchmark_shares_qty * close_price
             equity_values[index] = equity_value
             benchmark_values[index] = benchmark_value
-            equity_curve.append({"date": day_text, "value": equity_value, "benchmark_value": benchmark_value})
+            if detailed:
+                equity_curve.append({"date": day_text, "value": equity_value, "benchmark_value": benchmark_value})
+                sub_info0 = sub["by_date"].get(day_text)
+                daily_data.append({
+                    "date": day_text,
+                    "open": float(main["by_date"][day_text]["open"]),
+                    "high": float(main["by_date"][day_text]["high"]),
+                    "low": float(main["by_date"][day_text]["low"]),
+                    "close": close_price,
+                    "execution_price": float(main["by_date"][day_text]["exec"]),
+                    "execution_price_label": execution_price_label,
+                    "volume": float(main["by_date"][day_text]["volume"]),
+                    "fear_greed": float(base_df.iloc[index]["fear_greed"]) if index < len(base_df) else None,
+                    "equity": equity_value, "cash": cash, "shares": shares, "avg_cost": avg_cost,
+                    "benchmark_value": benchmark_value,
+                    "sub_symbol": sub_symbol or None,
+                    "sub_open": float(sub_info0["open"]) if sub_info0 else None,
+                    "sub_high": float(sub_info0["high"]) if sub_info0 else None,
+                    "sub_low": float(sub_info0["low"]) if sub_info0 else None,
+                    "sub_close": float(sub_info0["close"]) if sub_info0 else None,
+                    "sub_volume": float(sub_info0["volume"]) if sub_info0 else None,
+                })
             continue
 
         main_info = main["by_date"][day_text]
@@ -1733,6 +1754,12 @@ def _run_seesaw_backtest(
                 "shares": shares,
                 "avg_cost": avg_cost,
                 "benchmark_value": benchmark_value,
+                "sub_symbol": sub_symbol or None,
+                "sub_open": float(sub_info["open"]) if sub_info else None,
+                "sub_high": float(sub_info["high"]) if sub_info else None,
+                "sub_low": float(sub_info["low"]) if sub_info else None,
+                "sub_close": float(sub_info["close"]) if sub_info else None,
+                "sub_volume": float(sub_info["volume"]) if sub_info else None,
             })
 
     strategy_metrics, drawdowns = _compute_equity_metrics(main["dates"], equity_values)
