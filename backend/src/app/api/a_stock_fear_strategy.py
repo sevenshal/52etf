@@ -31,6 +31,7 @@ from .soxl_fear_backtest import (
     A_STOCK_FEAR_SOURCE_OPTIONS,
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
+    FEAR_SOURCE_OPTIONS,
 )
 
 router = APIRouter(prefix="/api/a-stock-fear-strategy", tags=["a-stock-fear-strategy"])
@@ -609,7 +610,7 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_account)):
                 "value": key,
                 "symbol": config.get("symbol"),
             }
-            for key, config in A_STOCK_FEAR_SOURCE_OPTIONS.items()
+            for key, config in FEAR_SOURCE_OPTIONS.items()
         ],
         "preset_pairs": A_STOCK_PRESET_PAIRS,
         "default_request": {
