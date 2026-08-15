@@ -395,7 +395,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             volume_ratio_consecutive_days=1, buy_position_pct=100.0, cooldown_days=0,
             trailing_stop_pct=0.0, sell_position_pct=100.0, sell_reduction_basis="holdings",
             sell_price_above_avg_cost=False, min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0, slippage_pct=0.0, slippage_pct=0.1, stamp_duty_pct=0.05,
+            rebalance_threshold_pct=0.0, slippage_pct=0.1, stamp_duty_pct=0.05,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
         buys = [t for t in result["trades"] if t["action"] == "BUY"]
