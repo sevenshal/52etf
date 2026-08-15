@@ -4437,9 +4437,9 @@ def _apply_batch_amount_cap(
     *,
     reference_prices: Dict[str, float],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """每轮（每次执行循环）每个 symbol+side 最多提交 executor_max_batch_amount 金额，
-    拆出的多笔共享同一批次上限（跨订单累计）。超出部分从本轮移除（不落库），
-    下一轮执行时 delta 会重新生成并继续提交，实现跨轮分批。
+    """每轮（每次执行循环）每个 symbol+side 最多提交 executor_max_batch_amount 金额。
+    超出部分从本轮移除（不落库），下一轮执行时 delta 会重新生成并继续提交，实现跨轮分批。
+    默认 max_batch_amount=0 时为恒等函数，行为与不配置完全一致。
     """
     kept: List[Dict[str, Any]] = []
     deferred: List[Dict[str, Any]] = []
