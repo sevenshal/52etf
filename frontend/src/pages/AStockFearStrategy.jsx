@@ -19,6 +19,8 @@ import {
   message,
 } from 'antd';
 import dayjs from 'dayjs';
+import { useNavigate } from 'react-router-dom';
+import { ExperimentOutlined } from '@ant-design/icons';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 
@@ -69,6 +71,7 @@ const normalizeStateFormValues = (state) => ({
 const AStockFearStrategy = ({ embedded = false }) => {
   const [form] = Form.useForm();
   const [stateForm] = Form.useForm();
+  const navigate = useNavigate();
   const [options, setOptions] = useState({ target_options: [], fear_source_options: [], preset_pairs: [] });
   const [configs, setConfigs] = useState([]);
   const [selectedConfig, setSelectedConfig] = useState(null);
@@ -318,6 +321,49 @@ const AStockFearStrategy = ({ embedded = false }) => {
     volume_signal_symbol: values.volume_signal_symbol || undefined,
     run_time: values.run_time ? values.run_time.format('HH:mm') : '09:30',
   });
+
+  const handleBacktest = () => {
+    const values = {
+      ...defaultValues,
+      ...form.getFieldsValue(),
+    };
+    // 跳转到「情绪 + 量能 超参数回测」页（SOXL 配置页同一个回测页面，支持 A股标的与 a_stock_* 恐贪来源）
+    // 实盘隔天信号语义 → 回测开启 execute_next_open（信号日收盘决策、次日开盘成交）、
+    // trailing_stop_pct=0 = 贪恐即卖，与实盘完全对齐
+    navigate('/soxl-fear-backtest', {
+      state: {
+        autoRunBacktest: true,
+        presetValues: {
+          symbol: values.symbol || '510880.SH',
+          volume_signal_symbol: values.volume_signal_symbol || undefined,
+          fear_source_values: [values.fear_source || 'a_stock_000015_sh'],
+          initial_capital: 1000000,
+          top_n: 1,
+          objective: 'annualized_return',
+          eval_workers: 1,
+          fit_rebalance_threshold_pct: values.rebalance_threshold_pct ?? 0,
+          date_range: [dayjs('2023-03-22'), dayjs()],
+          buy_threshold_values: String(values.buy_threshold ?? defaultValues.buy_threshold),
+          greed_threshold_values: String(values.greed_threshold ?? defaultValues.greed_threshold),
+          volume_ratio_threshold_values: String(values.volume_ratio_threshold ?? defaultValues.volume_ratio_threshold),
+          volume_ratio_consecutive_days_values: '1',
+          buy_position_pct_values: String(values.buy_position_pct ?? defaultValues.buy_position_pct),
+          cooldown_days_values: String(values.cooldown_days ?? defaultValues.cooldown_days),
+          trailing_stop_pct_values: String(values.trailing_stop_pct ?? defaultValues.trailing_stop_pct),
+          sell_position_pct_values: String(values.sell_position_pct ?? defaultValues.sell_position_pct),
+          sell_reduction_basis_values: [values.sell_reduction_basis || defaultValues.sell_reduction_basis],
+          sell_price_above_avg_cost_values: [values.sell_price_above_avg_cost ? true : false],
+          max_take_profit_sells_per_cycle_values: String(
+            values.max_take_profit_sells_per_cycle ?? defaultValues.max_take_profit_sells_per_cycle
+          ),
+          min_position_pct_after_take_profit_values: String(
+            values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
+          ),
+          execute_next_open_values: [true],
+        },
+      },
+    });
+  };
 
   const handleSave = async (values) => {
     setConfigLoading(true);
@@ -674,6 +720,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                       <Space>
                         <Button type="primary" htmlType="submit" loading={configLoading}>
                           保存配置
+                        </Button>
+                        <Button icon={<ExperimentOutlined />} onClick={handleBacktest}>
+                          回测
                         </Button>
                         <Button onClick={returnToList}>返回</Button>
                       </Space>
