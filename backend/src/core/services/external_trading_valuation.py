@@ -3,7 +3,9 @@ import logging
 import os
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from ..external_trading_database import (
@@ -13,10 +15,12 @@ from ..external_trading_database import (
 from .external_trading import ExternalTradingConnectionError, external_trading_hub
 from .external_trading_ledger import normalize_symbol, safe_float, safe_int
 from .longport import LongPortService
+from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 
 LONGPORT_MARKET_DATA_ACCOUNT_ID = os.getenv("EXTERNAL_TRADING_VALUATION_LONGPORT_ACCOUNT_ID", "LBPT10001248")
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class ExternalTradingValuationError(Exception):
@@ -101,6 +105,77 @@ async def _fetch_longport_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]
     return _normalize_quote_map(response or [], "longport")
 
 
+def _parse_tushare_realtime_frame(
+    frame: Any,
+    *,
+    today: Optional[Any] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """解析 tushare rt_k / rt_etf_k 返回，只保留 trade_time 为当日的行。
+
+    休市或未开盘（如跨境 ETF 延迟到 10:30）时 tushare 返回的是上一交易日数据
+    （trade_time 是昨天），必须丢弃，否则会把昨天的收盘价当成实时价照常下单。
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {}
+    if today is None:
+        today = datetime.now(CHINA_TZ).date()
+    result: Dict[str, Dict[str, Any]] = {}
+    for _, row in frame.iterrows():
+        ts_code = str(row.get("ts_code") or "").strip().upper()
+        symbol = normalize_symbol(ts_code)
+        if not symbol:
+            continue
+        raw_trade_time = row.get("trade_time")
+        if raw_trade_time is None or (isinstance(raw_trade_time, float) and pd.isna(raw_trade_time)):
+            continue
+        trade_time = pd.to_datetime(raw_trade_time, errors="coerce")
+        if trade_time is pd.NaT or trade_time.date() != today:
+            # 上一交易日/非今日数据，无法确认今日已开盘
+            continue
+        close = safe_float(row.get("close"))
+        if close <= 0:
+            continue
+        result[symbol] = {
+            "symbol": symbol,
+            "price": close,
+            "source": "tushare_rt",
+            "raw": row.to_dict(),
+        }
+    return result
+
+
+async def _fetch_tushare_realtime_quotes(
+    symbols: List[str],
+    *,
+    today: Optional[Any] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """tushare 实时行情（优先源）：股票走 rt_k，ETF 走 rt_etf_k（沪市带 topic）。
+    只接受 trade_time 为当日的行，未开盘/停牌（如 159941 延迟到 10:30）自然无价。
+    """
+    if not symbols:
+        return {}
+    a_share = [symbol for symbol in symbols if str(symbol or "").upper().endswith((".SH", ".SZ"))]
+    if not a_share:
+        return {}
+
+    def _call_tushare():
+        service = TushareService.get_instance()
+        frames = []
+        stock_frame = service.get_a_stock_realtime_rt_k_frame(a_share)
+        if isinstance(stock_frame, pd.DataFrame) and not stock_frame.empty:
+            frames.append(stock_frame)
+        etf_frame = service.get_a_stock_realtime_etf_rt_k_frame(a_share)
+        if isinstance(etf_frame, pd.DataFrame) and not etf_frame.empty:
+            frames.append(etf_frame)
+        if not frames:
+            return {}
+        merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"])
+        return _parse_tushare_realtime_frame(merged, today=today)
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _call_tushare)
+
+
 async def get_realtime_price_details(
     external_trading_account_id: int,
     symbols: Iterable[Any],
@@ -118,8 +193,20 @@ async def get_realtime_price_details(
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
 
+    tushare_error = None
     hub_error = None
     longport_error = None
+
+    async def fetch_tushare_for_missing():
+        nonlocal tushare_error
+        current_missing = [symbol for symbol in normalized_symbols if symbol not in result]
+        if not current_missing:
+            return
+        try:
+            result.update(await _fetch_tushare_realtime_quotes(current_missing))
+        except Exception as exc:
+            tushare_error = exc
+            logger.warning("Tushare realtime quote failed for valuation: %s", exc)
 
     async def fetch_hub_for_missing():
         nonlocal hub_error
@@ -146,12 +233,15 @@ async def get_realtime_price_details(
             longport_error = exc
             logger.warning("LongPort quote fallback failed for valuation: %s", exc)
 
+    await fetch_tushare_for_missing()
     await fetch_longport_for_missing()
     await fetch_hub_for_missing()
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
     if missing and raise_on_missing:
         errors = []
+        if tushare_error:
+            errors.append(f"tushare: {tushare_error}")
         if longport_error:
             errors.append(f"longport: {longport_error}")
         if hub_error:

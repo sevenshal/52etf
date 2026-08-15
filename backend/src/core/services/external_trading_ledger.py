@@ -4502,18 +4502,41 @@ def deferred_order_summary(
     amount: float,
     reason: str,
 ) -> Dict[str, Any]:
+    message_by_reason = {
+        "batch_amount_cap": "本轮提交金额达到上限，剩余部分将在后续执行轮次自动继续",
+        "batch_interval": "距上次提交不足批间隔，推迟到下一轮",
+        "no_reference_price": "未查到实时价，可能未开盘/停牌，开盘后自动继续",
+    }
     return {
         "symbol": normalize_symbol(order.get("symbol")),
         "side": str(order.get("side") or "").upper(),
         "quantity": safe_int(order.get("quantity")),
         "estimated_amount": round_money(amount),
         "reason": reason,
-        "message": (
-            "本轮提交金额达到上限，剩余部分将在后续执行轮次自动继续"
-            if reason == "batch_amount_cap"
-            else "距上次提交不足批间隔，推迟到下一轮"
-        ),
+        "message": message_by_reason.get(reason, reason),
     }
+
+
+def _defer_orders_without_reference_price(
+    external_orders: List[Dict[str, Any]],
+    *,
+    reference_prices: Dict[str, float],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """参考价缺失（未开盘/停牌，如跨境 ETF 延迟到 10:30 开盘）的订单本轮不提交。
+    开盘后行情有价，下一轮 delta 自动重新生成并提交。
+    调用方需保证仅在参考价查询链路成功（reference_prices 非空）时启用，
+    避免行情源整体故障时误把所有订单推迟。
+    """
+    kept: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
+    for order in external_orders:
+        symbol = normalize_symbol(order.get("symbol"))
+        price = _reference_price_for_symbol(reference_prices, symbol)
+        if price <= 0:
+            deferred.append(deferred_order_summary(order, 0.0, "no_reference_price"))
+            continue
+        kept.append(order)
+    return kept, deferred
 
 
 def build_netted_target_execution_plan(
@@ -4662,10 +4685,17 @@ def build_netted_target_execution_plan(
                 "allocations": allocations,
             })
     deferred_orders: List[Dict[str, Any]] = []
-    external_orders, deferred_orders = _apply_batch_amount_cap(
+    if reference_prices:
+        external_orders, no_price_deferred = _defer_orders_without_reference_price(
+            external_orders,
+            reference_prices=reference_prices,
+        )
+        deferred_orders.extend(no_price_deferred)
+    external_orders, batch_deferred = _apply_batch_amount_cap(
         external_orders,
         reference_prices=reference_prices,
     )
+    deferred_orders.extend(batch_deferred)
     external_orders = _filter_parent_orders_by_non_retryable_blocks(
         db,
         account_id=account_id,

@@ -38,6 +38,13 @@ TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR = max(
     1,
     int(os.getenv("TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR", "27")),
 )
+TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "450")),
+)
+
+# 沪深 ETF 代码前缀（rt_k 对沪市 ETF 返回空，需走 rt_etf_k 接口）
+TUSHARE_A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
 
 # Tushare publishes CSI-owned indexes with the .CSI suffix even when the
 # application uses the familiar exchange-style symbol as its canonical key.
@@ -119,6 +126,10 @@ class TushareService(QuoteProvider):
     _major_news_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR,
         3600.0,
+    )
+    _rt_k_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE,
+        60.0,
     )
 
     def __init__(self, token: Optional[str] = None):
@@ -614,6 +625,103 @@ class TushareService(QuoteProvider):
         result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
         result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
         for column in ("close", "pre_close", "high", "open", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"]).sort_values("ts_code")
+
+    @staticmethod
+    def _is_a_share_etf_ts_code(ts_code: str) -> bool:
+        normalized = str(ts_code or "").strip().upper()
+        if "." not in normalized:
+            return False
+        code, market = normalized.split(".", 1)
+        return (
+            market in {"SH", "SZ"}
+            and code.isdigit()
+            and len(code) == 6
+            and code.startswith(TUSHARE_A_SHARE_ETF_PREFIXES)
+        )
+
+    def get_a_stock_realtime_rt_k_frame(self, ts_codes) -> pd.DataFrame:
+        """A股实时日线（rt_k），用于非 ETF 股票。
+
+        休市/未开盘时返回的是上一交易日数据，调用方必须用 trade_time 过滤
+        （只接受 trade_time 日期为当日的行）才能当作实时价。
+        """
+        if isinstance(ts_codes, str):
+            codes = [item for item in ts_codes.split(",") if item.strip()]
+        else:
+            codes = [item for item in (ts_codes or []) if item]
+        normalized = [self.normalize_symbol(str(code).strip()) for code in codes]
+        normalized = [
+            code for code in normalized
+            if code and code.endswith((".SH", ".SZ")) and not self._is_a_share_etf_ts_code(code)
+        ]
+        if not normalized:
+            return pd.DataFrame()
+        try:
+            self._rt_k_rate_limiter.wait()
+            frame = self.pro.rt_k(
+                ts_code=",".join(normalized),
+                fields="ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
+                "ask_price1,ask_volume1,bid_price1,bid_volume1",
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare rt_k failed for %s: %s", normalized, exc)
+            return pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        if "trade_time" in result.columns:
+            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount", "num"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"]).sort_values("ts_code")
+
+    def get_a_stock_realtime_etf_rt_k_frame(self, ts_codes) -> pd.DataFrame:
+        """ETF实时日线（rt_etf_k），覆盖 rt_k 查不到的沪市 ETF。
+
+        沪市代码必须带 topic="HQ_FND_TICK"，深市代码不能带（带 topic 时深市被过滤），
+        因此沪/深分组两次调用后合并。休市/未开盘时同样返回上一交易日数据，
+        调用方必须用 trade_time 过滤。
+        """
+        if isinstance(ts_codes, str):
+            codes = [item for item in ts_codes.split(",") if item.strip()]
+        else:
+            codes = [item for item in (ts_codes or []) if item]
+        normalized = [self.normalize_symbol(str(code).strip()) for code in codes]
+        normalized = [code for code in normalized if self._is_a_share_etf_ts_code(code)]
+        if not normalized:
+            return pd.DataFrame()
+        sh_codes = [code for code in normalized if code.endswith(".SH")]
+        sz_codes = [code for code in normalized if code.endswith(".SZ")]
+        fields = (
+            "ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
+            "ask_price1,ask_volume1,bid_price1,bid_volume1"
+        )
+        frames = []
+        try:
+            if sh_codes:
+                self._rt_k_rate_limiter.wait()
+                frame = self.pro.rt_etf_k(ts_code=",".join(sh_codes), topic="HQ_FND_TICK", fields=fields)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frames.append(frame)
+            if sz_codes:
+                self._rt_k_rate_limiter.wait()
+                frame = self.pro.rt_etf_k(ts_code=",".join(sz_codes), fields=fields)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frames.append(frame)
+        except Exception as exc:
+            self.logger.warning("Tushare rt_etf_k failed for %s: %s", normalized, exc)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        if "trade_time" in result.columns:
+            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount", "num"):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["close"]).sort_values("ts_code")

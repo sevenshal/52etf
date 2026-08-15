@@ -706,6 +706,8 @@ async def _submit_current_targets(
             order_timeout_seconds_sequence=account_policy.get("order_timeout_seconds_sequence"),
         )
         symbols = collect_internal_cross_reference_symbols(plan)
+        # 内部撮合参考 symbol + 所有净额订单目标 symbol（无价跳过的判断依据）
+        symbols = list(dict.fromkeys([*symbols, *(plan.get("symbols") or [])]))
 
     if symbols:
         reference_prices = await _reference_prices_for_plan(account_pk, symbols)

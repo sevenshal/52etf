@@ -1082,7 +1082,11 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', width: 110, render: value => formatNumber(value) },
     { title: '预计金额', dataIndex: 'estimated_amount', width: 120, render: value => formatNumber(value) },
-    { title: '原因', dataIndex: 'reason', width: 130, render: value => <Tag color={value === 'batch_amount_cap' ? 'orange' : 'purple'}>{value === 'batch_amount_cap' ? '单轮金额上限' : '批间隔未到'}</Tag> },
+    { title: '原因', dataIndex: 'reason', width: 130, render: value => {
+      const color = value === 'batch_amount_cap' ? 'orange' : value === 'no_reference_price' ? 'red' : 'purple';
+      const label = value === 'batch_amount_cap' ? '单轮金额上限' : value === 'no_reference_price' ? '未开盘/停牌' : '批间隔未到';
+      return <Tag color={color}>{label}</Tag>;
+    } },
     { title: '说明', dataIndex: 'message' },
   ];
 

@@ -1,0 +1,198 @@
+import asyncio
+from datetime import date
+import unittest
+from unittest import TestCase
+from unittest.mock import patch
+
+import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from src.core.external_trading_database import (
+    ExternalTradingAccount,
+    ExternalTradingBase,
+    ExternalTradingSubAccount,
+    ExternalTradingTargetPosition,
+)
+from src.core.services.external_trading_ledger import (
+    _defer_orders_without_reference_price,
+    build_netted_target_execution_plan,
+)
+from src.core.services.external_trading_valuation import (
+    _fetch_tushare_realtime_quotes,
+    _parse_tushare_realtime_frame,
+)
+from src.core.services.tushare import TushareService
+
+
+TODAY = date(2026, 8, 17)  # 周一交易日
+
+
+class TushareRealtimeFrameParseTest(TestCase):
+    def test_keeps_today_rows_and_drops_stale(self):
+        frame = pd.DataFrame([
+            {"ts_code": "510300.SH", "close": 4.70, "trade_time": "2026-08-17 10:00:00"},
+            {"ts_code": "159941.SZ", "close": 1.70, "trade_time": "2026-08-14 17:00:00"},  # 昨日数据 → 丢弃
+            {"ts_code": "600519.SH", "close": 0.0, "trade_time": "2026-08-17 10:00:00"},   # close 0 → 丢弃
+            {"ts_code": "000001.SZ", "close": 11.0, "trade_time": None},                    # 无 trade_time → 丢弃
+        ])
+        result = _parse_tushare_realtime_frame(frame, today=TODAY)
+        self.assertEqual({"510300.SH"}, set(result.keys()))
+        self.assertEqual(4.7, result["510300.SH"]["price"])
+        self.assertEqual("tushare_rt", result["510300.SH"]["source"])
+
+    def test_empty_frame_returns_empty(self):
+        self.assertEqual({}, _parse_tushare_realtime_frame(pd.DataFrame(), today=TODAY))
+        self.assertEqual({}, _parse_tushare_realtime_frame(None, today=TODAY))
+
+
+class TushareRealtimeQuotesFetchTest(TestCase):
+    def _today_frame(self, rows):
+        return pd.DataFrame(rows)
+
+    def _mock_service(self, rt_k_frame, etf_frame):
+        instance = unittest.mock.MagicMock()
+        instance.get_a_stock_realtime_rt_k_frame.return_value = rt_k_frame
+        instance.get_a_stock_realtime_etf_rt_k_frame.return_value = etf_frame
+        return patch.object(TushareService, "get_instance", return_value=instance)
+
+    def test_routes_stock_to_rt_k_and_etf_to_rt_etf_k(self):
+        rt_k_frame = self._today_frame([
+            {"ts_code": "600519.SH", "close": 1341.0, "trade_time": f"{TODAY} 10:00:00"},
+        ])
+        etf_frame = self._today_frame([
+            {"ts_code": "510300.SH", "close": 4.7, "trade_time": f"{TODAY} 10:00:00"},
+        ])
+        with self._mock_service(rt_k_frame, etf_frame) as mock_get_instance:
+            result = asyncio.run(_fetch_tushare_realtime_quotes(["510300.SH", "600519.SH"], today=TODAY))
+        service = mock_get_instance.return_value
+        service.get_a_stock_realtime_rt_k_frame.assert_called_once_with(["510300.SH", "600519.SH"])
+        service.get_a_stock_realtime_etf_rt_k_frame.assert_called_once_with(["510300.SH", "600519.SH"])
+        self.assertEqual({"510300.SH", "600519.SH"}, set(result.keys()))
+
+    def test_skips_non_a_share_symbols(self):
+        with self._mock_service(pd.DataFrame(), pd.DataFrame()) as mock_get_instance:
+            result = asyncio.run(_fetch_tushare_realtime_quotes(["AAPL.US"]))
+        service = mock_get_instance.return_value
+        service.get_a_stock_realtime_rt_k_frame.assert_not_called()
+        service.get_a_stock_realtime_etf_rt_k_frame.assert_not_called()
+        self.assertEqual({}, result)
+
+    def test_drops_stale_rows_from_both_sources(self):
+        rt_k_frame = self._today_frame([
+            {"ts_code": "600519.SH", "close": 1341.0, "trade_time": "2026-08-14 16:29:43"},  # 昨日
+        ])
+        etf_frame = self._today_frame([
+            {"ts_code": "159941.SZ", "close": 1.7, "trade_time": "2026-08-14 17:00:12"},     # 昨日
+        ])
+        with self._mock_service(rt_k_frame, etf_frame):
+            result = asyncio.run(_fetch_tushare_realtime_quotes(["159941.SZ", "600519.SH"], today=TODAY))
+        self.assertEqual({}, result)
+
+
+class DeferWithoutReferencePriceTest(TestCase):
+    def _order(self, symbol):
+        return {"symbol": symbol, "side": "BUY", "quantity": 1000, "execution_policy": {}}
+
+    def test_defers_missing_and_keeps_priced(self):
+        orders = [self._order("159941.SZ"), self._order("510300.SH")]
+        kept, deferred = _defer_orders_without_reference_price(
+            orders,
+            reference_prices={"510300.SH": 4.7},
+        )
+        self.assertEqual(1, len(kept))
+        self.assertEqual("510300.SH", kept[0]["symbol"])
+        self.assertEqual(1, len(deferred))
+        self.assertEqual("159941.SZ", deferred[0]["symbol"])
+        self.assertEqual("no_reference_price", deferred[0]["reason"])
+
+    def test_defers_all_when_reference_prices_empty(self):
+        # 函数契约：无价即 defer；plan 集成层用 if reference_prices 保证
+        # 整体查询失败（空 dict）时不会走到这里（见 plan 集成测试）
+        orders = [self._order("159941.SZ")]
+        kept, deferred = _defer_orders_without_reference_price(orders, reference_prices={})
+        self.assertEqual(0, len(kept))
+        self.assertEqual(1, len(deferred))
+        self.assertEqual("no_reference_price", deferred[0]["reason"])
+
+
+class PlanDeferWithoutReferencePriceTest(TestCase):
+    def _db_session(self):
+        engine = create_engine("sqlite:///:memory:")
+        ExternalTradingBase.metadata.create_all(engine)
+        return sessionmaker(bind=engine)()
+
+    def _add_account(self, db):
+        db.add(ExternalTradingAccount(
+            id=1, account_id="acct", name="A", identifier="b", market_type="A_STOCK",
+            enabled=True, executor_lot_size=100, commission_rate_pct=0.025, min_commission=5.0,
+        ))
+
+    def _add_sub(self, db):
+        db.add(ExternalTradingSubAccount(
+            id=11, account_id="acct", external_trading_account_id=1, name="G",
+            enabled=True, executor_lot_size=100,
+        ))
+
+    def _add_target(self, db, symbol, target_quantity):
+        db.add(ExternalTradingTargetPosition(
+            account_id="acct", external_trading_account_id=1, sub_account_id=11,
+            symbol=symbol, target_quantity=target_quantity, reference_price=10.0,
+            reference_price_source="test", status="ACTIVE",
+        ))
+
+    def test_plan_defers_symbol_without_reference_price(self):
+        db = self._db_session()
+        self._add_account(db)
+        self._add_sub(db)
+        self._add_target(db, "159941.SZ", 10000)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"159941.SZ": 0.0},  # 查询链路成功但该标的无价（未开盘）
+        )
+
+        self.assertEqual([], plan["external_orders"])
+        self.assertEqual(1, len(plan["deferred"]))
+        self.assertEqual("no_reference_price", plan["deferred"][0]["reason"])
+
+    def test_plan_does_not_defer_when_reference_prices_empty(self):
+        db = self._db_session()
+        self._add_account(db)
+        self._add_sub(db)
+        self._add_target(db, "159941.SZ", 10000)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={},  # 整体查询失败（异常路径）→ 保持现状照常提交
+        )
+
+        self.assertEqual(1, len(plan["external_orders"]))
+        self.assertEqual([], plan["deferred"])
+
+    def test_plan_keeps_priced_symbol_and_defers_unpriced(self):
+        db = self._db_session()
+        self._add_account(db)
+        self._add_sub(db)
+        self._add_target(db, "510300.SH", 10000)
+        self._add_target(db, "159941.SZ", 10000)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"510300.SH": 4.7},
+        )
+
+        orders = {o["symbol"]: o for o in plan["external_orders"]}
+        self.assertEqual({"510300.SH"}, set(orders.keys()))
+        self.assertEqual(1, len(plan["deferred"]))
+        self.assertEqual("159941.SZ", plan["deferred"][0]["symbol"])
+        self.assertEqual("no_reference_price", plan["deferred"][0]["reason"])
