@@ -499,10 +499,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
     {
       title: '跷跷板候补',
       dataIndex: 'sub_symbol',
-      width: 240,
+      width: 260,
       ellipsis: true,
       render: (value, record) => (value
-        ? `${value} 恐慌≤${record.sub_buy_threshold}/量比≥${record.sub_volume_ratio_threshold}`
+        ? `${value} 恐慌≤${record.sub_buy_threshold}/量比≥${record.sub_volume_ratio_threshold}${record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}`
         : '-'),
     },
     {

@@ -725,10 +725,14 @@ class AStockFearStrategyTrader:
                 and sub_volume_ratio >= float(getattr(config, "sub_volume_ratio_threshold", 1.6) or 1.6)
             )
             sub_greedy = sub_symbol is not None and sub_fear_score is not None and sub_fear_score >= float(config.greed_threshold)
+            # 对称双轮动：换仓阈值非空时启用（恐贪超过阈值且另一标的有信号则换仓；空仓任一触发都买更恐慌的）
+            use_swap = getattr(config, "swap_threshold", None) is not None
+            swap_value = float(config.swap_threshold) if use_swap else None
             can_trade = state.cooldown_remaining_days <= 0
             position_ratio_after = position_ratio_before
             order_action = None
             order_symbol = None
+            order_target_symbol = None
             order_quantity = 0
             order_message_template = None
             trade_action = None
@@ -742,7 +746,7 @@ class AStockFearStrategyTrader:
                 log_action = "SKIP"
                 status = "SKIPPED"
 
-            # ---- 状态机：持有主/持有候补/空仓 ----
+            # ---- 状态机：持有主/持有候补/空仓（use_swap=对称双轮动，否则主辅跷跷板） ----
             if log_action != "SKIP" and can_trade and shares > 0 and holding:
                 if holding == "main" and main_greedy:
                     drawdown_from_peak = 0.0
@@ -786,8 +790,56 @@ class AStockFearStrategyTrader:
                             f"处于止盈区，等待触发。回撤 {drawdown_from_peak:.2f}%"
                             if drawdown_reached else f"处于止盈区，未触发（回撤 {drawdown_from_peak:.2f}% < {config.trailing_stop_pct:.2f}%）"
                         )
+                elif holding == "main" and use_swap and not order_action:
+                    # 对称双轮动：主标的恐贪>换仓阈值 且 候补有买入信号 → 换到候补
+                    if fear_score > swap_value and sub_signal and sub_price > 0:
+                        sell_quantity = int(available_shares)
+                        sell_amount = sell_quantity * current_price
+                        trade_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                        if sell_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                            order_action = "SELL_AND_BUY"
+                            order_symbol = holding_symbol
+                            order_target_symbol = sub_symbol
+                            order_quantity = sell_quantity
+                            order_message_template = (
+                                f"{fear_label} {fear_score:.2f} 恐贪>{swap_value:g} 且 {sub_fear_label} 出买入信号，"
+                                f"卖出 {holding_symbol} 换到候补 {sub_symbol}，订单ID={{order_id}}"
+                            )
+                        else:
+                            trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
                 elif holding == "sub":
-                    if main_signal:
+                    if use_swap:
+                        # 对称双轮动：候补贪恐>=卖出阈值 → 卖；候补恐贪>换仓阈值 且 主有信号 → 换主
+                        if sub_greedy:
+                            order_action = "SELL"
+                            order_symbol = holding_symbol
+                            order_quantity = int(available_shares)
+                            order_message_template = (
+                                f"{sub_fear_label} {sub_fear_score:.2f}（{signal_date}）候补到达贪恐阈值即卖，"
+                                f"保持空仓，订单ID={{order_id}}"
+                            )
+                            position_ratio_after = 0.0
+                        elif (
+                            sub_fear_score is not None
+                            and sub_fear_score > swap_value
+                            and main_signal
+                            and main_price > 0
+                        ):
+                            sell_quantity = int(available_shares)
+                            sell_amount = sell_quantity * current_price
+                            trade_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                            if sell_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                                order_action = "SELL_AND_BUY"
+                                order_symbol = holding_symbol
+                                order_target_symbol = symbol
+                                order_quantity = sell_quantity
+                                order_message_template = (
+                                    f"{sub_fear_label} {sub_fear_score:.2f} 恐贪>{swap_value:g} 且 {fear_label} 出买入信号，"
+                                    f"卖出候补 {holding_symbol} 换回主标的，订单ID={{order_id}}"
+                                )
+                            else:
+                                trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
+                    elif main_signal:
                         # 主标的出信号：卖出候补换回主标的（先卖后买，同日完成）
                         min_hold_shares = 0
                         sell_quantity = int(available_shares)
@@ -796,6 +848,7 @@ class AStockFearStrategyTrader:
                         if sell_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
                             order_action = "SELL_AND_BUY"
                             order_symbol = holding_symbol
+                            order_target_symbol = symbol
                             order_quantity = sell_quantity
                             order_message_template = (
                                 f"主标的出信号（{fear_label} {fear_score:.2f} + 量比 {volume_ratio:.2f}），"
@@ -833,8 +886,28 @@ class AStockFearStrategyTrader:
                         else:
                             trade_message = "候补处于止盈区，等待触发"
             elif log_action != "SKIP" and can_trade and not order_action:
-                # 空仓：主标的优先，其次候补
-                if main_signal:
+                # 空仓：对称双轮动=谁触发买谁（都触发买更恐慌的）；主辅跷跷板=主标的优先
+                if use_swap and main_signal and sub_signal and sub_price > 0:
+                    # 两个都触发：买更恐慌的
+                    target_symbol = symbol if fear_score <= sub_fear_score else sub_symbol
+                    target_price = main_price if target_symbol == symbol else sub_price
+                    buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
+                    trade_quantity = min(floor(buy_amount / target_price), floor(available_cash / target_price))
+                    actual_buy_amount = trade_quantity * target_price
+                    trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                    if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                        order_action = "BUY"
+                        order_symbol = target_symbol
+                        order_quantity = trade_quantity
+                        order_message_template = (
+                            f"双标的都触发，{'主标的' if target_symbol == symbol else f'候补 {sub_symbol}'} 恐贪 "
+                            f"{fear_score if target_symbol == symbol else sub_fear_score:.2f} 更恐慌，"
+                            f"买入 {target_symbol}，订单ID={{order_id}}"
+                        )
+                        position_ratio_after = (trade_quantity * target_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
+                    else:
+                        trade_message = "双标的买入信号成立，但可买数量过小或未达到调仓阈值"
+                elif main_signal:
                     buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
                     trade_quantity = min(floor(buy_amount / main_price), floor(available_cash / main_price))
                     actual_buy_amount = trade_quantity * main_price
@@ -886,23 +959,25 @@ class AStockFearStrategyTrader:
 
             if order_action:
                 if order_action == "SELL_AND_BUY":
-                    # 卖出候补 → 买入主标的（A股卖出资金 T+0 可用）
+                    # 卖出当前持仓 → 买入目标标的（A股卖出资金 T+0 可用）
                     sell_id = await self._sync_target_order(
                         config, snapshot, "SELL", order_quantity, current_price,
                         trigger_source=trigger_source, symbol=order_symbol,
                     )
+                    target_symbol = order_target_symbol or symbol
+                    target_price = main_price if target_symbol == symbol else sub_price
                     buy_cash = available_cash + order_quantity * current_price
                     buy_quantity = 0
                     buy_id = None
-                    if main_price > 0:
+                    if target_price > 0:
                         buy_quantity = min(
-                            floor(portfolio_value * (float(config.buy_position_pct) / 100.0) / main_price),
-                            floor(buy_cash / main_price),
+                            floor(portfolio_value * (float(config.buy_position_pct) / 100.0) / target_price),
+                            floor(buy_cash / target_price),
                         )
                         if buy_quantity >= 1:
                             buy_id = await self._sync_target_order(
-                                config, snapshot, "BUY", buy_quantity, main_price,
-                                trigger_source=trigger_source, symbol=symbol,
+                                config, snapshot, "BUY", buy_quantity, target_price,
+                                trigger_source=trigger_source, symbol=target_symbol,
                             )
                     order_id = f"SELL={sell_id}; BUY={buy_id or '0'}"
                     trade_action = "SELL"

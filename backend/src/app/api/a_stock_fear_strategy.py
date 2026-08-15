@@ -51,6 +51,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub_volume_signal_symbol: Optional[str] = None
     sub_buy_threshold: float = 25.0
     sub_volume_ratio_threshold: float = 1.6
+    swap_threshold: Optional[float] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
     run_time: str = "09:30"
@@ -125,6 +126,14 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub_volume_ratio_threshold(cls, value):
         if value <= 0 or value > 20:
             raise ValueError("候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("swap_threshold")
+    def validate_swap_threshold(cls, value):
+        if value is None:
+            return None
+        if value < 0 or value > 100:
+            raise ValueError("换仓阈值必须在 0 到 100 之间")
         return value
 
     @validator("run_time")
@@ -269,6 +278,7 @@ CONFIG_FIELDS = [
     "sub_volume_signal_symbol",
     "sub_buy_threshold",
     "sub_volume_ratio_threshold",
+    "swap_threshold",
     "external_trading_account_id",
     "live_sub_account_id",
     "run_time",

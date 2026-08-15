@@ -186,6 +186,17 @@ class SOXLFearStrategyParams(BaseModel):
     sub_volume_signal_symbol: Optional[str] = None
     sub_buy_threshold: float = 25.0
     sub_volume_ratio_threshold: float = 1.6
+    # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动——
+    # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
+    swap_threshold: Optional[float] = None
+
+    @validator("swap_threshold")
+    def validate_swap_threshold(cls, value):
+        if value is None:
+            return None
+        if value < 0 or value > 100:
+            raise ValueError("换仓阈值必须在 0 到 100 之间")
+        return value
 
     @validator("sub_buy_threshold")
     def validate_sub_buy_threshold(cls, value):
@@ -290,6 +301,16 @@ class SOXLFearSearchParams(BaseModel):
     sub_volume_signal_symbol: Optional[str] = None
     sub_buy_threshold: float = 25.0
     sub_volume_ratio_threshold: float = 1.6
+    # 换仓阈值（固定参数，不参与组合搜索）：None=主辅跷跷板；有值=对称双轮动
+    swap_threshold: Optional[float] = None
+
+    @validator("swap_threshold")
+    def validate_search_swap_threshold(cls, value):
+        if value is None:
+            return None
+        if value < 0 or value > 100:
+            raise ValueError("换仓阈值必须在 0 到 100 之间")
+        return value
 
     @validator("sub_symbol")
     def validate_sub_symbol(cls, value):
@@ -1666,8 +1687,97 @@ def _run_seesaw_backtest(
         trade_signal_vr = None
         trade_signal_label = None
 
+        use_swap = params.swap_threshold is not None
+        swap_value = float(params.swap_threshold) if use_swap else None
+
+        def _sell_main():
+            """持有主标的贪恐卖出（trailing 支持）。"""
+            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            if float(params.trailing_stop_pct) <= 0:
+                action = do_sell(day_text)
+                reason = f"{main_fear_label} {main_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
+            else:
+                if main_greedy:
+                    greed_peak_price = max(float(greed_peak_price or main_info["high"]), main_info["high"])
+                close_here = main_info["close"]
+                drawdown = (float(greed_peak_price) - close_here) / float(greed_peak_price) * 100 if greed_peak_price else 0.0
+                if drawdown >= float(params.trailing_stop_pct):
+                    action = do_sell(day_text)
+                    reason = f"{main_fear_label} {main_fear:.2f} 回撤 {drawdown:.2f}% 触发移动止盈"
+            trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+
+        def _sell_sub():
+            """持有候补的贪恐卖出。"""
+            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            action = do_sell(day_text)
+            reason = f"{sub_fear_label} {sub_fear:.2f} 候补到达贪恐阈值即卖，保持空仓"
+            trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
+
+        def _swap_from_main():
+            """换仓：卖主标的 → 买候补（对称双轮动）。"""
+            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            sell_action = do_sell(day_text)
+            if sell_action:
+                trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
+                reason = f"{main_fear_label} {main_fear:.2f} 恐贪>{swap_value:g} 且 {sub_fear_label} 出买入信号，卖出 {main_symbol} 换到候补"
+            buy_action = do_buy(day_text, "sub")
+            if sell_action:
+                trades.append({
+                    "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
+                    "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
+                    "profit": sell_action.get("profit"), "signal_date": day_text,
+                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
+                })
+            if buy_action:
+                trades.append({
+                    "date": buy_action["date"], "action": "BUY", "symbol": buy_action.get("symbol"),
+                    "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
+                    "signal_date": day_text,
+                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
+                    "reason": f"换仓买入候补 {sub_symbol}",
+                })
+            action = sell_action or buy_action
+
+        def _swap_from_sub():
+            """换仓：卖候补 → 买主标的（跷跷板换回 / 对称双轮动）。"""
+            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            sell_action = do_sell(day_text)
+            if sell_action:
+                trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+                if use_swap:
+                    reason = f"{sub_fear_label} {sub_fear:.2f} 恐贪>{swap_value:g} 且 {main_fear_label} 出买入信号，卖出候补换回主标的"
+                else:
+                    reason = f"主标的出信号（{main_fear_label} {main_fear:.2f} + 量比 {main_vr:.2f}），卖出候补 {sub_symbol} 换回"
+            buy_action = do_buy(day_text, "main")
+            if sell_action:
+                trades.append({
+                    "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
+                    "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
+                    "profit": sell_action.get("profit"), "signal_date": day_text,
+                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
+                })
+            if buy_action:
+                trades.append({
+                    "date": buy_action["date"], "action": "BUY", "symbol": buy_action.get("symbol"),
+                    "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
+                    "signal_date": day_text,
+                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
+                    "reason": f"买入主标的 {main_symbol}",
+                })
+            action = sell_action or buy_action
+
         if position_symbol is None and can_trade:
-            if main_signal:
+            if use_swap and main_signal and sub_signal:
+                # 对称双轮动：两个都触发 → 买更恐慌的
+                target = "main" if main_fear <= sub_fear else "sub"
+                action = do_buy(day_text, target)
+                if target == "main":
+                    reason = f"双标的都触发，{main_fear_label} {main_fear:.2f} 更恐慌，买入主标的"
+                    trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+                else:
+                    reason = f"双标的都触发，{sub_fear_label} {sub_fear:.2f} 更恐慌，买入候补 {sub_symbol}"
+                    trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
+            elif main_signal:
                 action = do_buy(day_text, "main")
                 reason = f"{main_fear_label} {main_fear:.2f} 极恐放量买入主标的"
                 trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
@@ -1677,46 +1787,16 @@ def _run_seesaw_backtest(
                 trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
         elif position_symbol == "main" and can_trade:
             if shares > 0 and main_greedy:
-                if float(params.trailing_stop_pct) <= 0:
-                    action = do_sell(day_text)
-                    reason = f"{main_fear_label} {main_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
-                else:
-                    if shares > 0:
-                        if main_greedy:
-                            greed_peak_price = max(float(greed_peak_price or main_info["high"]), main_info["high"])
-                        close_here = main_info["close"]
-                        drawdown = (float(greed_peak_price) - close_here) / float(greed_peak_price) * 100 if greed_peak_price else 0.0
-                        if drawdown >= float(params.trailing_stop_pct):
-                            action = do_sell(day_text)
-                            reason = f"{main_fear_label} {main_fear:.2f} 回撤 {drawdown:.2f}% 触发移动止盈"
-                trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+                _sell_main()
+            elif use_swap and shares > 0 and np.isfinite(main_fear) and main_fear > swap_value and sub_signal:
+                _swap_from_main()
         elif position_symbol == "sub" and can_trade:
-            if main_signal:
-                sell_action = do_sell(day_text)
-                if sell_action:
-                    trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
-                    reason = f"主标的出信号（{main_fear_label} {main_fear:.2f} + 量比 {main_vr:.2f}），卖出候补 {sub_symbol} 换回"
-                buy_action = do_buy(day_text, "main")
-                if sell_action:
-                    trades.append({
-                        "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
-                        "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
-                        "profit": sell_action.get("profit"), "signal_date": day_text,
-                        "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
-                    })
-                if buy_action:
-                    trades.append({
-                        "date": buy_action["date"], "action": "BUY", "symbol": buy_action.get("symbol"),
-                        "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
-                        "signal_date": day_text,
-                        "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
-                        "reason": f"主标的出信号，买入 {main_symbol}",
-                    })
-                action = sell_action or buy_action
-            elif sub_greedy:
-                action = do_sell(day_text)
-                reason = f"{sub_fear_label} {sub_fear:.2f} 候补到达贪恐阈值即卖，保持空仓"
-                trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
+            if sub_greedy:
+                _sell_sub()
+            elif use_swap and np.isfinite(sub_fear) and sub_fear > swap_value and main_signal:
+                _swap_from_sub()
+            elif main_signal:
+                _swap_from_sub()
 
         if action is not None and action.get("action"):
             already_logged = any(
@@ -1940,6 +2020,7 @@ def _evaluate_search_candidates(
                         sub_volume_signal_symbol=payload.sub_volume_signal_symbol,
                         sub_buy_threshold=payload.sub_buy_threshold,
                         sub_volume_ratio_threshold=payload.sub_volume_ratio_threshold,
+                        swap_threshold=payload.swap_threshold,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -1974,6 +2055,7 @@ def _evaluate_search_candidates(
                 payload.sub_volume_signal_symbol,
                 payload.sub_buy_threshold,
                 payload.sub_volume_ratio_threshold,
+                payload.swap_threshold,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -2027,6 +2109,7 @@ def _evaluate_search_batch(
     sub_volume_signal_symbol: Optional[str] = None,
     sub_buy_threshold: Optional[float] = None,
     sub_volume_ratio_threshold: Optional[float] = None,
+    swap_threshold: Optional[float] = None,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2069,6 +2152,7 @@ def _evaluate_search_batch(
                 sub_volume_signal_symbol=sub_volume_signal_symbol,
                 sub_buy_threshold=float(sub_buy_threshold if sub_buy_threshold is not None else 25.0),
                 sub_volume_ratio_threshold=float(sub_volume_ratio_threshold if sub_volume_ratio_threshold is not None else 1.6),
+                swap_threshold=swap_threshold,
             )
         except ValidationError as exc:
             skipped_combinations += 1

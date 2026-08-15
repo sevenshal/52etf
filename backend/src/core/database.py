@@ -894,6 +894,8 @@ class AStockFearStrategyConfig(Base):
     sub_volume_signal_symbol = Column(String, nullable=True)
     sub_buy_threshold = Column(Float, nullable=False, default=25.0)
     sub_volume_ratio_threshold = Column(Float, nullable=False, default=1.6)
+    # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
+    swap_threshold = Column(Float, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=30.0)
     greed_threshold = Column(Float, nullable=False, default=70.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
@@ -1867,6 +1869,7 @@ def ensure_a_stock_fear_strategy_schema():
             ("sub_volume_signal_symbol", "VARCHAR(32)"),
             ("sub_buy_threshold", "FLOAT DEFAULT 25.0"),
             ("sub_volume_ratio_threshold", "FLOAT DEFAULT 1.6"),
+            ("swap_threshold", "FLOAT"),
         ]
         for column_name, column_type in additions:
             if column_name not in columns:

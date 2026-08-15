@@ -235,6 +235,7 @@ const SoxlFearBacktest = () => {
       sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
       sub_buy_threshold: values.sub_buy_threshold ?? 25,
       sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
+      swap_threshold: values.swap_threshold ?? null,
     };
   };
 
@@ -257,6 +258,7 @@ const SoxlFearBacktest = () => {
     sub_volume_signal_symbol: record.sub_volume_signal_symbol ?? undefined,
     sub_buy_threshold: record.sub_buy_threshold ?? 25,
     sub_volume_ratio_threshold: record.sub_volume_ratio_threshold ?? 1.6,
+    swap_threshold: record.swap_threshold ?? null,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
 
@@ -448,9 +450,10 @@ const SoxlFearBacktest = () => {
     {
       title: '跷跷板候补',
       dataIndex: 'sub_symbol',
-      width: 220,
+      width: 260,
+      ellipsis: true,
       render: (value, record) => (value
-        ? <Tag color="purple">{value} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}</Tag>
+        ? <Tag color="purple">{value} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}{record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}</Tag>
         : '-'),
     },
     { title: '止盈减仓%', dataIndex: 'sell_position_pct', width: 100 },
@@ -1002,6 +1005,7 @@ const SoxlFearBacktest = () => {
             sub_volume_signal_symbol: undefined,
             sub_buy_threshold: 25,
             sub_volume_ratio_threshold: 1.6,
+            swap_threshold: null,
           }}
         >
           <Row gutter={16}>
@@ -1138,8 +1142,8 @@ const SoxlFearBacktest = () => {
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="跷跷板候补（可选）"
-                description="主标的空仓时，候补标的若恐慌≤候补恐慌阈值且量比≥候补量比阈值则买入候补；主标的出信号立即卖出候补换回；候补恐贪≥贪恐卖出阈值则卖出保持空仓。留空候补标的 = 单标的模式。"
+                message="跷跷板候补 / 对称双轮动（可选）"
+                description="留空候补标的 = 单标的模式。填写候补标的：若「换仓阈值」留空 = 主辅跷跷板（主标的优先，空仓时才买候补，主标的出信号换回）；若填了换仓阈值 = 对称双轮动（任一标的极恐放量都买、都触发买更恐慌的；持有 X 时若 X 恐贪超过换仓阈值且另一标的有买入信号则换仓；恐贪≥贪恐卖出阈值则卖出）。"
               />
             </Col>
             <Col xs={24} md={4}>
@@ -1165,6 +1169,11 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={4}>
               <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
                 <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="swap_threshold" label="换仓阈值(留空=主辅跷跷板)">
+                <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
@@ -1283,6 +1292,7 @@ const SoxlFearBacktest = () => {
                   <Descriptions.Item label="候补恐贪来源">{getFearSourceLabel(detailedResult.params.sub_fear_source)}</Descriptions.Item>
                   <Descriptions.Item label="候补恐慌阈值">{detailedResult.params.sub_buy_threshold}</Descriptions.Item>
                   <Descriptions.Item label="候补量比阈值">{detailedResult.params.sub_volume_ratio_threshold}</Descriptions.Item>
+                  <Descriptions.Item label="换仓阈值">{detailedResult.params.swap_threshold ?? '关闭（主辅跷跷板）'}</Descriptions.Item>
                 </>
               )}
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
