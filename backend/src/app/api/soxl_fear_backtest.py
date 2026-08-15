@@ -180,6 +180,24 @@ class SOXLFearStrategyParams(BaseModel):
     rebalance_threshold_pct: float = 5.0
     # True = 信号日收盘决策，次日开盘成交；False = 信号日收盘价成交（默认，保持旧行为）
     execute_next_open: bool = False
+    # 滑点：-1 = 最悲观（买入按当日最高价、卖出按当日最低价）；>=0 按成交价滑点%（买入×(1+s/100)，卖出×(1-s/100)）
+    slippage_pct: float = 0.0
+    # 印花税%（卖出收取，按卖出金额）
+    stamp_duty_pct: float = 0.0
+
+    @validator("slippage_pct")
+    def validate_slippage_pct(cls, value):
+        if value == -1.0:
+            return value
+        if value < 0 or value > 10:
+            raise ValueError("滑点必须为 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
+        return value
+
+    @validator("stamp_duty_pct")
+    def validate_stamp_duty_pct(cls, value):
+        if value < 0 or value > 10:
+            raise ValueError("印花税必须在 0 到 10 之间")
+        return value
     # 跷跷板候补标的（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号立即换回。
     sub_symbol: Optional[str] = None
     sub_fear_source: str = "cnn"
@@ -1297,6 +1315,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         close_price = float(close_prices[index])
         high_price = float(decision_high_prices[index])
         execution_price = float(execution_prices[index])
+        # 成交价：滑点<0 悲观（买=当日最高 卖=当日最低）；>=0 按成交价滑点%
+        if float(params.slippage_pct) < 0:
+            buy_fill_price = float(high_prices[index]) if np.isfinite(high_prices[index]) else execution_price
+            sell_fill_price = float(low_prices[index]) if np.isfinite(low_prices[index]) else execution_price
+        else:
+            slip_rate = float(params.slippage_pct) / 100.0
+            buy_fill_price = execution_price * (1 + slip_rate)
+            sell_fill_price = execution_price * (1 - slip_rate)
         signal_date = decision_signal_dates[index]
         signal_date_text = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date) if signal_date is not None else None
         fear_date = decision_fear_dates[index]
@@ -1348,6 +1374,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 trailing_reason = f"回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
             sell_price_guard_passed = (not params.sell_price_above_avg_cost) or decision_price > float(avg_cost)
             if drawdown_reached and sell_price_guard_passed:
+                execution_price = sell_fill_price
                 portfolio_value = cash + shares * execution_price
                 current_position_pct = (shares * execution_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
                 min_hold_shares = (
@@ -1372,11 +1399,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
                 if current_position_pct > params.min_position_pct_after_take_profit and sell_shares >= 1:
                     sell_amount = sell_shares * execution_price
+                    stamp_fee = sell_amount * (float(params.stamp_duty_pct) / 100.0)
                     cost_amount = sell_shares * avg_cost
-                    profit = sell_amount - cost_amount
+                    profit = sell_amount - stamp_fee - cost_amount
                     profit_pct = ((execution_price / avg_cost) - 1) * 100 if avg_cost > 0 else 0.0
 
-                    cash += sell_amount
+                    cash += sell_amount - stamp_fee
                     shares -= sell_shares
                     holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
@@ -1417,6 +1445,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "avg_cost_after": avg_cost,
                         "profit": profit,
                         "profit_pct": profit_pct,
+                        "stamp_duty": stamp_fee,
                         "reason": (
                             f"{fear_source_label} {fear_score:.2f} 进入止盈区后{trailing_reason}"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
@@ -1429,6 +1458,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     })
 
         if not action_taken and is_fear and buy_volume_signal_ok and can_trade:
+            execution_price = buy_fill_price
             portfolio_value = cash + shares * execution_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
             if buy_amount > 0:
@@ -1688,11 +1718,22 @@ def _run_seesaw_backtest(
         info = holder["by_date"].get(day_text)
         return float(info["exec"]) if info else 0.0
 
+    def fill_price(day_text: str, which: str, side: str) -> float:
+        """成交价：滑点<0 悲观（买=当日最高 卖=当日最低）；>=0 按成交价滑点%。"""
+        base = current_exec(day_text, which)
+        info = _holder(which)["by_date"].get(day_text) if which else None
+        if float(params.slippage_pct) < 0:
+            if info is None or base <= 0:
+                return base
+            return float(info["high"]) if side == "buy" else float(info["low"])
+        slip = float(params.slippage_pct) / 100.0
+        return base * (1 + slip) if side == "buy" else base * (1 - slip)
+
     def do_sell(day_text: str) -> Optional[Dict]:
         nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count
         which = position_symbol
         symbol = _holder_symbol(which) if which else ""
-        exec_price = current_exec(day_text, which) if which else 0.0
+        exec_price = fill_price(day_text, which, "sell") if which else 0.0
         if exec_price <= 0 or shares <= 0:
             return None
         sell_qty = shares
@@ -1706,11 +1747,12 @@ def _run_seesaw_backtest(
         if sell_qty < 1:
             return None
         proceeds = sell_qty * exec_price
+        stamp_fee = proceeds * (float(params.stamp_duty_pct) / 100.0)
         cost_amount = sell_qty * avg_cost
-        cash += proceeds
+        cash += proceeds - stamp_fee
         shares -= sell_qty
         closed_trade_count += 1
-        if proceeds - cost_amount > 0:
+        if proceeds - stamp_fee - cost_amount > 0:
             winning_trade_count += 1
         if shares <= 0:
             position_symbol = None
@@ -1725,13 +1767,14 @@ def _run_seesaw_backtest(
         return {
             "date": day_text, "action": "SELL", "symbol": symbol,
             "quantity": sell_qty, "price": exec_price, "amount": proceeds,
-            "profit": proceeds - cost_amount,
+            "stamp_duty": stamp_fee,
+            "profit": proceeds - stamp_fee - cost_amount,
         }
 
     def do_buy(day_text: str, which: str) -> Optional[Dict]:
         nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining
         symbol = _holder_symbol(which)
-        exec_price = current_exec(day_text, which)
+        exec_price = fill_price(day_text, which, "buy")
         if exec_price <= 0:
             return None
         portfolio_value = cash + shares * exec_price

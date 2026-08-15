@@ -224,6 +224,8 @@ const SoxlFearBacktest = () => {
       objective: values.objective,
       eval_workers: values.eval_workers,
       rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
+      slippage_pct: values.slippage_pct ?? 0,
+      stamp_duty_pct: values.stamp_duty_pct ?? 0,
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
@@ -267,6 +269,8 @@ const SoxlFearBacktest = () => {
     max_take_profit_sells_per_cycle: record.max_take_profit_sells_per_cycle,
     min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
     execute_next_open: record.execute_next_open ?? false,
+    slippage_pct: record.slippage_pct ?? 0,
+    stamp_duty_pct: record.stamp_duty_pct ?? 0,
     sub_symbol: record.sub_symbol ?? undefined,
     sub_fear_source: record.sub_fear_source ?? 'a_stock_000688_sh',
     sub_volume_signal_symbol: record.sub_volume_signal_symbol ?? undefined,
@@ -1065,6 +1069,8 @@ const SoxlFearBacktest = () => {
             objective: 'annualized_return',
             eval_workers: 4,
             fit_rebalance_threshold_pct: 0,
+            slippage_pct: 0,
+            stamp_duty_pct: 0,
             date_range: [dayjs('2023-03-22'), dayjs()],
             buy_threshold_values: '30',
             greed_threshold_values: '70',
@@ -1219,6 +1225,16 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={4}>
               <Form.Item name="fit_rebalance_threshold_pct" label="调仓阈值%">
                 <InputNumber min={0.1} max={100} step={0.1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="slippage_pct" label="滑点%(-1=最悲观)">
+                <InputNumber min={-1} max={10} step={0.1} placeholder="0=无滑点；-1=买最高卖最低" style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="stamp_duty_pct" label="印花税%(卖出收取)">
+                <InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col xs={24} md={24}>
@@ -1422,6 +1438,8 @@ const SoxlFearBacktest = () => {
                 </>
               )}
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
+              <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct === -1 ? '-1（最悲观：买最高卖最低）' : `${detailedResult.params?.slippage_pct ?? 0}%`}</Descriptions.Item>
+              <Descriptions.Item label="印花税%(卖出)">{detailedResult.params?.stamp_duty_pct ?? 0}%</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
               <Descriptions.Item label="成交口径">{detailedResult.meta?.execution_price_label || '信号日收盘价'}</Descriptions.Item>
