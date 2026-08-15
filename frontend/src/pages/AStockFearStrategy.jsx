@@ -47,7 +47,7 @@ const defaultValues = {
   run_time: dayjs('09:30', 'HH:mm'),
   buy_threshold: 30,
   greed_threshold: 70,
-  volume_ratio_threshold: 1.3,
+  volume_ratio_threshold: 1.6,
   buy_position_pct: 100,
   cooldown_days: 0,
   trailing_stop_pct: 0,
@@ -57,20 +57,20 @@ const defaultValues = {
   max_take_profit_sells_per_cycle: 2,
   min_position_pct_after_take_profit: 0,
   rebalance_threshold_pct: 0,
-  // 跷跷板候补（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号换回
-  sub_symbol: undefined,
+  // 推荐配置 = 回测最优三标的轮动：候补1=科创50
+  sub_symbol: '588000.SH',
   sub_fear_source: 'a_stock_000688_sh',
   sub_volume_signal_symbol: undefined,
   sub_buy_threshold: 25,
   sub_volume_ratio_threshold: 1.6,
-  // 第二候补（三标的轮动，可选）
-  sub2_symbol: undefined,
+  // 第二候补=纳指 159941，量比用 QQQ.US，恐贪 qqq_clone
+  sub2_symbol: '159941.SZ',
   sub2_fear_source: 'qqq_clone',
-  sub2_volume_signal_symbol: undefined,
+  sub2_volume_signal_symbol: 'QQQ.US',
   sub2_buy_threshold: 20,
   sub2_volume_ratio_threshold: 1.3,
-  // 换仓阈值：留空=主辅跷跷板；有值=对称双轮动
-  swap_threshold: null,
+  // 换仓阈值：对称轮动 45
+  swap_threshold: 45,
 };
 
 const normalizeConfig = (config) => ({
