@@ -57,10 +57,10 @@ const defaultValues = {
   max_take_profit_sells_per_cycle: 2,
   min_position_pct_after_take_profit: 0,
   rebalance_threshold_pct: 0,
-  // 推荐配置 = 回测最优三标的轮动：候补1=科创50
-  sub_symbol: '588000.SH',
+  // 推荐配置 = 回测最优三标的轮动：候补1=科创50信号→半导体交易（恐贪/量比用科创50，交易半导体512480）
+  sub_symbol: '512480.SH',
   sub_fear_source: 'a_stock_000688_sh',
-  sub_volume_signal_symbol: undefined,
+  sub_volume_signal_symbol: '588000.SH',
   sub_buy_threshold: 25,
   sub_volume_ratio_threshold: 1.6,
   // 第二候补=纳指 159941，量比用 QQQ.US，恐贪 qqq_clone

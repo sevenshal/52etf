@@ -1066,7 +1066,7 @@ const SoxlFearBacktest = () => {
           layout="vertical"
           onFinish={handleSearch}
           initialValues={{
-            // 推荐配置：红利 + 科创50 + 纳指(159941, 量比用 QQQ, 恐贪 qqq_clone) 对称轮动 换仓45
+            // 推荐配置：红利 + 科创50信号→半导体交易 + 纳指(159941, 量比QQQ, 恐贪qqq_clone) 对称轮动 换仓45
             symbol: '510880.SH',
             fear_source_values: ['a_stock_000015_sh'],
             initial_capital: 1000000,
@@ -1090,9 +1090,9 @@ const SoxlFearBacktest = () => {
             max_take_profit_sells_per_cycle_values: '2',
             min_position_pct_after_take_profit_values: '0',
             execute_next_open_values: ['true'],
-            sub_symbol: '588000.SH',
+            sub_symbol: '512480.SH',
             sub_fear_source: 'a_stock_000688_sh',
-            sub_volume_signal_symbol: undefined,
+            sub_volume_signal_symbol: '588000.SH',
             sub_buy_threshold_values: '25',
             sub_volume_ratio_threshold_values: '1.6',
             swap_threshold_values: '45',
