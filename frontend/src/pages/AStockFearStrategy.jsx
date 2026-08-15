@@ -29,6 +29,13 @@ const sellReductionBasisOptions = [
   { label: '按持仓股票', value: 'holdings' },
 ];
 
+// run_time 可能是 dayjs（表单）或字符串（后端），统一格式化，避免把 dayjs 对象直接渲染成 React child
+const formatRunTime = (value) => {
+  if (!value) return '09:30';
+  if (dayjs.isDayjs(value)) return value.format('HH:mm');
+  return String(value);
+};
+
 // 默认参数 = 回测那套：极恐<30 + 20日量比≥1.3 买100%，极贪>70 卖100%，移动止盈=0（贪恐即卖），冷却0
 const defaultValues = {
   enabled: false,
@@ -407,14 +414,18 @@ const AStockFearStrategy = ({ embedded = false }) => {
     }
   };
 
-  const handleDelete = async () => {
-    if (!selectedConfig?.id) {
+  const handleDelete = async (configId = selectedConfig?.id) => {
+    if (!configId) {
       return;
     }
     try {
-      await request.delete(`/api/a-stock-fear-strategy/configs/${selectedConfig.id}`);
+      await request.delete(`/api/a-stock-fear-strategy/configs/${configId}`);
       message.success('策略配置已删除');
-      returnToList();
+      if (selectedConfig?.id === configId) {
+        returnToList();
+      } else {
+        await fetchConfigs();
+      }
     } catch (error) {
       message.error(error.response?.data?.detail || '删除策略配置失败');
     }
@@ -487,7 +498,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
       title: '触发时间',
       dataIndex: 'run_time',
       width: 100,
-      render: (value) => value || '09:30',
+      render: (value) => (value ? dayjs(value).format('HH:mm') : '09:30'),
     },
     {
       title: '账户',
@@ -527,10 +538,31 @@ const AStockFearStrategy = ({ embedded = false }) => {
     {
       title: '操作',
       key: 'action',
-      width: 160,
+      width: 200,
       fixed: 'right',
       render: (_, record) => (
         <Space>
+          <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              openConfig(record, 'config');
+            }}
+          >
+            编辑
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            danger
+            onClick={(event) => {
+              event.stopPropagation();
+              handleDelete(record.id);
+            }}
+          >
+            删除
+          </Button>
           <Button
             type="link"
             size="small"
@@ -865,7 +897,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                 <Descriptions.Item label="标的">{selectedConfig.symbol}</Descriptions.Item>
                 <Descriptions.Item label="恐贪来源">{getFearSourceLabel(selectedConfig.fear_source)}</Descriptions.Item>
                 <Descriptions.Item label="量比来源">{selectedConfig.volume_signal_symbol || '标的自身'}</Descriptions.Item>
-                <Descriptions.Item label="触发时间">{selectedConfig.run_time || '09:30'} (Asia/Shanghai)</Descriptions.Item>
+                <Descriptions.Item label="触发时间">{formatRunTime(selectedConfig.run_time)} (Asia/Shanghai)</Descriptions.Item>
                 <Descriptions.Item label="信号日">前一交易日恐贪 + 量比，触发时开盘成交</Descriptions.Item>
                 <Descriptions.Item label="移动止盈">
                   {Number(selectedConfig.trailing_stop_pct) === 0 ? '0 = 到达贪恐阈值即卖' : `${selectedConfig.trailing_stop_pct}% 回撤触发`}
