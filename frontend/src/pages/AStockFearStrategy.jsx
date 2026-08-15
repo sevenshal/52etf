@@ -50,6 +50,12 @@ const defaultValues = {
   max_take_profit_sells_per_cycle: 2,
   min_position_pct_after_take_profit: 0,
   rebalance_threshold_pct: 0,
+  // 跷跷板候补（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号换回
+  sub_symbol: undefined,
+  sub_fear_source: 'a_stock_000688_sh',
+  sub_volume_signal_symbol: undefined,
+  sub_buy_threshold: 25,
+  sub_volume_ratio_threshold: 1.6,
 };
 
 const normalizeConfig = (config) => ({
@@ -59,6 +65,11 @@ const normalizeConfig = (config) => ({
   volume_signal_symbol: config?.volume_signal_symbol ?? undefined,
   external_trading_account_id: config?.external_trading_account_id ?? undefined,
   live_sub_account_id: config?.live_sub_account_id ?? undefined,
+  sub_symbol: config?.sub_symbol ?? undefined,
+  sub_fear_source: config?.sub_fear_source ?? 'a_stock_000688_sh',
+  sub_volume_signal_symbol: config?.sub_volume_signal_symbol ?? undefined,
+  sub_buy_threshold: config?.sub_buy_threshold ?? 25,
+  sub_volume_ratio_threshold: config?.sub_volume_ratio_threshold ?? 1.6,
 });
 
 const normalizeStateFormValues = (state) => ({
@@ -320,6 +331,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
     symbol: (values.symbol || '510880.SH').trim().toUpperCase(),
     volume_signal_symbol: values.volume_signal_symbol || undefined,
     run_time: values.run_time ? values.run_time.format('HH:mm') : '09:30',
+    sub_symbol: values.sub_symbol || undefined,
+    sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
+    sub_buy_threshold: values.sub_buy_threshold ?? 25,
+    sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
   });
 
   const handleBacktest = () => {
@@ -362,6 +377,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
           execute_next_open_values: ['true'],
+          sub_symbol: values.sub_symbol || undefined,
+          sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
+          sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
+          sub_buy_threshold: values.sub_buy_threshold ?? 25,
+          sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
         },
       },
     });
@@ -454,6 +474,14 @@ const AStockFearStrategy = ({ embedded = false }) => {
       title: '量比来源',
       dataIndex: 'volume_signal_symbol',
       render: (value) => value || '自身',
+    },
+    {
+      title: '跷跷板候补',
+      dataIndex: 'sub_symbol',
+      width: 210,
+      render: (value, record) => (value
+        ? `${value} 恐慌≤${record.sub_buy_threshold}/量比≥${record.sub_volume_ratio_threshold}`
+        : '-'),
     },
     {
       title: '触发时间',
@@ -713,6 +741,40 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             <InputNumber min={0} max={100} step={0.5} style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
+                        <Col xs={24} md={24}>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message="跷跷板候补（可选）"
+                            description="主标的空仓时，候补标的若恐慌≤候补恐慌阈值且量比≥候补量比阈值则买入候补；主标的出信号立即卖出候补换回；候补恐贪≥贪恐卖出阈值则卖出保持空仓。留空候补标的 = 单标的模式。"
+                          />
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub_symbol" label="候补标的">
+                            <Select allowClear showSearch optionFilterProp="label" placeholder="留空=单标的" options={targetOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub_fear_source" label="候补恐贪来源">
+                            <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub_volume_signal_symbol" label="候补量比来源">
+                            <Select allowClear showSearch optionFilterProp="label" placeholder="默认候补自身" options={targetOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub_buy_threshold" label="候补恐慌阈值(<=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
+                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="enabled" label="启用" valuePropName="checked">
                             <Switch />
@@ -808,6 +870,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
                 <Descriptions.Item label="移动止盈">
                   {Number(selectedConfig.trailing_stop_pct) === 0 ? '0 = 到达贪恐阈值即卖' : `${selectedConfig.trailing_stop_pct}% 回撤触发`}
                 </Descriptions.Item>
+                {selectedConfig.sub_symbol && (
+                  <>
+                    <Descriptions.Item label="跷跷板候补">{selectedConfig.sub_symbol}</Descriptions.Item>
+                    <Descriptions.Item label="候补恐贪来源">{getFearSourceLabel(selectedConfig.sub_fear_source)}</Descriptions.Item>
+                    <Descriptions.Item label="候补买入门槛">恐慌≤{selectedConfig.sub_buy_threshold} 且 量比≥{selectedConfig.sub_volume_ratio_threshold}</Descriptions.Item>
+                  </>
+                )}
               </Descriptions>
             </Card>
           )}

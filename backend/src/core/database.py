@@ -888,6 +888,12 @@ class AStockFearStrategyConfig(Base):
     trading_account_id = Column(String, nullable=True)
     # 每日触发时间（Asia/Shanghai，HH:MM），默认 09:30 开盘
     run_time = Column(String(5), nullable=False, default="09:30")
+    # 跷跷板候补（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号换回
+    sub_symbol = Column(String, nullable=True)
+    sub_fear_source = Column(String, nullable=True)
+    sub_volume_signal_symbol = Column(String, nullable=True)
+    sub_buy_threshold = Column(Float, nullable=False, default=25.0)
+    sub_volume_ratio_threshold = Column(Float, nullable=False, default=1.6)
     buy_threshold = Column(Float, nullable=False, default=30.0)
     greed_threshold = Column(Float, nullable=False, default=70.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
@@ -1846,6 +1852,29 @@ def ensure_soxl_fear_strategy_multi_config_schema():
         """))
 
 ensure_soxl_fear_strategy_multi_config_schema()
+
+
+def ensure_a_stock_fear_strategy_schema():
+    """A股情绪量能策略表结构迁移（幂等）：给 configs 表补跷跷板候补列。"""
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)")).fetchall()
+        }
+        additions = [
+            ("sub_symbol", "VARCHAR(32)"),
+            ("sub_fear_source", "VARCHAR(64)"),
+            ("sub_volume_signal_symbol", "VARCHAR(32)"),
+            ("sub_buy_threshold", "FLOAT DEFAULT 25.0"),
+            ("sub_volume_ratio_threshold", "FLOAT DEFAULT 1.6"),
+        ]
+        for column_name, column_type in additions:
+            if column_name not in columns:
+                conn.execute(text(
+                    f"ALTER TABLE a_stock_fear_strategy_configs ADD COLUMN {column_name} {column_type}"
+                ))
+
+ensure_a_stock_fear_strategy_schema()
 
 def get_db():
     """FastAPI dependency for database session"""

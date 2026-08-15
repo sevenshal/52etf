@@ -7,6 +7,7 @@ from src.app.api.soxl_fear_backtest import (
     SOXLFearStrategyParams,
     _prepare_base_dataframe,
     _run_backtest,
+    _run_seesaw_backtest,
 )
 
 
@@ -394,3 +395,83 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         self.assertEqual(dates[0].isoformat(), buys[0]["signal_date"])
         self.assertAlmostEqual(100.0, buys[0]["execution_price"])
         self.assertEqual("same_day_close", result["execution_price_type"])
+
+    def _seesaw_frames(self):
+        """主标的无信号 + 候补恐慌放量（次开成交）"""
+        dates = pd.bdate_range("2024-01-01", periods=4).date
+
+        def frame(fear, vr, attrs):
+            df = pd.DataFrame({
+                "date": dates, "open": [100.0, 101.0, 102.0, 103.0],
+                "high": [101.0, 102.0, 103.0, 104.0],
+                "low": [99.0, 100.0, 101.0, 102.0],
+                "close": [100.5, 101.5, 102.5, 103.5],
+                "execution_price": [100.0, 101.0, 102.0, 103.0],
+                "volume": [1000.0] * 4, "ma20": [100.0] * 4, "volume_ma20": [100.0] * 4,
+                "volume_ratio": vr, "volume_ma20_excluding_recent_1": [100.0] * 4,
+                "volume_ratio_consecutive_1": vr, "fear_greed": fear,
+                "signal_volume": [100.0] * 4, "signal_date": dates, "fear_date": dates,
+            })
+            for key, value in attrs.items():
+                df.attrs[key] = value
+            return df
+
+        main_df = frame([45.0, 45.0, 45.0, 45.0], [1.0, 1.0, 1.0, 1.0], {"symbol": "510880.SH", "fear_source_label": "上证红利"})
+        sub_df = frame([20.0, 60.0, 60.0, 60.0], [2.0, 1.0, 1.0, 1.0], {"symbol": "588000.SH", "fear_source_label": "科创50"})
+        return main_df, sub_df, dates
+
+    def _seesaw_params(self, **overrides):
+        base = dict(
+            buy_threshold=40.0, greed_threshold=80.0, volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1, buy_position_pct=100.0, cooldown_days=0,
+            trailing_stop_pct=0.0, sell_position_pct=100.0, sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True, max_take_profit_sells_per_cycle=2,
+            min_position_pct_after_take_profit=0.0, rebalance_threshold_pct=0.0,
+            execute_next_open=True,
+            sub_symbol="588000.SH", sub_fear_source="a_stock_000688_sh",
+            sub_buy_threshold=25.0, sub_volume_ratio_threshold=1.5,
+        )
+        base.update(overrides)
+        return SOXLFearStrategyParams(**base)
+
+    def test_seesaw_buys_sub_when_main_flat(self):
+        """跷跷板：主标的无信号、空仓时，候补极恐放量 → 买入候补"""
+        main_df, sub_df, dates = self._seesaw_frames()
+        result = _run_seesaw_backtest(main_df, sub_df, self._seesaw_params(), 10000.0, detailed=True)
+        buys = [item for item in result["trades"] if item["action"] == "BUY"]
+        self.assertEqual(1, len(buys))
+        self.assertEqual("588000.SH", buys[0]["symbol"])
+        # 信号日 day0（候补 fear=20 < 25, 量比 2.0）→ 次日 day1 开盘成交
+        self.assertEqual(dates[1].isoformat(), buys[0]["date"])
+        self.assertAlmostEqual(101.0, buys[0]["price"])
+
+    def test_seesaw_main_signal_switches_back_from_sub(self):
+        """跷跷板：持有候补时主标的出信号 → 卖出候补换回主标的"""
+        main_df, sub_df, dates = self._seesaw_frames()
+        # 主标的 day1 出信号（fear=20 量比=2.0）
+        main_df.loc[1, "fear_greed"] = 20.0
+        main_df.loc[1, "volume_ratio"] = 2.0
+        main_df.loc[1, "volume_ratio_consecutive_1"] = 2.0
+        result = _run_seesaw_backtest(main_df, sub_df, self._seesaw_params(), 10000.0, detailed=True)
+        actions = [(t["date"], t["action"], t["symbol"]) for t in result["trades"]]
+        # day1(信号day0): 候补信号买入候补；day2(信号day1): 主信号 → 卖候补买主
+        self.assertEqual(dates[1].isoformat(), actions[0][0])
+        self.assertEqual("BUY", actions[0][1])
+        self.assertEqual("588000.SH", actions[0][2])
+        self.assertEqual(dates[2].isoformat(), actions[1][0])
+        self.assertEqual("SELL", actions[1][1])
+        self.assertEqual("588000.SH", actions[1][2])
+        self.assertEqual(dates[2].isoformat(), actions[2][0])
+        self.assertEqual("BUY", actions[2][1])
+        self.assertEqual("510880.SH", actions[2][2])
+
+    def test_seesaw_sub_greedy_sells_to_flat(self):
+        """跷跷板：持有候补且候补到达贪恐阈值 → 卖出保持空仓"""
+        main_df, sub_df, dates = self._seesaw_frames()
+        # 候补 day1 贪恐 >= 80 → 信号 day1 → day2 卖出
+        sub_df.loc[1, "fear_greed"] = 90.0
+        result = _run_seesaw_backtest(main_df, sub_df, self._seesaw_params(), 10000.0, detailed=True)
+        sells = [item for item in result["trades"] if item["action"] == "SELL"]
+        self.assertEqual(1, len(sells))
+        self.assertEqual("588000.SH", sells[0]["symbol"])
+        self.assertEqual(dates[2].isoformat(), sells[0]["date"])

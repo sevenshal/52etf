@@ -229,6 +229,12 @@ const SoxlFearBacktest = () => {
       max_take_profit_sells_per_cycle_values: parseNumberList(values.max_take_profit_sells_per_cycle_values, true),
       min_position_pct_after_take_profit_values: parseNumberList(values.min_position_pct_after_take_profit_values),
       execute_next_open_values: executeNextOpenValues.length ? executeNextOpenValues : [false, true],
+      // 跷跷板候补（固定参数，不参与搜索组合）
+      sub_symbol: values.sub_symbol || undefined,
+      sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
+      sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
+      sub_buy_threshold: values.sub_buy_threshold ?? 25,
+      sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
     };
   };
 
@@ -246,6 +252,11 @@ const SoxlFearBacktest = () => {
     max_take_profit_sells_per_cycle: record.max_take_profit_sells_per_cycle,
     min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
     execute_next_open: record.execute_next_open ?? false,
+    sub_symbol: record.sub_symbol ?? undefined,
+    sub_fear_source: record.sub_fear_source ?? 'a_stock_000688_sh',
+    sub_volume_signal_symbol: record.sub_volume_signal_symbol ?? undefined,
+    sub_buy_threshold: record.sub_buy_threshold ?? 25,
+    sub_volume_ratio_threshold: record.sub_volume_ratio_threshold ?? 1.6,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
 
@@ -433,6 +444,14 @@ const SoxlFearBacktest = () => {
       dataIndex: 'execute_next_open',
       width: 120,
       render: value => <Tag color={value ? 'green' : 'default'}>{value ? '开启' : '关闭'}</Tag>,
+    },
+    {
+      title: '跷跷板候补',
+      dataIndex: 'sub_symbol',
+      width: 220,
+      render: (value, record) => (value
+        ? <Tag color="purple">{value} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}</Tag>
+        : '-'),
     },
     { title: '止盈减仓%', dataIndex: 'sell_position_pct', width: 100 },
     {
@@ -908,6 +927,11 @@ const SoxlFearBacktest = () => {
             max_take_profit_sells_per_cycle_values: '1,2,3',
             min_position_pct_after_take_profit_values: '5,10,15',
             execute_next_open_values: ['false', 'true'],
+            sub_symbol: undefined,
+            sub_fear_source: 'a_stock_000688_sh',
+            sub_volume_signal_symbol: undefined,
+            sub_buy_threshold: 25,
+            sub_volume_ratio_threshold: 1.6,
           }}
         >
           <Row gutter={16}>
@@ -1039,6 +1063,40 @@ const SoxlFearBacktest = () => {
                 <InputNumber min={0.1} max={100} step={0.1} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
+            <Col xs={24} md={24}>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="跷跷板候补（可选）"
+                description="主标的空仓时，候补标的若恐慌≤候补恐慌阈值且量比≥候补量比阈值则买入候补；主标的出信号立即卖出候补换回；候补恐贪≥贪恐卖出阈值则卖出保持空仓。留空候补标的 = 单标的模式。"
+              />
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub_symbol" label="候补标的">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="留空=单标的" options={symbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub_fear_source" label="候补恐贪来源">
+                <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub_volume_signal_symbol" label="候补量比来源">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="默认候补自身" options={volumeSignalSymbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub_buy_threshold" label="候补恐慌阈值(<=)">
+                <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
+                <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
           </Row>
 
           <Space>
@@ -1149,6 +1207,14 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="同轮止盈最多卖出次数">{detailedResult.params?.max_take_profit_sells_per_cycle}</Descriptions.Item>
               <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
               <Descriptions.Item label="次日开盘成交">{detailedResult.params?.execute_next_open ? '开启（信号日收盘决策，次日开盘成交）' : '关闭（信号日收盘价成交）'}</Descriptions.Item>
+              {detailedResult.params?.sub_symbol && (
+                <>
+                  <Descriptions.Item label="跷跷板候补">{detailedResult.params.sub_symbol}</Descriptions.Item>
+                  <Descriptions.Item label="候补恐贪来源">{getFearSourceLabel(detailedResult.params.sub_fear_source)}</Descriptions.Item>
+                  <Descriptions.Item label="候补恐慌阈值">{detailedResult.params.sub_buy_threshold}</Descriptions.Item>
+                  <Descriptions.Item label="候补量比阈值">{detailedResult.params.sub_volume_ratio_threshold}</Descriptions.Item>
+                </>
+              )}
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>

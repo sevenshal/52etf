@@ -45,6 +45,12 @@ class AStockFearStrategyConfigPayload(BaseModel):
     symbol: str = "510880.SH"
     fear_source: str = "a_stock_000015_sh"
     volume_signal_symbol: Optional[str] = None
+    # 跷跷板候补（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号换回
+    sub_symbol: Optional[str] = None
+    sub_fear_source: str = "a_stock_000688_sh"
+    sub_volume_signal_symbol: Optional[str] = None
+    sub_buy_threshold: float = 25.0
+    sub_volume_ratio_threshold: float = 1.6
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
     run_time: str = "09:30"
@@ -82,6 +88,43 @@ class AStockFearStrategyConfigPayload(BaseModel):
         value = (value or "").strip().upper()
         if value not in A_STOCK_SYMBOLS:
             raise ValueError("量比来源标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub_symbol")
+    def validate_sub_symbol(cls, value):
+        if not value:
+            return None
+        value = (value or "").strip().upper()
+        if value not in A_STOCK_SYMBOLS:
+            raise ValueError("候补标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub_fear_source")
+    def validate_sub_fear_source(cls, value):
+        value = (value or "").strip().lower()
+        if value not in A_STOCK_FEAR_SOURCE_KEYS:
+            raise ValueError("候补恐贪来源必须是 A 股指数恐贪（a_stock_*）")
+        return value
+
+    @validator("sub_volume_signal_symbol")
+    def validate_sub_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        value = (value or "").strip().upper()
+        if value not in A_STOCK_SYMBOLS:
+            raise ValueError("候补量比来源标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub_buy_threshold")
+    def validate_sub_buy_threshold(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("候补恐慌阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("sub_volume_ratio_threshold")
+    def validate_sub_volume_ratio_threshold(cls, value):
+        if value <= 0 or value > 20:
+            raise ValueError("候补量比阈值必须大于 0 且不超过 20")
         return value
 
     @validator("run_time")
@@ -221,6 +264,11 @@ CONFIG_FIELDS = [
     "symbol",
     "fear_source",
     "volume_signal_symbol",
+    "sub_symbol",
+    "sub_fear_source",
+    "sub_volume_signal_symbol",
+    "sub_buy_threshold",
+    "sub_volume_ratio_threshold",
     "external_trading_account_id",
     "live_sub_account_id",
     "run_time",
