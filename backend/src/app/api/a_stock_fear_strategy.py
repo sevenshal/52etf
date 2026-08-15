@@ -88,13 +88,21 @@ class AStockFearStrategyConfigPayload(BaseModel):
             raise ValueError("恐贪来源必须是 A 股指数恐贪（a_stock_*）")
         return value
 
+    def _is_valid_volume_source_symbol(value: str) -> bool:
+        """量比来源：可交易 A 股 ETF 或美股标的（如 QQQ.US）。"""
+        upper = str(value or "").strip().upper()
+        if upper in A_STOCK_SYMBOLS:
+            return True
+        if upper.endswith(".US"):
+            return True
+        return False
+
     @validator("volume_signal_symbol")
     def validate_volume_signal_symbol(cls, value):
         if not value:
             return None
-        value = (value or "").strip().upper()
-        if value not in A_STOCK_SYMBOLS:
-            raise ValueError("量比来源标的必须是可交易 A 股 ETF")
+        if not cls._is_valid_volume_source_symbol(value):
+            raise ValueError("量比来源标的必须是可交易 A 股 ETF 或美股标的")
         return value
 
     @validator("sub_symbol")
@@ -122,9 +130,8 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub_volume_signal_symbol(cls, value):
         if not value:
             return None
-        value = (value or "").strip().upper()
-        if value not in A_STOCK_SYMBOLS:
-            raise ValueError("候补量比来源标的必须是可交易 A 股 ETF")
+        if not cls._is_valid_volume_source_symbol(value):
+            raise ValueError("候补量比来源标的必须是可交易 A 股 ETF 或美股标的")
         return value
 
     @validator("sub_buy_threshold")
@@ -164,9 +171,8 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub2_volume_signal_symbol(cls, value):
         if not value:
             return None
-        value = (value or "").strip().upper()
-        if value not in A_STOCK_SYMBOLS:
-            raise ValueError("第二候补量比来源标的必须是可交易 A 股 ETF")
+        if not cls._is_valid_volume_source_symbol(value):
+            raise ValueError("第二候补量比来源标的必须是可交易 A 股 ETF 或美股标的")
         return value
 
     @validator("sub2_buy_threshold")

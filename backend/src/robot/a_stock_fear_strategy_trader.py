@@ -203,8 +203,10 @@ class AStockFearStrategyTrader:
         start: date,
         end: date,
     ) -> pd.DataFrame:
-        """ETF 日线（前复权，a_stock_fund_daily_qfq）。"""
+        """日线（前复权）。A股查 a_stock_fund_daily_qfq；美股（.US，如 QQQ.US 量比来源）查 us_stock_daily。"""
         normalized = normalize_external_symbol(symbol) or symbol
+        is_us = normalized.upper().endswith(".US")
+        table = "us_stock_daily" if is_us else "a_stock_fund_daily_qfq"
         try:
             connection = connect_duckdb(prefer_read_only=True)
         except Exception as exc:
@@ -212,9 +214,9 @@ class AStockFearStrategyTrader:
             return pd.DataFrame()
         try:
             frame = connection.execute(
-                """
+                f"""
                 SELECT trade_date, open, high, low, close, volume
-                FROM a_stock_fund_daily_qfq
+                FROM {table}
                 WHERE upper(symbol) = ?
                   AND trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 ORDER BY trade_date
