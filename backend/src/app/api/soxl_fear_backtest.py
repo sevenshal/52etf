@@ -1300,9 +1300,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 "signal_volume": float(signal_volumes[index]),
                 "ma20": float(ma20_values[index]),
                 "volume_ma20": float(volume_ma20_values[index]),
-                "volume_ratio": volume_ratio,
+                "volume_ratio": None if not np.isfinite(volume_ratio) else volume_ratio,
                 "buy_volume_ma20": float(buy_volume_ma_values[index]),
-                "buy_volume_ratio": buy_volume_ratio,
+                "buy_volume_ratio": None if not np.isfinite(buy_volume_ratio) else buy_volume_ratio,
                 "volume_ratio_consecutive_days": volume_ratio_consecutive_days,
                 "fear_greed": float(fear_values[index]),
                 "cnn_fear_greed": float(fear_values[index]),
@@ -1713,7 +1713,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
     fear_series = _build_fear_series_payload(base_dfs)
     search_execution_type, search_execution_label = _execution_mode_meta(payload.execute_next_open_values)
 
-    return {
+    return _clean_nan_for_json({
         "meta": {
             **meta,
             "initial_capital": payload.initial_capital,
@@ -1738,7 +1738,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
                 "execution_price_label": best_result.get("execution_price_label"),
             },
         },
-    }
+    })
 
 
 def _cleanup_finished_jobs(max_age_hours: int = 12):
@@ -1753,6 +1753,17 @@ def _cleanup_finished_jobs(max_age_hours: int = 12):
             SEARCH_JOBS.pop(task_id, None)
 
 
+def _clean_nan_for_json(value: Any) -> Any:
+    """递归把 NaN/Inf 转 None，避免事件/HTTP JSON 序列化出非法 JSON（NaN）。"""
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _clean_nan_for_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_nan_for_json(item) for item in value]
+    return value
+
+
 def _publish_search_job(task_id: str):
     with SEARCH_JOBS_LOCK:
         job = SEARCH_JOBS.get(task_id)
@@ -1760,7 +1771,7 @@ def _publish_search_job(task_id: str):
             return
         account_id = job.get("account_id")
         payload = SOXLFearSearchJobStatus(**job).dict()
-    publish_event(account_id, "soxl_fear_search", payload)
+    publish_event(account_id, "soxl_fear_search", _clean_nan_for_json(payload))
 
 
 def _update_search_job(task_id: str, **updates):
@@ -1897,7 +1908,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             total_combinations=total_combinations,
             skipped_combinations=skipped_combinations,
             message="搜索完成",
-            result=result_payload,
+            result=_clean_nan_for_json(result_payload),
         )
     except Exception as exc:
         logger.exception("SOXL fear parameter search job failed, task_id=%s", task_id)
@@ -2077,6 +2088,6 @@ def run_soxl_fear_backtest(
             "execution_price_label": result.get("execution_price_label") or meta.get("execution_price_label"),
         }
         result["fear_series"] = _build_fear_series_payload(base_dfs)
-        return result
+        return _clean_nan_for_json(result)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
