@@ -324,6 +324,24 @@ class SOXLFearSearchParams(BaseModel):
     objective: str = "annualized_return"
     eval_workers: Optional[int] = None
     rebalance_threshold_pct: float = 5.0
+    # 固定成本参数（不参与组合搜索）：滑点 -1=悲观，>=0 按成交价滑点%；印花税卖出收取
+    slippage_pct: float = -1.0
+    stamp_duty_pct: float = 0.0
+
+    @validator("slippage_pct")
+    def validate_search_slippage_pct(cls, value):
+        if value == -1.0:
+            return value
+        if value < 0 or value > 10:
+            raise ValueError("滑点必须为 -1（最悲观）或 0 到 10 之间（按成交价滑点%）")
+        return value
+
+    @validator("stamp_duty_pct")
+    def validate_search_stamp_duty_pct(cls, value):
+        if value < 0 or value > 10:
+            raise ValueError("印花税必须在 0 到 10 之间")
+        return value
+
     buy_threshold_values: List[float] = Field(default_factory=lambda: [35.0, 40.0, 45.0])
     greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0, 41.0, 42.0])
     volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3, 1.38, 1.45])
@@ -2206,6 +2224,8 @@ def _evaluate_search_candidates(
                         payload.objective,
                         payload.rebalance_threshold_pct,
                         batch_meta["batch"],
+                        slippage_pct=payload.slippage_pct,
+                        stamp_duty_pct=payload.stamp_duty_pct,
                         sub_base_df=sub_base_df,
                         sub_symbol=payload.sub_symbol,
                         sub_fear_source=payload.sub_fear_source,
@@ -2242,6 +2262,8 @@ def _evaluate_search_candidates(
                 payload.objective,
                 payload.rebalance_threshold_pct,
                 batch,
+                payload.slippage_pct,
+                payload.stamp_duty_pct,
                 sub_base_df,
                 payload.sub_symbol,
                 payload.sub_fear_source,
@@ -2297,6 +2319,8 @@ def _evaluate_search_batch(
     objective: str,
     rebalance_threshold_pct: float,
     batch_items: List[Tuple[int, Tuple]],
+    slippage_pct: float = -1.0,
+    stamp_duty_pct: float = 0.0,
     sub_base_df: Optional[pd.DataFrame] = None,
     sub_symbol: Optional[str] = None,
     sub_fear_source: Optional[str] = None,
@@ -2347,6 +2371,8 @@ def _evaluate_search_batch(
                 min_position_pct_after_take_profit=float(min_position_pct_after_take_profit),
                 execute_next_open=bool(execute_next_open),
                 rebalance_threshold_pct=float(rebalance_threshold_pct),
+                slippage_pct=float(slippage_pct),
+                stamp_duty_pct=float(stamp_duty_pct),
                 sub_symbol=sub_symbol,
                 sub_fear_source=sub_fear_source or "cnn",
                 sub_volume_signal_symbol=sub_volume_signal_symbol,
