@@ -316,33 +316,6 @@ const SoxlFearBacktest = () => {
     });
   }, []);
 
-  // 轮询兑底：websocket 事件丢失（如 JSON 解析失败/断连）时仍能拿到任务结果
-  useEffect(() => {
-    if (!searchTaskId) {
-      return;
-    }
-    const timer = setInterval(async () => {
-      if (searchTaskIdRef.current === null) {
-        clearInterval(timer);
-        return;
-      }
-      try {
-        const { data } = await request.get(`/api/fear-volume-backtest/search/jobs/${searchTaskId}`);
-        if (data.task_id !== searchTaskIdRef.current) {
-          clearInterval(timer);
-          return;
-        }
-        if (data.status === 'completed' || data.status === 'failed') {
-          clearInterval(timer);
-          applySearchJobStatus(data);
-        }
-      } catch (error) {
-        // 瞬时错误忽略，继续轮询
-      }
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [searchTaskId]);
-
   const handleSearch = async (values) => {
     setLoading(true);
     setSearchMeta(null);
