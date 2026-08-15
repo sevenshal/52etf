@@ -494,17 +494,15 @@ const AStockFearStrategy = ({ embedded = false }) => {
 
   return (
     <div style={{ padding: embedded ? 0 : 24 }}>
-      {!embedded && (
-        <Card title="A股情绪量能策略" style={{ marginBottom: 24 }}>
-          <Button type="primary" onClick={openCreate}>新建策略配置</Button>
-        </Card>
-      )}
-
       {viewMode === 'list' ? (
-        <Card title={embedded ? 'A股情绪量能策略' : '策略配置列表'} loading={listLoading} style={{ marginBottom: 24 }}>
-          {!embedded && (
-            <Button type="primary" onClick={openCreate} style={{ marginBottom: 16 }}>新建策略配置</Button>
-          )}
+        <Card
+          title={embedded ? 'A股情绪量能策略' : '策略配置列表'}
+          loading={listLoading}
+          style={{ marginBottom: 24 }}
+          extra={
+            <Button type="primary" onClick={openCreate}>新建策略配置</Button>
+          }
+        >
           <Alert
             type="info"
             showIcon
