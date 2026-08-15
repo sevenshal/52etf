@@ -873,6 +873,21 @@ def _prepare_base_dataframe(
     merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce")
     merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
     merged_df["execution_price"] = pd.to_numeric(merged_df["close"], errors="coerce")
+    # 跨市场量比/恐贪来源（如 A股交易、QQQ 恐贪与量比）：美股休市日 A股开市时
+    # 信号列为 NaN，用最近可用值填充（A股 T 日早上可用美股最近交易日数据），避免删掉 A股交易日
+    signal_columns = [
+        "fear_greed", "signal_volume", "volume_ma20", "volume_ratio", "signal_date", "fear_date",
+        *[
+            column
+            for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1)
+            for column in (
+                _volume_ma_excluding_recent_column(days),
+                _volume_ratio_consecutive_column(days),
+            )
+        ],
+    ]
+    existing_signal_columns = [column for column in signal_columns if column in merged_df.columns]
+    merged_df[existing_signal_columns] = merged_df[existing_signal_columns].ffill()
     base_df = merged_df.dropna(
         subset=["fear_greed", "ma20", "volume_ma20", "volume_ratio", "execution_price", "signal_date"]
     ).reset_index(drop=True)
