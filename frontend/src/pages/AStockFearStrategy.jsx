@@ -472,6 +472,12 @@ const AStockFearStrategy = ({ embedded = false }) => {
 
   const columns = [
     {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 80,
+      render: (value) => <Tag color={value ? 'green' : 'default'}>{value ? '是' : '否'}</Tag>,
+    },
+    {
       title: '标的',
       dataIndex: 'symbol',
       width: 110,
@@ -524,12 +530,6 @@ const AStockFearStrategy = ({ embedded = false }) => {
     { title: '买入仓位%', dataIndex: 'buy_position_pct', width: 100 },
     { title: '卖出仓位%', dataIndex: 'sell_position_pct', width: 100 },
     { title: '冷却天数', dataIndex: 'cooldown_days', width: 90 },
-    {
-      title: '启用',
-      dataIndex: 'enabled',
-      width: 80,
-      render: (value) => <Tag color={value ? 'green' : 'default'}>{value ? '是' : '否'}</Tag>,
-    },
     {
       title: '最近运行',
       dataIndex: 'last_run_at',
