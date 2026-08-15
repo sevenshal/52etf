@@ -349,6 +349,18 @@ class AStockFearStrategyTrader:
                 live_sub_account_id=sub_account.id,
             )
 
+    @staticmethod
+    def _position_shares_for_symbol(snapshot: SimpleNamespace, symbol: str, config: SimpleNamespace) -> int:
+        """按标的取快照持仓（区分主/sub/sub2，换仓目标可能是 sub2）。"""
+        main_symbol = normalize_external_symbol(config.symbol)
+        sub_symbol = normalize_external_symbol(config.sub_symbol) if getattr(config, "sub_symbol", None) else None
+        sub2_symbol = normalize_external_symbol(config.sub2_symbol) if getattr(config, "sub2_symbol", None) else None
+        if symbol == main_symbol:
+            return int(snapshot.shares)
+        if sub2_symbol and symbol == sub2_symbol:
+            return int(snapshot.sub2_shares or 0)
+        return int(snapshot.sub_shares or 0)
+
     async def _sync_target_order(
         self,
         config: SimpleNamespace,
@@ -358,12 +370,12 @@ class AStockFearStrategyTrader:
         price: float,
         trigger_source: str,
         symbol: Optional[str] = None,
+        trigger_executor: bool = True,
     ) -> str:
         symbol = normalize_external_symbol(symbol or config.symbol)
         if not symbol:
             raise ValueError("交易标的格式不正确")
-        main_symbol = normalize_external_symbol(config.symbol)
-        current_shares = int(snapshot.shares) if symbol == main_symbol else int(snapshot.sub_shares or 0)
+        current_shares = self._position_shares_for_symbol(snapshot, symbol, config)
         if action == "BUY":
             target_quantity = current_shares + int(quantity)
         elif action == "SELL":
@@ -404,20 +416,22 @@ class AStockFearStrategyTrader:
                 source_execution_id=None,
             )
 
-        executor_result = await trigger_external_trading_executor(
-            account_id=config.account_id,
-            external_account_id=snapshot.external_trading_account_id,
-            trigger_source=f"a_stock_fear_{trigger_source}",
-        )
-        external_order_count = sum(
-            int(item.get("external_order_count") or 0)
-            for item in (executor_result.get("accounts") or [])
-            if isinstance(item, dict)
-        )
-        return (
-            f"外部目标仓位已同步 target={target_quantity}, signal={signal_version}, "
-            f"executor={executor_result.get('status')}, orders={external_order_count}"
-        )
+        if trigger_executor:
+            executor_result = await trigger_external_trading_executor(
+                account_id=config.account_id,
+                external_account_id=snapshot.external_trading_account_id,
+                trigger_source=f"a_stock_fear_{trigger_source}",
+            )
+            external_order_count = sum(
+                int(item.get("external_order_count") or 0)
+                for item in (executor_result.get("accounts") or [])
+                if isinstance(item, dict)
+            )
+            return (
+                f"外部目标仓位已同步 target={target_quantity}, signal={signal_version}, "
+                f"executor={executor_result.get('status')}, orders={external_order_count}"
+            )
+        return f"外部目标仓位已同步 target={target_quantity}, signal={signal_version}"
 
     def _persist_run_result(
         self,
@@ -1078,10 +1092,11 @@ class AStockFearStrategyTrader:
 
             if order_action:
                 if order_action == "SELL_AND_BUY":
-                    # 卖出当前持仓 → 买入目标标的（A股卖出资金 T+0 可用）
+                    # 换仓：先同步卖出当前持仓 + 买入目标（不触发），再统一触发一次 executor
+                    # （避免卖出未成交时第二次 executor 因资金不足被拒；executor 按目标仓位先卖后买，T+0 资金衔接）
                     sell_id = await self._sync_target_order(
                         config, snapshot, "SELL", order_quantity, current_price,
-                        trigger_source=trigger_source, symbol=order_symbol,
+                        trigger_source=trigger_source, symbol=order_symbol, trigger_executor=False,
                     )
                     target_symbol = order_target_symbol or symbol
                     if target_symbol == symbol:
@@ -1101,9 +1116,22 @@ class AStockFearStrategyTrader:
                         if buy_quantity >= 1:
                             buy_id = await self._sync_target_order(
                                 config, snapshot, "BUY", buy_quantity, target_price,
-                                trigger_source=trigger_source, symbol=target_symbol,
+                                trigger_source=trigger_source, symbol=target_symbol, trigger_executor=False,
                             )
-                    order_id = f"SELL={sell_id}; BUY={buy_id or '0'}"
+                    executor_result = await trigger_external_trading_executor(
+                        account_id=config.account_id,
+                        external_account_id=snapshot.external_trading_account_id,
+                        trigger_source=f"a_stock_fear_{trigger_source}_swap",
+                    )
+                    external_order_count = sum(
+                        int(item.get("external_order_count") or 0)
+                        for item in (executor_result.get("accounts") or [])
+                        if isinstance(item, dict)
+                    )
+                    order_id = (
+                        f"SELL={sell_id}; BUY={buy_id or '0'}; "
+                        f"executor={executor_result.get('status')}, orders={external_order_count}"
+                    )
                     trade_action = "SELL"
                     trade_quantity = order_quantity
                     state.cooldown_remaining_days = int(config.cooldown_days)
@@ -1140,6 +1168,10 @@ class AStockFearStrategyTrader:
                 trade_fear = sub_fear_score if sub_fear_score is not None else fear_score
                 trade_vr = sub_volume_ratio if sub_volume_ratio is not None else volume_ratio
                 trade_fear_label = sub_fear_label or fear_label
+            elif sub2_symbol and order_symbol == sub2_symbol:
+                trade_fear = sub2_fear_score if sub2_fear_score is not None else fear_score
+                trade_vr = sub2_volume_ratio if sub2_volume_ratio is not None else volume_ratio
+                trade_fear_label = sub2_fear_label or fear_label
             else:
                 trade_fear = fear_score
                 trade_vr = volume_ratio

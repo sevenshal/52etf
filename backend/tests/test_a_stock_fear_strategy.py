@@ -1,4 +1,5 @@
 from datetime import date
+from types import SimpleNamespace
 from unittest import TestCase
 
 import pandas as pd
@@ -91,3 +92,36 @@ class AStockFearStrategyTraderTest(TestCase):
             AStockFearStrategyConfigPayload(trailing_stop_pct=-1.0)
         with self.assertRaises(Exception):
             AStockFearStrategyConfigPayload(trailing_stop_pct=101.0)
+
+    def test_position_shares_for_symbol_distinguishes_sub2(self):
+        """下单持仓判断按 symbol 区分主/sub/sub2，换仓到第二候补不误读 sub 持仓。"""
+        trader = AStockFearStrategyTrader()
+        config = SimpleNamespace(symbol="510880.SH", sub_symbol="588000.SH", sub2_symbol="159941.SZ")
+        snapshot = SimpleNamespace(shares=111, sub_shares=222, sub2_shares=333)
+        self.assertEqual(111, trader._position_shares_for_symbol(snapshot, "510880.SH", config))
+        self.assertEqual(222, trader._position_shares_for_symbol(snapshot, "588000.SH", config))
+        # 修复前会把 159941.SZ 误读成 sub(588000) 的 222
+        self.assertEqual(333, trader._position_shares_for_symbol(snapshot, "159941.SZ", config))
+
+    def test_position_shares_for_symbol_no_sub2_falls_back_to_sub(self):
+        """无 sub2 时非主标的走 sub 持仓。"""
+        trader = AStockFearStrategyTrader()
+        config = SimpleNamespace(symbol="510880.SH", sub_symbol="588000.SH", sub2_symbol=None)
+        snapshot = SimpleNamespace(shares=111, sub_shares=222, sub2_shares=333)
+        self.assertEqual(222, trader._position_shares_for_symbol(snapshot, "588000.SH", config))
+
+    def test_config_payload_allows_us_volume_source_symbol(self):
+        """量比来源允许美股标的（QQQ.US），支持三标的中纳指用 QQQ 成交量。"""
+        payload = AStockFearStrategyConfigPayload(
+            symbol="510880.SH",
+            fear_source="a_stock_000015_sh",
+            sub_symbol="588000.SH",
+            sub_fear_source="a_stock_000688_sh",
+            sub2_symbol="159941.SZ",
+            sub2_fear_source="qqq_clone",
+            sub2_volume_signal_symbol="QQQ.US",
+        )
+        self.assertEqual("QQQ.US", payload.sub2_volume_signal_symbol)
+        # 非法量比来源仍拒绝
+        with self.assertRaises(Exception):
+            AStockFearStrategyConfigPayload(volume_signal_symbol="BOGUS.XY")
