@@ -1755,7 +1755,13 @@ async def _prefetch_realtime_price_details(
     optional_symbols: Optional[List[str]] = None,
     *,
     timeout: float,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
+    """预取实时行情供页面展示/估值。
+
+    filter_stale_quotes=True 只保留当日实时价（执行器预览场景，停盘标的无价展示）；
+    默认 False 不过滤（子账户列表估值等场景，休市/未开盘用昨收价估值，避免报'无法获取最新价'）。
+    """
     required_symbols = _dedupe_normalized_symbols(required_symbols)
     optional_symbols = _dedupe_normalized_symbols(optional_symbols or [])
     all_symbols = _dedupe_normalized_symbols([*required_symbols, *optional_symbols])
@@ -1767,7 +1773,7 @@ async def _prefetch_realtime_price_details(
                 all_symbols,
                 timeout=timeout,
                 raise_on_missing=False,
-                filter_stale_quotes=True,  # 执行器预览场景：只展示当日实时价
+                filter_stale_quotes=filter_stale_quotes,
             )
         except Exception as exc:
             logger.warning(
@@ -1796,6 +1802,8 @@ async def _build_netted_executor_plan(
     timeout_seconds = options["order_timeout_seconds"]
     plan = base_plan or _build_netted_executor_base_plan(db, account, owner_account_id, payload)
     symbols = collect_internal_cross_reference_symbols(plan)
+    # 内部撮合参考 symbol + 所有净额订单目标 symbol（无价跳过的判断依据，与执行器主链路一致）
+    symbols = list(dict.fromkeys([*symbols, *(plan.get("symbols") or [])]))
     connected = external_trading_hub.get_status(account.id).get("connected")
     if require_connection and not connected:
         raise ExternalTradingConnectionError("外部交易账号未连接")
@@ -1805,14 +1813,17 @@ async def _build_netted_executor_plan(
         try:
             if prefetched_prices is not None:
                 reference_prices = _reference_prices_from_prefetched(symbols, prefetched_prices)
+                # 缺失的标的（未开盘/停牌/行情源无当日价）不 raise：
+                # 计划构建时会按'未开盘/停牌'跳过该订单，内部撮合按 MISSING_PRICE 跳过
                 missing_symbols = [
                     symbol
                     for symbol in _dedupe_normalized_symbols(symbols)
                     if symbol not in reference_prices
                 ]
                 if missing_symbols:
-                    raise ExternalTradingValuationError(
-                        f"无法获取以下标的最新价: {', '.join(missing_symbols)}"
+                    logger.info(
+                        "External trading preview missing today prices (deferred): %s",
+                        missing_symbols,
                     )
             else:
                 reference_prices = await get_realtime_reference_prices(
@@ -2735,6 +2746,7 @@ async def get_external_trading_executor_status_plan(
             [],
             [*reference_symbols, *display_symbols],
             timeout=min(normalize_timeout_seconds(account.executor_order_timeout_seconds), 15.0),
+            filter_stale_quotes=True,  # 执行器预览：只展示当日实时价，停盘标的显示无价
         )
         plan = await _build_netted_executor_plan(
             db,
