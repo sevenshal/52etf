@@ -772,23 +772,25 @@ const SoxlFearBacktest = () => {
     }));
 
     const buyMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'BUY' && (!subSymbol || item.symbol !== subSymbol))
+      .filter(item => item.action === 'BUY' && (!subSymbol || item.symbol !== subSymbol) && (!sub2Symbol || item.symbol !== sub2Symbol))
       .map(item => ({
         name: '买',
         value: 'B',
         xAxis: dates.indexOf(item.date),
         yAxis: item.price,
         itemStyle: { color: '#cf1322' },
-      }));
+      }))
+      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis));
     const sellMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'SELL' && (!subSymbol || item.symbol !== subSymbol))
+      .filter(item => item.action === 'SELL' && (!subSymbol || item.symbol !== subSymbol) && (!sub2Symbol || item.symbol !== sub2Symbol))
       .map(item => ({
         name: '卖',
         value: 'S',
         xAxis: dates.indexOf(item.date),
         yAxis: item.price,
         itemStyle: { color: '#1677ff' },
-      }));
+      }))
+      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis));
     const subBuyMarkers = subSymbol ? (detailedResult.trades || [])
       .filter(item => item.action === 'BUY' && item.symbol === subSymbol)
       .map(item => ({
@@ -810,22 +812,25 @@ const SoxlFearBacktest = () => {
     const sub2KlineData = sub2Symbol ? detailedResult.daily_data.map(item => (
       item.sub2_open == null ? null : [item.sub2_open, item.sub2_close, item.sub2_low, item.sub2_high]
     )) : [];
+    const sub2HasData = sub2KlineData.some(d => d != null);
     const sub2VolumeData = sub2Symbol ? detailedResult.daily_data.map(item => ({
-      value: item.sub2_volume,
+      value: Number.isFinite(item.sub2_volume) ? item.sub2_volume : null,
       itemStyle: { color: '#eb2f96' },
     })) : [];
     const sub2BuyMarkers = sub2Symbol ? (detailedResult.trades || [])
       .filter(item => item.action === 'BUY' && item.symbol === sub2Symbol)
-      .map(item => ({ name: '第二候补买', value: 'B', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#fa8c16' } })) : [];
+      .map(item => ({ name: '第二候补买', value: 'B', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#fa8c16' } }))
+      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis)) : [];
     const sub2SellMarkers = sub2Symbol ? (detailedResult.trades || [])
       .filter(item => item.action === 'SELL' && item.symbol === sub2Symbol)
-      .map(item => ({ name: '第二候补卖', value: 'S', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#eb2f96' } })) : [];
+      .map(item => ({ name: '第二候补卖', value: 'S', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#eb2f96' } }))
+      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis)) : [];
 
     const legendData = [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'];
     if (subSymbol) {
       legendData.push(`${subSymbol} K线`, `${subSymbol} 成交量`);
     }
-    if (sub2Symbol) {
+    if (sub2Symbol && sub2HasData) {
       legendData.push(`${sub2Symbol} K线`, `${sub2Symbol} 成交量`);
     }
 
@@ -867,7 +872,7 @@ const SoxlFearBacktest = () => {
         },
       });
     }
-    if (sub2Symbol) {
+    if (sub2Symbol && sub2HasData) {
       series.push({
         name: `${sub2Symbol} K线`,
         type: 'candlestick',
@@ -923,7 +928,7 @@ const SoxlFearBacktest = () => {
         barWidth: 5,
       });
     }
-    if (sub2Symbol) {
+    if (sub2Symbol && sub2HasData) {
       series.push({
         name: `${sub2Symbol} 成交量`,
         type: 'bar',
@@ -950,7 +955,7 @@ const SoxlFearBacktest = () => {
         { scale: true, splitArea: { show: true } },
         { scale: true, gridIndex: 1, splitNumber: 2 },
         ...(subSymbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
-        ...(sub2Symbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
+        ...(sub2Symbol && sub2HasData ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
