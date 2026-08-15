@@ -58,6 +58,8 @@ from ...core.services.external_trading_execution_policy import (
     MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     normalize_lot_size,
     normalize_min_order_amount,
+    normalize_max_batch_amount,
+    normalize_batch_interval_seconds,
     normalize_max_replace_count,
     normalize_max_slippage_pct,
     normalize_price_level,
@@ -526,8 +528,10 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_max_replace_count": executor_max_replace_count,
         "executor_max_slippage_pct": executor_max_slippage_pct,
         "executor_min_order_amount": executor_min_order_amount,
-        "executor_max_batch_amount": getattr(account, "executor_max_batch_amount", None),
-        "executor_batch_interval_seconds": getattr(account, "executor_batch_interval_seconds", None),
+        "executor_max_batch_amount": normalize_max_batch_amount(getattr(account, "executor_max_batch_amount", None)),
+        "executor_batch_interval_seconds": normalize_batch_interval_seconds(
+            getattr(account, "executor_batch_interval_seconds", None)
+        ),
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
         "executor_order_timeout_seconds_sequence": executor_order_timeout_seconds_sequence,
