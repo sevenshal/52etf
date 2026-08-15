@@ -55,7 +55,55 @@ def _extract_quote_price(quote: Any) -> float:
     return bid or ask or 0.0
 
 
-def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[str, Any]]:
+def _parse_quote_timestamp(value: Any) -> Optional[Any]:
+    """解析行情时间戳（epoch 秒或时间字符串）为带 A 股时区的 datetime。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), CHINA_TZ)
+        except Exception:
+            return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if parsed is pd.NaT:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=CHINA_TZ)
+        return parsed.astimezone(CHINA_TZ)
+    except Exception:
+        return None
+
+
+def _quote_is_today(item: Any, symbol: Optional[str], today: Optional[Any] = None) -> bool:
+    """只对 A 股标的使用行情时间戳判断'今日已开盘'。
+
+    longport/hub 在停盘或未开盘（如跨境 ETF 延迟到 10:30）时可能返回上一交易日
+    价格（带昨日 timestamp/trade_time），必须丢弃，否则会把昨收当实时价下单。
+    带时间戳但解析不出、或没有时间字段的报价保持原样（信任源本身）。
+    美股/港股等非 A 股标的不过滤（交易时段在境外，不能用 A 股日历判断）。
+    """
+    normalized = str(symbol or "").upper()
+    if not normalized.endswith((".SH", ".SZ")):
+        return True
+    raw = item if isinstance(item, dict) else {}
+    timestamp_value = raw.get("timestamp") or raw.get("trade_time") or raw.get("quote_time")
+    if timestamp_value is None:
+        return True
+    parsed = _parse_quote_timestamp(timestamp_value)
+    if parsed is None:
+        return True
+    if today is None:
+        today = datetime.now(CHINA_TZ).date()
+    return parsed.date() == today
+
+
+def _normalize_quote_map(
+    quotes: Optional[Any],
+    source: str,
+    *,
+    today: Optional[Any] = None,
+) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     if not quotes:
         return result
@@ -68,6 +116,9 @@ def _normalize_quote_map(quotes: Optional[Any], source: str) -> Dict[str, Dict[s
         else:
             symbol = normalize_symbol(getattr(item, "symbol", None) or key)
         if not symbol:
+            continue
+        if not _quote_is_today(item, symbol, today=today):
+            # 上一交易日/非今日数据，无法确认今日已开盘
             continue
         price = _extract_quote_price(item)
         if price <= 0:

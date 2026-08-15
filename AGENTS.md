@@ -2,6 +2,11 @@
 
 本文补充上级 `quant/AGENTS.md`（部署架构、目录约定、dev.52etf.vip 访问方式）。这里只写代码层最容易重复踩的坑。
 
+## 提交约定（务必遵守）
+
+1. **不要自行直接提交推送**：改动完成后先向用户说明改了什么、验证结果，**问是否提交**，得到确认后才 `git commit` / `git push`。
+2. **commit message 必须写清楚描述**：说明改动内容和原因（例如 `feat(executor): 参考价优先走 tushare，未开盘/停牌标的自动跳过`），不要用无描述/不相关的提交信息。
+
 ## SQLAlchemy Session 生命周期（高频坑，务必先读）
 
 项目统一用 `get_db_ctx()` / `get_external_trading_db_ctx()` 提供短事务，退出时 `commit()` 并 `close()`。

@@ -20,6 +20,7 @@ from src.core.services.external_trading_ledger import (
 )
 from src.core.services.external_trading_valuation import (
     _fetch_tushare_realtime_quotes,
+    _normalize_quote_map,
     _parse_tushare_realtime_frame,
 )
 from src.core.services.tushare import TushareService
@@ -114,6 +115,45 @@ class DeferWithoutReferencePriceTest(TestCase):
         self.assertEqual(0, len(kept))
         self.assertEqual(1, len(deferred))
         self.assertEqual("no_reference_price", deferred[0]["reason"])
+
+
+class QuoteMapTradeTimeFilterTest(TestCase):
+    """longport/hub 返回的报价统一按时间戳过滤，避免停盘时的昨收价被当实时价。"""
+
+    def test_keeps_today_timestamp_and_drops_yesterday(self):
+        today = date(2026, 8, 17)
+        quotes = [
+            {"symbol": "159941.SZ", "price": 1.70, "timestamp": "2026-08-17 10:00:00"},
+            {"symbol": "510300.SH", "price": 4.70, "timestamp": "2026-08-14 16:29:58"},  # 昨日 → 丢弃
+        ]
+        result = _normalize_quote_map(quotes, "longport", today=today)
+        self.assertEqual({"159941.SZ"}, set(result.keys()))
+
+    def test_keeps_quote_without_timestamp(self):
+        # 无时间字段的报价（如 hub 快照无时间戳）保持原样，信任源本身
+        today = date(2026, 8, 17)
+        quotes = [{"symbol": "510300.SH", "price": 4.70}]
+        result = _normalize_quote_map(quotes, "hub", today=today)
+        self.assertEqual({"510300.SH"}, set(result.keys()))
+
+    def test_epoch_seconds_timestamp_filtered(self):
+        today = date(2026, 8, 17)
+        # epoch 秒：2026-08-17 10:00:00 北京时间 ≈ 1786 亿级别，用字符串更稳，这里测 int 解析
+        from datetime import datetime, timezone
+        epoch_today = int(datetime(2026, 8, 17, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        epoch_yesterday = int(datetime(2026, 8, 16, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        quotes = [
+            {"symbol": "600519.SH", "price": 1341.0, "timestamp": epoch_today},
+            {"symbol": "000001.SZ", "price": 11.1, "timestamp": epoch_yesterday},
+        ]
+        result = _normalize_quote_map(quotes, "longport", today=today)
+        self.assertEqual({"600519.SH"}, set(result.keys()))
+
+    def test_non_a_share_symbols_not_filtered(self):
+        today = date(2026, 8, 17)
+        quotes = [{"symbol": "AAPL.US", "price": 220.0, "timestamp": "2026-08-16 20:00:00"}]
+        result = _normalize_quote_map(quotes, "longport", today=today)
+        self.assertEqual({"AAPL.US"}, set(result.keys()))
 
 
 class PlanDeferWithoutReferencePriceTest(TestCase):
