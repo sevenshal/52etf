@@ -63,6 +63,8 @@ const defaultValues = {
   sub_volume_signal_symbol: undefined,
   sub_buy_threshold: 25,
   sub_volume_ratio_threshold: 1.6,
+  // 换仓阈值：留空=主辅跷跷板；有值=对称双轮动
+  swap_threshold: null,
 };
 
 const normalizeConfig = (config) => ({
@@ -77,6 +79,7 @@ const normalizeConfig = (config) => ({
   sub_volume_signal_symbol: config?.sub_volume_signal_symbol ?? undefined,
   sub_buy_threshold: config?.sub_buy_threshold ?? 25,
   sub_volume_ratio_threshold: config?.sub_volume_ratio_threshold ?? 1.6,
+  swap_threshold: config?.swap_threshold ?? null,
 });
 
 const normalizeStateFormValues = (state) => ({
@@ -342,6 +345,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
     sub_buy_threshold: values.sub_buy_threshold ?? 25,
     sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
+    swap_threshold: values.swap_threshold ?? null,
   });
 
   const handleBacktest = () => {
@@ -389,6 +393,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
           sub_buy_threshold: values.sub_buy_threshold ?? 25,
           sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
+          swap_threshold: values.swap_threshold ?? null,
         },
       },
     });
@@ -785,8 +790,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             type="info"
                             showIcon
                             style={{ marginBottom: 12 }}
-                            message="跷跷板候补（可选）"
-                            description="主标的空仓时，候补标的若恐慌≤候补恐慌阈值且量比≥候补量比阈值则买入候补；主标的出信号立即卖出候补换回；候补恐贪≥贪恐卖出阈值则卖出保持空仓。留空候补标的 = 单标的模式。"
+                            message="跷跷板候补 / 对称双轮动（可选）"
+                            description="留空候补标的 = 单标的模式。填写候补标的：若「换仓阈值」留空 = 主辅跷跷板（主标的优先，空仓时才买候补，主标的出信号换回）；若填了换仓阈值 = 对称双轮动（任一标的极恐放量都买、都触发买更恐慌的；持有 X 时若 X 恐贪超过换仓阈值且另一标的有买入信号则换仓；恐贪≥贪恐卖出阈值则卖出）。"
                           />
                         </Col>
                         <Col xs={24} md={4}>
@@ -812,6 +817,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
                         <Col xs={24} md={4}>
                           <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="swap_threshold" label="换仓阈值(留空=主辅跷跷板)">
+                            <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
@@ -914,6 +924,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                     <Descriptions.Item label="跷跷板候补">{selectedConfig.sub_symbol}</Descriptions.Item>
                     <Descriptions.Item label="候补恐贪来源">{getFearSourceLabel(selectedConfig.sub_fear_source)}</Descriptions.Item>
                     <Descriptions.Item label="候补买入门槛">恐慌≤{selectedConfig.sub_buy_threshold} 且 量比≥{selectedConfig.sub_volume_ratio_threshold}</Descriptions.Item>
+                    <Descriptions.Item label="换仓阈值">{selectedConfig.swap_threshold ?? '关闭（主辅跷跷板）'}</Descriptions.Item>
                   </>
                 )}
               </Descriptions>
