@@ -91,8 +91,12 @@ def _build_a_stock_fear_sources() -> Dict[str, Dict[str, Any]]:
 
 def _build_a_stock_target_options() -> List[Dict[str, Any]]:
     options = []
+    seen: set[str] = set()
     for symbol in [*A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS, *A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS]:
         normalized = _normalize_symbol(symbol)
+        if normalized in seen:
+            continue  # 源配置存在重复（如 510300.SH 出现两次），去重避免下拉重复项
+        seen.add(normalized)
         name = A_STOCK_ETF_DAILY_NAMES.get(normalized, normalized)
         options.append({
             "label": f"{name} {normalized}",
