@@ -180,9 +180,9 @@ class SOXLFearStrategyParams(BaseModel):
     rebalance_threshold_pct: float = 5.0
     # True = 信号日收盘决策，次日开盘成交；False = 信号日收盘价成交（默认，保持旧行为）
     execute_next_open: bool = False
-    # 滑点：-1 = 最悲观（买入按当日最高价、卖出按当日最低价）；>=0 按成交价滑点%（买入×(1+s/100)，卖出×(1-s/100)）
-    slippage_pct: float = 0.0
-    # 印花税%（卖出收取，按卖出金额）
+    # 滑点：-1 = 最悲观（买入按当日最高价、卖出按当日最低价，默认）；>=0 按成交价滑点%（买入×(1+s/100)，卖出×(1-s/100)）
+    slippage_pct: float = -1.0
+    # 印花税%（卖出收取，按卖出金额；A股 ETF 不收取，默认 0）
     stamp_duty_pct: float = 0.0
 
     @validator("slippage_pct")

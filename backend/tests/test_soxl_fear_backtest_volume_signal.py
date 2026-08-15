@@ -97,7 +97,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
                 cooldown_days=0,
                 trailing_stop_pct=5.0,
                 sell_position_pct=50.0,
-                rebalance_threshold_pct=0.0,
+                rebalance_threshold_pct=0.0, slippage_pct=0.0,
             ),
             10000.0,
             detailed=True,
@@ -148,7 +148,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
                 sell_position_pct=50.0,
                 sell_reduction_basis="holdings",
                 sell_price_above_avg_cost=True,
-                rebalance_threshold_pct=0.0,
+                rebalance_threshold_pct=0.0, slippage_pct=0.0,
             ),
             10000.0,
             detailed=True,
@@ -196,7 +196,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True,
             min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
 
@@ -243,7 +243,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True,
             min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
 
@@ -286,7 +286,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True,
             min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0,
             execute_next_open=True,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
@@ -335,7 +335,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True,
             min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0,
             execute_next_open=True,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
@@ -395,7 +395,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             volume_ratio_consecutive_days=1, buy_position_pct=100.0, cooldown_days=0,
             trailing_stop_pct=0.0, sell_position_pct=100.0, sell_reduction_basis="holdings",
             sell_price_above_avg_cost=False, min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0, slippage_pct=0.1, stamp_duty_pct=0.05,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0, slippage_pct=0.1, stamp_duty_pct=0.05,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
         buys = [t for t in result["trades"] if t["action"] == "BUY"]
@@ -442,7 +442,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True,
             min_position_pct_after_take_profit=0.0,
-            rebalance_threshold_pct=0.0,
+            rebalance_threshold_pct=0.0, slippage_pct=0.0,
         )
         result = _run_backtest(base_df, params, 10000.0, detailed=True)
 
@@ -483,7 +483,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
             volume_ratio_consecutive_days=1, buy_position_pct=100.0, cooldown_days=0,
             trailing_stop_pct=0.0, sell_position_pct=100.0, sell_reduction_basis="holdings",
             sell_price_above_avg_cost=True, max_take_profit_sells_per_cycle=2,
-            min_position_pct_after_take_profit=0.0, rebalance_threshold_pct=0.0,
+            min_position_pct_after_take_profit=0.0, rebalance_threshold_pct=0.0, slippage_pct=0.0,
             execute_next_open=True,
             sub_symbol="588000.SH", sub_fear_source="a_stock_000688_sh",
             sub_buy_threshold=25.0, sub_volume_ratio_threshold=1.5,
