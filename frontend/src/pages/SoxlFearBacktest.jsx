@@ -482,10 +482,10 @@ const SoxlFearBacktest = () => {
     {
       title: '第二候补',
       dataIndex: 'sub2_symbol',
-      width: 190,
+      width: 230,
       ellipsis: true,
       render: (value, record) => (value
-        ? <Tag color="magenta">{value} 恐慌≤{record.sub2_buy_threshold}/量比≥{record.sub2_volume_ratio_threshold}</Tag>
+        ? <Tag color="magenta">{value} 恐慌≤{record.sub2_buy_threshold}/量比≥{record.sub2_volume_ratio_threshold}{record.sub2_volume_signal_symbol ? `/量比源:${record.sub2_volume_signal_symbol}` : ''}</Tag>
         : '-'),
     },
     { title: '止盈减仓%', dataIndex: 'sell_position_pct', width: 100 },
@@ -1438,6 +1438,7 @@ const SoxlFearBacktest = () => {
                 <>
                   <Descriptions.Item label="第二候补">{detailedResult.params.sub2_symbol}</Descriptions.Item>
                   <Descriptions.Item label="第二候补恐贪来源">{getFearSourceLabel(detailedResult.params.sub2_fear_source)}</Descriptions.Item>
+                  <Descriptions.Item label="第二候补量比来源">{detailedResult.params.sub2_volume_signal_symbol || '自身'}</Descriptions.Item>
                   <Descriptions.Item label="第二候补恐慌阈值">{detailedResult.params.sub2_buy_threshold}</Descriptions.Item>
                   <Descriptions.Item label="第二候补量比阈值">{detailedResult.params.sub2_volume_ratio_threshold}</Descriptions.Item>
                 </>
