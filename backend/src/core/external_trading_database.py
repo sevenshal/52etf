@@ -69,6 +69,9 @@ class ExternalTradingAccount(ExternalTradingBase):
     executor_max_replace_count = Column(Integer, default=3, nullable=False)
     executor_max_slippage_pct = Column(Float, default=0.5, nullable=False)
     executor_min_order_amount = Column(Float, default=0.0, nullable=False)
+    executor_max_single_order_amount = Column(Float)
+    executor_max_batch_amount = Column(Float)
+    executor_batch_interval_seconds = Column(Integer)
     executor_clip_sell_to_available = Column(Boolean, default=True, nullable=False)
     executor_price_level_sequence = Column(JSON)
     executor_order_timeout_seconds_sequence = Column(JSON)
@@ -111,6 +114,9 @@ class ExternalTradingSubAccount(ExternalTradingBase):
     executor_max_replace_count = Column(Integer)
     executor_max_slippage_pct = Column(Float)
     executor_min_order_amount = Column(Float)
+    executor_max_single_order_amount = Column(Float)
+    executor_max_batch_amount = Column(Float)
+    executor_batch_interval_seconds = Column(Integer)
     executor_clip_sell_to_available = Column(Boolean)
     executor_price_level_sequence = Column(JSON)
     executor_order_timeout_seconds_sequence = Column(JSON)
@@ -456,11 +462,17 @@ def ensure_external_trading_columns():
             "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",
             "executor_max_slippage_pct": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_slippage_pct FLOAT NOT NULL DEFAULT 0.5",
             "executor_min_order_amount": "ALTER TABLE external_trading_accounts ADD COLUMN executor_min_order_amount FLOAT NOT NULL DEFAULT 0.0",
+            "executor_max_single_order_amount": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_single_order_amount FLOAT",
+            "executor_max_batch_amount": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_batch_amount FLOAT",
+            "executor_batch_interval_seconds": "ALTER TABLE external_trading_accounts ADD COLUMN executor_batch_interval_seconds INTEGER",
             "executor_order_timeout_seconds_sequence": "ALTER TABLE external_trading_accounts ADD COLUMN executor_order_timeout_seconds_sequence JSON",
         },
         "external_trading_sub_accounts": {
             "executor_max_slippage_pct": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_slippage_pct FLOAT",
             "executor_min_order_amount": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_min_order_amount FLOAT",
+            "executor_max_single_order_amount": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_single_order_amount FLOAT",
+            "executor_max_batch_amount": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_max_batch_amount FLOAT",
+            "executor_batch_interval_seconds": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_batch_interval_seconds INTEGER",
             "executor_order_timeout_seconds_sequence": "ALTER TABLE external_trading_sub_accounts ADD COLUMN executor_order_timeout_seconds_sequence JSON",
         },
         "external_trading_orders": {

@@ -373,6 +373,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_max_replace_count: 3,
       executor_max_slippage_pct: 0.5,
       executor_min_order_amount: 0,
+      executor_max_single_order_amount: 0,
+      executor_max_batch_amount: 0,
+      executor_batch_interval_seconds: 0,
       executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
       commission_rate_pct: 0.025,
       min_commission: 5,
@@ -396,6 +399,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_max_replace_count: record.executor_max_replace_count ?? 3,
       executor_max_slippage_pct: record.executor_max_slippage_pct ?? 0.5,
       executor_min_order_amount: record.executor_min_order_amount ?? 0,
+      executor_max_single_order_amount: record.executor_max_single_order_amount ?? 0,
+      executor_max_batch_amount: record.executor_max_batch_amount ?? 0,
+      executor_batch_interval_seconds: record.executor_batch_interval_seconds ?? 0,
       executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
       commission_rate_pct: record.commission_rate_pct ?? 0.025,
       min_commission: record.min_commission ?? 5,
@@ -506,6 +512,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_max_replace_count: null,
       executor_max_slippage_pct: null,
       executor_min_order_amount: null,
+      executor_max_single_order_amount: null,
+      executor_max_batch_amount: null,
+      executor_batch_interval_seconds: null,
       executor_price_level_sequence: ''
     });
     setSubModalVisible(true);
@@ -526,6 +535,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_max_replace_count: subAccount.executor_max_replace_count,
       executor_max_slippage_pct: subAccount.executor_max_slippage_pct,
       executor_min_order_amount: subAccount.executor_min_order_amount,
+      executor_max_single_order_amount: subAccount.executor_max_single_order_amount,
+      executor_max_batch_amount: subAccount.executor_max_batch_amount,
+      executor_batch_interval_seconds: subAccount.executor_batch_interval_seconds,
       executor_price_level_sequence: Array.isArray(subAccount.executor_price_level_sequence)
         ? sequenceToText(subAccount.executor_price_level_sequence)
         : ''
@@ -570,6 +582,9 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         executor_max_replace_count: values.executor_max_replace_count ?? null,
         executor_max_slippage_pct: values.executor_max_slippage_pct ?? null,
         executor_min_order_amount: values.executor_min_order_amount ?? null,
+        executor_max_single_order_amount: values.executor_max_single_order_amount ?? null,
+        executor_max_batch_amount: values.executor_max_batch_amount ?? null,
+        executor_batch_interval_seconds: values.executor_batch_interval_seconds ?? null,
         executor_price_level_sequence: priceSequence
       };
       if (editingSubAccount) {
@@ -1153,6 +1168,48 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           <Form.Item name="executor_min_order_amount" label="单笔最低金额" rules={[{ required: true, message: '请输入单笔最低金额' }]}>
             <InputNumber min={0} step={100} precision={2} style={{ width: '100%' }} />
           </Form.Item>
+          <Form.Item
+            name="executor_max_single_order_amount"
+            label={(
+              <Space size={4}>
+                <span>单笔最大金额（拆单）</span>
+                <Tooltip title="净额委托金额超过该值时分拆成多笔小单；每笔金额自动不低于佣金门槛（最低佣金÷费率），拆单不产生额外佣金。0 = 不拆单" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+            rules={[{ required: true, message: '请输入单笔最大金额' }]}
+          >
+            <InputNumber min={0} step={10000} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="executor_max_batch_amount"
+            label={(
+              <Space size={4}>
+                <span>单轮最大提交金额</span>
+                <Tooltip title="每轮执行最多提交该金额（按 symbol 累计），超出部分留到下一轮继续提交，实现跨轮分批进场。0 = 不限制（一轮全部提交）" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+            rules={[{ required: true, message: '请输入单轮最大提交金额' }]}
+          >
+            <InputNumber min={0} step={10000} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="executor_batch_interval_seconds"
+            label={(
+              <Space size={4}>
+                <span>提交间隔（秒）</span>
+                <Tooltip title="同一标的相邻两次提交的最小间隔；应小于订单超时秒数，否则前一批先超时撤单。0 = 跟随执行循环默认节奏（约 15 秒）" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+            rules={[{ required: true, message: '请输入提交间隔' }]}
+          >
+            <InputNumber min={0} step={5} style={{ width: '100%' }} />
+          </Form.Item>
           <Form.Item name="executor_lot_size" label="默认最小交易单位" rules={[{ required: true, message: '请输入默认最小交易单位' }]}>
             <InputNumber min={1} step={100} style={{ width: '100%' }} />
           </Form.Item>
@@ -1218,6 +1275,45 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           </Form.Item>
           <Form.Item name="executor_min_order_amount" label="单笔最低金额">
             <InputNumber min={0} step={100} precision={2} style={{ width: '100%' }} placeholder="继承账户默认，0 表示不限制" />
+          </Form.Item>
+          <Form.Item
+            name="executor_max_single_order_amount"
+            label={(
+              <Space size={4}>
+                <span>单笔最大金额（拆单）</span>
+                <Tooltip title="净额委托金额超过该值时分拆成多笔小单；每笔金额自动不低于佣金门槛（最低佣金÷费率），拆单不产生额外佣金。留空继承账户默认，0 = 不拆单" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={10000} precision={2} style={{ width: '100%' }} placeholder="继承账户默认，0 表示不拆单" />
+          </Form.Item>
+          <Form.Item
+            name="executor_max_batch_amount"
+            label={(
+              <Space size={4}>
+                <span>单轮最大提交金额</span>
+                <Tooltip title="每轮执行最多提交该金额（按 symbol 累计），超出部分留到下一轮继续提交，实现跨轮分批进场。留空继承账户默认，0 = 不限制" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={10000} precision={2} style={{ width: '100%' }} placeholder="继承账户默认，0 表示不限制" />
+          </Form.Item>
+          <Form.Item
+            name="executor_batch_interval_seconds"
+            label={(
+              <Space size={4}>
+                <span>提交间隔（秒）</span>
+                <Tooltip title="同一标的相邻两次提交的最小间隔；应小于订单超时秒数。留空继承账户默认，0 = 跟随执行循环默认节奏" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={5} style={{ width: '100%' }} placeholder="继承账户默认，0 表示跟随默认节奏" />
           </Form.Item>
           <Form.Item name="executor_lot_size" label="最小交易单位">
             <InputNumber min={1} step={100} style={{ width: '100%' }} placeholder="继承账户默认" />

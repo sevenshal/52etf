@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 from datetime import date, datetime, time as dtime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -27,6 +28,7 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
+    normalize_batch_interval_seconds,
     normalize_max_replace_count,
     normalize_max_slippage_pct,
     normalize_price_level,
@@ -51,6 +53,7 @@ from .external_trading_ledger import (
     build_netted_target_execution_plan,
     collect_internal_cross_reference_symbols,
     create_netted_execution_orders,
+    deferred_order_summary,
     expire_insufficient_sellable_blocks,
     expire_stale_intraday_orders,
     normalize_symbol,
@@ -75,6 +78,8 @@ _running_account_ids: Set[int] = set()
 _liquidation_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
 _liquidation_statuses: Dict[Tuple[int, int], Dict[str, Any]] = {}
 _trading_day_cache: Dict[date, bool] = {}
+# (account_pk, symbol, side) -> 最近一次成功提交时间（epoch 秒），用于跨轮分批节奏控制
+_last_submit_at: Dict[Tuple[int, str, str], float] = {}
 
 
 def _china_now() -> datetime:
@@ -272,6 +277,11 @@ def _load_accounts(
                 "executor_max_replace_count": row.executor_max_replace_count,
                 "executor_max_slippage_pct": getattr(row, "executor_max_slippage_pct", DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT),
                 "executor_min_order_amount": getattr(row, "executor_min_order_amount", 0.0),
+                "executor_max_single_order_amount": getattr(row, "executor_max_single_order_amount", None),
+                "executor_max_batch_amount": getattr(row, "executor_max_batch_amount", None),
+                "executor_batch_interval_seconds": getattr(row, "executor_batch_interval_seconds", None),
+                "commission_rate_pct": row.commission_rate_pct,
+                "min_commission": row.min_commission,
                 "executor_clip_sell_to_available": True,
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }
@@ -617,6 +627,54 @@ def _mark_submission_error(parent_client_order_ids: List[str], message: str) -> 
             _propagate_parent_status_for_executor(db, row)
 
 
+def _filter_orders_by_batch_interval(
+    external_orders: List[Dict[str, Any]],
+    *,
+    account_pk: int,
+    now_ts: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """批次间隔控制：同一 symbol+side 距上次成功提交不足 executor_batch_interval_seconds
+    的订单本轮跳过（不落库），下一轮执行时再提交。必须在订单落库前调用，
+    否则 CREATED 未提交订单会算进 pending、delta 永不减少。"""
+    kept: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
+    for order in external_orders:
+        policy = order.get("execution_policy") or {}
+        interval = normalize_batch_interval_seconds(policy.get("batch_interval_seconds"))
+        symbol = normalize_symbol(order.get("symbol"))
+        side = str(order.get("side") or "").upper()
+        key = (account_pk, symbol, side)
+        last_ts = _last_submit_at.get(key, 0.0)
+        if interval > 0 and symbol and now_ts - last_ts < interval:
+            deferred.append(deferred_order_summary(order, 0.0, "batch_interval"))
+            continue
+        kept.append(order)
+    return kept, deferred
+
+
+def _record_batch_submit_times(
+    account_pk: int,
+    execution_orders: List[Dict[str, Any]],
+    response_orders: List[Dict[str, Any]],
+    now_ts: float,
+) -> None:
+    """只对券商确认成功（ok 非 false）的订单记录提交时间，
+    避免被拒绝/失败的订单占用批次间隔导致重试被推迟。"""
+    failed_client_ids = {
+        str(item.get("client_order_id") or "")
+        for item in response_orders or []
+        if item.get("ok") is False
+    }
+    for order in execution_orders:
+        client_order_id = str(order.get("client_order_id") or "")
+        if client_order_id and client_order_id in failed_client_ids:
+            continue
+        symbol = normalize_symbol(order.get("symbol"))
+        side = str(order.get("side") or "").upper()
+        if symbol and side in {"BUY", "SELL"}:
+            _last_submit_at[(account_pk, symbol, side)] = now_ts
+
+
 async def _submit_current_targets(
     account: Dict[str, Any],
     *,
@@ -669,6 +727,14 @@ async def _submit_current_targets(
         )
         plan["reference_prices"] = reference_prices
         plan["account_executor_policy"] = account_policy
+        now_ts = time.time()
+        kept_orders, interval_deferred = _filter_orders_by_batch_interval(
+            plan.get("external_orders") or [],
+            account_pk=account_pk,
+            now_ts=now_ts,
+        )
+        plan["external_orders"] = kept_orders
+        plan["deferred"] = (plan.get("deferred") or []) + interval_deferred
         _apply_execution_metadata(
             db,
             account_pk=account_pk,
@@ -695,6 +761,12 @@ async def _submit_current_targets(
                 account_pk,
                 execution_orders,
                 timeout=60.0,
+            )
+            _record_batch_submit_times(
+                account_pk,
+                execution_orders,
+                result.get("orders") or [],
+                time.time(),
             )
             with get_external_trading_db_ctx() as db:
                 record_submission_result(

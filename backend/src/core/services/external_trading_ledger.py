@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import uuid
 import os
 from datetime import date, datetime, timedelta
@@ -26,6 +27,8 @@ from .external_trading_execution_policy import (
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_CLIP_SELL_TO_AVAILABLE,
     aggregate_execution_policy,
+    normalize_max_batch_amount,
+    normalize_max_single_order_amount,
     normalize_min_order_amount,
     resolve_execution_policy,
 )
@@ -545,6 +548,9 @@ def serialize_sub_account(sub_account: Optional[ExternalTradingSubAccount]) -> O
         "executor_max_replace_count": sub_account.executor_max_replace_count,
         "executor_max_slippage_pct": sub_account.executor_max_slippage_pct,
         "executor_min_order_amount": getattr(sub_account, "executor_min_order_amount", None),
+        "executor_max_single_order_amount": getattr(sub_account, "executor_max_single_order_amount", None),
+        "executor_max_batch_amount": getattr(sub_account, "executor_max_batch_amount", None),
+        "executor_batch_interval_seconds": getattr(sub_account, "executor_batch_interval_seconds", None),
         "executor_clip_sell_to_available": True,
         "executor_price_level_sequence": sub_account.executor_price_level_sequence,
         "executor_order_timeout_seconds_sequence": getattr(sub_account, "executor_order_timeout_seconds_sequence", None),
@@ -4404,6 +4410,198 @@ def _build_demand_rows(
     return demands
 
 
+def _split_quantity_for_amount(
+    *,
+    quantity: int,
+    price: float,
+    lot_size: int,
+    max_single_amount: float,
+    fee_break_even_amount: float,
+    min_shares_per_chunk: int = 1,
+) -> List[int]:
+    """把数量均分成 n 份（每份按 lot_size 取整、最后一笔补齐），满足：
+    - 每笔金额不超过 max_single_amount（n = ceil(总额/上限)）
+    - 每笔金额不低于 fee_break_even_amount（拆单不产生额外佣金）
+    - 每笔股数不低于 min_shares_per_chunk（科创板 200 股，避免 INVALID_LOT_SIZE 阻塞）
+    无法拆出 ≥2 笔满足约束时返回 [quantity]（不拆）。
+    """
+    if quantity <= 0 or price <= 0 or max_single_amount <= 0:
+        return [quantity]
+    amount = price * quantity
+    if amount <= max_single_amount:
+        return [quantity]
+    lot_size = max(safe_int(lot_size, 100), 1)
+    n_cap = float("inf")
+    if fee_break_even_amount > 0:
+        n_cap = min(n_cap, amount // fee_break_even_amount)
+    if min_shares_per_chunk > 1:
+        n_cap = min(n_cap, quantity // min_shares_per_chunk)
+    n_target = math.ceil(amount / max_single_amount)
+    n = max(1, int(min(n_target, n_cap)))
+    if n <= 1:
+        return [quantity]
+    base = (quantity // n // lot_size) * lot_size
+    if base <= 0:
+        return [quantity]
+    # 取整后均匀笔仍须不低于费用门槛（最后一笔 = base + 零头 ≥ base，自动满足）
+    if fee_break_even_amount > 0:
+        fee_quantity = math.ceil(fee_break_even_amount / price / lot_size) * lot_size
+        while n > 1 and base < fee_quantity:
+            n -= 1
+            base = (quantity // n // lot_size) * lot_size
+        if n <= 1:
+            return [quantity]
+    chunks = [base] * n
+    remainder = quantity - base * n
+    index = 0
+    while remainder >= lot_size and index < n:
+        chunks[index] += lot_size
+        remainder -= lot_size
+        index += 1
+    if remainder:
+        chunks[-1] += remainder
+    return chunks
+
+
+def _chunk_allocations(
+    allocations: List[Dict[str, Any]],
+    chunk_quantities: List[int],
+) -> List[List[Dict[str, Any]]]:
+    """把子账户 allocations 按 chunk 目标数量顺序切分，保持各子单 allocations 合计守恒。"""
+    chunks: List[List[Dict[str, Any]]] = [[] for _ in chunk_quantities]
+    remaining = list(chunk_quantities)
+    for allocation in allocations:
+        quantity = safe_int(allocation.get("quantity"))
+        cursor = 0
+        while quantity > 0 and cursor < len(remaining):
+            if remaining[cursor] <= 0:
+                cursor += 1
+                continue
+            take = min(quantity, remaining[cursor])
+            if take > 0:
+                piece = dict(allocation)
+                piece["quantity"] = take
+                chunks[cursor].append(piece)
+                remaining[cursor] -= take
+                quantity -= take
+            cursor += 1
+    return chunks
+
+
+def _split_netted_order_by_amount(
+    order: Dict[str, Any],
+    *,
+    reference_prices: Dict[str, float],
+) -> List[Dict[str, Any]]:
+    """把金额超过单笔上限的净额订单拆成多个小订单（每个独立 PARENT 提交券商）。
+    拆出的每笔金额不低于佣金门槛（fee_break_even_amount），保证拆单不产生额外佣金。
+    """
+    policy = order.get("execution_policy") or {}
+    max_single_amount = normalize_max_single_order_amount(policy.get("max_single_order_amount"))
+    symbol = normalize_symbol(order.get("symbol"))
+    price = _reference_price_for_symbol(reference_prices, symbol)
+    quantity = safe_int(order.get("quantity"))
+    if max_single_amount <= 0 or price <= 0 or quantity <= 0:
+        return [order]
+    lot_size = max(safe_int(policy.get("lot_size"), 100), 1)
+    fee_break_even = safe_float(policy.get("fee_break_even_amount"), 0.0)
+    min_shares_per_chunk = 200 if is_star_market_symbol(symbol) else 1
+    chunks = _split_quantity_for_amount(
+        quantity=quantity,
+        price=price,
+        lot_size=lot_size,
+        max_single_amount=max_single_amount,
+        fee_break_even_amount=fee_break_even,
+        min_shares_per_chunk=min_shares_per_chunk,
+    )
+    if len(chunks) <= 1:
+        return [order]
+    allocation_chunks = _chunk_allocations(order.get("allocations") or [], chunks)
+    pieces = []
+    for chunk_quantity, chunk_allocations in zip(chunks, allocation_chunks):
+        piece = dict(order)
+        piece["quantity"] = chunk_quantity
+        piece["allocations"] = chunk_allocations
+        pieces.append(piece)
+    return pieces
+
+
+def _apply_batch_amount_cap(
+    external_orders: List[Dict[str, Any]],
+    *,
+    reference_prices: Dict[str, float],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """每轮（每次执行循环）每个 symbol+side 最多提交 executor_max_batch_amount 金额，
+    拆出的多笔共享同一批次上限（跨订单累计）。超出部分从本轮移除（不落库），
+    下一轮执行时 delta 会重新生成并继续提交，实现跨轮分批。
+    """
+    kept: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
+    submitted_amount: Dict[Tuple[str, str], float] = {}
+    for order in external_orders:
+        policy = order.get("execution_policy") or {}
+        max_batch_amount = normalize_max_batch_amount(policy.get("max_batch_amount"))
+        symbol = normalize_symbol(order.get("symbol"))
+        side = str(order.get("side") or "").upper()
+        price = _reference_price_for_symbol(reference_prices, symbol)
+        quantity = safe_int(order.get("quantity"))
+        amount = price * quantity
+        if max_batch_amount <= 0 or price <= 0 or quantity <= 0:
+            kept.append(order)
+            continue
+        key = (symbol, side)
+        remaining_cap = max(max_batch_amount - submitted_amount.get(key, 0.0), 0.0)
+        if remaining_cap <= 0:
+            deferred.append(deferred_order_summary(order, amount, "batch_amount_cap"))
+            continue
+        if amount <= remaining_cap:
+            kept.append(order)
+            submitted_amount[key] = submitted_amount.get(key, 0.0) + amount
+            continue
+        lot_size = max(safe_int(policy.get("lot_size"), 100), 1)
+        keep_quantity = (int(remaining_cap / price) // lot_size) * lot_size
+        if keep_quantity <= 0:
+            deferred.append(deferred_order_summary(order, amount, "batch_amount_cap"))
+            continue
+        allocation_chunks = _chunk_allocations(
+            order.get("allocations") or [],
+            [keep_quantity, quantity - keep_quantity],
+        )
+        kept_piece = dict(order)
+        kept_piece["quantity"] = keep_quantity
+        kept_piece["allocations"] = allocation_chunks[0] if allocation_chunks else []
+        kept.append(kept_piece)
+        submitted_amount[key] = submitted_amount.get(key, 0.0) + price * keep_quantity
+        deferred_piece = dict(order)
+        deferred_piece["quantity"] = quantity - keep_quantity
+        deferred_piece["allocations"] = allocation_chunks[1] if len(allocation_chunks) > 1 else []
+        deferred.append(deferred_order_summary(
+            deferred_piece,
+            price * (quantity - keep_quantity),
+            "batch_amount_cap",
+        ))
+    return kept, deferred
+
+
+def deferred_order_summary(
+    order: Dict[str, Any],
+    amount: float,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "symbol": normalize_symbol(order.get("symbol")),
+        "side": str(order.get("side") or "").upper(),
+        "quantity": safe_int(order.get("quantity")),
+        "estimated_amount": round_money(amount),
+        "reason": reason,
+        "message": (
+            "本轮提交金额达到上限，剩余部分将在后续执行轮次自动继续"
+            if reason == "batch_amount_cap"
+            else "距上次提交不足批间隔，推迟到下一轮"
+        ),
+    }
+
+
 def build_netted_target_execution_plan(
     db: Session,
     *,
@@ -4549,6 +4747,33 @@ def build_netted_target_execution_plan(
                 "execution_policy": order_policy,
                 "allocations": allocations,
             })
+    split_orders: List[Dict[str, Any]] = []
+    splits: List[Dict[str, Any]] = []
+    for order in external_orders:
+        pieces = _split_netted_order_by_amount(order, reference_prices=reference_prices)
+        if len(pieces) > 1:
+            symbol = normalize_symbol(order.get("symbol"))
+            side = str(order.get("side") or "").upper()
+            price = _reference_price_for_symbol(reference_prices, symbol)
+            splits.append({
+                "symbol": symbol,
+                "side": side,
+                "total_quantity": safe_int(order.get("quantity")),
+                "estimated_amount": round_money(price * safe_int(order.get("quantity"))),
+                "piece_count": len(pieces),
+                "pieces": pieces,
+                "max_single_order_amount": normalize_max_single_order_amount(
+                    (order.get("execution_policy") or {}).get("max_single_order_amount")
+                ),
+            })
+        split_orders.extend(pieces)
+    external_orders = split_orders
+
+    deferred_orders: List[Dict[str, Any]] = []
+    external_orders, deferred_orders = _apply_batch_amount_cap(
+        external_orders,
+        reference_prices=reference_prices,
+    )
     external_orders = _filter_parent_orders_by_non_retryable_blocks(
         db,
         account_id=account_id,
@@ -4587,6 +4812,8 @@ def build_netted_target_execution_plan(
         "internal_crosses": internal_crosses,
         "external_orders": external_orders,
         "skipped": skipped,
+        "splits": splits,
+        "deferred": deferred_orders,
     }
 
 

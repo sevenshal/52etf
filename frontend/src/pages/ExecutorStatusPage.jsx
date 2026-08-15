@@ -63,6 +63,9 @@ const formatPolicy = policy => {
   const maxReplace = policy.max_replace_count ?? policy.executor_max_replace_count;
   const maxSlippage = policy.max_slippage_pct ?? policy.executor_max_slippage_pct;
   const minOrderAmount = Number(policy.min_order_amount ?? policy.executor_min_order_amount ?? 0);
+  const maxSingleAmount = Number(policy.max_single_order_amount ?? policy.executor_max_single_order_amount ?? 0);
+  const maxBatchAmount = Number(policy.max_batch_amount ?? policy.executor_max_batch_amount ?? 0);
+  const batchInterval = Number(policy.batch_interval_seconds ?? policy.executor_batch_interval_seconds ?? 0);
   const sequence = sequenceToText(policy.price_level_sequence ?? policy.executor_price_level_sequence);
   const timeoutSequence = timeoutSequenceToText(
     policy.order_timeout_seconds_sequence
@@ -71,7 +74,16 @@ const formatPolicy = policy => {
         ? [policy.order_timeout_seconds ?? policy.executor_order_timeout_seconds]
         : undefined)
   );
-  return `档位序列${sequence} / 超时序列${timeoutSequence}s / 重定价${maxReplace ?? '-'}次 / 滑点${maxSlippage ?? '-'}% / 最低金额${minOrderAmount > 0 ? Number(minOrderAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '关闭'}`;
+  const parts = [`档位序列${sequence}`, `超时序列${timeoutSequence}s`, `重定价${maxReplace ?? '-'}次`, `滑点${maxSlippage ?? '-'}%`, `最低金额${minOrderAmount > 0 ? Number(minOrderAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '关闭'}`];
+  if (maxSingleAmount > 0) parts.push(`单笔上限${formatAmountShort(maxSingleAmount)}`);
+  if (maxBatchAmount > 0) parts.push(`单轮上限${formatAmountShort(maxBatchAmount)}`);
+  if (batchInterval > 0) parts.push(`批间隔${batchInterval}s`);
+  return parts.join(' / ');
+};
+const formatAmountShort = value => {
+  const num = Number(value || 0);
+  if (num >= 10000) return `${(num / 10000).toFixed(1)}万`;
+  return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
 };
 const roleLabel = value => {
   if (value === 'PARENT') return '父单';
@@ -318,6 +330,8 @@ const ExecutorStatusPage = ({ embedded = false }) => {
   const demandRows = plan?.plan?.demands || [];
   const internalCrossRows = plan?.plan?.internal_crosses || [];
   const externalOrderRows = plan?.plan?.external_orders || [];
+  const splitRows = plan?.plan?.splits || [];
+  const deferredRows = plan?.plan?.deferred || [];
   const totals = {
     cashAllocated: sumNumberField(subRows, 'cash_allocated'),
     netAsset: sumNumberField(subRows, 'net_asset'),
@@ -1063,17 +1077,38 @@ const ExecutorStatusPage = ({ embedded = false }) => {
     { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
     { title: '数量', dataIndex: 'quantity', width: 100, render: value => formatNumber(value) },
     { title: '限价规则', dataIndex: 'price_level', width: 110, render: priceLevelLabel },
-    { title: '执行策略', dataIndex: 'execution_policy', width: 310, render: formatPolicy },
+    { title: '执行策略', dataIndex: 'execution_policy', width: 340, render: formatPolicy },
     { title: '分配', dataIndex: 'allocations', render: value => (value || []).map(item => `${item.sub_account_name}:${formatNumber(item.quantity)}`).join(' / ') || '-' },
+  ];
+  const splitColumns = [
+    { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol },
+    { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
+    { title: '拆分前总量', dataIndex: 'total_quantity', width: 110, render: value => formatNumber(value) },
+    { title: '预计金额', dataIndex: 'estimated_amount', width: 120, render: value => formatNumber(value) },
+    { title: '拆分笔数', dataIndex: 'piece_count', width: 100, render: value => <Tag color="blue">{value} 笔</Tag> },
+    { title: '每笔数量', dataIndex: 'pieces', render: value => (value || []).map(piece => formatNumber(piece.quantity)).join(' / ') || '-' },
+    { title: '单笔金额上限', dataIndex: 'max_single_order_amount', width: 130, render: value => (value && value > 0) ? formatNumber(value) : '-' },
+  ];
+  const deferredColumns = [
+    { title: '标的', dataIndex: 'symbol', width: 150, render: renderSymbol },
+    { title: '方向', dataIndex: 'side', width: 80, render: value => <Tag color={value === 'BUY' ? 'red' : 'green'}>{value}</Tag> },
+    { title: '数量', dataIndex: 'quantity', width: 110, render: value => formatNumber(value) },
+    { title: '预计金额', dataIndex: 'estimated_amount', width: 120, render: value => formatNumber(value) },
+    { title: '原因', dataIndex: 'reason', width: 130, render: value => <Tag color={value === 'batch_amount_cap' ? 'orange' : 'purple'}>{value === 'batch_amount_cap' ? '单轮金额上限' : '批间隔未到'}</Tag> },
+    { title: '说明', dataIndex: 'message' },
   ];
 
   const renderMetricCards = () => {
     const summary = status?.summary || {};
+    const splitPieceCount = (plan?.plan?.splits || []).reduce((sum, item) => sum + (item.piece_count || 0), 0);
+    const deferredCount = (plan?.plan?.deferred || []).length;
     const metrics = [
       { label: '子账户', value: status?.summary?.sub_account_count ?? subRows.length },
       { label: '目标仓位', value: status?.summary?.target_position_count ?? 0 },
       { label: '待执行差额', value: status?.summary?.pending_delta_count ?? 0, tone: 'warning' },
       { label: '活跃订单', value: status?.summary?.active_order_count ?? 0, tone: 'danger' },
+      { label: '拆单笔数', value: splitPieceCount || 0, tone: splitPieceCount ? 'warning' : 'normal' },
+      { label: '推迟笔数', value: deferredCount || 0, tone: deferredCount ? 'warning' : 'normal' },
       { label: '成交回报', value: status?.summary?.fill_count ?? 0 },
       { label: '交割单', value: status?.summary?.deliver_record_count ?? 0 },
       { label: '总净资产', value: formatNumber(totals.netAsset, 2) },
@@ -1411,6 +1446,38 @@ const ExecutorStatusPage = ({ embedded = false }) => {
         <Table title={() => '子账户目标差额'} rowKey={(record, index) => `${record.sub_account_id}-${record.symbol}-${record.side}-${index}`} columns={demandColumns} dataSource={demandRows} loading={planLoading} pagination={false} size="small" scroll={{ x: 1100 }} />
         <Table title={() => '内部撮合'} rowKey={(record, index) => `${record.symbol}-${index}`} columns={internalCrossColumns} dataSource={internalCrossRows} loading={planLoading} pagination={false} size="small" scroll={{ x: 980 }} />
         <Table title={() => '提交到 PTrade 的净额限价单'} rowKey={(record, index) => `${record.symbol}-${record.side}-${index}`} columns={externalOrderColumns} dataSource={externalOrderRows} loading={planLoading} pagination={false} size="small" scroll={{ x: 1080 }} />
+        {splitRows.length > 0 ? (
+          <Table
+            title={() => (
+              <Space size={8}>
+                <span>大单拆分明细</span>
+                <Tag color="blue">{splitRows.reduce((sum, item) => sum + (item.piece_count || 0), 0)} 笔</Tag>
+              </Space>
+            )}
+            rowKey={(record, index) => `${record.symbol}-${record.side}-${index}`}
+            columns={splitColumns}
+            dataSource={splitRows}
+            pagination={false}
+            size="small"
+            scroll={{ x: 980 }}
+          />
+        ) : null}
+        {deferredRows.length > 0 ? (
+          <Table
+            title={() => (
+              <Space size={8}>
+                <span>本轮推迟（跨轮分批）</span>
+                <Tag color="orange">{deferredRows.length} 笔</Tag>
+              </Space>
+            )}
+            rowKey={(record, index) => `${record.symbol}-${record.side}-${record.reason}-${index}`}
+            columns={deferredColumns}
+            dataSource={deferredRows}
+            pagination={false}
+            size="small"
+            scroll={{ x: 980 }}
+          />
+        ) : null}
       </Space>
     );
   };

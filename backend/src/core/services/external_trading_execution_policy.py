@@ -9,6 +9,9 @@ MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS = 86400
 DEFAULT_EXECUTOR_MAX_REPLACE_COUNT = 3
 DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT = 0.5
 DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT = 0.0
+DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT = 0.0
+DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT = 0.0
+DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS = 0
 DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE = [1, 2, 3, 5, -1]
 DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE = [
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS
@@ -90,6 +93,86 @@ def normalize_min_order_amount(value: Any, default: float = DEFAULT_EXECUTOR_MIN
     except Exception:
         pass
     return float(default)
+
+
+def normalize_max_single_order_amount(
+    value: Any,
+    default: float = DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
+) -> float:
+    """单笔净额委托最大金额（元）。0/None 表示不拆单。"""
+    try:
+        if value is None or value == "":
+            return float(default)
+        parsed = float(value)
+        if parsed >= 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
+
+
+def normalize_max_batch_amount(
+    value: Any,
+    default: float = DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
+) -> float:
+    """每轮（每次执行循环）单个 symbol 最多提交金额（元）。0/None 表示不限制（同批全提）。"""
+    try:
+        if value is None or value == "":
+            return float(default)
+        parsed = float(value)
+        if parsed >= 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
+
+
+def normalize_batch_interval_seconds(
+    value: Any,
+    default: int = DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
+) -> int:
+    """同一 symbol 相邻两次提交的最小间隔秒数。0/None 表示跟随执行循环默认节奏。"""
+    try:
+        if value is None or value == "":
+            return int(default)
+        parsed = int(float(value))
+        if parsed >= 0:
+            return parsed
+    except Exception:
+        pass
+    return int(default)
+
+
+def compute_fee_break_even_amount(
+    account: Any,
+    fallback: Optional[Dict[str, Any]] = None,
+) -> float:
+    """拆单不产生额外佣金的最低单笔金额：每笔低于该金额会被最低佣金吃掉。
+    佣金 = max(金额 × 费率, 最低佣金)，所以每笔金额 ≥ min_commission / (rate/100) 时
+    拆单前后总佣金一致。min_commission 或费率 ≤ 0 时无门槛（返回 0）。
+    """
+    fallback = fallback or {}
+
+    def _pick(value: Any, default: float) -> float:
+        try:
+            if value is None or value == "":
+                return float(default)
+            parsed = float(value)
+            return parsed
+        except Exception:
+            return float(default)
+
+    rate_pct = _pick(
+        getattr(account, "commission_rate_pct", None),
+        _pick(fallback.get("commission_rate_pct"), 0.025),
+    )
+    min_commission = _pick(
+        getattr(account, "min_commission", None),
+        _pick(fallback.get("min_commission"), 5.0),
+    )
+    if min_commission <= 0 or rate_pct <= 0:
+        return 0.0
+    return min_commission / (rate_pct / 100.0)
 
 
 def normalize_clip_sell_to_available(
@@ -200,6 +283,28 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
         "clip_sell_to_available": True,
         "price_level_sequence": account_sequence,
         "order_timeout_seconds_sequence": account_timeout_sequence,
+        "max_single_order_amount": normalize_max_single_order_amount(
+            getattr(account, "executor_max_single_order_amount", None),
+            normalize_max_single_order_amount(
+                fallback.get("max_single_order_amount"),
+                DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
+            ),
+        ),
+        "max_batch_amount": normalize_max_batch_amount(
+            getattr(account, "executor_max_batch_amount", None),
+            normalize_max_batch_amount(
+                fallback.get("max_batch_amount"),
+                DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
+            ),
+        ),
+        "batch_interval_seconds": normalize_batch_interval_seconds(
+            getattr(account, "executor_batch_interval_seconds", None),
+            normalize_batch_interval_seconds(
+                fallback.get("batch_interval_seconds"),
+                DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
+            ),
+        ),
+        "fee_break_even_amount": compute_fee_break_even_amount(account, fallback),
         "source": "account",
     }
 
@@ -222,6 +327,9 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             ("max_replace_count", normalize_max_replace_count),
             ("max_slippage_pct", normalize_max_slippage_pct),
             ("min_order_amount", normalize_min_order_amount),
+            ("max_single_order_amount", normalize_max_single_order_amount),
+            ("max_batch_amount", normalize_max_batch_amount),
+            ("batch_interval_seconds", normalize_batch_interval_seconds),
         ):
             attr = f"executor_{field}"
             value = getattr(sub_account, attr, None)
@@ -239,6 +347,14 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             ] * len(DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE)
             policy["source"] = "sub_account"
     return policy
+
+
+def _policy_fee_break_even(policy: Dict[str, Any]) -> float:
+    try:
+        parsed = float(policy.get("fee_break_even_amount") or 0.0)
+        return parsed if parsed >= 0 else 0.0
+    except Exception:
+        return 0.0
 
 
 def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -273,6 +389,19 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
             "clip_sell_to_available": True,
             "price_level_sequence": sequence,
             "order_timeout_seconds_sequence": timeout_sequence,
+            "max_single_order_amount": normalize_max_single_order_amount(
+                fallback.get("max_single_order_amount"),
+                DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
+            ),
+            "max_batch_amount": normalize_max_batch_amount(
+                fallback.get("max_batch_amount"),
+                DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
+            ),
+            "batch_interval_seconds": normalize_batch_interval_seconds(
+                fallback.get("batch_interval_seconds"),
+                DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
+            ),
+            "fee_break_even_amount": compute_fee_break_even_amount(fallback),
             "source": "fallback",
         }
 
@@ -301,5 +430,20 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         "clip_sell_to_available": True,
         "price_level_sequence": normalize_price_level_sequence(base_sequence),
         "order_timeout_seconds_sequence": timeout_sequence,
+        "max_single_order_amount": min(
+            normalize_max_single_order_amount(item.get("max_single_order_amount"))
+            for item in policies
+        ),
+        "max_batch_amount": min(
+            normalize_max_batch_amount(item.get("max_batch_amount"))
+            for item in policies
+        ),
+        "batch_interval_seconds": max(
+            normalize_batch_interval_seconds(item.get("batch_interval_seconds"))
+            for item in policies
+        ),
+        "fee_break_even_amount": max(
+            _policy_fee_break_even(item) for item in policies
+        ),
         "source": "aggregated",
     }

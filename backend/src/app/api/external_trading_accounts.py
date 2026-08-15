@@ -47,12 +47,15 @@ from ...core.services.external_trading_execution_policy import (
     ALLOWED_EXECUTOR_PRICE_LEVELS,
     DEFAULT_EXECUTOR_LOT_SIZE,
     DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT,
+    DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
     DEFAULT_EXECUTOR_MAX_REPLACE_COUNT,
+    DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
     DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE,
     DEFAULT_EXECUTOR_PRICE_LEVEL,
     DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE,
+    DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
     MAX_EXECUTOR_ORDER_TIMEOUT_SECONDS,
     normalize_lot_size,
     normalize_min_order_amount,
@@ -155,6 +158,21 @@ class ExternalTradingAccountBase(BaseModel):
     executor_max_replace_count: int = Field(default=DEFAULT_EXECUTOR_MAX_REPLACE_COUNT, ge=0, le=20)
     executor_max_slippage_pct: float = Field(default=DEFAULT_EXECUTOR_MAX_SLIPPAGE_PCT, ge=0)
     executor_min_order_amount: float = Field(default=DEFAULT_EXECUTOR_MIN_ORDER_AMOUNT, ge=0)
+    executor_max_single_order_amount: float = Field(
+        default=DEFAULT_EXECUTOR_MAX_SINGLE_ORDER_AMOUNT,
+        ge=0,
+        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
+    )
+    executor_max_batch_amount: float = Field(
+        default=DEFAULT_EXECUTOR_MAX_BATCH_AMOUNT,
+        ge=0,
+        description="每轮单个 symbol 最多提交金额（元），超出留到下一轮；0 = 不限制",
+    )
+    executor_batch_interval_seconds: int = Field(
+        default=DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
+        ge=0,
+        description="同一 symbol 相邻提交最小间隔秒数；0 = 跟随执行循环默认节奏",
+    )
     executor_price_level_sequence: List[int] = Field(default_factory=lambda: DEFAULT_EXECUTOR_PRICE_LEVEL_SEQUENCE.copy())
     executor_order_timeout_seconds_sequence: List[int] = Field(
         default_factory=lambda: DEFAULT_EXECUTOR_ORDER_TIMEOUT_SECONDS_SEQUENCE.copy()
@@ -235,6 +253,21 @@ class ExternalTradingAccountUpdate(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_min_order_amount: Optional[float] = Field(default=None, ge=0)
+    executor_max_single_order_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
+    )
+    executor_max_batch_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="每轮单个 symbol 最多提交金额（元），超出留到下一轮；0 = 不限制",
+    )
+    executor_batch_interval_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="同一 symbol 相邻提交最小间隔秒数；0 = 跟随执行循环默认节奏",
+    )
     executor_price_level_sequence: Optional[List[int]] = None
     executor_order_timeout_seconds_sequence: Optional[List[int]] = None
     commission_rate_pct: Optional[float] = Field(default=None, ge=0)
@@ -405,6 +438,21 @@ class ExternalTradingSubAccountPayload(BaseModel):
     executor_max_replace_count: Optional[int] = Field(default=None, ge=0, le=20)
     executor_max_slippage_pct: Optional[float] = Field(default=None, ge=0)
     executor_min_order_amount: Optional[float] = Field(default=None, ge=0)
+    executor_max_single_order_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="单笔净额委托最大金额（元），超过则拆单；0 = 不拆",
+    )
+    executor_max_batch_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="每轮单个 symbol 最多提交金额（元），超出留到下一轮；0 = 不限制",
+    )
+    executor_batch_interval_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="同一 symbol 相邻提交最小间隔秒数；0 = 跟随执行循环默认节奏",
+    )
     executor_price_level_sequence: Optional[List[int]] = None
     executor_order_timeout_seconds_sequence: Optional[List[int]] = None
 
@@ -494,6 +542,9 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "executor_max_replace_count": executor_max_replace_count,
         "executor_max_slippage_pct": executor_max_slippage_pct,
         "executor_min_order_amount": executor_min_order_amount,
+        "executor_max_single_order_amount": getattr(account, "executor_max_single_order_amount", None),
+        "executor_max_batch_amount": getattr(account, "executor_max_batch_amount", None),
+        "executor_batch_interval_seconds": getattr(account, "executor_batch_interval_seconds", None),
         "executor_clip_sell_to_available": executor_clip_sell_to_available,
         "executor_price_level_sequence": executor_price_level_sequence,
         "executor_order_timeout_seconds_sequence": executor_order_timeout_seconds_sequence,
@@ -2197,6 +2248,9 @@ async def create_external_trading_sub_account(
         executor_max_replace_count=payload.executor_max_replace_count,
         executor_max_slippage_pct=payload.executor_max_slippage_pct,
         executor_min_order_amount=payload.executor_min_order_amount,
+        executor_max_single_order_amount=payload.executor_max_single_order_amount,
+        executor_max_batch_amount=payload.executor_max_batch_amount,
+        executor_batch_interval_seconds=payload.executor_batch_interval_seconds,
         executor_clip_sell_to_available=None,
         executor_price_level_sequence=payload.executor_price_level_sequence,
         executor_order_timeout_seconds_sequence=stored_timeout_sequence,
@@ -2266,6 +2320,9 @@ async def update_external_trading_sub_account(
     sub_account.executor_max_replace_count = payload.executor_max_replace_count
     sub_account.executor_max_slippage_pct = payload.executor_max_slippage_pct
     sub_account.executor_min_order_amount = payload.executor_min_order_amount
+    sub_account.executor_max_single_order_amount = payload.executor_max_single_order_amount
+    sub_account.executor_max_batch_amount = payload.executor_max_batch_amount
+    sub_account.executor_batch_interval_seconds = payload.executor_batch_interval_seconds
     sub_account.executor_clip_sell_to_available = None
     sub_account.executor_price_level_sequence = payload.executor_price_level_sequence
     sub_account.executor_order_timeout_seconds_sequence = stored_timeout_sequence
