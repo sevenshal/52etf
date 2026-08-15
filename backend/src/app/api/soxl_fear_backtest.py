@@ -186,9 +186,33 @@ class SOXLFearStrategyParams(BaseModel):
     sub_volume_signal_symbol: Optional[str] = None
     sub_buy_threshold: float = 25.0
     sub_volume_ratio_threshold: float = 1.6
-    # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动——
+    # 第二候补（可选）：三标的对称轮动用（与 sub 一起参与空仓买最恐慌/换仓）
+    sub2_symbol: Optional[str] = None
+    sub2_fear_source: str = "cnn"
+    sub2_volume_signal_symbol: Optional[str] = None
+    sub2_buy_threshold: float = 20.0
+    sub2_volume_ratio_threshold: float = 1.3
+    # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
     # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
     swap_threshold: Optional[float] = None
+
+    @validator("sub2_buy_threshold")
+    def validate_sub2_buy_threshold(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("第二候补恐慌阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("sub2_volume_ratio_threshold")
+    def validate_sub2_volume_ratio_threshold(cls, value):
+        if value <= 0 or value > 20:
+            raise ValueError("第二候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("sub2_fear_source")
+    def validate_sub2_fear_source(cls, value):
+        if value not in FEAR_SOURCE_OPTIONS:
+            raise ValueError("第二候补恐贪来源包含不支持的来源")
+        return value
 
     @validator("swap_threshold")
     def validate_swap_threshold(cls, value):
@@ -303,6 +327,57 @@ class SOXLFearSearchParams(BaseModel):
     sub_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.6])
     # 换仓阈值候选：None（关闭=主辅跷跷板）或 0~100（对称双轮动）
     swap_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [None, 45.0])
+    # 第二候补（固定标的 + 阈值参与组合搜索）
+    sub2_symbol: Optional[str] = None
+    sub2_fear_source: str = "cnn"
+    sub2_volume_signal_symbol: Optional[str] = None
+    sub2_buy_threshold_values: List[float] = Field(default_factory=lambda: [20.0])
+    sub2_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
+
+    @validator("sub2_symbol")
+    def validate_sub2_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("sub2_symbol 格式不正确")
+        return symbol
+
+    @validator("sub2_volume_signal_symbol")
+    def validate_sub2_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("sub2_volume_signal_symbol 格式不正确")
+        return symbol
+
+    @validator("sub2_fear_source")
+    def validate_search_sub2_fear_source(cls, value):
+        if value not in FEAR_SOURCE_OPTIONS:
+            raise ValueError("第二候补恐贪来源包含不支持的来源")
+        return value
+
+    @validator("sub2_buy_threshold_values", "sub2_volume_ratio_threshold_values")
+    def validate_sub2_threshold_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("第二候补阈值候选至少一个值")
+        return normalized
+
+    @validator("sub2_volume_ratio_threshold_values")
+    def validate_sub2_vr_values(cls, value):
+        for item in value:
+            if item <= 0 or item > 20:
+                raise ValueError("第二候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("sub2_buy_threshold_values")
+    def validate_sub2_buy_values(cls, value):
+        for item in value:
+            if item < 0 or item > 100:
+                raise ValueError("第二候补恐慌阈值必须在 0 到 100 之间")
+        return value
 
     @validator("sub_buy_threshold_values", "sub_volume_ratio_threshold_values")
     def validate_sub_threshold_values(cls, value):
@@ -820,7 +895,10 @@ def _prepare_search_dataframes(
     sub_symbol: Optional[str] = None,
     sub_fear_source: Optional[str] = None,
     sub_volume_signal_symbol: Optional[str] = None,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict], Dict, Optional[pd.DataFrame], Optional[Dict]]:
+    sub2_symbol: Optional[str] = None,
+    sub2_fear_source: Optional[str] = None,
+    sub2_volume_signal_symbol: Optional[str] = None,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict], Dict, Optional[pd.DataFrame], Optional[Dict], Optional[pd.DataFrame], Optional[Dict]]:
     base_dfs: Dict[str, pd.DataFrame] = {}
     source_metas: Dict[str, Dict] = {}
     meta_items: List[Dict] = []
@@ -847,6 +925,18 @@ def _prepare_search_dataframes(
             end_date,
             sub_fear_source or "cnn",
             sub_volume_signal_symbol,
+        )
+
+    # 第二候补数据（可选）
+    sub2_base_df: Optional[pd.DataFrame] = None
+    sub2_meta: Optional[Dict] = None
+    if sub2_symbol:
+        sub2_base_df, sub2_meta = _prepare_base_dataframe(
+            sub2_symbol,
+            start_date,
+            end_date,
+            sub2_fear_source or "cnn",
+            sub2_volume_signal_symbol,
         )
 
     if not meta_items:
@@ -886,7 +976,11 @@ def _prepare_search_dataframes(
         "sub_fear_source": sub_fear_source,
         "sub_volume_signal_symbol": sub_volume_signal_symbol,
         "sub_meta": sub_meta,
-    }, sub_base_df, sub_meta
+        "sub2_symbol": sub2_symbol,
+        "sub2_fear_source": sub2_fear_source,
+        "sub2_volume_signal_symbol": sub2_volume_signal_symbol,
+        "sub2_meta": sub2_meta,
+    }, sub_base_df, sub_meta, sub2_base_df, sub2_meta
 
 
 def _build_fear_series_payload(base_dfs: Dict[str, pd.DataFrame]) -> Dict:
@@ -1486,6 +1580,7 @@ def _run_seesaw_backtest(
     params: SOXLFearStrategyParams,
     initial_capital: float,
     detailed: bool = False,
+    sub2_base_df: Optional[pd.DataFrame] = None,
 ) -> Dict:
     """跷跷板轮动回测：主标的优先，候补只在主标的空仓时极恐放量买入。
 
@@ -1538,11 +1633,16 @@ def _run_seesaw_backtest(
 
     main = _frame_arrays(base_df)
     sub = _frame_arrays(sub_base_df)
+    sub2 = _frame_arrays(sub2_base_df) if sub2_base_df is not None else None
     main_dates = main["date_texts"]
     main_symbol = _normalize_symbol(str(base_df.attrs.get("symbol") or "") or "") or _normalize_symbol(str(params.symbol or "")) or ""
     sub_symbol = _normalize_symbol(str(sub_base_df.attrs.get("symbol") or "") or "") or _normalize_symbol(str(params.sub_symbol or "")) or ""
+    sub2_symbol = (
+        _normalize_symbol(str(sub2_base_df.attrs.get("symbol") or "") or "") or _normalize_symbol(str(params.sub2_symbol or "")) or ""
+    ) if sub2 is not None else ""
     main_fear_label = str(base_df.attrs.get("fear_source_label") or "主恐贪")
     sub_fear_label = str(sub_base_df.attrs.get("fear_source_label") or "候补恐贪")
+    sub2_fear_label = str(sub2_base_df.attrs.get("fear_source_label") or "第二候补恐贪") if sub2 is not None else ""
 
     cash = float(initial_capital)
     position_symbol = None  # "main" | "sub" | None
@@ -1564,21 +1664,35 @@ def _run_seesaw_backtest(
     benchmark_cash = initial_capital - benchmark_shares * first_exec if first_exec > 0 else initial_capital
     benchmark_shares_qty = benchmark_shares
 
+    def _holder(which: str):
+        if which == "main":
+            return main
+        if which == "sub":
+            return sub
+        return sub2
+
+    def _holder_symbol(which: str) -> str:
+        if which == "main":
+            return main_symbol
+        if which == "sub":
+            return sub_symbol
+        return sub2_symbol
+
     def current_close(day_text: str) -> float:
-        holder = main if position_symbol == "main" else sub
+        holder = _holder(position_symbol) if position_symbol else main
         info = holder["by_date"].get(day_text)
         return float(info["close"]) if info else 0.0
 
     def current_exec(day_text: str, which: str) -> float:
-        holder = main if which == "main" else sub
+        holder = _holder(which)
         info = holder["by_date"].get(day_text)
         return float(info["exec"]) if info else 0.0
 
     def do_sell(day_text: str) -> Optional[Dict]:
         nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count
         which = position_symbol
-        symbol = main_symbol if which == "main" else sub_symbol
-        exec_price = current_exec(day_text, which)
+        symbol = _holder_symbol(which) if which else ""
+        exec_price = current_exec(day_text, which) if which else 0.0
         if exec_price <= 0 or shares <= 0:
             return None
         sell_qty = shares
@@ -1616,7 +1730,7 @@ def _run_seesaw_backtest(
 
     def do_buy(day_text: str, which: str) -> Optional[Dict]:
         nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining
-        symbol = main_symbol if which == "main" else sub_symbol
+        symbol = _holder_symbol(which)
         exec_price = current_exec(day_text, which)
         if exec_price <= 0:
             return None
@@ -1649,6 +1763,7 @@ def _run_seesaw_backtest(
             if detailed:
                 equity_curve.append({"date": day_text, "value": equity_value, "benchmark_value": benchmark_value})
                 sub_info0 = sub["by_date"].get(day_text)
+                sub2_info0 = sub2["by_date"].get(day_text) if sub2 is not None else None
                 daily_data.append({
                     "date": day_text,
                     "open": float(main["by_date"][day_text]["open"]),
@@ -1667,6 +1782,12 @@ def _run_seesaw_backtest(
                     "sub_low": float(sub_info0["low"]) if sub_info0 else None,
                     "sub_close": float(sub_info0["close"]) if sub_info0 else None,
                     "sub_volume": float(sub_info0["volume"]) if sub_info0 else None,
+                    "sub2_symbol": sub2_symbol or None,
+                    "sub2_open": float(sub2_info0["open"]) if sub2 is not None and sub2_info0 else None,
+                    "sub2_high": float(sub2_info0["high"]) if sub2 is not None and sub2_info0 else None,
+                    "sub2_low": float(sub2_info0["low"]) if sub2 is not None and sub2_info0 else None,
+                    "sub2_close": float(sub2_info0["close"]) if sub2 is not None and sub2_info0 else None,
+                    "sub2_volume": float(sub2_info0["volume"]) if sub2 is not None and sub2_info0 else None,
                 })
             continue
 
@@ -1701,65 +1822,68 @@ def _run_seesaw_backtest(
         use_swap = params.swap_threshold is not None
         swap_value = float(params.swap_threshold) if use_swap else None
 
-        def _sell_main():
-            """持有主标的贪恐卖出（trailing 支持）。"""
+        # 三标的信号汇总（sub2 可选）
+        sig = {
+            "main": {"fear": main_fear, "vr": main_vr, "symbol": main_symbol, "label": main_fear_label,
+                     "signal": main_signal, "greedy": main_greedy},
+            "sub": {"fear": sub_fear, "vr": sub_vr, "symbol": sub_symbol, "label": sub_fear_label,
+                    "signal": sub_signal, "greedy": sub_greedy},
+        }
+        if sub2 is not None:
+            sub2_info = sub2["by_date"].get(day_text)
+            sub2_fear = float(sub2_info["fear"]) if sub2_info else np.nan
+            sub2_vr = float(sub2_info["buy_vr"]) if sub2_info else np.nan
+            sub2_signal = (
+                np.isfinite(sub2_fear) and sub2_fear <= float(params.sub2_buy_threshold)
+                and np.isfinite(sub2_vr) and sub2_vr >= float(params.sub2_volume_ratio_threshold)
+            )
+            sub2_greedy = np.isfinite(sub2_fear) and sub2_fear >= float(params.greed_threshold)
+            sig["sub2"] = {
+                "fear": sub2_fear, "vr": sub2_vr, "symbol": sub2_symbol, "label": sub2_fear_label,
+                "signal": sub2_signal, "greedy": sub2_greedy,
+            }
+
+        def _sell_held():
+            """持有标的贪恐卖出（trailing 支持）。"""
             nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            held_sig = sig[position_symbol]
+            held_fear = float(held_sig["fear"])
+            held_vr = float(held_sig["vr"])
             if float(params.trailing_stop_pct) <= 0:
                 action = do_sell(day_text)
-                reason = f"{main_fear_label} {main_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
+                reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
             else:
-                if main_greedy:
-                    greed_peak_price = max(float(greed_peak_price or main_info["high"]), main_info["high"])
-                close_here = main_info["close"]
+                held_info = _holder(position_symbol)["by_date"][day_text]
+                if held_sig["greedy"]:
+                    greed_peak_price = max(float(greed_peak_price or held_info["high"]), held_info["high"])
+                close_here = held_info["close"]
                 drawdown = (float(greed_peak_price) - close_here) / float(greed_peak_price) * 100 if greed_peak_price else 0.0
                 if drawdown >= float(params.trailing_stop_pct):
                     action = do_sell(day_text)
-                    reason = f"{main_fear_label} {main_fear:.2f} 回撤 {drawdown:.2f}% 触发移动止盈"
-            trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+                    reason = f"{held_sig['label']} {held_fear:.2f} 回撤 {drawdown:.2f}% 触发移动止盈"
+            trade_signal_fear, trade_signal_vr, trade_signal_label = held_fear, held_vr, held_sig["label"]
 
-        def _sell_sub():
-            """持有候补的贪恐卖出。"""
+        def _swap_held_to(target_key: str):
+            """换仓：卖当前持仓 → 买 target 标的。"""
             nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
-            action = do_sell(day_text)
-            reason = f"{sub_fear_label} {sub_fear:.2f} 候补到达贪恐阈值即卖，保持空仓"
-            trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
-
-        def _swap_from_main():
-            """换仓：卖主标的 → 买候补（对称双轮动）。"""
-            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            held_sig = sig[position_symbol]
+            target_sig = sig[target_key]
             sell_action = do_sell(day_text)
             if sell_action:
-                trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
-                reason = f"{main_fear_label} {main_fear:.2f} 恐贪>{swap_value:g} 且 {sub_fear_label} 出买入信号，卖出 {main_symbol} 换到候补"
-            buy_action = do_buy(day_text, "sub")
-            if sell_action:
-                trades.append({
-                    "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
-                    "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
-                    "profit": sell_action.get("profit"), "signal_date": day_text,
-                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
-                })
-            if buy_action:
-                trades.append({
-                    "date": buy_action["date"], "action": "BUY", "symbol": buy_action.get("symbol"),
-                    "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
-                    "signal_date": day_text,
-                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
-                    "reason": f"换仓买入候补 {sub_symbol}",
-                })
-            action = sell_action or buy_action
-
-        def _swap_from_sub():
-            """换仓：卖候补 → 买主标的（跷跷板换回 / 对称双轮动）。"""
-            nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
-            sell_action = do_sell(day_text)
-            if sell_action:
-                trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
+                trade_signal_fear, trade_signal_vr, trade_signal_label = (
+                    float(target_sig["fear"]), float(target_sig["vr"]), target_sig["label"]
+                )
                 if use_swap:
-                    reason = f"{sub_fear_label} {sub_fear:.2f} 恐贪>{swap_value:g} 且 {main_fear_label} 出买入信号，卖出候补换回主标的"
+                    reason = (
+                        f"{held_sig['label']} {held_sig['fear']:.2f} 恐贪>{swap_value:g} 且 {target_sig['label']} 出买入信号，"
+                        f"卖出 {held_sig['symbol']} 换到 {target_sig['symbol']}"
+                    )
                 else:
-                    reason = f"主标的出信号（{main_fear_label} {main_fear:.2f} + 量比 {main_vr:.2f}），卖出候补 {sub_symbol} 换回"
-            buy_action = do_buy(day_text, "main")
+                    reason = (
+                        f"主标的出信号（{main_fear_label} {main_fear:.2f} + 量比 {main_vr:.2f}），"
+                        f"卖出候补 {held_sig['symbol']} 换回主标的"
+                    )
+            buy_action = do_buy(day_text, target_key)
             if sell_action:
                 trades.append({
                     "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
@@ -1773,21 +1897,19 @@ def _run_seesaw_backtest(
                     "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
                     "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
-                    "reason": f"买入主标的 {main_symbol}",
+                    "reason": f"买入 {target_sig['symbol']}",
                 })
             action = sell_action or buy_action
 
         if position_symbol is None and can_trade:
-            if use_swap and main_signal and sub_signal:
-                # 对称双轮动：两个都触发 → 买更恐慌的
-                target = "main" if main_fear <= sub_fear else "sub"
-                action = do_buy(day_text, target)
-                if target == "main":
-                    reason = f"双标的都触发，{main_fear_label} {main_fear:.2f} 更恐慌，买入主标的"
-                    trade_signal_fear, trade_signal_vr, trade_signal_label = main_fear, main_vr, main_fear_label
-                else:
-                    reason = f"双标的都触发，{sub_fear_label} {sub_fear:.2f} 更恐慌，买入候补 {sub_symbol}"
-                    trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
+            if use_swap:
+                cands = [k for k, s in sig.items() if s["signal"] and np.isfinite(s["fear"])]
+                if cands:
+                    target = min(cands, key=lambda k: sig[k]["fear"])
+                    action = do_buy(day_text, target)
+                    t = sig[target]
+                    reason = f"多标的都触发，{t['label']} {t['fear']:.2f} 更恐慌，买入 {t['symbol']}"
+                    trade_signal_fear, trade_signal_vr, trade_signal_label = float(t["fear"]), float(t["vr"]), t["label"]
             elif main_signal:
                 action = do_buy(day_text, "main")
                 reason = f"{main_fear_label} {main_fear:.2f} 极恐放量买入主标的"
@@ -1796,18 +1918,17 @@ def _run_seesaw_backtest(
                 action = do_buy(day_text, "sub")
                 reason = f"主标的空仓，{sub_fear_label} {sub_fear:.2f} 极恐放量买入候补 {sub_symbol}"
                 trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
-        elif position_symbol == "main" and can_trade:
-            if shares > 0 and main_greedy:
-                _sell_main()
-            elif use_swap and shares > 0 and np.isfinite(main_fear) and main_fear > swap_value and sub_signal:
-                _swap_from_main()
-        elif position_symbol == "sub" and can_trade:
-            if sub_greedy:
-                _sell_sub()
-            elif use_swap and np.isfinite(sub_fear) and sub_fear > swap_value and main_signal:
-                _swap_from_sub()
-            elif main_signal:
-                _swap_from_sub()
+        elif position_symbol and can_trade and shares > 0:
+            held_sig = sig.get(position_symbol)
+            if held_sig and held_sig["greedy"]:
+                _sell_held()
+            elif use_swap and held_sig and np.isfinite(held_sig["fear"]) and held_sig["fear"] > swap_value:
+                others = [k for k, s in sig.items() if k != position_symbol and s["signal"] and np.isfinite(s["fear"])]
+                if others:
+                    target = min(others, key=lambda k: sig[k]["fear"])
+                    _swap_held_to(target)
+            elif not use_swap and position_symbol == "sub" and main_signal:
+                _swap_held_to("main")
 
         if action is not None and action.get("action"):
             already_logged = any(
@@ -1851,6 +1972,12 @@ def _run_seesaw_backtest(
                 "sub_low": float(sub_info["low"]) if sub_info else None,
                 "sub_close": float(sub_info["close"]) if sub_info else None,
                 "sub_volume": float(sub_info["volume"]) if sub_info else None,
+                "sub2_symbol": sub2_symbol or None,
+                "sub2_open": float(sub2_info["open"]) if sub2 is not None and sub2_info else None,
+                "sub2_high": float(sub2_info["high"]) if sub2 is not None and sub2_info else None,
+                "sub2_low": float(sub2_info["low"]) if sub2 is not None and sub2_info else None,
+                "sub2_close": float(sub2_info["close"]) if sub2 is not None and sub2_info else None,
+                "sub2_volume": float(sub2_info["volume"]) if sub2 is not None and sub2_info else None,
             })
 
     strategy_metrics, drawdowns = _compute_equity_metrics(main["dates"], equity_values)
@@ -1921,6 +2048,8 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.sub_buy_threshold_values,
         payload.sub_volume_ratio_threshold_values,
         payload.swap_threshold_values,
+        payload.sub2_buy_threshold_values,
+        payload.sub2_volume_ratio_threshold_values,
     ]
     total = 1
     for values in value_groups:
@@ -1935,6 +2064,7 @@ def _evaluate_search_candidates(
     base_dfs: Dict[str, pd.DataFrame],
     progress_callback=None,
     sub_base_df: Optional[pd.DataFrame] = None,
+    sub2_base_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[List[Dict], Dict, int]:
     total_combinations = _count_search_params(payload)
     eval_workers = payload.eval_workers or SEARCH_EVAL_MAX_WORKERS
@@ -1980,6 +2110,8 @@ def _evaluate_search_candidates(
                 payload.sub_buy_threshold_values,
                 payload.sub_volume_ratio_threshold_values,
                 payload.swap_threshold_values,
+                payload.sub2_buy_threshold_values,
+                payload.sub2_volume_ratio_threshold_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -2035,6 +2167,10 @@ def _evaluate_search_candidates(
                         sub_symbol=payload.sub_symbol,
                         sub_fear_source=payload.sub_fear_source,
                         sub_volume_signal_symbol=payload.sub_volume_signal_symbol,
+                        sub2_base_df=sub2_base_df,
+                        sub2_symbol=payload.sub2_symbol,
+                        sub2_fear_source=payload.sub2_fear_source,
+                        sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -2067,6 +2203,10 @@ def _evaluate_search_candidates(
                 payload.sub_symbol,
                 payload.sub_fear_source,
                 payload.sub_volume_signal_symbol,
+                sub2_base_df,
+                payload.sub2_symbol,
+                payload.sub2_fear_source,
+                payload.sub2_volume_signal_symbol,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -2118,6 +2258,10 @@ def _evaluate_search_batch(
     sub_symbol: Optional[str] = None,
     sub_fear_source: Optional[str] = None,
     sub_volume_signal_symbol: Optional[str] = None,
+    sub2_base_df: Optional[pd.DataFrame] = None,
+    sub2_symbol: Optional[str] = None,
+    sub2_fear_source: Optional[str] = None,
+    sub2_volume_signal_symbol: Optional[str] = None,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2142,6 +2286,8 @@ def _evaluate_search_batch(
                 sub_buy_threshold,
                 sub_volume_ratio_threshold,
                 swap_threshold,
+                sub2_buy_threshold,
+                sub2_volume_ratio_threshold,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),
@@ -2164,6 +2310,11 @@ def _evaluate_search_batch(
                 sub_buy_threshold=float(sub_buy_threshold if sub_buy_threshold is not None else 25.0),
                 sub_volume_ratio_threshold=float(sub_volume_ratio_threshold if sub_volume_ratio_threshold is not None else 1.6),
                 swap_threshold=swap_threshold,
+                sub2_symbol=sub2_symbol,
+                sub2_fear_source=sub2_fear_source or "cnn",
+                sub2_volume_signal_symbol=sub2_volume_signal_symbol,
+                sub2_buy_threshold=float(sub2_buy_threshold if sub2_buy_threshold is not None else 20.0),
+                sub2_volume_ratio_threshold=float(sub2_volume_ratio_threshold if sub2_volume_ratio_threshold is not None else 1.3),
             )
         except ValidationError as exc:
             skipped_combinations += 1
@@ -2173,7 +2324,10 @@ def _evaluate_search_batch(
 
         try:
             if sub_base_df is not None and params.sub_symbol:
-                result = _run_seesaw_backtest(base_df, sub_base_df, params, initial_capital, detailed=False)
+                result = _run_seesaw_backtest(
+                    base_df, sub_base_df, params, initial_capital, detailed=False,
+                    sub2_base_df=sub2_base_df,
+                )
             else:
                 result = _run_backtest(base_df, params, initial_capital, detailed=False)
         except Exception as exc:
@@ -2241,7 +2395,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
     if total_combinations <= 0:
         raise ValueError("至少需要提供一组有效的超参数候选值")
 
-    base_dfs, source_metas, meta, sub_base_df, sub_meta = _prepare_search_dataframes(
+    base_dfs, source_metas, meta, sub_base_df, sub_meta, sub2_base_df, sub2_meta = _prepare_search_dataframes(
         payload.symbol,
         start_date,
         end_date,
@@ -2250,15 +2404,19 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         sub_symbol=payload.sub_symbol,
         sub_fear_source=payload.sub_fear_source,
         sub_volume_signal_symbol=payload.sub_volume_signal_symbol,
+        sub2_symbol=payload.sub2_symbol,
+        sub2_fear_source=payload.sub2_fear_source,
+        sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
     )
     logger.info(
-        "Starting SOXL fear parameter search, symbol=%s, volume_signal_symbol=%s, fear_sources=%s, combinations=%s, top_n=%s, sub_symbol=%s",
+        "Starting SOXL fear parameter search, symbol=%s, volume_signal_symbol=%s, fear_sources=%s, combinations=%s, top_n=%s, sub_symbol=%s, sub2_symbol=%s",
         payload.symbol,
         payload.volume_signal_symbol or payload.symbol,
         payload.fear_source_values,
         total_combinations,
         payload.top_n,
         payload.sub_symbol,
+        payload.sub2_symbol,
     )
 
     def progress_callback(index: int, total: int, skipped: int):
@@ -2276,6 +2434,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         base_dfs,
         progress_callback=progress_callback,
         sub_base_df=sub_base_df,
+        sub2_base_df=sub2_base_df,
     )
 
     best_fear_source = best_summary.get("fear_source") or payload.fear_source_values[0]
@@ -2283,7 +2442,8 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
     best_params = SOXLFearStrategyParams(**best_summary["params"])
     if sub_base_df is not None and best_params.sub_symbol:
         best_result = _run_seesaw_backtest(
-            base_dfs[best_fear_source], sub_base_df, best_params, payload.initial_capital, detailed=True
+            base_dfs[best_fear_source], sub_base_df, best_params, payload.initial_capital, detailed=True,
+            sub2_base_df=sub2_base_df,
         )
     else:
         best_result = _run_backtest(
@@ -2319,6 +2479,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
                 "execution_price_type": best_result.get("execution_price_type"),
                 "execution_price_label": best_result.get("execution_price_label"),
                 "sub_meta": sub_meta,
+                "sub2_meta": sub2_meta,
             },
         },
     }
@@ -2389,7 +2550,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             payload.top_n,
         )
 
-        base_dfs, source_metas, meta, sub_base_df, sub_meta = _prepare_search_dataframes(
+        base_dfs, source_metas, meta, sub_base_df, sub_meta, sub2_base_df, sub2_meta = _prepare_search_dataframes(
             payload.symbol,
             start_date,
             end_date,
@@ -2398,6 +2559,9 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             sub_symbol=payload.sub_symbol,
             sub_fear_source=payload.sub_fear_source,
             sub_volume_signal_symbol=payload.sub_volume_signal_symbol,
+            sub2_symbol=payload.sub2_symbol,
+            sub2_fear_source=payload.sub2_fear_source,
+            sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
         )
 
         def progress_callback(index: int, total: int, skipped: int):
@@ -2427,6 +2591,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             base_dfs,
             progress_callback=progress_callback,
             sub_base_df=sub_base_df,
+            sub2_base_df=sub2_base_df,
         )
 
         _update_search_job(
@@ -2443,7 +2608,8 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         best_params = SOXLFearStrategyParams(**best_summary["params"])
         if sub_base_df is not None and best_params.sub_symbol:
             best_result = _run_seesaw_backtest(
-                base_dfs[best_fear_source], sub_base_df, best_params, payload.initial_capital, detailed=True
+                base_dfs[best_fear_source], sub_base_df, best_params, payload.initial_capital, detailed=True,
+                sub2_base_df=sub2_base_df,
             )
         else:
             best_result = _run_backtest(
@@ -2479,6 +2645,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
                     "execution_price_type": best_result.get("execution_price_type"),
                     "execution_price_label": best_result.get("execution_price_label"),
                     "sub_meta": sub_meta,
+                "sub2_meta": sub2_meta,
                 },
             },
         }
@@ -2654,7 +2821,7 @@ def run_soxl_fear_backtest(
         if payload.fear_source not in compare_sources:
             compare_sources.insert(0, payload.fear_source)
 
-        base_dfs, source_metas, _, sub_base_df, sub_meta = _prepare_search_dataframes(
+        base_dfs, source_metas, _, sub_base_df, sub_meta, sub2_base_df, sub2_meta = _prepare_search_dataframes(
             payload.symbol,
             start_date,
             end_date,
@@ -2663,12 +2830,16 @@ def run_soxl_fear_backtest(
             sub_symbol=payload.params.sub_symbol,
             sub_fear_source=payload.params.sub_fear_source,
             sub_volume_signal_symbol=payload.params.sub_volume_signal_symbol,
+            sub2_symbol=payload.params.sub2_symbol,
+            sub2_fear_source=payload.params.sub2_fear_source,
+            sub2_volume_signal_symbol=payload.params.sub2_volume_signal_symbol,
         )
         base_df = base_dfs[payload.fear_source]
         meta = source_metas[payload.fear_source]
         if sub_base_df is not None and payload.params.sub_symbol:
             result = _run_seesaw_backtest(
-                base_df, sub_base_df, payload.params, payload.initial_capital, detailed=True
+                base_df, sub_base_df, payload.params, payload.initial_capital, detailed=True,
+                sub2_base_df=sub2_base_df,
             )
         else:
             result = _run_backtest(base_df, payload.params, payload.initial_capital, detailed=True)
@@ -2678,6 +2849,7 @@ def run_soxl_fear_backtest(
             "execution_price_type": result.get("execution_price_type") or meta.get("execution_price_type"),
             "execution_price_label": result.get("execution_price_label") or meta.get("execution_price_label"),
             "sub_meta": sub_meta,
+            "sub2_meta": sub2_meta,
         }
         result["fear_series"] = _build_fear_series_payload(base_dfs)
         return result

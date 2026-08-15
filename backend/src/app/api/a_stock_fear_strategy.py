@@ -51,6 +51,12 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub_volume_signal_symbol: Optional[str] = None
     sub_buy_threshold: float = 25.0
     sub_volume_ratio_threshold: float = 1.6
+    # 第二候补（三标的轮动，可选）
+    sub2_symbol: Optional[str] = None
+    sub2_fear_source: str = "qqq_clone"
+    sub2_volume_signal_symbol: Optional[str] = None
+    sub2_buy_threshold: float = 20.0
+    sub2_volume_ratio_threshold: float = 1.3
     swap_threshold: Optional[float] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
@@ -126,6 +132,43 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub_volume_ratio_threshold(cls, value):
         if value <= 0 or value > 20:
             raise ValueError("候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("sub2_symbol")
+    def validate_sub2_symbol(cls, value):
+        if not value:
+            return None
+        value = (value or "").strip().upper()
+        if value not in A_STOCK_SYMBOLS:
+            raise ValueError("第二候补标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub2_fear_source")
+    def validate_sub2_fear_source(cls, value):
+        value = (value or "").strip().lower()
+        if value not in A_STOCK_FEAR_SOURCE_KEYS and value not in {"qqq_clone", "cnn", "soxx_clone", "spy_clone", "dia_clone"}:
+            raise ValueError("第二候补恐贪来源必须是 a_stock_* 或美股自算贪恐（qqq_clone 等）")
+        return value
+
+    @validator("sub2_volume_signal_symbol")
+    def validate_sub2_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        value = (value or "").strip().upper()
+        if value not in A_STOCK_SYMBOLS:
+            raise ValueError("第二候补量比来源标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub2_buy_threshold")
+    def validate_sub2_buy_threshold(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("第二候补恐慌阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("sub2_volume_ratio_threshold")
+    def validate_sub2_volume_ratio_threshold(cls, value):
+        if value <= 0 or value > 20:
+            raise ValueError("第二候补量比阈值必须大于 0 且不超过 20")
         return value
 
     @validator("swap_threshold")
@@ -278,6 +321,11 @@ CONFIG_FIELDS = [
     "sub_volume_signal_symbol",
     "sub_buy_threshold",
     "sub_volume_ratio_threshold",
+    "sub2_symbol",
+    "sub2_fear_source",
+    "sub2_volume_signal_symbol",
+    "sub2_buy_threshold",
+    "sub2_volume_ratio_threshold",
     "swap_threshold",
     "external_trading_account_id",
     "live_sub_account_id",

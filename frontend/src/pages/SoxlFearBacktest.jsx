@@ -244,6 +244,12 @@ const SoxlFearBacktest = () => {
       sub_buy_threshold_values: parseNumberList(values.sub_buy_threshold_values),
       sub_volume_ratio_threshold_values: parseNumberList(values.sub_volume_ratio_threshold_values),
       swap_threshold_values: parseSwapThresholdList(values.swap_threshold_values),
+      // 第二候补（三标的轮动，可选）
+      sub2_symbol: values.sub2_symbol || undefined,
+      sub2_fear_source: values.sub2_fear_source || 'qqq_clone',
+      sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
+      sub2_buy_threshold_values: parseNumberList(values.sub2_buy_threshold_values),
+      sub2_volume_ratio_threshold_values: parseNumberList(values.sub2_volume_ratio_threshold_values),
     };
   };
 
@@ -267,6 +273,11 @@ const SoxlFearBacktest = () => {
     sub_buy_threshold: record.sub_buy_threshold ?? 25,
     sub_volume_ratio_threshold: record.sub_volume_ratio_threshold ?? 1.6,
     swap_threshold: record.swap_threshold ?? null,
+    sub2_symbol: record.sub2_symbol ?? undefined,
+    sub2_fear_source: record.sub2_fear_source ?? 'qqq_clone',
+    sub2_volume_signal_symbol: record.sub2_volume_signal_symbol ?? undefined,
+    sub2_buy_threshold: record.sub2_buy_threshold ?? 20,
+    sub2_volume_ratio_threshold: record.sub2_volume_ratio_threshold ?? 1.3,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
 
@@ -458,10 +469,19 @@ const SoxlFearBacktest = () => {
     {
       title: '跷跷板候补',
       dataIndex: 'sub_symbol',
-      width: 260,
+      width: 200,
       ellipsis: true,
       render: (value, record) => (value
         ? <Tag color="purple">{value} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}{record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}</Tag>
+        : '-'),
+    },
+    {
+      title: '第二候补',
+      dataIndex: 'sub2_symbol',
+      width: 190,
+      ellipsis: true,
+      render: (value, record) => (value
+        ? <Tag color="magenta">{value} 恐慌≤{record.sub2_buy_threshold}/量比≥{record.sub2_volume_ratio_threshold}</Tag>
         : '-'),
     },
     { title: '止盈减仓%', dataIndex: 'sell_position_pct', width: 100 },
@@ -736,6 +756,9 @@ const SoxlFearBacktest = () => {
     // 跷跷板候补：K线/成交量叠加到同一图（蓝色系区分主次）
     const firstSub = detailedResult.daily_data.find(item => item.sub_symbol);
     const subSymbol = firstSub?.sub_symbol || null;
+    // 第二候补（三标的）
+    const firstSub2 = detailedResult.daily_data.find(item => item.sub2_symbol);
+    const sub2Symbol = firstSub2?.sub2_symbol || null;
     const subKlineData = detailedResult.daily_data.map(item => (
       item.sub_open == null ? null : [item.sub_open, item.sub_close, item.sub_low, item.sub_high]
     ));
@@ -780,10 +803,26 @@ const SoxlFearBacktest = () => {
         yAxis: item.price,
         itemStyle: { color: '#13c2c2' },
       })) : [];
+    const sub2KlineData = sub2Symbol ? detailedResult.daily_data.map(item => (
+      item.sub2_open == null ? null : [item.sub2_open, item.sub2_close, item.sub2_low, item.sub2_high]
+    )) : [];
+    const sub2VolumeData = sub2Symbol ? detailedResult.daily_data.map(item => ({
+      value: item.sub2_volume,
+      itemStyle: { color: '#eb2f96' },
+    })) : [];
+    const sub2BuyMarkers = sub2Symbol ? (detailedResult.trades || [])
+      .filter(item => item.action === 'BUY' && item.symbol === sub2Symbol)
+      .map(item => ({ name: '第二候补买', value: 'B', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#fa8c16' } })) : [];
+    const sub2SellMarkers = sub2Symbol ? (detailedResult.trades || [])
+      .filter(item => item.action === 'SELL' && item.symbol === sub2Symbol)
+      .map(item => ({ name: '第二候补卖', value: 'S', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#eb2f96' } })) : [];
 
     const legendData = [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'];
     if (subSymbol) {
       legendData.push(`${subSymbol} K线`, `${subSymbol} 成交量`);
+    }
+    if (sub2Symbol) {
+      legendData.push(`${sub2Symbol} K线`, `${sub2Symbol} 成交量`);
     }
 
     const series = [
@@ -819,6 +858,26 @@ const SoxlFearBacktest = () => {
         markPoint: {
           data: [...subBuyMarkers, ...subSellMarkers],
           symbolSize: 24,
+          symbol: 'pin',
+          label: { color: '#fff', fontWeight: 'bold' },
+        },
+      });
+    }
+    if (sub2Symbol) {
+      series.push({
+        name: `${sub2Symbol} K线`,
+        type: 'candlestick',
+        data: sub2KlineData,
+        barWidth: 5,
+        itemStyle: {
+          color: 'rgba(235,47,150,0.4)',
+          color0: 'rgba(250,140,22,0.4)',
+          borderColor: '#eb2f96',
+          borderColor0: '#fa8c16',
+        },
+        markPoint: {
+          data: [...sub2BuyMarkers, ...sub2SellMarkers],
+          symbolSize: 22,
           symbol: 'pin',
           label: { color: '#fff', fontWeight: 'bold' },
         },
@@ -860,6 +919,16 @@ const SoxlFearBacktest = () => {
         barWidth: 5,
       });
     }
+    if (sub2Symbol) {
+      series.push({
+        name: `${sub2Symbol} 成交量`,
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 3,
+        data: sub2VolumeData,
+        barWidth: 4,
+      });
+    }
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
@@ -877,6 +946,7 @@ const SoxlFearBacktest = () => {
         { scale: true, splitArea: { show: true } },
         { scale: true, gridIndex: 1, splitNumber: 2 },
         ...(subSymbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
+        ...(sub2Symbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
@@ -1014,6 +1084,11 @@ const SoxlFearBacktest = () => {
             sub_buy_threshold_values: '25',
             sub_volume_ratio_threshold_values: '1.6',
             swap_threshold_values: 'none',
+            sub2_symbol: undefined,
+            sub2_fear_source: 'qqq_clone',
+            sub2_volume_signal_symbol: undefined,
+            sub2_buy_threshold_values: '20',
+            sub2_volume_ratio_threshold_values: '1.3',
           }}
         >
           <Row gutter={16}>
@@ -1184,6 +1259,40 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 none,45,55（none=主辅跷跷板）" />
               </Form.Item>
             </Col>
+            <Col xs={24} md={24}>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="第二候补（三标的轮动，可选）"
+                description="再填一个候补可做三标的对称轮动（需换仓阈值非空）：空仓时任一标的极恐放量都买（都触发买恐贪最低的）；持有 X 时 X 恐贪超过换仓阈值且任一其他标的有信号则换仓。例如纳指ETF 159941.SZ 配 QQQ 自算贪恐（美股恐贪上海凌晨已算出，信号日与 A股对齐）。"
+              />
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_symbol" label="第二候补标的">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="留空=双标的" options={symbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_fear_source" label="第二候补恐贪来源">
+                <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_volume_signal_symbol" label="第二候补量比来源">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="默认自身" options={volumeSignalSymbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_buy_threshold_values" label="第二候补恐慌阈值(<=)候选">
+                <Input placeholder="例如 20,25" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_volume_ratio_threshold_values" label="第二候补量比阈值(>=)候选">
+                <Input placeholder="例如 1.3,1.6" />
+              </Form.Item>
+            </Col>
           </Row>
 
           <Space>
@@ -1301,6 +1410,14 @@ const SoxlFearBacktest = () => {
                   <Descriptions.Item label="候补恐慌阈值">{detailedResult.params.sub_buy_threshold}</Descriptions.Item>
                   <Descriptions.Item label="候补量比阈值">{detailedResult.params.sub_volume_ratio_threshold}</Descriptions.Item>
                   <Descriptions.Item label="换仓阈值">{detailedResult.params.swap_threshold ?? '关闭（主辅跷跷板）'}</Descriptions.Item>
+                </>
+              )}
+              {detailedResult.params?.sub2_symbol && (
+                <>
+                  <Descriptions.Item label="第二候补">{detailedResult.params.sub2_symbol}</Descriptions.Item>
+                  <Descriptions.Item label="第二候补恐贪来源">{getFearSourceLabel(detailedResult.params.sub2_fear_source)}</Descriptions.Item>
+                  <Descriptions.Item label="第二候补恐慌阈值">{detailedResult.params.sub2_buy_threshold}</Descriptions.Item>
+                  <Descriptions.Item label="第二候补量比阈值">{detailedResult.params.sub2_volume_ratio_threshold}</Descriptions.Item>
                 </>
               )}
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>

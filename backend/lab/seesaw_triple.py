@@ -136,9 +136,9 @@ def run_backtest(fear_map, bars_map, trading_days, pairs, greed_threshold, swap_
         else:
             held_etf = position[1]
             held_fear = sigs.get(held_etf, (False, np.nan))[1]
-            if np.isfinite(held_fear) and held_fear >= greed_threshold:
+            if held_fear is not None and np.isfinite(held_fear) and held_fear >= greed_threshold:
                 do_sell(exec_day)
-            elif np.isfinite(held_fear) and held_fear > swap_threshold:
+            elif held_fear is not None and np.isfinite(held_fear) and held_fear > swap_threshold:
                 others = [p for p in pairs if p[1] != held_etf and sigs[p[1]][0]]
                 if others:
                     target = min(others, key=lambda p: sigs[p[1]][1])

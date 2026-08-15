@@ -63,6 +63,12 @@ const defaultValues = {
   sub_volume_signal_symbol: undefined,
   sub_buy_threshold: 25,
   sub_volume_ratio_threshold: 1.6,
+  // 第二候补（三标的轮动，可选）
+  sub2_symbol: undefined,
+  sub2_fear_source: 'qqq_clone',
+  sub2_volume_signal_symbol: undefined,
+  sub2_buy_threshold: 20,
+  sub2_volume_ratio_threshold: 1.3,
   // 换仓阈值：留空=主辅跷跷板；有值=对称双轮动
   swap_threshold: null,
 };
@@ -79,6 +85,11 @@ const normalizeConfig = (config) => ({
   sub_volume_signal_symbol: config?.sub_volume_signal_symbol ?? undefined,
   sub_buy_threshold: config?.sub_buy_threshold ?? 25,
   sub_volume_ratio_threshold: config?.sub_volume_ratio_threshold ?? 1.6,
+  sub2_symbol: config?.sub2_symbol ?? undefined,
+  sub2_fear_source: config?.sub2_fear_source ?? 'qqq_clone',
+  sub2_volume_signal_symbol: config?.sub2_volume_signal_symbol ?? undefined,
+  sub2_buy_threshold: config?.sub2_buy_threshold ?? 20,
+  sub2_volume_ratio_threshold: config?.sub2_volume_ratio_threshold ?? 1.3,
   swap_threshold: config?.swap_threshold ?? null,
 });
 
@@ -345,6 +356,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
     sub_buy_threshold: values.sub_buy_threshold ?? 25,
     sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
+    sub2_symbol: values.sub2_symbol || undefined,
+    sub2_fear_source: values.sub2_fear_source || 'qqq_clone',
+    sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
+    sub2_buy_threshold: values.sub2_buy_threshold ?? 20,
+    sub2_volume_ratio_threshold: values.sub2_volume_ratio_threshold ?? 1.3,
     swap_threshold: values.swap_threshold ?? null,
   });
 
@@ -394,6 +410,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub_buy_threshold_values: String(values.sub_buy_threshold ?? 25),
           sub_volume_ratio_threshold_values: String(values.sub_volume_ratio_threshold ?? 1.6),
           swap_threshold_values: [values.swap_threshold ?? null],
+          sub2_symbol: values.sub2_symbol || undefined,
+          sub2_fear_source: values.sub2_fear_source || 'qqq_clone',
+          sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
+          sub2_buy_threshold_values: String(values.sub2_buy_threshold ?? 20),
+          sub2_volume_ratio_threshold_values: String(values.sub2_volume_ratio_threshold ?? 1.3),
         },
       },
     });
@@ -504,10 +525,19 @@ const AStockFearStrategy = ({ embedded = false }) => {
     {
       title: '跷跷板候补',
       dataIndex: 'sub_symbol',
-      width: 260,
+      width: 200,
       ellipsis: true,
       render: (value, record) => (value
         ? `${value} 恐慌≤${record.sub_buy_threshold}/量比≥${record.sub_volume_ratio_threshold}${record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}`
+        : '-'),
+    },
+    {
+      title: '第二候补',
+      dataIndex: 'sub2_symbol',
+      width: 190,
+      ellipsis: true,
+      render: (value, record) => (value
+        ? `${value} 恐慌≤${record.sub2_buy_threshold}/量比≥${record.sub2_volume_ratio_threshold}`
         : '-'),
     },
     {
@@ -824,6 +854,40 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
+                        <Col xs={24} md={24}>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message="第二候补（三标的轮动，可选）"
+                            description="再填一个候补可做三标的对称轮动（需换仓阈值非空）：空仓时任一标的极恐放量都买（都触发买恐贪最低的）；持有 X 时 X 恐贪超过换仓阈值且任一其他标的有信号则换仓。例如纳指ETF 159941.SZ 配 QQQ 自算贪恐（美股恐贪上海凌晨已算出）。"
+                          />
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub2_symbol" label="第二候补标的">
+                            <Select allowClear showSearch optionFilterProp="label" placeholder="留空=双标的" options={targetOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub2_fear_source" label="第二候补恐贪来源">
+                            <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub2_volume_signal_symbol" label="第二候补量比来源">
+                            <Select allowClear showSearch optionFilterProp="label" placeholder="默认自身" options={targetOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub2_buy_threshold" label="第二候补恐慌阈值(<=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub2_volume_ratio_threshold" label="第二候补量比阈值(>=)">
+                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="enabled" label="启用" valuePropName="checked">
                             <Switch />
@@ -925,6 +989,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
                     <Descriptions.Item label="候补恐贪来源">{getFearSourceLabel(selectedConfig.sub_fear_source)}</Descriptions.Item>
                     <Descriptions.Item label="候补买入门槛">恐慌≤{selectedConfig.sub_buy_threshold} 且 量比≥{selectedConfig.sub_volume_ratio_threshold}</Descriptions.Item>
                     <Descriptions.Item label="换仓阈值">{selectedConfig.swap_threshold ?? '关闭（主辅跷跷板）'}</Descriptions.Item>
+                    {selectedConfig.sub2_symbol && (
+                      <>
+                        <Descriptions.Item label="第二候补">{selectedConfig.sub2_symbol}</Descriptions.Item>
+                        <Descriptions.Item label="第二候补恐贪来源">{getFearSourceLabel(selectedConfig.sub2_fear_source)}</Descriptions.Item>
+                        <Descriptions.Item label="第二候补买入门槛">恐慌≤{selectedConfig.sub2_buy_threshold} 且 量比≥{selectedConfig.sub2_volume_ratio_threshold}</Descriptions.Item>
+                      </>
+                    )}
                   </>
                 )}
               </Descriptions>
