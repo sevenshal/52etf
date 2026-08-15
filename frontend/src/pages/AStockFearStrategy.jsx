@@ -391,9 +391,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub_symbol: values.sub_symbol || undefined,
           sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
           sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
-          sub_buy_threshold: values.sub_buy_threshold ?? 25,
-          sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
-          swap_threshold: values.swap_threshold ?? null,
+          sub_buy_threshold_values: String(values.sub_buy_threshold ?? 25),
+          sub_volume_ratio_threshold_values: String(values.sub_volume_ratio_threshold ?? 1.6),
+          swap_threshold_values: [values.swap_threshold ?? null],
         },
       },
     });

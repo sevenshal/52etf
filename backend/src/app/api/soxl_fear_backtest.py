@@ -295,22 +295,45 @@ class SOXLFearSearchParams(BaseModel):
     max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [1, 2, 3])
     min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [5.0, 10.0, 15.0])
     execute_next_open_values: List[bool] = Field(default_factory=lambda: [False, True])
-    # 跷跷板候补（固定参数，不参与组合搜索）：sub_symbol 为空则保持单标的模式
+    # 跷跷板候补（sub_symbol 固定，阈值参与组合搜索）
     sub_symbol: Optional[str] = None
     sub_fear_source: str = "cnn"
     sub_volume_signal_symbol: Optional[str] = None
-    sub_buy_threshold: float = 25.0
-    sub_volume_ratio_threshold: float = 1.6
-    # 换仓阈值（固定参数，不参与组合搜索）：None=主辅跷跷板；有值=对称双轮动
-    swap_threshold: Optional[float] = None
+    sub_buy_threshold_values: List[float] = Field(default_factory=lambda: [25.0])
+    sub_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.6])
+    # 换仓阈值候选：None（关闭=主辅跷跷板）或 0~100（对称双轮动）
+    swap_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [None, 45.0])
 
-    @validator("swap_threshold")
-    def validate_search_swap_threshold(cls, value):
-        if value is None:
-            return None
-        if value < 0 or value > 100:
-            raise ValueError("换仓阈值必须在 0 到 100 之间")
+    @validator("sub_buy_threshold_values", "sub_volume_ratio_threshold_values")
+    def validate_sub_threshold_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("候补阈值候选至少一个值")
+        return normalized
+
+    @validator("sub_volume_ratio_threshold_values")
+    def validate_sub_vr_values(cls, value):
+        for item in value:
+            if item <= 0 or item > 20:
+                raise ValueError("候补量比阈值必须大于 0 且不超过 20")
         return value
+
+    @validator("sub_buy_threshold_values")
+    def validate_sub_buy_values(cls, value):
+        for item in value:
+            if item < 0 or item > 100:
+                raise ValueError("候补恐慌阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("swap_threshold_values")
+    def validate_swap_threshold_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("换仓阈值候选至少一个值（用 null 表示关闭）")
+        for item in normalized:
+            if item is not None and (item < 0 or item > 100):
+                raise ValueError("换仓阈值必须在 0 到 100 之间或为空")
+        return normalized
 
     @validator("sub_symbol")
     def validate_sub_symbol(cls, value):
@@ -334,18 +357,6 @@ class SOXLFearSearchParams(BaseModel):
     def validate_search_sub_fear_source(cls, value):
         if value not in FEAR_SOURCE_OPTIONS:
             raise ValueError("候补恐贪来源包含不支持的来源")
-        return value
-
-    @validator("sub_buy_threshold")
-    def validate_search_sub_buy_threshold(cls, value):
-        if value < 0 or value > 100:
-            raise ValueError("候补恐慌阈值必须在 0 到 100 之间")
-        return value
-
-    @validator("sub_volume_ratio_threshold")
-    def validate_search_sub_volume_ratio_threshold(cls, value):
-        if value <= 0 or value > 20:
-            raise ValueError("候补量比阈值必须大于 0 且不超过 20")
         return value
 
     @validator("symbol")
@@ -1907,6 +1918,9 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.max_take_profit_sells_per_cycle_values,
         payload.min_position_pct_after_take_profit_values,
         payload.execute_next_open_values,
+        payload.sub_buy_threshold_values,
+        payload.sub_volume_ratio_threshold_values,
+        payload.swap_threshold_values,
     ]
     total = 1
     for values in value_groups:
@@ -1963,6 +1977,9 @@ def _evaluate_search_candidates(
                 payload.max_take_profit_sells_per_cycle_values,
                 payload.min_position_pct_after_take_profit_values,
                 payload.execute_next_open_values,
+                payload.sub_buy_threshold_values,
+                payload.sub_volume_ratio_threshold_values,
+                payload.swap_threshold_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -2018,9 +2035,6 @@ def _evaluate_search_candidates(
                         sub_symbol=payload.sub_symbol,
                         sub_fear_source=payload.sub_fear_source,
                         sub_volume_signal_symbol=payload.sub_volume_signal_symbol,
-                        sub_buy_threshold=payload.sub_buy_threshold,
-                        sub_volume_ratio_threshold=payload.sub_volume_ratio_threshold,
-                        swap_threshold=payload.swap_threshold,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -2053,9 +2067,6 @@ def _evaluate_search_candidates(
                 payload.sub_symbol,
                 payload.sub_fear_source,
                 payload.sub_volume_signal_symbol,
-                payload.sub_buy_threshold,
-                payload.sub_volume_ratio_threshold,
-                payload.swap_threshold,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -2107,9 +2118,6 @@ def _evaluate_search_batch(
     sub_symbol: Optional[str] = None,
     sub_fear_source: Optional[str] = None,
     sub_volume_signal_symbol: Optional[str] = None,
-    sub_buy_threshold: Optional[float] = None,
-    sub_volume_ratio_threshold: Optional[float] = None,
-    swap_threshold: Optional[float] = None,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2131,6 +2139,9 @@ def _evaluate_search_batch(
                 max_take_profit_sells_per_cycle,
                 min_position_pct_after_take_profit,
                 execute_next_open,
+                sub_buy_threshold,
+                sub_volume_ratio_threshold,
+                swap_threshold,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),

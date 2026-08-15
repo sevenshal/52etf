@@ -45,6 +45,14 @@ const parseBooleanList = (value) => {
   return Array.from(new Set(value.map(item => item === true || item === 'true')));
 };
 
+// 换仓阈值候选：数字列表，支持 none/null/关闭 表示不启用（主辅跷跷板）
+const parseSwapThresholdList = (value) => String(value ?? '')
+  .split(',')
+  .map(item => item.trim().toLowerCase())
+  .filter(Boolean)
+  .map(item => (item === 'none' || item === 'null' || item === '关闭' ? null : parseFloat(item)))
+  .filter(item => item === null || Number.isFinite(item));
+
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -229,13 +237,13 @@ const SoxlFearBacktest = () => {
       max_take_profit_sells_per_cycle_values: parseNumberList(values.max_take_profit_sells_per_cycle_values, true),
       min_position_pct_after_take_profit_values: parseNumberList(values.min_position_pct_after_take_profit_values),
       execute_next_open_values: executeNextOpenValues.length ? executeNextOpenValues : [false, true],
-      // 跷跷板候补（固定参数，不参与搜索组合）
+      // 跷跷板候补（阈值参与组合搜索；sub_symbol 固定）
       sub_symbol: values.sub_symbol || undefined,
       sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
       sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
-      sub_buy_threshold: values.sub_buy_threshold ?? 25,
-      sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
-      swap_threshold: values.swap_threshold ?? null,
+      sub_buy_threshold_values: parseNumberList(values.sub_buy_threshold_values),
+      sub_volume_ratio_threshold_values: parseNumberList(values.sub_volume_ratio_threshold_values),
+      swap_threshold_values: parseSwapThresholdList(values.swap_threshold_values),
     };
   };
 
@@ -1003,9 +1011,9 @@ const SoxlFearBacktest = () => {
             sub_symbol: undefined,
             sub_fear_source: 'a_stock_000688_sh',
             sub_volume_signal_symbol: undefined,
-            sub_buy_threshold: 25,
-            sub_volume_ratio_threshold: 1.6,
-            swap_threshold: null,
+            sub_buy_threshold_values: '25',
+            sub_volume_ratio_threshold_values: '1.6',
+            swap_threshold_values: 'none',
           }}
         >
           <Row gutter={16}>
@@ -1162,18 +1170,18 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub_buy_threshold" label="候补恐慌阈值(<=)">
-                <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+              <Form.Item name="sub_buy_threshold_values" label="候补恐慌阈值(<=)候选">
+                <Input placeholder="例如 25,30（参与组合搜索）" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
-                <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+              <Form.Item name="sub_volume_ratio_threshold_values" label="候补量比阈值(>=)候选">
+                <Input placeholder="例如 1.3,1.6" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="swap_threshold" label="换仓阈值(留空=主辅跷跷板)">
-                <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
+              <Form.Item name="swap_threshold_values" label="换仓阈值候选(none=关闭)">
+                <Input placeholder="例如 none,45,55（none=主辅跷跷板）" />
               </Form.Item>
             </Col>
           </Row>
