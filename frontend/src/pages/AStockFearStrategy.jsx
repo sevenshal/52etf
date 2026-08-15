@@ -353,14 +353,15 @@ const AStockFearStrategy = ({ embedded = false }) => {
           trailing_stop_pct_values: String(values.trailing_stop_pct ?? defaultValues.trailing_stop_pct),
           sell_position_pct_values: String(values.sell_position_pct ?? defaultValues.sell_position_pct),
           sell_reduction_basis_values: [values.sell_reduction_basis || defaultValues.sell_reduction_basis],
-          sell_price_above_avg_cost_values: [values.sell_price_above_avg_cost ? true : false],
+          // 回测页表单 Select 的 option value 是字符串 'true'/'false'，必须传字符串才能正确显示/解析
+          sell_price_above_avg_cost_values: [values.sell_price_above_avg_cost ? 'true' : 'false'],
           max_take_profit_sells_per_cycle_values: String(
             values.max_take_profit_sells_per_cycle ?? defaultValues.max_take_profit_sells_per_cycle
           ),
           min_position_pct_after_take_profit_values: String(
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
-          execute_next_open_values: [true],
+          execute_next_open_values: ['true'],
         },
       },
     });
