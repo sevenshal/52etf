@@ -473,7 +473,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       ...defaultValues,
       ...form.getFieldsValue(),
     };
-    navigate('/soxl-fear-backtest', {
+    navigate('/fear-volume-backtest', {
       state: {
         autoRunBacktest: true,
         presetValues: {

@@ -28,7 +28,7 @@ const PROFILE_ROUTES = [
   '/lev-etf-backtest',
   '/all-weather-backtest',
   '/fear/backtest',
-  '/soxl-fear-backtest',
+  '/fear-volume-backtest',
   '/a-stock-fear-etf-backtest',
   '/monthly-analysis',
   '/scheduled-tasks',

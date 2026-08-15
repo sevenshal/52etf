@@ -175,7 +175,7 @@ const SoxlFearBacktest = () => {
     const loadOptions = async () => {
       setOptionsLoading(true);
       try {
-        const { data } = await request.get('/api/soxl-fear-backtest/options');
+        const { data } = await request.get('/api/fear-volume-backtest/options');
         if (!cancelled) {
           setBacktestOptions({
             symbol_options: data.symbol_options?.length ? data.symbol_options : DEFAULT_SYMBOL_OPTIONS,
@@ -327,7 +327,7 @@ const SoxlFearBacktest = () => {
     setSearchStatus('pending');
     try {
       const payload = buildPayload(values);
-      const { data } = await request.post('/api/soxl-fear-backtest/search/jobs', payload, {
+      const { data } = await request.post('/api/fear-volume-backtest/search/jobs', payload, {
         timeout: 60 * 1000,
       });
       searchTaskIdRef.current = data.task_id;
@@ -345,6 +345,7 @@ const SoxlFearBacktest = () => {
   };
   handleSearchRef.current = handleSearch;
 
+  // 从实盘策略配置页跳转：autoRunBacktest=true 时把 presetValues 填进表单并自动回测一次
   useEffect(() => {
     const autoRunBacktest = location.state?.autoRunBacktest;
     const presetValues = location.state?.presetValues;
@@ -358,7 +359,11 @@ const SoxlFearBacktest = () => {
       ...presetValues,
     };
 
-    if (!mergedValues.date_range) {
+    // history state 会被浏览器 structuredClone，dayjs 实例会丢失原型方法（isValid 报错），
+    // 这里统一把日期字符串/对象转成 dayjs
+    const rawRange = mergedValues.date_range || [];
+    mergedValues.date_range = rawRange.map(value => (dayjs.isDayjs(value) ? value : dayjs(value)));
+    if (!mergedValues.date_range.length) {
       mergedValues.date_range = [dayjs('2021-01-01'), dayjs()];
     }
 
@@ -389,7 +394,7 @@ const SoxlFearBacktest = () => {
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
         params: buildParamsFromRecord(record),
       };
-      const { data } = await request.post('/api/soxl-fear-backtest/run', payload);
+      const { data } = await request.post('/api/fear-volume-backtest/run', payload);
       setDetailedResult(data);
       setTimeout(() => {
         document.getElementById('soxl-fear-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });

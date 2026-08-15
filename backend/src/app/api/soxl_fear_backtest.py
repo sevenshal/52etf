@@ -27,7 +27,7 @@ from ...robot.a_stock_base_data_config import (
 from ...robot.cnn_fear_index import CNN_HISTORY_SYMBOL
 from .account import valid_account
 
-router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["Fear Volume Backtest"])
+router = APIRouter(prefix="/api/fear-volume-backtest", tags=["Fear Volume Backtest"])
 logger = logging.getLogger(__name__)
 SEARCH_JOBS: Dict[str, Dict] = {}
 SEARCH_JOBS_LOCK = threading.Lock()

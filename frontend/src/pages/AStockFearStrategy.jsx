@@ -330,7 +330,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     // 跳转到「情绪 + 量能 超参数回测」页（SOXL 配置页同一个回测页面，支持 A股标的与 a_stock_* 恐贪来源）
     // 实盘隔天信号语义 → 回测开启 execute_next_open（信号日收盘决策、次日开盘成交）、
     // trailing_stop_pct=0 = 贪恐即卖，与实盘完全对齐
-    navigate('/soxl-fear-backtest', {
+    navigate('/fear-volume-backtest', {
       state: {
         autoRunBacktest: true,
         presetValues: {
@@ -342,7 +342,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
           objective: 'annualized_return',
           eval_workers: 1,
           fit_rebalance_threshold_pct: values.rebalance_threshold_pct ?? 0,
-          date_range: [dayjs('2023-03-22'), dayjs()],
+          // history state 会被 structuredClone，dayjs 会丢原型，传字符串由回测页转 dayjs
+          date_range: ['2023-03-22', dayjs().format('YYYY-MM-DD')],
           buy_threshold_values: String(values.buy_threshold ?? defaultValues.buy_threshold),
           greed_threshold_values: String(values.greed_threshold ?? defaultValues.greed_threshold),
           volume_ratio_threshold_values: String(values.volume_ratio_threshold ?? defaultValues.volume_ratio_threshold),

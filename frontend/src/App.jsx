@@ -88,7 +88,7 @@ function App() {
           <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
           <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
           <Route path="/email-settings" element={<AdminRoute><EmailSettings /></AdminRoute>} />
-          <Route path="/soxl-fear-backtest" element={<SoxlFearBacktest />} />
+          <Route path="/fear-volume-backtest" element={<SoxlFearBacktest />} />
           <Route path="/a-stock-fear-etf-backtest" element={<AStockFearEtfBacktest />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
         </Route>
