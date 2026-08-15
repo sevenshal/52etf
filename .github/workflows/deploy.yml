@@ -4,37 +4,64 @@ on:
   push:
     branches:
       - master
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '部署目标（仅手动触发时生效，会跳过变更检测强制部署；push 时自动按变更检测）'
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - backend
+          - frontend
 
 concurrency:
   group: 52etf-deploy
   cancel-in-progress: false
 
 jobs:
-  # 检测本次变更涉及 backend 还是 frontend；手动触发时两侧都会部署。
+  # push 时按变更检测 backend / frontend；手动触发时跳过检测，按输入的 target 决定部署目标。
   detect:
     name: Detect changed packages
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
+      backend: ${{ steps.decide.outputs.backend }}
+      frontend: ${{ steps.decide.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name == 'push'
         with:
           filters: |
             backend:
               - 'backend/**'
             frontend:
               - 'frontend/**'
+      - name: Decide deploy targets
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            case "${{ github.event.inputs.target }}" in
+              backend)  BACKEND=true;  FRONTEND=false ;;
+              frontend) BACKEND=false; FRONTEND=true ;;
+              *)        BACKEND=true;  FRONTEND=true ;;
+            esac
+          else
+            BACKEND="${{ steps.filter.outputs.backend }}"
+            FRONTEND="${{ steps.filter.outputs.frontend }}"
+          fi
+          echo "deploy targets -> backend=${BACKEND} frontend=${FRONTEND}"
+          echo "backend=${BACKEND}" >> "$GITHUB_OUTPUT"
+          echo "frontend=${FRONTEND}" >> "$GITHUB_OUTPUT"
 
   deploy-backend:
     name: Deploy backend
     needs: detect
-    if: needs.detect.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -190,7 +217,7 @@ jobs:
   deploy-frontend:
     name: Deploy frontend
     needs: detect
-    if: needs.detect.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
