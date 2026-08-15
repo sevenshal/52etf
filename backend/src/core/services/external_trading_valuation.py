@@ -75,14 +75,22 @@ def _parse_quote_timestamp(value: Any) -> Optional[Any]:
         return None
 
 
-def _quote_is_today(item: Any, symbol: Optional[str], today: Optional[Any] = None) -> bool:
-    """只对 A 股标的使用行情时间戳判断'今日已开盘'。
+def _quote_is_today(
+    item: Any,
+    symbol: Optional[str],
+    today: Optional[Any] = None,
+    filter_stale_quotes: bool = False,
+) -> bool:
+    """filter_stale_quotes=True 时，对 A 股标的用行情时间戳判断'今日已开盘'。
 
     longport/hub 在停盘或未开盘（如跨境 ETF 延迟到 10:30）时可能返回上一交易日
     价格（带昨日 timestamp/trade_time），必须丢弃，否则会把昨收当实时价下单。
     带时间戳但解析不出、或没有时间字段的报价保持原样（信任源本身）。
     美股/港股等非 A 股标的不过滤（交易时段在境外，不能用 A 股日历判断）。
+    默认 False 不过滤，兼容估值、策略行情等依赖昨收价的场景。
     """
+    if not filter_stale_quotes:
+        return True
     normalized = str(symbol or "").upper()
     if not normalized.endswith((".SH", ".SZ")):
         return True
@@ -103,6 +111,7 @@ def _normalize_quote_map(
     source: str,
     *,
     today: Optional[Any] = None,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     if not quotes:
@@ -117,7 +126,7 @@ def _normalize_quote_map(
             symbol = normalize_symbol(getattr(item, "symbol", None) or key)
         if not symbol:
             continue
-        if not _quote_is_today(item, symbol, today=today):
+        if not _quote_is_today(item, symbol, today=today, filter_stale_quotes=filter_stale_quotes):
             # 上一交易日/非今日数据，无法确认今日已开盘
             continue
         price = _extract_quote_price(item)
@@ -136,14 +145,24 @@ async def _fetch_hub_quotes(
     external_trading_account_id: int,
     symbols: List[str],
     timeout: float,
+    *,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     if not symbols:
         return {}
     response = await external_trading_hub.get_quotes(external_trading_account_id, symbols, timeout=timeout)
-    return _normalize_quote_map(response.get("quotes") or [], "hub")
+    return _normalize_quote_map(
+        response.get("quotes") or [],
+        "hub",
+        filter_stale_quotes=filter_stale_quotes,
+    )
 
 
-async def _fetch_longport_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+async def _fetch_longport_quotes(
+    symbols: List[str],
+    *,
+    filter_stale_quotes: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     if not symbols:
         return {}
 
@@ -153,18 +172,21 @@ async def _fetch_longport_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]
 
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None, _call_longport)
-    return _normalize_quote_map(response or [], "longport")
+    return _normalize_quote_map(response or [], "longport", filter_stale_quotes=filter_stale_quotes)
 
 
 def _parse_tushare_realtime_frame(
     frame: Any,
     *,
     today: Optional[Any] = None,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    """解析 tushare rt_k / rt_etf_k 返回，只保留 trade_time 为当日的行。
+    """解析 tushare rt_k / rt_etf_k 返回。
 
-    休市或未开盘（如跨境 ETF 延迟到 10:30）时 tushare 返回的是上一交易日数据
-    （trade_time 是昨天），必须丢弃，否则会把昨天的收盘价当成实时价照常下单。
+    filter_stale_quotes=True 时只保留 trade_time 为当日的行：休市或未开盘
+    （如跨境 ETF 延迟到 10:30）时 tushare 返回的是上一交易日数据（trade_time
+    是昨天），必须丢弃，否则会把昨天的收盘价当成实时价照常下单。
+    默认 False 不过滤，兼容估值、策略行情等依赖昨收价的场景。
     """
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {}
@@ -176,16 +198,17 @@ def _parse_tushare_realtime_frame(
         symbol = normalize_symbol(ts_code)
         if not symbol:
             continue
-        raw_trade_time = row.get("trade_time")
-        if raw_trade_time is None or (isinstance(raw_trade_time, float) and pd.isna(raw_trade_time)):
-            continue
-        trade_time = pd.to_datetime(raw_trade_time, errors="coerce")
-        if trade_time is pd.NaT or trade_time.date() != today:
-            # 上一交易日/非今日数据，无法确认今日已开盘
-            continue
         close = safe_float(row.get("close"))
         if close <= 0:
             continue
+        if filter_stale_quotes:
+            raw_trade_time = row.get("trade_time")
+            if raw_trade_time is None or (isinstance(raw_trade_time, float) and pd.isna(raw_trade_time)):
+                continue
+            trade_time = pd.to_datetime(raw_trade_time, errors="coerce")
+            if trade_time is pd.NaT or trade_time.date() != today:
+                # 上一交易日/非今日数据，无法确认今日已开盘
+                continue
         result[symbol] = {
             "symbol": symbol,
             "price": close,
@@ -199,9 +222,11 @@ async def _fetch_tushare_realtime_quotes(
     symbols: List[str],
     *,
     today: Optional[Any] = None,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """tushare 实时行情（优先源）：股票走 rt_k，ETF 走 rt_etf_k（沪市带 topic）。
-    只接受 trade_time 为当日的行，未开盘/停牌（如 159941 延迟到 10:30）自然无价。
+    filter_stale_quotes=True 时只接受 trade_time 为当日的行，未开盘/停牌
+    （如 159941 延迟到 10:30）自然无价。
     """
     if not symbols:
         return {}
@@ -221,7 +246,11 @@ async def _fetch_tushare_realtime_quotes(
         if not frames:
             return {}
         merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"])
-        return _parse_tushare_realtime_frame(merged, today=today)
+        return _parse_tushare_realtime_frame(
+            merged,
+            today=today,
+            filter_stale_quotes=filter_stale_quotes,
+        )
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _call_tushare)
@@ -234,11 +263,22 @@ async def get_realtime_price_details(
     timeout: float = 10.0,
     prefetched_prices: Optional[Any] = None,
     raise_on_missing: bool = True,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
+    """获取实时行情，多源合并（tushare → longport → hub）。
+
+    filter_stale_quotes=True 时只接受当日数据（A 股标的），停盘/未开盘标的自然无价，
+    用于外部交易执行器的'未开盘/停牌自动跳过'。默认 False 不过滤，
+    兼容估值、策略行情等依赖昨收价的场景。
+    """
     normalized_symbols = _normalize_symbols(symbols)
     result: Dict[str, Dict[str, Any]] = {}
 
-    for symbol, item in _normalize_quote_map(prefetched_prices, "prefetched_prices").items():
+    for symbol, item in _normalize_quote_map(
+        prefetched_prices,
+        "prefetched_prices",
+        filter_stale_quotes=filter_stale_quotes,
+    ).items():
         if symbol in normalized_symbols:
             result[symbol] = item
 
@@ -254,7 +294,10 @@ async def get_realtime_price_details(
         if not current_missing:
             return
         try:
-            result.update(await _fetch_tushare_realtime_quotes(current_missing))
+            result.update(await _fetch_tushare_realtime_quotes(
+                current_missing,
+                filter_stale_quotes=filter_stale_quotes,
+            ))
         except Exception as exc:
             tushare_error = exc
             logger.warning("Tushare realtime quote failed for valuation: %s", exc)
@@ -265,7 +308,12 @@ async def get_realtime_price_details(
         if not current_missing:
             return
         try:
-            result.update(await _fetch_hub_quotes(external_trading_account_id, current_missing, timeout))
+            result.update(await _fetch_hub_quotes(
+                external_trading_account_id,
+                current_missing,
+                timeout,
+                filter_stale_quotes=filter_stale_quotes,
+            ))
         except ExternalTradingConnectionError as exc:
             hub_error = exc
             logger.warning("External trading hub quote failed for valuation: %s", exc)
@@ -279,7 +327,10 @@ async def get_realtime_price_details(
         if not current_missing:
             return
         try:
-            result.update(await _fetch_longport_quotes(current_missing))
+            result.update(await _fetch_longport_quotes(
+                current_missing,
+                filter_stale_quotes=filter_stale_quotes,
+            ))
         except Exception as exc:
             longport_error = exc
             logger.warning("LongPort quote fallback failed for valuation: %s", exc)
@@ -308,12 +359,14 @@ async def get_realtime_reference_prices(
     *,
     timeout: float = 10.0,
     prefetched_prices: Optional[Any] = None,
+    filter_stale_quotes: bool = False,
 ) -> Dict[str, float]:
     price_details = await get_realtime_price_details(
         external_trading_account_id,
         symbols,
         timeout=timeout,
         prefetched_prices=prefetched_prices,
+        filter_stale_quotes=filter_stale_quotes,
     )
     return {
         normalize_symbol(symbol): safe_float(detail.get("price"))

@@ -1767,6 +1767,7 @@ async def _prefetch_realtime_price_details(
                 all_symbols,
                 timeout=timeout,
                 raise_on_missing=False,
+                filter_stale_quotes=True,  # 执行器预览场景：只展示当日实时价
             )
         except Exception as exc:
             logger.warning(
@@ -1818,6 +1819,7 @@ async def _build_netted_executor_plan(
                     account.id,
                     symbols,
                     timeout=min(timeout_seconds, 15.0),
+                    filter_stale_quotes=True,  # 执行器场景：只接受当日实时价
                 )
         except ExternalTradingValuationError as exc:
             reference_price_error = str(exc)

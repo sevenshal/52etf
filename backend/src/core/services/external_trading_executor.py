@@ -443,7 +443,9 @@ async def _reference_prices_for_plan(account_pk: int, symbols: List[str]) -> Dic
     if not symbols:
         return {}
     try:
-        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0)
+        # 执行器场景：只接受当日实时价，停盘/未开盘（如跨境 ETF 延迟到 10:30）的标的
+        # 过滤掉 → 无价 → 订单 defer，避免拿昨收价去券商下单被拒
+        return await get_realtime_reference_prices(account_pk, symbols, timeout=10.0, filter_stale_quotes=True)
     except ExternalTradingValuationError as exc:
         logger.warning("External trading executor reference price lookup failed: %s", exc)
         return {}

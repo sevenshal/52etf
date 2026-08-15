@@ -4942,6 +4942,7 @@ async def _execute_factor_live_signal(
             account.id,
             symbols,
             timeout=min(float(timeout_seconds or 120.0), 30.0),
+            filter_stale_quotes=True,  # 执行器触发场景：只接受当日实时价
         )
     except ExternalTradingValuationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
