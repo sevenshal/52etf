@@ -113,6 +113,11 @@ class AStockFearStrategyConfigPayload(BaseModel):
             raise ValueError("候补恐贪来源必须是 A 股指数恐贪（a_stock_*）")
         return value
 
+    @validator("sub_fear_source", pre=True, always=True)
+    def normalize_sub_fear_source_none(cls, value):
+        # 存量配置（后加列）可能为 NULL → 补默认值
+        return value or "a_stock_000688_sh"
+
     @validator("sub_volume_signal_symbol")
     def validate_sub_volume_signal_symbol(cls, value):
         if not value:
@@ -149,6 +154,11 @@ class AStockFearStrategyConfigPayload(BaseModel):
         if value not in A_STOCK_FEAR_SOURCE_KEYS and value not in {"qqq_clone", "cnn", "soxx_clone", "spy_clone", "dia_clone"}:
             raise ValueError("第二候补恐贪来源必须是 a_stock_* 或美股自算贪恐（qqq_clone 等）")
         return value
+
+    @validator("sub2_fear_source", pre=True, always=True)
+    def normalize_sub2_fear_source_none(cls, value):
+        # 存量配置（后加列）可能为 NULL → 补默认值
+        return value or "qqq_clone"
 
     @validator("sub2_volume_signal_symbol")
     def validate_sub2_volume_signal_symbol(cls, value):
