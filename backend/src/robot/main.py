@@ -7,6 +7,7 @@ from .szdt_us_trader import start_szdt_us_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
+from .a_stock_fear_strategy_trader import start_a_stock_fear_strategy_trader
 from .scheduled_tasks import scheduled_task_manager, run_startup_tasks
 from .external_trading_log import summarize_external_trading_executor_result
 
@@ -159,6 +160,8 @@ def robot():
   start_portfolio_copy_trader()
   # 启动 SOXL 情绪量能自动交易
   start_soxl_fear_strategy_trader()
+  # 启动 A股情绪量能自动交易（独立策略，隔天信号：前一交易日恐贪+量比，run_time 开盘成交）
+  start_a_stock_fear_strategy_trader()
 
   while True:
     try:

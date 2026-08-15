@@ -158,3 +158,239 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         self.assertEqual(dates[2].isoformat(), sells[0]["date"])
         self.assertAlmostEqual(107.0, sells[0]["execution_price"])
         self.assertIn("回撤 10.83%", sells[0]["reason"])
+
+    def test_trailing_stop_zero_sells_immediately_when_greedy(self):
+        """移动止盈=0：贪恐到达阈值当天即卖出，不再等回撤。"""
+        dates = pd.bdate_range("2024-01-01", periods=3).date
+        base_df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 102.0, 103.0],
+                "high": [101.0, 102.0, 103.0],
+                "low": [99.0, 100.0, 102.0],
+                "close": [100.0, 101.0, 103.0],
+                "execution_price": [100.0, 101.0, 103.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+                "ma20": [100.0, 100.0, 100.0],
+                "volume_ma20": [100.0, 100.0, 100.0],
+                "volume_ratio": [2.0, 1.0, 1.0],
+                "volume_ma20_excluding_recent_1": [100.0, 100.0, 100.0],
+                "volume_ratio_consecutive_1": [2.0, 1.0, 1.0],
+                "fear_greed": [20.0, 90.0, 90.0],
+                "signal_volume": [200.0, 100.0, 100.0],
+                "signal_date": dates,
+                "fear_date": dates,
+            }
+        )
+
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0,
+            greed_threshold=80.0,
+            volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1,
+            buy_position_pct=100.0,
+            cooldown_days=0,
+            trailing_stop_pct=0.0,  # 到达贪恐即卖
+            sell_position_pct=100.0,
+            sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True,
+            min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+
+        sells = [item for item in result["trades"] if item["action"] == "SELL"]
+        self.assertEqual(1, len(sells))
+        # 贪恐 90 >= 80 的当天（第 2 个交易日）即卖出，没有等待回撤
+        self.assertEqual(dates[1].isoformat(), sells[0]["date"])
+        self.assertAlmostEqual(101.0, sells[0]["execution_price"])
+        self.assertIn("到达贪恐阈值即卖", sells[0]["reason"])
+
+    def test_trailing_stop_positive_waits_for_drawdown_even_when_greedy(self):
+        """对照组：同样的数据，移动止盈>0 时不满足回撤条件则不卖。"""
+        dates = pd.bdate_range("2024-01-01", periods=3).date
+        base_df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 102.0, 103.0],
+                "high": [101.0, 102.0, 103.0],
+                "low": [99.0, 100.0, 102.0],
+                "close": [100.0, 101.0, 103.0],
+                "execution_price": [100.0, 101.0, 103.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+                "ma20": [100.0, 100.0, 100.0],
+                "volume_ma20": [100.0, 100.0, 100.0],
+                "volume_ratio": [2.0, 1.0, 1.0],
+                "volume_ma20_excluding_recent_1": [100.0, 100.0, 100.0],
+                "volume_ratio_consecutive_1": [2.0, 1.0, 1.0],
+                "fear_greed": [20.0, 90.0, 90.0],
+                "signal_volume": [200.0, 100.0, 100.0],
+                "signal_date": dates,
+                "fear_date": dates,
+            }
+        )
+
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0,
+            greed_threshold=80.0,
+            volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1,
+            buy_position_pct=100.0,
+            cooldown_days=0,
+            trailing_stop_pct=5.0,
+            sell_position_pct=100.0,
+            sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True,
+            min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+
+        sells = [item for item in result["trades"] if item["action"] == "SELL"]
+        self.assertEqual(0, len(sells))
+
+    def test_execute_next_open_buy_fills_at_next_trading_day_open(self):
+        """次日开盘成交：信号日收盘决策，下一交易日开盘价成交，交易日期为成交日。"""
+        dates = pd.bdate_range("2024-01-01", periods=3).date
+        base_df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 103.0, 104.0],
+                "high": [101.0, 105.0, 106.0],
+                "low": [99.0, 102.0, 103.0],
+                "close": [100.0, 104.0, 105.0],
+                "execution_price": [100.0, 104.0, 105.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+                "ma20": [100.0, 100.0, 100.0],
+                "volume_ma20": [100.0, 100.0, 100.0],
+                "volume_ratio": [2.0, 1.0, 1.0],
+                "volume_ma20_excluding_recent_1": [100.0, 100.0, 100.0],
+                "volume_ratio_consecutive_1": [2.0, 1.0, 1.0],
+                "fear_greed": [20.0, 60.0, 60.0],
+                "signal_volume": [200.0, 100.0, 100.0],
+                "signal_date": dates,
+                "fear_date": dates,
+            }
+        )
+
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0,
+            greed_threshold=90.0,
+            volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1,
+            buy_position_pct=100.0,
+            cooldown_days=0,
+            trailing_stop_pct=5.0,
+            sell_position_pct=100.0,
+            sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True,
+            min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0,
+            execute_next_open=True,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+
+        buys = [item for item in result["trades"] if item["action"] == "BUY"]
+        self.assertEqual(1, len(buys))
+        # 信号在第 1 个交易日收盘形成（fear=20），成交在第 2 个交易日开盘价 103
+        self.assertEqual(dates[1].isoformat(), buys[0]["date"])
+        self.assertEqual(dates[0].isoformat(), buys[0]["signal_date"])
+        self.assertAlmostEqual(103.0, buys[0]["execution_price"])
+        self.assertEqual("next_day_open", result["execution_price_type"])
+
+    def test_execute_next_open_sell_fills_at_next_trading_day_open(self):
+        """次日开盘成交 + 移动止盈=0：贪恐到达阈值次日开盘卖出。"""
+        dates = pd.bdate_range("2024-01-01", periods=4).date
+        base_df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 103.0, 104.0, 106.0],
+                "high": [101.0, 105.0, 106.0, 108.0],
+                "low": [99.0, 102.0, 103.0, 105.0],
+                "close": [100.0, 104.0, 105.0, 107.0],
+                "execution_price": [100.0, 104.0, 105.0, 107.0],
+                "volume": [1000.0, 1000.0, 1000.0, 1000.0],
+                "ma20": [100.0, 100.0, 100.0, 100.0],
+                "volume_ma20": [100.0, 100.0, 100.0, 100.0],
+                "volume_ratio": [2.0, 1.0, 1.0, 1.0],
+                "volume_ma20_excluding_recent_1": [100.0, 100.0, 100.0, 100.0],
+                "volume_ratio_consecutive_1": [2.0, 1.0, 1.0, 1.0],
+                "fear_greed": [20.0, 85.0, 85.0, 60.0],
+                "signal_volume": [200.0, 100.0, 100.0, 100.0],
+                "signal_date": dates,
+                "fear_date": dates,
+            }
+        )
+
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0,
+            greed_threshold=80.0,
+            volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1,
+            buy_position_pct=100.0,
+            cooldown_days=0,
+            trailing_stop_pct=0.0,
+            sell_position_pct=100.0,
+            sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True,
+            min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0,
+            execute_next_open=True,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+
+        buys = [item for item in result["trades"] if item["action"] == "BUY"]
+        sells = [item for item in result["trades"] if item["action"] == "SELL"]
+        self.assertEqual(1, len(buys))
+        self.assertEqual(1, len(sells))
+        # 第 2 个交易日贪恐 85 >= 80 → 第 3 个交易日开盘价 104 卖出
+        self.assertEqual(dates[2].isoformat(), sells[0]["date"])
+        self.assertEqual(dates[1].isoformat(), sells[0]["signal_date"])
+        self.assertAlmostEqual(104.0, sells[0]["execution_price"])
+        self.assertIn("到达贪恐阈值即卖", sells[0]["reason"])
+
+    def test_execute_next_open_default_keeps_same_day_close(self):
+        """默认 execute_next_open=False：维持信号日收盘价成交。"""
+        dates = pd.bdate_range("2024-01-01", periods=3).date
+        base_df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 103.0, 104.0],
+                "high": [101.0, 105.0, 106.0],
+                "low": [99.0, 102.0, 103.0],
+                "close": [100.0, 104.0, 105.0],
+                "execution_price": [100.0, 104.0, 105.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+                "ma20": [100.0, 100.0, 100.0],
+                "volume_ma20": [100.0, 100.0, 100.0],
+                "volume_ratio": [2.0, 1.0, 1.0],
+                "volume_ma20_excluding_recent_1": [100.0, 100.0, 100.0],
+                "volume_ratio_consecutive_1": [2.0, 1.0, 1.0],
+                "fear_greed": [20.0, 60.0, 60.0],
+                "signal_volume": [200.0, 100.0, 100.0],
+                "signal_date": dates,
+                "fear_date": dates,
+            }
+        )
+        params = SOXLFearStrategyParams(
+            buy_threshold=40.0,
+            greed_threshold=90.0,
+            volume_ratio_threshold=1.5,
+            volume_ratio_consecutive_days=1,
+            buy_position_pct=100.0,
+            cooldown_days=0,
+            trailing_stop_pct=5.0,
+            sell_position_pct=100.0,
+            sell_reduction_basis="holdings",
+            sell_price_above_avg_cost=True,
+            min_position_pct_after_take_profit=0.0,
+            rebalance_threshold_pct=0.0,
+        )
+        result = _run_backtest(base_df, params, 10000.0, detailed=True)
+
+        buys = [item for item in result["trades"] if item["action"] == "BUY"]
+        self.assertEqual(1, len(buys))
+        self.assertEqual(dates[0].isoformat(), buys[0]["date"])
+        self.assertEqual(dates[0].isoformat(), buys[0]["signal_date"])
+        self.assertAlmostEqual(100.0, buys[0]["execution_price"])
+        self.assertEqual("same_day_close", result["execution_price_type"])

@@ -178,11 +178,20 @@ class SOXLFearStrategyParams(BaseModel):
     max_take_profit_sells_per_cycle: int = 2
     min_position_pct_after_take_profit: float = 5.0
     rebalance_threshold_pct: float = 5.0
+    # True = 信号日收盘决策，次日开盘成交；False = 信号日收盘价成交（默认，保持旧行为）
+    execute_next_open: bool = False
 
-    @validator("buy_position_pct", "trailing_stop_pct", "sell_position_pct")
+    @validator("buy_position_pct", "sell_position_pct")
     def validate_positive_percent(cls, value):
         if value <= 0 or value > 100:
             raise ValueError("百分比参数必须在 0 到 100 之间")
+        return value
+
+    @validator("trailing_stop_pct")
+    def validate_trailing_stop_pct(cls, value):
+        # 0 = 不等待回撤，到达贪恐阈值（>= greed_threshold）即卖出
+        if value < 0 or value > 100:
+            raise ValueError("移动止盈回撤必须在 0 到 100 之间（0=到达贪恐阈值即卖）")
         return value
 
     @validator("min_position_pct_after_take_profit")
@@ -250,6 +259,7 @@ class SOXLFearSearchParams(BaseModel):
     sell_price_above_avg_cost_values: List[bool] = Field(default_factory=lambda: [True, False])
     max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [1, 2, 3])
     min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [5.0, 10.0, 15.0])
+    execute_next_open_values: List[bool] = Field(default_factory=lambda: [False, True])
 
     @validator("symbol")
     def validate_symbol(cls, value):
@@ -300,6 +310,13 @@ class SOXLFearSearchParams(BaseModel):
         normalized = list(dict.fromkeys(value or []))
         if not normalized:
             raise ValueError("至少选择一个卖出价高于均价开关")
+        return normalized
+
+    @validator("execute_next_open_values")
+    def validate_execute_next_open_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("至少选择一个次日开盘成交开关")
         return normalized
 
     @validator("eval_workers")
@@ -1018,6 +1035,33 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     fear_source_label = str(base_df.attrs.get("fear_source_label") or "贪恐")
     execution_price_label = str(base_df.attrs.get("execution_price_label") or "收盘价")
 
+    # 成交模式：
+    #   execute_next_open=False（默认）：信号日收盘决策、信号日收盘价成交（旧行为）；
+    #   execute_next_open=True：信号日收盘决策，下一交易日开盘价成交。
+    # 实现方式：把决策用数据（恐贪、量比、止盈峰值参考高低价、信号日期等）整体前移一个交易日，
+    # 成交价用当日开盘价，交易日期即成交日，信号日期为前一交易日。
+    use_next_open = bool(params.execute_next_open)
+    if use_next_open:
+        execution_prices = open_prices
+        decision_close_prices = np.concatenate([[np.nan], close_prices[:-1]])
+        decision_high_prices = np.concatenate([[np.nan], high_prices[:-1]])
+        decision_fear_values = np.concatenate([[np.nan], fear_values[:-1]])
+        decision_volume_ratios = np.concatenate([[np.nan], volume_ratios[:-1]])
+        decision_buy_volume_ratios = np.concatenate([[np.nan], buy_volume_ratios[:-1]])
+        decision_signal_volumes = np.concatenate([[np.nan], signal_volumes[:-1]])
+        decision_signal_dates = [None] + list(signal_dates[:-1])
+        decision_fear_dates = [None] + list(fear_dates[:-1])
+        execution_price_label = "信号日次日开盘价"
+    else:
+        decision_close_prices = close_prices
+        decision_high_prices = high_prices
+        decision_fear_values = fear_values
+        decision_volume_ratios = volume_ratios
+        decision_buy_volume_ratios = buy_volume_ratios
+        decision_signal_volumes = signal_volumes
+        decision_signal_dates = signal_dates
+        decision_fear_dates = fear_dates
+
     cash = float(initial_capital)
     shares = 0
     avg_cost = 0.0
@@ -1039,15 +1083,15 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     for index in range(len(close_prices)):
         current_date = date_strings[index]
         close_price = float(close_prices[index])
-        high_price = float(high_prices[index])
+        high_price = float(decision_high_prices[index])
         execution_price = float(execution_prices[index])
-        signal_date = signal_dates[index]
-        signal_date_text = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date)
-        fear_date = fear_dates[index]
-        fear_date_text = fear_date.isoformat() if hasattr(fear_date, "isoformat") else str(fear_date)
-        fear_score = float(fear_values[index])
-        volume_ratio = float(volume_ratios[index])
-        buy_volume_ratio = float(buy_volume_ratios[index])
+        signal_date = decision_signal_dates[index]
+        signal_date_text = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date) if signal_date is not None else None
+        fear_date = decision_fear_dates[index]
+        fear_date_text = fear_date.isoformat() if hasattr(fear_date, "isoformat") else str(fear_date) if fear_date is not None else None
+        fear_score = float(decision_fear_values[index])
+        volume_ratio = float(decision_volume_ratios[index])
+        buy_volume_ratio = float(decision_buy_volume_ratios[index])
         buy_volume_signal_ok = (
             np.isfinite(buy_volume_ratio)
             and buy_volume_ratio >= float(params.volume_ratio_threshold)
@@ -1079,9 +1123,19 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             and greed_peak_price
             and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
         ):
-            drawdown_from_peak = ((greed_peak_price - execution_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
-            sell_price_guard_passed = (not params.sell_price_above_avg_cost) or execution_price > float(avg_cost)
-            if drawdown_from_peak >= params.trailing_stop_pct and sell_price_guard_passed:
+            # 决策价 = 信号形成时的收盘价（同收盘成交模式下即成交价）
+            decision_price = float(decision_close_prices[index])
+            if params.trailing_stop_pct <= 0:
+                # 移动止盈 = 0：不等待回撤，到达贪恐阈值（>= greed_threshold）即卖出
+                drawdown_from_peak = 0.0
+                drawdown_reached = True
+                trailing_reason = "到达贪恐阈值即卖（移动止盈=0）"
+            else:
+                drawdown_from_peak = ((greed_peak_price - decision_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
+                drawdown_reached = drawdown_from_peak >= params.trailing_stop_pct
+                trailing_reason = f"回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+            sell_price_guard_passed = (not params.sell_price_above_avg_cost) or decision_price > float(avg_cost)
+            if drawdown_reached and sell_price_guard_passed:
                 portfolio_value = cash + shares * execution_price
                 current_position_pct = (shares * execution_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
                 min_hold_shares = (
@@ -1152,14 +1206,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "profit": profit,
                         "profit_pct": profit_pct,
                         "reason": (
-                            f"{fear_source_label} {fear_score:.2f} 进入止盈区后回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+                            f"{fear_source_label} {fear_score:.2f} 进入止盈区后{trailing_reason}"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
                             f"，均价保护{'开启' if params.sell_price_above_avg_cost else '关闭'}"
                         ),
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,
-                        "signal_volume": float(signal_volumes[index]),
+                        "signal_volume": float(decision_signal_volumes[index]),
                     })
 
         if not action_taken and is_fear and buy_volume_signal_ok and can_trade:
@@ -1218,7 +1272,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "single_day_volume_ratio": volume_ratio,
                         "buy_volume_ratio": buy_volume_ratio,
                         "volume_ratio_consecutive_days": volume_ratio_consecutive_days,
-                        "signal_volume": float(signal_volumes[index]),
+                        "signal_volume": float(decision_signal_volumes[index]),
                     })
 
         equity_value = cash + shares * close_price
@@ -1291,6 +1345,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         "sell_count": sum(1 for item in trades if item["action"] == "SELL"),
         "ending_cash": cash,
         "ending_shares": shares,
+        "execution_price_type": "next_day_open" if use_next_open else "same_day_close",
+        "execution_price_label": "信号日次日开盘价" if use_next_open else "信号日收盘价",
         "benchmark_metrics": benchmark_metrics,
         "yearly_returns": yearly_returns,
     }
@@ -1321,6 +1377,7 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.sell_price_above_avg_cost_values,
         payload.max_take_profit_sells_per_cycle_values,
         payload.min_position_pct_after_take_profit_values,
+        payload.execute_next_open_values,
     ]
     total = 1
     for values in value_groups:
@@ -1375,6 +1432,7 @@ def _evaluate_search_candidates(
                 payload.sell_price_above_avg_cost_values,
                 payload.max_take_profit_sells_per_cycle_values,
                 payload.min_position_pct_after_take_profit_values,
+                payload.execute_next_open_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -1521,6 +1579,7 @@ def _evaluate_search_batch(
                 sell_price_above_avg_cost,
                 max_take_profit_sells_per_cycle,
                 min_position_pct_after_take_profit,
+                execute_next_open,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),
@@ -1535,6 +1594,7 @@ def _evaluate_search_batch(
                 sell_price_above_avg_cost=bool(sell_price_above_avg_cost),
                 max_take_profit_sells_per_cycle=int(max_take_profit_sells_per_cycle),
                 min_position_pct_after_take_profit=float(min_position_pct_after_take_profit),
+                execute_next_open=bool(execute_next_open),
                 rebalance_threshold_pct=float(rebalance_threshold_pct),
             )
         except ValidationError as exc:
@@ -1588,6 +1648,18 @@ def _serialize_summary(result: Dict) -> Dict:
     return serialized
 
 
+def _execution_mode_meta(values: List[bool]) -> Tuple[str, str]:
+    """按搜索开关候选值计算成交口径的汇总文案。"""
+    normalized = list(dict.fromkeys(values or []))
+    has_on = True in normalized
+    has_off = False in normalized
+    if has_on and has_off:
+        return "same_day_close_or_next_open", "信号日收盘价 / 信号日次日开盘价"
+    if has_on:
+        return "next_day_open", "信号日次日开盘价"
+    return "same_day_close", "信号日收盘价"
+
+
 def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
     start_date = _parse_date(payload.start_date)
     end_date = _parse_date(payload.end_date, default=date.today())
@@ -1639,6 +1711,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         detailed=True,
     )
     fear_series = _build_fear_series_payload(base_dfs)
+    search_execution_type, search_execution_label = _execution_mode_meta(payload.execute_next_open_values)
 
     return {
         "meta": {
@@ -1650,6 +1723,8 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
             "valid_combinations": total_combinations - skipped_combinations,
             "returned_results": min(payload.top_n, len(results)),
             "objective": payload.objective,
+            "execution_price_type": search_execution_type,
+            "execution_price_label": search_execution_label,
         },
         "results": [_serialize_summary(item) for item in results[:payload.top_n]],
         "best_result": {
@@ -1659,6 +1734,8 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
             "meta": {
                 **best_meta,
                 "initial_capital": payload.initial_capital,
+                "execution_price_type": best_result.get("execution_price_type"),
+                "execution_price_label": best_result.get("execution_price_label"),
             },
         },
     }
@@ -1783,6 +1860,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             detailed=True,
         )
         fear_series = _build_fear_series_payload(base_dfs)
+        search_execution_type, search_execution_label = _execution_mode_meta(payload.execute_next_open_values)
 
         result_payload = {
             "meta": {
@@ -1794,6 +1872,8 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
                 "valid_combinations": total_combinations - skipped_combinations,
                 "returned_results": min(payload.top_n, len(results)),
                 "objective": payload.objective,
+                "execution_price_type": search_execution_type,
+                "execution_price_label": search_execution_label,
             },
             "results": [_serialize_summary(item) for item in results[:payload.top_n]],
             "best_result": {
@@ -1803,6 +1883,8 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
                 "meta": {
                     **best_meta,
                     "initial_capital": payload.initial_capital,
+                    "execution_price_type": best_result.get("execution_price_type"),
+                    "execution_price_label": best_result.get("execution_price_label"),
                 },
             },
         }
@@ -1991,6 +2073,8 @@ def run_soxl_fear_backtest(
         result["meta"] = {
             **meta,
             "initial_capital": payload.initial_capital,
+            "execution_price_type": result.get("execution_price_type") or meta.get("execution_price_type"),
+            "execution_price_label": result.get("execution_price_label") or meta.get("execution_price_label"),
         }
         result["fear_series"] = _build_fear_series_payload(base_dfs)
         return result

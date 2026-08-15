@@ -11,9 +11,10 @@ import ExecutorStatusPage from './ExecutorStatusPage';
 import ExternalTradingAccountManager from './ExternalTradingAccountManager';
 import FactorLab from './FactorLab';
 import SoxlFearStrategy from './SoxlFearStrategy';
+import AStockFearStrategy from './AStockFearStrategy';
 import './LiveTrading.css';
 
-const LIVE_TAB_KEYS = ['executor', 'accounts', 'factor', 'sentiment'];
+const LIVE_TAB_KEYS = ['executor', 'accounts', 'factor', 'sentiment', 'sentiment_a'];
 
 const LiveTrading = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -57,10 +58,20 @@ const LiveTrading = () => {
       label: (
         <span className="live-trading-tab-label">
           <FireOutlined />
-          <span>情绪量能策略</span>
+          <span>SOXL情绪量能</span>
         </span>
       ),
       children: <SoxlFearStrategy embedded />,
+    },
+    {
+      key: 'sentiment_a',
+      label: (
+        <span className="live-trading-tab-label">
+          <FireOutlined />
+          <span>A股情绪量能</span>
+        </span>
+      ),
+      children: <AStockFearStrategy embedded />,
     },
   ], []);
 

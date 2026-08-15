@@ -870,6 +870,82 @@ class SoxlFearStrategyLog(Base):
     message = Column(String(1000))
 
 
+class AStockFearStrategyConfig(Base):
+    """A股情绪量能自动交易配置（隔天信号：用前一交易日恐贪+量比，在 run_time 开盘成交）"""
+    __tablename__ = "a_stock_fear_strategy_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String, index=True)
+    enabled = Column(Boolean, default=False)
+    symbol = Column(String, nullable=False, default="510880.SH")
+    # 恐贪来源：a_stock_000015_sh 等（对齐回测 FEAR_SOURCE_OPTIONS 的 key）
+    fear_source = Column(String, nullable=False, default="a_stock_000015_sh")
+    # 量比来源标的（可选，默认=交易标的自身）
+    volume_signal_symbol = Column(String, nullable=True)
+    account_type = Column(String, default="external")
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_sub_account_id = Column(Integer, nullable=True)
+    trading_account_id = Column(String, nullable=True)
+    # 每日触发时间（Asia/Shanghai，HH:MM），默认 09:30 开盘
+    run_time = Column(String(5), nullable=False, default="09:30")
+    buy_threshold = Column(Float, nullable=False, default=30.0)
+    greed_threshold = Column(Float, nullable=False, default=70.0)
+    volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
+    buy_position_pct = Column(Float, nullable=False, default=100.0)
+    cooldown_days = Column(Integer, nullable=False, default=0)
+    # 0 = 到达贪恐阈值（>= greed_threshold）即卖
+    trailing_stop_pct = Column(Float, nullable=False, default=0.0)
+    sell_position_pct = Column(Float, nullable=False, default=100.0)
+    sell_reduction_basis = Column(String, nullable=False, default="holdings")
+    sell_price_above_avg_cost = Column(Boolean, nullable=False, default=False)
+    max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
+    min_position_pct_after_take_profit = Column(Float, nullable=False, default=0.0)
+    rebalance_threshold_pct = Column(Float, nullable=False, default=0.0)
+    last_run_at = Column(DateTime)
+    last_run_status = Column(String(16))
+    last_run_message = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    __table_args__ = (
+        UniqueConstraint('symbol', 'trading_account_id', name='uniq_a_stock_fear_strategy_target_account'),
+    )
+
+
+class AStockFearStrategyState(Base):
+    """A股情绪量能自动交易运行状态"""
+    __tablename__ = "a_stock_fear_strategy_states"
+
+    config_id = Column(Integer, ForeignKey("a_stock_fear_strategy_configs.id"), primary_key=True)
+    account_id = Column(String, index=True)
+    symbol = Column(String, nullable=False, default="510880.SH")
+    last_processed_date = Column(Date)
+    cooldown_remaining_days = Column(Integer, nullable=False, default=0)
+    greed_peak_price = Column(Float)
+    take_profit_cycle_sell_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class AStockFearStrategyLog(Base):
+    """A股情绪量能自动交易日志"""
+    __tablename__ = "a_stock_fear_strategy_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("a_stock_fear_strategy_configs.id"), index=True, nullable=True)
+    account_id = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.now, index=True)
+    symbol = Column(String, nullable=False, default="510880.SH")
+    trigger_source = Column(String(16), nullable=False, default="auto")
+    action = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False)
+    price = Column(Float)
+    quantity = Column(Integer)
+    fear_score = Column(Float)
+    volume_ratio = Column(Float)
+    position_ratio_before = Column(Float)
+    position_ratio_after = Column(Float)
+    message = Column(String(1000))
+
+
 class ValuationSimConfig(Base):
     """EVC 估值成长策略模拟盘配置。"""
     __tablename__ = "valuation_sim_configs"
