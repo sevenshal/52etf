@@ -186,7 +186,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
       return;
     }
     try {
-      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts/options`);
       setLiveSubAccounts(data || []);
     } catch (error) {
       message.error(error.response?.data?.detail || '获取虚拟子账户失败');

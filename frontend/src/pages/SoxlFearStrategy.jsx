@@ -164,7 +164,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       return [];
     }
     try {
-      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+      const { data } = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts/options`);
       setLiveSubAccounts(data || []);
       return data || [];
     } catch (error) {

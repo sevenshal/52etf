@@ -1800,7 +1800,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       return;
     }
     try {
-      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts`);
+      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts/options`);
       setExternalTradingSubAccounts(Array.isArray(data) ? data : []);
     } catch (error) {
       message.error(getErrorMessage(error, '加载外部交易子账户失败'));
@@ -1979,29 +1979,28 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     externalTradingAccounts.find(item => Number(item.id) === Number(selectedLiveExternalTradingAccountId)) || null
   ), [externalTradingAccounts, selectedLiveExternalTradingAccountId]);
   const selectedLiveSubAccountLotSizeNumber = Number(
-    selectedLiveSubAccount?.effective_executor_policy?.lot_size
-      ?? selectedLiveSubAccount?.executor_lot_size
+    selectedLiveSubAccount?.executor_lot_size
       ?? selectedLiveExternalTradingAccount?.executor_lot_size,
   );
   const selectedLiveSubAccountLotSize = Number.isFinite(selectedLiveSubAccountLotSizeNumber)
     && selectedLiveSubAccountLotSizeNumber > 0
     ? selectedLiveSubAccountLotSizeNumber
     : null;
-  const selectedLiveSubAccountNetAsset = Number(selectedLiveSubAccount?.net_asset);
-  const selectedLiveSubAccountNetAssetValue = Number.isFinite(selectedLiveSubAccountNetAsset)
-    ? selectedLiveSubAccountNetAsset
+  const selectedLiveSubAccountCashAllocated = Number(selectedLiveSubAccount?.cash_allocated ?? 0);
+  const selectedLiveSubAccountCashAllocatedValue = Number.isFinite(selectedLiveSubAccountCashAllocated)
+    ? selectedLiveSubAccountCashAllocated
     : null;
 
   useEffect(() => {
     liveForm.setFieldsValue({
-      initial_capital: selectedLiveSubAccountNetAssetValue && selectedLiveSubAccountNetAssetValue > 0
-        ? selectedLiveSubAccountNetAssetValue
+      initial_capital: selectedLiveSubAccountCashAllocatedValue && selectedLiveSubAccountCashAllocatedValue > 0
+        ? selectedLiveSubAccountCashAllocatedValue
         : DEFAULT_BACKTEST_VALUES.initial_capital,
       lot_size: selectedLiveSubAccountLotSize
         ? selectedLiveSubAccountLotSize
         : (isAStockPoolValue(selectedLivePool) ? 100 : 1),
     });
-  }, [selectedLiveSubAccountLotSize, selectedLiveSubAccountNetAssetValue, selectedLivePool, liveForm]);
+  }, [selectedLiveSubAccountLotSize, selectedLiveSubAccountCashAllocatedValue, selectedLivePool, liveForm]);
 
   useEffect(() => {
     if (!selectedSinglePool) return;
@@ -2282,8 +2281,8 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     try {
       const payload = buildBacktestPayload({
         ...values,
-        initial_capital: selectedLiveSubAccountNetAssetValue && selectedLiveSubAccountNetAssetValue > 0
-          ? selectedLiveSubAccountNetAssetValue
+        initial_capital: selectedLiveSubAccountCashAllocatedValue && selectedLiveSubAccountCashAllocatedValue > 0
+          ? selectedLiveSubAccountCashAllocatedValue
           : values.initial_capital,
         lot_size: selectedLiveSubAccountLotSize || values.lot_size,
       });
@@ -3337,11 +3336,11 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6} md={4} lg={3}>
-                        <Form.Item label="子账户净资产">
+                        <Form.Item label="子账户分配资金">
                           <Input
                             disabled
                             readOnly
-                            value={selectedLiveSubAccount ? numberFormatter(selectedLiveSubAccountNetAssetValue) : '-'}
+                            value={selectedLiveSubAccount ? numberFormatter(selectedLiveSubAccountCashAllocatedValue) : '-'}
                           />
                         </Form.Item>
                       </Col>

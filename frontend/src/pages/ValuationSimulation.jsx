@@ -222,7 +222,7 @@ const ValuationSimulation = () => {
       return;
     }
     try {
-      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts`);
+      const { data } = await request.get(`/api/external-trading-accounts/${accountId}/sub-accounts/options`);
       setExternalTradingSubAccounts(Array.isArray(data) ? data : []);
     } catch (error) {
       message.error(error?.response?.data?.detail || '加载外部交易子账户失败');

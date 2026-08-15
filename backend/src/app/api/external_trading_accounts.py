@@ -605,6 +605,84 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
     return sub_account.strategy_type
 
 
+# 策略绑定显示名的批量解析规格：(strategy_type, 配置模型, 行->显示名, 配置缺失时的显示名)
+# model 为 None 表示无需查库（如已下线的 W20）。
+_BINDING_CONFIG_SPECS = [
+    (STRATEGY_W20, None, lambda _config: "历史 W20 虚拟盘（已下线）", "历史 W20 虚拟盘（已下线）"),
+    (
+        STRATEGY_SNOWBALL,
+        SnowballCopyConfig,
+        lambda c: c.combination_name or c.combination_id or "A股雪球跟单",
+        "A股雪球跟单（配置已删除）",
+    ),
+    (
+        STRATEGY_PORTFOLIO_COPY,
+        PortfolioCopyConfig,
+        lambda c: c.portfolio_name or c.portfolio_id or "美股账户跟单",
+        "美股账户跟单（配置已删除）",
+    ),
+    (STRATEGY_FACTOR_LIVE, FactorLiveTradingConfig, lambda c: c.name, "因子线上交易（配置已删除）"),
+    (
+        STRATEGY_SOXL_FEAR,
+        SoxlFearStrategyConfig,
+        lambda c: f"SOXL情绪量能自动交易 {c.symbol or ''}".strip(),
+        "SOXL情绪量能自动交易（配置已删除）",
+    ),
+    (STRATEGY_VALUATION_SIM, ValuationSimConfig, lambda c: c.name, "估值模拟盘（配置已删除）"),
+]
+
+
+def _batch_strategy_binding_names(
+    main_db: OrmSession,
+    account_id: str,
+    sub_accounts: List[ExternalTradingSubAccount],
+) -> Dict[int, Optional[str]]:
+    """批量解析虚拟子账户的策略绑定显示名。
+
+    与 _strategy_binding_name 行为一致，但每个策略配置表只查询一次，
+    避免下拉列表场景下对每个子账户做最多 6 次跨库查询。
+    """
+    if not sub_accounts:
+        return {}
+    result: Dict[int, Optional[str]] = {sub.id: None for sub in sub_accounts}
+    by_type: Dict[str, List[ExternalTradingSubAccount]] = {}
+    for sub in sub_accounts:
+        if sub.strategy_type and sub.strategy_config_id:
+            by_type.setdefault(sub.strategy_type, []).append(sub)
+
+    for strategy_type, model, name_for, deleted_label in _BINDING_CONFIG_SPECS:
+        entries = by_type.get(strategy_type)
+        if not entries:
+            continue
+        if model is None:
+            for sub in entries:
+                result[sub.id] = name_for(None)
+            continue
+        config_ids = sorted({
+            safe_int(sub.strategy_config_id)
+            for sub in entries
+            if safe_int(sub.strategy_config_id) > 0
+        })
+        config_by_id: Dict[int, Any] = {}
+        if config_ids:
+            rows = (
+                main_db.query(model)
+                .filter(model.id.in_(config_ids), model.account_id == account_id)
+                .all()
+            )
+            config_by_id = {row.id: row for row in rows}
+        for sub in entries:
+            config = config_by_id.get(safe_int(sub.strategy_config_id))
+            result[sub.id] = name_for(config) if config else deleted_label
+
+    known_types = {spec[0] for spec in _BINDING_CONFIG_SPECS}
+    for strategy_type, entries in by_type.items():
+        if strategy_type not in known_types:
+            for sub in entries:
+                result[sub.id] = strategy_type
+    return result
+
+
 def _stored_sub_account_valuation(
     sub_account: ExternalTradingSubAccount,
     positions: List[ExternalTradingLedgerPosition],
@@ -2145,6 +2223,46 @@ async def list_external_trading_sub_accounts(
             prefetched_prices=price_details,
             fee_summary=fee_summaries.get(sub_account.id),
         ))
+    return result
+
+
+@router.get("/{external_account_id}/sub-accounts/options")
+async def list_external_trading_sub_account_options(
+    external_account_id: int,
+    db: OrmSession = Depends(get_external_trading_db),
+    main_db: OrmSession = Depends(get_db),
+    account_id: str = Depends(valid_account),
+):
+    """轻量虚拟子账户列表：仅返回下拉选择所需的最小字段。
+
+    不计算净值、不拉实时行情、不查持仓/成交手续费，零网络 I/O，
+    适用于只需要子账户下拉选项的场景（策略绑定、执行器配置等）。
+    """
+    sub_accounts = (
+        db.query(ExternalTradingSubAccount)
+        .filter(
+            ExternalTradingSubAccount.account_id == account_id,
+            ExternalTradingSubAccount.external_trading_account_id == external_account_id,
+        )
+        .order_by(ExternalTradingSubAccount.id.desc())
+        .all()
+    )
+    binding_names = _batch_strategy_binding_names(main_db, account_id, sub_accounts)
+    result = []
+    for sub_account in sub_accounts:
+        strategy_name = binding_names.get(sub_account.id)
+        result.append({
+            "id": sub_account.id,
+            "name": sub_account.name,
+            "enabled": sub_account.enabled,
+            "strategy_type": sub_account.strategy_type,
+            "strategy_config_id": sub_account.strategy_config_id,
+            "strategy_name": strategy_name,
+            "binding_status": "BOUND" if strategy_name else "FREE",
+            "binding_label": strategy_name or "空闲",
+            "cash_allocated": sub_account.cash_allocated,
+            "cash_available": sub_account.cash_available,
+        })
     return result
 
 

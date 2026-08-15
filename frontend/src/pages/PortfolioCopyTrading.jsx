@@ -145,7 +145,7 @@ const PortfolioCopyTrading = () => {
             return [];
         }
         try {
-            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts/options`);
             setSnowballLiveSubAccounts(response.data || []);
             return response.data || [];
         } catch (error) {
@@ -161,7 +161,7 @@ const PortfolioCopyTrading = () => {
             return [];
         }
         try {
-            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts`);
+            const response = await request.get(`/api/external-trading-accounts/${externalAccountId}/sub-accounts/options`);
             setPortfolioLiveSubAccounts(response.data || []);
             return response.data || [];
         } catch (error) {
