@@ -184,6 +184,27 @@ class ExternalTradingBatchAmountTest(TestCase):
         self.assertEqual(10000, orders[0]["quantity"])  # 整笔 10 万全提交
         self.assertEqual([], plan["deferred"])
 
+    def test_batch_amount_cap_keeps_whole_order_when_tail_below_fee_break_even(self):
+        db = self._db_session()
+        # 跨轮分批最后一轮场景：剩余 31 万，单轮上限 30 万，佣金门槛 2 万。
+        # 截断 30 万后剩余 1 万 < 门槛 → 本轮整笔提交 31 万，避免尾单被最低佣金吃掉
+        self._add_account(db, max_batch_amount=300000.0)
+        self._add_sub_account(db, sub_account_id=11, name="Growth")
+        self._add_target(db, sub_account_id=11, target_quantity=31000, reference_price=10.0)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"510300.SH": 10.0},
+        )
+
+        orders = plan["external_orders"]
+        self.assertEqual(1, len(orders))
+        self.assertEqual(31000, orders[0]["quantity"])  # 整笔 31 万全提交
+        self.assertEqual([], plan["deferred"])
+
     def test_batch_amount_cap_lower_than_one_lot_keeps_whole_order(self):
         db = self._db_session()
         # 上限 500 元 < 1 手（1000 元）：截断部分不足一个最小交易单位 → 整笔提交

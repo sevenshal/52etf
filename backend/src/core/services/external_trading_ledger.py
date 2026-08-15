@@ -4467,14 +4467,19 @@ def _apply_batch_amount_cap(
         lot_size = max(safe_int(policy.get("lot_size"), 100), 1)
         keep_quantity = (int(remaining_cap / price) // lot_size) * lot_size
         fee_break_even = safe_float(policy.get("fee_break_even_amount"), 0.0)
-        if keep_quantity <= 0 or (fee_break_even > 0 and price * keep_quantity < fee_break_even):
-            # 本轮可提交的部分低于佣金门槛（会被最低佣金吃掉）→ 整笔提交，宁可不分批也不额外亏费
+        deferred_quantity = quantity - keep_quantity
+        if keep_quantity <= 0 or (
+            fee_break_even > 0
+            and (price * keep_quantity < fee_break_even or price * deferred_quantity < fee_break_even)
+        ):
+            # 本轮可提交的部分或剩余部分低于佣金门槛（会被最低佣金吃掉）→
+            # 整笔提交，宁可不分批也不额外亏费（含最后一笔尾单场景）
             kept.append(order)
             submitted_amount[key] = submitted_amount.get(key, 0.0) + amount
             continue
         allocation_chunks = _chunk_allocations(
             order.get("allocations") or [],
-            [keep_quantity, quantity - keep_quantity],
+            [keep_quantity, deferred_quantity],
         )
         kept_piece = dict(order)
         kept_piece["quantity"] = keep_quantity
