@@ -1837,8 +1837,11 @@ async def _prefetch_realtime_price_details(
 ) -> Dict[str, Dict[str, Any]]:
     """预取实时行情供页面展示/估值。
 
-    filter_stale_quotes=True 只保留当日实时价（执行器预览场景，停盘标的无价展示）；
-    默认 False 不过滤（子账户列表估值等场景，休市/未开盘用昨收价估值，避免报'无法获取最新价'）。
+    默认不过滤（子账户列表估值、执行器状态页市价列等展示场景，休市/未开盘用昨收价，
+    避免市价列为空或报'无法获取最新价'）。
+    filter_stale_quotes=True 只保留当日实时价——当前仅当展示侧明确需要'未开盘/停牌无价'时
+    才传（执行器净额预览的'未开盘/停牌'defer 判断在 _build_netted_executor_plan 内部完成，
+    不经由此函数的 prefetch）。
     """
     required_symbols = _dedupe_normalized_symbols(required_symbols)
     optional_symbols = _dedupe_normalized_symbols(optional_symbols or [])
@@ -2864,7 +2867,7 @@ async def get_external_trading_executor_status_plan(
             [],
             [*reference_symbols, *display_symbols],
             timeout=min(normalize_timeout_seconds(account.executor_order_timeout_seconds), 15.0),
-            filter_stale_quotes=True,  # 执行器预览：只展示当日实时价，停盘标的显示无价
+            filter_stale_quotes=False,  # 展示用：市价列显示参考价（休市/未开盘用昨收），不要过滤空
         )
         plan = await _build_netted_executor_plan(
             db,
@@ -2873,7 +2876,8 @@ async def get_external_trading_executor_status_plan(
             payload,
             require_connection=False,
             base_plan=base_plan,
-            prefetched_prices=price_details,
+            # 不传 prefetched：plan 内部分别按当日实时价查询（filter_stale_quotes=True），
+            # 未开盘/停牌标的正确 defer；与展示用 price_details（不过滤）分离
         )
     except Exception as exc:
         plan_error = str(exc)

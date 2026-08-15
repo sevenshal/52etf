@@ -22,6 +22,7 @@ from src.core.services.external_trading_valuation import (
     _fetch_tushare_realtime_quotes,
     _normalize_quote_map,
     _parse_tushare_realtime_frame,
+    get_realtime_price_details,
 )
 from src.core.services.tushare import TushareService
 
@@ -185,6 +186,51 @@ class QuoteMapTradeTimeFilterTest(TestCase):
         quotes = [{"symbol": "AAPL.US", "price": 220.0, "timestamp": "2026-08-16 20:00:00"}]
         result = _normalize_quote_map(quotes, "longport", today=today, filter_stale_quotes=True)
         self.assertEqual({"AAPL.US"}, set(result.keys()))
+
+
+class UnifiedFilterTest(TestCase):
+    """先取价（不过滤）→ 缺失才查下一个源 → 最后统一按 trade_time 过滤。
+    避免休市/未开盘时 tushare 昨日数据被过滤后又去 longport/hub 各查一遍。
+    """
+
+    def _mock_tushare_service(self, rt_k_frame, etf_frame):
+        instance = unittest.mock.MagicMock()
+        instance.get_a_stock_realtime_rt_k_frame.return_value = rt_k_frame
+        instance.get_a_stock_realtime_etf_rt_k_frame.return_value = etf_frame
+        return patch.object(TushareService, "get_instance", return_value=instance)
+
+    @patch("src.core.services.external_trading_valuation._fetch_longport_quotes", side_effect=AssertionError("longport 不应被调用：tushare 已返回全部标的"))
+    @patch("src.core.services.external_trading_valuation._fetch_hub_quotes", side_effect=AssertionError("hub 不应被调用：tushare 已返回全部标的"))
+    def test_stale_prices_from_tushare_prevent_fallback_and_are_filtered(self, mock_hub, mock_longport):
+        # 休市日：tushare 返回全部标的的昨日数据（有价）→ longport/hub 不兜底
+        rt_k_frame = pd.DataFrame([
+            {"ts_code": "600519.SH", "close": 1341.0, "trade_time": "2026-08-14 16:29:43"},
+        ])
+        etf_frame = pd.DataFrame([
+            {"ts_code": "159941.SZ", "close": 1.70, "trade_time": "2026-08-14 17:00:12"},
+        ])
+        with self._mock_tushare_service(rt_k_frame, etf_frame):
+            result = asyncio.run(get_realtime_price_details(
+                1, ["159941.SZ", "600519.SH"], timeout=5.0,
+                raise_on_missing=False, filter_stale_quotes=True, today=TODAY,
+            ))
+        # 统一过滤后：昨日数据全部丢弃 → 无价
+        self.assertEqual({}, result)
+
+    def test_unified_filter_keeps_today_and_drops_stale(self):
+        rt_k_frame = pd.DataFrame([
+            {"ts_code": "600519.SH", "close": 1341.0, "trade_time": f"{TODAY} 10:00:00"},
+        ])
+        etf_frame = pd.DataFrame([
+            {"ts_code": "159941.SZ", "close": 1.70, "trade_time": "2026-08-14 17:00:12"},
+        ])
+        with self._mock_tushare_service(rt_k_frame, etf_frame):
+            result = asyncio.run(get_realtime_price_details(
+                1, ["159941.SZ", "600519.SH"], timeout=5.0,
+                raise_on_missing=False, filter_stale_quotes=True, today=TODAY,
+            ))
+        # 今日数据保留、昨日数据统一丢弃（159941 未开盘）
+        self.assertEqual({"600519.SH"}, set(result.keys()))
 
 
 class PlanDeferWithoutReferencePriceTest(TestCase):

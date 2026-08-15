@@ -96,6 +96,10 @@ def _quote_is_today(
         return True
     raw = item if isinstance(item, dict) else {}
     timestamp_value = raw.get("timestamp") or raw.get("trade_time") or raw.get("quote_time")
+    if timestamp_value is None and isinstance(raw.get("raw"), dict):
+        # tushare 等源的时间戳放在嵌套 raw 里（raw.trade_time）
+        nested = raw.get("raw")
+        timestamp_value = nested.get("timestamp") or nested.get("trade_time") or nested.get("quote_time")
     if timestamp_value is None:
         return True
     parsed = _parse_quote_timestamp(timestamp_value)
@@ -264,6 +268,7 @@ async def get_realtime_price_details(
     prefetched_prices: Optional[Any] = None,
     raise_on_missing: bool = True,
     filter_stale_quotes: bool = False,
+    today: Optional[Any] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """获取实时行情，多源合并（tushare → longport → hub）。
 
@@ -274,10 +279,12 @@ async def get_realtime_price_details(
     normalized_symbols = _normalize_symbols(symbols)
     result: Dict[str, Dict[str, Any]] = {}
 
+    # 各源先取价（不过滤 trade_time）：有价的标的不会触发下一个源的兜底查询，
+    # 避免休市/未开盘时 tushare 返回昨日数据被过滤后又去 longport/hub 各查一遍。
+    # 全部取完后在函数末尾统一按 trade_time 过滤。
     for symbol, item in _normalize_quote_map(
         prefetched_prices,
         "prefetched_prices",
-        filter_stale_quotes=filter_stale_quotes,
     ).items():
         if symbol in normalized_symbols:
             result[symbol] = item
@@ -294,10 +301,7 @@ async def get_realtime_price_details(
         if not current_missing:
             return
         try:
-            result.update(await _fetch_tushare_realtime_quotes(
-                current_missing,
-                filter_stale_quotes=filter_stale_quotes,
-            ))
+            result.update(await _fetch_tushare_realtime_quotes(current_missing))
         except Exception as exc:
             tushare_error = exc
             logger.warning("Tushare realtime quote failed for valuation: %s", exc)
@@ -312,7 +316,6 @@ async def get_realtime_price_details(
                 external_trading_account_id,
                 current_missing,
                 timeout,
-                filter_stale_quotes=filter_stale_quotes,
             ))
         except ExternalTradingConnectionError as exc:
             hub_error = exc
@@ -327,10 +330,7 @@ async def get_realtime_price_details(
         if not current_missing:
             return
         try:
-            result.update(await _fetch_longport_quotes(
-                current_missing,
-                filter_stale_quotes=filter_stale_quotes,
-            ))
+            result.update(await _fetch_longport_quotes(current_missing))
         except Exception as exc:
             longport_error = exc
             logger.warning("LongPort quote fallback failed for valuation: %s", exc)
@@ -338,6 +338,15 @@ async def get_realtime_price_details(
     await fetch_tushare_for_missing()
     await fetch_longport_for_missing()
     await fetch_hub_for_missing()
+
+    if filter_stale_quotes:
+        # 统一按'今日已开盘'过滤：休市/未开盘标的（如跨境 ETF 延迟到 10:30）的
+        # 昨日数据在此丢弃，执行器场景表现为无价 → 订单 defer
+        result = {
+            symbol: item
+            for symbol, item in result.items()
+            if _quote_is_today(item, symbol, today=today, filter_stale_quotes=True)
+        }
 
     missing = [symbol for symbol in normalized_symbols if symbol not in result]
     if missing and raise_on_missing:
