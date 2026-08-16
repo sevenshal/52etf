@@ -79,7 +79,7 @@ const normalizeConfig = (config) => ({
   ...defaultValues,
   ...config,
   run_time: config?.run_time ? dayjs(config.run_time, 'HH:mm') : dayjs('09:30', 'HH:mm'),
-  volume_z_threshold: config?.volume_z_threshold ?? 1.25,
+  volume_z_threshold: config?.volume_z_threshold === undefined ? 1.25 : config?.volume_z_threshold,
   sell_shrink_z: config?.sell_shrink_z ?? -1,
   volume_signal_symbol: config?.volume_signal_symbol ?? undefined,
   external_trading_account_id: config?.external_trading_account_id ?? undefined,
@@ -365,7 +365,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub2_buy_threshold: values.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: values.sub2_volume_ratio_threshold ?? 1.3,
     swap_threshold: values.swap_threshold ?? null,
-    volume_z_threshold: values.volume_z_threshold ?? 1.25,
+    volume_z_threshold: values.volume_z_threshold ?? null,
     sell_shrink_z: values.sell_shrink_z ?? -1,
   });
 
@@ -409,7 +409,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
           execute_next_open_values: ['true'],
-          volume_z_threshold_values: String(values.volume_z_threshold ?? 1.25),
+          volume_z_threshold_values: String(values.volume_z_threshold ?? ''),
           sell_shrink_z_values: String(values.sell_shrink_z ?? -1),
           sub_symbol: values.sub_symbol || undefined,
           sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
