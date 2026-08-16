@@ -1965,6 +1965,7 @@ def _run_seesaw_backtest(
     position_symbol = None  # "main" | "sub" | "sub2" | "trend" | None
     position_trend_etf = None
     position_trend_index = None
+    last_trend_close = [0.0]  # 趋势持仓最近已知估值价（当日无行情时兜底）
     shares = 0
     avg_cost = 0.0
     cooldown_remaining = 0
@@ -2019,7 +2020,12 @@ def _run_seesaw_backtest(
     def current_close(day_text: str) -> float:
         if position_symbol == "trend":
             slot = _trend_slot(day_text)
-            return float(slot["exec"]) if slot else 0.0
+            if slot:
+                value = float(slot["exec"])
+                last_trend_close[0] = value
+                return value
+            # 当日无槽位行情（停牌/上市前等）→ 用最近已知价估值，避免净值异常
+            return last_trend_close[0]
         holder = _holder(position_symbol) if position_symbol else main
         info = holder["by_date"].get(day_text)
         return float(info["close"]) if info else 0.0
