@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -11,6 +12,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import duckdb
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError, validator
 
