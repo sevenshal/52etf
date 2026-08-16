@@ -341,10 +341,10 @@ class SOXLFearSearchParams(BaseModel):
     # 固定成本参数（不参与组合搜索）：滑点 -1=悲观，>=0 按成交价滑点%；印花税卖出收取
     slippage_pct: float = -1.0
     stamp_duty_pct: float = 0.0
-    # 统一对数放量阈值（log-z，不参与网格，固定用于搜索）：None=旧量比逻辑；默认 1.25
-    volume_z_threshold: Optional[float] = 1.25
-    # 卖出缩量阈值（不参与网格，固定用于搜索）：<=0 关闭（贪恐即卖）；>0 贪恐>=greed 且缩量才卖
-    sell_shrink_z: float = -1.0
+    # 统一对数放量阈值候选（参与网格搜索）：None=旧量比逻辑（用各标的量比阈值）；数值=log-z 放量标准差
+    volume_z_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [1.25])
+    # 卖出缩量阈值候选（参与网格搜索）：<=0 关闭（贪恐即卖）；>0 贪恐>=greed 且当日缩量达该标准差才卖
+    sell_shrink_z_values: List[float] = Field(default_factory=lambda: [-1.0])
 
     @validator("slippage_pct")
     def validate_search_slippage_pct(cls, value):
@@ -2243,6 +2243,8 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.swap_threshold_values,
         payload.sub2_buy_threshold_values,
         payload.sub2_volume_ratio_threshold_values,
+        payload.volume_z_threshold_values,
+        payload.sell_shrink_z_values,
     ]
     total = 1
     for values in value_groups:
@@ -2305,6 +2307,8 @@ def _evaluate_search_candidates(
                 payload.swap_threshold_values,
                 payload.sub2_buy_threshold_values,
                 payload.sub2_volume_ratio_threshold_values,
+                payload.volume_z_threshold_values,
+                payload.sell_shrink_z_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -2366,8 +2370,6 @@ def _evaluate_search_candidates(
                         sub2_symbol=payload.sub2_symbol,
                         sub2_fear_source=payload.sub2_fear_source,
                         sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
-                        volume_z_threshold=payload.volume_z_threshold,
-                        sell_shrink_z=payload.sell_shrink_z,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -2406,8 +2408,6 @@ def _evaluate_search_candidates(
                 payload.sub2_symbol,
                 payload.sub2_fear_source,
                 payload.sub2_volume_signal_symbol,
-                payload.volume_z_threshold,
-                payload.sell_shrink_z,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -2465,8 +2465,6 @@ def _evaluate_search_batch(
     sub2_symbol: Optional[str] = None,
     sub2_fear_source: Optional[str] = None,
     sub2_volume_signal_symbol: Optional[str] = None,
-    volume_z_threshold: Optional[float] = 1.25,
-    sell_shrink_z: float = -1.0,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2493,6 +2491,8 @@ def _evaluate_search_batch(
                 swap_threshold,
                 sub2_buy_threshold,
                 sub2_volume_ratio_threshold,
+                volume_z_threshold,
+                sell_shrink_z,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),

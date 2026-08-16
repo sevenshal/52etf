@@ -409,8 +409,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
           execute_next_open_values: ['true'],
-          volume_z_threshold: values.volume_z_threshold ?? 1.25,
-          sell_shrink_z: values.sell_shrink_z ?? -1,
+          volume_z_threshold_values: String(values.volume_z_threshold ?? 1.25),
+          sell_shrink_z_values: String(values.sell_shrink_z ?? -1),
           sub_symbol: values.sub_symbol || undefined,
           sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
           sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,

@@ -53,6 +53,9 @@ const parseSwapThresholdList = (value) => String(value ?? '')
   .map(item => (item === 'none' || item === 'null' || item === '关闭' ? null : parseFloat(item)))
   .filter(item => item === null || Number.isFinite(item));
 
+// 放量标准差候选：none=旧量比（null）；数值=log-z 放量标准差
+const parseVolumeZList = (value) => parseSwapThresholdList(value);
+
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -159,9 +162,9 @@ const SoxlFearBacktest = () => {
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
   const selectedVolumeSignalSymbol = Form.useWatch('volume_signal_symbol', form) || selectedSymbol;
   const selectedFearSources = Form.useWatch('fear_source_values', form) || ['cnn'];
-  const selectedVolumeZThreshold = Form.useWatch('volume_z_threshold', form);
-  // 统一 log-z 放量启用时（有值），主/候补/第二候补放量统一走 log-z，各标的量比阈值忽略
-  const logZVolumeEnabled = selectedVolumeZThreshold !== undefined && selectedVolumeZThreshold !== null && selectedVolumeZThreshold !== '';
+  const selectedVolumeZThresholds = Form.useWatch('volume_z_threshold_values', form);
+  // 统一 log-z 放量启用时（候选含数值），主/候补/第二候补放量统一走 log-z，各标的量比阈值忽略
+  const logZVolumeEnabled = parseVolumeZList(selectedVolumeZThresholds).some(v => v !== null);
   const subRatioDisabled = logZVolumeEnabled;
   const sub2RatioDisabled = logZVolumeEnabled;
   const selectedFearSourceLabel = formatFearSourceLabels(selectedFearSources);
@@ -231,8 +234,12 @@ const SoxlFearBacktest = () => {
       rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
       slippage_pct: values.slippage_pct ?? -1,
       stamp_duty_pct: values.stamp_duty_pct ?? 0,
-      volume_z_threshold: values.volume_z_threshold ?? 1.25,
-      sell_shrink_z: values.sell_shrink_z ?? -1,
+      volume_z_threshold_values: parseVolumeZList(values.volume_z_threshold_values).length
+        ? parseVolumeZList(values.volume_z_threshold_values)
+        : [null],
+      sell_shrink_z_values: parseNumberList(values.sell_shrink_z_values).length
+        ? parseNumberList(values.sell_shrink_z_values)
+        : [-1],
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
@@ -266,7 +273,7 @@ const SoxlFearBacktest = () => {
     buy_threshold: record.buy_threshold,
     greed_threshold: record.greed_threshold,
     volume_ratio_threshold: record.volume_ratio_threshold,
-    volume_z_threshold: record.volume_z_threshold ?? 1.25,
+    volume_z_threshold: record.volume_z_threshold === undefined ? 1.25 : record.volume_z_threshold,
     sell_shrink_z: record.sell_shrink_z ?? -1,
     volume_ratio_consecutive_days: record.volume_ratio_consecutive_days ?? 1,
     buy_position_pct: record.buy_position_pct,
@@ -1085,8 +1092,8 @@ const SoxlFearBacktest = () => {
             fit_rebalance_threshold_pct: 0,
             slippage_pct: -1,
             stamp_duty_pct: 0,
-            volume_z_threshold: 1.25,
-            sell_shrink_z: -1,
+            volume_z_threshold_values: '1.25',
+            sell_shrink_z_values: '-1',
             date_range: [dayjs('2023-03-22'), dayjs()],
             buy_threshold_values: '30',
             greed_threshold_values: '70',
@@ -1254,13 +1261,13 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="买入放量统一用 log(成交量) 相对前20日均值的标准差倍数，默认 1.25">
-                <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} />
+              <Form.Item name="volume_z_threshold_values" label="放量标准差(log-z)候选" tooltip="逗号分隔；none=旧量比逻辑；数值=log(成交量)相对前20日均值的标准差倍数，默认 1.25">
+                <Input placeholder="例如 none,1.25,1.5（none=旧量比）" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sell_shrink_z" label="卖出缩量标准差" tooltip="-1=关闭（贪恐即卖）；>0 时贪恐>=止盈阈值且当日缩量达该标准差才卖（如 0.25）">
-                <InputNumber min={-1} max={5} step={0.05} style={{ width: '100%' }} />
+              <Form.Item name="sell_shrink_z_values" label="卖出缩量标准差候选" tooltip="逗号分隔；-1=关闭（贪恐即卖）；>0 时贪恐>=止盈阈值且当日缩量达该标准差才卖（如 0.25）">
+                <Input placeholder="例如 -1,0.25,0.5（-1=关闭）" />
               </Form.Item>
             </Col>
             <Col xs={24} md={24}>
