@@ -126,6 +126,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
   const stateRequestSeqRef = useRef(0);
 
   const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form) || undefined;
+  const selectedVolumeZThreshold = Form.useWatch('volume_z_threshold', form);
+  const logZVolumeEnabled = selectedVolumeZThreshold !== undefined && selectedVolumeZThreshold !== null && selectedVolumeZThreshold !== '';
 
   const targetOptions = options.target_options?.length
     ? options.target_options
@@ -860,8 +862,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)">
-                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)"
+                            tooltip={logZVolumeEnabled ? '已启用统一放量标准差(log-z)，候补放量统一用该标准差，此阈值被忽略' : '候补放量量比阈值'}
+                          >
+                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
@@ -899,8 +903,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="sub2_volume_ratio_threshold" label="第二候补量比阈值(>=)">
-                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          <Form.Item name="sub2_volume_ratio_threshold" label="第二候补量比阈值(>=)"
+                            tooltip={logZVolumeEnabled ? '已启用统一放量标准差(log-z)，第二候补放量统一用该标准差，此阈值被忽略' : '第二候补放量量比阈值'}
+                          >
+                            <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>

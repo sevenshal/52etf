@@ -159,6 +159,11 @@ const SoxlFearBacktest = () => {
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
   const selectedVolumeSignalSymbol = Form.useWatch('volume_signal_symbol', form) || selectedSymbol;
   const selectedFearSources = Form.useWatch('fear_source_values', form) || ['cnn'];
+  const selectedVolumeZThreshold = Form.useWatch('volume_z_threshold', form);
+  // 统一 log-z 放量启用时（有值），主/候补/第二候补放量统一走 log-z，各标的量比阈值忽略
+  const logZVolumeEnabled = selectedVolumeZThreshold !== undefined && selectedVolumeZThreshold !== null && selectedVolumeZThreshold !== '';
+  const subRatioDisabled = logZVolumeEnabled;
+  const sub2RatioDisabled = logZVolumeEnabled;
   const selectedFearSourceLabel = formatFearSourceLabels(selectedFearSources);
   const [loading, setLoading] = useState(false);
   const [searchMeta, setSearchMeta] = useState(null);
@@ -1288,8 +1293,10 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub_volume_ratio_threshold_values" label="候补量比阈值(>=)候选">
-                <Input placeholder="例如 1.3,1.6" />
+              <Form.Item name="sub_volume_ratio_threshold_values" label="候补量比阈值(>=)候选"
+                tooltip={subRatioDisabled ? '已启用统一放量标准差(log-z)，候补放量统一用该标准差，此阈值被忽略' : '候补放量量比阈值'}
+              >
+                <Input placeholder="例如 1.3,1.6" disabled={subRatioDisabled} />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -1327,8 +1334,10 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub2_volume_ratio_threshold_values" label="第二候补量比阈值(>=)候选">
-                <Input placeholder="例如 1.3,1.6" />
+              <Form.Item name="sub2_volume_ratio_threshold_values" label="第二候补量比阈值(>=)候选"
+                tooltip={sub2RatioDisabled ? '已启用统一放量标准差(log-z)，第二候补放量统一用该标准差，此阈值被忽略' : '第二候补放量量比阈值'}
+              >
+                <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
               </Form.Item>
             </Col>
           </Row>
