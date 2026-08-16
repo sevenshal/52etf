@@ -819,6 +819,13 @@ def _prepare_base_dataframe(
     price_df = _normalize_price_dates(price_df)
     price_df["ma20"] = pd.to_numeric(price_df["close"], errors="coerce").rolling(20).mean()
     price_df["date_ts"] = pd.to_datetime(price_df["date"])
+    # 持仓标的自有成交量 log_z（用于卖出缩量确认；与信号量比来源的 log_z 区分）
+    price_df["log_volume_self"] = np.log(pd.to_numeric(price_df["volume"], errors="coerce").replace(0, np.nan))
+    price_df["log_vol_ma20_self"] = price_df["log_volume_self"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).mean()
+    price_df["log_vol_std20_self"] = price_df["log_volume_self"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).std(ddof=0)
+    price_df["log_z_self"] = (
+        price_df["log_volume_self"] - price_df["log_vol_ma20_self"]
+    ) / price_df["log_vol_std20_self"].replace(0, np.nan)
 
     if signal_symbol == symbol:
         signal_price_df = price_df[["date", "volume"]].copy()
@@ -901,6 +908,8 @@ def _prepare_base_dataframe(
     merged_df["fear_greed"] = pd.to_numeric(merged_df["fear_greed"], errors="coerce")
     merged_df["cnn_fear_greed"] = merged_df["fear_greed"]
     merged_df["execution_price"] = pd.to_numeric(merged_df["close"], errors="coerce")
+    if "log_z_self" not in merged_df.columns:
+        merged_df["log_z_self"] = np.nan
     # 跨市场量比/恐贪来源（如 A股交易、QQQ 恐贪与量比）：美股休市日 A股开市时
     # 信号列为 NaN，用最近可用值填充（A股 T 日早上可用美股最近交易日数据），避免删掉 A股交易日
     signal_columns = [
@@ -1304,6 +1313,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         if "log_z" in base_df.columns
         else np.full(len(base_df), np.nan, dtype=float)
     )
+    log_z_self_values = (
+        base_df["log_z_self"].to_numpy(dtype=float, copy=False)
+        if "log_z_self" in base_df.columns
+        else np.full(len(base_df), np.nan, dtype=float)
+    )
     use_log_z = params.volume_z_threshold is not None
     volume_ratio_consecutive_days = int(params.volume_ratio_consecutive_days)
     buy_volume_ratio_column = _volume_ratio_consecutive_column(volume_ratio_consecutive_days)
@@ -1345,6 +1359,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_volume_ratios = np.concatenate([[np.nan], volume_ratios[:-1]])
         decision_buy_volume_ratios = np.concatenate([[np.nan], buy_volume_ratios[:-1]])
         decision_log_z = np.concatenate([[np.nan], log_z_values[:-1]])
+        decision_log_z_self = np.concatenate([[np.nan], log_z_self_values[:-1]])
         decision_signal_volumes = np.concatenate([[np.nan], signal_volumes[:-1]])
         decision_signal_dates = [None] + list(signal_dates[:-1])
         decision_fear_dates = [None] + list(fear_dates[:-1])
@@ -1356,6 +1371,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_volume_ratios = volume_ratios
         decision_buy_volume_ratios = buy_volume_ratios
         decision_log_z = log_z_values
+        decision_log_z_self = log_z_self_values
         decision_signal_volumes = signal_volumes
         decision_signal_dates = signal_dates
         decision_fear_dates = fear_dates
@@ -1406,6 +1422,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         volume_ratio = float(decision_volume_ratios[index])
         buy_volume_ratio = float(decision_buy_volume_ratios[index])
         log_z = float(decision_log_z[index]) if np.isfinite(decision_log_z[index]) else np.nan
+        log_z_self = float(decision_log_z_self[index]) if np.isfinite(decision_log_z_self[index]) else np.nan
         if use_log_z:
             buy_volume_signal_ok = np.isfinite(log_z) and log_z >= float(params.volume_z_threshold)
         else:
@@ -1422,10 +1439,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         is_fear = fear_score <= params.buy_threshold
         is_greedy = fear_score >= params.greed_threshold
-        # 缩量卖出确认：sell_shrink_z > 0 时需当日 log_z <= -sell_shrink_z 才卖（量能衰竭确认）
+        # 缩量卖出确认：sell_shrink_z > 0 时需持仓标的自有成交量缩量（log_z_self <= -sell_shrink_z）
         shrink_sell_ok = True
         if float(params.sell_shrink_z) > 0:
-            shrink_sell_ok = np.isfinite(log_z) and log_z <= -float(params.sell_shrink_z)
+            shrink_sell_ok = np.isfinite(log_z_self) and log_z_self <= -float(params.sell_shrink_z)
 
         if shares > 0:
             if is_greedy:
@@ -1742,6 +1759,11 @@ def _run_seesaw_backtest(
             if "log_z" in df.columns else np.full(len(date_texts), np.nan)
         )
         d_log_z = np.concatenate([[np.nan], raw_log_z[:-1]]) if use_next_open else raw_log_z
+        raw_log_z_self = (
+            df["log_z_self"].to_numpy(dtype=float, copy=False)
+            if "log_z_self" in df.columns else np.full(len(date_texts), np.nan)
+        )
+        d_log_z_self = np.concatenate([[np.nan], raw_log_z_self[:-1]]) if use_next_open else raw_log_z_self
         by_date: Dict[str, Dict] = {}
         for index, day_text in enumerate(date_texts):
             by_date[day_text] = {
@@ -1753,6 +1775,7 @@ def _run_seesaw_backtest(
                 "fear": float(d_fear[index]),
                 "buy_vr": float(d_buy_vr[index]),
                 "log_z": float(d_log_z[index]),
+                "log_z_self": float(d_log_z_self[index]),
                 "volume": float(df["volume"].to_numpy(dtype=float, copy=False)[index]),
             }
         return {"dates": dates, "date_texts": date_texts, "by_date": by_date}
@@ -2011,7 +2034,7 @@ def _run_seesaw_backtest(
             held_sig = sig[position_symbol]
             held_fear = float(held_sig["fear"])
             held_vr = float(held_sig["vr"])
-            held_log_z = float(_holder(position_symbol)["by_date"][day_text]["log_z"])
+            held_log_z = float(_holder(position_symbol)["by_date"][day_text]["log_z_self"])
             if float(params.trailing_stop_pct) <= 0:
                 shrink_ok = True
                 if float(params.sell_shrink_z) > 0:
