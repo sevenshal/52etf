@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date, datetime
 from typing import List, Optional
@@ -59,6 +60,11 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub2_buy_threshold: float = 20.0
     sub2_volume_ratio_threshold: float = 1.3
     swap_threshold: Optional[float] = None
+    # 趋势补位：空仓且无恐慌信号时，选趋势最强（收盘>MA20且gap最大）的槽位买入，跌破均线卖出
+    trend_enabled: bool = False
+    trend_ma_win: int = 20
+    trend_max_fear: float = 50.0
+    trend_slots: Optional[List[str]] = None  # ["INDEX:ETF", ...]，None/空=默认15池
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
     run_time: str = "09:30"
@@ -187,6 +193,37 @@ class AStockFearStrategyConfigPayload(BaseModel):
         if value <= 0 or value > 20:
             raise ValueError("第二候补量比阈值必须大于 0 且不超过 20")
         return value
+
+    @validator("trend_ma_win")
+    def validate_trend_ma_win(cls, value):
+        if value < 2 or value > 500:
+            raise ValueError("趋势均线窗口必须在2到500之间")
+        return value
+
+    @validator("trend_max_fear")
+    def validate_trend_max_fear(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("趋势买入恐贪条件必须在0到100之间")
+        return value
+
+    @validator("trend_slots")
+    def validate_trend_slots(cls, value):
+        if not value:
+            return None
+        normalized = []
+        for item in value:
+            parts = str(item).split(":")
+            if len(parts) != 2:
+                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
+            idx = parts[0].strip().upper()
+            etf = parts[1].strip().upper()
+            if not idx or not etf:
+                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
+            if etf.endswith(".US") or etf in A_STOCK_SYMBOLS:
+                normalized.append(f"{idx}:{etf}")
+            else:
+                raise ValueError(f"趋势槽位交易标的 {etf} 必须是可交易 A 股 ETF 或美股标的")
+        return list(dict.fromkeys(normalized)) or None
 
     @validator("swap_threshold")
     def validate_swap_threshold(cls, value):
@@ -344,6 +381,10 @@ CONFIG_FIELDS = [
     "sub2_buy_threshold",
     "sub2_volume_ratio_threshold",
     "swap_threshold",
+    "trend_enabled",
+    "trend_ma_win",
+    "trend_max_fear",
+    "trend_slots",
     "external_trading_account_id",
     "live_sub_account_id",
     "run_time",
@@ -517,6 +558,11 @@ def _config_response(
             "updated_at",
         ]
     }
+    if isinstance(data.get("trend_slots"), str):
+        try:
+            data["trend_slots"] = json.loads(data["trend_slots"])
+        except (ValueError, TypeError):
+            data["trend_slots"] = None
     if getattr(config, "external_trading_account_id", None):
         account = trading_db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.id == config.external_trading_account_id,
@@ -557,7 +603,10 @@ def _apply_payload_to_config(
     trading_account_id: str,
 ):
     for field in CONFIG_FIELDS:
-        setattr(config, field, payload.dict()[field])
+        value = payload.dict()[field]
+        if field == "trend_slots" and isinstance(value, list):
+            value = json.dumps(value)
+        setattr(config, field, value)
     config.trading_account_id = trading_account_id
     config.updated_at = datetime.now()
 

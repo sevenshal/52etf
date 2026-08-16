@@ -34,6 +34,9 @@ const PARAM_FIELDS = [
   { key: 'volatility_std_multiplier', label: '波动率突破标准差', value: '0.5,1', group: 'exit', note: '当前波动率 > 均值 + Nσ' },
   { key: 'trailing_drawdown_pct', label: '移动止盈回撤%', value: '5,7', group: 'exit', note: '相对买入后最高价' },
   { key: 'top_sell_threshold', label: '见顶卖出阈值', value: '70,80', group: 'exit', searchable: false, note: '恐贪MA转跌且近期触及阈值→清仓逃顶；留空=关闭' },
+  { key: 'trend_enabled', label: '趋势补位开关', value: 'true', group: 'trend', searchable: false, note: '空仓且无恐慌信号时，选趋势最强（收盘>MA20且gap最大）的槽位全仓买入' },
+  { key: 'trend_ma_win', label: '趋势均线窗口', value: '20', group: 'trend', integer: true, searchable: false, note: '指数收盘相对该均线判断趋势；跌破均线卖出' },
+  { key: 'trend_max_fear', label: '趋势买入恐贪条件', value: '50', group: 'trend', note: '趋势槽位对应指数恐贪必须低于该值才买入；逗号分隔可搜参（如 50,35,65）' },
   { key: 'commission_pct', label: '佣金%', value: '0.03', group: 'cost' },
   { key: 'min_commission', label: '最低佣金（元）', value: '5', group: 'cost' },
   { key: 'slippage_pct', label: '单边滑点%', value: '0.02', group: 'cost' },
@@ -55,7 +58,27 @@ const reasonLabels = {
   extreme_greed_partial: '极贪减仓',
   stop_loss: '固定止损',
   volatility_trailing_stop: '波动突破后移动止盈',
+  trend_follow: '趋势补位买入',
+  trend_ma_break: '跌破趋势均线卖出',
 };
+
+const TREND_SLOT_OPTIONS = [
+  { value: '000688.SH:588000.SH', label: '科创50 → 588000' },
+  { value: '000698.SH:588220.SH', label: '科创100 → 588220' },
+  { value: '000699.SH:588230.SH', label: '科创200 → 588230' },
+  { value: 'H30184.CSI:512480.SH', label: '半导体 → 512480' },
+  { value: 'QQQ.US:159509.SZ', label: '纳指科技 → 159509' },
+  { value: '399967.SZ:512660.SH', label: '军工 → 512660' },
+  { value: '930997.CSI:515030.SH', label: '新能源车 → 515030' },
+  { value: '931152.CSI:515120.SH', label: '创新药 → 515120' },
+  { value: '399989.SZ:512170.SH', label: '医疗 → 512170' },
+  { value: '000819.SH:512400.SH', label: '有色 → 512400' },
+  { value: '399975.SZ:512880.SH', label: '证券 → 512880' },
+  { value: '399998.SZ:515220.SH', label: '煤炭 → 515220' },
+  { value: '399986.SZ:512800.SH', label: '银行 → 512800' },
+  { value: '000932.SH:159928.SZ', label: '消费 → 159928' },
+  { value: 'H30269.CSI:512890.SH', label: '红利低波 → 512890' },
+];
 
 const parseNumbers = (value, integer = false) => String(value ?? '')
   .split(',')
@@ -145,6 +168,9 @@ const AStockFearEtfBacktest = () => {
     candidateGroups[field.key]?.[0] ?? parseNumbers(field.value, field.integer)[0],
   ]));
 
+  // 趋势槽位：多选（"INDEX:ETF"），留空 = 默认15池
+  const selectedTrendSlots = () => (formValues?.trend_slots || []);
+
   const runDetail = async params => {
     const values = await form.validateFields();
     const selected = params || firstParams();
@@ -154,8 +180,9 @@ const AStockFearEtfBacktest = () => {
     }
     setDetailLoading(true);
     try {
+      const slots = selectedTrendSlots();
       const { data } = await request.post('/api/a-stock-fear-etf-backtest/run', {
-        ...commonPayload(values), params: selected,
+        ...commonPayload(values), params: { ...selected, ...(slots.length ? { trend_slots: slots } : {}) },
       });
       setResult(data);
       setTimeout(() => document.getElementById('a-fear-etf-detail')?.scrollIntoView({ behavior: 'smooth' }), 0);
@@ -240,7 +267,8 @@ const AStockFearEtfBacktest = () => {
     greed_sell_fraction: '极贪卖', stop_loss_pct: '止损', stop_cooldown_days: '冷静',
     volatility_window: '波动窗', volatility_baseline_window: '基准窗', volatility_std_multiplier: '波动σ',
     trailing_drawdown_pct: '回撤止盈', top_sell_threshold: '见顶', sort_by_fear: '恐慌优先',
-    buy_when_flat_only: '空仓才买', commission_pct: '佣金', min_commission: '最低佣',
+    buy_when_flat_only: '空仓才买', trend_enabled: '趋势补位', trend_ma_win: '趋势MA',
+    trend_max_fear: '趋势恐贪<', commission_pct: '佣金', min_commission: '最低佣',
     slippage_pct: '滑点', stamp_duty_pct: '印花税', lot_size: '手数',
   };
 
@@ -345,6 +373,14 @@ const AStockFearEtfBacktest = () => {
             items={[
               { key: 'entry', label: '买入、仓位与择优', children: renderFields('entry') },
               { key: 'exit', label: '减仓、波动率与移动止盈', children: renderFields('exit') },
+              { key: 'trend', label: '趋势补位（空仓时追最强趋势）', children: (
+                <>
+                  {renderFields('trend')}
+                  <Form.Item name="trend_slots" label="趋势候选标的" extra="留空使用默认15池：科创50/科创100/科创200/半导体/纳指科技/军工/新能源车/创新药/医疗/有色/证券/煤炭/银行/消费/红利低波">
+                    <Select mode="multiple" allowClear options={TREND_SLOT_OPTIONS} maxTagCount="responsive" placeholder="默认15池" />
+                  </Form.Item>
+                </>
+              ) },
               { key: 'cost', label: '成交与成本', children: renderFields('cost') },
             ]}
           />
@@ -385,8 +421,9 @@ const AStockFearEtfBacktest = () => {
                 <Col xs={12} sm={8} lg={4}><Statistic title="年化波动率" value={result.summary?.annualized_volatility_pct} precision={2} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="平均仓位" value={result.summary?.average_exposure_pct} precision={1} suffix="%" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="平均持仓" value={result.summary?.average_holding_count} precision={2} suffix="只" /></Col>
-                <Col xs={12} sm={8} lg={4}><Statistic title="买入次数" value={result.summary?.buy_count} /></Col>
-                <Col xs={12} sm={8} lg={4}><Statistic title="卖出次数" value={result.summary?.sell_count} /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="买卖次数" value={`${result.summary?.buy_count ?? 0} / ${result.summary?.sell_count ?? 0}`} suffix="买/卖" /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="空仓占比" value={result.summary?.flat_days_pct} precision={1} suffix="%" /></Col>
+                <Col xs={12} sm={8} lg={4}><Statistic title="空仓天数" value={`${result.summary?.flat_days ?? 0} / ${result.summary?.total_days ?? 0}`} suffix="天" /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="已实现盈亏" value={result.summary?.realized_pnl} precision={2} valueStyle={{ color: (result.summary?.realized_pnl || 0) >= 0 ? '#ef5350' : '#66bb6a' }} /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="期末资产" value={result.summary?.final_value} precision={2} valueStyle={{ color: (result.summary?.final_value || 0) >= (result.summary?.initial_capital || 0) ? '#ef5350' : '#66bb6a' }} /></Col>
                 <Col xs={12} sm={8} lg={4}><Statistic title="换手率" value={result.summary?.turnover_pct} precision={1} suffix="%" /></Col>
@@ -401,6 +438,7 @@ const AStockFearEtfBacktest = () => {
                 <Descriptions.Item label="波动率窗口">{result.params?.volatility_window}日 / 基线 {result.params?.volatility_baseline_window}日</Descriptions.Item>
                 <Descriptions.Item label="最大持仓">{result.params?.max_positions} 只</Descriptions.Item>
                 <Descriptions.Item label="轮动模式">恐慌优先 {result.params?.sort_by_fear ? '开' : '关'} / 空仓才买 {result.params?.buy_when_flat_only ? '开' : '关'}</Descriptions.Item>
+                <Descriptions.Item label="趋势补位">{result.params?.trend_enabled ? '开' : '关'} · MA{result.params?.trend_ma_win} · 恐贪&lt;{result.params?.trend_max_fear ?? '-'} · {result.params?.trend_slots?.length ? `${result.params.trend_slots.length}个自定义槽位` : '默认15池'}</Descriptions.Item>
                 <Descriptions.Item label="见顶卖出">恐贪MA转跌且近{result.params?.bottom_ma_window}日曾 &gt; {result.params?.top_sell_threshold ?? '-'} → 清仓</Descriptions.Item>
                 <Descriptions.Item label="对比基准">{result.benchmark?.label || result.benchmark?.symbol || '-'}</Descriptions.Item>
                 <Descriptions.Item label="回测区间">{result.meta?.start_date || result.summary?.start_date} ~ {result.meta?.end_date || result.summary?.end_date}</Descriptions.Item>

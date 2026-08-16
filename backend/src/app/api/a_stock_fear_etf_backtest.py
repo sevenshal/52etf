@@ -20,8 +20,11 @@ from ...core.services.a_stock_fear_etf_backtest_engine import (
     build_fear_by_date,
     build_signal_rows,
     build_top_signals,
+    build_trend_index_by_date,
+    build_trend_ma_by_index,
     load_etf_bars,
     load_fear,
+    load_trend_index_close,
     max_drawdown,
     prepare_fear_features,
     prepare_market_features,
@@ -46,6 +49,50 @@ RECOMMENDED_INDEXES = [
     "000300.SH", "000905.SH", "399006.SZ",
 ]
 DEFAULT_BENCHMARK_SYMBOL = "000300.SH"
+
+# 趋势补位默认候选池（指数 -> ETF）：科创50/科创100/科创200/半导体/纳指科技/
+# 军工/新能源车/创新药/医疗/有色/证券/煤炭/银行/消费/红利低波
+DEFAULT_TREND_SLOTS: list[tuple[str, str]] = [
+    ("000688.SH", "588000.SH"),
+    ("000698.SH", "588220.SH"),
+    ("000699.SH", "588230.SH"),
+    ("H30184.CSI", "512480.SH"),
+    ("QQQ.US", "159509.SZ"),
+    ("399967.SZ", "512660.SH"),
+    ("930997.CSI", "515030.SH"),
+    ("931152.CSI", "515120.SH"),
+    ("399989.SZ", "512170.SH"),
+    ("000819.SH", "512400.SH"),
+    ("399975.SZ", "512880.SH"),
+    ("399998.SZ", "515220.SH"),
+    ("399986.SZ", "512800.SH"),
+    ("000932.SH", "159928.SZ"),
+    ("H30269.CSI", "512890.SH"),
+]
+
+TREND_SLOT_LABELS: dict[str, str] = {
+    "000688.SH": "科创50", "000698.SH": "科创100", "000699.SH": "科创200",
+    "H30184.CSI": "半导体", "QQQ.US": "纳指科技", "399967.SZ": "军工",
+    "930997.CSI": "新能源车", "931152.CSI": "创新药", "399989.SZ": "医疗",
+    "000819.SH": "有色", "399975.SZ": "证券", "399998.SZ": "煤炭",
+    "399986.SZ": "银行", "000932.SH": "消费", "H30269.CSI": "红利低波",
+}
+
+
+def _parse_trend_slots(raw: Optional[List[str]]) -> list[tuple[str, str]]:
+    """解析前端传入的趋势槽位（"INDEX:ETF" 格式），None/空 → 默认15池。"""
+    if not raw:
+        return list(DEFAULT_TREND_SLOTS)
+    slots: list[tuple[str, str]] = []
+    for item in raw:
+        parts = str(item).split(":")
+        if len(parts) != 2:
+            continue
+        index_symbol = parts[0].strip().upper()
+        etf_symbol = parts[1].strip().upper()
+        if index_symbol and etf_symbol:
+            slots.append((index_symbol, etf_symbol))
+    return slots or list(DEFAULT_TREND_SLOTS)
 
 
 def _target_options() -> List[Dict[str, str]]:
@@ -122,6 +169,30 @@ class StrategyParams(BaseModel):
     buy_when_flat_only: bool = True
     # 恐贪见顶反转卖出（MA 转跌 + 近期触及极端贪婪）→ 清仓
     top_sell_threshold: Optional[float] = 70.0
+    # 趋势补位：空仓且无恐慌信号时，选 gap（收盘/MA-1）最大的槽位全仓买入，跌破指数 MA 卖出
+    trend_enabled: bool = False
+    trend_ma_win: int = 20
+    trend_max_fear: float = 50.0
+    trend_slots: Optional[List[str]] = None  # ["INDEX:ETF", ...]，None/空=默认15池
+
+    @validator("trend_ma_win")
+    def validate_trend_ma_win(cls, value):
+        if value < 2 or value > 500:
+            raise ValueError("趋势均线窗口必须在2到500之间")
+        return value
+
+    @validator("trend_max_fear")
+    def validate_trend_max_fear(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("趋势买入恐贪条件必须在0到100之间")
+        return value
+
+    @validator("trend_slots")
+    def validate_trend_slots(cls, value):
+        if value is None:
+            return None
+        normalized = [str(item).strip().upper() for item in value if str(item).strip()]
+        return list(dict.fromkeys(normalized)) or None
 
     @validator("extreme_fear_threshold", "bottom_fear_threshold", "greed_threshold")
     def validate_fear(cls, value):
@@ -238,6 +309,7 @@ SEARCH_FIELDS = (
     "trailing_drawdown_pct", "max_positions",
     "commission_pct", "min_commission", "slippage_pct", "stamp_duty_pct", "lot_size",
     "sort_by_fear", "buy_when_flat_only", "top_sell_threshold",
+    "trend_enabled", "trend_ma_win", "trend_max_fear",
 )
 
 
@@ -263,11 +335,41 @@ class SearchRequest(RunRequest):
     sort_by_fear_values: List[bool] = Field(default_factory=lambda: [True, False])
     buy_when_flat_only_values: List[bool] = Field(default_factory=lambda: [True, False])
     top_sell_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [70.0, 80.0])
+    trend_enabled_values: List[bool] = Field(default_factory=lambda: [False])
+    trend_ma_win_values: List[int] = Field(default_factory=lambda: [20])
+    trend_max_fear_values: List[float] = Field(default_factory=lambda: [50.0])
     commission_pct_values: List[float] = Field(default_factory=lambda: [0.03])
     min_commission_values: List[float] = Field(default_factory=lambda: [5])
     slippage_pct_values: List[float] = Field(default_factory=lambda: [0.02])
     stamp_duty_pct_values: List[float] = Field(default_factory=lambda: [0])
     lot_size_values: List[int] = Field(default_factory=lambda: [100])
+
+    @validator("trend_max_fear_values")
+    def validate_trend_max_fear_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势恐贪条件候选至少一个值")
+        for item in normalized:
+            if item < 0 or item > 100:
+                raise ValueError("趋势恐贪条件必须在0到100之间")
+        return normalized
+
+    @validator("trend_enabled_values")
+    def validate_trend_enabled_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势补位开关候选至少一个值")
+        return normalized
+
+    @validator("trend_ma_win_values")
+    def validate_trend_ma_win_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势均线窗口候选至少一个值")
+        for item in normalized:
+            if item < 2 or item > 500:
+                raise ValueError("趋势均线窗口必须在2到500之间")
+        return normalized
 
     @validator("top_n")
     def validate_top_n(cls, value):
@@ -346,20 +448,42 @@ def _prepare_data(request: RunRequest):
     mapping = target_mapping(included=included)
     if included and not mapping:
         raise ValueError("所选标的池没有配置可交易ETF")
-    padding_days = max(180, _max_lookback(request) * 3)
+    # 趋势补位：仅当趋势可能启用时加载槽位数据（指数恐贪 + ETF行情 + 指数日线），
+    # 关闭时完全走原逻辑（不加载多余数据、行为不变）
+    def _trend_needed(req: RunRequest) -> bool:
+        if isinstance(req, SearchRequest):
+            return bool(getattr(req, "trend_enabled_values", [False]) and True in getattr(req, "trend_enabled_values", [False]))
+        return bool(getattr(getattr(req, "params", None), "trend_enabled", False))
+    trend_slots: list[tuple[str, str]] = []
+    trend_indexes: list[str] = []
+    trend_etfs: list[str] = []
+    if _trend_needed(request):
+        trend_slots = _parse_trend_slots(getattr(request.params, "trend_slots", None))
+        trend_indexes = [idx for idx, _ in trend_slots]
+        trend_etfs = [etf for _, etf in trend_slots]
+    padding_days = max(180, _max_lookback(request) * 3, 120)
     feature_start = start - timedelta(days=padding_days)
-    fear = load_fear(DB_PATH, list(mapping), feature_start.isoformat(), end.isoformat())
+    all_fear_indexes = list(dict.fromkeys([*mapping, *trend_indexes]))
+    fear = load_fear(DB_PATH, all_fear_indexes, feature_start.isoformat(), end.isoformat())
     mapping = {key: value for key, value in mapping.items() if key in set(fear["index_symbol"])}
     if not mapping:
         raise ValueError("所选标的在本地数据库中没有恐贪历史，请先同步最新数据")
     with duckdb.connect(ANALYTICS_DB_PATH, read_only=True) as connection:
+        all_etfs = sorted(set([*mapping.values(), *trend_etfs]))
         bars = load_etf_bars(
-            connection, sorted(set(mapping.values())), feature_start.isoformat(), end.isoformat()
+            connection, all_etfs, feature_start.isoformat(), end.isoformat()
         )
         available = set(bars["etf_symbol"])
         mapping = {key: value for key, value in mapping.items() if value in available}
-        fear = fear[fear["index_symbol"].isin(mapping)].copy()
-        bars = bars[bars["etf_symbol"].isin(mapping.values())].copy()
+        # 保留全部（主策略 mapping + 趋势槽位）的恐贪与行情，供 fear_by_date/趋势补位使用
+        keep_indexes = set(mapping) | set(trend_indexes)
+        keep_etfs = set(mapping.values()) | set(trend_etfs)
+        fear = fear[fear["index_symbol"].isin(keep_indexes)].copy()
+        bars = bars[bars["etf_symbol"].isin(keep_etfs)].copy()
+        # 趋势指数日线（含 QQQ 等美股）
+        trend_index = load_trend_index_close(
+            connection, trend_indexes, feature_start.isoformat(), end.isoformat()
+        )
         benchmark = connection.execute(
             "SELECT trade_date, close FROM a_stock_index_daily "
             "WHERE upper(ts_code)=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
@@ -382,7 +506,7 @@ def _prepare_data(request: RunRequest):
         raise ValueError("所选区间没有可用的ETF行情或恐贪历史")
     if benchmark.empty:
         raise ValueError(f"所选区间没有可用的{_benchmark_label(request.benchmark_symbol)}基准行情")
-    return start, end, included, mapping, fear, bars, benchmark
+    return start, end, included, mapping, fear, bars, benchmark, trend_index
 
 
 def _attach_benchmark(curve: pd.DataFrame, benchmark: pd.DataFrame, initial_capital: float) -> pd.DataFrame:
@@ -423,6 +547,7 @@ def _features(bars, fear, params: StrategyParams, cache: Optional[dict] = None):
 def _run_prepared(
     request: RunRequest, mapping, fear, bars, benchmark, params: StrategyParams,
     detailed: bool = True, feature_cache: Optional[dict] = None,
+    trend_index: Optional[pd.DataFrame] = None,
 ):
     featured_bars, featured_fear = _features(bars, fear, params, feature_cache)
     signals = build_signal_rows(
@@ -474,6 +599,27 @@ def _run_prepared(
             feature_cache[fd_key] = fear_by_date
         else:
             fear_by_date = feature_cache[fd_key]
+    # 趋势补位数据（按参数构建，搜索时缓存）
+    trend_slots = _parse_trend_slots(params.trend_slots)
+    trend_index_by_date = None
+    trend_ma_by_index = None
+    if params.trend_enabled and trend_index is not None and not trend_index.empty:
+        td_key = ("trend_index_by_date", request.start_date, request.end_date or date.today().isoformat())
+        tm_key = ("trend_ma_by_index", params.trend_ma_win)
+        if feature_cache is not None:
+            if td_key not in feature_cache:
+                feature_cache[td_key] = build_trend_index_by_date(
+                    trend_index, request.start_date, request.end_date or date.today().isoformat()
+                )
+            trend_index_by_date = feature_cache[td_key]
+            if tm_key not in feature_cache:
+                feature_cache[tm_key] = build_trend_ma_by_index(trend_index, params.trend_ma_win)
+            trend_ma_by_index = feature_cache[tm_key]
+        else:
+            trend_index_by_date = build_trend_index_by_date(
+                trend_index, request.start_date, request.end_date or date.today().isoformat()
+            )
+            trend_ma_by_index = build_trend_ma_by_index(trend_index, params.trend_ma_win)
     curve, trades = run_backtest(
         featured_bars, featured_fear, signals,
         start_date=request.start_date, end_date=request.end_date or date.today().isoformat(),
@@ -487,6 +633,11 @@ def _run_prepared(
         lot_size=params.lot_size, max_positions=params.max_positions,
         buy_when_flat_only=params.buy_when_flat_only, top_signals=top_signals,
         bars_by_date=bars_by_date, fear_by_date=fear_by_date,
+        trend_slots=trend_slots if params.trend_enabled else None,
+        trend_ma_win=params.trend_ma_win,
+        trend_max_fear=params.trend_max_fear,
+        trend_index_by_date=trend_index_by_date if params.trend_enabled else None,
+        trend_ma_by_index=trend_ma_by_index if params.trend_enabled else None,
     )
     if detailed:
         # 搜索/快速评估不需要基准曲线，跳过以加速
@@ -518,8 +669,8 @@ def _run_prepared(
 
 
 def _run_request(request: RunRequest):
-    start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
-    result = _run_prepared(request, mapping, fear, bars, benchmark, request.params, detailed=True)
+    start, end, included, mapping, fear, bars, benchmark, trend_index = _prepare_data(request)
+    result = _run_prepared(request, mapping, fear, bars, benchmark, request.params, detailed=True, trend_index=trend_index)
     result["meta"] = {
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "included_indexes": sorted(included), "index_etf_mapping": mapping,
@@ -567,7 +718,7 @@ def _search_job(task_id: str, request: SearchRequest):
         _update_job(task_id, status="running", message="正在加载ETF行情和恐贪历史")
         total = _combination_count(request)
         combinations = list(product(*_candidate_lists(request)))
-        start, end, included, mapping, fear, bars, benchmark = _prepare_data(request)
+        start, end, included, mapping, fear, bars, benchmark, trend_index = _prepare_data(request)
         results: list[dict[str, Any]] = []
         skipped = 0
         feature_cache: dict[str, dict] = {}
@@ -576,7 +727,7 @@ def _search_job(task_id: str, request: SearchRequest):
                 params = StrategyParams(**dict(zip(SEARCH_FIELDS, values)))
                 item = _run_prepared(
                     request, mapping, fear, bars, benchmark, params,
-                    detailed=False, feature_cache=feature_cache,
+                    detailed=False, feature_cache=feature_cache, trend_index=trend_index,
                 )
                 results.append(item)
             except Exception as exc:
@@ -595,7 +746,7 @@ def _search_job(task_id: str, request: SearchRequest):
             best_detail = _run_prepared(
                 request, mapping, fear, bars, benchmark,
                 StrategyParams(**top_results[0]["params"]), detailed=True,
-                feature_cache=feature_cache,
+                feature_cache=feature_cache, trend_index=trend_index,
             )
             best_detail["meta"] = {
                 "start_date": start.isoformat(), "end_date": end.isoformat(),

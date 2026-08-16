@@ -71,7 +71,30 @@ const defaultValues = {
   sub2_volume_ratio_threshold: 1.3,
   // 换仓阈值：对称轮动 45
   swap_threshold: 45,
+  // 趋势补位：空仓无恐慌信号时追最强趋势（收盘>MA20且gap最大），跌破均线卖出
+  trend_enabled: true,
+  trend_ma_win: 20,
+  trend_max_fear: 50,
+  trend_slots: undefined,
 };
+
+const TREND_SLOT_OPTIONS = [
+  { value: '000688.SH:588000.SH', label: '科创50 → 588000' },
+  { value: '000698.SH:588220.SH', label: '科创100 → 588220' },
+  { value: '000699.SH:588230.SH', label: '科创200 → 588230' },
+  { value: 'H30184.CSI:512480.SH', label: '半导体 → 512480' },
+  { value: 'QQQ.US:159509.SZ', label: '纳指科技 → 159509' },
+  { value: '399967.SZ:512660.SH', label: '军工 → 512660' },
+  { value: '930997.CSI:515030.SH', label: '新能源车 → 515030' },
+  { value: '931152.CSI:515120.SH', label: '创新药 → 515120' },
+  { value: '399989.SZ:512170.SH', label: '医疗 → 512170' },
+  { value: '000819.SH:512400.SH', label: '有色 → 512400' },
+  { value: '399975.SZ:512880.SH', label: '证券 → 512880' },
+  { value: '399998.SZ:515220.SH', label: '煤炭 → 515220' },
+  { value: '399986.SZ:512800.SH', label: '银行 → 512800' },
+  { value: '000932.SH:159928.SZ', label: '消费 → 159928' },
+  { value: 'H30269.CSI:512890.SH', label: '红利低波 → 512890' },
+];
 
 const normalizeConfig = (config) => ({
   ...defaultValues,
@@ -91,6 +114,10 @@ const normalizeConfig = (config) => ({
   sub2_buy_threshold: config?.sub2_buy_threshold ?? 20,
   sub2_volume_ratio_threshold: config?.sub2_volume_ratio_threshold ?? 1.3,
   swap_threshold: config?.swap_threshold ?? null,
+  trend_enabled: config?.trend_enabled ?? true,
+  trend_ma_win: config?.trend_ma_win ?? 20,
+  trend_max_fear: config?.trend_max_fear ?? 50,
+  trend_slots: config?.trend_slots ?? undefined,
 });
 
 const normalizeStateFormValues = (state) => ({
@@ -359,6 +386,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub2_buy_threshold: values.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: values.sub2_volume_ratio_threshold ?? 1.3,
     swap_threshold: values.swap_threshold ?? null,
+    trend_enabled: values.trend_enabled ?? true,
+    trend_ma_win: values.trend_ma_win ?? 20,
+    trend_max_fear: values.trend_max_fear ?? 50,
+    trend_slots: values.trend_slots?.length ? values.trend_slots : undefined,
   });
 
   const handleBacktest = () => {
@@ -849,6 +880,35 @@ const AStockFearStrategy = ({ embedded = false }) => {
                         <Col xs={24} md={4}>
                           <Form.Item name="swap_threshold" label="换仓阈值(留空=主辅跷跷板)">
                             <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={24}>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message="趋势补位（可选）"
+                            description="空仓且无恐慌信号时，从趋势候选池里选趋势最强（指数收盘>MA20且gap最大、恐贪低于阈值）的标的全仓买入，持有到指数跌破均线或恐贪到达卖出阈值。候选留空=默认15池：科创50/科创100/科创200/半导体/纳指科技/军工/新能源车/创新药/医疗/有色/证券/煤炭/银行/消费/红利低波。"
+                          />
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="trend_enabled" label="趋势补位开关" valuePropName="checked">
+                            <Switch />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="trend_ma_win" label="趋势均线窗口">
+                            <InputNumber min={2} max={500} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="trend_max_fear" label="趋势买入恐贪条件(<)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <Form.Item name="trend_slots" label="趋势候选标的">
+                            <Select mode="multiple" allowClear options={TREND_SLOT_OPTIONS} maxTagCount="responsive" placeholder="默认15池" />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={24}>

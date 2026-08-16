@@ -75,6 +75,55 @@ MAIN_DB_WRITE_RETRY_ATTEMPTS = 4
 MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
 MAIN_DB_WRITE_RETRY_MAX_SECONDS = 8.0
 
+# 趋势补位默认候选池（与回测页一致）：指数 -> ETF
+DEFAULT_TREND_SLOTS: list[tuple[str, str]] = [
+    ("000688.SH", "588000.SH"),
+    ("000698.SH", "588220.SH"),
+    ("000699.SH", "588230.SH"),
+    ("H30184.CSI", "512480.SH"),
+    ("QQQ.US", "159509.SZ"),
+    ("399967.SZ", "512660.SH"),
+    ("930997.CSI", "515030.SH"),
+    ("931152.CSI", "515120.SH"),
+    ("399989.SZ", "512170.SH"),
+    ("000819.SH", "512400.SH"),
+    ("399975.SZ", "512880.SH"),
+    ("399998.SZ", "515220.SH"),
+    ("399986.SZ", "512800.SH"),
+    ("000932.SH", "159928.SZ"),
+    ("H30269.CSI", "512890.SH"),
+]
+
+
+def _parse_trend_slots(raw: Any) -> list[tuple[str, str]]:
+    """解析配置 trend_slots（JSON 字符串 / 列表 / None）→ [(指数, ETF)]。空 → 默认15池。"""
+    items = raw
+    if isinstance(raw, str):
+        try:
+            import json
+            items = json.loads(raw)
+        except (ValueError, TypeError):
+            items = None
+    if not items:
+        return list(DEFAULT_TREND_SLOTS)
+    slots: list[tuple[str, str]] = []
+    for item in items:
+        parts = str(item).split(":")
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            slots.append((parts[0].strip().upper(), parts[1].strip().upper()))
+    return slots or list(DEFAULT_TREND_SLOTS)
+
+
+def _trend_slot_label(index_symbol: str) -> str:
+    labels = {
+        "000688.SH": "科创50", "000698.SH": "科创100", "000699.SH": "科创200",
+        "H30184.CSI": "半导体", "QQQ.US": "纳指科技", "399967.SZ": "军工",
+        "930997.CSI": "新能源车", "931152.CSI": "创新药", "399989.SZ": "医疗",
+        "000819.SH": "有色", "399975.SZ": "证券", "399998.SZ": "煤炭",
+        "399986.SZ": "银行", "000932.SH": "消费", "H30269.CSI": "红利低波",
+    }
+    return labels.get(index_symbol, index_symbol)
+
 
 def _fear_source_index_symbol(fear_source: str) -> Optional[str]:
     """恐贪来源 key → 指数标的。a_stock_000015_sh → 000015.SH；qqq_clone → QQQ.US（美股自算贪恐）。"""
@@ -232,6 +281,97 @@ class AStockFearStrategyTrader:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         return frame.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True)
 
+    def _fetch_index_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        """趋势指数日线（收盘）。A股指数查 a_stock_index_daily；美股（QQQ.US）查 us_stock_daily。"""
+        normalized = normalize_external_symbol(symbol) or symbol
+        is_us = normalized.upper().endswith(".US")
+        table = "us_stock_daily" if is_us else "a_stock_index_daily"
+        column = "symbol" if is_us else "ts_code"
+        try:
+            connection = connect_duckdb(prefer_read_only=True)
+        except Exception as exc:
+            logger.warning("A股情绪量能策略无法连接分析库: %s", exc)
+            return pd.DataFrame()
+        try:
+            frame = connection.execute(
+                f"""
+                SELECT trade_date, close
+                FROM {table}
+                WHERE upper({column}) = ?
+                  AND trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                ORDER BY trade_date
+                """,
+                [normalized, start.isoformat(), end.isoformat()],
+            ).fetch_df()
+        finally:
+            connection.close()
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        return frame.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True)
+
+    def _trend_candidate(
+        self,
+        trend_slots: List[Tuple[str, str]],
+        ma_win: int,
+        trend_max_fear: float,
+        signal_date: date,
+        lookback_start: date,
+    ) -> Optional[Tuple[str, str, float]]:
+        """趋势补位候选：选 gap（收盘/MA-1）最大的槽位，且指数收盘 > MA、恐贪 < trend_max_fear。
+
+        返回 (指数, ETF, gap) 或 None。短事务逐槽位查询，不跨会话持有。
+        """
+        best: Optional[Tuple[str, str, float]] = None
+        best_gap = 0.0
+        for index_symbol, etf_symbol in trend_slots:
+            try:
+                bars = self._fetch_index_bars(index_symbol, lookback_start, signal_date)
+                if bars is None or bars.empty:
+                    continue
+                row = bars[bars["trade_date"] == signal_date]
+                if row.empty:
+                    continue
+                close = float(row.iloc[0]["close"])
+                prior = bars[bars["trade_date"] <= signal_date]["close"]
+                if len(prior) < ma_win:
+                    continue
+                ma_value = float(prior.tail(ma_win).mean())
+                if ma_value <= 0 or close <= ma_value:
+                    continue
+                fear_map = self._fetch_fear_map(index_symbol, lookback_start, signal_date)
+                fear_value = fear_map.get(signal_date)
+                if fear_value is None or fear_value >= float(trend_max_fear):
+                    continue
+                gap = close / ma_value - 1.0
+                if gap > best_gap:
+                    best_gap = gap
+                    best = (index_symbol, etf_symbol, gap)
+            except Exception as exc:
+                logger.warning("A股情绪量能策略 趋势槽位 %s 数据异常: %s", index_symbol, exc)
+        return best
+
+    def _trend_index_state(
+        self, index_symbol: str, ma_win: int, signal_date: date, lookback_start: date,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """趋势持仓状态：返回 (close, ma)（信号日指数收盘与 MA）。"""
+        try:
+            bars = self._fetch_index_bars(index_symbol, lookback_start, signal_date)
+            if bars is None or bars.empty:
+                return None, None
+            row = bars[bars["trade_date"] == signal_date]
+            if row.empty:
+                return None, None
+            close = float(row.iloc[0]["close"])
+            prior = bars[bars["trade_date"] <= signal_date]["close"]
+            if len(prior) < ma_win:
+                return close, None
+            return close, float(prior.tail(ma_win).mean())
+        except Exception as exc:
+            logger.warning("A股情绪量能策略 趋势状态 %s 异常: %s", index_symbol, exc)
+            return None, None
+
     @staticmethod
     def _volume_ratio_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
         """信号日量比 = 当日成交量 / 前 20 日均量（shift(1) 语义，与回测一致）。"""
@@ -295,6 +435,16 @@ class AStockFearStrategyTrader:
             main_info = _position_info(main_symbol)
             sub_info = _position_info(sub_symbol) if sub_symbol else {"shares": 0, "available_shares": 0, "avg_cost": 0.0}
             sub2_info = _position_info(sub2_symbol) if sub2_symbol else {"shares": 0, "available_shares": 0, "avg_cost": 0.0}
+            # 趋势补位持仓：趋势槽位 ETF（可能不是 main/sub/sub2）
+            trend_slots = _parse_trend_slots(getattr(config, "trend_slots", None))
+            trend_etf_list = [normalize_external_symbol(etf) for _, etf in trend_slots]
+            trend_info = {"shares": 0, "available_shares": 0, "avg_cost": 0.0, "symbol": None, "index_symbol": None}
+            for idx, etf in trend_slots:
+                etf_norm = normalize_external_symbol(etf)
+                info = _position_info(etf_norm)
+                if info["shares"] > 0:
+                    trend_info = {**info, "symbol": etf_norm, "index_symbol": normalize_external_symbol(idx)}
+                    break
 
             try:
                 valuation = await calculate_sub_account_net_asset(db, sub_account)
@@ -342,6 +492,12 @@ class AStockFearStrategyTrader:
                 sub2_shares=max(0, sub2_info["shares"]),
                 sub2_available_shares=max(0, sub2_info["available_shares"]),
                 sub2_avg_cost=sub2_info["avg_cost"],
+                trend_shares=max(0, trend_info["shares"]),
+                trend_available_shares=max(0, trend_info["available_shares"]),
+                trend_avg_cost=trend_info["avg_cost"],
+                trend_symbol=trend_info.get("symbol"),
+                trend_index_symbol=trend_info.get("index_symbol"),
+                trend_etf_list=trend_etf_list,
                 available_cash=available_cash,
                 portfolio_value=max(portfolio_value, 1.0),
                 has_today_order=has_open_order,
@@ -588,6 +744,10 @@ class AStockFearStrategyTrader:
                     config.rebalance_threshold_pct = float(persisted_config.rebalance_threshold_pct or 0)
                     config.sell_reduction_basis = persisted_config.sell_reduction_basis or "holdings"
                     config.sell_price_above_avg_cost = bool(persisted_config.sell_price_above_avg_cost)
+                    config.trend_enabled = bool(getattr(persisted_config, "trend_enabled", False))
+                    config.trend_ma_win = int(getattr(persisted_config, "trend_ma_win", None) or 20)
+                    config.trend_max_fear = float(getattr(persisted_config, "trend_max_fear", None) or 50.0)
+                    config.trend_slots = getattr(persisted_config, "trend_slots", None)
 
                 state_row = db.query(AStockFearStrategyState).filter(
                     AStockFearStrategyState.config_id == config_id
@@ -666,12 +826,15 @@ class AStockFearStrategyTrader:
                     sub2_volume_ratio = self._volume_ratio_at(sub2_bars, signal_date)
                     sub2_fear_label = _fear_source_label(getattr(config, "sub2_fear_source", None) or "qqq_clone")
 
-            # 实时价格（主+候补+第二候补），hub quote + LongPort 兜底
+            # 实时价格（主+候补+第二候补+趋势槽位 ETF），hub quote + LongPort 兜底
             price_symbols = [symbol]
             if sub_symbol:
                 price_symbols.append(sub_symbol)
             if sub2_symbol:
                 price_symbols.append(sub2_symbol)
+            if getattr(config, "trend_enabled", False):
+                price_symbols.extend(normalize_external_symbol(etf) for _, etf in trend_slots)
+            price_symbols = list(dict.fromkeys(price_symbols))
             price_map: Dict[str, float] = {}
             try:
                 price_details = await get_realtime_price_details(
@@ -702,11 +865,26 @@ class AStockFearStrategyTrader:
             portfolio_value = float(snapshot.portfolio_value or 0)
             available_cash = float(snapshot.available_cash or 0)
 
-            # 持仓推断：sub2 > sub > main > 空仓（子账户同时只持有其中一只）
+            # 持仓推断：trend > sub2 > sub > main > 空仓（子账户同时只持有其中一只）
             main_shares = int(snapshot.shares)
             sub_shares = int(snapshot.sub_shares or 0) if sub_symbol else 0
             sub2_shares = int(snapshot.sub2_shares or 0) if sub2_symbol else 0
-            if sub2_shares > 0:
+            trend_shares = int(snapshot.trend_shares or 0) if getattr(config, "trend_enabled", False) else 0
+            trend_symbol = getattr(snapshot, "trend_symbol", None)
+            trend_index_symbol = getattr(snapshot, "trend_index_symbol", None)
+            trend_slots = _parse_trend_slots(getattr(config, "trend_slots", None))
+            trend_slot_by_etf = {
+                normalize_external_symbol(etf): normalize_external_symbol(idx)
+                for idx, etf in trend_slots
+            }
+            if trend_shares > 0 and trend_symbol:
+                holding = "trend"
+                holding_symbol = trend_symbol
+                shares = trend_shares
+                available_shares = int(snapshot.trend_available_shares or trend_shares)
+                avg_cost = float(snapshot.trend_avg_cost or 0)
+                current_price = price_map.get(normalize_external_symbol(trend_symbol), 0.0)
+            elif sub2_shares > 0:
                 holding = "sub2"
                 holding_symbol = sub2_symbol
                 shares = sub2_shares
@@ -744,6 +922,9 @@ class AStockFearStrategyTrader:
                 holding_bars, holding_fear_map = sub_bars, sub_fear_map
             elif holding == "sub2":
                 holding_bars, holding_fear_map = sub2_bars, sub2_fear_map
+            elif holding == "trend":
+                holding_bars = self._fetch_index_bars(trend_index_symbol or trend_symbol or "000688.SH", lookback_start, signal_date)
+                holding_fear_map = self._fetch_fear_map(trend_index_symbol or "000688.SH", lookback_start, signal_date)
             else:
                 holding_bars, holding_fear_map = bars, fear_map
 
@@ -1013,8 +1194,43 @@ class AStockFearStrategyTrader:
                                     )
                                 else:
                                     trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
+            elif log_action != "SKIP" and can_trade and holding == "trend" and not order_action:
+                # 趋势补位持仓：恐贪>=贪卖阈值 → 卖；指数收盘跌破 MA → 卖（不做固定止损/见顶反转）
+                trend_fear = holding_fear_map.get(signal_date)
+                trend_close, trend_ma = self._trend_index_state(
+                    trend_index_symbol or "000688.SH",
+                    int(getattr(config, "trend_ma_win", None) or 20),
+                    signal_date, lookback_start,
+                )
+                trend_reason = ""
+                if trend_fear is not None and trend_fear >= float(config.greed_threshold):
+                    trend_reason = f"{_trend_slot_label(trend_index_symbol or '')} 恐贪 {trend_fear:.2f} >= 贪卖阈值 {config.greed_threshold:g}"
+                elif trend_close is not None and trend_ma is not None and trend_close < trend_ma:
+                    trend_reason = (
+                        f"{_trend_slot_label(trend_index_symbol or '')} 收盘 {trend_close:.2f} "
+                        f"跌破 MA{getattr(config, 'trend_ma_win', 20)}（{trend_ma:.2f}）"
+                    )
+                if trend_reason:
+                    trade_quantity = int(available_shares)
+                    trade_pct = (trade_quantity * current_price / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                    if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                        order_action = "SELL"
+                        order_symbol = holding_symbol
+                        order_quantity = trade_quantity
+                        order_message_template = (
+                            f"趋势补位持仓 {holding_symbol}：{trend_reason}，订单ID={{order_id}}"
+                        )
+                        position_ratio_after = 0.0
+                    else:
+                        trade_message = "趋势持仓卖出信号成立，但可卖数量过小或未达到调仓阈值"
+                else:
+                    trade_message = (
+                        f"趋势补位持仓 {holding_symbol} 持有中"
+                        + (f"（恐贪 {trend_fear:.2f}）" if trend_fear is not None else "")
+                    )
+
             elif log_action != "SKIP" and can_trade and not order_action:
-                # 空仓：对称双轮动=谁触发买谁（都触发买恐贪最低的）；主辅跷跷板=主标的优先
+                # 空仓：对称双轮动=谁触发买谁（都触发买恐贪最低的）；主辅跷跷板=主标的优先；再退到趋势补位
                 if use_swap:
                     cands = []
                     if main_signal and main_price > 0:
@@ -1072,6 +1288,38 @@ class AStockFearStrategyTrader:
                         position_ratio_after = (trade_quantity * sub_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
                     else:
                         trade_message = "候补买入信号成立，但可买数量过小或未达到调仓阈值"
+                elif getattr(config, "trend_enabled", False) and not order_action:
+                    # 空仓且无任何恐慌信号 → 趋势补位：选 gap 最大的槽位全仓买入
+                    trend_hit = self._trend_candidate(
+                        trend_slots,
+                        int(getattr(config, "trend_ma_win", None) or 20),
+                        float(getattr(config, "trend_max_fear", None) or 50.0),
+                        signal_date, lookback_start,
+                    )
+                    if trend_hit:
+                        t_index, t_symbol, t_gap = trend_hit
+                        t_symbol_norm = normalize_external_symbol(t_symbol)
+                        t_price = price_map.get(t_symbol_norm, 0.0)
+                        if t_price <= 0:
+                            trade_message = f"趋势补位候选 {t_symbol}（{_trend_slot_label(t_index)}）无实时价，跳过"
+                        else:
+                            buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
+                            trade_quantity = min(floor(buy_amount / t_price), floor(available_cash / t_price))
+                            actual_buy_amount = trade_quantity * t_price
+                            trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                            if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                                order_action = "BUY"
+                                order_symbol = t_symbol_norm
+                                order_quantity = trade_quantity
+                                order_message_template = (
+                                    f"空仓无恐慌信号，趋势补位：{_trend_slot_label(t_index)} "
+                                    f"gap {t_gap:.2%}（恐贪<{getattr(config, 'trend_max_fear', 50):g}），买入 {t_symbol_norm}，订单ID={{order_id}}"
+                                )
+                                position_ratio_after = (trade_quantity * t_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
+                            else:
+                                trade_message = "趋势补位信号成立，但可买数量过小或未达到调仓阈值"
+                    else:
+                        trade_message = "空仓无恐慌信号，趋势候选均不满足（收盘需>MA20 且恐贪<阈值）"
 
             if log_action != "SKIP" and not order_action and not trade_message:
                 if not can_trade:
