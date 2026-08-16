@@ -38,7 +38,6 @@ class Position:
     volatility_monitoring: bool = False
     trailing_armed: bool = False
     is_baseline: bool = False
-    is_trend: bool = False
 
 
 def abnormal_volume(
@@ -260,86 +259,6 @@ def build_signal_rows(
     return signals
 
 
-def load_trend_index_close(
-    connection: duckdb.DuckDBPyConnection,
-    index_symbols: list[str],
-    start: str,
-    end: str,
-) -> pd.DataFrame:
-    """加载趋势补位所需指数/美股日线收盘价（A股指数 + QQQ 等美股）。
-
-    返回 DataFrame: [trade_date, index_symbol, close]
-    """
-    if not index_symbols:
-        return pd.DataFrame(columns=["trade_date", "index_symbol", "close"])
-    frames = []
-    a_stock = [sym for sym in index_symbols if not sym.upper().endswith(".US")]
-    us_stock = [sym for sym in index_symbols if sym.upper().endswith(".US")]
-    if a_stock:
-        frame = connection.execute(
-            """
-            SELECT trade_date, upper(ts_code) AS index_symbol, close
-            FROM a_stock_index_daily
-            WHERE upper(ts_code) IN (SELECT * FROM unnest(?))
-              AND trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-            ORDER BY index_symbol, trade_date
-            """,
-            [a_stock, start, end],
-        ).fetch_df()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
-        frames.append(frame)
-    if us_stock:
-        frame = connection.execute(
-            """
-            SELECT trade_date, upper(symbol) AS index_symbol, close
-            FROM us_stock_daily
-            WHERE upper(symbol) IN (SELECT * FROM unnest(?))
-              AND trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-            ORDER BY index_symbol, trade_date
-            """,
-            [us_stock, start, end],
-        ).fetch_df()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
-        frames.append(frame)
-    if not frames:
-        return pd.DataFrame(columns=["trade_date", "index_symbol", "close"])
-    result = pd.concat(frames, ignore_index=True)
-    result["close"] = pd.to_numeric(result["close"], errors="coerce")
-    return result.dropna(subset=["close"])
-
-
-def build_trend_index_by_date(
-    trend_index: pd.DataFrame, start_date: str, end_date: str,
-) -> dict[Any, dict[str, float]]:
-    """按日期索引趋势指数收盘（与参数无关，搜索时构建一次复用）"""
-    start = pd.Timestamp(start_date).date()
-    end = pd.Timestamp(end_date).date()
-    active = trend_index[(trend_index["trade_date"] >= start) & (trend_index["trade_date"] <= end)]
-    return {
-        day: dict(zip(group["index_symbol"], group["close"]))
-        for day, group in active.groupby("trade_date")
-    }
-
-
-def build_trend_ma_by_index(
-    trend_index: pd.DataFrame, ma_window: int,
-) -> dict[str, dict[Any, float]]:
-    """每个趋势指数收盘的滚动均线（如 MA20）：{index: {date: ma}}。
-
-    使用完整传入区间（含回测起点前的数据）保证起点处均线有效。
-    """
-    result: dict[str, dict[Any, float]] = {}
-    for index_symbol, group in trend_index.sort_values("trade_date").groupby("index_symbol"):
-        group = group.copy()
-        group["ma"] = group["close"].rolling(ma_window, min_periods=ma_window).mean()
-        result[str(index_symbol).upper()] = {
-            row.trade_date: float(row.ma)
-            for row in group.itertuples(index=False)
-            if pd.notna(row.ma)
-        }
-    return result
-
-
 def max_drawdown(values: pd.Series) -> float:
     return float((values / values.cummax() - 1).min()) if len(values) else 0.0
 
@@ -443,11 +362,6 @@ def run_backtest(
     baseline_etf: str | None = None,
     bars_by_date: dict[Any, dict] | None = None,
     fear_by_date: dict[Any, dict] | None = None,
-    trend_slots: list[tuple[str, str]] | None = None,
-    trend_ma_win: int = 20,
-    trend_max_fear: float = 50.0,
-    trend_index_by_date: dict[Any, dict[str, float]] | None = None,
-    trend_ma_by_index: dict[str, dict[Any, float]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
@@ -469,35 +383,6 @@ def run_backtest(
     trades: list[dict[str, Any]] = []
     curve: list[dict[str, Any]] = []
     buy_blocked_until_index = -1
-    # 趋势补位：槽位 -> (指数, ETF)
-    trend_index_set = {str(idx).upper() for idx, _ in (trend_slots or [])}
-
-    def _trend_candidate(day):
-        """空仓且无恐慌信号时，返回 (index_symbol, etf_symbol) 或 None。
-
-        条件：指数收盘 > MA20 且 gap 最大；恐贪 < trend_max_fear（若可评估）。
-        """
-        if not trend_slots or trend_index_by_date is None or trend_ma_by_index is None:
-            return None
-        day_close = trend_index_by_date.get(day, {})
-        best: tuple[str, str] | None = None
-        best_gap = 0.0
-        for index_symbol, etf_symbol in trend_slots:
-            index_key = str(index_symbol).upper()
-            close = day_close.get(index_key)
-            ma = trend_ma_by_index.get(index_key, {}).get(day)
-            if close is None or ma is None or ma <= 0 or not np.isfinite(close):
-                continue
-            # 趋势买入恐贪条件：对应指数恐贪必须低于阈值
-            if trend_max_fear is not None:
-                fear_value = fear_by_date.get(day, {}).get(index_key)
-                if fear_value is None or fear_value >= trend_max_fear:
-                    continue
-            gap = float(close) / float(ma) - 1.0
-            if close > ma and gap > best_gap:
-                best_gap = gap
-                best = (index_key, etf_symbol)
-        return best
 
     for day_index, day in enumerate(dates):
         day_bars = bars_by_date.get(day, {})
@@ -577,7 +462,6 @@ def run_backtest(
                             entry_date=str(day),
                             entry_fear=pending_buy["fear_score"], high_water=float(quote["high"]),
                             is_baseline=bool(pending_buy.get("is_baseline", False)),
-                            is_trend=bool(pending_buy.get("reason") == "trend_follow"),
                         )
                         trades.append({
                             "date": str(day), "signal_date": pending_buy["signal_date"],
@@ -608,27 +492,6 @@ def run_backtest(
                 continue
             position.high_water = max(position.high_water, float(quote["high"]))
             fear_score = fear_by_date.get(day, {}).get(position.index_symbol)
-            if position.is_trend:
-                # 趋势持仓：不做固定止损/见顶反转/波动率尾随，保留贪卖；跌破指数 MA20 次日开盘卖出
-                if not position.greed_reduced and fear_score is not None and fear_score > greed_threshold:
-                    pending_sells[symbol] = {
-                        "signal_date": str(day), "reason": "extreme_greed_partial",
-                        "fraction": greed_sell_fraction, "fear_score": float(fear_score),
-                    }
-                    continue
-                index_key = str(position.index_symbol).upper()
-                trend_close = trend_index_by_date.get(day, {}).get(index_key)
-                trend_ma = trend_ma_by_index.get(index_key, {}).get(day)
-                if (
-                    trend_close is not None and trend_ma is not None
-                    and float(trend_close) < float(trend_ma)
-                ):
-                    pending_sells[symbol] = {
-                        "signal_date": str(day), "reason": "trend_ma_break",
-                        "fraction": 1.0,
-                        "fear_score": float(fear_score) if fear_score is not None else None,
-                    }
-                continue
             drawdown_from_entry = float(quote["close"]) / position.entry_price - 1
             if drawdown_from_entry < -stop_loss:
                 pending_sells[symbol] = {
@@ -702,20 +565,6 @@ def run_backtest(
                         ),
                     }
                 pending_buy = {**candidates[0], "signal_date": str(day)}
-            elif trend_slots:
-                # 空仓且无恐慌信号 → 趋势补位：选 gap 最大的槽位全仓买入
-                trend_hit = _trend_candidate(day)
-                if trend_hit is not None:
-                    trend_index_symbol, trend_etf_symbol = trend_hit
-                    if trend_etf_symbol not in positions:
-                        pending_buy = {
-                            "etf_symbol": trend_etf_symbol,
-                            "index_symbol": trend_index_symbol,
-                            "target_fraction": 1.0, "fraction": 1.0,
-                            "reason": "trend_follow",
-                            "fear_score": fear_by_date.get(day, {}).get(trend_index_symbol),
-                            "signal_date": str(day),
-                        }
             elif baseline_etf and baseline_etf not in positions:
                 # 空仓且无恐慌信号 → 持有红利低波底仓（全天候防御）
                 pending_buy = {
@@ -769,8 +618,5 @@ def summarize(curve: pd.DataFrame, trades: pd.DataFrame, initial_capital: float)
         "turnover_pct": gross_turnover / initial_capital * 100,
         "average_exposure_pct": float(curve["exposure_pct"].mean()),
         "average_holding_count": float(curve["holding_count"].mean()),
-        "flat_days": int((curve["exposure_pct"] == 0).sum()),
-        "total_days": int(len(curve)),
-        "flat_days_pct": float((curve["exposure_pct"] == 0).mean() * 100),
         "ending_positions": [item for item in str(curve.iloc[-1]["positions"]).split(",") if item],
     }

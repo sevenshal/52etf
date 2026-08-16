@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import sqlite3
 import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -12,7 +11,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import duckdb
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError, validator
 
@@ -41,160 +39,6 @@ VOLUME_LOOKBACK_DAYS = 20
 MAX_VOLUME_RATIO_CONSECUTIVE_DAYS = 20
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ",)
-
-# 趋势补位默认候选池（指数 -> ETF），与实盘/A股组合回测一致
-DEFAULT_TREND_SLOTS: list[tuple[str, str]] = [
-    ("000688.SH", "588000.SH"),
-    ("000698.SH", "588220.SH"),
-    ("000699.SH", "588230.SH"),
-    ("H30184.CSI", "512480.SH"),
-    ("QQQ.US", "159509.SZ"),
-    ("399967.SZ", "512660.SH"),
-    ("930997.CSI", "515030.SH"),
-    ("931152.CSI", "515120.SH"),
-    ("399989.SZ", "512170.SH"),
-]
-
-TREND_SLOT_LABELS: dict[str, str] = {
-    "000688.SH": "科创50", "000698.SH": "科创100", "000699.SH": "科创200",
-    "H30184.CSI": "半导体", "QQQ.US": "纳指科技", "399967.SZ": "军工",
-    "930997.CSI": "新能源车", "931152.CSI": "创新药", "399989.SZ": "医疗",
-
-}
-
-
-def _parse_trend_slots(raw: Optional[List[str]]) -> list[tuple[str, str]]:
-    if not raw:
-        return list(DEFAULT_TREND_SLOTS)
-    slots: list[tuple[str, str]] = []
-    for item in raw:
-        parts = str(item).split(":")
-        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-            slots.append((parts[0].strip().upper(), parts[1].strip().upper()))
-    return slots or list(DEFAULT_TREND_SLOTS)
-
-
-def _load_trend_by_date(
-    start_date: date,
-    end_date: date,
-    trend_slots: list[tuple[str, str]],
-    ma_win: int,
-    use_next_open: bool = True,
-) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
-    """加载趋势槽位数据：返回 (trend_by_date, trend_ma_by_index)。
-
-    trend_by_date: {day_text: {"slots": [{index, etf, close, high, low, exec, fear, gap}...]}}
-    - use_next_open=True：slots 的 close/ma/gap/fear 为决策日（前一交易日）值，exec 为当日开盘价
-    - use_next_open=False：slots 为当日值，exec 为当日收盘价
-    trend_ma_by_index: {index: {day: ma}}
-    """
-    from ...core.duckdb_utils import ANALYTICS_DB_PATH
-    from ...core.database import DB_PATH as _DB_PATH
-
-    padding_start = start_date - timedelta(days=max(180, ma_win * 4))
-    index_symbols = [idx for idx, _ in trend_slots]
-    etf_symbols = [etf for _, etf in trend_slots]
-    a_indexes = [idx for idx in index_symbols if not idx.upper().endswith(".US")]
-    us_indexes = [idx for idx in index_symbols if idx.upper().endswith(".US")]
-
-    index_close: Dict[str, Dict[date, float]] = {}
-    etf_prices: Dict[str, Dict[date, Dict]] = {}
-    with duckdb.connect(ANALYTICS_DB_PATH, read_only=True) as connection:
-        if a_indexes:
-            placeholders = ",".join("?" for _ in a_indexes)
-            frame = connection.execute(
-                f"SELECT upper(ts_code) AS code, trade_date, close FROM a_stock_index_daily "
-                f"WHERE upper(ts_code) IN ({placeholders}) AND trade_date BETWEEN ? AND ?",
-                [*a_indexes, padding_start.isoformat(), end_date.isoformat()],
-            ).fetch_df()
-            for row in frame.itertuples(index=False):
-                index_close.setdefault(str(row.code), {})[row.trade_date.date()] = float(row.close)
-        if us_indexes:
-            placeholders = ",".join("?" for _ in us_indexes)
-            frame = connection.execute(
-                f"SELECT upper(symbol) AS code, trade_date, close FROM us_stock_daily "
-                f"WHERE upper(symbol) IN ({placeholders}) AND trade_date BETWEEN ? AND ?",
-                [*us_indexes, padding_start.isoformat(), end_date.isoformat()],
-            ).fetch_df()
-            for row in frame.itertuples(index=False):
-                index_close.setdefault(str(row.code), {})[row.trade_date.date()] = float(row.close)
-        for symbol in etf_symbols:
-            is_us = symbol.upper().endswith(".US")
-            table = "us_stock_daily" if is_us else "a_stock_fund_daily_qfq"
-            frame = connection.execute(
-                f"SELECT trade_date, open, high, low, close FROM {table} "
-                f"WHERE upper(symbol) = ? AND trade_date BETWEEN ? AND ?",
-                [symbol, padding_start.isoformat(), end_date.isoformat()],
-            ).fetch_df()
-            for row in frame.itertuples(index=False):
-                etf_prices.setdefault(str(symbol).upper(), {})[row.trade_date.date()] = {
-                    "open": float(row.open), "high": float(row.high),
-                    "low": float(row.low), "close": float(row.close),
-                }
-
-    with sqlite3.connect(f"file:{_DB_PATH}?mode=ro&immutable=1", uri=True) as connection:
-        placeholders = ",".join("?" for _ in index_symbols)
-        frame = pd.read_sql_query(
-            f"SELECT upper(symbol) AS code, date, score FROM etf_fear_greed_clone_history "
-            f"WHERE upper(symbol) IN ({placeholders}) AND date BETWEEN ? AND ?",
-            connection,
-            params=(*index_symbols, padding_start.isoformat(), end_date.isoformat()),
-            parse_dates=["date"],
-        )
-    index_fear: Dict[str, Dict[date, float]] = {}
-    for row in frame.itertuples(index=False):
-        code = str(row.code)
-        score = row.score
-        if score is None or pd.isna(score):
-            continue
-        index_fear.setdefault(code, {})[row.date.date()] = float(score)
-
-    trend_ma_by_index: Dict[str, Dict[date, float]] = {}
-    for idx in index_symbols:
-        series = index_close.get(idx.upper(), {})
-        if not series:
-            continue
-        dates = sorted(series)
-        ma_map: Dict[date, float] = {}
-        rolling = []
-        for d in dates:
-            rolling.append(series[d])
-            if len(rolling) > ma_win:
-                rolling.pop(0)
-            if len(rolling) >= ma_win:
-                ma_map[d] = sum(rolling) / ma_win
-        trend_ma_by_index[idx.upper()] = ma_map
-
-    all_days = sorted(set().union(*(prices.keys() for prices in etf_prices.values())))
-    day_index_map = {d: i for i, d in enumerate(all_days)}
-    trend_by_date: Dict[str, Dict] = {}
-    for day in all_days:
-        if day < start_date or day > end_date:
-            continue
-        day_text = day.isoformat()
-        decision_day = all_days[day_index_map[day] - 1] if use_next_open and day_index_map[day] > 0 else day
-        slots = []
-        for idx, etf in trend_slots:
-            idx_key = idx.upper()
-            etf_key = etf.upper()
-            price = etf_prices.get(etf_key, {}).get(day)
-            close = index_close.get(idx_key, {}).get(decision_day)
-            ma = trend_ma_by_index.get(idx_key, {}).get(decision_day)
-            if price is None or close is None or ma is None or ma <= 0:
-                continue
-            fear = index_fear.get(idx_key, {}).get(decision_day)
-            exec_price = float(price["open"]) if use_next_open else float(price["close"])
-            slots.append({
-                "index": idx_key, "etf": etf_key,
-                "close": float(close), "ma": float(ma),
-                "gap": float(close) / float(ma) - 1.0,
-                "open": float(price["open"]), "high": float(price["high"]),
-                "low": float(price["low"]), "exec": exec_price,
-                "fear": float(fear) if fear is not None else None,
-            })
-        if slots:
-            trend_by_date[day_text] = {"slots": slots}
-    return trend_by_date, trend_ma_by_index
 
 US_TARGET_OPTIONS = [
     {"label": "SOXL.US", "value": "SOXL.US", "market": "us"},
@@ -373,40 +217,6 @@ class SOXLFearStrategyParams(BaseModel):
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
     # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
     swap_threshold: Optional[float] = None
-    # 趋势补位：空仓且无恐慌信号时，选趋势最强（指数收盘>MA且gap最大）的槽位买入，跌破均线/贪卖卖出
-    trend_enabled: bool = False
-    trend_ma_win: int = 20
-    trend_max_fear: float = 50.0
-    trend_slots: Optional[List[str]] = None  # ["INDEX:ETF", ...]，None/空=默认15池
-
-    @validator("trend_ma_win")
-    def validate_trend_ma_win(cls, value):
-        if value < 2 or value > 500:
-            raise ValueError("趋势均线窗口必须在2到500之间")
-        return value
-
-    @validator("trend_max_fear")
-    def validate_trend_max_fear(cls, value):
-        if value < 0 or value > 100:
-            raise ValueError("趋势买入恐贪条件必须在0到100之间")
-        return value
-
-    @validator("trend_slots")
-    def validate_trend_slots(cls, value):
-        if not value:
-            return None
-        normalized = []
-        for item in value:
-            parts = str(item).split(":")
-            if len(parts) != 2:
-                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
-            idx = parts[0].strip().upper()
-            etf = parts[1].strip().upper()
-            if idx and etf:
-                normalized.append(f"{idx}:{etf}")
-            else:
-                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
-        return list(dict.fromkeys(normalized)) or None
 
     @validator("sub2_buy_threshold")
     def validate_sub2_buy_threshold(cls, value):
@@ -563,54 +373,6 @@ class SOXLFearSearchParams(BaseModel):
     sub2_volume_signal_symbol: Optional[str] = None
     sub2_buy_threshold_values: List[float] = Field(default_factory=lambda: [20.0])
     sub2_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
-    trend_enabled_values: List[bool] = Field(default_factory=lambda: [False])
-    trend_ma_win_values: List[int] = Field(default_factory=lambda: [20])
-    trend_max_fear_values: List[float] = Field(default_factory=lambda: [50.0])
-    trend_slots: Optional[List[str]] = None  # ["INDEX:ETF", ...]，None/空=默认15池
-
-    @validator("trend_max_fear_values")
-    def validate_search_trend_max_fear_values(cls, value):
-        normalized = list(dict.fromkeys(value or []))
-        if not normalized:
-            raise ValueError("趋势恐贪条件候选至少一个值")
-        for item in normalized:
-            if item < 0 or item > 100:
-                raise ValueError("趋势恐贪条件必须在0到100之间")
-        return normalized
-
-    @validator("trend_ma_win_values")
-    def validate_search_trend_ma_win_values(cls, value):
-        normalized = list(dict.fromkeys(value or []))
-        if not normalized:
-            raise ValueError("趋势均线窗口候选至少一个值")
-        for item in normalized:
-            if item < 2 or item > 500:
-                raise ValueError("趋势均线窗口必须在2到500之间")
-        return normalized
-
-    @validator("trend_enabled_values")
-    def validate_search_trend_enabled_values(cls, value):
-        normalized = list(dict.fromkeys(value or []))
-        if not normalized:
-            raise ValueError("趋势补位开关候选至少一个值")
-        return normalized
-
-    @validator("trend_slots")
-    def validate_search_trend_slots(cls, value):
-        if not value:
-            return None
-        normalized = []
-        for item in value:
-            parts = str(item).split(":")
-            if len(parts) != 2:
-                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
-            idx = parts[0].strip().upper()
-            etf = parts[1].strip().upper()
-            if idx and etf:
-                normalized.append(f"{idx}:{etf}")
-            else:
-                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
-        return list(dict.fromkeys(normalized)) or None
 
     @validator("sub2_symbol")
     def validate_sub2_symbol(cls, value):
@@ -1890,7 +1652,6 @@ def _run_seesaw_backtest(
     initial_capital: float,
     detailed: bool = False,
     sub2_base_df: Optional[pd.DataFrame] = None,
-    trend_by_date: Optional[Dict] = None,
 ) -> Dict:
     """跷跷板轮动回测：主标的优先，候补只在主标的空仓时极恐放量买入。
 
@@ -1955,10 +1716,7 @@ def _run_seesaw_backtest(
     sub2_fear_label = str(sub2_base_df.attrs.get("fear_source_label") or "第二候补恐贪") if sub2 is not None else ""
 
     cash = float(initial_capital)
-    position_symbol = None  # "main" | "sub" | "sub2" | "trend" | None
-    position_trend_etf = None
-    position_trend_index = None
-    last_trend_close = [0.0]  # 趋势持仓最近已知估值价（当日无行情时兜底）
+    position_symbol = None  # "main" | "sub" | None
     shares = 0
     avg_cost = 0.0
     cooldown_remaining = 0
@@ -1977,21 +1735,6 @@ def _run_seesaw_backtest(
     benchmark_cash = initial_capital - benchmark_shares * first_exec if first_exec > 0 else initial_capital
     benchmark_shares_qty = benchmark_shares
 
-    def _trend_slot(day_text: str) -> Optional[Dict]:
-        """持仓趋势槽位在当日的行情（exec/high/low/close/ma/fear）。"""
-        if trend_by_date is None or position_trend_etf is None:
-            return None
-        day_data = trend_by_date.get(day_text)
-        if not day_data:
-            return None
-        for slot in day_data["slots"]:
-            if slot["etf"] == position_trend_etf:
-                return slot
-        return None
-
-    def _trend_symbol() -> str:
-        return position_trend_etf or ""
-
     def _holder(which: str):
         if which == "main":
             return main
@@ -2004,29 +1747,14 @@ def _run_seesaw_backtest(
             return main_symbol
         if which == "sub":
             return sub_symbol
-        if which == "sub2":
-            return sub2_symbol
-        if which == "trend":
-            return _trend_symbol()
-        return ""
+        return sub2_symbol
 
     def current_close(day_text: str) -> float:
-        if position_symbol == "trend":
-            slot = _trend_slot(day_text)
-            if slot:
-                value = float(slot["exec"])
-                last_trend_close[0] = value
-                return value
-            # 当日无槽位行情（停牌/上市前等）→ 用最近已知价估值，避免净值异常
-            return last_trend_close[0]
         holder = _holder(position_symbol) if position_symbol else main
         info = holder["by_date"].get(day_text)
         return float(info["close"]) if info else 0.0
 
     def current_exec(day_text: str, which: str) -> float:
-        if which == "trend":
-            slot = _trend_slot(day_text)
-            return float(slot["exec"]) if slot else 0.0
         holder = _holder(which)
         info = holder["by_date"].get(day_text)
         return float(info["exec"]) if info else 0.0
@@ -2034,16 +1762,6 @@ def _run_seesaw_backtest(
     def fill_price(day_text: str, which: str, side: str) -> float:
         """成交价：滑点<0 悲观（买=当日最高 卖=当日最低）；>=0 按成交价滑点%。"""
         base = current_exec(day_text, which)
-        if which == "trend":
-            slot = _trend_slot(day_text)
-            if float(params.slippage_pct) < 0:
-                if slot is None or base <= 0:
-                    return base
-                if float(params.slippage_pct) <= -1.5:
-                    return float(slot["low"]) if side == "buy" else float(slot["high"])
-                return float(slot["high"]) if side == "buy" else float(slot["low"])
-            slip = float(params.slippage_pct) / 100.0
-            return base * (1 + slip) if side == "buy" else base * (1 - slip)
         info = _holder(which)["by_date"].get(day_text) if which else None
         if float(params.slippage_pct) < 0:
             if info is None or base <= 0:
@@ -2057,7 +1775,7 @@ def _run_seesaw_backtest(
         return base * (1 + slip) if side == "buy" else base * (1 - slip)
 
     def do_sell(day_text: str) -> Optional[Dict]:
-        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count, position_trend_etf, position_trend_index
+        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count
         which = position_symbol
         symbol = _holder_symbol(which) if which else ""
         exec_price = fill_price(day_text, which, "sell") if which else 0.0
@@ -2087,8 +1805,6 @@ def _run_seesaw_backtest(
             avg_cost = 0.0
             greed_peak_price = None
             take_profit_cycle_sell_count = 0
-            position_trend_etf = None
-            position_trend_index = None
         else:
             greed_peak_price = current_close(day_text)
             take_profit_cycle_sell_count += 1
@@ -2101,7 +1817,7 @@ def _run_seesaw_backtest(
         }
 
     def do_buy(day_text: str, which: str) -> Optional[Dict]:
-        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, position_trend_etf, position_trend_index
+        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining
         symbol = _holder_symbol(which)
         exec_price = fill_price(day_text, which, "buy")
         if exec_price <= 0:
@@ -2119,44 +1835,6 @@ def _run_seesaw_backtest(
         avg_cost = total_cost / shares if shares > 0 else 0.0
         cash -= actual
         position_symbol = which
-        position_trend_etf = None
-        position_trend_index = None
-        greed_peak_price = None
-        take_profit_cycle_sell_count = 0
-        cooldown_remaining = int(params.cooldown_days)
-        return {"date": day_text, "action": "BUY", "symbol": symbol, "quantity": buy_qty, "price": exec_price, "amount": actual}
-
-    def do_buy_trend(day_text: str, slot: Dict) -> Optional[Dict]:
-        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, position_trend_etf, position_trend_index
-        symbol = str(slot["etf"])
-        base = float(slot["exec"])
-        if base <= 0:
-            return None
-        if float(params.slippage_pct) < 0:
-            if float(params.slippage_pct) <= -1.5:
-                exec_price = float(slot["low"])
-            else:
-                exec_price = float(slot["high"])
-        else:
-            slip = float(params.slippage_pct) / 100.0
-            exec_price = base * (1 + slip)
-        if exec_price <= 0:
-            return None
-        portfolio_value = cash + shares * exec_price
-        buy_amount = min(cash, portfolio_value * (float(params.buy_position_pct) / 100.0))
-        if buy_amount <= 0:
-            return None
-        buy_qty = min(_floor_share_count(buy_amount / exec_price), _floor_share_count(cash / exec_price))
-        if buy_qty < 1:
-            return None
-        actual = buy_qty * exec_price
-        total_cost = shares * avg_cost + actual
-        shares += buy_qty
-        avg_cost = total_cost / shares if shares > 0 else 0.0
-        cash -= actual
-        position_symbol = "trend"
-        position_trend_etf = symbol
-        position_trend_index = str(slot["index"])
         greed_peak_price = None
         take_profit_cycle_sell_count = 0
         cooldown_remaining = int(params.cooldown_days)
@@ -2320,27 +1998,6 @@ def _run_seesaw_backtest(
                     t = sig[target]
                     reason = f"多标的都触发，{t['label']} {t['fear']:.2f} 更恐慌，买入 {t['symbol']}"
                     trade_signal_fear, trade_signal_vr, trade_signal_label = float(t["fear"]), float(t["vr"]), t["label"]
-                elif params.trend_enabled and trend_by_date:
-                    # 对称轮动下无恐慌信号 → 趋势补位
-                    day_data = trend_by_date.get(day_text)
-                    if day_data and day_data.get("slots"):
-                        best = None
-                        for slot in day_data["slots"]:
-                            slot_fear = slot.get("fear")
-                            if slot_fear is not None and slot_fear >= float(params.trend_max_fear):
-                                continue
-                            if slot["close"] > slot["ma"] and (best is None or slot["gap"] > best["gap"]):
-                                best = slot
-                        if best:
-                            action = do_buy_trend(day_text, best)
-                            if action:
-                                reason = (
-                                    f"空仓无恐慌信号，趋势补位：{TREND_SLOT_LABELS.get(best['index'], best['index'])} "
-                                    f"gap {best['gap']:.2%}（恐贪<{params.trend_max_fear:g}），买入 {best['etf']}"
-                                )
-                                trade_signal_fear = best.get("fear")
-                                trade_signal_vr = None
-                                trade_signal_label = TREND_SLOT_LABELS.get(best["index"], best["index"])
             elif main_signal:
                 action = do_buy(day_text, "main")
                 reason = f"{main_fear_label} {main_fear:.2f} 极恐放量买入主标的"
@@ -2349,58 +2006,17 @@ def _run_seesaw_backtest(
                 action = do_buy(day_text, "sub")
                 reason = f"主标的空仓，{sub_fear_label} {sub_fear:.2f} 极恐放量买入候补 {sub_symbol}"
                 trade_signal_fear, trade_signal_vr, trade_signal_label = sub_fear, sub_vr, sub_fear_label
-            elif params.trend_enabled and trend_by_date:
-                # 空仓且无恐慌信号 → 趋势补位：选 gap 最大且恐贪<trend_max_fear 的槽位全仓买入
-                day_data = trend_by_date.get(day_text)
-                if day_data and day_data.get("slots"):
-                    best = None
-                    for slot in day_data["slots"]:
-                        slot_fear = slot.get("fear")
-                        if slot_fear is not None and slot_fear >= float(params.trend_max_fear):
-                            continue
-                        if slot["close"] > slot["ma"] and (best is None or slot["gap"] > best["gap"]):
-                            best = slot
-                    if best:
-                        action = do_buy_trend(day_text, best)
-                        if action:
-                            reason = (
-                                f"空仓无恐慌信号，趋势补位：{TREND_SLOT_LABELS.get(best['index'], best['index'])} "
-                                f"gap {best['gap']:.2%}（恐贪<{params.trend_max_fear:g}），买入 {best['etf']}"
-                            )
-                            trade_signal_fear = best.get("fear")
-                            trade_signal_vr = None
-                            trade_signal_label = TREND_SLOT_LABELS.get(best["index"], best["index"])
         elif position_symbol and can_trade and shares > 0:
-            if position_symbol == "trend":
-                # 趋势持仓：恐贪>=贪卖阈值 或 指数收盘跌破 MA → 卖出（不做固定止损/见顶反转）
-                slot = _trend_slot(day_text)
-                if slot is None:
-                    reason = None
-                    action = None
-                else:
-                    trend_fear = float(slot["fear"]) if slot["fear"] is not None else np.nan
-                    trend_label = TREND_SLOT_LABELS.get(slot["index"], slot["index"])
-                    if np.isfinite(trend_fear) and trend_fear >= float(params.greed_threshold):
-                        action = do_sell(day_text)
-                        reason = f"趋势持仓 {slot['etf']}（{trend_label}）恐贪 {trend_fear:.2f} 到达贪卖阈值"
-                        trade_signal_fear, trade_signal_vr, trade_signal_label = trend_fear, None, trend_label
-                    elif slot["close"] < slot["ma"]:
-                        action = do_sell(day_text)
-                        reason = f"趋势持仓 {slot['etf']}（{trend_label}）跌破 MA{params.trend_ma_win}（{slot['close']:.2f} < {slot['ma']:.2f}）"
-                        trade_signal_fear, trade_signal_vr, trade_signal_label = (
-                            float(slot["fear"]) if slot["fear"] is not None else None, None, trend_label
-                        )
-            else:
-                held_sig = sig.get(position_symbol)
-                if held_sig and held_sig["greedy"]:
-                    _sell_held()
-                elif use_swap and held_sig and np.isfinite(held_sig["fear"]) and held_sig["fear"] > swap_value:
-                    others = [k for k, s in sig.items() if k != position_symbol and s["signal"] and np.isfinite(s["fear"])]
-                    if others:
-                        target = min(others, key=lambda k: sig[k]["fear"])
-                        _swap_held_to(target)
-                elif not use_swap and position_symbol == "sub" and main_signal:
-                    _swap_held_to("main")
+            held_sig = sig.get(position_symbol)
+            if held_sig and held_sig["greedy"]:
+                _sell_held()
+            elif use_swap and held_sig and np.isfinite(held_sig["fear"]) and held_sig["fear"] > swap_value:
+                others = [k for k, s in sig.items() if k != position_symbol and s["signal"] and np.isfinite(s["fear"])]
+                if others:
+                    target = min(others, key=lambda k: sig[k]["fear"])
+                    _swap_held_to(target)
+            elif not use_swap and position_symbol == "sub" and main_signal:
+                _swap_held_to("main")
 
         if action is not None and action.get("action"):
             already_logged = any(
@@ -2482,9 +2098,6 @@ def _run_seesaw_backtest(
         "trade_count": len(trades),
         "buy_count": sum(1 for item in trades if item["action"] == "BUY"),
         "sell_count": sum(1 for item in trades if item["action"] == "SELL"),
-        "flat_days": int(sum(1 for item in daily_data if item.get("shares", 0) <= 0)),
-        "total_days": int(len(daily_data)),
-        "flat_days_pct": float(sum(1 for item in daily_data if item.get("shares", 0) <= 0) / len(daily_data) * 100) if daily_data else 0.0,
         "ending_cash": cash,
         "ending_shares": shares,
         "execution_price_type": execution_price_type,
@@ -2525,9 +2138,6 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.swap_threshold_values,
         payload.sub2_buy_threshold_values,
         payload.sub2_volume_ratio_threshold_values,
-        payload.trend_enabled_values,
-        payload.trend_ma_win_values,
-        payload.trend_max_fear_values,
     ]
     total = 1
     for values in value_groups:
@@ -2543,7 +2153,6 @@ def _evaluate_search_candidates(
     progress_callback=None,
     sub_base_df: Optional[pd.DataFrame] = None,
     sub2_base_df: Optional[pd.DataFrame] = None,
-    trend_by_date: Optional[Dict] = None,
 ) -> Tuple[List[Dict], Dict, int]:
     total_combinations = _count_search_params(payload)
     eval_workers = payload.eval_workers or SEARCH_EVAL_MAX_WORKERS
@@ -2591,9 +2200,6 @@ def _evaluate_search_candidates(
                 payload.swap_threshold_values,
                 payload.sub2_buy_threshold_values,
                 payload.sub2_volume_ratio_threshold_values,
-                payload.trend_enabled_values,
-                payload.trend_ma_win_values,
-                payload.trend_max_fear_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -2655,8 +2261,6 @@ def _evaluate_search_candidates(
                         sub2_symbol=payload.sub2_symbol,
                         sub2_fear_source=payload.sub2_fear_source,
                         sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
-                        trend_by_date=trend_by_date,
-                        trend_slots=payload.trend_slots,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -2752,8 +2356,6 @@ def _evaluate_search_batch(
     sub2_symbol: Optional[str] = None,
     sub2_fear_source: Optional[str] = None,
     sub2_volume_signal_symbol: Optional[str] = None,
-    trend_by_date: Optional[Dict] = None,
-    trend_slots: Optional[List[str]] = None,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2780,9 +2382,6 @@ def _evaluate_search_batch(
                 swap_threshold,
                 sub2_buy_threshold,
                 sub2_volume_ratio_threshold,
-                trend_enabled,
-                trend_ma_win,
-                trend_max_fear,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),
@@ -2812,10 +2411,6 @@ def _evaluate_search_batch(
                 sub2_volume_signal_symbol=sub2_volume_signal_symbol,
                 sub2_buy_threshold=float(sub2_buy_threshold if sub2_buy_threshold is not None else 20.0),
                 sub2_volume_ratio_threshold=float(sub2_volume_ratio_threshold if sub2_volume_ratio_threshold is not None else 1.3),
-                trend_enabled=bool(trend_enabled),
-                trend_ma_win=int(trend_ma_win),
-                trend_max_fear=float(trend_max_fear),
-                trend_slots=trend_slots,
             )
         except ValidationError as exc:
             skipped_combinations += 1
@@ -2824,12 +2419,10 @@ def _evaluate_search_batch(
             continue
 
         try:
-            if params.trend_enabled and not params.sub_symbol:
-                raise ValueError("趋势补位需要配置候补标的（sub_symbol）")
             if sub_base_df is not None and params.sub_symbol:
                 result = _run_seesaw_backtest(
                     base_df, sub_base_df, params, initial_capital, detailed=False,
-                    sub2_base_df=sub2_base_df, trend_by_date=trend_by_date,
+                    sub2_base_df=sub2_base_df,
                 )
             else:
                 result = _run_backtest(base_df, params, initial_capital, detailed=False)
@@ -3089,21 +2682,12 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
                     skipped,
                 )
 
-        trend_by_date = None
-        if True in (payload.trend_enabled_values or [False]):
-            trend_by_date, _ = _load_trend_by_date(
-                start_date, end_date,
-                _parse_trend_slots(payload.trend_slots),
-                int((payload.trend_ma_win_values or [20])[0]),
-                use_next_open=True,
-            )
         results, best_summary, skipped_combinations = _evaluate_search_candidates(
             payload,
             base_dfs,
             progress_callback=progress_callback,
             sub_base_df=sub_base_df,
             sub2_base_df=sub2_base_df,
-            trend_by_date=trend_by_date,
         )
 
         _update_search_job(
@@ -3121,7 +2705,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         if sub_base_df is not None and best_params.sub_symbol:
             best_result = _run_seesaw_backtest(
                 base_dfs[best_fear_source], sub_base_df, best_params, payload.initial_capital, detailed=True,
-                sub2_base_df=sub2_base_df, trend_by_date=trend_by_date,
+                sub2_base_df=sub2_base_df,
             )
         else:
             best_result = _run_backtest(
@@ -3348,20 +2932,10 @@ def run_soxl_fear_backtest(
         )
         base_df = base_dfs[payload.fear_source]
         meta = source_metas[payload.fear_source]
-        if payload.params.trend_enabled and not payload.params.sub_symbol:
-            raise ValueError("趋势补位需要配置候补标的（sub_symbol），主标的空仓时才能趋势补位买入")
-        trend_by_date = None
-        if payload.params.trend_enabled:
-            trend_by_date, _ = _load_trend_by_date(
-                start_date, end_date,
-                _parse_trend_slots(payload.params.trend_slots),
-                int(payload.params.trend_ma_win),
-                use_next_open=bool(payload.params.execute_next_open),
-            )
         if sub_base_df is not None and payload.params.sub_symbol:
             result = _run_seesaw_backtest(
                 base_df, sub_base_df, payload.params, payload.initial_capital, detailed=True,
-                sub2_base_df=sub2_base_df, trend_by_date=trend_by_date,
+                sub2_base_df=sub2_base_df,
             )
         else:
             result = _run_backtest(base_df, payload.params, payload.initial_capital, detailed=True)

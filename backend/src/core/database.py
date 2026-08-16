@@ -902,11 +902,6 @@ class AStockFearStrategyConfig(Base):
     sub2_volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
     # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
     swap_threshold = Column(Float, nullable=True)
-    # 趋势补位：空仓且无恐慌信号时，选趋势最强（收盘>MA20且gap最大）的槽位买入，跌破均线卖出
-    trend_enabled = Column(Boolean, nullable=False, default=False)
-    trend_ma_win = Column(Integer, nullable=False, default=20)
-    trend_max_fear = Column(Float, nullable=False, default=50.0)
-    trend_slots = Column(Text, nullable=True)  # JSON 数组 ["INDEX:ETF", ...]，NULL=默认15池
     buy_threshold = Column(Float, nullable=False, default=30.0)
     greed_threshold = Column(Float, nullable=False, default=70.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
