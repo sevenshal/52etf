@@ -65,12 +65,6 @@ const TREND_SLOT_OPTIONS = [
   { value: '930997.CSI:515030.SH', label: '新能源车 → 515030' },
   { value: '931152.CSI:515120.SH', label: '创新药 → 515120' },
   { value: '399989.SZ:512170.SH', label: '医疗 → 512170' },
-  { value: '000819.SH:512400.SH', label: '有色 → 512400' },
-  { value: '399975.SZ:512880.SH', label: '证券 → 512880' },
-  { value: '399998.SZ:515220.SH', label: '煤炭 → 515220' },
-  { value: '399986.SZ:512800.SH', label: '银行 → 512800' },
-  { value: '000932.SH:159928.SZ', label: '消费 → 159928' },
-  { value: 'H30269.CSI:512890.SH', label: '红利低波 → 512890' },
 ];
 
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
