@@ -53,6 +53,25 @@ const parseSwapThresholdList = (value) => String(value ?? '')
   .map(item => (item === 'none' || item === 'null' || item === '关闭' ? null : parseFloat(item)))
   .filter(item => item === null || Number.isFinite(item));
 
+// 趋势补位默认候选池（指数 -> ETF）
+const TREND_SLOT_OPTIONS = [
+  { value: '000688.SH:588000.SH', label: '科创50 → 588000' },
+  { value: '000698.SH:588220.SH', label: '科创100 → 588220' },
+  { value: '000699.SH:588230.SH', label: '科创200 → 588230' },
+  { value: 'H30184.CSI:512480.SH', label: '半导体 → 512480' },
+  { value: 'QQQ.US:159509.SZ', label: '纳指科技 → 159509' },
+  { value: '399967.SZ:512660.SH', label: '军工 → 512660' },
+  { value: '930997.CSI:515030.SH', label: '新能源车 → 515030' },
+  { value: '931152.CSI:515120.SH', label: '创新药 → 515120' },
+  { value: '399989.SZ:512170.SH', label: '医疗 → 512170' },
+  { value: '000819.SH:512400.SH', label: '有色 → 512400' },
+  { value: '399975.SZ:512880.SH', label: '证券 → 512880' },
+  { value: '399998.SZ:515220.SH', label: '煤炭 → 515220' },
+  { value: '399986.SZ:512800.SH', label: '银行 → 512800' },
+  { value: '000932.SH:159928.SZ', label: '消费 → 159928' },
+  { value: 'H30269.CSI:512890.SH', label: '红利低波 → 512890' },
+];
+
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -252,6 +271,11 @@ const SoxlFearBacktest = () => {
       sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
       sub2_buy_threshold_values: parseNumberList(values.sub2_buy_threshold_values),
       sub2_volume_ratio_threshold_values: parseNumberList(values.sub2_volume_ratio_threshold_values),
+      // 趋势补位
+      trend_enabled_values: [!!values.trend_enabled],
+      trend_ma_win_values: parseNumberList(values.trend_ma_win_values, true),
+      trend_max_fear_values: parseNumberList(values.trend_max_fear_values),
+      trend_slots: values.trend_slots?.length ? values.trend_slots : undefined,
     };
   };
 
@@ -282,6 +306,10 @@ const SoxlFearBacktest = () => {
     sub2_volume_signal_symbol: record.sub2_volume_signal_symbol ?? undefined,
     sub2_buy_threshold: record.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: record.sub2_volume_ratio_threshold ?? 1.3,
+    trend_enabled: !!record.trend_enabled,
+    trend_ma_win: record.trend_ma_win ?? 20,
+    trend_max_fear: record.trend_max_fear ?? 50,
+    trend_slots: record.trend_slots ?? undefined,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
 
@@ -1101,6 +1129,9 @@ const SoxlFearBacktest = () => {
             sub2_volume_signal_symbol: 'QQQ.US',
             sub2_buy_threshold_values: '20',
             sub2_volume_ratio_threshold_values: '1.3',
+            trend_enabled: false,
+            trend_ma_win_values: '20',
+            trend_max_fear_values: '50',
           }}
         >
           <Row gutter={16}>
@@ -1315,6 +1346,35 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 1.3,1.6" />
               </Form.Item>
             </Col>
+            <Col xs={24} md={24}>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="趋势补位（可选）"
+                description="空仓且无恐慌信号时，从趋势候选池里选趋势最强（指数收盘>MA且gap最大、恐贪低于阈值）的标的全仓买入，持有到指数跌破均线或恐贪到达卖出阈值。候选留空=默认15池：科创50/科创100/科创200/半导体/纳指科技/军工/新能源车/创新药/医疗/有色/证券/煤炭/银行/消费/红利低波。"
+              />
+            </Col>
+            <Col xs={24} md={3}>
+              <Form.Item name="trend_enabled" label="趋势补位" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="trend_ma_win_values" label="趋势均线窗口候选">
+                <Input placeholder="20" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={5}>
+              <Form.Item name="trend_max_fear_values" label="趋势买入恐贪条件(<)候选">
+                <Input placeholder="50,35,65（多值搜参）" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item name="trend_slots" label="趋势候选标的">
+                <Select mode="multiple" allowClear options={TREND_SLOT_OPTIONS} maxTagCount="responsive" placeholder="默认15池" />
+              </Form.Item>
+            </Col>
           </Row>
 
           <Space>
@@ -1400,12 +1460,17 @@ const SoxlFearBacktest = () => {
             {renderComparedMetric({ title: '日盈亏比', dataIndex: 'profit_loss_ratio', formatter: formatProfitLossRatio })}
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
-                <Statistic title="买入次数" value={detailedResult.buy_count} />
+                <Statistic title="买卖次数" value={`${detailedResult.buy_count ?? 0} / ${detailedResult.sell_count ?? 0}`} suffix="买/卖" />
               </Card>
             </Col>
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
-                <Statistic title="卖出次数" value={detailedResult.sell_count} />
+                <Statistic title="空仓占比" value={detailedResult.flat_days_pct} precision={1} suffix="%" />
+              </Card>
+            </Col>
+            <Col xs={12} md={6}>
+              <Card loading={detailLoading}>
+                <Statistic title="空仓天数" value={`${detailedResult.flat_days ?? 0} / ${detailedResult.total_days ?? 0}`} suffix="天" />
               </Card>
             </Col>
           </Row>
@@ -1443,6 +1508,7 @@ const SoxlFearBacktest = () => {
                   <Descriptions.Item label="第二候补量比阈值">{detailedResult.params.sub2_volume_ratio_threshold}</Descriptions.Item>
                 </>
               )}
+              <Descriptions.Item label="趋势补位">{detailedResult.params?.trend_enabled ? '开' : '关'}{detailedResult.params?.trend_enabled ? ` · MA${detailedResult.params.trend_ma_win} · 恐贪<${detailedResult.params.trend_max_fear ?? '-'} · ${detailedResult.params.trend_slots?.length ? `${detailedResult.params.trend_slots.length}个自定义槽位` : '默认15池'}` : ''}</Descriptions.Item>
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
               <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct === -2 ? '-2（最乐观：买最低卖最高）' : detailedResult.params?.slippage_pct === -1 ? '-1（最悲观：买最高卖最低）' : `${detailedResult.params?.slippage_pct ?? 0}%`}</Descriptions.Item>
               <Descriptions.Item label="印花税%(卖出)">{detailedResult.params?.stamp_duty_pct ?? 0}%</Descriptions.Item>
