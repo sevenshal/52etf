@@ -182,6 +182,7 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("000510.SH", "563360.SH"),
         ("000905.SH", "510500.SH"),
         ("000985.SH", "510300.SH"),
+        ("000680.SH", "589000.SH"),
         ("000688.SH", "588000.SH"),
         ("000698.SH", "588220.SH"),
         ("000699.SH", "588230.SH"),

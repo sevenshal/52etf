@@ -73,6 +73,14 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "option_underlyings": [],
     },
     {
+        "symbol": "000680.SH",
+        "ticker": "科创综指",
+        "label": "科创综指",
+        "index_name": "上证科创板综合指数",
+        "option_underlyings": [],
+        "proxy_etf": "589000.SH",
+    },
+    {
         "symbol": "000688.SH",
         "ticker": "科创50",
         "label": "科创50",
@@ -281,6 +289,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "563360.SH",
     "510500.SH",
     "510300.SH",
+    "589000.SH",
     "588000.SH",
     "588220.SH",
     "588230.SH",
@@ -340,6 +349,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
 A_STOCK_ETF_DAILY_NAMES = {
     "563360.SH": "A500ETF",
     "510500.SH": "中证500ETF",
+    "589000.SH": "科创综指ETF",
     "588000.SH": "科创50ETF",
     "588220.SH": "科创100ETF",
     "588230.SH": "科创200ETF",
