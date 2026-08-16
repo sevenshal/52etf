@@ -571,6 +571,51 @@ class SOXLFearSearchParams(BaseModel):
     trend_enabled_values: List[bool] = Field(default_factory=lambda: [False])
     trend_ma_win_values: List[int] = Field(default_factory=lambda: [20])
     trend_max_fear_values: List[float] = Field(default_factory=lambda: [50.0])
+    trend_slots: Optional[List[str]] = None  # ["INDEX:ETF", ...]，None/空=默认15池
+
+    @validator("trend_max_fear_values")
+    def validate_search_trend_max_fear_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势恐贪条件候选至少一个值")
+        for item in normalized:
+            if item < 0 or item > 100:
+                raise ValueError("趋势恐贪条件必须在0到100之间")
+        return normalized
+
+    @validator("trend_ma_win_values")
+    def validate_search_trend_ma_win_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势均线窗口候选至少一个值")
+        for item in normalized:
+            if item < 2 or item > 500:
+                raise ValueError("趋势均线窗口必须在2到500之间")
+        return normalized
+
+    @validator("trend_enabled_values")
+    def validate_search_trend_enabled_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("趋势补位开关候选至少一个值")
+        return normalized
+
+    @validator("trend_slots")
+    def validate_search_trend_slots(cls, value):
+        if not value:
+            return None
+        normalized = []
+        for item in value:
+            parts = str(item).split(":")
+            if len(parts) != 2:
+                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
+            idx = parts[0].strip().upper()
+            etf = parts[1].strip().upper()
+            if idx and etf:
+                normalized.append(f"{idx}:{etf}")
+            else:
+                raise ValueError("趋势槽位格式必须为 INDEX:ETF")
+        return list(dict.fromkeys(normalized)) or None
 
     @validator("sub2_symbol")
     def validate_sub2_symbol(cls, value):
