@@ -1888,11 +1888,19 @@ def _run_seesaw_backtest(
             greed_peak_price = current_close(day_text)
             take_profit_cycle_sell_count += 1
         cooldown_remaining = int(params.cooldown_days)
+        net_value_after = cash + shares * exec_price
         return {
             "date": day_text, "action": "SELL", "symbol": symbol,
             "quantity": sell_qty, "price": exec_price, "amount": proceeds,
             "stamp_duty": stamp_fee,
             "profit": proceeds - stamp_fee - cost_amount,
+            "shares": sell_qty,
+            "position_after": shares,
+            "cash_after": cash,
+            "position_pct_after": (shares * exec_price / net_value_after * 100) if net_value_after > 0 else 0.0,
+            "holdings_value_after": shares * exec_price,
+            "net_value_after": net_value_after,
+            "avg_cost_after": avg_cost,
         }
 
     def do_buy(day_text: str, which: str) -> Optional[Dict]:
@@ -1917,7 +1925,17 @@ def _run_seesaw_backtest(
         greed_peak_price = None
         take_profit_cycle_sell_count = 0
         cooldown_remaining = int(params.cooldown_days)
-        return {"date": day_text, "action": "BUY", "symbol": symbol, "quantity": buy_qty, "price": exec_price, "amount": actual}
+        net_value_after = cash + shares * exec_price
+        return {
+            "date": day_text, "action": "BUY", "symbol": symbol, "quantity": buy_qty, "price": exec_price, "amount": actual,
+            "shares": buy_qty,
+            "position_after": shares,
+            "cash_after": cash,
+            "position_pct_after": (shares * exec_price / net_value_after * 100) if net_value_after > 0 else 0.0,
+            "holdings_value_after": shares * exec_price,
+            "net_value_after": net_value_after,
+            "avg_cost_after": avg_cost,
+        }
 
     for index, day_text in enumerate(main_dates):
         if position_symbol is None:
@@ -2041,7 +2059,10 @@ def _run_seesaw_backtest(
                     shrink_ok = np.isfinite(held_log_z) and held_log_z <= -float(params.sell_shrink_z)
                 if shrink_ok:
                     action = do_sell(day_text)
-                    reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值且缩量{held_log_z:.2f}σ即卖（移动止盈=0）"
+                    if float(params.sell_shrink_z) > 0:
+                        reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值且缩量{held_log_z:.2f}σ即卖（移动止盈=0）"
+                    else:
+                        reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
             else:
                 held_info = _holder(position_symbol)["by_date"][day_text]
                 if held_sig["greedy"]:
@@ -2080,6 +2101,10 @@ def _run_seesaw_backtest(
                     "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
                     "profit": sell_action.get("profit"), "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
+                    "shares": sell_action.get("shares"), "position_after": sell_action.get("position_after"),
+                    "cash_after": sell_action.get("cash_after"), "position_pct_after": sell_action.get("position_pct_after"),
+                    "holdings_value_after": sell_action.get("holdings_value_after"), "net_value_after": sell_action.get("net_value_after"),
+                    "avg_cost_after": sell_action.get("avg_cost_after"),
                 })
             if buy_action:
                 trades.append({
@@ -2088,6 +2113,10 @@ def _run_seesaw_backtest(
                     "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
                     "reason": f"买入 {target_sig['symbol']}",
+                    "shares": buy_action.get("shares"), "position_after": buy_action.get("position_after"),
+                    "cash_after": buy_action.get("cash_after"), "position_pct_after": buy_action.get("position_pct_after"),
+                    "holdings_value_after": buy_action.get("holdings_value_after"), "net_value_after": buy_action.get("net_value_after"),
+                    "avg_cost_after": buy_action.get("avg_cost_after"),
                 })
             action = sell_action or buy_action
 
@@ -2098,7 +2127,10 @@ def _run_seesaw_backtest(
                     target = min(cands, key=lambda k: sig[k]["fear"])
                     action = do_buy(day_text, target)
                     t = sig[target]
-                    reason = f"多标的都触发，{t['label']} {t['fear']:.2f} 更恐慌，买入 {t['symbol']}"
+                    if len(cands) > 1:
+                        reason = f"多标的都触发（{len(cands)}个），{t['label']} {t['fear']:.2f} 更恐慌，买入 {t['symbol']}"
+                    else:
+                        reason = f"空仓，{t['label']} {t['fear']:.2f} 极恐放量买入 {t['symbol']}"
                     trade_signal_fear, trade_signal_vr, trade_signal_label = float(t["fear"]), float(t["vr"]), t["label"]
             elif main_signal:
                 action = do_buy(day_text, "main")
@@ -2132,6 +2164,10 @@ def _run_seesaw_backtest(
                     "profit": action.get("profit"), "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
                     "reason": reason or "",
+                    "shares": action.get("shares"), "position_after": action.get("position_after"),
+                    "cash_after": action.get("cash_after"), "position_pct_after": action.get("position_pct_after"),
+                    "holdings_value_after": action.get("holdings_value_after"), "net_value_after": action.get("net_value_after"),
+                    "avg_cost_after": action.get("avg_cost_after"),
                 })
 
         close_price = float(main["by_date"][day_text]["close"])
