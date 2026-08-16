@@ -905,6 +905,10 @@ class AStockFearStrategyConfig(Base):
     buy_threshold = Column(Float, nullable=False, default=30.0)
     greed_threshold = Column(Float, nullable=False, default=70.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
+    # 统一对数放量阈值（log-z）：NULL=旧量比逻辑；有值=log(vol) 相对前20日均值放大该标准差视为放量（默认 1.25）
+    volume_z_threshold = Column(Float, nullable=True)
+    # 卖出缩量阈值：<=0 关闭（贪恐即卖）；>0 时贪恐>=greed 且当日缩量达该标准差才卖
+    sell_shrink_z = Column(Float, nullable=False, default=-1.0)
     buy_position_pct = Column(Float, nullable=False, default=100.0)
     cooldown_days = Column(Integer, nullable=False, default=0)
     # 0 = 到达贪恐阈值（>= greed_threshold）即卖
@@ -1881,6 +1885,8 @@ def ensure_a_stock_fear_strategy_schema():
             ("sub2_buy_threshold", "FLOAT DEFAULT 20.0"),
             ("sub2_volume_ratio_threshold", "FLOAT DEFAULT 1.3"),
             ("swap_threshold", "FLOAT"),
+            ("volume_z_threshold", "FLOAT"),
+            ("sell_shrink_z", "FLOAT DEFAULT -1.0"),
         ]
         for column_name, column_type in additions:
             if column_name not in columns:

@@ -48,6 +48,8 @@ const defaultValues = {
   buy_threshold: 30,
   greed_threshold: 70,
   volume_ratio_threshold: 1.6,
+  volume_z_threshold: 1.25,
+  sell_shrink_z: -1,
   buy_position_pct: 100,
   cooldown_days: 0,
   trailing_stop_pct: 0,
@@ -77,6 +79,8 @@ const normalizeConfig = (config) => ({
   ...defaultValues,
   ...config,
   run_time: config?.run_time ? dayjs(config.run_time, 'HH:mm') : dayjs('09:30', 'HH:mm'),
+  volume_z_threshold: config?.volume_z_threshold ?? 1.25,
+  sell_shrink_z: config?.sell_shrink_z ?? -1,
   volume_signal_symbol: config?.volume_signal_symbol ?? undefined,
   external_trading_account_id: config?.external_trading_account_id ?? undefined,
   live_sub_account_id: config?.live_sub_account_id ?? undefined,
@@ -359,6 +363,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub2_buy_threshold: values.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: values.sub2_volume_ratio_threshold ?? 1.3,
     swap_threshold: values.swap_threshold ?? null,
+    volume_z_threshold: values.volume_z_threshold ?? 1.25,
+    sell_shrink_z: values.sell_shrink_z ?? -1,
   });
 
   const handleBacktest = () => {
@@ -401,6 +407,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
           execute_next_open_values: ['true'],
+          volume_z_threshold: values.volume_z_threshold ?? 1.25,
+          sell_shrink_z: values.sell_shrink_z ?? -1,
           sub_symbol: values.sub_symbol || undefined,
           sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
           sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
@@ -765,6 +773,16 @@ const AStockFearStrategy = ({ embedded = false }) => {
                         <Col xs={24} md={4}>
                           <Form.Item name="volume_ratio_threshold" label="买入量比阈值(>=)">
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="统一 log(成交量) 放量阈值：log(vol) 相对前20日均值放大该标准差即放量，默认 1.25；留空=用旧量比阈值">
+                            <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} placeholder="默认 1.25" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sell_shrink_z" label="卖出缩量标准差" tooltip="-1=关闭（贪恐即卖）；>0 时贪恐>=卖出阈值且当日缩量达该标准差才卖（如 0.25）">
+                            <InputNumber min={-1} max={5} step={0.05} style={{ width: '100%' }} placeholder="-1=关闭" />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>

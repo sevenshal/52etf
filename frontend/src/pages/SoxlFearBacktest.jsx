@@ -226,6 +226,8 @@ const SoxlFearBacktest = () => {
       rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
       slippage_pct: values.slippage_pct ?? -1,
       stamp_duty_pct: values.stamp_duty_pct ?? 0,
+      volume_z_threshold: values.volume_z_threshold ?? 1.25,
+      sell_shrink_z: values.sell_shrink_z ?? -1,
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
@@ -259,6 +261,8 @@ const SoxlFearBacktest = () => {
     buy_threshold: record.buy_threshold,
     greed_threshold: record.greed_threshold,
     volume_ratio_threshold: record.volume_ratio_threshold,
+    volume_z_threshold: record.volume_z_threshold ?? 1.25,
+    sell_shrink_z: record.sell_shrink_z ?? -1,
     volume_ratio_consecutive_days: record.volume_ratio_consecutive_days ?? 1,
     buy_position_pct: record.buy_position_pct,
     cooldown_days: record.cooldown_days,
@@ -1076,6 +1080,8 @@ const SoxlFearBacktest = () => {
             fit_rebalance_threshold_pct: 0,
             slippage_pct: -1,
             stamp_duty_pct: 0,
+            volume_z_threshold: 1.25,
+            sell_shrink_z: -1,
             date_range: [dayjs('2023-03-22'), dayjs()],
             buy_threshold_values: '30',
             greed_threshold_values: '70',
@@ -1242,6 +1248,16 @@ const SoxlFearBacktest = () => {
                 <InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="买入放量统一用 log(成交量) 相对前20日均值的标准差倍数，默认 1.25">
+                <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sell_shrink_z" label="卖出缩量标准差" tooltip="-1=关闭（贪恐即卖）；>0 时贪恐>=止盈阈值且当日缩量达该标准差才卖（如 0.25）">
+                <InputNumber min={-1} max={5} step={0.05} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
             <Col xs={24} md={24}>
               <Alert
                 type="info"
@@ -1400,12 +1416,16 @@ const SoxlFearBacktest = () => {
             {renderComparedMetric({ title: '日盈亏比', dataIndex: 'profit_loss_ratio', formatter: formatProfitLossRatio })}
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
-                <Statistic title="买入次数" value={detailedResult.buy_count} />
+                <Statistic title="买卖次数" value={`${detailedResult.buy_count ?? 0} / ${detailedResult.sell_count ?? 0}`} suffix="买/卖" />
               </Card>
             </Col>
             <Col xs={12} md={6}>
               <Card loading={detailLoading}>
-                <Statistic title="卖出次数" value={detailedResult.sell_count} />
+                <Statistic
+                  title="空仓时间"
+                  value={`${detailedResult.idle_days ?? 0} 天`}
+                  suffix={`(${(detailedResult.idle_ratio ?? 0).toFixed(1)}%)`}
+                />
               </Card>
             </Col>
           </Row>
@@ -1415,6 +1435,8 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
               <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
+              <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>
+              <Descriptions.Item label="卖出缩量标准差">{(detailedResult.params?.sell_shrink_z ?? -1) <= 0 ? '关闭（贪恐即卖）' : detailedResult.params?.sell_shrink_z}</Descriptions.Item>
               <Descriptions.Item label="连续量比天数">{detailedResult.params?.volume_ratio_consecutive_days ?? 1}</Descriptions.Item>
               <Descriptions.Item label="每次买入仓位%">{detailedResult.params?.buy_position_pct}</Descriptions.Item>
               <Descriptions.Item label="冷却天数">{detailedResult.params?.cooldown_days}</Descriptions.Item>

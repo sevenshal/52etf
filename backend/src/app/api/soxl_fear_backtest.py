@@ -173,6 +173,10 @@ class SOXLFearStrategyParams(BaseModel):
     greed_threshold: float = 41.0
     volume_ratio_threshold: float = 1.38
     volume_ratio_consecutive_days: int = 1
+    # 统一对数放量阈值（log-z）：None=用旧 volume_ratio_threshold；有值=log(vol) 相对前20日均值放大该标准差视为放量
+    volume_z_threshold: Optional[float] = None
+    # 卖出缩量阈值：<=0 关闭（贪恐>=greed 即卖）；>0 时贪恐>=greed 且当日 log_z <= -该值 才卖
+    sell_shrink_z: float = -1.0
     buy_position_pct: float = 60.0
     cooldown_days: int = 10
     trailing_stop_pct: float = 5.0
@@ -201,6 +205,12 @@ class SOXLFearStrategyParams(BaseModel):
     def validate_stamp_duty_pct(cls, value):
         if value < 0 or value > 10:
             raise ValueError("印花税必须在 0 到 10 之间")
+        return value
+
+    @validator("sell_shrink_z")
+    def validate_sell_shrink_z(cls, value):
+        if value is None or value < 0:
+            return -1.0
         return value
     # 跷跷板候补标的（可选）：主标的空仓时，候补极恐放量则买入候补；主标的出信号立即换回。
     sub_symbol: Optional[str] = None
@@ -331,6 +341,10 @@ class SOXLFearSearchParams(BaseModel):
     # 固定成本参数（不参与组合搜索）：滑点 -1=悲观，>=0 按成交价滑点%；印花税卖出收取
     slippage_pct: float = -1.0
     stamp_duty_pct: float = 0.0
+    # 统一对数放量阈值（log-z，不参与网格，固定用于搜索）：None=旧量比逻辑；默认 1.25
+    volume_z_threshold: Optional[float] = 1.25
+    # 卖出缩量阈值（不参与网格，固定用于搜索）：<=0 关闭（贪恐即卖）；>0 贪恐>=greed 且缩量才卖
+    sell_shrink_z: float = -1.0
 
     @validator("slippage_pct")
     def validate_search_slippage_pct(cls, value):
@@ -818,6 +832,15 @@ def _prepare_base_dataframe(
         signal_price_df["signal_volume"] / signal_price_df["volume_ma20"],
         np.nan,
     )
+    # 对数放量 z 值：log(vol[T]) 相对前 20 日 log(vol) 的均值 + n*标准差（统一放量阈值）
+    signal_price_df["log_volume"] = np.log(
+        pd.to_numeric(signal_price_df["signal_volume"], errors="coerce").replace(0, np.nan)
+    )
+    signal_price_df["log_vol_ma20"] = signal_price_df["log_volume"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).mean()
+    signal_price_df["log_vol_std20"] = signal_price_df["log_volume"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).std(ddof=0)
+    signal_price_df["log_z"] = (
+        signal_price_df["log_volume"] - signal_price_df["log_vol_ma20"]
+    ) / signal_price_df["log_vol_std20"].replace(0, np.nan)
     for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1):
         baseline_column = _volume_ma_excluding_recent_column(days)
         ratio_column = _volume_ratio_consecutive_column(days)
@@ -856,6 +879,7 @@ def _prepare_base_dataframe(
         "signal_volume",
         "volume_ma20",
         "volume_ratio",
+        "log_z",
         *[
             column
             for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1)
@@ -880,7 +904,7 @@ def _prepare_base_dataframe(
     # 跨市场量比/恐贪来源（如 A股交易、QQQ 恐贪与量比）：美股休市日 A股开市时
     # 信号列为 NaN，用最近可用值填充（A股 T 日早上可用美股最近交易日数据），避免删掉 A股交易日
     signal_columns = [
-        "fear_greed", "signal_volume", "volume_ma20", "volume_ratio", "signal_date", "fear_date",
+        "fear_greed", "signal_volume", "volume_ma20", "volume_ratio", "log_z", "signal_date", "fear_date",
         *[
             column
             for days in range(1, MAX_VOLUME_RATIO_CONSECUTIVE_DAYS + 1)
@@ -895,7 +919,6 @@ def _prepare_base_dataframe(
     base_df = merged_df.dropna(
         subset=["fear_greed", "ma20", "volume_ma20", "volume_ratio", "execution_price", "signal_date"]
     ).reset_index(drop=True)
-
     if base_df.empty:
         diagnostics = (
             f"price={_describe_df_range(price_df)}; "
@@ -1276,6 +1299,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     ma20_values = base_df["ma20"].to_numpy(dtype=float, copy=False)
     volume_ma20_values = base_df["volume_ma20"].to_numpy(dtype=float, copy=False)
     volume_ratios = base_df["volume_ratio"].to_numpy(dtype=float, copy=False)
+    log_z_values = (
+        base_df["log_z"].to_numpy(dtype=float, copy=False)
+        if "log_z" in base_df.columns
+        else np.full(len(base_df), np.nan, dtype=float)
+    )
+    use_log_z = params.volume_z_threshold is not None
     volume_ratio_consecutive_days = int(params.volume_ratio_consecutive_days)
     buy_volume_ratio_column = _volume_ratio_consecutive_column(volume_ratio_consecutive_days)
     buy_volume_ma_column = _volume_ma_excluding_recent_column(volume_ratio_consecutive_days)
@@ -1315,6 +1344,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_fear_values = np.concatenate([[np.nan], fear_values[:-1]])
         decision_volume_ratios = np.concatenate([[np.nan], volume_ratios[:-1]])
         decision_buy_volume_ratios = np.concatenate([[np.nan], buy_volume_ratios[:-1]])
+        decision_log_z = np.concatenate([[np.nan], log_z_values[:-1]])
         decision_signal_volumes = np.concatenate([[np.nan], signal_volumes[:-1]])
         decision_signal_dates = [None] + list(signal_dates[:-1])
         decision_fear_dates = [None] + list(fear_dates[:-1])
@@ -1325,6 +1355,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_fear_values = fear_values
         decision_volume_ratios = volume_ratios
         decision_buy_volume_ratios = buy_volume_ratios
+        decision_log_z = log_z_values
         decision_signal_volumes = signal_volumes
         decision_signal_dates = signal_dates
         decision_fear_dates = fear_dates
@@ -1340,6 +1371,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     daily_data: List[Dict] = []
     closed_trade_count = 0
     winning_trade_count = 0
+    idle_days = 0
     equity_values = np.empty(len(close_prices), dtype=float)
     benchmark_values = np.empty(len(close_prices), dtype=float)
 
@@ -1348,6 +1380,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     benchmark_cash = initial_capital - benchmark_shares * first_execution_price if first_execution_price > 0 else initial_capital
 
     for index in range(len(close_prices)):
+        if shares == 0:
+            idle_days += 1
         current_date = date_strings[index]
         close_price = float(close_prices[index])
         high_price = float(decision_high_prices[index])
@@ -1371,10 +1405,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         fear_score = float(decision_fear_values[index])
         volume_ratio = float(decision_volume_ratios[index])
         buy_volume_ratio = float(decision_buy_volume_ratios[index])
-        buy_volume_signal_ok = (
-            np.isfinite(buy_volume_ratio)
-            and buy_volume_ratio >= float(params.volume_ratio_threshold)
-        )
+        log_z = float(decision_log_z[index]) if np.isfinite(decision_log_z[index]) else np.nan
+        if use_log_z:
+            buy_volume_signal_ok = np.isfinite(log_z) and log_z >= float(params.volume_z_threshold)
+        else:
+            buy_volume_signal_ok = (
+                np.isfinite(buy_volume_ratio)
+                and buy_volume_ratio >= float(params.volume_ratio_threshold)
+            )
         can_trade = cooldown_remaining == 0
         action_taken = False
 
@@ -1384,6 +1422,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         is_fear = fear_score <= params.buy_threshold
         is_greedy = fear_score >= params.greed_threshold
+        # 缩量卖出确认：sell_shrink_z > 0 时需当日 log_z <= -sell_shrink_z 才卖（量能衰竭确认）
+        shrink_sell_ok = True
+        if float(params.sell_shrink_z) > 0:
+            shrink_sell_ok = np.isfinite(log_z) and log_z <= -float(params.sell_shrink_z)
 
         if shares > 0:
             if is_greedy:
@@ -1405,10 +1447,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             # 决策价 = 信号形成时的收盘价（同收盘成交模式下即成交价）
             decision_price = float(decision_close_prices[index])
             if params.trailing_stop_pct <= 0:
-                # 移动止盈 = 0：不等待回撤，到达贪恐阈值（>= greed_threshold）即卖出
-                drawdown_from_peak = 0.0
-                drawdown_reached = True
-                trailing_reason = "到达贪恐阈值即卖（移动止盈=0）"
+                # 移动止盈 = 0：不等待回撤，到达贪恐阈值（>= greed_threshold）即卖出（缩量卖出开启时需当日缩量确认）
+                if float(params.sell_shrink_z) > 0 and not shrink_sell_ok:
+                    drawdown_reached = False
+                    trailing_reason = "到达贪恐阈值但未缩量，等待缩量确认"
+                else:
+                    drawdown_from_peak = 0.0
+                    drawdown_reached = True
+                    trailing_reason = "到达贪恐阈值即卖（移动止盈=0）"
             else:
                 drawdown_from_peak = ((greed_peak_price - decision_price) / greed_peak_price) * 100 if greed_peak_price > 0 else 0.0
                 drawdown_reached = drawdown_from_peak >= params.trailing_stop_pct
@@ -1626,6 +1672,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         "trade_count": len(trades),
         "buy_count": sum(1 for item in trades if item["action"] == "BUY"),
         "sell_count": sum(1 for item in trades if item["action"] == "SELL"),
+        "idle_days": idle_days,
+        "total_trading_days": len(close_prices),
+        "idle_ratio": round(idle_days / len(close_prices) * 100, 2) if len(close_prices) else 0.0,
         "ending_cash": cash,
         "ending_shares": shares,
         "execution_price_type": "next_day_open" if use_next_open else "same_day_close",
@@ -1688,6 +1737,11 @@ def _run_seesaw_backtest(
             )
             d_fear = fear
             d_buy_vr = buy_vr
+        raw_log_z = (
+            df["log_z"].to_numpy(dtype=float, copy=False)
+            if "log_z" in df.columns else np.full(len(date_texts), np.nan)
+        )
+        d_log_z = np.concatenate([[np.nan], raw_log_z[:-1]]) if use_next_open else raw_log_z
         by_date: Dict[str, Dict] = {}
         for index, day_text in enumerate(date_texts):
             by_date[day_text] = {
@@ -1698,6 +1752,7 @@ def _run_seesaw_backtest(
                 "exec": float(exec_p[index]),
                 "fear": float(d_fear[index]),
                 "buy_vr": float(d_buy_vr[index]),
+                "log_z": float(d_log_z[index]),
                 "volume": float(df["volume"].to_numpy(dtype=float, copy=False)[index]),
             }
         return {"dates": dates, "date_texts": date_texts, "by_date": by_date}
@@ -1727,6 +1782,7 @@ def _run_seesaw_backtest(
     daily_data: List[Dict] = []
     closed_trade_count = 0
     winning_trade_count = 0
+    idle_days = 0
     equity_values = np.empty(len(main_dates), dtype=float)
     benchmark_values = np.empty(len(main_dates), dtype=float)
 
@@ -1841,6 +1897,8 @@ def _run_seesaw_backtest(
         return {"date": day_text, "action": "BUY", "symbol": symbol, "quantity": buy_qty, "price": exec_price, "amount": actual}
 
     for index, day_text in enumerate(main_dates):
+        if position_symbol is None:
+            idle_days += 1
         if index == 0 and use_next_open:
             # 首日无前一日信号，只记账不平仓
             close_price = float(main["by_date"][day_text]["close"])
@@ -1882,17 +1940,28 @@ def _run_seesaw_backtest(
         main_info = main["by_date"][day_text]
         main_fear = main_info["fear"]
         main_vr = main_info["buy_vr"]
+        use_log_z = params.volume_z_threshold is not None
+        main_log_z = main_info["log_z"]
+        if use_log_z:
+            main_vol_ok = np.isfinite(main_log_z) and main_log_z >= float(params.volume_z_threshold)
+        else:
+            main_vol_ok = np.isfinite(main_vr) and main_vr >= float(params.volume_ratio_threshold)
         main_signal = (
             np.isfinite(main_fear) and main_fear <= float(params.buy_threshold)
-            and np.isfinite(main_vr) and main_vr >= float(params.volume_ratio_threshold)
+            and main_vol_ok
         )
         main_greedy = np.isfinite(main_fear) and main_fear >= float(params.greed_threshold)
         sub_info = sub["by_date"].get(day_text)
         sub_fear = float(sub_info["fear"]) if sub_info else np.nan
         sub_vr = float(sub_info["buy_vr"]) if sub_info else np.nan
+        sub_log_z = float(sub_info["log_z"]) if sub_info else np.nan
+        if use_log_z:
+            sub_vol_ok = np.isfinite(sub_log_z) and sub_log_z >= float(params.volume_z_threshold)
+        else:
+            sub_vol_ok = np.isfinite(sub_vr) and sub_vr >= float(params.sub_volume_ratio_threshold)
         sub_signal = (
             np.isfinite(sub_fear) and sub_fear <= float(params.sub_buy_threshold)
-            and np.isfinite(sub_vr) and sub_vr >= float(params.sub_volume_ratio_threshold)
+            and sub_vol_ok
         )
         sub_greedy = np.isfinite(sub_fear) and sub_fear >= float(params.greed_threshold)
 
@@ -1921,9 +1990,14 @@ def _run_seesaw_backtest(
             sub2_info = sub2["by_date"].get(day_text)
             sub2_fear = float(sub2_info["fear"]) if sub2_info else np.nan
             sub2_vr = float(sub2_info["buy_vr"]) if sub2_info else np.nan
+            sub2_log_z = float(sub2_info["log_z"]) if sub2_info else np.nan
+            if use_log_z:
+                sub2_vol_ok = np.isfinite(sub2_log_z) and sub2_log_z >= float(params.volume_z_threshold)
+            else:
+                sub2_vol_ok = np.isfinite(sub2_vr) and sub2_vr >= float(params.sub2_volume_ratio_threshold)
             sub2_signal = (
                 np.isfinite(sub2_fear) and sub2_fear <= float(params.sub2_buy_threshold)
-                and np.isfinite(sub2_vr) and sub2_vr >= float(params.sub2_volume_ratio_threshold)
+                and sub2_vol_ok
             )
             sub2_greedy = np.isfinite(sub2_fear) and sub2_fear >= float(params.greed_threshold)
             sig["sub2"] = {
@@ -1932,14 +2006,19 @@ def _run_seesaw_backtest(
             }
 
         def _sell_held():
-            """持有标的贪恐卖出（trailing 支持）。"""
+            """持有标的贪恐卖出（trailing 支持；trailing=0 贪即卖时 sell_shrink_z>0 需当日缩量确认）。"""
             nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
             held_sig = sig[position_symbol]
             held_fear = float(held_sig["fear"])
             held_vr = float(held_sig["vr"])
+            held_log_z = float(_holder(position_symbol)["by_date"][day_text]["log_z"])
             if float(params.trailing_stop_pct) <= 0:
-                action = do_sell(day_text)
-                reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
+                shrink_ok = True
+                if float(params.sell_shrink_z) > 0:
+                    shrink_ok = np.isfinite(held_log_z) and held_log_z <= -float(params.sell_shrink_z)
+                if shrink_ok:
+                    action = do_sell(day_text)
+                    reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值且缩量{held_log_z:.2f}σ即卖（移动止盈=0）"
             else:
                 held_info = _holder(position_symbol)["by_date"][day_text]
                 if held_sig["greedy"]:
@@ -2098,6 +2177,9 @@ def _run_seesaw_backtest(
         "trade_count": len(trades),
         "buy_count": sum(1 for item in trades if item["action"] == "BUY"),
         "sell_count": sum(1 for item in trades if item["action"] == "SELL"),
+        "idle_days": idle_days,
+        "total_trading_days": len(main_dates),
+        "idle_ratio": round(idle_days / len(main_dates) * 100, 2) if main_dates else 0.0,
         "ending_cash": cash,
         "ending_shares": shares,
         "execution_price_type": execution_price_type,
@@ -2261,6 +2343,8 @@ def _evaluate_search_candidates(
                         sub2_symbol=payload.sub2_symbol,
                         sub2_fear_source=payload.sub2_fear_source,
                         sub2_volume_signal_symbol=payload.sub2_volume_signal_symbol,
+                        volume_z_threshold=payload.volume_z_threshold,
+                        sell_shrink_z=payload.sell_shrink_z,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -2299,6 +2383,8 @@ def _evaluate_search_candidates(
                 payload.sub2_symbol,
                 payload.sub2_fear_source,
                 payload.sub2_volume_signal_symbol,
+                payload.volume_z_threshold,
+                payload.sell_shrink_z,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -2356,6 +2442,8 @@ def _evaluate_search_batch(
     sub2_symbol: Optional[str] = None,
     sub2_fear_source: Optional[str] = None,
     sub2_volume_signal_symbol: Optional[str] = None,
+    volume_z_threshold: Optional[float] = 1.25,
+    sell_shrink_z: float = -1.0,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -2411,6 +2499,8 @@ def _evaluate_search_batch(
                 sub2_volume_signal_symbol=sub2_volume_signal_symbol,
                 sub2_buy_threshold=float(sub2_buy_threshold if sub2_buy_threshold is not None else 20.0),
                 sub2_volume_ratio_threshold=float(sub2_volume_ratio_threshold if sub2_volume_ratio_threshold is not None else 1.3),
+                volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
+                sell_shrink_z=float(sell_shrink_z),
             )
         except ValidationError as exc:
             skipped_combinations += 1

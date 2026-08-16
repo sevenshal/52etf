@@ -248,6 +248,25 @@ class AStockFearStrategyTrader:
             return None
         return volume / prior
 
+    @staticmethod
+    def _log_z_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
+        """信号日对数放量 z 值：(log(vol) - 前20日log均值) / 前20日log标准差（与回测一致）。"""
+        if bars is None or bars.empty:
+            return None
+        log_volume = np.log(pd.to_numeric(bars["volume"], errors="coerce").replace(0, np.nan))
+        prior_mean = log_volume.shift(1).rolling(VOLUME_WINDOW, min_periods=VOLUME_WINDOW).mean()
+        prior_std = log_volume.shift(1).rolling(VOLUME_WINDOW, min_periods=VOLUME_WINDOW).std(ddof=0)
+        row = bars[bars["trade_date"] == signal_date]
+        if row.empty:
+            return None
+        idx = row.index[0]
+        log_vol = float(log_volume.iloc[idx])
+        prior = float(prior_mean.iloc[idx])
+        std = float(prior_std.iloc[idx])
+        if np.isnan(log_vol) or np.isnan(prior) or np.isnan(std) or std <= 0:
+            return None
+        return (log_vol - prior) / std
+
     async def _build_snapshot(self, config: SimpleNamespace, price_map: Dict[str, float]) -> SimpleNamespace:
         """外部交易子账户快照（仅 A 股外部账户）。返回主标的与跷跷板候补的持仓。"""
         if not config.external_trading_account_id or not config.live_sub_account_id:
@@ -579,6 +598,12 @@ class AStockFearStrategyTrader:
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
                     config.volume_ratio_threshold = float(persisted_config.volume_ratio_threshold)
+                    config.volume_z_threshold = (
+                        float(persisted_config.volume_z_threshold)
+                        if getattr(persisted_config, "volume_z_threshold", None) is not None
+                        else None
+                    )
+                    config.sell_shrink_z = float(getattr(persisted_config, "sell_shrink_z", -1.0) or -1.0)
                     config.trailing_stop_pct = float(persisted_config.trailing_stop_pct)
                     config.buy_position_pct = float(persisted_config.buy_position_pct)
                     config.sell_position_pct = float(persisted_config.sell_position_pct)
@@ -620,13 +645,15 @@ class AStockFearStrategyTrader:
             fear_score = float(fear_map[signal_date])
             volume_symbol = normalize_external_symbol(config.volume_signal_symbol or symbol) or symbol
             bars = self._fetch_etf_bars(volume_symbol, lookback_start, signal_date)
+            use_log_z = getattr(config, "volume_z_threshold", None) is not None
             volume_ratio = self._volume_ratio_at(bars, signal_date)
-            if volume_ratio is None:
-                log_message = f"信号日 {signal_date} 缺少 {volume_symbol} 量比数据（历史不足 {VOLUME_WINDOW} 日），跳过。"
+            log_z = self._log_z_at(bars, signal_date) if use_log_z else None
+            if volume_ratio is None or (use_log_z and log_z is None):
+                log_message = f"信号日 {signal_date} 缺少 {volume_symbol} 量能数据（历史不足 {VOLUME_WINDOW} 日），跳过。"
                 self._persist_run_result(
                     config_id=config_id, account_id=config.account_id, symbol=symbol,
                     trigger_source=trigger_source, action="CHECK", status="SKIPPED",
-                    message=log_message, state_values=state, run_message="量比数据未就绪",
+                    message=log_message, state_values=state, run_message="量能数据未就绪",
                 )
                 return
 
@@ -634,6 +661,7 @@ class AStockFearStrategyTrader:
             sub_symbol = normalize_external_symbol(config.sub_symbol) if getattr(config, "sub_symbol", None) else None
             sub_fear_score = None
             sub_volume_ratio = None
+            sub_log_z = None
             sub_fear_label = ""
             sub_bars = None
             sub_fear_map: Dict[date, float] = {}
@@ -646,12 +674,17 @@ class AStockFearStrategyTrader:
                     sub_volume_symbol = normalize_external_symbol(config.sub_volume_signal_symbol or sub_symbol) or sub_symbol
                     sub_bars = self._fetch_etf_bars(sub_volume_symbol, lookback_start, signal_date)
                     sub_volume_ratio = self._volume_ratio_at(sub_bars, signal_date)
+                    if use_log_z:
+                        sub_log_z = self._log_z_at(sub_bars, signal_date)
+                    else:
+                        sub_log_z = None
                     sub_fear_label = _fear_source_label(getattr(config, "sub_fear_source", None) or "a_stock_000688_sh")
 
             # 第二候补数据（可选，三标的轮动）：恐贪 + 量比（独立阈值）
             sub2_symbol = normalize_external_symbol(config.sub2_symbol) if getattr(config, "sub2_symbol", None) else None
             sub2_fear_score = None
             sub2_volume_ratio = None
+            sub2_log_z = None
             sub2_fear_label = ""
             sub2_bars = None
             sub2_fear_map: Dict[date, float] = {}
@@ -664,6 +697,10 @@ class AStockFearStrategyTrader:
                     sub2_volume_symbol = normalize_external_symbol(config.sub2_volume_signal_symbol or sub2_symbol) or sub2_symbol
                     sub2_bars = self._fetch_etf_bars(sub2_volume_symbol, lookback_start, signal_date)
                     sub2_volume_ratio = self._volume_ratio_at(sub2_bars, signal_date)
+                    if use_log_z:
+                        sub2_log_z = self._log_z_at(sub2_bars, signal_date)
+                    else:
+                        sub2_log_z = None
                     sub2_fear_label = _fear_source_label(getattr(config, "sub2_fear_source", None) or "qqq_clone")
 
             # 实时价格（主+候补+第二候补），hub quote + LongPort 兜底
@@ -784,27 +821,41 @@ class AStockFearStrategyTrader:
                     state.take_profit_cycle_sell_count = 0
             state.last_processed_date = signal_date
 
-            # 信号：主标的 + 候补（独立阈值）
+            # 信号：主标的 + 候补（独立阈值）；放量统一用 log-z（volume_z_threshold）或旧量比
+            if use_log_z:
+                main_vol_ok = log_z is not None and log_z >= float(config.volume_z_threshold)
+            else:
+                main_vol_ok = volume_ratio is not None and volume_ratio >= float(config.volume_ratio_threshold)
             main_signal = (
                 fear_score <= float(config.buy_threshold)
-                and volume_ratio >= float(config.volume_ratio_threshold)
+                and main_vol_ok
             )
             main_greedy = fear_score >= float(config.greed_threshold)
+            sub_vol_ok = False
+            if sub_symbol is not None and sub_volume_ratio is not None:
+                if use_log_z:
+                    sub_vol_ok = sub_log_z is not None and sub_log_z >= float(config.volume_z_threshold)
+                else:
+                    sub_vol_ok = sub_volume_ratio >= float(getattr(config, "sub_volume_ratio_threshold", 1.6) or 1.6)
             sub_signal = (
                 sub_symbol is not None
                 and sub_fear_score is not None
                 and sub_fear_score <= float(getattr(config, "sub_buy_threshold", 25.0) or 25.0)
-                and sub_volume_ratio is not None
-                and sub_volume_ratio >= float(getattr(config, "sub_volume_ratio_threshold", 1.6) or 1.6)
+                and sub_vol_ok
             )
             sub_greedy = sub_symbol is not None and sub_fear_score is not None and sub_fear_score >= float(config.greed_threshold)
             # 第二候补信号（三标的轮动）
+            sub2_vol_ok = False
+            if sub2_symbol is not None and sub2_volume_ratio is not None:
+                if use_log_z:
+                    sub2_vol_ok = sub2_log_z is not None and sub2_log_z >= float(config.volume_z_threshold)
+                else:
+                    sub2_vol_ok = sub2_volume_ratio >= float(getattr(config, "sub2_volume_ratio_threshold", 1.3) or 1.3)
             sub2_signal = (
                 sub2_symbol is not None
                 and sub2_fear_score is not None
                 and sub2_fear_score <= float(getattr(config, "sub2_buy_threshold", 20.0) or 20.0)
-                and sub2_volume_ratio is not None
-                and sub2_volume_ratio >= float(getattr(config, "sub2_volume_ratio_threshold", 1.3) or 1.3)
+                and sub2_vol_ok
             )
             sub2_greedy = sub2_symbol is not None and sub2_fear_score is not None and sub2_fear_score >= float(config.greed_threshold)
             # 对称双轮动：换仓阈值非空时启用（恐贪超过阈值且另一标的有信号则换仓；空仓任一触发都买更恐慌的）
@@ -841,6 +892,11 @@ class AStockFearStrategyTrader:
 
             # ---- 状态机：持有主/持有候补/空仓（use_swap=对称双轮动，否则主辅跷跷板） ----
             if log_action != "SKIP" and can_trade and shares > 0 and holding:
+                # 缩量卖出确认（仅贪即卖 trailing=0 路径生效）：sell_shrink_z>0 时需持仓标的前一交易日缩量
+                shrink_sell_ok = True
+                if float(getattr(config, "sell_shrink_z", -1.0) or -1.0) > 0:
+                    shrink_log_z = log_z if holding == "main" else (sub_log_z if holding == "sub" else sub2_log_z)
+                    shrink_sell_ok = shrink_log_z is not None and shrink_log_z <= -float(getattr(config, "sell_shrink_z", -1.0))
                 if holding == "main" and main_greedy:
                     drawdown_from_peak = 0.0
                     drawdown_reached = True
@@ -852,6 +908,9 @@ class AStockFearStrategyTrader:
                         )
                         drawdown_reached = drawdown_from_peak >= float(config.trailing_stop_pct)
                         trailing_reason = f"较止盈峰值回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
+                    elif not shrink_sell_ok:
+                        drawdown_reached = False
+                        trailing_reason = "到达贪恐阈值但未缩量，等待缩量确认"
                     sell_price_guard_passed = (not config.sell_price_above_avg_cost) or current_price > avg_cost
                     min_hold_shares = (
                         ceil(portfolio_value * (float(config.min_position_pct_after_take_profit) / 100.0) / current_price)
@@ -906,7 +965,7 @@ class AStockFearStrategyTrader:
                 elif holding == "sub":
                     if use_swap:
                         # 对称双轮动：候补贪恐>=卖出阈值 → 卖；候补恐贪>换仓阈值 且 主有信号 → 换主
-                        if sub_greedy:
+                        if sub_greedy and shrink_sell_ok:
                             order_action = "SELL"
                             order_symbol = holding_symbol
                             order_quantity = int(available_shares)
@@ -986,7 +1045,7 @@ class AStockFearStrategyTrader:
                 elif holding == "sub2":
                     if use_swap:
                         # 三标的对称：第二候补贪恐>=卖出阈值 → 卖；恐贪>换仓阈值 且 其他有信号 → 换仓
-                        if sub2_greedy:
+                        if sub2_greedy and shrink_sell_ok:
                             order_action = "SELL"
                             order_symbol = holding_symbol
                             order_quantity = int(available_shares)

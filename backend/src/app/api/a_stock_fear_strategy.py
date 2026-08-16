@@ -65,6 +65,8 @@ class AStockFearStrategyConfigPayload(BaseModel):
     buy_threshold: float = 30.0
     greed_threshold: float = 70.0
     volume_ratio_threshold: float = 1.3
+    volume_z_threshold: Optional[float] = 1.25
+    sell_shrink_z: float = -1.0
     buy_position_pct: float = 100.0
     cooldown_days: int = 0
     trailing_stop_pct: float = 0.0
@@ -350,6 +352,8 @@ CONFIG_FIELDS = [
     "buy_threshold",
     "greed_threshold",
     "volume_ratio_threshold",
+    "volume_z_threshold",
+    "sell_shrink_z",
     "buy_position_pct",
     "cooldown_days",
     "trailing_stop_pct",
@@ -621,6 +625,8 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_account)):
             "buy_threshold": 30.0,
             "greed_threshold": 70.0,
             "volume_ratio_threshold": 1.3,
+            "volume_z_threshold": 1.25,
+            "sell_shrink_z": -1.0,
             "buy_position_pct": 100.0,
             "cooldown_days": 0,
             "trailing_stop_pct": 0.0,
