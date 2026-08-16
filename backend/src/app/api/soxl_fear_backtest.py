@@ -2321,6 +2321,27 @@ def _run_seesaw_backtest(
                     t = sig[target]
                     reason = f"多标的都触发，{t['label']} {t['fear']:.2f} 更恐慌，买入 {t['symbol']}"
                     trade_signal_fear, trade_signal_vr, trade_signal_label = float(t["fear"]), float(t["vr"]), t["label"]
+                elif params.trend_enabled and trend_by_date:
+                    # 对称轮动下无恐慌信号 → 趋势补位
+                    day_data = trend_by_date.get(day_text)
+                    if day_data and day_data.get("slots"):
+                        best = None
+                        for slot in day_data["slots"]:
+                            slot_fear = slot.get("fear")
+                            if slot_fear is not None and slot_fear >= float(params.trend_max_fear):
+                                continue
+                            if slot["close"] > slot["ma"] and (best is None or slot["gap"] > best["gap"]):
+                                best = slot
+                        if best:
+                            action = do_buy_trend(day_text, best)
+                            if action:
+                                reason = (
+                                    f"空仓无恐慌信号，趋势补位：{TREND_SLOT_LABELS.get(best['index'], best['index'])} "
+                                    f"gap {best['gap']:.2%}（恐贪<{params.trend_max_fear:g}），买入 {best['etf']}"
+                                )
+                                trade_signal_fear = best.get("fear")
+                                trade_signal_vr = None
+                                trade_signal_label = TREND_SLOT_LABELS.get(best["index"], best["index"])
             elif main_signal:
                 action = do_buy(day_text, "main")
                 reason = f"{main_fear_label} {main_fear:.2f} 极恐放量买入主标的"
@@ -2372,15 +2393,15 @@ def _run_seesaw_backtest(
                         )
             else:
                 held_sig = sig.get(position_symbol)
-            if held_sig and held_sig["greedy"]:
-                _sell_held()
-            elif use_swap and held_sig and np.isfinite(held_sig["fear"]) and held_sig["fear"] > swap_value:
-                others = [k for k, s in sig.items() if k != position_symbol and s["signal"] and np.isfinite(s["fear"])]
-                if others:
-                    target = min(others, key=lambda k: sig[k]["fear"])
-                    _swap_held_to(target)
-            elif not use_swap and position_symbol == "sub" and main_signal:
-                _swap_held_to("main")
+                if held_sig and held_sig["greedy"]:
+                    _sell_held()
+                elif use_swap and held_sig and np.isfinite(held_sig["fear"]) and held_sig["fear"] > swap_value:
+                    others = [k for k, s in sig.items() if k != position_symbol and s["signal"] and np.isfinite(s["fear"])]
+                    if others:
+                        target = min(others, key=lambda k: sig[k]["fear"])
+                        _swap_held_to(target)
+                elif not use_swap and position_symbol == "sub" and main_signal:
+                    _swap_held_to("main")
 
         if action is not None and action.get("action"):
             already_logged = any(
@@ -2792,6 +2813,10 @@ def _evaluate_search_batch(
                 sub2_volume_signal_symbol=sub2_volume_signal_symbol,
                 sub2_buy_threshold=float(sub2_buy_threshold if sub2_buy_threshold is not None else 20.0),
                 sub2_volume_ratio_threshold=float(sub2_volume_ratio_threshold if sub2_volume_ratio_threshold is not None else 1.3),
+                trend_enabled=bool(trend_enabled),
+                trend_ma_win=int(trend_ma_win),
+                trend_max_fear=float(trend_max_fear),
+                trend_slots=trend_slots,
             )
         except ValidationError as exc:
             skipped_combinations += 1
