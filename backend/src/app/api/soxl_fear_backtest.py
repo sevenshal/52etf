@@ -2569,6 +2569,9 @@ def _evaluate_search_candidates(
                 payload.swap_threshold_values,
                 payload.sub2_buy_threshold_values,
                 payload.sub2_volume_ratio_threshold_values,
+                payload.trend_enabled_values,
+                payload.trend_ma_win_values,
+                payload.trend_max_fear_values,
             ):
                 index += 1
                 batch.append((index, values))
