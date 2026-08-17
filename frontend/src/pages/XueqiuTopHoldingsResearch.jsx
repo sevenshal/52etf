@@ -4,13 +4,17 @@ import {
   Card,
   Col,
   Empty,
+  Form,
   Input,
   InputNumber,
+  Modal,
   Row,
   Space,
+  Spin,
   Statistic,
   Switch,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -21,6 +25,7 @@ import {
   LineChartOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
   StockOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -295,6 +300,107 @@ const XueqiuTopHoldingsResearch = () => {
   const latestRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [configs, setConfigs] = useState([]);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configForm] = Form.useForm();
+
+  const STRATEGY_CONFIG_FIELDS = useMemo(() => [
+    {
+      key: 'fear_threshold',
+      label: '恐慌阈值',
+      tooltip: '恐贪分 < 该值视为恐慌；恐慌且放量时才扩到 10 只',
+      min: 0,
+      max: 100,
+      step: 1,
+      suffix: '分',
+    },
+    {
+      key: 'fear_volume_std',
+      label: '恐慌放量标准差',
+      tooltip: '放量确认：log量比z 需大于该标准差（默认 1.0）',
+      min: 0,
+      max: 10,
+      step: 0.1,
+      suffix: 'σ',
+    },
+    {
+      key: 'greed_threshold',
+      label: '贪婪阈值',
+      tooltip: '恐贪分 > 该值视为贪婪；贪婪且缩量时才收缩到 3 只',
+      min: 0,
+      max: 100,
+      step: 1,
+      suffix: '分',
+    },
+    {
+      key: 'greed_volume_std',
+      label: '贪婪缩量标准差',
+      tooltip: '缩量确认：log量比z 需小于 -该标准差（默认 0.25）',
+      min: 0,
+      max: 10,
+      step: 0.05,
+      suffix: 'σ',
+    },
+    {
+      key: 'min_holding_cubes',
+      label: '最少持仓组合数',
+      tooltip: '买入候选至少被多少个活跃组合持有',
+      min: 1,
+      max: 200,
+      step: 1,
+      suffix: '个',
+    },
+  ], []);
+
+  const fetchStrategyConfigs = useCallback(async () => {
+    setConfigLoading(true);
+    try {
+      const response = await request.get('/api/factor-lab/xueqiu-strategy-configs');
+      const items = response.data?.configs || [];
+      setConfigs(items);
+      const initialValues = {};
+      items.forEach(item => {
+        STRATEGY_CONFIG_FIELDS.forEach(field => {
+          initialValues[`${item.strategy_key}.${field.key}`] = item[field.key];
+        });
+      });
+      configForm.setFieldsValue(initialValues);
+    } catch (error) {
+      message.error(error?.response?.data?.detail || error.message || '加载策略配置失败');
+    } finally {
+      setConfigLoading(false);
+    }
+  }, [STRATEGY_CONFIG_FIELDS, configForm]);
+
+  const openConfigModal = () => {
+    setConfigOpen(true);
+    fetchStrategyConfigs();
+  };
+
+  const saveStrategyConfigs = async () => {
+    const values = configForm.getFieldsValue();
+    setConfigSaving(true);
+    try {
+      for (const item of configs) {
+        const payload = {};
+        STRATEGY_CONFIG_FIELDS.forEach(field => {
+          const value = values[`${item.strategy_key}.${field.key}`];
+          if (value !== undefined && value !== null) {
+            payload[field.key] = Number(value);
+          }
+        });
+        await request.put(`/api/factor-lab/xueqiu-strategy-configs/${item.strategy_key}`, payload);
+      }
+      message.success('策略配置已保存');
+      await fetchStrategyConfigs();
+    } catch (error) {
+      message.error(error?.response?.data?.detail || error.message || '保存策略配置失败');
+    } finally {
+      setConfigSaving(false);
+    }
+  };
 
   const latestItems = useMemo(() => latestData?.items || [], [latestData]);
   const ratioStats = useMemo(() => {
@@ -728,6 +834,9 @@ const XueqiuTopHoldingsResearch = () => {
                   onChange={event => setSearchText(event.target.value)}
                 />
                 <Button icon={<ReloadOutlined />} onClick={fetchLatest} loading={latestLoading} />
+                <Button icon={<SettingOutlined />} onClick={openConfigModal}>
+                  策略配置
+                </Button>
               </Space>
             )}
           >
@@ -825,6 +934,66 @@ const XueqiuTopHoldingsResearch = () => {
           </Card>
         </Col>
       </Row>
+
+      <Modal
+        title={<Space><SettingOutlined />星澜组合策略配置</Space>}
+        open={configOpen}
+        onCancel={() => setConfigOpen(false)}
+        width={860}
+        maskClosable={false}
+        destroyOnClose={false}
+        styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
+        footer={(
+          <Space>
+            <Button onClick={() => setConfigOpen(false)}>取消</Button>
+            <Button loading={configSaving} type="primary" onClick={saveStrategyConfigs}>
+              保存
+            </Button>
+          </Space>
+        )}
+      >
+        <Spin spinning={configLoading}>
+          <Form form={configForm} layout="vertical">
+            <Tabs
+              items={configs.map(item => ({
+                key: item.strategy_key,
+                label: item.label || item.strategy_key,
+                children: (
+                  <Row gutter={16}>
+                    {STRATEGY_CONFIG_FIELDS.map(field => (
+                      <Col xs={24} md={12} key={field.key}>
+                        <Form.Item
+                          name={`${item.strategy_key}.${field.key}`}
+                          label={(
+                            <Tooltip title={field.tooltip}>
+                              {field.label}
+                            </Tooltip>
+                          )}
+                        >
+                          <InputNumber
+                            min={field.min}
+                            max={field.max}
+                            step={field.step}
+                            precision={field.key === 'min_holding_cubes' ? 0 : 2}
+                            style={{ width: '100%' }}
+                          />
+                        </Form.Item>
+                      </Col>
+                    ))}
+                    <Col span={24}>
+                      <Text type="secondary">
+                        规则：恐慌(恐贪分&lt;恐慌阈值)且放量(log量比z&gt;放量标准差) → 10只；
+                        贪婪(恐贪分&gt;贪婪阈值)且缩量(log量比z&lt;-缩量标准差) → 3只；
+                        其余情况维持当前仓位。log量比z = 当日log(成交量) 相对前21个交易日log(成交量) 的 z-score。
+                      </Text>
+                    </Col>
+                  </Row>
+                ),
+              }))}
+            />
+          </Form>
+        </Spin>
+      </Modal>
     </div>
   );
 };

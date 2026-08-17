@@ -1237,6 +1237,27 @@ class XueqiuTopHoldingsRun(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class XueqiuStrategyConfig(Base):
+    """雪球星澜组合策略参数（壹号综合权重/贰号排名加速/叁号权价比）。
+
+    恐贪择时仓位管理：恐慌(score<fear_threshold)且放量(log量比z>fear_volume_std) → 10只；
+    贪婪(score>greed_threshold)且缩量(log量比z<-greed_volume_std) → 3只。
+    """
+    __tablename__ = "xueqiu_strategy_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy_key = Column(String(32), unique=True, nullable=False, index=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    # 恐慌/贪婪分数阈值
+    fear_threshold = Column(Float, nullable=False, default=25.0)
+    greed_threshold = Column(Float, nullable=False, default=75.0)
+    # 放量/缩量的 log 量比 z-score 阈值（放量：z > fear_volume_std；缩量：z < -greed_volume_std）
+    fear_volume_std = Column(Float, nullable=False, default=1.0)
+    greed_volume_std = Column(Float, nullable=False, default=0.25)
+    # 买入候选最少持仓组合数
+    min_holding_cubes = Column(Integer, nullable=False, default=8)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class IBKRAccountConfig(Base):
     """IBKR Gateway 账户配置与基础设施管理"""
     __tablename__ = "ib_account_configs"

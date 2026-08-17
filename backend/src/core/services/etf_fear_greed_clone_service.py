@@ -27,7 +27,7 @@ from .evc import EVCService
 from .longport import LongPortService
 from .market import MarketService
 from .quote import QuoteService
-from .volume_metrics import calculate_volume_ratio
+from .volume_metrics import calculate_log_volume_z_score, calculate_volume_ratio
 from .a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
 from ..analytics_database import AnalyticsSession
 from ..database import ETFHolding as DBETFHolding
@@ -1025,10 +1025,11 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                         upto = frame[frame.index <= pd.Timestamp(anchor)]
                         if upto.empty:
                             continue
-                        # 恐贪最新日及之前最近 21 个交易日的 ETF 成交量（最新在前）
+                        # 恐贪最新日及之前最近 22 个交易日的 ETF 成交量（最新在前，含今日）
+                        # 今日 + 前 21 个交易日，供 log 量比 z-score 使用
                         proxy_volume_by_symbol[symbol] = [
                             (ts.date(), float(row.volume))
-                            for ts, row in upto.tail(21).iloc[::-1].iterrows()
+                            for ts, row in upto.tail(22).iloc[::-1].iterrows()
                             if pd.notna(row.volume)
                         ]
             summaries = [
@@ -2257,6 +2258,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "price_change_1m_pct": None,
                 "volume_ratio_20d": None,
                 "volume_ma20": None,
+                "log_volume_z": None,
                 "history_points": 0,
                 "is_stale": True,
                 "stale_days": None,
@@ -2270,7 +2272,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 ETFFearGreedCloneHistory.etf_volume.isnot(None),
             )
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .limit(20)
+            .limit(21)
             .all()
         )
         if proxy_volume_history:
@@ -2287,6 +2289,21 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 )
         else:
             volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
+                latest_row.etf_volume,
+                [row.etf_volume for row in previous_volume_rows],
+            )
+        if proxy_volume_history and len(proxy_volume_history) >= 2:
+            log_volume_z = calculate_log_volume_z_score(
+                proxy_volume_history[0][1],
+                [volume for _, volume in proxy_volume_history[1:]],
+            )
+            if log_volume_z is None:
+                log_volume_z = calculate_log_volume_z_score(
+                    latest_row.etf_volume,
+                    [row.etf_volume for row in previous_volume_rows],
+                )
+        else:
+            log_volume_z = calculate_log_volume_z_score(
                 latest_row.etf_volume,
                 [row.etf_volume for row in previous_volume_rows],
             )
@@ -2316,6 +2333,11 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "volume_ma20": (
                 round(volume_ma20, 4)
                 if volume_ma20 is not None
+                else None
+            ),
+            "log_volume_z": (
+                round(log_volume_z, 4)
+                if log_volume_z is not None
                 else None
             ),
             "history_points": history_points,

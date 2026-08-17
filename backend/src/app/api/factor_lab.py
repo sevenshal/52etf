@@ -3066,6 +3066,62 @@ def get_xueqiu_top_holding_details(
     )
 
 
+class XueqiuStrategyConfigUpdate(BaseModel):
+    """雪球星澜组合策略参数更新（壹号综合权重/贰号排名加速/叁号权价比）。"""
+    enabled: Optional[bool] = None
+    fear_threshold: Optional[float] = Field(None, gt=0, lt=100, description="恐慌阈值（恐贪分<该值）")
+    greed_threshold: Optional[float] = Field(None, gt=0, lt=100, description="贪婪阈值（恐贪分>该值）")
+    fear_volume_std: Optional[float] = Field(None, ge=0, description="恐慌放量确认：log量比z 需大于该标准差")
+    greed_volume_std: Optional[float] = Field(None, ge=0, description="贪婪缩量确认：log量比z 需小于 -该标准差")
+    min_holding_cubes: Optional[int] = Field(None, ge=1, le=200, description="买入候选最少持仓组合数")
+
+
+XUEQIU_STRATEGY_CONFIG_KEYS = ("buffer", "rank_acceleration", "weight_price_ratio")
+
+
+@router.get("/xueqiu-strategy-configs")
+def get_xueqiu_strategy_configs(
+    _: str = Depends(valid_admin_account),
+):
+    from ...robot.xueqiu_top_holdings_report import (
+        XUEQIU_STRATEGY_CONFIG_DEFAULTS,
+        load_xueqiu_strategy_config,
+    )
+
+    return {
+        "configs": [
+            load_xueqiu_strategy_config(strategy_key)
+            for strategy_key in XUEQIU_STRATEGY_CONFIG_DEFAULTS
+        ],
+    }
+
+
+@router.put("/xueqiu-strategy-configs/{strategy_key}")
+def update_xueqiu_strategy_config(
+    strategy_key: str,
+    payload: XueqiuStrategyConfigUpdate,
+    _: str = Depends(valid_admin_account),
+):
+    if strategy_key not in XUEQIU_STRATEGY_CONFIG_KEYS:
+        raise HTTPException(status_code=400, detail=f"未知策略: {strategy_key}")
+    from ...core.database import XueqiuStrategyConfig
+    from ...robot.xueqiu_top_holdings_report import load_xueqiu_strategy_config
+
+    updates = payload.dict(exclude_none=True)
+    with get_db_ctx() as db:
+        row = (
+            db.query(XueqiuStrategyConfig)
+            .filter(XueqiuStrategyConfig.strategy_key == strategy_key)
+            .first()
+        )
+        if row is None:
+            row = XueqiuStrategyConfig(strategy_key=strategy_key)
+            db.add(row)
+        for key, value in updates.items():
+            setattr(row, key, value)
+    return load_xueqiu_strategy_config(strategy_key)
+
+
 def _load_industry_frame(
     db: ORMSession,
     symbols: List[str],

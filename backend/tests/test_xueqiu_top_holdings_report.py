@@ -45,6 +45,7 @@ from src.robot.xueqiu_top_holdings_report import (
     rounded_rebalance_weights,
     process_xueqiu_top_holdings_rebalance_for_robot,
     resolve_fear_greed_target_count,
+    resolve_xueqiu_strategy_position_target,
     save_cube_activity_cache,
     save_xueqiu_cube_rank_history_to_duckdb,
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
@@ -72,6 +73,83 @@ class XueqiuTopHoldingsReportTest(TestCase):
         )
         self.assertEqual((3, "greed"), resolve_fear_greed_target_count({"score": 75.01}))
         self.assertEqual((10, "missing_fallback"), resolve_fear_greed_target_count(None))
+
+    def test_position_target_requires_fear_plus_volume_expansion(self):
+        # 恐慌且放量 → 10只（从3只扩仓）
+        self.assertEqual(
+            (10, "fear_volume"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": 1.5},
+                current_holding_count=3,
+            ),
+        )
+        # 恐慌但缩量 → 不扩仓（维持3只）
+        self.assertEqual(
+            (3, "neutral_keep_3"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": -1.5},
+                current_holding_count=3,
+            ),
+        )
+        # 恐慌但量比不足（未达 +1 个标准差）→ 维持
+        self.assertEqual(
+            (3, "neutral_keep_3"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": 0.5},
+                current_holding_count=3,
+            ),
+        )
+        # 无量比确认 → 维持当前
+        self.assertEqual(
+            (3, "neutral_keep_3_no_volume"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0},
+                current_holding_count=3,
+            ),
+        )
+
+    def test_position_target_requires_greed_plus_volume_shrink(self):
+        # 贪婪且缩量 → 3只（从10只收缩）
+        self.assertEqual(
+            (3, "greed_shrink"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 80.0, "log_volume_z": -1.0},
+                current_holding_count=10,
+            ),
+        )
+        # 贪婪但放量 → 不收缩（维持10只）
+        self.assertEqual(
+            (10, "neutral_keep_10"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 80.0, "log_volume_z": 1.5},
+                current_holding_count=10,
+            ),
+        )
+        # 贪婪但缩量不足（未达 -0.25 个标准差）→ 维持
+        self.assertEqual(
+            (10, "neutral_keep_10"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 80.0, "log_volume_z": -0.1},
+                current_holding_count=10,
+            ),
+        )
+
+    def test_position_target_custom_thresholds_and_fallbacks(self):
+        # 自定义阈值：恐慌 30 + 放量 2 个标准差
+        self.assertEqual(
+            (10, "fear_volume"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 28.0, "log_volume_z": 2.5},
+                current_holding_count=3,
+                fear_threshold=30.0,
+                fear_volume_std=2.0,
+            ),
+        )
+        self.assertEqual((10, "missing_fallback"), resolve_xueqiu_strategy_position_target(None))
+        self.assertEqual(
+            (10, "invalid_fallback"),
+            resolve_xueqiu_strategy_position_target({"score": None}),
+        )
 
     def test_top3_regime_keeps_holdings_until_one_falls_out_of_top12(self):
         ranking = [
@@ -549,6 +627,66 @@ class XueqiuTopHoldingsReportTest(TestCase):
             self.assertTrue(loaded["ZH000001"].cache_hit)
             self.assertEqual(123, loaded["ZH000001"].latest_rebalance_id)
             self.assertEqual("2026-05-22T13:00:58+08:00", loaded["ZH000001"].latest_rebalance_at.isoformat())
+
+    def test_strategy_config_defaults_and_upsert(self):
+        from src.core.database import XueqiuStrategyConfig
+        from src.robot.xueqiu_top_holdings_report import load_xueqiu_strategy_config
+
+        with TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{tmpdir}/strategy_config.db")
+            Base.metadata.create_all(engine, tables=[XueqiuStrategyConfig.__table__])
+            session_factory = sessionmaker(bind=engine)
+
+            with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
+                # 未配置时回退默认值
+                defaults = load_xueqiu_strategy_config("rank_acceleration")
+                self.assertEqual(25.0, defaults["fear_threshold"])
+                self.assertEqual(1.0, defaults["fear_volume_std"])
+                self.assertEqual(0.25, defaults["greed_volume_std"])
+                self.assertEqual(8, defaults["min_holding_cubes"])
+
+                # 写入配置后读取生效
+                db = session_factory()
+                db.add(
+                    XueqiuStrategyConfig(
+                        strategy_key="rank_acceleration",
+                        fear_threshold=30.0,
+                        fear_volume_std=1.5,
+                        greed_threshold=70.0,
+                        greed_volume_std=0.5,
+                        min_holding_cubes=6,
+                    )
+                )
+                db.commit()
+                db.close()
+                saved = load_xueqiu_strategy_config("rank_acceleration")
+                self.assertEqual(30.0, saved["fear_threshold"])
+                self.assertEqual(1.5, saved["fear_volume_std"])
+                self.assertEqual(0.5, saved["greed_volume_std"])
+                self.assertEqual(6, saved["min_holding_cubes"])
+                # 其他策略不受影响
+                self.assertEqual(25.0, load_xueqiu_strategy_config("buffer")["fear_threshold"])
+
+    def test_position_target_uses_configured_volume_thresholds(self):
+        # 恐慌但量比未达到配置的 1.5 标准差 → 维持
+        self.assertEqual(
+            (3, "neutral_keep_3"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": 1.2},
+                current_holding_count=3,
+                fear_threshold=25.0,
+                fear_volume_std=1.5,
+            ),
+        )
+        self.assertEqual(
+            (10, "fear_volume"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": 1.6},
+                current_holding_count=3,
+                fear_threshold=25.0,
+                fear_volume_std=1.5,
+            ),
+        )
 
     def test_buffer_plan_keeps_retained_weights_and_allocates_sold_weight_to_new_buy(self):
         ranking_symbols = [
@@ -1062,7 +1200,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": current_holdings}}),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
-            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10"},
+            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10", "log_volume_z": -2.0},
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
             return_value=[
@@ -1100,7 +1238,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("SUCCESS", result["status"])
         # 贪婪（score=80）→ 目标3只，从10只收缩
         self.assertEqual(3, len(result["top_items"]))
-        self.assertEqual("greed", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual("greed_shrink", (result["strategy_plan"] or {}).get("fear_greed_regime"))
         self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
 
     def test_rank_acceleration_is_appended_to_same_email(self):
@@ -1343,7 +1481,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3664736, "holdings": []}}),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
-            return_value={"score": 20.0, "rating": "极度恐慌", "date": "2026-07-10"},
+            return_value={"score": 20.0, "rating": "极度恐慌", "date": "2026-07-10", "log_volume_z": 2.0},
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
             return_value=[
@@ -1418,7 +1556,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             }),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
-            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10"},
+            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10", "log_volume_z": -2.0},
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
             return_value=[
@@ -1456,7 +1594,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("SUCCESS", result["status"])
         # 贪婪（score=80）→ 目标3只，从10只收缩
         self.assertEqual(3, len(result["top_items"]))
-        self.assertEqual("greed", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual("greed_shrink", (result["strategy_plan"] or {}).get("fear_greed_regime"))
         self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
 
     def test_weight_price_ratio_is_appended_to_same_email(self):
