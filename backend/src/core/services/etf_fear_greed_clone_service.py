@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_, desc, func
+from sqlalchemy import and_, desc, func, text
 
 from .fear_greed_clone_service import (
     CBOE_OPTIONS_DAILY_URL,
@@ -28,6 +28,8 @@ from .longport import LongPortService
 from .market import MarketService
 from .quote import QuoteService
 from .volume_metrics import calculate_volume_ratio
+from .a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
+from ..analytics_database import AnalyticsSession
 from ..database import ETFHolding as DBETFHolding
 from ..database import (
     ETFFearGreedCloneHistory,
@@ -45,6 +47,96 @@ from ...robot.etf.spdr import SPDRDataFetcher
 
 NASDAQ_OPTION_CHAIN_URL = "https://api.nasdaq.com/api/quote/{symbol}/option-chain"
 DEFAULT_ETF_FEAR_GREED_SYMBOLS = ["SOXX.US", "SPY.US", "QQQ.US", "DIA.US"]
+
+
+def _a_stock_proxy_etf_map() -> Dict[str, str]:
+    """A股指数自算贪恐 symbol → 场内代理 ETF 代码（无 proxy_etf 的指数不在映射里）。"""
+    return {
+        symbol: str(target["proxy_etf"]).strip().upper()
+        for symbol, target in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL.items()
+        if target.get("proxy_etf")
+    }
+
+
+def _finite_or_none(value: Any) -> Optional[float]:
+    """None / NaN / inf → None，否则保留 6 位小数。"""
+    try:
+        if value is None or pd.isna(value):
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if not np.isfinite(number) else round(number, 6)
+
+
+def _load_proxy_etf_bars(
+    etf_symbols: List[str],
+    start_date: date,
+    end_date: date,
+    use_qfq: bool = True,
+) -> Dict[str, pd.DataFrame]:
+    """从 DuckDB 读取 A股场内 ETF 日线（价格前复权可选）。
+
+    use_qfq=True 查 a_stock_fund_daily_qfq（价格前复权，成交量/成交额不变）；
+    False 查原始 a_stock_fund_daily。
+    返回 {ts_code: DataFrame(index=trade_date, columns=[open, high, low, close, volume, turnover])}。
+    """
+    symbols = sorted(
+        {
+            str(symbol or "").strip().upper()
+            for symbol in (etf_symbols or [])
+            if str(symbol or "").strip()
+        }
+    )
+    if not symbols:
+        return {}
+    table = "a_stock_fund_daily_qfq" if use_qfq else "a_stock_fund_daily"
+    placeholders = ", ".join(f":etf_{idx}" for idx in range(len(symbols)))
+    params: Dict[str, Any] = {
+        f"etf_{idx}": symbol for idx, symbol in enumerate(symbols)
+    }
+    params["start_date"] = start_date.isoformat()
+    params["end_date"] = end_date.isoformat()
+    analytics_db = AnalyticsSession()
+    try:
+        rows = analytics_db.execute(
+            text(
+                f"""
+                SELECT ts_code, trade_date, open, high, low, close, vol, amount
+                FROM {table}
+                WHERE ts_code IN ({placeholders})
+                  AND trade_date >= :start_date
+                  AND trade_date <= :end_date
+                ORDER BY ts_code, trade_date
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        AnalyticsSession.remove()
+    by_symbol: Dict[str, List[tuple]] = {}
+    for row in rows:
+        by_symbol.setdefault(str(row[0]).upper(), []).append(tuple(row))
+    frames: Dict[str, pd.DataFrame] = {}
+    for symbol, symbol_rows in by_symbol.items():
+        frame = pd.DataFrame(
+            symbol_rows,
+            columns=[
+                "ts_code",
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "turnover",
+            ],
+        )
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+        for column in ("open", "high", "low", "close", "volume", "turnover"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frames[symbol] = frame.set_index("trade_date").sort_index()
+    return frames
 
 
 ETF_COMPONENTS: Dict[str, ComponentSpec] = {
@@ -702,6 +794,51 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 query = query.filter(ETFFearGreedCloneHistory.date <= end_date)
             rows = query.order_by(ETFFearGreedCloneHistory.date.asc()).all()
             data = [self._db_history_row_payload(row, include_components) for row in rows]
+            # A股指数且有 proxy_etf：历史详情价格曲线/成交量用场内 ETF 日线替换指数点位/指数量
+            proxy_etf = _a_stock_proxy_etf_map().get(etf_symbol)
+            proxy_etf_used: Optional[str] = None
+            if proxy_etf and data:
+                first_day = datetime.strptime(data[0]["date"], "%Y-%m-%d").date()
+                last_day = datetime.strptime(data[-1]["date"], "%Y-%m-%d").date()
+                bars = _load_proxy_etf_bars(
+                    [proxy_etf],
+                    first_day - timedelta(days=30),
+                    last_day,
+                    use_qfq=True,
+                ).get(proxy_etf)
+                # 仅当 ETF 日线完整覆盖历史区间时才替换，避免新上市 ETF 早期缺数据导致
+                # 指数点位与 ETF 价格混在一张图里（比例尺断裂）。
+                if (
+                    bars is not None
+                    and not bars.empty
+                    and bars.index.min().date() <= first_day
+                    and bars.index.max().date() >= last_day
+                ):
+                    history_dates = pd.DatetimeIndex(
+                        datetime.strptime(item["date"], "%Y-%m-%d")
+                        for item in data
+                    )
+                    etf_reindexed = bars[
+                        ["open", "high", "low", "close", "volume", "turnover"]
+                    ].reindex(history_dates).ffill()
+                    bar_dates = set(bars.index.date)
+                    proxy_etf_used = proxy_etf
+                    for item, ts in zip(data, history_dates):
+                        row = etf_reindexed.loc[ts]
+                        had_bar = ts.date() in bar_dates
+                        item["etf_price"] = {
+                            "open": _finite_or_none(row["open"]),
+                            "high": _finite_or_none(row["high"]),
+                            "low": _finite_or_none(row["low"]),
+                            "close": _finite_or_none(row["close"]),
+                            # 停牌/无成交日不显示成交量柱
+                            "volume": (
+                                _finite_or_none(row["volume"]) if had_bar else None
+                            ),
+                            "turnover": (
+                                _finite_or_none(row["turnover"]) if had_bar else None
+                            ),
+                        }
             latest = data[-1] if data else None
             latest_holdings: List[Dict[str, Any]] = []
             if latest and include_latest_holdings:
@@ -724,6 +861,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "count": len(data),
                 "latest": latest,
                 "latest_holdings": latest_holdings,
+                "proxy_etf": proxy_etf_used,
                 "data": data,
             }
         finally:
@@ -735,10 +873,58 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             for symbol in dict.fromkeys(symbols or [])
             if str(symbol or "").strip()
         ]
+        proxy_map = _a_stock_proxy_etf_map()
+        proxy_symbols = [
+            symbol for symbol in normalized_symbols if symbol in proxy_map
+        ]
         db = Session()
         try:
+            # A股指数：量比改用对应 proxy_etf 的成交量（以各指数最新恐贪日为锚点）
+            proxy_volume_by_symbol: Dict[
+                str, List[Tuple[date, Optional[float]]]
+            ] = {}
+            if proxy_symbols:
+                anchors = {
+                    symbol: anchor_date
+                    for symbol, anchor_date in (
+                        db.query(
+                            ETFFearGreedCloneHistory.symbol,
+                            func.max(ETFFearGreedCloneHistory.date),
+                        )
+                        .filter(ETFFearGreedCloneHistory.symbol.in_(proxy_symbols))
+                        .group_by(ETFFearGreedCloneHistory.symbol)
+                        .all()
+                    )
+                    if anchor_date
+                }
+                if anchors:
+                    min_date = min(anchors.values()) - timedelta(days=120)
+                    max_date = max(anchors.values())
+                    bars_by_etf = _load_proxy_etf_bars(
+                        sorted({proxy_map[symbol] for symbol in anchors}),
+                        min_date,
+                        max_date,
+                        use_qfq=False,
+                    )
+                    for symbol, anchor in anchors.items():
+                        frame = bars_by_etf.get(proxy_map[symbol])
+                        if frame is None or frame.empty:
+                            continue
+                        upto = frame[frame.index <= pd.Timestamp(anchor)]
+                        if upto.empty:
+                            continue
+                        # 恐贪最新日及之前最近 21 个交易日的 ETF 成交量（最新在前）
+                        proxy_volume_by_symbol[symbol] = [
+                            (ts.date(), float(row.volume))
+                            for ts, row in upto.tail(21).iloc[::-1].iterrows()
+                            if pd.notna(row.volume)
+                        ]
             summaries = [
-                self._db_summary_payload(db, symbol)
+                self._db_summary_payload(
+                    db,
+                    symbol,
+                    proxy_volume_history=proxy_volume_by_symbol.get(symbol),
+                )
                 for symbol in normalized_symbols
             ]
             return {
@@ -1935,7 +2121,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         return payload
 
     @classmethod
-    def _db_summary_payload(cls, db, symbol: str) -> Dict[str, Any]:
+    def _db_summary_payload(
+        cls,
+        db,
+        symbol: str,
+        proxy_volume_history: Optional[List[Tuple[date, Optional[float]]]] = None,
+    ) -> Dict[str, Any]:
         latest_row = (
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == symbol)
@@ -1970,10 +2161,23 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             .limit(20)
             .all()
         )
-        volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
-            latest_row.etf_volume,
-            [row.etf_volume for row in previous_volume_rows],
-        )
+        if proxy_volume_history:
+            # 有 proxy_etf 的 A股指数：量比用 ETF 成交量（恐贪日 ÷ 前 20 个 ETF 交易日）
+            volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
+                proxy_volume_history[0][1],
+                [volume for _, volume in proxy_volume_history[1:]],
+            )
+            if volume_ratio_20d is None:
+                # ETF 前值不足 20 个交易日时回退到指数量比
+                volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
+                    latest_row.etf_volume,
+                    [row.etf_volume for row in previous_volume_rows],
+                )
+        else:
+            volume_ratio_20d, volume_ma20 = calculate_volume_ratio(
+                latest_row.etf_volume,
+                [row.etf_volume for row in previous_volume_rows],
+            )
         seven_day_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=7))
         one_month_row = cls._db_history_row_on_or_before(db, symbol, latest_row.date - timedelta(days=30))
         history_points = (

@@ -289,13 +289,15 @@ const SOXXFearGreed = () => {
     });
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
+    // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
+    const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
     const priceValues = prices.filter(value => value !== null && value !== undefined);
     const priceMin = priceValues.length ? Math.floor(Math.min(...priceValues) * 0.92) : undefined;
     const priceMax = priceValues.length ? Math.ceil(Math.max(...priceValues) * 1.08) : undefined;
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: [`${ticker}贪恐`, '贪恐5日均线', `${ticker}价格`, '成交量'], top: 0 },
+      legend: { data: [`${ticker}贪恐`, '贪恐5日均线', priceSeriesName, '成交量'], top: 0 },
       grid: [
         { left: 56, right: 64, top: 48, height: '57%' },
         { left: 56, right: 64, top: '72%', bottom: 58 },
@@ -382,7 +384,7 @@ const SOXXFearGreed = () => {
           },
         },
         {
-          name: `${ticker}价格`,
+          name: priceSeriesName,
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
@@ -584,7 +586,7 @@ const SOXXFearGreed = () => {
                 </Col>
                 <Col xs={12} sm={8} lg={4}>
                   <Statistic
-                    title={expandedETF?.priceLabel || '价格'}
+                    title={expandedDetail?.proxy_etf ? '价格' : (expandedETF?.priceLabel || '价格')}
                     value={displayPrice}
                     precision={pricePrecision}
                     prefix={expandedETF?.symbol.endsWith('.US') ? '$' : undefined}
