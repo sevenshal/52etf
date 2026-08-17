@@ -281,6 +281,10 @@ def _load_accounts(
                 "executor_batch_interval_seconds": getattr(row, "executor_batch_interval_seconds", None),
                 "commission_rate_pct": row.commission_rate_pct,
                 "min_commission": row.min_commission,
+                "stamp_tax_rate_pct": getattr(row, "stamp_tax_rate_pct", None),
+                "etf_commission_rate_pct": getattr(row, "etf_commission_rate_pct", None),
+                "etf_min_commission": getattr(row, "etf_min_commission", None),
+                "etf_stamp_tax_rate_pct": getattr(row, "etf_stamp_tax_rate_pct", None),
                 "executor_clip_sell_to_available": True,
                 "executor_price_level_sequence": row.executor_price_level_sequence,
             }

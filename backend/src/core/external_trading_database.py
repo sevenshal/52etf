@@ -77,6 +77,10 @@ class ExternalTradingAccount(ExternalTradingBase):
     commission_rate_pct = Column(Float, default=0.025, nullable=False)
     min_commission = Column(Float, default=5.0, nullable=False)
     stamp_tax_rate_pct = Column(Float, default=0.05, nullable=False)
+    # A 股 ETF 单独费率；NULL 表示继承上面的股票费率（佣金/最低佣金/印花税逐项继承）
+    etf_commission_rate_pct = Column(Float)
+    etf_min_commission = Column(Float)
+    etf_stamp_tax_rate_pct = Column(Float)
     last_connected_at = Column(DateTime)
     last_disconnected_at = Column(DateTime)
     last_seen_at = Column(DateTime)
@@ -458,6 +462,9 @@ def ensure_external_trading_columns():
             "commission_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN commission_rate_pct FLOAT NOT NULL DEFAULT 0.025",
             "min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN min_commission FLOAT NOT NULL DEFAULT 5.0",
             "stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN stamp_tax_rate_pct FLOAT NOT NULL DEFAULT 0.05",
+            "etf_commission_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN etf_commission_rate_pct FLOAT",
+            "etf_min_commission": "ALTER TABLE external_trading_accounts ADD COLUMN etf_min_commission FLOAT",
+            "etf_stamp_tax_rate_pct": "ALTER TABLE external_trading_accounts ADD COLUMN etf_stamp_tax_rate_pct FLOAT",
             "executor_max_slippage_pct": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_slippage_pct FLOAT NOT NULL DEFAULT 0.5",
             "executor_min_order_amount": "ALTER TABLE external_trading_accounts ADD COLUMN executor_min_order_amount FLOAT NOT NULL DEFAULT 0.0",
             "executor_max_batch_amount": "ALTER TABLE external_trading_accounts ADD COLUMN executor_max_batch_amount FLOAT",

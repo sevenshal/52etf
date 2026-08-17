@@ -176,6 +176,21 @@ class ExternalTradingAccountBase(BaseModel):
     commission_rate_pct: float = Field(default=0.025, ge=0)
     min_commission: float = Field(default=5.0, ge=0)
     stamp_tax_rate_pct: float = Field(default=0.05, ge=0)
+    etf_commission_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 单独佣金费率（%），留空继承股票佣金费率",
+    )
+    etf_min_commission: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 每笔最低佣金，留空继承股票最低佣金",
+    )
+    etf_stamp_tax_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 印花税费率（%），通常为 0（ETF 不收印花税），留空继承股票印花税费率",
+    )
 
     @root_validator(pre=True)
     def apply_market_defaults(cls, values):
@@ -264,6 +279,21 @@ class ExternalTradingAccountUpdate(BaseModel):
     commission_rate_pct: Optional[float] = Field(default=None, ge=0)
     min_commission: Optional[float] = Field(default=None, ge=0)
     stamp_tax_rate_pct: Optional[float] = Field(default=None, ge=0)
+    etf_commission_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 单独佣金费率（%），留空继承股票佣金费率",
+    )
+    etf_min_commission: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 每笔最低佣金，留空继承股票最低佣金",
+    )
+    etf_stamp_tax_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="A 股 ETF 印花税费率（%），通常为 0（ETF 不收印花税），留空继承股票印花税费率",
+    )
 
     @root_validator(pre=True)
     def apply_market_defaults(cls, values):
@@ -538,6 +568,9 @@ def _serialize_account(account: ExternalTradingAccount) -> Dict[str, Any]:
         "commission_rate_pct": _safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025),
         "min_commission": _safe_float(getattr(account, "min_commission", 5.0), 5.0),
         "stamp_tax_rate_pct": _safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05),
+        "etf_commission_rate_pct": getattr(account, "etf_commission_rate_pct", None),
+        "etf_min_commission": getattr(account, "etf_min_commission", None),
+        "etf_stamp_tax_rate_pct": getattr(account, "etf_stamp_tax_rate_pct", None),
         "connected": runtime_status.get("connected", False),
         "pending_count": runtime_status.get("pending_count", 0),
         "connected_at": runtime_status.get("connected_at"),
@@ -2018,6 +2051,9 @@ async def create_external_trading_account(
         commission_rate_pct=payload.commission_rate_pct,
         min_commission=payload.min_commission,
         stamp_tax_rate_pct=payload.stamp_tax_rate_pct,
+        etf_commission_rate_pct=payload.etf_commission_rate_pct,
+        etf_min_commission=payload.etf_min_commission,
+        etf_stamp_tax_rate_pct=payload.etf_stamp_tax_rate_pct,
     )
     db.add(account)
     db.commit()

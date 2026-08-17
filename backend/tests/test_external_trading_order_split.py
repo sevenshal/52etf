@@ -24,7 +24,8 @@ class ExternalTradingBatchAmountTest(TestCase):
         ExternalTradingBase.metadata.create_all(engine)
         return sessionmaker(bind=engine)()
 
-    def _add_account(self, db, *, max_batch_amount=None, batch_interval_seconds=None, min_commission=5.0):
+    def _add_account(self, db, *, max_batch_amount=None, batch_interval_seconds=None, min_commission=5.0,
+                     etf_commission_rate_pct=None, etf_min_commission=None, etf_stamp_tax_rate_pct=None):
         account = ExternalTradingAccount(
             id=1,
             account_id="acct",
@@ -36,6 +37,9 @@ class ExternalTradingBatchAmountTest(TestCase):
             commission_rate_pct=0.025,
             min_commission=min_commission,
             stamp_tax_rate_pct=0.05,
+            etf_commission_rate_pct=etf_commission_rate_pct,
+            etf_min_commission=etf_min_commission,
+            etf_stamp_tax_rate_pct=etf_stamp_tax_rate_pct,
             executor_max_batch_amount=max_batch_amount,
             executor_batch_interval_seconds=batch_interval_seconds,
         )
@@ -94,6 +98,63 @@ class ExternalTradingBatchAmountTest(TestCase):
         self.assertAlmostEqual(20000.0, compute_fee_break_even_amount(account))
         account.min_commission = 0
         self.assertEqual(0.0, compute_fee_break_even_amount(account))
+
+    def test_fee_break_even_etf_rates_when_configured(self):
+        db = self._db_session()
+        # 股票佣金万 2.5/最低 5 → 门槛 2 万；ETF 佣金万 0.5/最低 1 → 门槛 2 万；
+        # 若 ETF 最低佣金也是 5 → 门槛 = 5/(0.005/100) = 10 万
+        self._add_account(db, etf_commission_rate_pct=0.005, etf_min_commission=5.0)
+        db.flush()
+        account = db.query(ExternalTradingAccount).first()
+        self.assertAlmostEqual(20000.0, compute_fee_break_even_amount(account))
+        self.assertAlmostEqual(100000.0, compute_fee_break_even_amount(account, etf=True))
+
+    def test_fee_break_even_etf_inherits_stock_rates_when_unset(self):
+        db = self._db_session()
+        self._add_account(db)
+        db.flush()
+        account = db.query(ExternalTradingAccount).first()
+        # 未配置 ETF 费率 → ETF 门槛与股票一致
+        self.assertAlmostEqual(
+            compute_fee_break_even_amount(account),
+            compute_fee_break_even_amount(account, etf=True),
+        )
+
+    def test_estimate_fee_totals_uses_etf_rates(self):
+        from src.core.services.external_trading_ledger import _estimate_fee_totals
+
+        db = self._db_session()
+        self._add_account(
+            db,
+            etf_commission_rate_pct=0.005,
+            etf_min_commission=1.0,
+            etf_stamp_tax_rate_pct=0.0,
+        )
+        db.flush()
+        account = db.query(ExternalTradingAccount).first()
+        # ETF 卖出：佣金 100000*0.005/100=5 元（≥最低 1），印花税 0
+        totals = _estimate_fee_totals(account, "SELL", 100000.0, symbol="510300.SH")
+        self.assertAlmostEqual(5.0, totals["commission"])
+        self.assertAlmostEqual(0.0, totals["stamp_tax"])
+        self.assertAlmostEqual(5.0, totals["fee_total"])
+        # 股票卖出：佣金 25 元 + 印花税 50 元
+        totals = _estimate_fee_totals(account, "SELL", 100000.0, symbol="600519.SH")
+        self.assertAlmostEqual(25.0, totals["commission"])
+        self.assertAlmostEqual(50.0, totals["stamp_tax"])
+        self.assertAlmostEqual(75.0, totals["fee_total"])
+
+    def test_estimate_fee_totals_etf_inherits_stock_rates_when_unset(self):
+        from src.core.services.external_trading_ledger import _estimate_fee_totals
+
+        db = self._db_session()
+        self._add_account(db)
+        db.flush()
+        account = db.query(ExternalTradingAccount).first()
+        # 未配置 ETF 费率 → ETF 卖出仍按股票费率计印花税
+        totals = _estimate_fee_totals(account, "SELL", 100000.0, symbol="510300.SH")
+        self.assertAlmostEqual(25.0, totals["commission"])
+        self.assertAlmostEqual(50.0, totals["stamp_tax"])
+
 
     def test_resolve_execution_policy_sub_account_overrides_account(self):
         db = self._db_session()
@@ -204,6 +265,58 @@ class ExternalTradingBatchAmountTest(TestCase):
         self.assertEqual(1, len(orders))
         self.assertEqual(31000, orders[0]["quantity"])  # 整笔 31 万全提交
         self.assertEqual([], plan["deferred"])
+
+    def test_batch_amount_cap_uses_etf_break_even_for_etf_symbols(self):
+        db = self._db_session()
+        # 股票佣金门槛 2 万；ETF 佣金万 0.5/最低 5 → 门槛 10 万。
+        # 单轮上限 5 万：高于股票门槛（可分）但低于 ETF 门槛（不可分）→
+        # ETF 标的整笔提交，股票标的正常拆分。
+        self._add_account(
+            db,
+            max_batch_amount=50000.0,
+            etf_commission_rate_pct=0.005,
+            etf_min_commission=5.0,
+        )
+        self._add_sub_account(db, sub_account_id=11, name="Growth")
+        self._add_target(db, sub_account_id=11, symbol="510300.SH", target_quantity=10000, reference_price=10.0)
+        self._add_target(db, sub_account_id=11, symbol="600519.SH", target_quantity=10000, reference_price=10.0)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"510300.SH": 10.0, "600519.SH": 10.0},
+        )
+
+        orders = {o["symbol"]: o for o in plan["external_orders"]}
+        deferred = {d["symbol"]: d for d in plan["deferred"]}
+        # ETF：整笔 10 万全提交（低于 ETF 佣金门槛 10 万，拆分会被最低佣金吃掉）
+        self.assertEqual(10000, orders["510300.SH"]["quantity"])
+        self.assertNotIn("510300.SH", deferred)
+        # 股票：门槛 2 万 < 截断 5 万 → 本轮提交 5 万，剩余 5 万留待下轮
+        self.assertEqual(5000, orders["600519.SH"]["quantity"])
+        self.assertEqual(5000, deferred["600519.SH"]["quantity"])
+
+    def test_batch_amount_cap_etf_break_even_inherits_stock_when_unset(self):
+        db = self._db_session()
+        # 未配置 ETF 费率：ETF 标的按股票门槛 2 万拆分
+        self._add_account(db, max_batch_amount=50000.0)
+        self._add_sub_account(db, sub_account_id=11, name="Growth")
+        self._add_target(db, sub_account_id=11, symbol="510300.SH", target_quantity=10000, reference_price=10.0)
+        db.commit()
+
+        plan = build_netted_target_execution_plan(
+            db,
+            account_id="acct",
+            external_trading_account_id=1,
+            reference_prices={"510300.SH": 10.0},
+        )
+
+        orders = plan["external_orders"]
+        self.assertEqual(1, len(orders))
+        self.assertEqual(5000, orders[0]["quantity"])
+        self.assertEqual(5000, plan["deferred"][0]["quantity"])
 
     def test_batch_amount_cap_lower_than_one_lot_keeps_whole_order(self):
         db = self._db_session()

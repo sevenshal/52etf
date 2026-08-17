@@ -310,14 +310,40 @@ def round_money(value: Any) -> float:
     return round(safe_float(value), 2)
 
 
-def _estimate_fee_totals(account: Optional[ExternalTradingAccount], side: str, cumulative_amount: float) -> Dict[str, float]:
+def _account_fee_rates(account: Optional[ExternalTradingAccount], symbol: Optional[str]) -> Dict[str, float]:
+    """按 symbol 选择费用费率：A 股 ETF 且配置了 ETF 单独费率时逐项使用 ETF 费率，
+    未配置的项（None）继承股票费率。非 ETF 一律用股票费率。
+    """
+    stock_commission = safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025)
+    stock_min_commission = safe_float(getattr(account, "min_commission", 5.0), 5.0)
+    stock_stamp_tax = safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05)
+    if is_a_share_etf_symbol(symbol):
+        return {
+            "commission_rate_pct": safe_float(getattr(account, "etf_commission_rate_pct", None), stock_commission),
+            "min_commission": safe_float(getattr(account, "etf_min_commission", None), stock_min_commission),
+            "stamp_tax_rate_pct": safe_float(getattr(account, "etf_stamp_tax_rate_pct", None), stock_stamp_tax),
+        }
+    return {
+        "commission_rate_pct": stock_commission,
+        "min_commission": stock_min_commission,
+        "stamp_tax_rate_pct": stock_stamp_tax,
+    }
+
+
+def _estimate_fee_totals(
+    account: Optional[ExternalTradingAccount],
+    side: str,
+    cumulative_amount: float,
+    symbol: Optional[str] = None,
+) -> Dict[str, float]:
     amount = max(safe_float(cumulative_amount), 0.0)
     if amount <= 0:
         return {"commission": 0.0, "stamp_tax": 0.0, "fee_total": 0.0}
 
-    commission_rate_pct = safe_float(getattr(account, "commission_rate_pct", 0.025), 0.025)
-    min_commission = safe_float(getattr(account, "min_commission", 5.0), 5.0)
-    stamp_tax_rate_pct = safe_float(getattr(account, "stamp_tax_rate_pct", 0.05), 0.05)
+    rates = _account_fee_rates(account, symbol)
+    commission_rate_pct = rates["commission_rate_pct"]
+    min_commission = rates["min_commission"]
+    stamp_tax_rate_pct = rates["stamp_tax_rate_pct"]
 
     commission = amount * commission_rate_pct / 100.0 if commission_rate_pct > 0 else 0.0
     if min_commission > 0 and (commission > 0 or commission_rate_pct > 0):
@@ -335,7 +361,7 @@ def _estimate_fee_totals(account: Optional[ExternalTradingAccount], side: str, c
 def _estimated_fee_increment_for_order(db: Session, order: ExternalTradingOrder, fill_amount: float) -> Dict[str, float]:
     account = db.query(ExternalTradingAccount).filter(ExternalTradingAccount.id == order.external_trading_account_id).first()
     previous_amount, previous_commission, previous_stamp_tax, previous_fee_total = _order_fill_money_totals(db, order.id)
-    target_totals = _estimate_fee_totals(account, order.side, previous_amount + safe_float(fill_amount))
+    target_totals = _estimate_fee_totals(account, order.side, previous_amount + safe_float(fill_amount), symbol=order.symbol)
     commission = max(target_totals["commission"] - previous_commission, 0.0)
     stamp_tax = max(target_totals["stamp_tax"] - previous_stamp_tax, 0.0)
     fee_total = max(target_totals["fee_total"] - previous_fee_total, 0.0)
@@ -4466,7 +4492,10 @@ def _apply_batch_amount_cap(
             continue
         lot_size = max(safe_int(policy.get("lot_size"), 100), 1)
         keep_quantity = (int(remaining_cap / price) // lot_size) * lot_size
-        fee_break_even = safe_float(policy.get("fee_break_even_amount"), 0.0)
+        fee_break_even = safe_float(
+            policy.get("etf_fee_break_even_amount"),
+            0.0,
+        ) if is_a_share_etf_symbol(symbol) else safe_float(policy.get("fee_break_even_amount"), 0.0)
         deferred_quantity = quantity - keep_quantity
         if keep_quantity <= 0 or (
             fee_break_even > 0

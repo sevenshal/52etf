@@ -378,7 +378,10 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_price_level_sequence: sequenceToText(DEFAULT_EXECUTOR_SEQUENCE),
       commission_rate_pct: 0.025,
       min_commission: 5,
-      stamp_tax_rate_pct: 0.05
+      stamp_tax_rate_pct: 0.05,
+      etf_commission_rate_pct: undefined,
+      etf_min_commission: undefined,
+      etf_stamp_tax_rate_pct: undefined
     });
     setModalVisible(true);
   };
@@ -403,7 +406,10 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
       executor_price_level_sequence: sequenceToText(record.executor_price_level_sequence),
       commission_rate_pct: record.commission_rate_pct ?? 0.025,
       min_commission: record.min_commission ?? 5,
-      stamp_tax_rate_pct: record.stamp_tax_rate_pct ?? 0.05
+      stamp_tax_rate_pct: record.stamp_tax_rate_pct ?? 0.05,
+      etf_commission_rate_pct: record.etf_commission_rate_pct ?? undefined,
+      etf_min_commission: record.etf_min_commission ?? undefined,
+      etf_stamp_tax_rate_pct: record.etf_stamp_tax_rate_pct ?? undefined
     });
     setModalVisible(true);
   };
@@ -844,13 +850,24 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
     {
       title: '费用估算',
       key: 'fees',
-      width: 220,
-      render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Text>佣金 {formatNumber(record.commission_rate_pct, 5)}%</Text>
-          <Text type="secondary">最低 {formatNumber(record.min_commission, 2)} / 印花税 {formatNumber(record.stamp_tax_rate_pct, 4)}%</Text>
-        </Space>
-      )
+      width: 260,
+      render: (_, record) => {
+        const hasEtfFees = record.etf_commission_rate_pct != null || record.etf_min_commission != null || record.etf_stamp_tax_rate_pct != null;
+        const etfEffective = {
+          commission: record.etf_commission_rate_pct != null ? record.etf_commission_rate_pct : record.commission_rate_pct,
+          min: record.etf_min_commission != null ? record.etf_min_commission : record.min_commission,
+          stamp: record.etf_stamp_tax_rate_pct != null ? record.etf_stamp_tax_rate_pct : record.stamp_tax_rate_pct
+        };
+        return (
+          <Space direction="vertical" size={0}>
+            <Text>佣金 {formatNumber(record.commission_rate_pct, 5)}%</Text>
+            <Text type="secondary">最低 {formatNumber(record.min_commission, 2)} / 印花税 {formatNumber(record.stamp_tax_rate_pct, 4)}%</Text>
+            {hasEtfFees && (
+              <Text type="secondary">ETF 佣金 {formatNumber(etfEffective.commission, 5)}% / 最低 {formatNumber(etfEffective.min, 2)} / 印花税 {formatNumber(etfEffective.stamp, 4)}%</Text>
+            )}
+          </Space>
+        );
+      }
     },
     {
       title: '操作',
@@ -1015,6 +1032,11 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
         </div>
         <div className="external-account-card__fee">
           佣金 {formatNumber(account.commission_rate_pct, 5)}% / 最低 {formatNumber(account.min_commission, 2)} / 印花税 {formatNumber(account.stamp_tax_rate_pct, 4)}%
+          {(account.etf_commission_rate_pct != null || account.etf_min_commission != null || account.etf_stamp_tax_rate_pct != null) && (
+            <div>
+              ETF 佣金 {formatNumber(account.etf_commission_rate_pct != null ? account.etf_commission_rate_pct : account.commission_rate_pct, 5)}% / 最低 {formatNumber(account.etf_min_commission != null ? account.etf_min_commission : account.min_commission, 2)} / 印花税 {formatNumber(account.etf_stamp_tax_rate_pct != null ? account.etf_stamp_tax_rate_pct : account.stamp_tax_rate_pct, 4)}%
+            </div>
+          )}
         </div>
         <div className="external-account-card__actions">
           <Button size="small" type="primary" icon={<PlusOutlined />} disabled={loading} onClick={() => openSubCreateModal(account)}>
@@ -1203,6 +1225,46 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
           </Form.Item>
           <Form.Item name="stamp_tax_rate_pct" label="印花税费率 (%)" rules={[{ required: true, message: '请输入印花税费率' }]}>
             <InputNumber min={0} step={0.001} precision={4} style={{ width: '100%' }} />
+          </Form.Item>
+          <Divider orientation="left">ETF 交易费用（可选，留空继承股票费率）</Divider>
+          <Form.Item
+            name="etf_commission_rate_pct"
+            label={(
+              <Space size={4}>
+                <span>ETF 佣金费率 (%)</span>
+                <Tooltip title="A 股 ETF 单独佣金费率，例如万 0.5 填 0.005。留空则 ETF 按上方股票佣金费率计费" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={0.00001} precision={5} placeholder="继承股票费率" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="etf_min_commission"
+            label={(
+              <Space size={4}>
+                <span>ETF 每笔最低佣金</span>
+                <Tooltip title="留空则 ETF 继承上方股票最低佣金" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={0.01} precision={2} placeholder="继承股票最低佣金" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="etf_stamp_tax_rate_pct"
+            label={(
+              <Space size={4}>
+                <span>ETF 印花税费率 (%)</span>
+                <Tooltip title="ETF 通常不收印花税，填 0 即可。留空则 ETF 按上方股票印花税费率计费" placement="right" overlayInnerStyle={{ backgroundColor: '#1f2937' }}>
+                  <InfoCircleOutlined />
+                </Tooltip>
+              </Space>
+            )}
+          >
+            <InputNumber min={0} step={0.001} precision={4} placeholder="继承股票印花税" style={{ width: '100%' }} />
           </Form.Item>
         </Form>
       </Modal>

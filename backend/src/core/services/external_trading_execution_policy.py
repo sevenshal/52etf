@@ -126,33 +126,61 @@ def normalize_batch_interval_seconds(
     return int(default)
 
 
+_A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
+
+
+def is_a_share_etf_symbol(symbol: Any) -> bool:
+    """A 股 ETF 代码判断（与 external_trading_ledger.is_a_share_etf_symbol 保持一致）。
+    支持 510300.SH / 159915.SZ / 510300 三种写法。
+    """
+    if not symbol:
+        return False
+    text = str(symbol).strip().upper()
+    code, _, market = text.partition(".")
+    if not code.isdigit() or len(code) != 6:
+        return False
+    if market and market not in {"SH", "SZ"}:
+        return False
+    return code.startswith(_A_SHARE_ETF_PREFIXES)
+
+
+def _account_value(account: Any, name: str, fallback: Optional[Dict[str, Any]], default: float) -> float:
+    """从 ORM 对象或 dict 中取费率字段，逐级回退：account 属性 → fallback dict → default。"""
+    value = None
+    if isinstance(account, dict):
+        value = account.get(name)
+    else:
+        value = getattr(account, name, None)
+    if value is None and fallback:
+        value = fallback.get(name)
+    if value is None:
+        value = default
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def compute_fee_break_even_amount(
     account: Any,
     fallback: Optional[Dict[str, Any]] = None,
+    *,
+    etf: bool = False,
 ) -> float:
     """拆单不产生额外佣金的最低单笔金额：每笔低于该金额会被最低佣金吃掉。
     佣金 = max(金额 × 费率, 最低佣金)，所以每笔金额 ≥ min_commission / (rate/100) 时
     拆单前后总佣金一致。min_commission 或费率 ≤ 0 时无门槛（返回 0）。
+    etf=True 时使用 A 股 ETF 单独费率；未配置的项继承股票费率。
     """
     fallback = fallback or {}
-
-    def _pick(value: Any, default: float) -> float:
-        try:
-            if value is None or value == "":
-                return float(default)
-            parsed = float(value)
-            return parsed
-        except Exception:
-            return float(default)
-
-    rate_pct = _pick(
-        getattr(account, "commission_rate_pct", None),
-        _pick(fallback.get("commission_rate_pct"), 0.025),
-    )
-    min_commission = _pick(
-        getattr(account, "min_commission", None),
-        _pick(fallback.get("min_commission"), 5.0),
-    )
+    if etf:
+        stock_rate = _account_value(account, "commission_rate_pct", fallback, 0.025)
+        stock_min_commission = _account_value(account, "min_commission", fallback, 5.0)
+        rate_pct = _account_value(account, "etf_commission_rate_pct", fallback, stock_rate)
+        min_commission = _account_value(account, "etf_min_commission", fallback, stock_min_commission)
+    else:
+        rate_pct = _account_value(account, "commission_rate_pct", fallback, 0.025)
+        min_commission = _account_value(account, "min_commission", fallback, 5.0)
     if min_commission <= 0 or rate_pct <= 0:
         return 0.0
     return min_commission / (rate_pct / 100.0)
@@ -281,6 +309,7 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
             ),
         ),
         "fee_break_even_amount": compute_fee_break_even_amount(account, fallback),
+        "etf_fee_break_even_amount": compute_fee_break_even_amount(account, fallback, etf=True),
         "source": "account",
     }
 
@@ -324,9 +353,9 @@ def resolve_execution_policy(account: Any, sub_account: Any = None, fallback: Op
     return policy
 
 
-def _policy_fee_break_even(policy: Dict[str, Any]) -> float:
+def _policy_fee_break_even(policy: Dict[str, Any], key: str = "fee_break_even_amount") -> float:
     try:
-        parsed = float(policy.get("fee_break_even_amount") or 0.0)
+        parsed = float(policy.get(key) or 0.0)
         return parsed if parsed >= 0 else 0.0
     except Exception:
         return 0.0
@@ -373,6 +402,7 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
                 DEFAULT_EXECUTOR_BATCH_INTERVAL_SECONDS,
             ),
             "fee_break_even_amount": compute_fee_break_even_amount(fallback),
+            "etf_fee_break_even_amount": compute_fee_break_even_amount(fallback, etf=True),
             "source": "fallback",
         }
 
@@ -411,6 +441,13 @@ def aggregate_execution_policy(policies: List[Dict[str, Any]], fallback: Optiona
         ),
         "fee_break_even_amount": max(
             _policy_fee_break_even(item) for item in policies
+        ),
+        "etf_fee_break_even_amount": max(
+            max(
+                _policy_fee_break_even(item, "etf_fee_break_even_amount"),
+                _policy_fee_break_even(item),
+            )
+            for item in policies
         ),
         "source": "aggregated",
     }
