@@ -98,6 +98,29 @@
   font-size: 12px;
 }
 
+.sysinfo-disk__mountpoints {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #f0f0f0;
+}
+
+.sysinfo-disk__mountpoints-label {
+  font-size: 12px;
+  margin-right: 6px;
+}
+
+.sysinfo-disk__mountpoints-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.sysinfo-disk__mountpoints-tag {
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
 .sysinfo-process {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

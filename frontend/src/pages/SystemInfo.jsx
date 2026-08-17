@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import dayjs from 'dayjs';
-import { Button, Card, Col, Descriptions, Progress, Row, Statistic, Tooltip, Typography, message } from 'antd';
+import { Button, Card, Col, Descriptions, Progress, Row, Statistic, Tag, Tooltip, Typography, message } from 'antd';
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import request from '../utils/request';
 import { PageShell } from '../components/PageScaffold';
@@ -180,11 +180,11 @@ const SystemInfo = () => {
         ) : (
           <Row gutter={[16, 16]}>
             {disks.map((disk) => (
-              <Col xs={24} sm={12} lg={8} key={disk.mountpoint}>
+              <Col xs={24} sm={12} lg={8} key={disk.device}>
                 <Card size="small" className="sysinfo-disk">
                   <div className="sysinfo-disk__head">
                     <Tooltip title={disk.device}>
-                      <Text strong className="sysinfo-disk__mount">{disk.mountpoint}</Text>
+                      <Text strong className="sysinfo-disk__mount">{disk.device}</Text>
                     </Tooltip>
                     <Text type="secondary" className="sysinfo-disk__fstype">{disk.fstype}</Text>
                   </div>
@@ -198,6 +198,16 @@ const SystemInfo = () => {
                     <Statistic title="已用" value={formatBytes(disk.used)} />
                     <Statistic title="可用" value={formatBytes(disk.free)} />
                   </div>
+                  {(disk.mountpoints || []).length > 0 && (
+                    <div className="sysinfo-disk__mountpoints">
+                      <Text type="secondary" className="sysinfo-disk__mountpoints-label">挂载点</Text>
+                      <div className="sysinfo-disk__mountpoints-list">
+                        {disk.mountpoints.map((mp) => (
+                          <Tag key={mp} className="sysinfo-disk__mountpoints-tag">{mp}</Tag>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </Card>
               </Col>
             ))}

@@ -60,7 +60,7 @@ def _read_cpu_temperature() -> Optional[dict]:
 
 
 def _mount_device(mountpoint: str) -> Optional[int]:
-    """返回挂载点所在分区的设备号（用于同分区去重）。"""
+    """返回挂载点所在分区的设备号（用于同分区合并）。"""
     try:
         return os.stat(mountpoint).st_dev
     except OSError:
@@ -68,12 +68,16 @@ def _mount_device(mountpoint: str) -> Optional[int]:
 
 
 def _collect_disk_usage() -> List[dict]:
-    """收集主要磁盘分区及重点关注路径的使用情况。"""
+    """收集磁盘分区使用情况：同一分区的所有挂载点归入一个条目（一张卡片）。
+
+    每个条目对应一个分区设备，mountpoints 列出该分区下全部挂载点，
+    例如 namespace 里数据/日志目录被 bind 成 /var/lib/quant_robot、/var/log/quant，
+    与根分区同盘时都归入根分区条目。
+    """
     if psutil is None:
         return []
-    disks: List[dict] = []
+    raw = []
     seen = set()
-    seen_devices = set()
     for part in psutil.disk_partitions(all=False):
         fstype = part.fstype or ""
         if fstype in SKIP_FSTYPES:
@@ -83,47 +87,48 @@ def _collect_disk_usage() -> List[dict]:
         if part.mountpoint in seen:
             continue
         seen.add(part.mountpoint)
-        try:
-            usage = psutil.disk_usage(part.mountpoint)
-        except OSError:
-            continue
-        st_dev = _mount_device(part.mountpoint)
-        if st_dev is not None:
-            seen_devices.add(st_dev)
-        disks.append({
+        raw.append({
             "mountpoint": part.mountpoint,
             "device": part.device,
             "fstype": fstype,
-            "total": usage.total,
-            "used": usage.used,
-            "free": usage.free,
-            "percent": usage.percent,
+            "st_dev": _mount_device(part.mountpoint),
         })
-    # 补充关注路径（未被分区覆盖且存在时；与已列出分区同设备则跳过，避免重复）
+    # 关注路径兜底：未被分区表覆盖但存在时补上（如部分环境 disk_partitions 不列 bind 子目录）
     for path in EXTRA_DISK_PATHS:
         if path in seen or not os.path.exists(path):
             continue
-        st_dev = _mount_device(path)
-        if st_dev is not None and st_dev in seen_devices:
-            continue
-        try:
-            usage = psutil.disk_usage(path)
-        except OSError:
-            continue
-        if st_dev is not None:
-            seen_devices.add(st_dev)
-        disks.append({
+        raw.append({
             "mountpoint": path,
             "device": "-",
             "fstype": "-",
+            "st_dev": _mount_device(path),
+        })
+        seen.add(path)
+
+    # 按分区设备分组：同一分区的挂载点合并成一个条目，mountpoints 列出全部
+    groups = {}
+    for r in raw:
+        groups.setdefault(r["st_dev"], []).append(r)
+    disks = []
+    for _st_dev, group in groups.items():
+        mountpoints = sorted(g["mountpoint"] for g in group)
+        # 使用率按组内真实挂载点计算（同分区各挂载点结果一致）
+        usage_target = max(mountpoints, key=len)
+        try:
+            usage = psutil.disk_usage(usage_target)
+        except OSError:
+            continue
+        disks.append({
+            "device": next((g["device"] for g in group if g["device"] != "-"), "-"),
+            "fstype": next((g["fstype"] for g in group if g["fstype"] != "-"), "-"),
             "total": usage.total,
             "used": usage.used,
             "free": usage.free,
             "percent": usage.percent,
+            "mountpoints": mountpoints,
         })
-        seen.add(path)
     # 根分区排最前
-    disks.sort(key=lambda d: (d["mountpoint"] != "/", d["mountpoint"]))
+    disks.sort(key=lambda d: ("/" not in d["mountpoints"], d["device"]))
     return disks
 
 
