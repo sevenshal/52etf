@@ -2692,6 +2692,8 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "label": "星澜壹号 · 综合权重",
         "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
+        "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
+        "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
         "min_holding_cubes": 8,
@@ -2701,6 +2703,8 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "label": "星澜贰号 · 5日排名加速",
         "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
+        "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
+        "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
         "min_holding_cubes": RANK_ACCELERATION_MIN_HOLDING_CUBES,
@@ -2710,6 +2714,8 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "label": "星澜叁号 · 5日权价比",
         "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
+        "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
+        "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
         "min_holding_cubes": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES,
@@ -2736,6 +2742,8 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "enabled": bool(row.enabled),
             "fear_threshold": float(row.fear_threshold),
             "greed_threshold": float(row.greed_threshold),
+            "fear_target_count": int(row.fear_target_count),
+            "greed_target_count": int(row.greed_target_count),
             "fear_volume_std": float(row.fear_volume_std),
             "greed_volume_std": float(row.greed_volume_std),
             "min_holding_cubes": int(row.min_holding_cubes),
@@ -2753,12 +2761,14 @@ def resolve_xueqiu_strategy_position_target(
     greed_threshold: float = FEAR_GREED_GREED_THRESHOLD,
     fear_volume_std: float = FEAR_VOLUME_STD_DEFAULT,
     greed_volume_std: float = GREED_VOLUME_STD_DEFAULT,
+    fear_target_count: int = FEAR_GREED_FEAR_TARGET_COUNT,
+    greed_target_count: int = FEAR_GREED_GREED_TARGET_COUNT,
     default_top_n: int = BUFFER_STRATEGY_TOP_N,
 ) -> Tuple[int, str]:
     """恐贪 + log量比 双重确认的目标仓位管理。
 
-    - 恐慌(score<fear_threshold)且放量(log_volume_z > fear_volume_std) → 10只
-    - 贪婪(score>greed_threshold)且缩量(log_volume_z < -greed_volume_std) → 3只
+    - 恐慌(score<fear_threshold)且放量(log_volume_z > fear_volume_std) → fear_target_count 只
+    - 贪婪(score>greed_threshold)且缩量(log_volume_z < -greed_volume_std) → greed_target_count 只
     - 其余情况（含缺少量比确认）维持当前仓位，避免在无成交量确认时来回切换
     """
     if not fear_greed:
@@ -2768,16 +2778,16 @@ def resolve_xueqiu_strategy_position_target(
         return default_top_n, "invalid_fallback"
     volume_z = safe_float(fear_greed.get("log_volume_z"))
     if volume_z is None:
-        if current_holding_count is not None and current_holding_count <= FEAR_GREED_GREED_TARGET_COUNT:
-            return FEAR_GREED_GREED_TARGET_COUNT, "neutral_keep_3_no_volume"
-        return default_top_n, "neutral_keep_10_no_volume"
+        if current_holding_count is not None and current_holding_count <= greed_target_count:
+            return greed_target_count, "neutral_keep_3_no_volume"
+        return fear_target_count, "neutral_keep_10_no_volume"
     if score < fear_threshold and volume_z > fear_volume_std:
-        return FEAR_GREED_FEAR_TARGET_COUNT, "fear_volume"
+        return fear_target_count, "fear_volume"
     if score > greed_threshold and volume_z < -greed_volume_std:
-        return FEAR_GREED_GREED_TARGET_COUNT, "greed_shrink"
-    if current_holding_count is not None and current_holding_count <= FEAR_GREED_GREED_TARGET_COUNT:
-        return FEAR_GREED_GREED_TARGET_COUNT, "neutral_keep_3"
-    return default_top_n, "neutral_keep_10"
+        return greed_target_count, "greed_shrink"
+    if current_holding_count is not None and current_holding_count <= greed_target_count:
+        return greed_target_count, "neutral_keep_3"
+    return fear_target_count, "neutral_keep_10"
 
 
 def resolve_fear_greed_target_count(
@@ -4489,17 +4499,20 @@ def build_rank_acceleration_email_section_html(result: Dict[str, Any]) -> str:
     )
     fear_greed = strategy_plan.get("fear_greed") or {}
     regime = strategy_plan.get("fear_greed_regime") or "-"
+    strategy_config = strategy_plan.get("strategy_config") or {}
+    fear_target = safe_int(strategy_config.get("fear_target_count")) or FEAR_GREED_FEAR_TARGET_COUNT
+    greed_target = safe_int(strategy_config.get("greed_target_count")) or FEAR_GREED_GREED_TARGET_COUNT
     regime_labels = {
-        "fear_volume": "恐慌+放量（目标10只）",
-        "greed_shrink": "贪婪+缩量（目标3只）",
-        "fear": "恐慌（目标10只）",
-        "greed": "贪婪（目标3只）",
-        "neutral_keep_3": "中性（维持3只）",
-        "neutral_keep_10": "中性（维持10只）",
-        "neutral_keep_3_no_volume": "中性/无量比确认（维持3只）",
-        "neutral_keep_10_no_volume": "中性/无量比确认（维持10只）",
-        "missing_fallback": "缺失（默认10只）",
-        "invalid_fallback": "无效（默认10只）",
+        "fear_volume": f"恐慌+放量（目标{fear_target}只）",
+        "greed_shrink": f"贪婪+缩量（目标{greed_target}只）",
+        "fear": f"恐慌（目标{fear_target}只）",
+        "greed": f"贪婪（目标{greed_target}只）",
+        "neutral_keep_3": f"中性（维持{greed_target}只）",
+        "neutral_keep_10": f"中性（维持{fear_target}只）",
+        "neutral_keep_3_no_volume": f"中性/无量比确认（维持{greed_target}只）",
+        "neutral_keep_10_no_volume": f"中性/无量比确认（维持{fear_target}只）",
+        "missing_fallback": f"缺失（默认{fear_target}只）",
+        "invalid_fallback": f"无效（默认{fear_target}只）",
     }
     summary_rows = [
         ("目标组合", f"{result.get('target_cube_symbol') or RANK_ACCELERATION_TARGET_CUBE_SYMBOL} / cube_id={result.get('target_cube_id') or '-'}"),
@@ -4629,17 +4642,20 @@ def build_weight_price_ratio_email_section_html(result: Dict[str, Any]) -> str:
     )
     fear_greed = strategy_plan.get("fear_greed") or {}
     regime = strategy_plan.get("fear_greed_regime") or "-"
+    strategy_config = strategy_plan.get("strategy_config") or {}
+    fear_target = safe_int(strategy_config.get("fear_target_count")) or FEAR_GREED_FEAR_TARGET_COUNT
+    greed_target = safe_int(strategy_config.get("greed_target_count")) or FEAR_GREED_GREED_TARGET_COUNT
     regime_labels = {
-        "fear_volume": "恐慌+放量（目标10只）",
-        "greed_shrink": "贪婪+缩量（目标3只）",
-        "fear": "恐慌（目标10只）",
-        "greed": "贪婪（目标3只）",
-        "neutral_keep_3": "中性（维持3只）",
-        "neutral_keep_10": "中性（维持10只）",
-        "neutral_keep_3_no_volume": "中性/无量比确认（维持3只）",
-        "neutral_keep_10_no_volume": "中性/无量比确认（维持10只）",
-        "missing_fallback": "缺失（默认10只）",
-        "invalid_fallback": "无效（默认10只）",
+        "fear_volume": f"恐慌+放量（目标{fear_target}只）",
+        "greed_shrink": f"贪婪+缩量（目标{greed_target}只）",
+        "fear": f"恐慌（目标{fear_target}只）",
+        "greed": f"贪婪（目标{greed_target}只）",
+        "neutral_keep_3": f"中性（维持{greed_target}只）",
+        "neutral_keep_10": f"中性（维持{fear_target}只）",
+        "neutral_keep_3_no_volume": f"中性/无量比确认（维持{greed_target}只）",
+        "neutral_keep_10_no_volume": f"中性/无量比确认（维持{fear_target}只）",
+        "missing_fallback": f"缺失（默认{fear_target}只）",
+        "invalid_fallback": f"无效（默认{fear_target}只）",
     }
     summary_rows = [
         ("目标组合", f"{result.get('target_cube_symbol') or WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL} / cube_id={result.get('target_cube_id') or '-'}"),
@@ -4994,6 +5010,8 @@ async def execute_rank_acceleration_target_rebalance(
         current_holding_count=len(extract_current_target_holdings(current_holdings)),
         fear_threshold=strategy_config["fear_threshold"],
         greed_threshold=strategy_config["greed_threshold"],
+        fear_target_count=strategy_config["fear_target_count"],
+        greed_target_count=strategy_config["greed_target_count"],
         fear_volume_std=strategy_config["fear_volume_std"],
         greed_volume_std=strategy_config["greed_volume_std"],
         default_top_n=RANK_ACCELERATION_TOP_N,
@@ -5199,6 +5217,8 @@ async def execute_weight_price_ratio_target_rebalance(
         current_holding_count=len(extract_current_target_holdings(current_holdings)),
         fear_threshold=strategy_config["fear_threshold"],
         greed_threshold=strategy_config["greed_threshold"],
+        fear_target_count=strategy_config["fear_target_count"],
+        greed_target_count=strategy_config["greed_target_count"],
         fear_volume_std=strategy_config["fear_volume_std"],
         greed_volume_std=strategy_config["greed_volume_std"],
         default_top_n=WEIGHT_PRICE_RATIO_TOP_N,
@@ -5444,6 +5464,8 @@ async def run_top_holdings_job(
             current_holding_count=len(extract_current_target_holdings(current_target_holdings)),
             fear_threshold=strategy_config["fear_threshold"],
             greed_threshold=strategy_config["greed_threshold"],
+            fear_target_count=strategy_config["fear_target_count"],
+            greed_target_count=strategy_config["greed_target_count"],
             fear_volume_std=strategy_config["fear_volume_std"],
             greed_volume_std=strategy_config["greed_volume_std"],
             default_top_n=top_n,

@@ -151,6 +151,46 @@ class XueqiuTopHoldingsReportTest(TestCase):
             resolve_xueqiu_strategy_position_target({"score": None}),
         )
 
+    def test_position_target_uses_configurable_position_counts(self):
+        # x→y / y→x：恐慌放量扩到 fear_target_count，贪婪缩量收到 greed_target_count
+        self.assertEqual(
+            (15, "fear_volume"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 20.0, "log_volume_z": 1.5},
+                current_holding_count=5,
+                fear_target_count=15,
+                greed_target_count=5,
+            ),
+        )
+        self.assertEqual(
+            (5, "greed_shrink"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 80.0, "log_volume_z": -1.0},
+                current_holding_count=15,
+                fear_target_count=15,
+                greed_target_count=5,
+            ),
+        )
+        # 中性维持：当前 ≤ greed_target_count 时维持到 greed_target_count
+        self.assertEqual(
+            (5, "neutral_keep_3"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 50.0, "log_volume_z": 0.0},
+                current_holding_count=4,
+                fear_target_count=15,
+                greed_target_count=5,
+            ),
+        )
+        self.assertEqual(
+            (15, "neutral_keep_10"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 50.0, "log_volume_z": 0.0},
+                current_holding_count=8,
+                fear_target_count=15,
+                greed_target_count=5,
+            ),
+        )
+
     def test_top3_regime_keeps_holdings_until_one_falls_out_of_top12(self):
         ranking = [
             {"stock_symbol": f"SH.{600000 + index}", "stock_name": str(index)}
@@ -654,6 +694,8 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         fear_volume_std=1.5,
                         greed_threshold=70.0,
                         greed_volume_std=0.5,
+                        fear_target_count=15,
+                        greed_target_count=5,
                         min_holding_cubes=6,
                     )
                 )
@@ -663,6 +705,8 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 self.assertEqual(30.0, saved["fear_threshold"])
                 self.assertEqual(1.5, saved["fear_volume_std"])
                 self.assertEqual(0.5, saved["greed_volume_std"])
+                self.assertEqual(15, saved["fear_target_count"])
+                self.assertEqual(5, saved["greed_target_count"])
                 self.assertEqual(6, saved["min_holding_cubes"])
                 # 其他策略不受影响
                 self.assertEqual(25.0, load_xueqiu_strategy_config("buffer")["fear_threshold"])

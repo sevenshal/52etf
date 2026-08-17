@@ -3071,6 +3071,8 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     fear_threshold: Optional[float] = Field(None, gt=0, lt=100, description="恐慌阈值（恐贪分<该值）")
     greed_threshold: Optional[float] = Field(None, gt=0, lt=100, description="贪婪阈值（恐贪分>该值）")
+    fear_target_count: Optional[int] = Field(None, ge=1, le=200, description="恐慌放量时的目标持仓数")
+    greed_target_count: Optional[int] = Field(None, ge=1, le=200, description="贪婪缩量时的目标持仓数")
     fear_volume_std: Optional[float] = Field(None, ge=0, description="恐慌放量确认：log量比z 需大于该标准差")
     greed_volume_std: Optional[float] = Field(None, ge=0, description="贪婪缩量确认：log量比z 需小于 -该标准差")
     min_holding_cubes: Optional[int] = Field(None, ge=1, le=200, description="买入候选最少持仓组合数")

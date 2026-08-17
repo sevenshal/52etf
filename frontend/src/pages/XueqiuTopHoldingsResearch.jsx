@@ -326,9 +326,18 @@ const XueqiuTopHoldingsResearch = () => {
       suffix: 'σ',
     },
     {
+      key: 'fear_target_count',
+      label: '恐慌放量目标仓位',
+      tooltip: '恐慌且放量时扩仓到几只（默认 10；3→10 的“10”）',
+      min: 1,
+      max: 200,
+      step: 1,
+      suffix: '只',
+    },
+    {
       key: 'greed_threshold',
       label: '贪婪阈值',
-      tooltip: '恐贪分 > 该值视为贪婪；贪婪且缩量时才收缩到 3 只',
+      tooltip: '恐贪分 > 该值视为贪婪；贪婪且缩量时才收缩目标仓位',
       min: 0,
       max: 100,
       step: 1,
@@ -342,6 +351,15 @@ const XueqiuTopHoldingsResearch = () => {
       max: 10,
       step: 0.05,
       suffix: 'σ',
+    },
+    {
+      key: 'greed_target_count',
+      label: '贪婪缩量目标仓位',
+      tooltip: '贪婪且缩量时收缩到几只（默认 3；10→3 的“3”）',
+      min: 1,
+      max: 200,
+      step: 1,
+      suffix: '只',
     },
     {
       key: 'min_holding_cubes',
@@ -982,8 +1000,8 @@ const XueqiuTopHoldingsResearch = () => {
                     ))}
                     <Col span={24}>
                       <Text type="secondary">
-                        规则：恐慌(恐贪分&lt;恐慌阈值)且放量(log量比z&gt;放量标准差) → 10只；
-                        贪婪(恐贪分&gt;贪婪阈值)且缩量(log量比z&lt;-缩量标准差) → 3只；
+                        规则：恐慌(恐贪分&lt;恐慌阈值)且放量(log量比z&gt;放量标准差) → 恐慌放量目标仓位只；
+                        贪婪(恐贪分&gt;贪婪阈值)且缩量(log量比z&lt;-缩量标准差) → 贪婪缩量目标仓位只；
                         其余情况维持当前仓位。log量比z = 当日log(成交量) 相对前21个交易日log(成交量) 的 z-score。
                       </Text>
                     </Col>

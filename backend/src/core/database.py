@@ -1251,6 +1251,9 @@ class XueqiuStrategyConfig(Base):
     # 恐慌/贪婪分数阈值
     fear_threshold = Column(Float, nullable=False, default=25.0)
     greed_threshold = Column(Float, nullable=False, default=75.0)
+    # 目标仓位：恐慌放量 → fear_target_count 只；贪婪缩量 → greed_target_count 只
+    fear_target_count = Column(Integer, nullable=False, default=10)
+    greed_target_count = Column(Integer, nullable=False, default=3)
     # 放量/缩量的 log 量比 z-score 阈值（放量：z > fear_volume_std；缩量：z < -greed_volume_std）
     fear_volume_std = Column(Float, nullable=False, default=1.0)
     greed_volume_std = Column(Float, nullable=False, default=0.25)
@@ -1629,6 +1632,10 @@ def ensure_table_columns():
         "ai_stock_paper_lots": {
             "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",
             "peak_price": "ALTER TABLE ai_stock_paper_lots ADD COLUMN peak_price FLOAT",
+        },
+        "xueqiu_strategy_configs": {
+            "fear_target_count": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN fear_target_count INTEGER NOT NULL DEFAULT 10",
+            "greed_target_count": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN greed_target_count INTEGER NOT NULL DEFAULT 3",
         },
     }
 
