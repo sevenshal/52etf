@@ -279,6 +279,97 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(2, by_symbol["SH.600001"]["rank_change_5d"])
         self.assertEqual(-1, by_symbol["SH.600002"]["rank_change_5d"])
         self.assertEqual(-1, by_symbol["SH.600003"]["rank_change_5d"])
+        # No price tables in this DB → momentum/ratio stay None
+        self.assertEqual(10.0, by_symbol["SH.600001"]["weight_5d_ago"])
+        self.assertEqual(45.0, by_symbol["SH.600001"]["weight_change_5d"])
+        self.assertEqual(5.5, by_symbol["SH.600001"]["weight_multiple_5d"])
+        for symbol in ("SH.600001", "SH.600002", "SH.600003"):
+            self.assertIsNone(by_symbol[symbol]["momentum_5d"])
+            self.assertIsNone(by_symbol[symbol]["momentum_multiple_5d"])
+            self.assertIsNone(by_symbol[symbol]["weight_price_ratio_5d"])
+
+    def test_latest_includes_weight_change_and_momentum_ratio(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_rank_trend(db_path)
+            self._create_price_db(db_path)
+
+            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+
+        self.assertTrue(result["available"])
+        by_symbol = {row["stock_symbol"]: row for row in result["items"]}
+        # 5-day-ago composite weights from 2026-06-15 snapshot
+        self.assertEqual(10.0, by_symbol["SH.600001"]["weight_5d_ago"])
+        self.assertEqual(60.0, by_symbol["SH.600002"]["weight_5d_ago"])
+        self.assertEqual(30.0, by_symbol["SH.600003"]["weight_5d_ago"])
+        self.assertEqual(45.0, by_symbol["SH.600001"]["weight_change_5d"])
+        self.assertEqual(-35.0, by_symbol["SH.600002"]["weight_change_5d"])
+        self.assertEqual(-10.0, by_symbol["SH.600003"]["weight_change_5d"])
+        # weight multiple = current weight / weight 5 trading days ago
+        self.assertEqual(5.5, by_symbol["SH.600001"]["weight_multiple_5d"])  # 55/10
+        self.assertEqual(0.417, by_symbol["SH.600002"]["weight_multiple_5d"])  # 25/60
+        self.assertEqual(0.667, by_symbol["SH.600003"]["weight_multiple_5d"])  # 20/30
+        # momentum = close(2026-06-22) / close(2026-06-15) - 1, in pct
+        self.assertEqual(-10.0, by_symbol["SH.600001"]["momentum_5d"])  # 90/100-1
+        self.assertEqual(10.0, by_symbol["SH.600002"]["momentum_5d"])  # 110/100-1
+        self.assertIsNone(by_symbol["SH.600003"]["momentum_5d"])  # no price data
+        # price multiple = close(latest) / close(compare)
+        self.assertEqual(0.9, by_symbol["SH.600001"]["momentum_multiple_5d"])
+        self.assertEqual(1.1, by_symbol["SH.600002"]["momentum_multiple_5d"])
+        self.assertIsNone(by_symbol["SH.600003"]["momentum_multiple_5d"])
+        # ratio = weight multiple / price multiple; ≈1 means weight rise is price-driven
+        self.assertEqual(6.11, by_symbol["SH.600001"]["weight_price_ratio_5d"])  # 5.5/0.9, 权重升但股价跌
+        self.assertEqual(0.38, by_symbol["SH.600002"]["weight_price_ratio_5d"])  # 0.4167/1.1, 权重降股价升
+        self.assertIsNone(by_symbol["SH.600003"]["weight_price_ratio_5d"])
+
+    def test_latest_weight_change_null_for_new_entries(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+            self._create_price_db(db_path)
+
+            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+
+        self.assertTrue(result["available"])
+        self.assertIsNone(result["rank_compare_snapshot_date"])  # < 5 trading days of history
+        by_symbol = {row["stock_symbol"]: row for row in result["items"]}
+        self.assertIsNone(by_symbol["SH.600001"]["weight_5d_ago"])
+        self.assertIsNone(by_symbol["SH.600001"]["weight_change_5d"])
+        self.assertIsNone(by_symbol["SH.600001"]["weight_multiple_5d"])
+        self.assertIsNone(by_symbol["SH.600001"]["momentum_5d"])
+        self.assertIsNone(by_symbol["SH.600001"]["momentum_multiple_5d"])
+        self.assertIsNone(by_symbol["SH.600001"]["weight_price_ratio_5d"])
+
+    def _create_price_db(self, path: str) -> None:
+        connection = duckdb.connect(path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE a_stock_market_daily_qfq (
+                    ts_code VARCHAR NOT NULL,
+                    trade_date DATE NOT NULL,
+                    open DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    close DOUBLE,
+                    vol DOUBLE,
+                    amount DOUBLE
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO a_stock_market_daily_qfq VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("600001.SH", "2026-06-15", 100.0, 100.0, 100.0, 100.0, 0.0, 0.0),
+                    ("600001.SH", "2026-06-22", 90.0, 90.0, 90.0, 90.0, 0.0, 0.0),
+                    ("600002.SH", "2026-06-15", 100.0, 100.0, 100.0, 100.0, 0.0, 0.0),
+                    ("600002.SH", "2026-06-22", 110.0, 110.0, 110.0, 110.0, 0.0, 0.0),
+                ],
+            )
+        finally:
+            connection.close()
 
     def test_history_returns_weight_and_rank_by_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:

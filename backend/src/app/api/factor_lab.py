@@ -1483,6 +1483,114 @@ def _attach_xueqiu_fear_index_memberships(
     return sorted(used_options.values(), key=lambda value: (value["label"], value["symbol"]))
 
 
+_XUEQIU_PRICE_TABLES = (
+    "us_stock_daily",
+    "a_stock_index_daily",
+    "a_stock_fund_daily_qfq",
+    "a_stock_market_daily_qfq",
+)
+
+
+def _attach_xueqiu_5d_momentum(
+    connection,
+    items: List[Dict[str, Any]],
+    compare_snapshot_date: Any,
+    snapshot_date: Any,
+) -> None:
+    """Attach 5-day price momentum and weight/price multiple ratio to latest holdings items.
+
+    momentum_5d = price return (pct) between the compare snapshot and the latest snapshot.
+    momentum_multiple_5d = close(latest) / close(compare) price multiple.
+    weight_multiple_5d = composite weight multiple (computed in SQL).
+    weight_price_ratio_5d = weight_multiple_5d / momentum_multiple_5d.
+
+    If a stock's weight rise is purely driven by its own price rise, both multiples move
+    together and the ratio is near 1. A ratio clearly above 1 (especially weight up while
+    price down) means the weight rise is NOT caused by the rally — it reflects active buying.
+    """
+    for item in items:
+        item.setdefault("momentum_5d", None)
+        item.setdefault("momentum_multiple_5d", None)
+        item.setdefault("weight_price_ratio_5d", None)
+    if not items or compare_snapshot_date is None or snapshot_date is None:
+        return
+    if not any(_duckdb_table_exists(connection, table) for table in _XUEQIU_PRICE_TABLES):
+        return
+    try:
+        compare_day = (
+            compare_snapshot_date
+            if isinstance(compare_snapshot_date, date)
+            else date.fromisoformat(str(compare_snapshot_date))
+        )
+        snapshot_day = (
+            snapshot_date
+            if isinstance(snapshot_date, date)
+            else date.fromisoformat(str(snapshot_date))
+        )
+    except ValueError:
+        return
+
+    price_symbols: List[str] = []
+    for item in items:
+        raw_symbol = str(item.get("stock_symbol") or "").strip().upper()
+        if raw_symbol in {"CASH", "CN_CASH"}:
+            continue
+        price_symbol = _xueqiu_symbol_to_ts_code(raw_symbol)
+        if not price_symbol or not SYMBOL_PATTERN.match(price_symbol):
+            continue
+        price_symbols.append(price_symbol)
+    if not price_symbols:
+        return
+
+    try:
+        price_df = _load_price_frame(
+            price_symbols,
+            compare_day - timedelta(days=10),
+            snapshot_day + timedelta(days=5),
+        )
+        if price_df.is_empty():
+            return
+        usable = price_df.filter(pl.col("trade_date") <= snapshot_day)
+        if usable.is_empty():
+            return
+        momentum_by_symbol: Dict[str, float] = {}
+        multiple_by_symbol: Dict[str, float] = {}
+        for (symbol,), group in usable.group_by("symbol"):
+            latest_close = group.sort("trade_date").tail(1).select("close").to_series()[0]
+            base = group.filter(pl.col("trade_date") <= compare_day)
+            if base.is_empty():
+                continue
+            base_close = base.sort("trade_date").tail(1).select("close").to_series()[0]
+            if base_close and base_close > 0 and latest_close and latest_close > 0:
+                momentum_by_symbol[symbol] = (latest_close / base_close - 1.0) * 100.0
+                multiple_by_symbol[symbol] = latest_close / base_close
+    except Exception as exc:
+        logger.warning("Unable to compute 5d price momentum for 雪球持仓: %s", exc)
+        return
+
+    for item in items:
+        price_symbol = _xueqiu_symbol_to_ts_code(
+            str(item.get("stock_symbol") or "").strip().upper()
+        )
+        momentum = momentum_by_symbol.get(price_symbol)
+        multiple = multiple_by_symbol.get(price_symbol)
+        item["momentum_5d"] = round(momentum, 2) if momentum is not None else None
+        item["momentum_multiple_5d"] = round(multiple, 3) if multiple is not None else None
+        weight_multiple = item.get("weight_multiple_5d")
+        if weight_multiple is not None:
+            item["weight_multiple_5d"] = round(float(weight_multiple), 3)
+            weight_multiple = item["weight_multiple_5d"]
+        if (
+            multiple is not None
+            and weight_multiple is not None
+            and multiple > 0
+            and float(weight_multiple) > 0
+        ):
+            item["weight_price_ratio_5d"] = round(float(weight_multiple) / multiple, 2)
+        else:
+            item["weight_price_ratio_5d"] = None
+
+
 def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) -> Dict[str, Any]:
     normalized_limit = max(1, min(int(limit or 300), 2000))
     connection = _connect_duckdb()
@@ -1623,7 +1731,8 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
                 SELECT
                     stock_symbol,
                     COUNT(DISTINCT cube_symbol) AS holding_cube_count,
-                    SUM(weight_pct) AS total_weight_pct
+                    SUM(weight_pct) AS total_weight_pct,
+                    SUM(weight_pct) / NULLIF(MAX(compare_snapshot_summary.cube_count), 0) AS composite_weight_pct
                 FROM compare_holdings
                 CROSS JOIN compare_snapshot_summary
                 GROUP BY stock_symbol
@@ -1639,16 +1748,33 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             SELECT
                 ranked.*,
                 compare_ranked.composite_rank AS rank_5d_ago,
+                compare_ranked.composite_weight_pct AS weight_5d_ago,
                 CASE
                     WHEN compare_ranked.composite_rank IS NULL THEN NULL
                     ELSE compare_ranked.composite_rank - ranked.composite_rank
-                END AS rank_change_5d
+                END AS rank_change_5d,
+                CASE
+                    WHEN compare_ranked.composite_weight_pct IS NULL THEN NULL
+                    ELSE ranked.composite_weight_pct - compare_ranked.composite_weight_pct
+                END AS weight_change_5d,
+                CASE
+                    WHEN compare_ranked.composite_weight_pct IS NULL
+                         OR compare_ranked.composite_weight_pct = 0
+                    THEN NULL
+                    ELSE ranked.composite_weight_pct / compare_ranked.composite_weight_pct
+                END AS weight_multiple_5d
             FROM ranked
             LEFT JOIN compare_ranked ON compare_ranked.stock_symbol = ranked.stock_symbol
             ORDER BY ranked.composite_rank
             LIMIT ?
             """,
             [normalized_limit],
+        )
+        _attach_xueqiu_5d_momentum(
+            connection,
+            item_rows,
+            metadata.get("rank_compare_snapshot_date"),
+            snapshot_date,
         )
         index_options = _attach_xueqiu_fear_index_memberships(
             connection,

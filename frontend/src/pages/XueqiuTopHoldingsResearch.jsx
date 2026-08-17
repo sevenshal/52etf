@@ -12,6 +12,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -69,6 +70,81 @@ const renderRankDelta = value => {
     <Text style={{ color: delta > 0 ? '#389e0d' : '#cf1322' }}>
       {delta > 0 ? `+${delta}` : `${delta}`}
     </Text>
+  );
+};
+
+const weightMomentumRatioNumber = value => (
+  value === null || value === undefined || Number.isNaN(Number(value))
+    ? null
+    : Number(value)
+);
+
+// 权重上升但股价下跌：权重变化不是由本身上涨带动的，疑似主动加仓
+const isWeightUpPriceDown = record => {
+  const weightMultiple = weightMomentumRatioNumber(record?.weight_multiple_5d);
+  const momentumMultiple = weightMomentumRatioNumber(record?.momentum_multiple_5d);
+  return (
+    weightMultiple !== null
+    && momentumMultiple !== null
+    && weightMultiple > 1
+    && momentumMultiple < 1
+  );
+};
+
+const signedFixed = value => (
+  value !== null && value !== undefined
+    ? `${value >= 0 ? '+' : ''}${Number(value).toFixed(2)}`
+    : '-'
+);
+
+const multipleFixed = value => (
+  value !== null && value !== undefined ? Number(value).toFixed(2) : '-'
+);
+
+const renderWeightMomentumRatio = (value, record) => {
+  const ratio = weightMomentumRatioNumber(value);
+  if (ratio === null) return '-';
+  const weightMultiple = weightMomentumRatioNumber(record?.weight_multiple_5d);
+  const momentumMultiple = weightMomentumRatioNumber(record?.momentum_multiple_5d);
+  const weightChange = weightMomentumRatioNumber(record?.weight_change_5d);
+  const momentum = weightMomentumRatioNumber(record?.momentum_5d);
+  const weightUpPriceDown = isWeightUpPriceDown(record);
+  let color = '#595959';
+  if (ratio > 1.15) color = '#389e0d';
+  else if (ratio < 0.85) color = '#cf1322';
+  const priceColor = momentumMultiple === null
+    ? undefined
+    : (momentumMultiple > 1 ? '#389e0d' : momentumMultiple < 1 ? '#cf1322' : undefined);
+  return (
+    <Tooltip
+      title={
+        `5日权重 ${weightChange !== null ? `${signedFixed(weightChange)}pp` : '-'}`
+        + `（${weightMultiple !== null ? `${multipleFixed(weightMultiple)}x` : '-'}）`
+        + ` / 5日股价 ${momentum !== null ? `${signedFixed(momentum)}%` : '-'}`
+        + `（${momentumMultiple !== null ? `${multipleFixed(momentumMultiple)}x` : '-'}）`
+      }
+    >
+      <Space size={4} direction="vertical" style={{ gap: 0 }}>
+        <Space size={4}>
+          <Text
+            style={{
+              color: weightUpPriceDown ? '#13c2c2' : color,
+              fontWeight: weightUpPriceDown ? 600 : 400,
+            }}
+          >
+            {ratio.toFixed(2)}x
+          </Text>
+          {weightUpPriceDown ? <Tag color="cyan" style={{ marginInlineEnd: 0 }}>权升价跌</Tag> : null}
+        </Space>
+        <Text type="secondary" style={{ fontSize: 11, lineHeight: '14px' }}>
+          权{weightMultiple !== null ? multipleFixed(weightMultiple) : '-'}x
+          {' / '}
+          <span style={{ color: priceColor }}>
+            价{momentumMultiple !== null ? multipleFixed(momentumMultiple) : '-'}x
+          </span>
+        </Text>
+      </Space>
+    </Tooltip>
   );
 };
 
@@ -220,7 +296,20 @@ const XueqiuTopHoldingsResearch = () => {
   const historyRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
 
-  const latestItems = latestData?.items || [];
+  const latestItems = useMemo(() => latestData?.items || [], [latestData]);
+  const ratioStats = useMemo(() => {
+    const values = latestItems
+      .map(item => weightMomentumRatioNumber(item.weight_price_ratio_5d))
+      .filter(value => value !== null)
+      .sort((a, b) => a - b);
+    if (!values.length) return { mean: null, median: null };
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const mid = Math.floor(values.length / 2);
+    const median = values.length % 2
+      ? values[mid]
+      : (values[mid - 1] + values[mid]) / 2;
+    return { mean, median };
+  }, [latestItems]);
   const selectedItem = useMemo(
     () => latestItems.find(item => item.stock_symbol === selectedSymbol) || null,
     [latestItems, selectedSymbol],
@@ -381,6 +470,32 @@ const XueqiuTopHoldingsResearch = () => {
           ? <Tag color="green">新进</Tag>
           : renderRankDelta(value)
       ),
+    },
+    {
+      title: (
+        <Tooltip title="权重5日倍数 ÷ 股价5日倍数。若权重上升纯粹由股价上涨带动，比值≈1；明显>1（尤其权重升但股价跌）说明权重涨幅超过股价，疑似主动加仓。">
+          权重/股价 5日
+        </Tooltip>
+      ),
+      dataIndex: 'weight_price_ratio_5d',
+      width: 142,
+      align: 'right',
+      sorter: (a, b) => (
+        (weightMomentumRatioNumber(a.weight_price_ratio_5d) ?? Number.NEGATIVE_INFINITY)
+        - (weightMomentumRatioNumber(b.weight_price_ratio_5d) ?? Number.NEGATIVE_INFINITY)
+      ),
+      sortDirections: ['descend', 'ascend'],
+      filters: [
+        { text: '权重升价跌', value: 'weight_up_price_down' },
+        { text: '其他', value: 'others' },
+      ],
+      filterMultiple: false,
+      onFilter: (value, record) => (
+        value === 'weight_up_price_down'
+          ? isWeightUpPriceDown(record)
+          : !isWeightUpPriceDown(record)
+      ),
+      render: renderWeightMomentumRatio,
     },
     {
       title: '股票',
@@ -546,24 +661,48 @@ const XueqiuTopHoldingsResearch = () => {
   return (
     <div className="xueqiu-holdings-page">
       <Row gutter={[12, 12]} className="xueqiu-holdings-metrics">
-        <Col xs={12} md={6}>
+        <Col xs={12} md={4}>
           <Card bordered={false}>
             <Statistic title="最新日期" value={latestData?.snapshot_date || '-'} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
+        <Col xs={12} md={4}>
           <Card bordered={false}>
             <Statistic title="统计组合" value={latestData?.cube_count || 0} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
+        <Col xs={12} md={4}>
           <Card bordered={false}>
             <Statistic title="活跃/来源" value={`${numberFormatter(latestData?.active_cube_count || 0)} / ${numberFormatter(latestData?.source_cube_count || 0)}`} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
+        <Col xs={12} md={4}>
           <Card bordered={false}>
             <Statistic title="覆盖标的" value={latestItems.length} />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card bordered={false}>
+            <Statistic
+              title={
+                <Tooltip title="全部标的中，5日权重倍数÷股价倍数比值的均值（≈1为被动，>1疑似主动加仓）">
+                  5日权价比均值
+                </Tooltip>
+              }
+              value={ratioStats.mean !== null ? `${ratioStats.mean.toFixed(2)}x` : '-'}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card bordered={false}>
+            <Statistic
+              title={
+                <Tooltip title="全部标的中，5日权重倍数÷股价倍数比值的中位数（≈1为被动，>1疑似主动加仓）">
+                  5日权价比中位数
+                </Tooltip>
+              }
+              value={ratioStats.median !== null ? `${ratioStats.median.toFixed(2)}x` : '-'}
+            />
           </Card>
         </Col>
       </Row>
@@ -600,7 +739,7 @@ const XueqiuTopHoldingsResearch = () => {
               columns={latestColumns}
               dataSource={filteredItems}
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
-              scroll={{ x: 1200, y: 560 }}
+              scroll={{ x: 1400, y: 560 }}
               rowClassName={record => (record.stock_symbol === selectedSymbol ? 'xueqiu-holdings-row-selected' : '')}
               onRow={record => ({
                 onClick: () => setSelectedSymbol(record.stock_symbol),
