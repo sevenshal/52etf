@@ -432,7 +432,10 @@ const SOXXFearGreed = () => {
   const realtimePrice = realtime?.etf_price?.close ?? realtime?.etf_price?.quote?.price;
   const latest = expandedDetail.latest || expandedSummary?.latest;
   const latestPrice = latest?.etf_price?.close;
-  const displayPrice = realtimePrice ?? latestPrice;
+  // 今日已收盘入库：点位/价格与概要卡片、历史曲线保持一致（日线收盘值）；
+  // 盘中（history 尚未更新今日）才用实时快照点位（A股为盘中快照指数点位）。
+  const closeIsToday = latest?.date === chinaToday;
+  const displayPrice = closeIsToday ? latestPrice : (realtimePrice ?? latestPrice);
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
   const valuation = expandedDetail.valuation || expandedSummary?.valuation;
   const valuation252Label = valuation?.valuation_position_252_label || valuation?.valuation_position_label;
