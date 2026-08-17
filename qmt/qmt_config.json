@@ -3,6 +3,7 @@
   "identifier": "GJ40600083",
   "api_host": "api.52etf.vip",
   "use_https": false,
+  "ws_hosts": ["192.168.122.1:8001", "api.52etf.vip"],
   "qmt_data_path": "C:\\qjzq_qmt_trader\\userdata",
   "qmt_account_id": "40600083",
   "qmt_session_id": 9501

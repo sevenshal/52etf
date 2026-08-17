@@ -34,6 +34,9 @@ from urllib.parse import quote
 # ---------------------------------------------------------------------------
 USE_HTTPS = False
 API_HOST = "api.52etf.vip"
+# 连接后端的主机列表(依次尝试)。同一台物理机上的 VM 优先直连 NAT 内网, 失败回退公网域名。
+# 每项格式 "host[:port]"。
+WS_HOSTS = ["192.168.122.1:8001", "api.52etf.vip"]
 
 # 52ETF 外部交易账号（管理端"外部交易账号"页创建）
 DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
@@ -967,8 +970,9 @@ _PENDING_COMMANDS = []
 _PENDING_COMMANDS_LOCK = threading.Lock()
 
 
-def build_ws_url(account_id, identifier):
+def build_ws_url(account_id, identifier, host=None):
     ws_scheme = "wss" if USE_HTTPS else "ws"
+    host = host or API_HOST
     ts = str(int(time.time()))
     nonce = b64url_encode(pseudo_random_bytes(16))
     signature = sign_handshake(account_id, identifier, ts, nonce)
@@ -979,7 +983,7 @@ def build_ws_url(account_id, identifier):
         quote(nonce, safe=""),
         quote(signature, safe=""),
     )
-    return "%s://%s/api/external-trading-accounts/ws?%s" % (ws_scheme, API_HOST, query)
+    return "%s://%s/api/external-trading-accounts/ws?%s" % (ws_scheme, host, query)
 
 
 def send_ws_json(loop, conn, payload):
@@ -1057,23 +1061,26 @@ def discard_pending_commands_for_conn(conn):
 
 
 def run_ws_client(account_id, identifier, gateway, stop_event):
-    """WebSocket 连接循环 (独立线程)"""
+    """WebSocket 连接循环 (独立线程), 按 WS_HOSTS 顺序尝试主机。"""
     global _WS_LOOP, _WS_CONN
     from tornado import ioloop, websocket
+    host_index = 0
     while not stop_event.is_set():
         conn = None
         loop = None
         heartbeat = None
+        host = WS_HOSTS[host_index % len(WS_HOSTS)]
         try:
             loop = ioloop.IOLoop()
             loop.make_current()
-            ws_url = build_ws_url(account_id, identifier)
+            ws_url = build_ws_url(account_id, identifier, host)
             log.info("连接 52ETF WebSocket: %s", ws_url)
             future = websocket.websocket_connect(ws_url, connect_timeout=10)
             conn = loop.run_sync(lambda: future)
             _WS_LOOP = loop
             _WS_CONN = conn
-            log.info("52ETF WebSocket 已连接")
+            host_index = 0  # 成功后下轮回到首选主机
+            log.info("52ETF WebSocket 已连接 (%s)", host)
 
             def send_heartbeat():
                 try:
@@ -1095,7 +1102,7 @@ def run_ws_client(account_id, identifier, gateway, stop_event):
                     break
                 handle_ws_message(loop, conn, msg, gateway)
         except Exception as e:
-            log.error("WebSocket 错误: %s: %s", e.__class__.__name__, e)
+            log.error("WebSocket 错误(%s): %s: %s", host, e.__class__.__name__, e)
         finally:
             if heartbeat:
                 try:
@@ -1117,6 +1124,8 @@ def run_ws_client(account_id, identifier, gateway, stop_event):
                 except Exception:
                     pass
         if not stop_event.is_set():
+            if host_index < len(WS_HOSTS) - 1:
+                host_index += 1  # 切到下一个主机
             time.sleep(RECONNECT_DELAY_SECONDS)
 
 
@@ -1420,6 +1429,11 @@ def load_config(args):
         "qmt_account_id": cfg.get("qmt_account_id", QMT_ACCOUNT_ID),
         "qmt_session_id": int(cfg.get("qmt_session_id", QMT_SESSION_ID)),
     }
+    hosts = cfg.get("ws_hosts")
+    if isinstance(hosts, list) and hosts:
+        g["ws_hosts"] = [str(h) for h in hosts]
+    else:
+        g["ws_hosts"] = WS_HOSTS
     if args.account_id:
         g["account_id"] = args.account_id
     if args.identifier:
@@ -1434,7 +1448,7 @@ def load_config(args):
 
 
 def main():
-    global USE_HTTPS, API_HOST, DEFAULT_ACCOUNT_ID, DEFAULT_IDENTIFIER
+    global USE_HTTPS, API_HOST, DEFAULT_ACCOUNT_ID, DEFAULT_IDENTIFIER, WS_HOSTS
     parser = argparse.ArgumentParser(description="52ETF 国金 QMT 外部交易客户端")
     parser.add_argument("--config", help="JSON 配置文件路径")
     parser.add_argument("--account-id", help="52ETF account_id")
@@ -1453,11 +1467,12 @@ def main():
     DEFAULT_IDENTIFIER = g["identifier"]
     QMT_DATA_PATH = g["qmt_data_path"]
     QMT_ACCOUNT_ID = g["qmt_account_id"]
+    WS_HOSTS = g["ws_hosts"]
 
     log.info("=" * 60)
     log.info("52ETF QMT 客户端启动")
     log.info("  52ETF 账号: %s / identifier=%s", g["account_id"], g["identifier"])
-    log.info("  API: %s://%s", "wss" if USE_HTTPS else "ws", API_HOST)
+    log.info("  API 主机: %s (依次尝试)", " ".join(WS_HOSTS))
     log.info("  QMT: %s 资金账号=%s", QMT_DATA_PATH, QMT_ACCOUNT_ID)
     log.info("  QMT 客户端版本: 2.1.19.0 (xtquant 250807.1.2)")
 
