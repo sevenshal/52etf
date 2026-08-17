@@ -796,47 +796,31 @@ class XueqiuTopHoldingsReportTest(TestCase):
             session_factory = sessionmaker(bind=engine)
 
             with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
-                # 未配置时回退默认值
+                # 未配置时回退默认值（仅含雪球组合参数，信号参数已统一到 fear_greed_signal_configs）
                 defaults = load_xueqiu_strategy_config("rank_acceleration")
-                self.assertEqual(30.0, defaults["fear_threshold"])
-                self.assertEqual(1.25, defaults["fear_volume_std"])
-                self.assertEqual(0.25, defaults["greed_volume_std"])
-                self.assertEqual(25.0, defaults["ma5_bottom_score"])
-                self.assertEqual(75.0, defaults["ma5_top_score"])
-                self.assertEqual(5, defaults["ma5_lookback_days"])
+                self.assertEqual(10, defaults["fear_target_count"])
+                self.assertEqual(3, defaults["greed_target_count"])
                 self.assertEqual(8, defaults["min_holding_cubes"])
+                self.assertNotIn("fear_threshold", defaults)
 
                 # 写入配置后读取生效
                 db = session_factory()
                 db.add(
                     XueqiuStrategyConfig(
                         strategy_key="rank_acceleration",
-                        fear_threshold=30.0,
-                        fear_volume_std=1.5,
-                        greed_threshold=70.0,
-                        greed_volume_std=0.5,
                         fear_target_count=15,
                         greed_target_count=5,
-                        ma5_bottom_score=22.0,
-                        ma5_top_score=78.0,
-                        ma5_lookback_days=7,
                         min_holding_cubes=6,
                     )
                 )
                 db.commit()
                 db.close()
                 saved = load_xueqiu_strategy_config("rank_acceleration")
-                self.assertEqual(30.0, saved["fear_threshold"])
-                self.assertEqual(1.5, saved["fear_volume_std"])
-                self.assertEqual(0.5, saved["greed_volume_std"])
                 self.assertEqual(15, saved["fear_target_count"])
                 self.assertEqual(5, saved["greed_target_count"])
-                self.assertEqual(22.0, saved["ma5_bottom_score"])
-                self.assertEqual(78.0, saved["ma5_top_score"])
-                self.assertEqual(7, saved["ma5_lookback_days"])
                 self.assertEqual(6, saved["min_holding_cubes"])
                 # 其他策略不受影响
-                self.assertEqual(30.0, load_xueqiu_strategy_config("buffer")["fear_threshold"])
+                self.assertEqual(10, load_xueqiu_strategy_config("buffer")["fear_target_count"])
 
     def test_position_target_uses_configured_volume_thresholds(self):
         # 恐慌但量比未达到配置的 1.5 标准差 → 维持

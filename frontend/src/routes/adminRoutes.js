@@ -64,6 +64,10 @@ export const adminRouteDescriptors = [
     path: '/email-settings',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/EmailSettings')),
   },
+  {
+    path: '/fear-greed-signal-config',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FearGreedSignalConfig')),
+  },
   // ---- Profile 管理员菜单页面（持仓/账户管理/回测/系统等）----
   {
     path: '/options',

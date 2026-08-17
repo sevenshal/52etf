@@ -32,6 +32,16 @@ from ..core.database import (
     XueqiuTopHoldingsRun,
 )
 from ..core.duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
+from ..core.services.fear_greed_signal_config import (
+    MA5_BOTTOM_SCORE_DEFAULT,
+    MA5_LOOKBACK_DAYS_DEFAULT,
+    MA5_TOP_SCORE_DEFAULT,
+    VOLUME_BOTTOM_SCORE_DEFAULT,
+    VOLUME_EXPAND_STD_DEFAULT,
+    VOLUME_SHRINK_STD_DEFAULT,
+    VOLUME_TOP_SCORE_DEFAULT,
+    load_fear_greed_signal_config,
+)
 from ..core.utils import send_alert_email, send_configured_email
 
 
@@ -68,14 +78,7 @@ FEAR_GREED_FEAR_THRESHOLD = 25.0
 FEAR_GREED_GREED_THRESHOLD = 75.0
 FEAR_GREED_FEAR_TARGET_COUNT = 10
 FEAR_GREED_GREED_TARGET_COUNT = 3
-# log 量比 z-score：放量 z > FEAR_VOLUME_STD，缩量 z < -GREED_VOLUME_STD（默认值，可被配置覆盖）
-FEAR_VOLUME_STD_DEFAULT = 1.25
-GREED_VOLUME_STD_DEFAULT = 0.25
-# 量能型底：恐贪 ≤ XUEQIU_VOLUME_FEAR_THRESHOLD 且放量；量能型顶：恐贪 ≥ 75 且缩量
-XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT = 30.0
-# MA5均线型信号默认参数
-XUEQIU_MA5_BOTTOM_SCORE_DEFAULT = 25.0
-XUEQIU_MA5_TOP_SCORE_DEFAULT = 75.0
+# MA5均线型信号回看天数（默认值，被统一信号配置覆盖）
 XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT = 5
 REPORT_TABLE_DISPLAY_RANK = BUFFER_STRATEGY_SELL_RANK
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
@@ -2703,43 +2706,22 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
     "buffer": {
         "strategy_key": "buffer",
         "label": "星澜壹号 · 综合权重",
-        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
-        "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
-        "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
-        "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
-        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
-        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
-        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": 8,
     },
     "rank_acceleration": {
         "strategy_key": "rank_acceleration",
         "label": "星澜贰号 · 5日排名加速",
-        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
-        "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
-        "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
-        "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
-        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
-        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
-        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": RANK_ACCELERATION_MIN_HOLDING_CUBES,
     },
     "weight_price_ratio": {
         "strategy_key": "weight_price_ratio",
         "label": "星澜叁号 · 5日权价比",
-        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
-        "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
-        "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
-        "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
-        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
-        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
-        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES,
     },
 }
@@ -2762,15 +2744,8 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
         return {
             **defaults,
             "enabled": bool(row.enabled),
-            "fear_threshold": float(row.fear_threshold),
-            "greed_threshold": float(row.greed_threshold),
             "fear_target_count": int(row.fear_target_count),
             "greed_target_count": int(row.greed_target_count),
-            "fear_volume_std": float(row.fear_volume_std),
-            "greed_volume_std": float(row.greed_volume_std),
-            "ma5_bottom_score": float(row.ma5_bottom_score),
-            "ma5_top_score": float(row.ma5_top_score),
-            "ma5_lookback_days": int(row.ma5_lookback_days),
             "min_holding_cubes": int(row.min_holding_cubes),
             "updated_at": (
                 row.updated_at.isoformat() if row.updated_at else None
@@ -2795,13 +2770,13 @@ def resolve_xueqiu_strategy_position_target(
     fear_greed: Optional[Dict[str, Any]],
     *,
     current_holding_count: Optional[int] = None,
-    fear_threshold: float = XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
-    greed_threshold: float = FEAR_GREED_GREED_THRESHOLD,
-    fear_volume_std: float = FEAR_VOLUME_STD_DEFAULT,
-    greed_volume_std: float = GREED_VOLUME_STD_DEFAULT,
-    ma5_bottom_score: float = XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
-    ma5_top_score: float = XUEQIU_MA5_TOP_SCORE_DEFAULT,
-    ma5_lookback_days: int = XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
+    fear_threshold: float = VOLUME_BOTTOM_SCORE_DEFAULT,
+    greed_threshold: float = VOLUME_TOP_SCORE_DEFAULT,
+    fear_volume_std: float = VOLUME_EXPAND_STD_DEFAULT,
+    greed_volume_std: float = VOLUME_SHRINK_STD_DEFAULT,
+    ma5_bottom_score: float = MA5_BOTTOM_SCORE_DEFAULT,
+    ma5_top_score: float = MA5_TOP_SCORE_DEFAULT,
+    ma5_lookback_days: int = MA5_LOOKBACK_DAYS_DEFAULT,
     fear_target_count: int = FEAR_GREED_FEAR_TARGET_COUNT,
     greed_target_count: int = FEAR_GREED_GREED_TARGET_COUNT,
     default_top_n: int = BUFFER_STRATEGY_TOP_N,
@@ -5084,18 +5059,19 @@ async def execute_rank_acceleration_target_rebalance(
         logger.warning("Failed to load CSI All Share fear greed for 星澜贰号: %s", exc)
         fear_greed_snapshot = None
     strategy_config = load_xueqiu_strategy_config("rank_acceleration")
+    signal_config = load_fear_greed_signal_config()
     strategy_top_n, fear_greed_regime = resolve_xueqiu_strategy_position_target(
         fear_greed_snapshot,
         current_holding_count=len(extract_current_target_holdings(current_holdings)),
-        fear_threshold=strategy_config["fear_threshold"],
-        greed_threshold=strategy_config["greed_threshold"],
+        fear_threshold=signal_config["volume_bottom_score"],
+        greed_threshold=signal_config["volume_top_score"],
         fear_target_count=strategy_config["fear_target_count"],
         greed_target_count=strategy_config["greed_target_count"],
-        fear_volume_std=strategy_config["fear_volume_std"],
-        greed_volume_std=strategy_config["greed_volume_std"],
-        ma5_bottom_score=strategy_config["ma5_bottom_score"],
-        ma5_top_score=strategy_config["ma5_top_score"],
-        ma5_lookback_days=strategy_config["ma5_lookback_days"],
+        fear_volume_std=signal_config["volume_expand_std"],
+        greed_volume_std=signal_config["volume_shrink_std"],
+        ma5_bottom_score=signal_config["ma5_bottom_score"],
+        ma5_top_score=signal_config["ma5_top_score"],
+        ma5_lookback_days=signal_config["ma5_lookback_days"],
         default_top_n=RANK_ACCELERATION_TOP_N,
     )
     strategy_sell_rank = max(
@@ -5294,18 +5270,19 @@ async def execute_weight_price_ratio_target_rebalance(
         logger.warning("Failed to load CSI All Share fear greed for 星澜叁号: %s", exc)
         fear_greed_snapshot = None
     strategy_config = load_xueqiu_strategy_config("weight_price_ratio")
+    signal_config = load_fear_greed_signal_config()
     strategy_top_n, fear_greed_regime = resolve_xueqiu_strategy_position_target(
         fear_greed_snapshot,
         current_holding_count=len(extract_current_target_holdings(current_holdings)),
-        fear_threshold=strategy_config["fear_threshold"],
-        greed_threshold=strategy_config["greed_threshold"],
+        fear_threshold=signal_config["volume_bottom_score"],
+        greed_threshold=signal_config["volume_top_score"],
         fear_target_count=strategy_config["fear_target_count"],
         greed_target_count=strategy_config["greed_target_count"],
-        fear_volume_std=strategy_config["fear_volume_std"],
-        greed_volume_std=strategy_config["greed_volume_std"],
-        ma5_bottom_score=strategy_config["ma5_bottom_score"],
-        ma5_top_score=strategy_config["ma5_top_score"],
-        ma5_lookback_days=strategy_config["ma5_lookback_days"],
+        fear_volume_std=signal_config["volume_expand_std"],
+        greed_volume_std=signal_config["volume_shrink_std"],
+        ma5_bottom_score=signal_config["ma5_bottom_score"],
+        ma5_top_score=signal_config["ma5_top_score"],
+        ma5_lookback_days=signal_config["ma5_lookback_days"],
         default_top_n=WEIGHT_PRICE_RATIO_TOP_N,
     )
     strategy_sell_rank = max(
@@ -5544,18 +5521,19 @@ async def run_top_holdings_job(
             logger.warning("Failed to load CSI All Share fear greed, using current Top%s logic: %s", top_n, exc)
             fear_greed_snapshot = None
         strategy_config = load_xueqiu_strategy_config("buffer")
+        signal_config = load_fear_greed_signal_config()
         strategy_top_n, fear_greed_regime = resolve_xueqiu_strategy_position_target(
             fear_greed_snapshot,
             current_holding_count=len(extract_current_target_holdings(current_target_holdings)),
-            fear_threshold=strategy_config["fear_threshold"],
-            greed_threshold=strategy_config["greed_threshold"],
+            fear_threshold=signal_config["volume_bottom_score"],
+            greed_threshold=signal_config["volume_top_score"],
             fear_target_count=strategy_config["fear_target_count"],
             greed_target_count=strategy_config["greed_target_count"],
-            fear_volume_std=strategy_config["fear_volume_std"],
-            greed_volume_std=strategy_config["greed_volume_std"],
-            ma5_bottom_score=strategy_config["ma5_bottom_score"],
-            ma5_top_score=strategy_config["ma5_top_score"],
-            ma5_lookback_days=strategy_config["ma5_lookback_days"],
+            fear_volume_std=signal_config["volume_expand_std"],
+            greed_volume_std=signal_config["volume_shrink_std"],
+            ma5_bottom_score=signal_config["ma5_bottom_score"],
+            ma5_top_score=signal_config["ma5_top_score"],
+            ma5_lookback_days=signal_config["ma5_lookback_days"],
             default_top_n=top_n,
         )
         strategy_plan = build_equal_top10_top12_buffer_plan(

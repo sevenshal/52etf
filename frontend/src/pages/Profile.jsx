@@ -173,6 +173,11 @@ const Profile = () => {
           arrow: true
         },
         {
+          title: '贪恐信号配置',
+          onClick: () => navigate('/fear-greed-signal-config'),
+          arrow: true
+        },
+        {
           title: '系统日志',
           onClick: () => navigate('/system-log'),
           arrow: true

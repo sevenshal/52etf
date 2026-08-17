@@ -33,6 +33,7 @@ const PROFILE_ROUTES = [
   '/monthly-analysis',
   '/scheduled-tasks',
   '/email-settings',
+  '/fear-greed-signal-config',
   '/web-account-manager',
   '/tushare-account-manager',
   '/system-log',

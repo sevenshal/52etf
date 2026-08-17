@@ -1237,31 +1237,47 @@ class XueqiuTopHoldingsRun(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class FearGreedSignalConfig(Base):
+    """自算贪恐底/顶信号统一配置（全局单份，星澜壹贰叁号与历史曲线共用）。
+
+    两种信号类型（均线型 / 量能型）的阈值、放缩量标准差、回看与冷却天数统一配置：
+    - 均线型底：恐贪 MA5 上穿(当日>前一日)且最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
+    - 均线型顶：恐贪 MA5 下穿(当日<前一日)且最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
+    - 量能型底：恐贪 ≤ volume_bottom_score 且放量（log 量比 z > volume_expand_std）
+    - 量能型顶：恐贪 ≥ volume_top_score 且缩量（log 量比 z < -volume_shrink_std）
+    同类信号（各类型顶/底分别独立）出后 cooldown_days 个交易日不重复出信号。
+    """
+    __tablename__ = "fear_greed_signal_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 均线型
+    ma5_bottom_score = Column(Float, nullable=False, default=25.0)
+    ma5_top_score = Column(Float, nullable=False, default=75.0)
+    ma5_lookback_days = Column(Integer, nullable=False, default=5)
+    # 量能型
+    volume_bottom_score = Column(Float, nullable=False, default=30.0)
+    volume_top_score = Column(Float, nullable=False, default=75.0)
+    volume_expand_std = Column(Float, nullable=False, default=1.25)
+    volume_shrink_std = Column(Float, nullable=False, default=0.25)
+    # 冷却：同类信号出后 N 个交易日不重复
+    cooldown_days = Column(Integer, nullable=False, default=5)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class XueqiuStrategyConfig(Base):
     """雪球星澜组合策略参数（壹号综合权重/贰号排名加速/叁号权价比）。
 
-    恐贪择时仓位管理：恐慌(score<fear_threshold)且放量(log量比z>fear_volume_std) → 10只；
-    贪婪(score>greed_threshold)且缩量(log量比z<-greed_volume_std) → 3只。
+    仅保留雪球组合相关的目标仓位参数；底/顶信号检测参数（恐贪阈值、放缩量
+    标准差、MA5 阈值/回看、冷却）统一走 fear_greed_signal_configs 表。
     """
     __tablename__ = "xueqiu_strategy_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     strategy_key = Column(String(32), unique=True, nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
-    # 恐慌/贪婪分数阈值
-    fear_threshold = Column(Float, nullable=False, default=25.0)
-    greed_threshold = Column(Float, nullable=False, default=75.0)
     # 目标仓位：恐慌放量 → fear_target_count 只；贪婪缩量 → greed_target_count 只
     fear_target_count = Column(Integer, nullable=False, default=10)
     greed_target_count = Column(Integer, nullable=False, default=3)
-    # 放量/缩量的 log 量比 z-score 阈值（放量：z > fear_volume_std；缩量：z < -greed_volume_std）
-    fear_volume_std = Column(Float, nullable=False, default=1.25)
-    greed_volume_std = Column(Float, nullable=False, default=0.25)
-    # MA5均线型信号：恐贪MA5上穿(当日>前一日)且最近N日任意恐贪≤ma5_bottom_score → 底；
-    # MA5下穿(当日<前一日)且最近N日任意恐贪≥ma5_top_score → 顶
-    ma5_bottom_score = Column(Float, nullable=False, default=25.0)
-    ma5_top_score = Column(Float, nullable=False, default=75.0)
-    ma5_lookback_days = Column(Integer, nullable=False, default=5)
     # 买入候选最少持仓组合数
     min_holding_cubes = Column(Integer, nullable=False, default=8)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)

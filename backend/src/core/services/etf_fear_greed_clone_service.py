@@ -118,18 +118,22 @@ def _finite_or_none(value: Any) -> Optional[float]:
 
 
 # ---- 自算贪恐历史曲线底/顶信号（后端统一计算，前端只渲染标记） ----
+#
+# 参数默认值（与 XueqiuStrategyConfig 表「fear_greed_signals」行对齐）；
+# 实际计算时优先读取该表配置，表里没有时才用这里的默认值兜底。
 
-# ma5 均线型：MA5 上穿/下穿 + 最近 5 个交易日恐贪触及极值
+# ma5 均线型：MA5 上穿/下穿 + 最近 N 个交易日恐贪触及极值（MA5 均线本身固定 5 日）
 SIGNAL_MA5_WINDOW = 5
-SIGNAL_MA5_BOTTOM_THRESHOLD = 25.0
-SIGNAL_MA5_TOP_THRESHOLD = 75.0
+SIGNAL_MA5_BOTTOM_THRESHOLD_DEFAULT = 25.0
+SIGNAL_MA5_TOP_THRESHOLD_DEFAULT = 75.0
+SIGNAL_MA5_LOOKBACK_DAYS_DEFAULT = 5
 # 量能型：恐贪极值 + 放量/缩量（log 成交量相对不含当日过去 20 日均值的标准差）
-SIGNAL_VOLUME_BOTTOM_THRESHOLD = 30.0
-SIGNAL_VOLUME_TOP_THRESHOLD = 75.0
-SIGNAL_VOLUME_EXPAND_Z = 1.25  # 放量：高于均值 1.25 个标准差
-SIGNAL_VOLUME_SHRINK_Z = -0.25  # 缩量：低于均值 0.25 个标准差
-# 同类信号出后 5 个交易日冷却，不重复出信号（每类的顶/底各自独立冷却）
-SIGNAL_COOLDOWN_TRADING_DAYS = 5
+SIGNAL_VOLUME_BOTTOM_THRESHOLD_DEFAULT = 30.0
+SIGNAL_VOLUME_TOP_THRESHOLD_DEFAULT = 75.0
+SIGNAL_VOLUME_EXPAND_Z_DEFAULT = 1.25  # 放量：高于均值 1.25 个标准差
+SIGNAL_VOLUME_SHRINK_Z_DEFAULT = -0.25  # 缩量：低于均值 0.25 个标准差
+# 同类信号出后 N 个交易日冷却，不重复出信号（每类的顶/底各自独立冷却）
+SIGNAL_COOLDOWN_DAYS_DEFAULT = 5
 
 SIGNAL_KINDS = (
     "ma5_bottom",
@@ -147,43 +151,93 @@ def _finite(value: Any) -> bool:
         return False
 
 
+def load_turn_signal_params() -> Dict[str, Any]:
+    """读取自算贪恐底/顶信号参数（fear_greed_signal_configs 全局单行配置）。
+
+    返回可直接传给 ``compute_turn_signals`` 的参数 dict；表里没有行时回退到
+    本模块默认值。读取为独立短事务，调用方不要把它放进长事务。
+    """
+    from .fear_greed_signal_config import load_fear_greed_signal_config
+
+    config = load_fear_greed_signal_config()
+    return {
+        "ma5_bottom_score": float(
+            config.get("ma5_bottom_score") or SIGNAL_MA5_BOTTOM_THRESHOLD_DEFAULT
+        ),
+        "ma5_top_score": float(
+            config.get("ma5_top_score") or SIGNAL_MA5_TOP_THRESHOLD_DEFAULT
+        ),
+        "ma5_lookback_days": int(
+            config.get("ma5_lookback_days") or SIGNAL_MA5_LOOKBACK_DAYS_DEFAULT
+        ),
+        "volume_bottom_score": float(
+            config.get("volume_bottom_score") or SIGNAL_VOLUME_BOTTOM_THRESHOLD_DEFAULT
+        ),
+        "volume_top_score": float(
+            config.get("volume_top_score") or SIGNAL_VOLUME_TOP_THRESHOLD_DEFAULT
+        ),
+        "volume_expand_z": float(
+            config.get("volume_expand_std") or SIGNAL_VOLUME_EXPAND_Z_DEFAULT
+        ),
+        "volume_shrink_z": -abs(float(
+            config.get("volume_shrink_std") or abs(SIGNAL_VOLUME_SHRINK_Z_DEFAULT)
+        )),
+        "cooldown_days": int(
+            config.get("cooldown_days") if config.get("cooldown_days") is not None
+            else SIGNAL_COOLDOWN_DAYS_DEFAULT
+        ),
+    }
+
+
 def compute_turn_signals(
     rows: List[Dict[str, Any]],
+    params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """后端统一计算自算贪恐历史曲线的底/顶信号。
 
     入参为按日期升序的 ``{date, score, etf_price: {volume}}`` 行（full history，
     信号需要完整历史才能正确计算 MA5 / 量能 / 冷却）。两种信号类型各自独立
-    计算，且每类的顶/底分别独立冷却（信号后 ``SIGNAL_COOLDOWN_TRADING_DAYS`` 个
-    交易日不重复出同类信号）：
+    计算，且每类的顶/底分别独立冷却（信号后 ``cooldown_days`` 个交易日不重复出
+    同类信号）。参数通过 ``params`` 传入（见 ``load_turn_signal_params``），
+    缺省时使用模块默认值：
 
     - ma5 均线型：
-      - 底：恐贪 MA5 较前一交易日上穿（当日 > 前一日），且最近 5 个交易日任意
-        一天恐贪值 <= 25；
-      - 顶：恐贪 MA5 较前一交易日下穿（当日 < 前一日），且最近 5 个交易日任意
-        一天恐贪值 >= 75。
+      - 底：恐贪 MA5 较前一交易日上穿（当日 > 前一日），且最近 N 日任意一天
+        恐贪值 <= ma5_bottom_score；
+      - 顶：恐贪 MA5 较前一交易日下穿（当日 < 前一日），且最近 N 日任意一天
+        恐贪值 >= ma5_top_score。
     - 量能型：
-      - 底：恐贪 <= 30 且放量（log(成交量) 高于不含当日过去 20 个交易日
-        log(成交量) 均值 1.25 个标准差）；
-      - 顶：恐贪 >= 75 且缩量（log(成交量) 低于不含当日过去 20 个交易日
-        log(成交量) 均值 0.25 个标准差）。
+      - 底：恐贪 <= volume_bottom_score 且放量（log(成交量) 高于不含当日过去 20 个
+        交易日 log(成交量) 均值 volume_expand_z 个标准差）；
+      - 顶：恐贪 >= volume_top_score 且缩量（log(成交量) 低于不含当日过去 20 个
+        交易日 log(成交量) 均值 volume_shrink_z 个标准差）。
 
     返回 ``{date: [{kind, value, label}, ...]}``，kind 取值为
     ma5_bottom / ma5_top / volume_bottom / volume_top；value 为信号展示参考值
     （ma5 型取当日 MA5，量能型取当日恐贪值），label 为展示文案。
     """
+    params = params or {}
+    ma5_bottom_score = float(params.get("ma5_bottom_score") or SIGNAL_MA5_BOTTOM_THRESHOLD_DEFAULT)
+    ma5_top_score = float(params.get("ma5_top_score") or SIGNAL_MA5_TOP_THRESHOLD_DEFAULT)
+    ma5_lookback_days = int(params.get("ma5_lookback_days") or SIGNAL_MA5_LOOKBACK_DAYS_DEFAULT)
+    volume_bottom_score = float(params.get("volume_bottom_score") or SIGNAL_VOLUME_BOTTOM_THRESHOLD_DEFAULT)
+    volume_top_score = float(params.get("volume_top_score") or SIGNAL_VOLUME_TOP_THRESHOLD_DEFAULT)
+    volume_expand_z = float(params.get("volume_expand_z") or SIGNAL_VOLUME_EXPAND_Z_DEFAULT)
+    volume_shrink_z = float(params.get("volume_shrink_z") if params.get("volume_shrink_z") is not None else SIGNAL_VOLUME_SHRINK_Z_DEFAULT)
+    cooldown_days = int(params.get("cooldown_days") if params.get("cooldown_days") is not None else SIGNAL_COOLDOWN_DAYS_DEFAULT)
+
     n = len(rows)
     scores = [row.get("score") for row in rows]
     volumes = [(row.get("etf_price") or {}).get("volume") for row in rows]
-    # 恐贪 MA5（连续 5 个有效值才计算，与前端原逻辑一致）
+    # 恐贪 MA5（连续 5 个有效值才计算，MA5 均线本身固定 5 日）
     ma5: List[Optional[float]] = [None] * n
     for i in range(n):
         window = scores[max(0, i - SIGNAL_MA5_WINDOW + 1): i + 1]
         if len(window) == SIGNAL_MA5_WINDOW and all(_finite(v) for v in window):
             ma5[i] = float(sum(window) / SIGNAL_MA5_WINDOW)
-    # 每类信号独立冷却：记录该类信号的日期下标，之后 5 个交易日内不再重复出同类信号
+    # 每类信号独立冷却：记录该类信号的日期下标，之后 cooldown_days 个交易日内不再重复出同类信号
     last_signal_index = {
-        kind: -SIGNAL_COOLDOWN_TRADING_DAYS - 1 for kind in SIGNAL_KINDS
+        kind: -cooldown_days - 1 for kind in SIGNAL_KINDS
     }
     result: Dict[str, List[Dict[str, Any]]] = {}
     for i in range(n):
@@ -199,20 +253,20 @@ def compute_turn_signals(
 
         # ---- ma5 均线型 ----
         if i >= 1 and _finite(ma5[i]) and _finite(ma5[i - 1]):
-            recent = scores[max(0, i - SIGNAL_MA5_WINDOW + 1): i + 1]
+            recent = scores[max(0, i - ma5_lookback_days + 1): i + 1]
             if (
-                i - last_signal_index["ma5_bottom"] > SIGNAL_COOLDOWN_TRADING_DAYS
+                i - last_signal_index["ma5_bottom"] > cooldown_days
                 and ma5[i] > ma5[i - 1]
                 and any(
-                    _finite(v) and v <= SIGNAL_MA5_BOTTOM_THRESHOLD for v in recent
+                    _finite(v) and v <= ma5_bottom_score for v in recent
                 )
             ):
                 _fire("ma5_bottom", float(ma5[i]), "均线底")
             if (
-                i - last_signal_index["ma5_top"] > SIGNAL_COOLDOWN_TRADING_DAYS
+                i - last_signal_index["ma5_top"] > cooldown_days
                 and ma5[i] < ma5[i - 1]
                 and any(
-                    _finite(v) and v >= SIGNAL_MA5_TOP_THRESHOLD for v in recent
+                    _finite(v) and v >= ma5_top_score for v in recent
                 )
             ):
                 _fire("ma5_top", float(ma5[i]), "均线顶")
@@ -234,16 +288,15 @@ def compute_turn_signals(
                 )
         if log_z is not None:
             if (
-                i - last_signal_index["volume_bottom"]
-                > SIGNAL_COOLDOWN_TRADING_DAYS
-                and score <= SIGNAL_VOLUME_BOTTOM_THRESHOLD
-                and log_z > SIGNAL_VOLUME_EXPAND_Z
+                i - last_signal_index["volume_bottom"] > cooldown_days
+                and score <= volume_bottom_score
+                and log_z > volume_expand_z
             ):
                 _fire("volume_bottom", float(score), "放量底")
             if (
-                i - last_signal_index["volume_top"] > SIGNAL_COOLDOWN_TRADING_DAYS
-                and score >= SIGNAL_VOLUME_TOP_THRESHOLD
-                and log_z < SIGNAL_VOLUME_SHRINK_Z
+                i - last_signal_index["volume_top"] > cooldown_days
+                and score >= volume_top_score
+                and log_z < volume_shrink_z
             ):
                 _fire("volume_top", float(score), "缩量顶")
 
@@ -966,6 +1019,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         include_latest_holdings: bool = True,
     ) -> Dict[str, Any]:
         etf_symbol = self._normalize_etf_symbol(symbol)
+        # 底/顶信号参数：读取 XueqiuStrategyConfig 表 fear_greed_signals 行（独立短事务，
+        # 放在 DB 读历史之前，避免嵌套 session）
+        turn_signal_params = load_turn_signal_params()
         db = Session()
         try:
             # 信号需要完整历史才能正确计算 MA5 / 量能 / 冷却，因此始终加载全量，
@@ -1070,7 +1126,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                                 ),
                             }
             # 底/顶信号：后端统一计算（ma5 均线型 + 量能型，各自独立冷却）
-            signals_by_date = compute_turn_signals(data)
+            signals_by_date = compute_turn_signals(data, turn_signal_params)
             for item in data:
                 item["signals"] = signals_by_date.get(item["date"], [])
             # 信号计算完成后应用日期窗口过滤

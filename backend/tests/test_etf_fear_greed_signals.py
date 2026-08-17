@@ -9,7 +9,10 @@
 
 import datetime as dt
 
-from src.core.services.etf_fear_greed_clone_service import compute_turn_signals
+from src.core.services.etf_fear_greed_clone_service import (
+    compute_turn_signals,
+    load_turn_signal_params,
+)
 
 
 def _rows(scores, volumes):
@@ -149,3 +152,92 @@ def test_both_signal_types_on_same_day():
     volumes = base + [100.0] * 8 + [200.0] + [100.0] * 2
     result = _dates(compute_turn_signals(_rows(scores, volumes)))
     assert result == {"2024-01-30": ["ma5_bottom", "volume_bottom"]}
+
+
+def test_custom_volume_bottom_score_param():
+    # 量能底恐贪阈值可配置：默认 30 不触发，配成 40 后触发
+    base = [100.0 + (index % 3 - 1) for index in range(20)]
+    rows = _rows([45] * 20 + [40], base + [200.0])
+    assert compute_turn_signals(rows) == {}
+    result = compute_turn_signals(rows, {"volume_bottom_score": 40.0})
+    assert _dates(result) == {"2024-01-22": ["volume_bottom"]}
+
+
+def test_custom_cooldown_days_param():
+    # 冷却天数可配置：cooldown=2 时同类信号间隔 >2 个交易日（默认 5 时更稀）
+    scores = (
+        [70, 68, 66, 64, 62, 60, 58, 56, 54, 52,
+         50, 48, 46, 44, 42, 40, 38, 36, 34, 32,
+         30, 28, 26, 24, 22, 20, 22, 24,
+         21, 19, 21, 23, 26, 29, 31,
+         28, 25, 22, 20, 23, 26, 29, 32, 35]
+    )
+    rows = _rows(scores, [100.0] * len(scores))
+    default_result = _dates(compute_turn_signals(rows))
+    assert default_result == {
+        "2024-02-01": ["ma5_bottom"],
+        "2024-02-07": ["ma5_bottom"],
+        "2024-02-13": ["ma5_bottom"],
+    }
+    short_result = _dates(compute_turn_signals(rows, {"cooldown_days": 2}))
+    assert "2024-02-04" in short_result  # 默认 5 日冷却时该日无信号
+    assert "2024-02-04" not in default_result
+
+
+def test_custom_ma5_lookback_days_param():
+    # MA5 回看天数可配置：上穿日分数 28（>25）但 5 日内有 20 → lookback=5 触发、lookback=1 不触发
+    scores = [70, 68, 66, 64, 62, 60, 58, 56, 54, 52,
+              50, 48, 46, 44, 42, 40, 38, 36, 34, 32,
+              30, 28, 26, 24, 22, 20, 22, 24, 26, 28, 30, 32]
+    rows = _rows(scores, [100.0] * len(scores))
+    assert _dates(compute_turn_signals(rows, {"ma5_lookback_days": 5})) == {"2024-01-30": ["ma5_bottom"]}
+    assert compute_turn_signals(rows, {"ma5_lookback_days": 1}) == {}
+
+
+def test_load_turn_signal_params_defaults_without_row():
+    # 表里没有 fear_greed_signal_configs 行时回退默认参数
+    from src.core.database import Base, Session
+
+    Base.metadata.create_all(Session().bind)
+    params = load_turn_signal_params()
+    assert params == {
+        "ma5_bottom_score": 25.0,
+        "ma5_top_score": 75.0,
+        "ma5_lookback_days": 5,
+        "volume_bottom_score": 30.0,
+        "volume_top_score": 75.0,
+        "volume_expand_z": 1.25,
+        "volume_shrink_z": -0.25,
+        "cooldown_days": 5,
+    }
+
+
+def test_load_turn_signal_params_reads_config_row():
+    # 插入统一信号配置行后，参数从 fear_greed_signal_configs 表读取
+    from src.core.database import Base, FearGreedSignalConfig, Session
+
+    Base.metadata.create_all(Session().bind)
+    with Session() as db:
+        db.query(FearGreedSignalConfig).delete()
+        db.add(FearGreedSignalConfig(
+            ma5_bottom_score=22.0,
+            ma5_top_score=80.0,
+            ma5_lookback_days=3,
+            volume_bottom_score=33.0,
+            volume_top_score=78.0,
+            volume_expand_std=1.5,
+            volume_shrink_std=0.4,
+            cooldown_days=2,
+        ))
+        db.commit()
+    params = load_turn_signal_params()
+    assert params == {
+        "ma5_bottom_score": 22.0,
+        "ma5_top_score": 80.0,
+        "ma5_lookback_days": 3,
+        "volume_bottom_score": 33.0,
+        "volume_top_score": 78.0,
+        "volume_expand_z": 1.5,
+        "volume_shrink_z": -0.4,
+        "cooldown_days": 2,
+    }
