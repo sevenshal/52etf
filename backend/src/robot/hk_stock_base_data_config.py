@@ -12,15 +12,6 @@ HK_INDEX_FEAR_GREED_TARGETS = [
         "tushare_index_code": "HSI",
     },
     {
-        "symbol": "HSCEI.HK",
-        "ticker": "国企指数",
-        "label": "恒生国企",
-        "index_code": "HSCEI",
-        # Tushare index_global currently returns no rows for HSCEI. The sync
-        # service accepts an explicitly imported fallback series.
-        "tushare_index_code": None,
-    },
-    {
         "symbol": "HSTECH.HK",
         "ticker": "恒生科技",
         "label": "恒生科技",

@@ -51,7 +51,7 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         name="HK Index Volatility",
         raw_label="-(20-day realized volatility / 50-day average - 1)",
         source="hk_index_daily",
-        proxy_note="Realized-volatility proxy used consistently across HSI, HSCEI and HSTECH.",
+        proxy_note="Realized-volatility proxy used consistently across HSI and HSTECH.",
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",

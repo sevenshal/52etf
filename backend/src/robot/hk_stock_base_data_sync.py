@@ -413,40 +413,6 @@ class HKStockBaseDataSyncService:
         )
         return frame
 
-    def build_hscei_proxy_index(self, proxy_symbol: str = "02828.HK") -> int:
-        """Use the HSCEI tracker only when Tushare index_global lacks HSCEI."""
-        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO hk_index_daily (
-                    ts_code, trade_date, open, high, low, close, pre_close,
-                    change, pct_chg, swing, vol, source, created_at, updated_at
-                )
-                SELECT
-                    'HSCEI', trade_date, open, high, low, close, pre_close,
-                    change, pct_chg, NULL, vol, 'proxy_02828.HK',
-                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                FROM hk_stock_daily
-                WHERE ts_code = ?
-                """,
-                [proxy_symbol],
-            )
-            count = connection.execute(
-                "SELECT COUNT(*) FROM hk_index_daily WHERE ts_code = 'HSCEI'"
-            ).fetchone()[0]
-            connection.execute("COMMIT")
-            return int(count)
-        except Exception:
-            try:
-                connection.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
-        finally:
-            connection.close()
-
     def sync_yahoo_index(
         self,
         yahoo_symbol: str,
