@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from ...core.database import get_db, AutomatedTradingConfig, AutomatedTradeLog
 from ...core.event_stream import publish_event
-from .account import valid_account
+from .account import valid_admin_account
 from ...core.services.trading_strategy import execute_trading_strategy
 
 router = APIRouter(prefix="/api/trading", tags=["Automated Trading"])
@@ -36,7 +36,7 @@ class TradeLogSchema(BaseModel):
 
 @router.get("/config", response_model=Optional[TradingConfigSchema])
 async def get_trading_config(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     config = db.query(AutomatedTradingConfig).filter(
@@ -47,7 +47,7 @@ async def get_trading_config(
 @router.post("/config")
 async def save_trading_config(
     config_data: TradingConfigSchema,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     if config_data.short_window >= config_data.long_window:
@@ -79,7 +79,7 @@ async def save_trading_config(
 async def get_trading_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     logs = db.query(AutomatedTradeLog).filter(
@@ -92,7 +92,7 @@ async def get_trading_logs(
 
 @router.post("/manual-check")
 async def manual_strategy_check(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     # 手动触发策略检查，运行在独立线程和Loop中以避免冲突

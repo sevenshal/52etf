@@ -120,7 +120,7 @@ from ...robot.us_stock_signal_virtual import (
     _is_rebalance_day,
     _normalize_rebalance_frequency,
 )
-from .account import valid_account
+from .account import valid_admin_account
 
 
 router = APIRouter(prefix="/api/factor-lab", tags=["Factor Lab"])
@@ -2882,7 +2882,7 @@ def search_factor_lab_symbols(
     market: str = Query(..., description="a_stock 或 us_stock"),
     q: str = Query("", description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     market_key = str(market or "").strip().lower()
@@ -2905,7 +2905,7 @@ def search_factor_lab_symbols(
 def get_xueqiu_top_holdings_latest(
     active_only: bool = Query(True, description="只统计主理人活跃组合"),
     limit: int = Query(300, ge=1, le=2000),
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
 ):
     return load_xueqiu_top_holdings_latest(active_only=active_only, limit=limit)
 
@@ -2915,7 +2915,7 @@ def get_xueqiu_top_holdings_history(
     symbol: str = Query(..., min_length=1),
     active_only: bool = Query(True, description="只统计主理人活跃组合"),
     limit: int = Query(500, ge=1, le=2000),
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
 ):
     return load_xueqiu_top_holdings_history(
         symbol=symbol,
@@ -2930,7 +2930,7 @@ def get_xueqiu_top_holding_details(
     snapshot_date: date = Query(...),
     active_only: bool = Query(True, description="只统计主理人活跃组合"),
     limit: int = Query(1000, ge=1, le=5000),
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
 ):
     return load_xueqiu_top_holding_details(
         symbol=symbol,
@@ -6911,7 +6911,7 @@ def _run_factor_analysis(
 
 @router.get("/options", response_model=FactorLabOptionsResponse)
 async def get_factor_lab_options(
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     timing_target_names = load_symbol_name_map(
@@ -7047,7 +7047,7 @@ async def get_factor_lab_options(
 
 @router.get("/live-configs")
 async def list_factor_live_trading_configs(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7063,7 +7063,7 @@ async def list_factor_live_trading_configs(
 @router.post("/live-configs")
 async def create_factor_live_trading_config(
     payload: FactorLiveTradingConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7081,7 +7081,7 @@ async def create_factor_live_trading_config(
 @router.get("/live-configs/{config_id}")
 async def get_factor_live_trading_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7092,7 +7092,7 @@ async def get_factor_live_trading_config(
 async def update_factor_live_trading_config(
     config_id: int,
     payload: FactorLiveTradingConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7109,7 +7109,7 @@ async def update_factor_live_trading_config(
 @router.delete("/live-configs/{config_id}")
 async def delete_factor_live_trading_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7136,7 +7136,7 @@ async def delete_factor_live_trading_config(
 async def list_factor_live_trading_logs(
     config_id: int,
     limit: int = Query(default=100, ge=1, le=500),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     _get_factor_live_config_or_404(db, account_id, config_id)
@@ -7157,7 +7157,7 @@ async def list_factor_live_trading_logs(
 async def generate_factor_live_trading_signal(
     config_id: int,
     payload: Optional[FactorLiveSignalRequest] = None,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7213,7 +7213,7 @@ async def generate_factor_live_trading_signal(
 async def execute_factor_live_trading_signal(
     config_id: int,
     payload: Optional[FactorLiveExecutionRequest] = None,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
     external_db: ORMSession = Depends(get_external_trading_db),
 ):
@@ -7256,7 +7256,7 @@ async def execute_factor_live_trading_signal(
 @router.post("/analyze")
 async def analyze_factor(
     payload: FactorLabAnalyzeRequest,
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _run_factor_analysis(payload, db)
@@ -7265,7 +7265,7 @@ async def analyze_factor(
 @router.post("/analyze-composite")
 async def analyze_composite_factor(
     payload: CompositeFactorAnalyzeRequest,
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _run_composite_factor_analysis(payload, db)
@@ -7274,7 +7274,7 @@ async def analyze_composite_factor(
 @router.post("/analyze-timing")
 async def analyze_timing_factor(
     payload: TimingFactorAnalyzeRequest,
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _run_timing_factor_analysis(payload, db)
@@ -7283,7 +7283,7 @@ async def analyze_timing_factor(
 @router.post("/backtest")
 async def backtest_factor_strategy(
     payload: FactorBacktestRequest,
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _run_factor_backtest(payload, db)
@@ -7292,14 +7292,14 @@ async def backtest_factor_strategy(
 @router.post("/backtest-search/start")
 async def start_factor_backtest_search(
     payload: FactorBacktestSearchRequest,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     return _start_backtest_search_job(payload, account_id)
 
 
 @router.get("/backtest-search/status")
 async def get_factor_backtest_search_status(
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _serialize_backtest_search_status(db)
@@ -7307,7 +7307,7 @@ async def get_factor_backtest_search_status(
 
 @router.get("/backtest-search/history")
 async def get_factor_backtest_search_history(
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _serialize_backtest_search_status(db)
@@ -7320,7 +7320,7 @@ async def get_factor_backtest_search_results(
     sort_field: Optional[str] = None,
     sort_order: Optional[str] = None,
     filters: Optional[str] = None,
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     return _query_backtest_search_results(
@@ -7335,7 +7335,7 @@ async def get_factor_backtest_search_results(
 
 @router.post("/backtest-search/cancel")
 async def cancel_factor_backtest_search_job(
-    _: str = Depends(valid_account),
+    _: str = Depends(valid_admin_account),
     db: ORMSession = Depends(get_db),
 ):
     with BACKTEST_SEARCH_JOBS_LOCK:

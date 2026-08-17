@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .account import valid_account
+from .account import valid_admin_account
 from ...core.database import EVCAccountConfig, get_db
 from ...core.services.evc import EVCService
 
@@ -39,7 +39,7 @@ class EVCAccountResponse(BaseModel):
 @router.get("", response_model=EVCAccountResponse)
 async def get_evc_account(
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     config = db.query(EVCAccountConfig).filter(EVCAccountConfig.account_id == account_id).first()
     return EVCAccountResponse(
@@ -56,7 +56,7 @@ async def get_evc_account(
 async def upsert_evc_account(
     payload: EVCAccountUpsertRequest,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     username = payload.username.strip()
     if not username:
@@ -89,7 +89,7 @@ async def upsert_evc_account(
 
 @router.post("/login")
 async def login_evc_account(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         result = EVCService(account_id=account_id).login()

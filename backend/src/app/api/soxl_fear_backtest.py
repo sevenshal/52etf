@@ -25,7 +25,7 @@ from ...robot.a_stock_base_data_config import (
     A_STOCK_INDEX_FEAR_GREED_TARGETS,
 )
 from ...robot.cnn_fear_index import CNN_HISTORY_SYMBOL
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/fear-volume-backtest", tags=["Fear Volume Backtest"])
 logger = logging.getLogger(__name__)
@@ -2917,7 +2917,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
 
 @router.get("/options")
 def get_soxl_fear_backtest_options(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     return {
         "symbol_options": TARGET_OPTIONS,
@@ -2945,7 +2945,7 @@ def get_soxl_fear_backtest_options(
 @router.post("/search")
 def search_soxl_fear_params(
     payload: SOXLFearSearchParams,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         return _build_search_response(payload)
@@ -2956,7 +2956,7 @@ def search_soxl_fear_params(
 @router.post("/search/jobs", response_model=SOXLFearSearchJobCreated)
 def create_soxl_fear_search_job(
     payload: SOXLFearSearchParams,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         start_date = _parse_date(payload.start_date)
@@ -2999,7 +2999,7 @@ def create_soxl_fear_search_job(
 @router.get("/search/jobs/{task_id}", response_model=SOXLFearSearchJobStatus)
 def get_soxl_fear_search_job_status(
     task_id: str,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     with SEARCH_JOBS_LOCK:
         job = SEARCH_JOBS.get(task_id)
@@ -3054,7 +3054,7 @@ class SOXLFearRunParams(BaseModel):
 @router.post("/run")
 def run_soxl_fear_backtest(
     payload: SOXLFearRunParams,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         start_date = _parse_date(payload.start_date)

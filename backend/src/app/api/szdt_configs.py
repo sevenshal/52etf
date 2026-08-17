@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ...core.database import get_db, SZDTTradingConfig
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(
     prefix="/api/szdt-configs",
@@ -28,7 +28,7 @@ class SZDTConfigResponse(SZDTConfigBase):
 @router.get("/", response_model=SZDTConfigResponse)
 def get_config(
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     if not config:
@@ -43,7 +43,7 @@ def get_config(
 def update_config(
     config_in: SZDTConfigCreate,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     if not config:

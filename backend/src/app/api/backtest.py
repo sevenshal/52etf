@@ -6,7 +6,7 @@ import asyncio
 import multiprocessing
 from ...robot.etf_backtest import ETFBacktest
 from ...core.event_stream import publish_event
-from .account import valid_account
+from .account import valid_admin_account
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -211,7 +211,7 @@ def run_verify_process(session_id: str, params_dict: dict, result_queue: multipr
 async def start_backtest(
     params: BacktestParams, 
     background_tasks: BackgroundTasks,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     """启动回测任务"""
     session_id = account_id
@@ -257,7 +257,7 @@ async def start_backtest(
     return {"message": "回测任务已启动"}
 
 @router.post("/cancel")
-async def cancel_backtest(account_id: str = Depends(valid_account)):
+async def cancel_backtest(account_id: str = Depends(valid_admin_account)):
     """取消回测任务"""
     session_id = account_id
     if session_id not in backtest_sessions or not backtest_sessions[session_id].status["is_running"]:
@@ -279,7 +279,7 @@ async def cancel_backtest(account_id: str = Depends(valid_account)):
 async def verify_backtest_params(
     params: VerifyParams,
     background_tasks: BackgroundTasks,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     """验证回测参数"""
     session_id = account_id
@@ -325,7 +325,7 @@ async def verify_backtest_params(
     return {"message": "验证任务已启动"}
 
 @router.get("/status")
-async def get_backtest_status(account_id: str = Depends(valid_account)):
+async def get_backtest_status(account_id: str = Depends(valid_admin_account)):
     """获取回测任务状态"""
     session_id = account_id
     

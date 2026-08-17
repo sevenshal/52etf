@@ -7,7 +7,7 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/all-weather-backtest", tags=["All-Weather Backtest"])
 
@@ -30,7 +30,7 @@ class AllWeatherParams(BaseModel):
     end_date: Optional[str] = None
 
 @router.post("")
-async def run_all_weather_backtest(params: AllWeatherParams, account_id: str = Depends(valid_account)):
+async def run_all_weather_backtest(params: AllWeatherParams, account_id: str = Depends(valid_admin_account)):
     trade_service = LongPortService.get_instance()
     quote_service = QuoteService(trade_service)
     

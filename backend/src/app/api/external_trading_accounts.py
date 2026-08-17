@@ -119,7 +119,7 @@ from ...core.services.external_trading_crypto import (
     verify_handshake_signature,
 )
 from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
-from .account import is_valid_account, valid_account
+from .account import is_valid_account, valid_admin_account
 
 router = APIRouter(prefix="/api/external-trading-accounts", tags=["external-trading-accounts"])
 logger = logging.getLogger(__name__)
@@ -1979,7 +1979,7 @@ async def _build_netted_executor_plan(
 @router.get("", response_model=List[ExternalTradingAccountResponse])
 async def list_external_trading_accounts(
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     return _list_serialized_accounts(db, account_id)
 
@@ -2021,7 +2021,7 @@ async def external_trading_account_status_websocket(websocket: WebSocket):
 async def create_external_trading_account(
     payload: ExternalTradingAccountCreate,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     _ensure_unique(db, account_id, payload.name, payload.identifier)
     try:
@@ -2066,7 +2066,7 @@ async def update_external_trading_account(
     external_account_id: int,
     payload: ExternalTradingAccountUpdate,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     update_data = payload.dict(exclude_unset=True)
@@ -2142,7 +2142,7 @@ async def delete_external_trading_account(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     account_pk = account.id
@@ -2214,7 +2214,7 @@ async def list_external_trading_sub_accounts(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     sub_accounts = (
@@ -2270,7 +2270,7 @@ async def list_external_trading_sub_account_options(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     """轻量虚拟子账户列表：仅返回下拉选择所需的最小字段。
 
@@ -2313,7 +2313,7 @@ async def get_external_trading_sub_account_net_asset_history(
     end_date: Optional[date] = None,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     sub_account = db.query(ExternalTradingSubAccount).filter(
@@ -2367,7 +2367,7 @@ async def create_external_trading_sub_account(
     payload: ExternalTradingSubAccountPayload,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     account_policy = resolve_execution_policy(account)
@@ -2426,7 +2426,7 @@ async def update_external_trading_sub_account(
     payload: ExternalTradingSubAccountPayload,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     sub_account = db.query(ExternalTradingSubAccount).filter(
@@ -2491,7 +2491,7 @@ async def update_external_trading_sub_account(
 async def liquidate_external_trading_sub_account_and_pause(
     external_account_id: int,
     sub_account_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     try:
         return await liquidate_and_pause_sub_account(
@@ -2514,7 +2514,7 @@ async def delete_external_trading_sub_account(
     sub_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     _get_account_or_404(db, account_id, external_account_id)
     sub_account = db.query(ExternalTradingSubAccount).filter(
@@ -2602,7 +2602,7 @@ async def preview_external_trading_netted_executor(
     external_account_id: int,
     payload: NettedExecutorRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -2625,7 +2625,7 @@ async def execute_external_trading_netted_executor(
     external_account_id: int,
     payload: NettedExecutorRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -2659,7 +2659,7 @@ async def execute_external_trading_netted_executor(
 async def get_external_trading_executor_status(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
 
@@ -2844,7 +2844,7 @@ async def get_external_trading_executor_status_sub_accounts(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -2883,7 +2883,7 @@ async def get_external_trading_executor_status_plan(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -2949,7 +2949,7 @@ async def get_external_trading_executor_status_target_positions(
     delta_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -3043,7 +3043,7 @@ async def get_external_trading_executor_status_ledger_positions(
     sort_order: Optional[str] = Query(None),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -3121,7 +3121,7 @@ async def get_external_trading_executor_status_orders(
     unfilled_only: bool = Query(False),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -3189,7 +3189,7 @@ async def get_external_trading_executor_status_fills(
     role: Optional[str] = Query(None),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -3269,7 +3269,7 @@ async def get_external_trading_executor_status_deliver_records(
     side: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     query = (
@@ -3328,7 +3328,7 @@ async def get_external_trading_executor_status_events(
     process_status: Optional[str] = Query(None),
     db: OrmSession = Depends(get_external_trading_db),
     main_db: OrmSession = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     context = _load_executor_sub_account_context(db, main_db, account, account_id)
@@ -3425,7 +3425,7 @@ async def get_external_trading_executor_status_events(
 async def get_external_trading_account_status(
     external_account_id: int,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     return _serialize_account(account)
@@ -3436,7 +3436,7 @@ async def get_external_snapshots(
     external_account_id: int,
     payload: QuoteRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3456,7 +3456,7 @@ async def place_external_orders(
     external_account_id: int,
     payload: OrderBatchRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3476,7 +3476,7 @@ async def cancel_external_orders(
     external_account_id: int,
     payload: OrderCancelBatchRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3497,7 +3497,7 @@ async def mark_external_block_order_success(
     order_id: int,
     payload: ManualBlockSuccessRequest = ManualBlockSuccessRequest(),
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     order = (
@@ -3559,7 +3559,7 @@ async def repair_external_parent_order_fill(
     order_id: int,
     payload: ManualParentFillRepairRequest,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     order = (
@@ -3612,7 +3612,7 @@ async def get_external_account_snapshot(
     external_account_id: int,
     timeout_seconds: float = 10.0,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3628,7 +3628,7 @@ async def get_external_positions(
     external_account_id: int,
     timeout_seconds: float = 10.0,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3645,7 +3645,7 @@ async def get_external_broker_positions(
     refresh_if_open: bool = True,
     timeout_seconds: float = 10.0,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3729,7 +3729,7 @@ async def get_external_assets(
     external_account_id: int,
     timeout_seconds: float = 10.0,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:
@@ -3745,7 +3745,7 @@ async def get_external_today_orders(
     external_account_id: int,
     timeout_seconds: float = 10.0,
     db: OrmSession = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     account = _get_account_or_404(db, account_id, external_account_id)
     if not account.enabled:

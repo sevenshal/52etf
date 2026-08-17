@@ -52,7 +52,7 @@ from ...core.services.external_trading_valuation import (
 )
 from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
 from ...core.services.snowball_backtest import run_snowball_cube_backtest
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/snowball")
 logger = logging.getLogger(__name__)
@@ -1332,7 +1332,7 @@ def _run_snowball_backtest_task(run_id: int) -> None:
 @router.get("/info/{symbol}")
 async def get_combination_info(
     symbol: str, 
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     """Get combination info (name) from Xueqiu"""
@@ -1349,7 +1349,7 @@ async def get_combination_info(
 
 @router.get("/account-config", response_model=SnowballAccountConfigModel)
 async def get_account_config(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
@@ -1361,7 +1361,7 @@ async def get_account_config(
 @router.post("/account-config")
 async def update_account_config(
     data: SnowballAccountConfigModel,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     cookie = (data.xueqiu_cookie or "").strip()
@@ -1382,7 +1382,7 @@ async def update_account_config(
 @router.post("/account-config/xueqiu-cookie-sync")
 async def sync_xueqiu_cookie_from_browser_extension(
     data: SnowballCookieSyncRequest,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     x_snowball_cookie_sync_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
@@ -1436,7 +1436,7 @@ async def sync_xueqiu_cookie_from_browser_extension(
 
 @router.get("/configs", response_model=List[SnowballConfigResponse])
 async def list_configs(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -1446,7 +1446,7 @@ async def list_configs(
 @router.post("/configs", response_model=SnowballConfigResponse)
 async def create_config(
     config: SnowballConfigCreate,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -1475,7 +1475,7 @@ async def create_config(
 async def update_config(
     config_id: int,
     config_update: SnowballConfigUpdate,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -1515,7 +1515,7 @@ async def update_config(
 @router.delete("/configs/{config_id}")
 async def delete_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -1555,7 +1555,7 @@ async def start_config_backtest(
     config_id: int,
     request: SnowballBacktestStartRequest,
     background_tasks: BackgroundTasks,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = db.query(SnowballCopyConfig).filter(
@@ -1598,7 +1598,7 @@ async def start_config_backtest(
 @router.get("/configs/{config_id}/backtests", response_model=List[SnowballBacktestRunResponse])
 async def list_config_backtests(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = db.query(SnowballCopyConfig).filter(
@@ -1618,7 +1618,7 @@ async def list_config_backtests(
 @router.get("/backtests/{run_id}", response_model=SnowballBacktestDetailResponse)
 async def get_backtest_detail(
     run_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     run = db.query(SnowballBacktestRun).filter(
@@ -1653,7 +1653,7 @@ async def get_backtest_detail(
 
 @router.get("/logs", response_model=PaginatedSnowballLogs)
 async def get_logs(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     page: int = 1,
     page_size: int = 20,
     cli_id: Optional[str] = None,
@@ -1686,7 +1686,7 @@ async def get_logs(
 @router.post("/logs/status")
 async def update_log_status(
     status_update: SnowballLogStatusUpdate,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     log = db.query(SnowballCopyLog).filter(
@@ -1707,7 +1707,7 @@ async def update_log_status(
 @router.get("/snapshot/{config_id}", response_model=SnowballSnapshotResponse)
 async def get_snapshot(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -1943,7 +1943,7 @@ async def get_snapshot(
 @router.post("/configs/{config_id}/sync-external-targets")
 async def sync_config_external_targets(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = db.query(SnowballCopyConfig).filter(

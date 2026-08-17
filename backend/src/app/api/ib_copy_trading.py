@@ -16,7 +16,7 @@ from ...core.services.external_trading_market import (
     EXTERNAL_TRADING_MARKET_US_STOCK,
     normalize_external_trading_market_type,
 )
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/ib-copy-trading", tags=["ib-copy-trading"])
 
@@ -226,7 +226,7 @@ def _sync_portfolio_live_sub_account_binding(
 async def list_configs(
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     configs = db.query(PortfolioCopyConfig).filter(PortfolioCopyConfig.account_id == account_id).all()
     return [_portfolio_copy_config_response(config, trading_db) for config in configs]
@@ -236,7 +236,7 @@ async def save_config(
     config_data: PortfolioCopyConfigSchema,
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     platform = config_data.platform or "futu"
     if platform not in SUPPORTED_PORTFOLIO_COPY_PLATFORMS:
@@ -310,7 +310,7 @@ async def delete_config(
     config_id: int,
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(PortfolioCopyConfig).filter(
         PortfolioCopyConfig.id == config_id,
@@ -346,7 +346,7 @@ async def list_logs(
     portfolio_id: Optional[str] = None,
     config_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     query = db.query(PortfolioCopyLog)
     # Always filter by authenticated account_id
@@ -385,7 +385,7 @@ async def get_portfolio_info_proxy(
 async def preview_rebalance(
     config_id: int,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     from ...robot.portfolio_copy_trader import PortfolioCopyTrader
     config = db.query(PortfolioCopyConfig).filter(
@@ -411,7 +411,7 @@ async def preview_rebalance(
 async def sync_external_targets(
     config_id: int,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
 ):
     from ...robot.portfolio_copy_trader import PortfolioCopyTrader
     config = db.query(PortfolioCopyConfig).filter(

@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from ...core.database import get_db, LongPortAccount
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/longport-accounts", tags=["longport-accounts"])
 
@@ -28,7 +28,7 @@ class LongPortAccountResponse(LongPortAccountBase):
 @router.get("", response_model=List[LongPortAccountResponse])
 async def list_longport_accounts(
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     return db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).all()
 
@@ -42,7 +42,7 @@ from ...core.services.longport import LongPortService
 async def create_longport_account(
     account_data: LongPortAccountBase,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     # Check if lp_account_id exists globally
     existing = db.query(LongPortAccount).filter(LongPortAccount.lp_account_id == account_data.lp_account_id).first()
@@ -78,7 +78,7 @@ async def update_longport_account(
     id: int,
     account_data: LongPortAccountBase,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     account = db.query(LongPortAccount).filter(
         LongPortAccount.id == id,
@@ -113,7 +113,7 @@ async def update_longport_account(
 async def get_longport_account_status(
     id: int,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     account = db.query(LongPortAccount).filter(
         LongPortAccount.id == id,
@@ -132,7 +132,7 @@ async def get_longport_account_status(
 async def delete_longport_account(
     id: int,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     account = db.query(LongPortAccount).filter(
         LongPortAccount.id == id,

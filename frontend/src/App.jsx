@@ -1,37 +1,20 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { Navigate, Routes, Route, useLocation } from 'react-router-dom';
+import { Spin } from 'antd';
 import { AccountProvider, useAccount } from './contexts/AccountContext';
 import AppLayout from './pages/Layout';
-import FearDashboard from './pages/fear/FearDashboard';
-import FearStockList from './pages/fear/FearStockList';
-import FearTradingLogs from './pages/fear/FearTradingLogs';
-import Profile from './pages/Profile';
-import ETFReport from './pages/ETFReport';
-import ETFDetail from './pages/ETFDetail';
-import EVCValuation from './pages/EVCValuation';
-import StockDetail from './pages/StockDetail';
-import OptionsPositions from './pages/OptionsPositions';
-import MonthlyAnalysis from './pages/MonthlyAnalysis';
-import SystemLog from './pages/SystemLog';
-import SystemInfo from './pages/SystemInfo';
-import FearBacktest from './pages/fear/FearBacktest';
-import LevETFBacktest from './pages/LevETFBacktest';
-import AutomatedTrading from './pages/AutomatedTrading';
-import IBKRAccountManager from './pages/IBKRAccountManager';
-import AllWeatherBacktest from './pages/AllWeatherBacktest';
-import PortfolioCopyTrading from './pages/PortfolioCopyTrading';
-import LongPortAccountManager from './pages/LongPortAccountManager';
-import SZDTAutoTrading from './pages/SZDTAutoTrading';
-import ScheduledTasks from './pages/ScheduledTasks';
-import EVCAccountManager from './pages/EVCAccountManager';
-import SoxlFearBacktest from './pages/SoxlFearBacktest';
-import FactorLab from './pages/FactorLab';
-import LiveTrading from './pages/LiveTrading';
-import EmailSettings from './pages/EmailSettings';
-import WebAccountManager from './pages/WebAccountManager';
-import AStockFearEtfBacktest from './pages/AStockFearEtfBacktest';
-import AIStock from './pages/AIStock';
-import TushareAccountManager from './pages/TushareAccountManager';
+import { adminRouteDescriptors } from './routes/adminRoutes';
+
+// ---- 普通页面：按需加载（code splitting），每个页面一个独立 chunk ----
+const FearDashboard = lazy(() => import('./pages/fear/FearDashboard'));
+const FearTradingLogs = lazy(() => import('./pages/fear/FearTradingLogs'));
+const Profile = lazy(() => import('./pages/Profile'));
+const ETFReport = lazy(() => import('./pages/ETFReport'));
+const ETFDetail = lazy(() => import('./pages/ETFDetail'));
+const EVCValuation = lazy(() => import('./pages/EVCValuation'));
+const StockDetail = lazy(() => import('./pages/StockDetail'));
+
+// ---- 管理员页面：见 ./routes/adminRoutes.js（独立 admin chunk，仅管理员加载）----
 
 const LiveTabRedirect = ({ tab }) => {
   const location = useLocation();
@@ -50,51 +33,71 @@ const AdminRoute = ({ children }) => {
   return isAdmin ? children : <Navigate to="/profile" replace />;
 };
 
-function App() {
+const LoadingFallback = ({ fullScreen = false }) => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: fullScreen ? '100vh' : '60vh',
+    }}
+  >
+    <Spin size="large" />
+  </div>
+);
+
+function AppRoutes() {
+  const { isAdmin, accountReady } = useAccount();
+
+  // 账户信息还没校验完（validate-account 返回前）不渲染路由，
+  // 避免管理员直接访问 /ai-stock 等 URL 时被兜底路由误重定向到 /profile。
+  if (!accountReady) {
+    return <LoadingFallback fullScreen />;
+  }
+
   return (
-    <AccountProvider>
+    <Suspense fallback={<LoadingFallback />}>
       <Routes>
         <Route path="/" element={<AppLayout />}>
           <Route index element={<ETFReport />} />
           <Route path='/fear' element={<FearDashboard />} />
-          <Route path="/fear/stocks" element={<FearStockList />} />
           <Route path="/evc" element={<EVCValuation />} />
-          <Route path="/options" element={<OptionsPositions />} />
           <Route path="/executor-status" element={<LiveTabRedirect tab="executor" />} />
-          <Route path="/live" element={<LiveTrading />} />
-          <Route path="/db" element={<FactorLab initialTab="db" />} />
-          <Route path="/factor-lab" element={<FactorLab />} />
-          <Route path="/factor-lab/live" element={<LiveTabRedirect tab="factor" />} />
-          <Route path="/factor-lab/fund-flow" element={<FactorLab initialTab="fund-flow" />} />
-          <Route path="/factor-lab/xueqiu-holdings" element={<FactorLab initialTab="xueqiu-holdings" />} />
-          <Route path="/ai-stock" element={<AdminRoute><AIStock /></AdminRoute>} />
           <Route path="/profile" element={<Profile />} />
-          <Route path="/web-account-manager" element={<AdminRoute><WebAccountManager /></AdminRoute>} />
-          <Route path="/tushare-account-manager" element={<AdminRoute><TushareAccountManager /></AdminRoute>} />
           <Route path="/fear/logs" element={<FearTradingLogs />} />
-          <Route path="/fear/backtest" element={<FearBacktest />} />
           <Route path="/etf/:symbol" element={<ETFDetail />} />
           <Route path="/evc/valuation" element={<EVCValuation />} />
           <Route path="/stock/:symbol" element={<StockDetail />} />
-          <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
-          <Route path="/system-log" element={<AdminRoute><SystemLog /></AdminRoute>} />
-          <Route path="/system-info" element={<AdminRoute><SystemInfo /></AdminRoute>} />
-          <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
-          <Route path="/automated-trading" element={<AutomatedTrading />} />
-          <Route path="/ib-account-manager" element={<IBKRAccountManager />} />
-          <Route path="/evc-account-manager" element={<EVCAccountManager />} />
-          <Route path="/all-weather-backtest" element={<AllWeatherBacktest />} />
-          <Route path="/portfolio-copy-trading" element={<PortfolioCopyTrading />} />
-          <Route path="/longport-account-manager" element={<LongPortAccountManager />} />
           <Route path="/external-trading-accounts" element={<LiveTabRedirect tab="accounts" />} />
-          <Route path="/szdt-auto-trading" element={<SZDTAutoTrading />} />
-          <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
-          <Route path="/email-settings" element={<AdminRoute><EmailSettings /></AdminRoute>} />
-          <Route path="/fear-volume-backtest" element={<SoxlFearBacktest />} />
-          <Route path="/a-stock-fear-etf-backtest" element={<AStockFearEtfBacktest />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
+
+          {/* 管理员专属路由：仅 isAdmin 时注册。非管理员访问这些 URL 会命中下面的
+              "*" 兜底路由重定向到 /profile，且永远不会加载 admin chunk。 */}
+          {isAdmin &&
+            adminRouteDescriptors.map(({ path, Component, props }) => (
+              <Route
+                key={path}
+                path={path}
+                element={
+                  <AdminRoute>
+                    <Component {...props} />
+                  </AdminRoute>
+                }
+              />
+            ))}
+
+          {/* 兜底：未匹配路径（含非管理员访问管理员 URL）跳转到「我的」 */}
+          <Route path="*" element={<Navigate to="/profile" replace />} />
         </Route>
       </Routes>
+    </Suspense>
+  );
+}
+
+function App() {
+  return (
+    <AccountProvider>
+      <AppRoutes />
     </AccountProvider>
   );
 }

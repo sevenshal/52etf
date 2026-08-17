@@ -6,7 +6,7 @@ from datetime import datetime
 from ...core.database import get_db, IBKRAccountConfig
 from ...core.services.ib_account_service import IBAccountService
 from pydantic import BaseModel
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/ib-accounts", tags=["ib-accounts"])
 
@@ -30,7 +30,7 @@ class IBKRAccountSchema(BaseModel):
 @router.get("", response_model=List[IBKRAccountSchema])
 async def list_ib_accounts(
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     return db.query(IBKRAccountConfig).filter(IBKRAccountConfig.account_id == account_id).all()
 
@@ -38,7 +38,7 @@ async def list_ib_accounts(
 async def save_ib_account(
     config_data: IBKRAccountSchema, 
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     if config_data.id:
         config = db.query(IBKRAccountConfig).filter(
@@ -109,7 +109,7 @@ async def save_ib_account(
 async def delete_ib_account(
     config_id: int, 
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(IBKRAccountConfig).filter(
         IBKRAccountConfig.id == config_id,
@@ -136,7 +136,7 @@ async def delete_ib_account(
 async def get_ib_account_status(
     config_id: int, 
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(IBKRAccountConfig).filter(
         IBKRAccountConfig.id == config_id,
@@ -156,7 +156,7 @@ async def get_ib_account_status(
 async def restart_ib_gateway(
     config_id: int, 
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(IBKRAccountConfig).filter(
         IBKRAccountConfig.id == config_id,
@@ -178,7 +178,7 @@ async def restart_ib_gateway(
 async def remove_ib_gateway(
     config_id: int,
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(IBKRAccountConfig).filter(
         IBKRAccountConfig.id == config_id,
@@ -201,7 +201,7 @@ async def remove_ib_gateway(
 async def deploy_ib_gateway(
     config_id: int, 
     db: Session = Depends(get_db),
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     config = db.query(IBKRAccountConfig).filter(
         IBKRAccountConfig.id == config_id,
@@ -223,7 +223,7 @@ async def ws_ib_account_logs(
     db: Session = Depends(get_db)
 ):
     # Note: Websockets are hard to auth with headers in browsers. 
-    # For now we won't strictly enforce account owner check via Depends(valid_account) directly in signature 
+    # For now we won't strictly enforce account owner check via Depends(valid_admin_account) directly in signature 
     # unless we can extract it from query params.
     # But to be safe, we should at least check existence.
     await websocket.accept()

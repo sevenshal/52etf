@@ -1,5 +1,5 @@
-import React from 'react';
-import { Layout, Tabs } from 'antd';
+import React, { Suspense } from 'react';
+import { Layout, Tabs, Spin } from 'antd';
 import {
   DollarOutlined,
   ExperimentOutlined,
@@ -156,7 +156,22 @@ const AppLayout = () => {
     <Layout className="app-shell">
       <Content className="app-shell__content">
         <div className="app-shell__scroll">
-          <Outlet />
+          <Suspense
+            fallback={
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minHeight: '60vh',
+                }}
+              >
+                <Spin size="large" />
+              </div>
+            }
+          >
+            <Outlet />
+          </Suspense>
         </div>
       </Content>
       <Tabs

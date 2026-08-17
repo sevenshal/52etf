@@ -9,7 +9,7 @@ import json
 from ...core.event_stream import publish_event
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/lev-etf-backtest", tags=["Leveraged ETF Backtest"])
 
@@ -454,7 +454,7 @@ def background_batch_backtest(task_id: str, params: BatchBacktestParams, account
 async def start_batch_backtest(
     params: BatchBacktestParams,
     background_tasks: BackgroundTasks,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     # Determine Task ID (Use Hash for deduplication or UUID for uniqueness per request)
     # Using Hash allows caching if parameters are identical
@@ -494,7 +494,7 @@ async def get_batch_backtest_status(task_id: str):
 @router.post("/run", response_model=BacktestResult)
 async def run_lev_etf_backtest(
     params: LevETFBacktestParams,
-    account_id: str = Depends(valid_account)
+    account_id: str = Depends(valid_admin_account)
 ):
     # Initialize Services
     try:

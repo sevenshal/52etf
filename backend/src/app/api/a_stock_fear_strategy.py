@@ -26,7 +26,7 @@ from ...core.services.external_trading_market import (
 )
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES
 from ...robot.a_stock_fear_strategy_trader import AStockFearStrategyTrader
-from .account import valid_account
+from .account import valid_admin_account
 from .soxl_fear_backtest import (
     A_STOCK_FEAR_SOURCE_OPTIONS,
     A_STOCK_PRESET_PAIRS,
@@ -605,7 +605,7 @@ def _resolve_trading_account_id(
 
 
 @router.get("/options")
-def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_account)):
+def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_admin_account)):
     return {
         "target_options": A_STOCK_TARGET_OPTIONS,
         "fear_source_options": [
@@ -642,7 +642,7 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_account)):
 
 @router.get("/configs", response_model=List[AStockFearStrategyConfigSchema])
 def list_a_stock_fear_strategy_configs(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -658,7 +658,7 @@ def list_a_stock_fear_strategy_configs(
 @router.post("/configs", response_model=AStockFearStrategyConfigSchema)
 def create_a_stock_fear_strategy_config(
     payload: AStockFearStrategyConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -694,7 +694,7 @@ def create_a_stock_fear_strategy_config(
 @router.get("/configs/{config_id}", response_model=AStockFearStrategyConfigSchema)
 def get_a_stock_fear_strategy_config_by_id(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -705,7 +705,7 @@ def get_a_stock_fear_strategy_config_by_id(
 def update_a_stock_fear_strategy_config(
     config_id: int,
     payload: AStockFearStrategyConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -740,7 +740,7 @@ def update_a_stock_fear_strategy_config(
 @router.delete("/configs/{config_id}")
 def delete_a_stock_fear_strategy_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     trading_db: Session = Depends(get_external_trading_db),
 ):
@@ -774,7 +774,7 @@ def get_a_stock_fear_strategy_logs_by_config(
     config_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
@@ -791,7 +791,7 @@ def get_a_stock_fear_strategy_logs_by_config(
 @router.get("/configs/{config_id}/state", response_model=AStockFearStrategyStateSchema)
 def get_a_stock_fear_strategy_state_by_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
@@ -803,7 +803,7 @@ def get_a_stock_fear_strategy_state_by_config(
 def update_a_stock_fear_strategy_state_by_config(
     config_id: int,
     payload: AStockFearStrategyStatePayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
@@ -830,7 +830,7 @@ def update_a_stock_fear_strategy_state_by_config(
 @router.post("/configs/{config_id}/manual-check")
 def manual_check_a_stock_fear_strategy_by_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)

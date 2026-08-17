@@ -30,7 +30,7 @@ from ...core.services.a_stock_fear_etf_backtest_engine import (
     target_mapping,
 )
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_INDEX_FEAR_GREED_TARGETS
-from .account import valid_account
+from .account import valid_admin_account
 
 
 router = APIRouter(prefix="/api/a-stock-fear-etf-backtest", tags=["A-Stock Fear ETF Backtest"])
@@ -615,7 +615,7 @@ def _search_job(task_id: str, request: SearchRequest):
 
 
 @router.get("/options")
-def options(account_id: str = Depends(valid_account)):
+def options(account_id: str = Depends(valid_admin_account)):
     targets = _target_options()
     default_request = RunRequest().dict()
     default_request["included_indexes"] = list(RECOMMENDED_INDEXES)
@@ -626,7 +626,7 @@ def options(account_id: str = Depends(valid_account)):
 
 
 @router.post("/run")
-def run(payload: RunRequest, account_id: str = Depends(valid_account)):
+def run(payload: RunRequest, account_id: str = Depends(valid_admin_account)):
     try:
         return _run_request(payload)
     except Exception as exc:
@@ -634,7 +634,7 @@ def run(payload: RunRequest, account_id: str = Depends(valid_account)):
 
 
 @router.post("/search/jobs", response_model=SearchJobCreated)
-def create_search_job(payload: SearchRequest, account_id: str = Depends(valid_account)):
+def create_search_job(payload: SearchRequest, account_id: str = Depends(valid_admin_account)):
     total = _combination_count(payload)
     if total <= 0 or total > MAX_SEARCH_COMBINATIONS:
         raise HTTPException(status_code=400, detail=f"参数组合数必须在1到{MAX_SEARCH_COMBINATIONS}之间")
@@ -650,7 +650,7 @@ def create_search_job(payload: SearchRequest, account_id: str = Depends(valid_ac
 
 
 @router.get("/search/jobs/{task_id}", response_model=SearchJobStatus)
-def get_search_job(task_id: str, account_id: str = Depends(valid_account)):
+def get_search_job(task_id: str, account_id: str = Depends(valid_admin_account)):
     with SEARCH_LOCK:
         job = SEARCH_JOBS.get(task_id)
         if not job or job.get("account_id") != account_id:

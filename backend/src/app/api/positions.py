@@ -6,7 +6,7 @@ from scipy.stats import norm
 from ...core.services.trade import OrderSide
 from ...core.services.longport import LongPortService
 from ...core.services.fed_rate_monitor import FedRateMonitorService
-from .account import valid_account
+from .account import valid_admin_account
 from itertools import groupby
 from pydantic import BaseModel
 from decimal import Decimal
@@ -114,7 +114,7 @@ class OptionPositionsResponse(BaseModel):
 @router.get("/options")
 async def get_option_positions(
     lp_account_id: str,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     option_type: str = None,  # 可选值: "Call" 或 "Put"
     db: Session = Depends(get_db)
 ):
@@ -242,7 +242,7 @@ class StockPositionsResponse(BaseModel):
 @router.get("/stocks")
 async def get_stock_positions(
     lp_account_id: str,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
     """获取正股持仓汇总"""

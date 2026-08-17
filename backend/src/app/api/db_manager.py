@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session as OrmSession
 from ...core.database import DB_PATH, DbSqlFavorite, engine, get_db
 from ...core.analytics_database import ANALYTICS_DB_PATH, ANALYTICS_TABLE_NAMES
 from ...core.duckdb_utils import connect_duckdb
-from .account import valid_account
+from .account import valid_admin_account
 
 
 router = APIRouter(prefix="/api/db", tags=["DB"])
@@ -645,7 +645,7 @@ def _execute_duckdb_query(query: str, referenced_tables: List[DbTable]) -> Tuple
 @router.get("/tables", response_model=DbSchemaResponse)
 def list_queryable_tables(
     refresh: bool = Query(False),
-    _account_id: str = Depends(valid_account),
+    _account_id: str = Depends(valid_admin_account),
 ):
     tables, _allowed_table_names, _restricted_table_names = _get_table_metadata(force_refresh=refresh)
     return DbSchemaResponse(tables=tables)
@@ -653,7 +653,7 @@ def list_queryable_tables(
 
 @router.get("/favorites", response_model=List[DbSqlFavoriteResponse])
 def list_sql_favorites(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: OrmSession = Depends(get_db),
 ):
     favorites = (
@@ -668,7 +668,7 @@ def list_sql_favorites(
 @router.post("/favorites", response_model=DbSqlFavoriteResponse)
 def save_sql_favorite(
     payload: DbSqlFavoriteRequest,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: OrmSession = Depends(get_db),
 ):
     name = payload.name.strip()
@@ -710,7 +710,7 @@ def save_sql_favorite(
 @router.delete("/favorites/{favorite_id}", response_model=DbSqlFavoriteDeleteResponse)
 def delete_sql_favorite(
     favorite_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: OrmSession = Depends(get_db),
 ):
     favorite = (
@@ -732,7 +732,7 @@ def delete_sql_favorite(
 @router.post("/query", response_model=DbQueryResponse)
 def execute_query(
     payload: DbQueryRequest,
-    _account_id: str = Depends(valid_account),
+    _account_id: str = Depends(valid_admin_account),
 ):
     total_started_at = time.perf_counter()
     statement = _normalize_single_statement(payload.sql)

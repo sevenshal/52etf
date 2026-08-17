@@ -32,7 +32,7 @@ from ...core.services.valuation_simulator import (
     ValuationSimulationService,
     process_enabled_valuation_simulations,
 )
-from .account import valid_account
+from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/valuation-sim", tags=["valuation-sim"])
 logger = logging.getLogger(__name__)
@@ -416,7 +416,7 @@ def _apply_payload(config: ValuationSimConfig, payload: ValuationSimConfigPayloa
 
 @router.get("/configs", response_model=List[ValuationSimConfigSchema])
 def list_valuation_sim_configs(
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -432,7 +432,7 @@ def list_valuation_sim_configs(
 @router.post("/configs", response_model=ValuationSimConfigSchema)
 def create_valuation_sim_config(
     payload: ValuationSimConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -450,7 +450,7 @@ def create_valuation_sim_config(
 @router.get("/configs/{config_id}", response_model=ValuationSimConfigSchema)
 def get_valuation_sim_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -461,7 +461,7 @@ def get_valuation_sim_config(
 def update_valuation_sim_config(
     config_id: int,
     payload: ValuationSimConfigPayload,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -482,7 +482,7 @@ def update_valuation_sim_config(
 @router.delete("/configs/{config_id}")
 def delete_valuation_sim_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -499,7 +499,7 @@ def delete_valuation_sim_config(
 @router.post("/configs/{config_id}/reset", response_model=ValuationSimConfigSchema)
 def reset_valuation_sim_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -520,7 +520,7 @@ def reset_valuation_sim_config(
 @router.post("/configs/{config_id}/run")
 def run_valuation_sim_config(
     config_id: int,
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
     external_db: Session = Depends(get_external_trading_db),
 ):
@@ -542,7 +542,7 @@ def list_valuation_sim_logs(
     config_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)
@@ -560,7 +560,7 @@ def list_valuation_sim_logs(
 def preview_valuation_sim_candidates(
     config_id: int,
     limit: int = Query(50, ge=1, le=200),
-    account_id: str = Depends(valid_account),
+    account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db),
 ):
     config = _get_config_or_404(db, account_id, config_id)

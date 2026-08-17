@@ -45,7 +45,7 @@ def _make_app(main_session, ext_session):
 
     app.dependency_overrides[api.get_db] = _main_db
     app.dependency_overrides[api.get_external_trading_db] = _ext_db
-    app.dependency_overrides[api.valid_account] = lambda: "acct"
+    app.dependency_overrides[api.valid_admin_account] = lambda: "acct"
     return TestClient(app)
 
 
