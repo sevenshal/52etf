@@ -1543,8 +1543,8 @@ class ScheduledTaskManager:
             ),
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
-                name="雪球年榜双组合自动调仓",
-                description="A股交易日共享一次雪球年榜活跃组合持仓快照，同时调仓星澜壹号综合权重策略与星澜贰号5日排名加速策略。",
+                name="雪球年榜多组合自动调仓",
+                description="A股交易日共享一次雪球年榜活跃组合持仓快照，同时调仓星澜壹号综合权重策略、星澜贰号5日排名加速策略与星澜叁号5日权价比策略。",
                 default_time="14:50",
                 default_enabled=True,
                 sort_order=25,

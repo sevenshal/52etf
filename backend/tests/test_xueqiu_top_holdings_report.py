@@ -21,14 +21,17 @@ from src.robot.xueqiu_top_holdings_report import (
     XUEQIU_CUBE_RANK_HISTORY_TABLE,
     aggregate_holdings,
     append_rank_acceleration_email_section,
+    append_weight_price_ratio_email_section,
     build_equal_top10_top12_buffer_plan,
     build_rank_acceleration_buffer_plan,
+    build_weight_price_ratio_buffer_plan,
     build_report,
     build_report_html,
     build_rebalance_payload,
     describe_rebalance_quote_rejection,
     ensure_xueqiu_current_fetch_quality,
     execute_rank_acceleration_target_rebalance,
+    execute_weight_price_ratio_target_rebalance,
     fetch_cube_manager_activity,
     latest_manager_rebalance_from_events,
     load_cached_cube_activity,
@@ -47,6 +50,8 @@ from src.robot.xueqiu_top_holdings_report import (
     save_xueqiu_cube_holdings_snapshots_to_duckdb,
     save_year_top_cubes,
     validate_xueqiu_rank_cache_drift,
+    WEIGHT_PRICE_RATIO_STRATEGY_NAME,
+    WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
 )
 
 
@@ -1003,6 +1008,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": []}}),
         ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
+            return_value=None,
+        ), patch(
             "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
             return_value=[
                 self._strategy_history_entry(
@@ -1034,7 +1042,66 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(3644546, result["target_cube_id"])
         self.assertEqual("SUCCESS", result["status"])
         self.assertEqual(10, len(result["top_items"]))
+        self.assertEqual("missing_fallback", (result["strategy_plan"] or {}).get("fear_greed_regime"))
         create_rebalance.assert_awaited_once()
+
+    def test_rank_acceleration_greed_regime_targets_three_positions(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
+        aggregate = {
+            "ranking": ranking,
+            "failed_results": [],
+            "success_count": 100,
+        }
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
+            return_value=comparison,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
+            new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": current_holdings}}),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
+            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10"},
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
+            return_value=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.build_rebalance_payload",
+            new=AsyncMock(side_effect=lambda **kwargs: {
+                "target_cube_symbol": kwargs["target_cube_symbol"],
+                "cube_id": kwargs["target_cube_id"],
+                "holdings": [{"stock_symbol": "SH600031", "weight": 33.33}],
+                "top_items": kwargs["top_items"],
+                "skipped_items": [],
+            }),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.create_xueqiu_rebalance",
+            new=AsyncMock(return_value={"id": 12346, "status": "success"}),
+        ):
+            result = asyncio.run(
+                execute_rank_acceleration_target_rebalance(
+                    cookie="xq_a_token=test;",
+                    aggregate=aggregate,
+                    current_snapshot_date=date(2026, 7, 10),
+                    target_cube_symbol="ZH3644546",
+                    target_cube_id=None,
+                    active_filter_summary=None,
+                    dry_run=False,
+                    timeout=10.0,
+                )
+            )
+
+        self.assertEqual("SUCCESS", result["status"])
+        # 贪婪（score=80）→ 目标3只，从10只收缩
+        self.assertEqual(3, len(result["top_items"]))
+        self.assertEqual("greed", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
 
     def test_rank_acceleration_is_appended_to_same_email(self):
         result = {
@@ -1089,6 +1156,363 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertIn("+671", combined)
         self.assertIn("+12", combined)
         self.assertIn("12345", combined)
+
+    @staticmethod
+    def _weight_price_ratio_fixture():
+        ranking = []
+        comparison_items = [{} for _ in range(100)]
+        comparison_by_symbol = {}
+        ratios = {1: 1.2, 2: 2.5, 3: 0.9}
+        for index in range(1, 16):
+            symbol = f"SH.{600000 + index:06d}"
+            ranking.append(
+                {
+                    "composite_rank": index,
+                    "stock_symbol": symbol,
+                    "stock_name": f"权价比股票{index}",
+                    "segment_name": f"行业{index % 4}",
+                    "holding_cube_count": 12,
+                    "total_weight_pct": 500.0 - index,
+                    "composite_weight_pct": 5.0 - index / 100.0,
+                    "weight_price_ratio_5d": ratios.get(index, 1.5 + (10 - index) * 0.01),
+                    "weight_multiple_5d": 2.0,
+                    "momentum_multiple_5d": 1.0,
+                }
+            )
+            if index > 1:
+                comparison_by_symbol[symbol] = {
+                    "composite_rank": index + 30,
+                    "holding_cube_count": 8,
+                    "total_weight_pct": 300.0 - index,
+                }
+        return ranking, {
+            "available": True,
+            "reason": None,
+            "compare_snapshot_date": date(2026, 7, 3),
+            "trading_days": 5,
+            "items": comparison_items,
+            "by_symbol": comparison_by_symbol,
+        }
+
+    def test_weight_price_ratio_plan_selects_high_ratio_accumulators(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        ratio_sorted = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )
+        top10 = ratio_sorted[:10]
+        buy_signals = [item["stock_symbol"] for item in top10]
+
+        plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            strategy_history=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
+        )
+
+        self.assertTrue(plan["component_changed"])
+        self.assertEqual(10, len(plan["final_symbols"]))
+        # 按 5日权价比 排序：权价比最高（2.5）的排第一，而不是综合排名第1
+        self.assertEqual("SH.600002", plan["final_symbols"][0])
+        # 权价比 0.9（低于 1.15 门槛）不入选
+        self.assertNotIn("SH.600003", plan["final_symbols"])
+        self.assertEqual(WEIGHT_PRICE_RATIO_STRATEGY_NAME, plan["strategy_name"])
+        self.assertEqual("weight_price_ratio", plan["metric"])
+        first_item = next(item for item in plan["target_items"] if item["stock_symbol"] == "SH.600002")
+        self.assertEqual(1, first_item["strategy_rank"])
+        self.assertEqual(10.0, first_item["rebalance_weight_pct"])
+
+    def test_weight_price_ratio_plan_applies_fear_greed_target_count(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        ratio_sorted = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )
+        top3 = ratio_sorted[:3]
+        buy_signals = [item["stock_symbol"] for item in top3]
+        current_holdings = [
+            {
+                "stock_symbol": item["stock_symbol"].replace(".", ""),
+                "stock_name": item["stock_name"],
+                "weight": 33.33,
+            }
+            for item in top3
+        ]
+
+        plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+            strategy_history=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
+            top_n=3,
+            fear_greed_regime="greed",
+        )
+
+        self.assertEqual(3, plan["top_n"])
+        self.assertEqual("greed", plan["fear_greed_regime"])
+        self.assertEqual(3, len(plan["final_symbols"]))
+        self.assertEqual(100.0, round(sum(item["rebalance_weight_pct"] for item in plan["target_items"]), 2))
+
+    def test_robot_rebalance_enables_weight_price_ratio_target_in_same_job(self):
+        result = {
+            "skipped": False,
+            "record_id": 1,
+            "target_cube_symbol": "ZH3630096",
+            "target_cube_id": 3664154,
+            "success_count": 1000,
+            "failed_count": 0,
+            "stock_count": 600,
+            "rebalance_response": {"skipped": True},
+            "active_filter": {"active_cube_count": 600, "source_cube_count": 1000},
+            "holdings_snapshot": {"saved_rows": 3000},
+            "rank_acceleration_target": {
+                "target_cube_symbol": "ZH3644546",
+                "record_id": 2,
+                "status": "SKIPPED",
+                "rebalance_response": {"skipped": True},
+            },
+            "weight_price_ratio_target": {
+                "target_cube_symbol": "ZH3664736",
+                "record_id": 3,
+                "status": "SKIPPED",
+                "rebalance_response": {"skipped": True},
+            },
+        }
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.run_top_holdings_job",
+            new=AsyncMock(return_value=result),
+        ) as run_job, patch.dict(os.environ, {}, clear=True):
+            message = process_xueqiu_top_holdings_rebalance_for_robot()
+
+        self.assertEqual("ZH3664736", run_job.await_args.kwargs["weight_price_ratio_target_cube_symbol"])
+        self.assertIn("weight_price_ratio_target=ZH3664736", message)
+
+    def test_weight_price_ratio_target_rebalance_uses_target_cube_in_same_run(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        ratio_sorted = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )
+        buy_signals = [item["stock_symbol"] for item in ratio_sorted[:10]]
+        aggregate = {
+            "ranking": ranking,
+            "failed_results": [],
+            "success_count": 100,
+        }
+        ratio_by_symbol = {
+            item["stock_symbol"]: {
+                "weight_price_ratio_5d": item["weight_price_ratio_5d"],
+                "weight_multiple_5d": item.get("weight_multiple_5d"),
+                "momentum_multiple_5d": item.get("momentum_multiple_5d"),
+            }
+            for item in ranking
+        }
+
+        async def fake_payload(**kwargs):
+            return {
+                "target_cube_symbol": kwargs["target_cube_symbol"],
+                "cube_id": kwargs["target_cube_id"],
+                "holdings": [{"stock_symbol": "SH600002", "weight": 10.0}],
+                "top_items": kwargs["top_items"],
+                "skipped_items": [],
+            }
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
+            return_value=comparison,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_weight_price_ratio_map",
+            return_value=ratio_by_symbol,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
+            new=AsyncMock(return_value={"last_rb": {"cube_id": 3664736, "holdings": []}}),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
+            return_value={"score": 20.0, "rating": "极度恐慌", "date": "2026-07-10"},
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
+            return_value=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.build_rebalance_payload",
+            new=AsyncMock(side_effect=fake_payload),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.create_xueqiu_rebalance",
+            new=AsyncMock(return_value={"id": 22222, "status": "success"}),
+        ) as create_rebalance:
+            result = asyncio.run(
+                execute_weight_price_ratio_target_rebalance(
+                    cookie="xq_a_token=test;",
+                    aggregate=aggregate,
+                    current_snapshot_date=date(2026, 7, 10),
+                    target_cube_symbol=WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
+                    target_cube_id=None,
+                    active_filter_summary=None,
+                    dry_run=False,
+                    timeout=10.0,
+                )
+            )
+
+        self.assertEqual(WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL, result["target_cube_symbol"])
+        self.assertEqual(3664736, result["target_cube_id"])
+        self.assertEqual("SUCCESS", result["status"])
+        # 恐慌（score=20）→ 目标10只
+        self.assertEqual(10, len(result["top_items"]))
+        create_rebalance.assert_awaited_once()
+
+    def test_weight_price_ratio_greed_regime_targets_three_positions(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        ratio_sorted = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )
+        buy_signals = [item["stock_symbol"] for item in ratio_sorted[:10]]
+        aggregate = {
+            "ranking": ranking,
+            "failed_results": [],
+            "success_count": 100,
+        }
+        ratio_by_symbol = {
+            item["stock_symbol"]: {
+                "weight_price_ratio_5d": item["weight_price_ratio_5d"],
+                "weight_multiple_5d": item.get("weight_multiple_5d"),
+                "momentum_multiple_5d": item.get("momentum_multiple_5d"),
+            }
+            for item in ranking
+        }
+        current_holdings = [
+            {"stock_symbol": item["stock_symbol"].replace(".", ""), "weight": 10.0}
+            for item in ratio_sorted[:10]
+        ]
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
+            return_value=comparison,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_weight_price_ratio_map",
+            return_value=ratio_by_symbol,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
+            new=AsyncMock(return_value={
+                "last_rb": {"cube_id": 3664736, "holdings": current_holdings}
+            }),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_latest_csi_all_share_fear_greed",
+            return_value={"score": 80.0, "rating": "贪婪", "date": "2026-07-10"},
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_rank_acceleration_strategy_history",
+            return_value=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=buy_signals,
+                )
+            ],
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.build_rebalance_payload",
+            new=AsyncMock(side_effect=lambda **kwargs: {
+                "target_cube_symbol": kwargs["target_cube_symbol"],
+                "cube_id": kwargs["target_cube_id"],
+                "holdings": [{"stock_symbol": "SH600002", "weight": 33.33}],
+                "top_items": kwargs["top_items"],
+                "skipped_items": [],
+            }),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.create_xueqiu_rebalance",
+            new=AsyncMock(return_value={"id": 22223, "status": "success"}),
+        ):
+            result = asyncio.run(
+                execute_weight_price_ratio_target_rebalance(
+                    cookie="xq_a_token=test;",
+                    aggregate=aggregate,
+                    current_snapshot_date=date(2026, 7, 10),
+                    target_cube_symbol=WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
+                    target_cube_id=None,
+                    active_filter_summary=None,
+                    dry_run=False,
+                    timeout=10.0,
+                )
+            )
+
+        self.assertEqual("SUCCESS", result["status"])
+        # 贪婪（score=80）→ 目标3只，从10只收缩
+        self.assertEqual(3, len(result["top_items"]))
+        self.assertEqual("greed", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
+
+    def test_weight_price_ratio_is_appended_to_same_email(self):
+        result = {
+            "target_cube_symbol": "ZH3664736",
+            "target_cube_id": 3664736,
+            "status": "SUCCESS",
+            "comparison_snapshot": {"compare_snapshot_date": "2026-07-03"},
+            "strategy_plan": {
+                "top_n": 3,
+                "fear_greed_regime": "greed",
+                "fear_greed": {"score": 82.0, "rating": "贪婪", "date": "2026-07-10"},
+                "eligible_retain_count": 15,
+                "buy_rule": "买入规则样例",
+                "sell_rule": "卖出规则样例",
+                "execution_weight_rule": "等权规则样例",
+                "summary": {
+                    "current": [],
+                    "retained": [],
+                    "removed": [],
+                    "added": ["SH.600002(权价比股票2)"],
+                    "final": ["SH.600002(权价比股票2)"],
+                },
+            },
+            "rebalance_payload": {"cash": 0.0},
+            "rebalance_response": {"id": 22222, "status": "success"},
+            "top_items": [
+                {
+                    "strategy_rank": 1,
+                    "stock_symbol": "SH.600002",
+                    "stock_name": "权价比股票2",
+                    "composite_rank": 2,
+                    "weight_multiple_5d": 2.5,
+                    "momentum_multiple_5d": 1.0,
+                    "weight_price_ratio_5d": 2.5,
+                    "holding_cube_count": 12,
+                    "holding_cube_count_change_5d": 4,
+                    "rebalance_weight_pct": 33.33,
+                    "strategy_action": "buy",
+                }
+            ],
+        }
+
+        combined = append_weight_price_ratio_email_section(
+            "<html><body><h1>星澜壹号</h1></body></html>",
+            result,
+        )
+
+        self.assertEqual(1, combined.count("</body>"))
+        self.assertLess(combined.index("星澜壹号"), combined.index("星澜叁号"))
+        self.assertIn("ZH3664736", combined)
+        self.assertIn("2026-07-03", combined)
+        self.assertIn("权价比股票2", combined)
+        self.assertIn("2.50", combined)
+        self.assertIn("+4", combined)
+        self.assertIn("22222", combined)
 
     def test_build_rebalance_payload_skips_etf_quote_type_13_into_cash(self):
         top_items = [
