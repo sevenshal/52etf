@@ -86,6 +86,31 @@ const rollingAverage = (values, windowSize) => values.map((_, index) => {
   return Number((window.reduce((sum, value) => sum + Number(value), 0) / windowSize).toFixed(4));
 });
 
+// 底/顶信号由后端统一计算（history 接口每行 signals 字段），前端只负责渲染。
+// 两种信号类型用不同色系 + 形状区分：ma5 均线型 = 绿底/红顶方标；量能型 = 紫底/粉顶菱形。
+const SIGNAL_MARK_STYLE = {
+  ma5_bottom: { color: '#389e0d', symbol: 'roundRect', symbolSize: [22, 20], symbolOffset: [0, 18], mark: '底' },
+  ma5_top: { color: '#cf1322', symbol: 'roundRect', symbolSize: [22, 20], symbolOffset: [0, -18], mark: '顶' },
+  volume_bottom: { color: '#722ed1', symbol: 'diamond', symbolSize: [26, 26], symbolOffset: [0, 18], mark: '底' },
+  volume_top: { color: '#eb2f96', symbol: 'diamond', symbolSize: [26, 26], symbolOffset: [0, -18], mark: '顶' },
+};
+
+const buildSignalMarkPoints = (kind, items) => items
+  .filter(item => (item.signals || []).some(signal => signal.kind === kind))
+  .map((item) => {
+    const signal = (item.signals || []).find(candidate => candidate.kind === kind);
+    const style = SIGNAL_MARK_STYLE[kind];
+    return {
+      name: signal?.label || kind, // tooltip 显示全称（均线底/放量底…）
+      value: style.mark,           // 标记内显示 底/顶
+      coord: [item.date, signal?.value],
+      symbol: style.symbol,
+      symbolSize: style.symbolSize,
+      symbolOffset: style.symbolOffset,
+      itemStyle: { color: style.color },
+    };
+  });
+
 const formatDateTime = (value) => {
   if (!value) return '-';
   return new Date(value).toLocaleString();
@@ -260,33 +285,9 @@ const SOXXFearGreed = () => {
       const index = fullIndexByDate.get(item.date);
       return index === undefined ? null : fullScoreMa5[index];
     });
-    const reversalSignals = filteredData.flatMap((item) => {
-      const index = fullIndexByDate.get(item.date);
-      if (index === undefined || index < 5) return [];
-      const currentMa5 = fullScoreMa5[index];
-      const previousMa5 = fullScoreMa5[index - 1];
-      const recentScores = fullScores.slice(index - 4, index + 1);
-      if (![currentMa5, previousMa5].every(isFiniteNumber)) return [];
-      if (currentMa5 > previousMa5 && recentScores.some(value => isFiniteNumber(value) && Number(value) < 25)) {
-        return [{
-          name: '见底信号',
-          value: '底',
-          coord: [item.date, currentMa5],
-          symbolOffset: [0, 18],
-          itemStyle: { color: '#389e0d' },
-        }];
-      }
-      if (currentMa5 < previousMa5 && recentScores.some(value => isFiniteNumber(value) && Number(value) > 75)) {
-        return [{
-          name: '见顶信号',
-          value: '顶',
-          coord: [item.date, currentMa5],
-          symbolOffset: [0, -18],
-          itemStyle: { color: '#cf1322' },
-        }];
-      }
-      return [];
-    });
+    // 底/顶信号由后端统一计算（含 ma5 均线型与量能型、各自 5 日冷却），前端只按类型渲染色系
+    const ma5ReversalSignals = ['ma5_bottom', 'ma5_top'].flatMap(kind => buildSignalMarkPoints(kind, filteredData));
+    const volumeTurnSignals = ['volume_bottom', 'volume_top'].flatMap(kind => buildSignalMarkPoints(kind, filteredData));
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
@@ -358,6 +359,21 @@ const SOXXFearGreed = () => {
           data: scores,
           lineStyle: { width: 2, color: '#13c2c2' },
           itemStyle: { color: '#13c2c2' },
+          markPoint: {
+            symbol: 'diamond',
+            symbolSize: [26, 26],
+            label: {
+              show: true,
+              color: '#ffffff',
+              fontSize: 11,
+              fontWeight: 700,
+              formatter: '{c}',
+            },
+            tooltip: {
+              formatter: params => `${params.data.coord[0]}<br/>${params.data.name}`,
+            },
+            data: volumeTurnSignals,
+          },
         },
         {
           name: '贪恐5日均线',
@@ -380,7 +396,7 @@ const SOXXFearGreed = () => {
             tooltip: {
               formatter: params => `${params.data.coord[0]}<br/>${params.data.name}`,
             },
-            data: reversalSignals,
+            data: ma5ReversalSignals,
           },
         },
         {

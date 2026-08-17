@@ -117,6 +117,141 @@ def _finite_or_none(value: Any) -> Optional[float]:
     return None if not np.isfinite(number) else round(number, 6)
 
 
+# ---- 自算贪恐历史曲线底/顶信号（后端统一计算，前端只渲染标记） ----
+
+# ma5 均线型：MA5 上穿/下穿 + 最近 5 个交易日恐贪触及极值
+SIGNAL_MA5_WINDOW = 5
+SIGNAL_MA5_BOTTOM_THRESHOLD = 25.0
+SIGNAL_MA5_TOP_THRESHOLD = 75.0
+# 量能型：恐贪极值 + 放量/缩量（log 成交量相对不含当日过去 20 日均值的标准差）
+SIGNAL_VOLUME_BOTTOM_THRESHOLD = 30.0
+SIGNAL_VOLUME_TOP_THRESHOLD = 75.0
+SIGNAL_VOLUME_EXPAND_Z = 1.25  # 放量：高于均值 1.25 个标准差
+SIGNAL_VOLUME_SHRINK_Z = -0.25  # 缩量：低于均值 0.25 个标准差
+# 同类信号出后 5 个交易日冷却，不重复出信号（每类的顶/底各自独立冷却）
+SIGNAL_COOLDOWN_TRADING_DAYS = 5
+
+SIGNAL_KINDS = (
+    "ma5_bottom",
+    "ma5_top",
+    "volume_bottom",
+    "volume_top",
+)
+
+
+def _finite(value: Any) -> bool:
+    """数值可用（非 None / NaN / inf）。"""
+    try:
+        return value is not None and bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def compute_turn_signals(
+    rows: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """后端统一计算自算贪恐历史曲线的底/顶信号。
+
+    入参为按日期升序的 ``{date, score, etf_price: {volume}}`` 行（full history，
+    信号需要完整历史才能正确计算 MA5 / 量能 / 冷却）。两种信号类型各自独立
+    计算，且每类的顶/底分别独立冷却（信号后 ``SIGNAL_COOLDOWN_TRADING_DAYS`` 个
+    交易日不重复出同类信号）：
+
+    - ma5 均线型：
+      - 底：恐贪 MA5 较前一交易日上穿（当日 > 前一日），且最近 5 个交易日任意
+        一天恐贪值 <= 25；
+      - 顶：恐贪 MA5 较前一交易日下穿（当日 < 前一日），且最近 5 个交易日任意
+        一天恐贪值 >= 75。
+    - 量能型：
+      - 底：恐贪 <= 30 且放量（log(成交量) 高于不含当日过去 20 个交易日
+        log(成交量) 均值 1.25 个标准差）；
+      - 顶：恐贪 >= 75 且缩量（log(成交量) 低于不含当日过去 20 个交易日
+        log(成交量) 均值 0.25 个标准差）。
+
+    返回 ``{date: [{kind, value, label}, ...]}``，kind 取值为
+    ma5_bottom / ma5_top / volume_bottom / volume_top；value 为信号展示参考值
+    （ma5 型取当日 MA5，量能型取当日恐贪值），label 为展示文案。
+    """
+    n = len(rows)
+    scores = [row.get("score") for row in rows]
+    volumes = [(row.get("etf_price") or {}).get("volume") for row in rows]
+    # 恐贪 MA5（连续 5 个有效值才计算，与前端原逻辑一致）
+    ma5: List[Optional[float]] = [None] * n
+    for i in range(n):
+        window = scores[max(0, i - SIGNAL_MA5_WINDOW + 1): i + 1]
+        if len(window) == SIGNAL_MA5_WINDOW and all(_finite(v) for v in window):
+            ma5[i] = float(sum(window) / SIGNAL_MA5_WINDOW)
+    # 每类信号独立冷却：记录该类信号的日期下标，之后 5 个交易日内不再重复出同类信号
+    last_signal_index = {
+        kind: -SIGNAL_COOLDOWN_TRADING_DAYS - 1 for kind in SIGNAL_KINDS
+    }
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for i in range(n):
+        date_str = rows[i]["date"]
+        score = scores[i]
+        if not _finite(score):
+            continue
+        signals: List[Dict[str, Any]] = []
+
+        def _fire(kind: str, value: float, label: str) -> None:
+            signals.append({"kind": kind, "value": value, "label": label})
+            last_signal_index[kind] = i
+
+        # ---- ma5 均线型 ----
+        if i >= 1 and _finite(ma5[i]) and _finite(ma5[i - 1]):
+            recent = scores[max(0, i - SIGNAL_MA5_WINDOW + 1): i + 1]
+            if (
+                i - last_signal_index["ma5_bottom"] > SIGNAL_COOLDOWN_TRADING_DAYS
+                and ma5[i] > ma5[i - 1]
+                and any(
+                    _finite(v) and v <= SIGNAL_MA5_BOTTOM_THRESHOLD for v in recent
+                )
+            ):
+                _fire("ma5_bottom", float(ma5[i]), "均线底")
+            if (
+                i - last_signal_index["ma5_top"] > SIGNAL_COOLDOWN_TRADING_DAYS
+                and ma5[i] < ma5[i - 1]
+                and any(
+                    _finite(v) and v >= SIGNAL_MA5_TOP_THRESHOLD for v in recent
+                )
+            ):
+                _fire("ma5_top", float(ma5[i]), "均线顶")
+
+        # ---- 量能型（放量/缩量） ----
+        log_z: Optional[float] = None
+        if _finite(volumes[i]):
+            # 跳过无成交日（停牌等），向后收集最近 20 个有效成交量，
+            # 与摘要卡片的既有口径一致（SQL 过滤 etf_volume IS NOT NULL 取前 20）。
+            previous_volumes: List[float] = []
+            for j in range(i - 1, max(-1, i - 1 - 60), -1):
+                if _finite(volumes[j]):
+                    previous_volumes.append(float(volumes[j]))
+                    if len(previous_volumes) == 20:
+                        break
+            if len(previous_volumes) == 20:
+                log_z = calculate_log_volume_z_score(
+                    volumes[i], list(reversed(previous_volumes)), lookback=20
+                )
+        if log_z is not None:
+            if (
+                i - last_signal_index["volume_bottom"]
+                > SIGNAL_COOLDOWN_TRADING_DAYS
+                and score <= SIGNAL_VOLUME_BOTTOM_THRESHOLD
+                and log_z > SIGNAL_VOLUME_EXPAND_Z
+            ):
+                _fire("volume_bottom", float(score), "放量底")
+            if (
+                i - last_signal_index["volume_top"] > SIGNAL_COOLDOWN_TRADING_DAYS
+                and score >= SIGNAL_VOLUME_TOP_THRESHOLD
+                and log_z < SIGNAL_VOLUME_SHRINK_Z
+            ):
+                _fire("volume_top", float(score), "缩量顶")
+
+        if signals:
+            result[date_str] = signals
+    return result
+
+
 def _load_proxy_etf_bars(
     etf_symbols: List[str],
     start_date: date,
@@ -833,14 +968,14 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         etf_symbol = self._normalize_etf_symbol(symbol)
         db = Session()
         try:
-            query = db.query(ETFFearGreedCloneHistory).filter(
-                ETFFearGreedCloneHistory.symbol == etf_symbol
+            # 信号需要完整历史才能正确计算 MA5 / 量能 / 冷却，因此始终加载全量，
+            # start/end 日期窗口在信号计算完成后再过滤返回数据。
+            rows = (
+                db.query(ETFFearGreedCloneHistory)
+                .filter(ETFFearGreedCloneHistory.symbol == etf_symbol)
+                .order_by(ETFFearGreedCloneHistory.date.asc())
+                .all()
             )
-            if start_date:
-                query = query.filter(ETFFearGreedCloneHistory.date >= start_date)
-            if end_date:
-                query = query.filter(ETFFearGreedCloneHistory.date <= end_date)
-            rows = query.order_by(ETFFearGreedCloneHistory.date.asc()).all()
             data = [self._db_history_row_payload(row, include_components) for row in rows]
             # A股指数且有 proxy_etf：历史详情价格曲线/成交量用场内 ETF 日线替换指数点位/指数量
             proxy_etf = _a_stock_proxy_etf_map().get(etf_symbol)
@@ -934,6 +1069,17 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                                     else None
                                 ),
                             }
+            # 底/顶信号：后端统一计算（ma5 均线型 + 量能型，各自独立冷却）
+            signals_by_date = compute_turn_signals(data)
+            for item in data:
+                item["signals"] = signals_by_date.get(item["date"], [])
+            # 信号计算完成后应用日期窗口过滤
+            if start_date:
+                start_iso = start_date.isoformat()
+                data = [item for item in data if item["date"] >= start_iso]
+            if end_date:
+                end_iso = end_date.isoformat()
+                data = [item for item in data if item["date"] <= end_iso]
             latest = data[-1] if data else None
             latest_holdings: List[Dict[str, Any]] = []
             if latest and include_latest_holdings:
