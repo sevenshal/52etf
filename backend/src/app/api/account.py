@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import logging
+import threading
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from ...core.utils import read_json_file
@@ -130,17 +132,59 @@ def _ensure_web_account_schema() -> None:
             connection.execute(text("ALTER TABLE web_accounts ADD COLUMN note VARCHAR(500) NOT NULL DEFAULT ''"))
 
 
-def is_valid_account(account_id: str) -> bool:
-    """检查账户是否存在且已启用。"""
+# ---------------------------------------------------------------------------
+# web_accounts 有效账户集内存缓存（TTL 24h）
+# ---------------------------------------------------------------------------
+# valid_account / is_valid_account 命中每个带 X-Account-ID 的 API 请求，原实现
+# 每次请求都查 SQLite（PRAGMA 建表检查 + 2 次 SELECT）。这里把「已启用账户 id
+# 集合」在内存缓存 24 小时；账户增删改（create/update/delete）成功后调用
+# invalidate_account_cache() 立即失效，保证页面上的删除/停用即时生效。
+_ACCOUNT_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+_account_cache = {
+    # 用 -inf 而非 0：monotonic 时钟刚开机时远小于 TTL，0 会被误判为“新鲜”而跳过首次加载
+    "loaded_at": float("-inf"),
+    "ids": frozenset(),
+}
+_account_cache_lock = threading.Lock()
+
+
+def invalidate_account_cache() -> None:
+    """web_accounts 发生写入后调用：让下一次 is_valid_account 重新加载。"""
+    with _account_cache_lock:
+        _account_cache["loaded_at"] = float("-inf")
+        _account_cache["ids"] = frozenset()
+
+
+def _load_enabled_account_ids() -> frozenset:
+    """从数据库加载全部已启用账户 id（含首次 seed）。"""
     _seed_accounts_if_needed()
     db = SessionLocal()
     try:
-        return db.query(WebAccount).filter(
-            WebAccount.account_id == account_id,
-            WebAccount.enabled.is_(True),
-        ).first() is not None
+        rows = (
+            db.query(WebAccount.account_id)
+            .filter(WebAccount.enabled.is_(True))
+            .all()
+        )
+        return frozenset(row[0] for row in rows)
     finally:
         db.close()
+
+
+def is_valid_account(account_id: str) -> bool:
+    """检查账户是否存在且已启用（带 24h 内存缓存）。"""
+    now = time.monotonic()
+    with _account_cache_lock:
+        if now - _account_cache["loaded_at"] >= _ACCOUNT_CACHE_TTL_SECONDS:
+            try:
+                ids = _load_enabled_account_ids()
+                _account_cache["loaded_at"] = now
+                _account_cache["ids"] = ids
+            except Exception:
+                # 加载失败（如 DB 暂时不可用）时保留旧缓存并重试，避免误伤存量请求
+                logger.exception("Failed to load enabled account ids")
+        return account_id in _account_cache["ids"]
+
 
 async def valid_account(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
@@ -286,6 +330,7 @@ def create_account(payload: AccountCreate, _: str = Depends(valid_admin_account)
         account = WebAccount(account_id=account_id, note=note, enabled=payload.enabled)
         db.add(account)
         db.commit()
+        invalidate_account_cache()
         db.refresh(account)
         return _account_item(account)
     finally:
@@ -308,6 +353,7 @@ def update_account(account_id: str, payload: AccountUpdate, _: str = Depends(val
         if payload.note is not None:
             account.note = payload.note.strip()
         db.commit()
+        invalidate_account_cache()
         db.refresh(account)
         return _account_item(account)
     finally:
@@ -325,5 +371,6 @@ def delete_account(account_id: str, _: str = Depends(valid_admin_account)):
             raise HTTPException(status_code=404, detail="账户不存在")
         db.delete(account)
         db.commit()
+        invalidate_account_cache()
     finally:
         db.close()
