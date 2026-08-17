@@ -9,7 +9,7 @@ pairs = (fear_index, volume_etf, trade_etf, name, buy, vr, greed)：
 import itertools
 import sys
 
-sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf/backend")
+sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf")
 
 import lab.seesaw_pessimistic as sp
 

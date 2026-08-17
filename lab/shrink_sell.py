@@ -1,52 +1,28 @@
 #!/usr/bin/env python3
-"""统一 log 放量实验：放量 = log(vol[T]) > mean(log(vol[T-20..T-1])) + k*std(...)。
+"""卖出条件实验：贪恐≥70 且缩量 x 个标准差才卖（替代贪即卖）。
 
-替换原"每个标的自有量比阈值"为统一 k（k 在 1 附近搜索）。最悲观口径（滑点-1）。
-三标的：红利 + 科创50信号→半导体交易 + 纳指159941；4 标的再 +黄金518880（自算恐贪≤45）。
+缩量 = log(vol[T]) < mean(log(vol[T-20..T-1])) - x*std(...)（即 log_z <= -x）。
+放量沿用统一 k（三标的 k=1.5、4 标的 k=1.25，上实验最优）。
+换仓（持仓恐贪>45 且别标的有信号）保持原逻辑不变。最悲观口径（滑点-1）。
 """
 
 import math
 import sys
-from datetime import date
 
-sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf/backend")
+sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf")
 
 import numpy as np
-import pandas as pd
 
 import lab.seesaw_pessimistic as sp
+from lab.log_volume_signal import add_log_z, build_gold_fear
 
 TRADE_ETF = "159941.SZ"
 GOLD = "518880.SH"
-K_VALUES = [1.0, 1.25, 1.5, 1.75, 2.0]
+X_VALUES = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
 
-def normal_cdf(z):
-    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-
-def add_log_z(bars_map):
-    """在 bars_map 每个标的上加 log_z 列（对数放量 z 值），并保留旧 volume_ratio。"""
-    for sym, df in bars_map.items():
-        s = df.sort_values("trade_date").reset_index(drop=True)
-        s["log_vol"] = np.log(s["volume"].replace(0, np.nan))
-        prior_log_mean = s["log_vol"].shift(1).rolling(20, min_periods=20).mean()
-        prior_log_std = s["log_vol"].shift(1).rolling(20, min_periods=20).std(ddof=0)
-        s["log_z"] = (s["log_vol"] - prior_log_mean) / prior_log_std.replace(0, np.nan)
-        bars_map[sym] = s
-    return bars_map
-
-
-def build_gold_fear(bars_map):
-    df = bars_map[GOLD].sort_values("trade_date").reset_index(drop=True)
-    px = df["close"]
-    mean = px.rolling(252, min_periods=120).mean()
-    std = px.rolling(252, min_periods=120).std(ddof=0)
-    z = (px - mean) / std.replace(0, float("nan"))
-    return {d: normal_cdf(v) * 100 for d, v in zip(df["trade_date"], z) if v == v}
-
-
-def run_case(pairs, swap_threshold, fear_map, bars_map, trading_days):
+def run_case(pairs, swap_threshold, fear_map, bars_map, trading_days, sell_shrink_x):
+    """sell_shrink_x: 贪卖需缩量 log_z <= -x；None 表示贪即卖（原逻辑）。"""
     cash = 1000000.0
     position = None
     trades = []
@@ -60,6 +36,11 @@ def run_case(pairs, swap_threshold, fear_map, bars_map, trading_days):
         if sub.empty:
             return None
         return float(sub.iloc[0][kind])
+
+    def logz_at(etf, day):
+        row = bars_map[etf]
+        s2 = row[row["trade_date"] == day]
+        return float(s2["log_z"].iloc[0]) if not s2.empty else np.nan
 
     def do_buy(pair, day):
         nonlocal cash, position
@@ -108,7 +89,11 @@ def run_case(pairs, swap_threshold, fear_map, bars_map, trading_days):
         else:
             held_greed = pair_by_etf[position[0]][6]
             hf = sigs.get(position[0], (False, np.nan))[1]
-            if hf is not None and np.isfinite(hf) and hf >= held_greed:
+            shrink_ok = True
+            if sell_shrink_x is not None:
+                held_logz = logz_at(position[0], sd)
+                shrink_ok = np.isfinite(held_logz) and held_logz <= -sell_shrink_x
+            if hf is not None and np.isfinite(hf) and hf >= held_greed and shrink_ok:
                 do_sell(ed)
             elif hf is not None and np.isfinite(hf) and hf > swap_threshold:
                 others = [p for p in pairs if p[2] != position[0] and sigs[p[2]][0]]
@@ -141,9 +126,37 @@ if __name__ == "__main__":
     bars_map = add_log_z(bars_map)
     fear_map["GOLD_SELF"] = build_gold_fear(bars_map)
 
-    # 旧体系基准（三标的，各自量比阈值 1.6/1.6/1.3）——直接跑旧 run_case 需要旧列，跳过：
-    # 用 sp 已有 volume_ratio 的旧逻辑跑一遍基准
-    def run_case_old(pairs, swap_threshold, fear_map, bars_map, trading_days):
+    def pairs_for(k, with_gold):
+        p = [
+            ("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, k, 70.0),
+            ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, k, 70.0),
+            ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, k, 70.0),
+        ]
+        if with_gold:
+            p.append(("GOLD_SELF", GOLD, GOLD, "黄金", 45.0, k, 70.0))
+        return p
+
+    # 基准（贪即卖）
+    r_base3 = run_case(pairs_for(1.5, False), 45.0, fear_map, bars_map, trading_days, sell_shrink_x=None)
+    r_base4 = run_case(pairs_for(1.25, True), 45.0, fear_map, bars_map, trading_days, sell_shrink_x=None)
+    print(f"基准 贪即卖: 三标的(k=1.5) {r_base3['total']:.2f}% | 4标的(k=1.25) {r_base4['total']:.2f}%")
+
+    print("\n== 三标的（k=1.5）贪+缩量卖 x 搜索 ==")
+    for x in X_VALUES:
+        r = run_case(pairs_for(1.5, False), 45.0, fear_map, bars_map, trading_days, sell_shrink_x=x)
+        print(f"  x={x:.2f} 总收益 {r['total']:7.2f}% 回撤 {r['mdd']:6.2f}% 夏普 {r['sharpe']:.2f} "
+              f"买卖 {r['buys']}/{r['sells']} 空仓 {r['idle_ratio']:.1f}%")
+
+    # 三标的 x=0.25 明细
+    r25 = run_case(pairs_for(1.5, False), 45.0, fear_map, bars_map, trading_days, sell_shrink_x=0.25)
+    print(f"\n=== 三标的 x=0.25 {r25['total']:.2f}% 明细 ===")
+    for t in r25["buy_list"]:
+        print("  买", t["date"], t["symbol"], round(t["price"], 3))
+    for t in r25["sell_list"]:
+        print("  卖", t["date"], t["symbol"], round(t["price"], 3), "pnl", round(t["pnl"]))
+
+    # 旧体系（各自量比阈值 1.6/1.6/1.3）+ 缩量卖
+    def run_case_old(pairs, swap_threshold, fear_map, bars_map, trading_days, sell_shrink_x):
         cash = 1000000.0
         position = None
         trades = []
@@ -154,6 +167,11 @@ if __name__ == "__main__":
             row = bars_map[etf]
             sub = row[row["trade_date"] == day]
             return float(sub.iloc[0][kind]) if not sub.empty else None
+
+        def logz_at(etf, day):
+            row = bars_map[etf]
+            s2 = row[row["trade_date"] == day]
+            return float(s2["log_z"].iloc[0]) if not s2.empty else np.nan
 
         def do_buy(pair, day):
             nonlocal cash, position
@@ -201,7 +219,11 @@ if __name__ == "__main__":
             else:
                 held_greed = pair_by_etf[position[0]][6]
                 hf = sigs.get(position[0], (False, np.nan))[1]
-                if hf is not None and np.isfinite(hf) and hf >= held_greed:
+                shrink_ok = True
+                if sell_shrink_x is not None:
+                    held_logz = logz_at(position[0], sd)
+                    shrink_ok = np.isfinite(held_logz) and held_logz <= -sell_shrink_x
+                if hf is not None and np.isfinite(hf) and hf >= held_greed and shrink_ok:
                     do_sell(ed)
                 elif hf is not None and np.isfinite(hf) and hf > swap_threshold:
                     others = [p for p in pairs if p[2] != position[0] and sigs[p[2]][0]]
@@ -220,53 +242,35 @@ if __name__ == "__main__":
         return {"total": total * 100, "mdd": mdd, "sharpe": sharpe, "buys": sum(1 for t in trades if t["action"] == "BUY"),
                 "sells": sum(1 for t in trades if t["action"] == "SELL")}
 
-    base3_old = [
+    pairs_old3 = [
         ("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, 1.6, 70.0),
         ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, 1.6, 70.0),
         ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, 1.3, 70.0),
     ]
-    r_old = run_case_old(base3_old, 45.0, fear_map, bars_map, trading_days)
-    print(f"旧体系基准 三标的（各自量比阈值）: {r_old['total']:.2f}% 回撤 {r_old['mdd']:.2f}% 夏普 {r_old['sharpe']:.2f}")
+    pairs_old4 = pairs_old3 + [("GOLD_SELF", GOLD, GOLD, "黄金", 45.0, 1.3, 70.0)]
+    for label, ps in (("旧体系三标的", pairs_old3), ("旧体系4标的", pairs_old4)):
+        r0 = run_case_old(ps, 45.0, fear_map, bars_map, trading_days, None)
+        r1 = run_case_old(ps, 45.0, fear_map, bars_map, trading_days, 0.25)
+        r2 = run_case_old(ps, 45.0, fear_map, bars_map, trading_days, 0.5)
+        print(f"{label}: 贪即卖 {r0['total']:.2f}% | x=0.25 {r1['total']:.2f}% | x=0.5 {r2['total']:.2f}%")
 
-    print("\n== 三标的（红利 + 科创50信号→半导体 + 纳指159941）统一 k 搜索 ==")
-    rows3 = []
-    for k in K_VALUES:
-        pairs3 = [
-            ("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, k, 70.0),
-            ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, k, 70.0),
-            ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, k, 70.0),
-        ]
-        r = run_case(pairs3, 45.0, fear_map, bars_map, trading_days)
-        rows3.append({"k": k, **r})
-    for r in sorted(rows3, key=lambda r: -r["total"]):
-        print(f"  k={r['k']:.2f} 总收益 {r['total']:7.2f}% 回撤 {r['mdd']:6.2f}% 夏普 {r['sharpe']:.2f} "
-              f"买卖 {r['buys']}/{r['sells']} 空仓 {r['idle_ratio']:.1f}%")
-
-    print("\n== 4 标的（+黄金518880 恐慌≤45）统一 k 搜索 ==")
-    rows4 = []
-    for k in K_VALUES:
-        pairs4 = [
-            ("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, k, 70.0),
-            ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, k, 70.0),
-            ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, k, 70.0),
-            ("GOLD_SELF", GOLD, GOLD, "黄金", 45.0, k, 70.0),
-        ]
-        r = run_case(pairs4, 45.0, fear_map, bars_map, trading_days)
-        rows4.append({"k": k, **r})
-    for r in sorted(rows4, key=lambda r: -r["total"]):
-        print(f"  k={r['k']:.2f} 总收益 {r['total']:7.2f}% 回撤 {r['mdd']:6.2f}% 夏普 {r['sharpe']:.2f} "
-              f"买卖 {r['buys']}/{r['sells']} 空仓 {r['idle_ratio']:.1f}%")
-
-    # 4 标的 k=1.25 明细
-    pairs4b = [
-        ("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, 1.25, 70.0),
-        ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, 1.25, 70.0),
-        ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, 1.25, 70.0),
-        ("GOLD_SELF", GOLD, GOLD, "黄金", 45.0, 1.25, 70.0),
-    ]
-    rb = run_case(pairs4b, 45.0, fear_map, bars_map, trading_days)
-    print(f"\n=== 4 标的 k=1.25 {rb['total']:.2f}% 明细 ===")
-    for t in rb["buy_list"]:
+    # 旧体系4标的 x=0.25 明细（309.84%）
+    rb = run_case_old(pairs_old4, 45.0, fear_map, bars_map, trading_days, 0.25)
+    print(f"\n=== 旧体系4标的 x=0.25 {rb['total']:.2f}% 明细 ===")
+    # 需要 trades 明细：改造 run_case_old 返回 trades 太麻烦，用统一k版 run_case 打印（结构相同）
+    rbk = run_case([("000015.SH", "510880.SH", "510880.SH", "红利", 30.0, 1.6, 70.0),
+                    ("000688.SH", "588000.SH", "512480.SH", "科创50信号→半导体", 25.0, 1.6, 70.0),
+                    ("QQQ.US", "QQQ.US", TRADE_ETF, "纳指", 20.0, 1.3, 70.0),
+                    ("GOLD_SELF", GOLD, GOLD, "黄金", 45.0, 1.3, 70.0)],
+                   45.0, fear_map, bars_map, trading_days, sell_shrink_x=0.25)
+    print(f"统一k同参数 {rbk['total']:.2f}% 明细（近似旧体系，量比列不同）：")
+    for t in rbk["buy_list"]:
         print("  买", t["date"], t["symbol"], round(t["price"], 3))
-    for t in rb["sell_list"]:
+    for t in rbk["sell_list"]:
         print("  卖", t["date"], t["symbol"], round(t["price"], 3), "pnl", round(t["pnl"]))
+
+    print("\n== 4 标的（k=1.25 + 黄金45）贪+缩量卖 x 搜索 ==")
+    for x in X_VALUES:
+        r = run_case(pairs_for(1.25, True), 45.0, fear_map, bars_map, trading_days, sell_shrink_x=x)
+        print(f"  x={x:.2f} 总收益 {r['total']:7.2f}% 回撤 {r['mdd']:6.2f}% 夏普 {r['sharpe']:.2f} "
+              f"买卖 {r['buys']}/{r['sells']} 空仓 {r['idle_ratio']:.1f}%")

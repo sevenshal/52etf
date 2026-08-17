@@ -14,7 +14,7 @@ import sys
 import numpy as np
 from scipy import stats
 
-sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf/backend")
+sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf")
 
 import lab.seesaw_pessimistic as sp
 from lab.log_volume_signal import add_log_z, build_gold_fear

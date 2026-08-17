@@ -46,3 +46,6 @@ build_dist/
 .artifacts/
 cache/
 .data/
+
+# lab 回测/分析输出产物（不提交）
+lab/output/

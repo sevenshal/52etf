@@ -6,7 +6,7 @@ from __future__ import annotations
 import itertools
 import sys
 
-sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf/backend")
+sys.path.insert(0, "/home/sevenshal/Dev/github/quant/52etf")
 
 from lab.seesaw_triple import BASE_TWO, load_data, run_backtest
 
