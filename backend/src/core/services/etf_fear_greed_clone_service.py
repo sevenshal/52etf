@@ -58,6 +58,54 @@ def _a_stock_proxy_etf_map() -> Dict[str, str]:
     }
 
 
+# 没有直接跟踪 ETF 的 A股指数（中证全指）：用多只宽基 ETF 成交额加总作为成交量代理。
+# 中证全指(000985.SH) 无场内 ETF 直接跟踪（现有"中证全指XX" ETF 均为行业子指数），
+# 这里用 沪深300(510300.SH)+中证500(510500.SH)+中证1000(512100.SH)+中证2000(563300.SH)
+# 四只宽基 ETF 的当日成交额加总来代理全市场成交。563300 2023-09 才上市，加总用
+# min_count=1，上市前自动只取前三只（占比≤4%，不影响量比量级）。
+A_STOCK_AGGREGATE_VOLUME_ETFS: Dict[str, List[str]] = {
+    "000985.SH": ["510300.SH", "510500.SH", "512100.SH", "563300.SH"],
+}
+
+
+def _load_aggregate_proxy_bars(
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+) -> Dict[str, pd.DataFrame]:
+    """对需要聚合成交额代理的 A股指数，加载多只宽基 ETF 成交额加总。
+
+    返回 {symbol: DataFrame(index=trade_date, columns=[volume, turnover])}，
+    volume/turnover 均为当日 sum(各 ETF 成交额)。个别 ETF 缺数据（如中证2000
+    上市前）时用 min_count=1 保留其余 ETF 之和。
+    """
+    wanted = {
+        str(symbol or "").strip().upper(): etfs
+        for symbol, etfs in A_STOCK_AGGREGATE_VOLUME_ETFS.items()
+        if str(symbol or "").strip().upper() in {
+            str(item or "").strip().upper() for item in (symbols or [])
+        }
+    }
+    if not wanted:
+        return {}
+    etf_list = sorted({etf for etfs in wanted.values() for etf in etfs})
+    bars_by_etf = _load_proxy_etf_bars(
+        etf_list, start_date, end_date, use_qfq=False
+    )
+    result: Dict[str, pd.DataFrame] = {}
+    for symbol, etfs in wanted.items():
+        frames = [bars_by_etf[e] for e in etfs if e in bars_by_etf]
+        if not frames:
+            continue
+        combined = pd.concat(frames)
+        # 成交额加总（amount 单位为千元，×1000 换算为元；前端成交量柱按元显示亿/万）
+        amount = combined["turnover"].groupby(level=0).sum(min_count=1) * 1000.0
+        result[symbol] = pd.DataFrame(
+            {"volume": amount, "turnover": amount}
+        ).sort_index()
+    return result
+
+
 def _finite_or_none(value: Any) -> Optional[float]:
     """None / NaN / inf → None，否则保留 6 位小数。"""
     try:
@@ -800,45 +848,92 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             if proxy_etf and data:
                 first_day = datetime.strptime(data[0]["date"], "%Y-%m-%d").date()
                 last_day = datetime.strptime(data[-1]["date"], "%Y-%m-%d").date()
-                bars = _load_proxy_etf_bars(
-                    [proxy_etf],
-                    first_day - timedelta(days=30),
-                    last_day,
-                    use_qfq=True,
-                ).get(proxy_etf)
-                # 仅当 ETF 日线完整覆盖历史区间时才替换，避免新上市 ETF 早期缺数据导致
-                # 指数点位与 ETF 价格混在一张图里（比例尺断裂）。
-                if (
-                    bars is not None
-                    and not bars.empty
-                    and bars.index.min().date() <= first_day
-                    and bars.index.max().date() >= last_day
-                ):
-                    history_dates = pd.DatetimeIndex(
-                        datetime.strptime(item["date"], "%Y-%m-%d")
-                        for item in data
-                    )
-                    etf_reindexed = bars[
-                        ["open", "high", "low", "close", "volume", "turnover"]
-                    ].reindex(history_dates).ffill()
-                    bar_dates = set(bars.index.date)
-                    proxy_etf_used = proxy_etf
-                    for item, ts in zip(data, history_dates):
-                        row = etf_reindexed.loc[ts]
-                        had_bar = ts.date() in bar_dates
-                        item["etf_price"] = {
-                            "open": _finite_or_none(row["open"]),
-                            "high": _finite_or_none(row["high"]),
-                            "low": _finite_or_none(row["low"]),
-                            "close": _finite_or_none(row["close"]),
-                            # 停牌/无成交日不显示成交量柱
-                            "volume": (
-                                _finite_or_none(row["volume"]) if had_bar else None
-                            ),
-                            "turnover": (
-                                _finite_or_none(row["turnover"]) if had_bar else None
-                            ),
-                        }
+                if etf_symbol in A_STOCK_AGGREGATE_VOLUME_ETFS:
+                    # 中证全指等无直接 ETF：价格保留指数点位（DB 内 etf_* 即为指数 OHLC），
+                    # 成交量用多只宽基 ETF 成交额加总代理（见 A_STOCK_AGGREGATE_VOLUME_ETFS）。
+                    aggregate = _load_aggregate_proxy_bars(
+                        [etf_symbol],
+                        first_day - timedelta(days=30),
+                        last_day,
+                    ).get(etf_symbol)
+                    if (
+                        aggregate is not None
+                        and not aggregate.empty
+                        and aggregate.index.min().date() <= first_day
+                        and aggregate.index.max().date() >= last_day
+                    ):
+                        history_dates = pd.DatetimeIndex(
+                            datetime.strptime(item["date"], "%Y-%m-%d")
+                            for item in data
+                        )
+                        volume_reindexed = (
+                            aggregate["volume"].reindex(history_dates).ffill()
+                        )
+                        turnover_reindexed = (
+                            aggregate["turnover"].reindex(history_dates).ffill()
+                        )
+                        bar_dates = set(aggregate.index.date)
+                        for item, ts in zip(data, history_dates):
+                            had_bar = ts.date() in bar_dates
+                            item["etf_price"] = {
+                                "open": item["etf_price"].get("open"),
+                                "high": item["etf_price"].get("high"),
+                                "low": item["etf_price"].get("low"),
+                                "close": item["etf_price"].get("close"),
+                                # 停牌/无成交日不显示成交量柱
+                                "volume": (
+                                    _finite_or_none(volume_reindexed.loc[ts])
+                                    if had_bar
+                                    else None
+                                ),
+                                "turnover": (
+                                    _finite_or_none(turnover_reindexed.loc[ts])
+                                    if had_bar
+                                    else None
+                                ),
+                            }
+                else:
+                    bars = _load_proxy_etf_bars(
+                        [proxy_etf],
+                        first_day - timedelta(days=30),
+                        last_day,
+                        use_qfq=True,
+                    ).get(proxy_etf)
+                    # 仅当 ETF 日线完整覆盖历史区间时才替换，避免新上市 ETF 早期缺数据导致
+                    # 指数点位与 ETF 价格混在一张图里（比例尺断裂）。
+                    if (
+                        bars is not None
+                        and not bars.empty
+                        and bars.index.min().date() <= first_day
+                        and bars.index.max().date() >= last_day
+                    ):
+                        history_dates = pd.DatetimeIndex(
+                            datetime.strptime(item["date"], "%Y-%m-%d")
+                            for item in data
+                        )
+                        etf_reindexed = bars[
+                            ["open", "high", "low", "close", "volume", "turnover"]
+                        ].reindex(history_dates).ffill()
+                        bar_dates = set(bars.index.date)
+                        proxy_etf_used = proxy_etf
+                        for item, ts in zip(data, history_dates):
+                            row = etf_reindexed.loc[ts]
+                            had_bar = ts.date() in bar_dates
+                            item["etf_price"] = {
+                                "open": _finite_or_none(row["open"]),
+                                "high": _finite_or_none(row["high"]),
+                                "low": _finite_or_none(row["low"]),
+                                "close": _finite_or_none(row["close"]),
+                                # 停牌/无成交日不显示成交量柱
+                                "volume": (
+                                    _finite_or_none(row["volume"]) if had_bar else None
+                                ),
+                                "turnover": (
+                                    _finite_or_none(row["turnover"])
+                                    if had_bar
+                                    else None
+                                ),
+                            }
             latest = data[-1] if data else None
             latest_holdings: List[Dict[str, Any]] = []
             if latest and include_latest_holdings:
@@ -900,14 +995,31 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 if anchors:
                     min_date = min(anchors.values()) - timedelta(days=120)
                     max_date = max(anchors.values())
-                    bars_by_etf = _load_proxy_etf_bars(
-                        sorted({proxy_map[symbol] for symbol in anchors}),
+                    # 中证全指等无直接 ETF 的指数：用多只宽基 ETF 成交额加总代理
+                    aggregate_bars = _load_aggregate_proxy_bars(
+                        [s for s in anchors if s in A_STOCK_AGGREGATE_VOLUME_ETFS],
                         min_date,
                         max_date,
-                        use_qfq=False,
+                    )
+                    single_symbols = [
+                        s for s in anchors if s not in A_STOCK_AGGREGATE_VOLUME_ETFS
+                    ]
+                    bars_by_etf = (
+                        _load_proxy_etf_bars(
+                            sorted({proxy_map[symbol] for symbol in single_symbols}),
+                            min_date,
+                            max_date,
+                            use_qfq=False,
+                        )
+                        if single_symbols
+                        else {}
                     )
                     for symbol, anchor in anchors.items():
-                        frame = bars_by_etf.get(proxy_map[symbol])
+                        frame = (
+                            aggregate_bars.get(symbol)
+                            if symbol in A_STOCK_AGGREGATE_VOLUME_ETFS
+                            else bars_by_etf.get(proxy_map[symbol])
+                        )
                         if frame is None or frame.empty:
                             continue
                         upto = frame[frame.index <= pd.Timestamp(anchor)]
