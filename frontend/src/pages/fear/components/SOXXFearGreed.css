@@ -10,6 +10,9 @@
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
+  /* 详情面板内联展开：detail 占一整行(1/-1)，靠 dense 把该卡片所在行后面的卡片
+     回填到点击卡片右侧，保证详情永远出现在点击卡片所在行的下一行 */
+  grid-auto-flow: row dense;
 }
 
 .soxx-fear-cn-groups {
@@ -348,6 +351,12 @@
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid #f0f0f0;
+}
+
+/* 详情面板内联在概要网格中：独占整行，紧贴点击卡片所在行的下一行 */
+.soxx-fear-summary-grid > .soxx-fear-detail {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 .soxx-fear-detail-header {

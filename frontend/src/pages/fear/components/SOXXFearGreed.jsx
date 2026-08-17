@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Col, Divider, Empty, Radio, Row, Skeleton, Space, Statistic, Tag, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
@@ -444,6 +444,171 @@ const SOXXFearGreed = () => {
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
 
+  const detailRef = useRef(null);
+
+  useEffect(() => {
+    if (expandedSymbol && detailRef.current) {
+      detailRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [expandedSymbol]);
+
+  const detailNode = expandedSymbol ? (
+    <div ref={detailRef} className="soxx-fear-detail">
+
+      <div className="soxx-fear-detail-header">
+        <div>
+          <Text strong>{expandedETF?.ticker}</Text>
+          <Text type="secondary" style={{ marginLeft: 8 }}>{expandedETF?.symbol}</Text>
+        </div>
+        <Tag color={fearColor(realtimeScore ?? latest?.score)}>
+          {fearStatus(realtimeScore ?? latest?.score)}
+        </Tag>
+      </div>
+
+      {detailError && (
+        <Alert type="warning" showIcon message={`${expandedETF?.ticker}贪恐历史暂不可用`} description={detailError} />
+      )}
+
+      {!detailError && detailLoading && <Skeleton active paragraph={{ rows: 6 }} />}
+
+      {!detailError && !detailLoading && !latest && (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${expandedETF?.ticker} 暂无入库记录`} />
+      )}
+
+      {!detailError && !detailLoading && latest && (
+        <>
+          {realtimeError && (
+            <Alert
+              type="info"
+              showIcon
+              message={`${expandedETF?.ticker} 实时贪恐暂不可用，当前显示最新入库日线值`}
+              description={realtimeError}
+              style={{ marginBottom: 12 }}
+            />
+          )}
+
+          <Row gutter={[12, 12]} className="soxx-fear-detail-stats">
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic
+                title={realtimeEnabled ? '实时/最新' : '最新'}
+                value={realtimeScore ?? latest.score}
+                precision={1}
+                valueStyle={{ color: fearTextColor(realtimeScore ?? latest.score) }}
+                suffix="/100"
+              />
+              {realtimeEnabled && realtimeLoading && <Tag color="processing">实时计算中</Tag>}
+            </Col>
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic title="入库分数" value={latest.score} precision={1} suffix="/100" />
+            </Col>
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic
+                title={expandedDetail?.proxy_etf ? '价格' : (expandedETF?.priceLabel || '价格')}
+                value={displayPrice}
+                precision={pricePrecision}
+                prefix={expandedETF?.symbol.endsWith('.US') ? '$' : undefined}
+              />
+            </Col>
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic title="数据日期" value={latest.date} />
+            </Col>
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic title="报价时间" value={realtimeEnabled ? formatDateTime(realtimeMeta?.timestamp) : '日线'} />
+            </Col>
+            <Col xs={12} sm={8} lg={4}>
+              <Statistic title="历史样本" value={expandedSummary?.history_points ?? expandedDetail.count ?? '-'} />
+            </Col>
+          </Row>
+
+          {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
+            <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
+              <Row gutter={[12, 12]}>
+                <Col xs={12} sm={8}>
+                  <Statistic
+                    title="当前低估率"
+                    value={formatGap(valuation.current_gap_pct)}
+                    valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
+                  />
+                  <Tag>
+                    目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
+                  </Tag>
+                </Col>
+                <Col xs={12} sm={8}>
+                  <Statistic
+                    title="中期估值位置"
+                    value={valuation.valuation_position_label || '-'}
+                    valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
+                  />
+                  <Tag color={valuationColor(valuation.valuation_position_label)}>
+                    近{valuation.valuation_history_days || 0}日百分位{' '}
+                    {isFiniteNumber(valuation.valuation_position_pct)
+                      ? `${formatNumber(valuation.valuation_position_pct, 1)}%`
+                      : '样本不足'}
+                  </Tag>
+                </Col>
+                <Col xs={12} sm={8}>
+                  <Statistic
+                    title="近252日位置"
+                    value={valuation252Label || '-'}
+                    valueStyle={{ color: valuationColor(valuation252Label), fontSize: 20 }}
+                  />
+                  <Tag color={valuationColor(valuation252Label)}>
+                    有效{valuation252Days}日百分位{' '}
+                    {isFiniteNumber(valuation252Pct)
+                      ? `${formatNumber(valuation252Pct, 1)}%`
+                      : '样本不足'}
+                  </Tag>
+                </Col>
+                <Col xs={12} sm={8}>
+                  <Statistic title="估值覆盖权重" value={(valuation.coverage_ratio || 0) * 100} precision={1} suffix="%" />
+                  <Text type="secondary">
+                    {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
+                  </Text>
+                </Col>
+                <Col xs={12} sm={8}>
+                  <Statistic title="估值数据日期" value={valuation.valuation_date_max || '-'} />
+                  <Text type="secondary">
+                    区间 {valuation.valuation_date_min || '-'} 至 {valuation.valuation_date_max || '-'}
+                  </Text>
+                </Col>
+              </Row>
+              <Text type="secondary" className="soxx-fear-valuation-note">
+                低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
+              </Text>
+            </Card>
+          )}
+
+          {topHoldings.length > 0 && (
+            <Space wrap size={[8, 8]} className="soxx-fear-holdings">
+              {topHoldings.map(holding => (
+                <Tag key={holding.symbol}>
+                  {holding.symbol} {(holding.weight * 100).toFixed(2)}%
+                </Tag>
+              ))}
+            </Space>
+          )}
+
+          <div className="soxx-fear-chart-toolbar">
+            <Radio.Group
+              value={timeRange}
+              onChange={event => setTimeRange(event.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              {TIME_RANGES.filter(range => [1, 3, 5, -1].includes(range.value)).map(range => (
+                <Radio.Button key={range.value} value={range.value}>
+                  {range.label}
+                </Radio.Button>
+              ))}
+            </Radio.Group>
+          </div>
+
+          <ReactECharts option={chartOption} className="soxx-fear-chart" />
+        </>
+      )}
+    </div>
+  ) : null;
+
   return (
     <Card
       title="自算贪恐"
@@ -482,29 +647,21 @@ const SOXXFearGreed = () => {
         </>
       ) : (
         <>
-          <div className="soxx-fear-summary-grid">
-            {US_ETF_OPTIONS.map(item => (
-              <SummaryCard
-                key={item.symbol}
-                option={item}
-                summary={summaryBySymbol[item.symbol]}
-                active={expandedSymbol === item.symbol}
-                onToggle={() => toggleExpanded(item.symbol)}
-              />
-            ))}
-          </div>
+          <CardGrid
+            options={US_ETF_OPTIONS}
+            summaryBySymbol={summaryBySymbol}
+            expandedSymbol={expandedSymbol}
+            onToggle={toggleExpanded}
+            detailNode={detailNode}
+          />
           <Divider className="soxx-fear-market-divider">港股</Divider>
-          <div className="soxx-fear-summary-grid">
-            {HK_ETF_OPTIONS.map(item => (
-              <SummaryCard
-                key={item.symbol}
-                option={item}
-                summary={summaryBySymbol[item.symbol]}
-                active={expandedSymbol === item.symbol}
-                onToggle={() => toggleExpanded(item.symbol)}
-              />
-            ))}
-          </div>
+          <CardGrid
+            options={HK_ETF_OPTIONS}
+            summaryBySymbol={summaryBySymbol}
+            expandedSymbol={expandedSymbol}
+            onToggle={toggleExpanded}
+            detailNode={detailNode}
+          />
           <Divider className="soxx-fear-market-divider">A股</Divider>
           <div className="soxx-fear-cn-groups">
             {CN_GENERAL_GROUPS.map(group => (
@@ -515,6 +672,7 @@ const SOXXFearGreed = () => {
                 summaryBySymbol={summaryBySymbol}
                 expandedSymbol={expandedSymbol}
                 onToggle={toggleExpanded}
+                detailNode={detailNode}
               />
             ))}
 
@@ -534,6 +692,7 @@ const SOXXFearGreed = () => {
                   summaryBySymbol={summaryBySymbol}
                   expandedSymbol={expandedSymbol}
                   onToggle={toggleExpanded}
+                  detailNode={detailNode}
                 />
               ))}
             </div>
@@ -545,187 +704,37 @@ const SOXXFearGreed = () => {
                   summaryBySymbol={summaryBySymbol}
                   expandedSymbol={expandedSymbol}
                   onToggle={toggleExpanded}
+                  detailNode={detailNode}
                 />
               ))}
             </div>
           </div>
         </>
       )}
-
-      {expandedSymbol && (
-        <div className="soxx-fear-detail">
-          <div className="soxx-fear-detail-header">
-            <div>
-              <Text strong>{expandedETF?.ticker}</Text>
-              <Text type="secondary" style={{ marginLeft: 8 }}>{expandedETF?.symbol}</Text>
-            </div>
-            <Tag color={fearColor(realtimeScore ?? latest?.score)}>
-              {fearStatus(realtimeScore ?? latest?.score)}
-            </Tag>
-          </div>
-
-          {detailError && (
-            <Alert type="warning" showIcon message={`${expandedETF?.ticker}贪恐历史暂不可用`} description={detailError} />
-          )}
-
-          {!detailError && detailLoading && <Skeleton active paragraph={{ rows: 6 }} />}
-
-          {!detailError && !detailLoading && !latest && (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${expandedETF?.ticker} 暂无入库记录`} />
-          )}
-
-          {!detailError && !detailLoading && latest && (
-            <>
-              {realtimeError && (
-                <Alert
-                  type="info"
-                  showIcon
-                  message={`${expandedETF?.ticker} 实时贪恐暂不可用，当前显示最新入库日线值`}
-                  description={realtimeError}
-                  style={{ marginBottom: 12 }}
-                />
-              )}
-
-              <Row gutter={[12, 12]} className="soxx-fear-detail-stats">
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic
-                    title={realtimeEnabled ? '实时/最新' : '最新'}
-                    value={realtimeScore ?? latest.score}
-                    precision={1}
-                    valueStyle={{ color: fearTextColor(realtimeScore ?? latest.score) }}
-                    suffix="/100"
-                  />
-                  {realtimeEnabled && realtimeLoading && <Tag color="processing">实时计算中</Tag>}
-                </Col>
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic title="入库分数" value={latest.score} precision={1} suffix="/100" />
-                </Col>
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic
-                    title={expandedDetail?.proxy_etf ? '价格' : (expandedETF?.priceLabel || '价格')}
-                    value={displayPrice}
-                    precision={pricePrecision}
-                    prefix={expandedETF?.symbol.endsWith('.US') ? '$' : undefined}
-                  />
-                </Col>
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic title="数据日期" value={latest.date} />
-                </Col>
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic title="报价时间" value={realtimeEnabled ? formatDateTime(realtimeMeta?.timestamp) : '日线'} />
-                </Col>
-                <Col xs={12} sm={8} lg={4}>
-                  <Statistic title="历史样本" value={expandedSummary?.history_points ?? expandedDetail.count ?? '-'} />
-                </Col>
-              </Row>
-
-              {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
-                <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
-                  <Row gutter={[12, 12]}>
-                    <Col xs={12} sm={8}>
-                      <Statistic
-                        title="当前低估率"
-                        value={formatGap(valuation.current_gap_pct)}
-                        valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
-                      />
-                      <Tag>
-                        目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
-                      </Tag>
-                    </Col>
-                    <Col xs={12} sm={8}>
-                      <Statistic
-                        title="中期估值位置"
-                        value={valuation.valuation_position_label || '-'}
-                        valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
-                      />
-                      <Tag color={valuationColor(valuation.valuation_position_label)}>
-                        近{valuation.valuation_history_days || 0}日百分位{' '}
-                        {isFiniteNumber(valuation.valuation_position_pct)
-                          ? `${formatNumber(valuation.valuation_position_pct, 1)}%`
-                          : '样本不足'}
-                      </Tag>
-                    </Col>
-                    <Col xs={12} sm={8}>
-                      <Statistic
-                        title="近252日位置"
-                        value={valuation252Label || '-'}
-                        valueStyle={{ color: valuationColor(valuation252Label), fontSize: 20 }}
-                      />
-                      <Tag color={valuationColor(valuation252Label)}>
-                        有效{valuation252Days}日百分位{' '}
-                        {isFiniteNumber(valuation252Pct)
-                          ? `${formatNumber(valuation252Pct, 1)}%`
-                          : '样本不足'}
-                      </Tag>
-                    </Col>
-                    <Col xs={12} sm={8}>
-                      <Statistic title="估值覆盖权重" value={(valuation.coverage_ratio || 0) * 100} precision={1} suffix="%" />
-                      <Text type="secondary">
-                        {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
-                      </Text>
-                    </Col>
-                    <Col xs={12} sm={8}>
-                      <Statistic title="估值数据日期" value={valuation.valuation_date_max || '-'} />
-                      <Text type="secondary">
-                        区间 {valuation.valuation_date_min || '-'} 至 {valuation.valuation_date_max || '-'}
-                      </Text>
-                    </Col>
-                  </Row>
-                  <Text type="secondary" className="soxx-fear-valuation-note">
-                    低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
-                  </Text>
-                </Card>
-              )}
-
-              {topHoldings.length > 0 && (
-                <Space wrap size={[8, 8]} className="soxx-fear-holdings">
-                  {topHoldings.map(holding => (
-                    <Tag key={holding.symbol}>
-                      {holding.symbol} {(holding.weight * 100).toFixed(2)}%
-                    </Tag>
-                  ))}
-                </Space>
-              )}
-
-              <div className="soxx-fear-chart-toolbar">
-                <Radio.Group
-                  value={timeRange}
-                  onChange={event => setTimeRange(event.target.value)}
-                  optionType="button"
-                  buttonStyle="solid"
-                >
-                  {TIME_RANGES.filter(range => [1, 3, 5, -1].includes(range.value)).map(range => (
-                    <Radio.Button key={range.value} value={range.value}>
-                      {range.label}
-                    </Radio.Button>
-                  ))}
-                </Radio.Group>
-              </div>
-
-              <ReactECharts option={chartOption} className="soxx-fear-chart" />
-            </>
-          )}
-        </div>
-      )}
     </Card>
   );
 };
 
-const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle }) => (
-  <div className="soxx-fear-summary-grid">
-    {options.map(item => (
-      <SummaryCard
-        key={item.symbol}
-        option={item}
-        summary={summaryBySymbol[item.symbol]}
-        active={expandedSymbol === item.symbol}
-        onToggle={() => onToggle(item.symbol)}
-      />
-    ))}
-  </div>
-);
+const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => {
+  const expandedIndex = options.findIndex(item => item.symbol === expandedSymbol);
+  return (
+    <div className="soxx-fear-summary-grid">
+      {options.map((item, index) => (
+        <Fragment key={item.symbol}>
+          <SummaryCard
+            option={item}
+            summary={summaryBySymbol[item.symbol]}
+            active={expandedSymbol === item.symbol}
+            onToggle={() => onToggle(item.symbol)}
+          />
+          {index === expandedIndex && detailNode}
+        </Fragment>
+      ))}
+    </div>
+  );
+};
 
-const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle }) => (
+const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => (
   <section className="soxx-fear-market-group">
     <div className="soxx-fear-group-title">
       <Text strong>{title}</Text>
@@ -736,11 +745,12 @@ const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle
       summaryBySymbol={summaryBySymbol}
       expandedSymbol={expandedSymbol}
       onToggle={onToggle}
+      detailNode={detailNode}
     />
   </section>
 );
 
-const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
+const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => {
   const count = industryOptionCount(group);
   const options = [
     ...(group.options || []).map(item => ({
@@ -776,6 +786,7 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
           summaryBySymbol={summaryBySymbol}
           expandedSymbol={expandedSymbol}
           onToggle={onToggle}
+          detailNode={detailNode}
         />
       </div>
     </details>
