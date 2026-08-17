@@ -74,70 +74,188 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual((3, "greed"), resolve_fear_greed_target_count({"score": 75.01}))
         self.assertEqual((10, "missing_fallback"), resolve_fear_greed_target_count(None))
 
-    def test_position_target_requires_fear_plus_volume_expansion(self):
-        # 恐慌且放量 → 10只（从3只扩仓）
+    def test_position_target_volume_bottom_requires_fear_plus_volume_expansion(self):
+        # 量能底：恐贪≤30 且放量（z>1.25）→ 扩仓到10只
         self.assertEqual(
-            (10, "fear_volume"),
+            (10, "volume_bottom"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": 1.5},
                 current_holding_count=3,
             ),
         )
-        # 恐慌但缩量 → 不扩仓（维持3只）
+        # 恐贪≤30 但缩量 → 无信号，维持当前3只
         self.assertEqual(
-            (3, "neutral_keep_3"),
+            (3, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": -1.5},
                 current_holding_count=3,
             ),
         )
-        # 恐慌但量比不足（未达 +1 个标准差）→ 维持
+        # 恐贪≤30 但放量不足（z=0.5 < 1.25）→ 维持
         self.assertEqual(
-            (3, "neutral_keep_3"),
+            (3, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": 0.5},
                 current_holding_count=3,
             ),
         )
-        # 无量比确认 → 维持当前
+        # 无 log量比 → 无信号，维持当前
         self.assertEqual(
-            (3, "neutral_keep_3_no_volume"),
+            (3, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0},
                 current_holding_count=3,
             ),
         )
 
-    def test_position_target_requires_greed_plus_volume_shrink(self):
-        # 贪婪且缩量 → 3只（从10只收缩）
+    def test_position_target_volume_top_requires_greed_plus_volume_shrink(self):
+        # 量能顶：恐贪≥75 且缩量（z<-0.25）→ 收缩到3只
         self.assertEqual(
-            (3, "greed_shrink"),
+            (3, "volume_top"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 80.0, "log_volume_z": -1.0},
                 current_holding_count=10,
             ),
         )
-        # 贪婪但放量 → 不收缩（维持10只）
+        # 恐贪≥75 但放量 → 无信号，维持当前10只
         self.assertEqual(
-            (10, "neutral_keep_10"),
+            (10, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 80.0, "log_volume_z": 1.5},
                 current_holding_count=10,
             ),
         )
-        # 贪婪但缩量不足（未达 -0.25 个标准差）→ 维持
+        # 恐贪≥75 但缩量不足（z=-0.1 > -0.25）→ 维持
         self.assertEqual(
-            (10, "neutral_keep_10"),
+            (10, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 80.0, "log_volume_z": -0.1},
                 current_holding_count=10,
             ),
         )
 
-    def test_position_target_custom_thresholds_and_fallbacks(self):
-        # 自定义阈值：恐慌 30 + 放量 2 个标准差
+    def test_position_target_ma5_cross_signals(self):
+        # MA5底：MA5上穿（当日>前一日）且最近5日任意恐贪≤25
         self.assertEqual(
-            (10, "fear_volume"),
+            (10, "ma5_bottom"),
+            resolve_xueqiu_strategy_position_target(
+                {
+                    "score": 40.0,
+                    "log_volume_z": 0.0,
+                    # 最近6日：前5日低企稳，第6日(今日)跳升 → MA5上穿；窗口内含 20≤25
+                    "recent_scores": [
+                        {"date": "2026-07-01", "score": 20.0},
+                        {"date": "2026-07-02", "score": 22.0},
+                        {"date": "2026-07-03", "score": 24.0},
+                        {"date": "2026-07-06", "score": 26.0},
+                        {"date": "2026-07-07", "score": 28.0},
+                        {"date": "2026-07-08", "score": 60.0},
+                    ],
+                },
+                current_holding_count=3,
+            ),
+        )
+        # MA5顶：MA5下穿（当日<前一日）且最近5日任意恐贪≥75
+        self.assertEqual(
+            (3, "ma5_top"),
+            resolve_xueqiu_strategy_position_target(
+                {
+                    "score": 60.0,
+                    "log_volume_z": 0.0,
+                    "recent_scores": [
+                        {"date": "2026-07-01", "score": 78.0},
+                        {"date": "2026-07-02", "score": 76.0},
+                        {"date": "2026-07-03", "score": 74.0},
+                        {"date": "2026-07-06", "score": 72.0},
+                        {"date": "2026-07-07", "score": 70.0},
+                        {"date": "2026-07-08", "score": 40.0},
+                    ],
+                },
+                current_holding_count=10,
+            ),
+        )
+
+    def test_position_target_ma5_cross_requires_extreme_score_in_window(self):
+        # MA5上穿但最近5日无 ≤25 的分数 → 无MA5底信号
+        self.assertEqual(
+            (5, "neutral_keep_current"),
+            resolve_xueqiu_strategy_position_target(
+                {
+                    "score": 50.0,
+                    "log_volume_z": 0.0,
+                    "recent_scores": [
+                        {"date": "2026-07-01", "score": 30.0},
+                        {"date": "2026-07-02", "score": 32.0},
+                        {"date": "2026-07-03", "score": 34.0},
+                        {"date": "2026-07-06", "score": 36.0},
+                        {"date": "2026-07-07", "score": 38.0},
+                        {"date": "2026-07-08", "score": 60.0},
+                    ],
+                },
+                current_holding_count=5,
+            ),
+        )
+        # 最近5日有 ≤25 但 MA5 没有上穿（走平）→ 无信号
+        self.assertEqual(
+            (5, "neutral_keep_current"),
+            resolve_xueqiu_strategy_position_target(
+                {
+                    "score": 40.0,
+                    "log_volume_z": 0.0,
+                    "recent_scores": [
+                        {"date": "2026-07-01", "score": 20.0},
+                        {"date": "2026-07-02", "score": 30.0},
+                        {"date": "2026-07-03", "score": 40.0},
+                        {"date": "2026-07-06", "score": 50.0},
+                        {"date": "2026-07-07", "score": 40.0},
+                        {"date": "2026-07-08", "score": 40.0},
+                    ],
+                },
+                current_holding_count=5,
+            ),
+        )
+
+    def test_position_target_both_signal_types_and_keep_semantics(self):
+        # 量能底 + MA5底 同时触发 → bottom_both，仍扩仓
+        self.assertEqual(
+            (10, "bottom_both"),
+            resolve_xueqiu_strategy_position_target(
+                {
+                    "score": 20.0,
+                    "log_volume_z": 1.5,
+                    "recent_scores": [
+                        {"date": "2026-07-01", "score": 20.0},
+                        {"date": "2026-07-02", "score": 22.0},
+                        {"date": "2026-07-03", "score": 24.0},
+                        {"date": "2026-07-06", "score": 26.0},
+                        {"date": "2026-07-07", "score": 28.0},
+                        {"date": "2026-07-08", "score": 60.0},
+                    ],
+                },
+                current_holding_count=3,
+            ),
+        )
+        # 无任何信号 → 维持当前（非空仓）
+        self.assertEqual(
+            (7, "neutral_keep_current"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 50.0, "log_volume_z": 0.0},
+                current_holding_count=7,
+            ),
+        )
+        # 无信号且空仓 → 回退默认建仓数
+        self.assertEqual(
+            (10, "neutral_keep_default"),
+            resolve_xueqiu_strategy_position_target(
+                {"score": 50.0, "log_volume_z": 0.0},
+                current_holding_count=0,
+            ),
+        )
+
+    def test_position_target_custom_thresholds_and_fallbacks(self):
+        # 自定义阈值：恐贪 28≤30 且放量 z=2.5>2.0 → 量能底
+        self.assertEqual(
+            (10, "volume_bottom"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 28.0, "log_volume_z": 2.5},
                 current_holding_count=3,
@@ -152,9 +270,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
         )
 
     def test_position_target_uses_configurable_position_counts(self):
-        # x→y / y→x：恐慌放量扩到 fear_target_count，贪婪缩量收到 greed_target_count
+        # x→y / y→x：量能底扩到 fear_target_count，量能顶收到 greed_target_count
         self.assertEqual(
-            (15, "fear_volume"),
+            (15, "volume_bottom"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": 1.5},
                 current_holding_count=5,
@@ -163,7 +281,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ),
         )
         self.assertEqual(
-            (5, "greed_shrink"),
+            (5, "volume_top"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 80.0, "log_volume_z": -1.0},
                 current_holding_count=15,
@@ -171,9 +289,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 greed_target_count=5,
             ),
         )
-        # 中性维持：当前 ≤ greed_target_count 时维持到 greed_target_count
+        # 无信号 → 维持当前（不再强制回到满配）
         self.assertEqual(
-            (5, "neutral_keep_3"),
+            (4, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 50.0, "log_volume_z": 0.0},
                 current_holding_count=4,
@@ -182,7 +300,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ),
         )
         self.assertEqual(
-            (15, "neutral_keep_10"),
+            (8, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 50.0, "log_volume_z": 0.0},
                 current_holding_count=8,
@@ -680,9 +798,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
             with patch("src.robot.xueqiu_top_holdings_report.SessionLocal", session_factory):
                 # 未配置时回退默认值
                 defaults = load_xueqiu_strategy_config("rank_acceleration")
-                self.assertEqual(25.0, defaults["fear_threshold"])
-                self.assertEqual(1.0, defaults["fear_volume_std"])
+                self.assertEqual(30.0, defaults["fear_threshold"])
+                self.assertEqual(1.25, defaults["fear_volume_std"])
                 self.assertEqual(0.25, defaults["greed_volume_std"])
+                self.assertEqual(25.0, defaults["ma5_bottom_score"])
+                self.assertEqual(75.0, defaults["ma5_top_score"])
+                self.assertEqual(5, defaults["ma5_lookback_days"])
                 self.assertEqual(8, defaults["min_holding_cubes"])
 
                 # 写入配置后读取生效
@@ -696,6 +817,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         greed_volume_std=0.5,
                         fear_target_count=15,
                         greed_target_count=5,
+                        ma5_bottom_score=22.0,
+                        ma5_top_score=78.0,
+                        ma5_lookback_days=7,
                         min_holding_cubes=6,
                     )
                 )
@@ -707,14 +831,17 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 self.assertEqual(0.5, saved["greed_volume_std"])
                 self.assertEqual(15, saved["fear_target_count"])
                 self.assertEqual(5, saved["greed_target_count"])
+                self.assertEqual(22.0, saved["ma5_bottom_score"])
+                self.assertEqual(78.0, saved["ma5_top_score"])
+                self.assertEqual(7, saved["ma5_lookback_days"])
                 self.assertEqual(6, saved["min_holding_cubes"])
                 # 其他策略不受影响
-                self.assertEqual(25.0, load_xueqiu_strategy_config("buffer")["fear_threshold"])
+                self.assertEqual(30.0, load_xueqiu_strategy_config("buffer")["fear_threshold"])
 
     def test_position_target_uses_configured_volume_thresholds(self):
         # 恐慌但量比未达到配置的 1.5 标准差 → 维持
         self.assertEqual(
-            (3, "neutral_keep_3"),
+            (3, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": 1.2},
                 current_holding_count=3,
@@ -723,7 +850,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ),
         )
         self.assertEqual(
-            (10, "fear_volume"),
+            (10, "volume_bottom"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 20.0, "log_volume_z": 1.6},
                 current_holding_count=3,
@@ -1282,7 +1409,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("SUCCESS", result["status"])
         # 贪婪（score=80）→ 目标3只，从10只收缩
         self.assertEqual(3, len(result["top_items"]))
-        self.assertEqual("greed_shrink", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual("volume_top", (result["strategy_plan"] or {}).get("fear_greed_regime"))
         self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
 
     def test_rank_acceleration_is_appended_to_same_email(self):
@@ -1638,7 +1765,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("SUCCESS", result["status"])
         # 贪婪（score=80）→ 目标3只，从10只收缩
         self.assertEqual(3, len(result["top_items"]))
-        self.assertEqual("greed_shrink", (result["strategy_plan"] or {}).get("fear_greed_regime"))
+        self.assertEqual("volume_top", (result["strategy_plan"] or {}).get("fear_greed_regime"))
         self.assertEqual(7, len((result["strategy_plan"] or {}).get("trim_removed_symbols") or []))
 
     def test_weight_price_ratio_is_appended_to_same_email(self):

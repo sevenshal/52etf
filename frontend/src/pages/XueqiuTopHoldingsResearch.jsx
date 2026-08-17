@@ -309,8 +309,8 @@ const XueqiuTopHoldingsResearch = () => {
   const STRATEGY_CONFIG_FIELDS = useMemo(() => [
     {
       key: 'fear_threshold',
-      label: '恐慌阈值',
-      tooltip: '恐贪分 < 该值视为恐慌；恐慌且放量时才扩到 10 只',
+      label: '量能底恐贪阈值',
+      tooltip: '量能底信号：恐贪分 ≤ 该值且放量（默认 30）',
       min: 0,
       max: 100,
       step: 1,
@@ -318,17 +318,17 @@ const XueqiuTopHoldingsResearch = () => {
     },
     {
       key: 'fear_volume_std',
-      label: '恐慌放量标准差',
-      tooltip: '放量确认：log量比z 需大于该标准差（默认 1.0）',
+      label: '量能底放量标准差',
+      tooltip: '放量确认：log量比z 需大于该标准差（默认 1.25）',
       min: 0,
       max: 10,
-      step: 0.1,
+      step: 0.05,
       suffix: 'σ',
     },
     {
       key: 'fear_target_count',
-      label: '恐慌放量目标仓位',
-      tooltip: '恐慌且放量时扩仓到几只（默认 10；3→10 的“10”）',
+      label: '底信号目标仓位',
+      tooltip: '量能底或MA5底触发时扩仓到几只（默认 10；3→10 的“10”）',
       min: 1,
       max: 200,
       step: 1,
@@ -336,8 +336,8 @@ const XueqiuTopHoldingsResearch = () => {
     },
     {
       key: 'greed_threshold',
-      label: '贪婪阈值',
-      tooltip: '恐贪分 > 该值视为贪婪；贪婪且缩量时才收缩目标仓位',
+      label: '量能顶恐贪阈值',
+      tooltip: '量能顶信号：恐贪分 ≥ 该值且缩量（默认 75）',
       min: 0,
       max: 100,
       step: 1,
@@ -345,7 +345,7 @@ const XueqiuTopHoldingsResearch = () => {
     },
     {
       key: 'greed_volume_std',
-      label: '贪婪缩量标准差',
+      label: '量能顶缩量标准差',
       tooltip: '缩量确认：log量比z 需小于 -该标准差（默认 0.25）',
       min: 0,
       max: 10,
@@ -354,12 +354,39 @@ const XueqiuTopHoldingsResearch = () => {
     },
     {
       key: 'greed_target_count',
-      label: '贪婪缩量目标仓位',
-      tooltip: '贪婪且缩量时收缩到几只（默认 3；10→3 的“3”）',
+      label: '顶信号目标仓位',
+      tooltip: '量能顶或MA5顶触发时收缩到几只（默认 3；10→3 的“3”）',
       min: 1,
       max: 200,
       step: 1,
       suffix: '只',
+    },
+    {
+      key: 'ma5_bottom_score',
+      label: 'MA5底分数阈值',
+      tooltip: 'MA5底信号：恐贪MA5上穿且最近N日任意一天恐贪 ≤ 该值（默认 25）',
+      min: 0,
+      max: 100,
+      step: 1,
+      suffix: '分',
+    },
+    {
+      key: 'ma5_top_score',
+      label: 'MA5顶分数阈值',
+      tooltip: 'MA5顶信号：恐贪MA5下穿且最近N日任意一天恐贪 ≥ 该值（默认 75）',
+      min: 0,
+      max: 100,
+      step: 1,
+      suffix: '分',
+    },
+    {
+      key: 'ma5_lookback_days',
+      label: 'MA5回看天数',
+      tooltip: '最近N日内任意一天满足分数条件即视为触发（默认 5）',
+      min: 1,
+      max: 30,
+      step: 1,
+      suffix: '天',
     },
     {
       key: 'min_holding_cubes',
@@ -1000,8 +1027,10 @@ const XueqiuTopHoldingsResearch = () => {
                     ))}
                     <Col span={24}>
                       <Text type="secondary">
-                        规则：恐慌(恐贪分&lt;恐慌阈值)且放量(log量比z&gt;放量标准差) → 恐慌放量目标仓位只；
-                        贪婪(恐贪分&gt;贪婪阈值)且缩量(log量比z&lt;-缩量标准差) → 贪婪缩量目标仓位只；
+                        底信号（扩仓→底目标仓位）：量能型 = 恐贪分≤量能底恐贪阈值 且放量(z&gt;放量标准差)；
+                        MA5型 = 恐贪MA5上穿 且 最近N日任意一天恐贪≤MA5底分数阈值。
+                        顶信号（收缩→顶目标仓位）：量能型 = 恐贪分≥量能顶恐贪阈值 且缩量(z&lt;-缩量标准差)；
+                        MA5型 = 恐贪MA5下穿 且 最近N日任意一天恐贪≥MA5顶分数阈值。
                         其余情况维持当前仓位。log量比z = 当日log(成交量) 相对前21个交易日log(成交量) 的 z-score。
                       </Text>
                     </Col>

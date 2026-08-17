@@ -1255,8 +1255,13 @@ class XueqiuStrategyConfig(Base):
     fear_target_count = Column(Integer, nullable=False, default=10)
     greed_target_count = Column(Integer, nullable=False, default=3)
     # 放量/缩量的 log 量比 z-score 阈值（放量：z > fear_volume_std；缩量：z < -greed_volume_std）
-    fear_volume_std = Column(Float, nullable=False, default=1.0)
+    fear_volume_std = Column(Float, nullable=False, default=1.25)
     greed_volume_std = Column(Float, nullable=False, default=0.25)
+    # MA5均线型信号：恐贪MA5上穿(当日>前一日)且最近N日任意恐贪≤ma5_bottom_score → 底；
+    # MA5下穿(当日<前一日)且最近N日任意恐贪≥ma5_top_score → 顶
+    ma5_bottom_score = Column(Float, nullable=False, default=25.0)
+    ma5_top_score = Column(Float, nullable=False, default=75.0)
+    ma5_lookback_days = Column(Integer, nullable=False, default=5)
     # 买入候选最少持仓组合数
     min_holding_cubes = Column(Integer, nullable=False, default=8)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -1636,6 +1641,9 @@ def ensure_table_columns():
         "xueqiu_strategy_configs": {
             "fear_target_count": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN fear_target_count INTEGER NOT NULL DEFAULT 10",
             "greed_target_count": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN greed_target_count INTEGER NOT NULL DEFAULT 3",
+            "ma5_bottom_score": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_bottom_score FLOAT NOT NULL DEFAULT 25.0",
+            "ma5_top_score": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_top_score FLOAT NOT NULL DEFAULT 75.0",
+            "ma5_lookback_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_lookback_days INTEGER NOT NULL DEFAULT 5",
         },
     }
 

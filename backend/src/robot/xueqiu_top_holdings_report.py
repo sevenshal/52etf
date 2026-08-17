@@ -69,8 +69,14 @@ FEAR_GREED_GREED_THRESHOLD = 75.0
 FEAR_GREED_FEAR_TARGET_COUNT = 10
 FEAR_GREED_GREED_TARGET_COUNT = 3
 # log 量比 z-score：放量 z > FEAR_VOLUME_STD，缩量 z < -GREED_VOLUME_STD（默认值，可被配置覆盖）
-FEAR_VOLUME_STD_DEFAULT = 1.0
+FEAR_VOLUME_STD_DEFAULT = 1.25
 GREED_VOLUME_STD_DEFAULT = 0.25
+# 量能型底：恐贪 ≤ XUEQIU_VOLUME_FEAR_THRESHOLD 且放量；量能型顶：恐贪 ≥ 75 且缩量
+XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT = 30.0
+# MA5均线型信号默认参数
+XUEQIU_MA5_BOTTOM_SCORE_DEFAULT = 25.0
+XUEQIU_MA5_TOP_SCORE_DEFAULT = 75.0
+XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT = 5
 REPORT_TABLE_DISPLAY_RANK = BUFFER_STRATEGY_SELL_RANK
 BUFFER_STRATEGY_NAME = "Top10等权 + 跌出Top12才卖 + 从Top10补位 + 成分变化才调仓"
 BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT = 1.0
@@ -2652,22 +2658,29 @@ def load_latest_csi_all_share_fear_greed() -> Optional[Dict[str, Any]]:
     """Read a plain snapshot so no ORM object/session crosses external I/O.
 
     Includes the proxy-ETF log-volume z-score (放量/缩量确认) computed by the
-    shared 自算贪恐 summary service for 中证全指.
+    shared 自算贪恐 summary service for 中证全指, plus the most recent 6 daily
+    scores (chronological) for the MA5 moving-average signal.
     """
     with SessionLocal() as db:
-        row = (
+        rows = (
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == CSI_ALL_SHARE_FEAR_GREED_SYMBOL)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .first()
+            .limit(6)
+            .all()
         )
-        if row is None:
+        if not rows:
             return None
+        latest = rows[0]
         base = {
-            "symbol": row.symbol,
-            "date": row.date.isoformat(),
-            "score": float(row.score),
-            "rating": row.rating,
+            "symbol": latest.symbol,
+            "date": latest.date.isoformat(),
+            "score": float(latest.score),
+            "rating": latest.rating,
+            "recent_scores": [
+                {"date": row.date.isoformat(), "score": float(row.score)}
+                for row in reversed(rows)
+            ],
         }
     try:
         from ..core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
@@ -2690,34 +2703,43 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
     "buffer": {
         "strategy_key": "buffer",
         "label": "星澜壹号 · 综合权重",
-        "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
+        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
+        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
+        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
+        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": 8,
     },
     "rank_acceleration": {
         "strategy_key": "rank_acceleration",
         "label": "星澜贰号 · 5日排名加速",
-        "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
+        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
+        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
+        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
+        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": RANK_ACCELERATION_MIN_HOLDING_CUBES,
     },
     "weight_price_ratio": {
         "strategy_key": "weight_price_ratio",
         "label": "星澜叁号 · 5日权价比",
-        "fear_threshold": FEAR_GREED_FEAR_THRESHOLD,
+        "fear_threshold": XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
         "greed_threshold": FEAR_GREED_GREED_THRESHOLD,
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "fear_volume_std": FEAR_VOLUME_STD_DEFAULT,
         "greed_volume_std": GREED_VOLUME_STD_DEFAULT,
+        "ma5_bottom_score": XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
+        "ma5_top_score": XUEQIU_MA5_TOP_SCORE_DEFAULT,
+        "ma5_lookback_days": XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
         "min_holding_cubes": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES,
     },
 }
@@ -2746,6 +2768,9 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "greed_target_count": int(row.greed_target_count),
             "fear_volume_std": float(row.fear_volume_std),
             "greed_volume_std": float(row.greed_volume_std),
+            "ma5_bottom_score": float(row.ma5_bottom_score),
+            "ma5_top_score": float(row.ma5_top_score),
+            "ma5_lookback_days": int(row.ma5_lookback_days),
             "min_holding_cubes": int(row.min_holding_cubes),
             "updated_at": (
                 row.updated_at.isoformat() if row.updated_at else None
@@ -2753,23 +2778,43 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
         }
 
 
+def _ma5_cross_state(recent_scores: List[float]) -> Optional[str]:
+    """MA5 上穿/下穿：当日 MA5 > 前一日 MA5 → up；< → down。需要至少 6 个连续分数。"""
+    if len(recent_scores) < 6:
+        return None
+    ma5_today = sum(recent_scores[-5:]) / 5.0
+    ma5_yesterday = sum(recent_scores[-6:-1]) / 5.0
+    if ma5_today > ma5_yesterday:
+        return "up"
+    if ma5_today < ma5_yesterday:
+        return "down"
+    return None
+
+
 def resolve_xueqiu_strategy_position_target(
     fear_greed: Optional[Dict[str, Any]],
     *,
     current_holding_count: Optional[int] = None,
-    fear_threshold: float = FEAR_GREED_FEAR_THRESHOLD,
+    fear_threshold: float = XUEQIU_VOLUME_FEAR_THRESHOLD_DEFAULT,
     greed_threshold: float = FEAR_GREED_GREED_THRESHOLD,
     fear_volume_std: float = FEAR_VOLUME_STD_DEFAULT,
     greed_volume_std: float = GREED_VOLUME_STD_DEFAULT,
+    ma5_bottom_score: float = XUEQIU_MA5_BOTTOM_SCORE_DEFAULT,
+    ma5_top_score: float = XUEQIU_MA5_TOP_SCORE_DEFAULT,
+    ma5_lookback_days: int = XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT,
     fear_target_count: int = FEAR_GREED_FEAR_TARGET_COUNT,
     greed_target_count: int = FEAR_GREED_GREED_TARGET_COUNT,
     default_top_n: int = BUFFER_STRATEGY_TOP_N,
 ) -> Tuple[int, str]:
-    """恐贪 + log量比 双重确认的目标仓位管理。
+    """量能型 + MA5均线型 双信号的目标仓位管理。
 
-    - 恐慌(score<fear_threshold)且放量(log_volume_z > fear_volume_std) → fear_target_count 只
-    - 贪婪(score>greed_threshold)且缩量(log_volume_z < -greed_volume_std) → greed_target_count 只
-    - 其余情况（含缺少量比确认）维持当前仓位，避免在无成交量确认时来回切换
+    底（扩仓 3→x）：
+      - 量能型：恐贪 ≤ fear_threshold 且放量（log量比z > fear_volume_std）
+      - MA5型：恐贪MA5上穿 且 最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
+    顶（收缩 10→y）：
+      - 量能型：恐贪 ≥ greed_threshold 且缩量（log量比z < -greed_volume_std）
+      - MA5型：恐贪MA5下穿 且 最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
+    其余情况维持当前仓位（空仓回退 default_top_n），避免无信号时来回切换。
     """
     if not fear_greed:
         return default_top_n, "missing_fallback"
@@ -2777,17 +2822,51 @@ def resolve_xueqiu_strategy_position_target(
     if score is None:
         return default_top_n, "invalid_fallback"
     volume_z = safe_float(fear_greed.get("log_volume_z"))
-    if volume_z is None:
-        if current_holding_count is not None and current_holding_count <= greed_target_count:
-            return greed_target_count, "neutral_keep_3_no_volume"
-        return fear_target_count, "neutral_keep_10_no_volume"
-    if score < fear_threshold and volume_z > fear_volume_std:
-        return fear_target_count, "fear_volume"
-    if score > greed_threshold and volume_z < -greed_volume_std:
-        return greed_target_count, "greed_shrink"
-    if current_holding_count is not None and current_holding_count <= greed_target_count:
-        return greed_target_count, "neutral_keep_3"
-    return fear_target_count, "neutral_keep_10"
+    recent_scores = [
+        safe_float(item.get("score"))
+        for item in (fear_greed.get("recent_scores") or [])
+    ]
+    recent_scores = [value for value in recent_scores if value is not None]
+
+    volume_bottom = (
+        volume_z is not None
+        and score <= fear_threshold
+        and volume_z > fear_volume_std
+    )
+    volume_top = (
+        volume_z is not None
+        and score >= greed_threshold
+        and volume_z < -greed_volume_std
+    )
+    normalized_lookback = max(1, int(ma5_lookback_days or XUEQIU_MA5_LOOKBACK_DAYS_DEFAULT))
+    recent_window = recent_scores[-normalized_lookback:]
+    ma5_state = _ma5_cross_state(recent_scores)
+    ma5_bottom = (
+        ma5_state == "up"
+        and len(recent_window) > 0
+        and any(value <= ma5_bottom_score for value in recent_window)
+    )
+    ma5_top = (
+        ma5_state == "down"
+        and len(recent_window) > 0
+        and any(value >= ma5_top_score for value in recent_window)
+    )
+
+    if volume_bottom and ma5_bottom:
+        return fear_target_count, "bottom_both"
+    if volume_bottom:
+        return fear_target_count, "volume_bottom"
+    if ma5_bottom:
+        return fear_target_count, "ma5_bottom"
+    if volume_top and ma5_top:
+        return greed_target_count, "top_both"
+    if volume_top:
+        return greed_target_count, "volume_top"
+    if ma5_top:
+        return greed_target_count, "ma5_top"
+    if current_holding_count is not None and current_holding_count > 0:
+        return current_holding_count, "neutral_keep_current"
+    return default_top_n, "neutral_keep_default"
 
 
 def resolve_fear_greed_target_count(
@@ -4503,14 +4582,14 @@ def build_rank_acceleration_email_section_html(result: Dict[str, Any]) -> str:
     fear_target = safe_int(strategy_config.get("fear_target_count")) or FEAR_GREED_FEAR_TARGET_COUNT
     greed_target = safe_int(strategy_config.get("greed_target_count")) or FEAR_GREED_GREED_TARGET_COUNT
     regime_labels = {
-        "fear_volume": f"恐慌+放量（目标{fear_target}只）",
-        "greed_shrink": f"贪婪+缩量（目标{greed_target}只）",
-        "fear": f"恐慌（目标{fear_target}只）",
-        "greed": f"贪婪（目标{greed_target}只）",
-        "neutral_keep_3": f"中性（维持{greed_target}只）",
-        "neutral_keep_10": f"中性（维持{fear_target}只）",
-        "neutral_keep_3_no_volume": f"中性/无量比确认（维持{greed_target}只）",
-        "neutral_keep_10_no_volume": f"中性/无量比确认（维持{fear_target}只）",
+        "volume_bottom": f"量能底（目标{fear_target}只）",
+        "volume_top": f"量能顶（目标{greed_target}只）",
+        "ma5_bottom": f"MA5底（目标{fear_target}只）",
+        "ma5_top": f"MA5顶（目标{greed_target}只）",
+        "bottom_both": f"量能+MA5底（目标{fear_target}只）",
+        "top_both": f"量能+MA5顶（目标{greed_target}只）",
+        "neutral_keep_current": "中性（维持当前）",
+        "neutral_keep_default": f"中性/空仓（默认{fear_target}只）",
         "missing_fallback": f"缺失（默认{fear_target}只）",
         "invalid_fallback": f"无效（默认{fear_target}只）",
     }
@@ -4646,14 +4725,14 @@ def build_weight_price_ratio_email_section_html(result: Dict[str, Any]) -> str:
     fear_target = safe_int(strategy_config.get("fear_target_count")) or FEAR_GREED_FEAR_TARGET_COUNT
     greed_target = safe_int(strategy_config.get("greed_target_count")) or FEAR_GREED_GREED_TARGET_COUNT
     regime_labels = {
-        "fear_volume": f"恐慌+放量（目标{fear_target}只）",
-        "greed_shrink": f"贪婪+缩量（目标{greed_target}只）",
-        "fear": f"恐慌（目标{fear_target}只）",
-        "greed": f"贪婪（目标{greed_target}只）",
-        "neutral_keep_3": f"中性（维持{greed_target}只）",
-        "neutral_keep_10": f"中性（维持{fear_target}只）",
-        "neutral_keep_3_no_volume": f"中性/无量比确认（维持{greed_target}只）",
-        "neutral_keep_10_no_volume": f"中性/无量比确认（维持{fear_target}只）",
+        "volume_bottom": f"量能底（目标{fear_target}只）",
+        "volume_top": f"量能顶（目标{greed_target}只）",
+        "ma5_bottom": f"MA5底（目标{fear_target}只）",
+        "ma5_top": f"MA5顶（目标{greed_target}只）",
+        "bottom_both": f"量能+MA5底（目标{fear_target}只）",
+        "top_both": f"量能+MA5顶（目标{greed_target}只）",
+        "neutral_keep_current": "中性（维持当前）",
+        "neutral_keep_default": f"中性/空仓（默认{fear_target}只）",
         "missing_fallback": f"缺失（默认{fear_target}只）",
         "invalid_fallback": f"无效（默认{fear_target}只）",
     }
@@ -5014,6 +5093,9 @@ async def execute_rank_acceleration_target_rebalance(
         greed_target_count=strategy_config["greed_target_count"],
         fear_volume_std=strategy_config["fear_volume_std"],
         greed_volume_std=strategy_config["greed_volume_std"],
+        ma5_bottom_score=strategy_config["ma5_bottom_score"],
+        ma5_top_score=strategy_config["ma5_top_score"],
+        ma5_lookback_days=strategy_config["ma5_lookback_days"],
         default_top_n=RANK_ACCELERATION_TOP_N,
     )
     strategy_sell_rank = max(
@@ -5221,6 +5303,9 @@ async def execute_weight_price_ratio_target_rebalance(
         greed_target_count=strategy_config["greed_target_count"],
         fear_volume_std=strategy_config["fear_volume_std"],
         greed_volume_std=strategy_config["greed_volume_std"],
+        ma5_bottom_score=strategy_config["ma5_bottom_score"],
+        ma5_top_score=strategy_config["ma5_top_score"],
+        ma5_lookback_days=strategy_config["ma5_lookback_days"],
         default_top_n=WEIGHT_PRICE_RATIO_TOP_N,
     )
     strategy_sell_rank = max(
@@ -5468,6 +5553,9 @@ async def run_top_holdings_job(
             greed_target_count=strategy_config["greed_target_count"],
             fear_volume_std=strategy_config["fear_volume_std"],
             greed_volume_std=strategy_config["greed_volume_std"],
+            ma5_bottom_score=strategy_config["ma5_bottom_score"],
+            ma5_top_score=strategy_config["ma5_top_score"],
+            ma5_lookback_days=strategy_config["ma5_lookback_days"],
             default_top_n=top_n,
         )
         strategy_plan = build_equal_top10_top12_buffer_plan(
