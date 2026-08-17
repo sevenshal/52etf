@@ -1,0 +1,116 @@
+.sysinfo-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sysinfo-collected-at {
+  font-size: 12px;
+}
+
+.sysinfo-card {
+  margin-bottom: 16px;
+}
+
+.sysinfo-card--error {
+  background: #fff1f0;
+  border-color: #ffa39e;
+}
+
+.sysinfo-cpu {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.sysinfo-cpu__meta {
+  flex: 1;
+  min-width: 220px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 24px;
+}
+
+.sysinfo-cpu__temp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.sysinfo-cpu__temp strong {
+  font-size: 16px;
+}
+
+.sysinfo-meter {
+  margin-bottom: 12px;
+}
+
+.sysinfo-meter__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.sysinfo-meter__label {
+  color: rgba(0, 0, 0, 0.65);
+  font-size: 13px;
+}
+
+.sysinfo-meter__value {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sysinfo-meter__suffix {
+  margin-top: 4px;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+
+.sysinfo-memory__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 16px;
+  margin-top: 4px;
+}
+
+.sysinfo-swap {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px dashed #f0f0f0;
+}
+
+.sysinfo-disk__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.sysinfo-disk__mount {
+  font-size: 14px;
+}
+
+.sysinfo-disk__fstype {
+  font-size: 12px;
+}
+
+.sysinfo-process {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 24px;
+  margin-bottom: 12px;
+}
+
+.sysinfo-cmdline {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border-radius: 6px;
+  border: 1px solid #f0f0f0;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+}

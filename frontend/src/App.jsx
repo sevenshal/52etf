@@ -13,6 +13,7 @@ import StockDetail from './pages/StockDetail';
 import OptionsPositions from './pages/OptionsPositions';
 import MonthlyAnalysis from './pages/MonthlyAnalysis';
 import SystemLog from './pages/SystemLog';
+import SystemInfo from './pages/SystemInfo';
 import FearBacktest from './pages/fear/FearBacktest';
 import LevETFBacktest from './pages/LevETFBacktest';
 import AutomatedTrading from './pages/AutomatedTrading';
@@ -77,6 +78,7 @@ function App() {
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/monthly-analysis" element={<MonthlyAnalysis />} />
           <Route path="/system-log" element={<AdminRoute><SystemLog /></AdminRoute>} />
+          <Route path="/system-info" element={<AdminRoute><SystemInfo /></AdminRoute>} />
           <Route path="/lev-etf-backtest" element={<LevETFBacktest />} />
           <Route path="/automated-trading" element={<AutomatedTrading />} />
           <Route path="/ib-account-manager" element={<IBKRAccountManager />} />

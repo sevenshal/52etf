@@ -176,6 +176,11 @@ const Profile = () => {
           title: '系统日志',
           onClick: () => navigate('/system-log'),
           arrow: true
+        },
+        {
+          title: '系统信息',
+          onClick: () => navigate('/system-info'),
+          arrow: true
         }
       ]
     }
