@@ -2789,7 +2789,7 @@ def resolve_xueqiu_strategy_position_target(
     顶（收缩 10→y）：
       - 量能型：恐贪 ≥ greed_threshold 且缩量（log量比z < -greed_volume_std）
       - MA5型：恐贪MA5下穿 且 最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
-    其余情况维持当前仓位（空仓回退 default_top_n），避免无信号时来回切换。
+    其余情况维持当前仓位（当前不足 y 只时补到 y），避免无信号时来回切换或持仓过少锁死。
     """
     if not fear_greed:
         return default_top_n, "missing_fallback"
@@ -2840,7 +2840,7 @@ def resolve_xueqiu_strategy_position_target(
     if ma5_top:
         return greed_target_count, "ma5_top"
     if current_holding_count is not None and current_holding_count > 0:
-        return current_holding_count, "neutral_keep_current"
+        return max(int(current_holding_count), greed_target_count), "neutral_keep_current"
     return default_top_n, "neutral_keep_default"
 
 
@@ -4563,7 +4563,7 @@ def build_rank_acceleration_email_section_html(result: Dict[str, Any]) -> str:
         "ma5_top": f"MA5顶（目标{greed_target}只）",
         "bottom_both": f"量能+MA5底（目标{fear_target}只）",
         "top_both": f"量能+MA5顶（目标{greed_target}只）",
-        "neutral_keep_current": "中性（维持当前）",
+        "neutral_keep_current": f"中性（维持当前，至少{greed_target}只）",
         "neutral_keep_default": f"中性/空仓（默认{fear_target}只）",
         "missing_fallback": f"缺失（默认{fear_target}只）",
         "invalid_fallback": f"无效（默认{fear_target}只）",
@@ -4706,7 +4706,7 @@ def build_weight_price_ratio_email_section_html(result: Dict[str, Any]) -> str:
         "ma5_top": f"MA5顶（目标{greed_target}只）",
         "bottom_both": f"量能+MA5底（目标{fear_target}只）",
         "top_both": f"量能+MA5顶（目标{greed_target}只）",
-        "neutral_keep_current": "中性（维持当前）",
+        "neutral_keep_current": f"中性（维持当前，至少{greed_target}只）",
         "neutral_keep_default": f"中性/空仓（默认{fear_target}只）",
         "missing_fallback": f"缺失（默认{fear_target}只）",
         "invalid_fallback": f"无效（默认{fear_target}只）",

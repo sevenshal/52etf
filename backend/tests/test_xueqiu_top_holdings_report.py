@@ -289,9 +289,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 greed_target_count=5,
             ),
         )
-        # 无信号 → 维持当前（不再强制回到满配）
+        # 无信号 → 维持当前，但至少顶信号目标仓位（y=5）
         self.assertEqual(
-            (4, "neutral_keep_current"),
+            (5, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
                 {"score": 50.0, "log_volume_z": 0.0},
                 current_holding_count=4,
