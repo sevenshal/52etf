@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v3"
+PROMPT_VERSION = "news-ths-v4"  # v4: 候选不再重复携带 board_strength（顶层 board_market_snapshot 已有），第3轮载荷大幅缩小
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -1024,7 +1024,7 @@ class DeepSeekStockSelector:
         _params = _load_strategy_params()
         _news_enabled = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT)) > 0
         _xueqiu_enabled = bool(int(_params.get("xueqiu_signal_enabled", XUEQIU_SIGNAL_ENABLED)))
-        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "rps", "board_strength")
+        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "rps")
         if _news_enabled:
             # 纯新闻信号开启时才把信号与窗口特征喂给模型；权重=0 时保持旧字段集
             _compact_keys = _compact_keys + ("news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d")
