@@ -304,27 +304,42 @@ def _is_recommendation_window(now: datetime) -> bool:
 
 
 def _serialize_news_headlines(*frames: Tuple[str, Any]) -> List[Dict[str, Any]]:
-    """Keep every source-scoped headline exactly as passed to the model."""
+    """新闻标题归一化：按标题精确去重（保留最早时间、合并来源），不再输出 kind 字段。
+
+    输入仍按 (kind, frame) 分组以支持多来源；输出只保留模型需要的字段。
+    """
     rows = []
-    for news_kind, frame in frames:
+    for _news_kind, frame in frames:
         if frame is None or frame.empty:
             continue
         for _, row in frame.iterrows():
-            title = str(row.get("title") or "")
-            if not title.strip():
+            title = str(row.get("title") or "").strip()
+            if not title:
                 continue
             rows.append(
                 {
                     "time": row.get("datetime").isoformat() if hasattr(row.get("datetime"), "isoformat") else str(row.get("datetime") or ""),
-                    "source": str(row.get("source") or ""),
-                    "kind": news_kind,
+                    "source": str(row.get("source") or "").strip(),
                     "title": title,
                 }
             )
-    rows.sort(key=lambda item: (item["time"], item["kind"], item["source"], item["title"]))
-    for index, item in enumerate(rows, start=1):
+    rows.sort(key=lambda item: (item["time"], item["source"], item["title"]))
+    # 标题完全相同的合并：按 time 升序排序后第一条即最早，来源用 | 连接去重
+    deduped: List[Dict[str, Any]] = []
+    index_by_title: Dict[str, int] = {}
+    for item in rows:
+        title = item["title"]
+        existing = index_by_title.get(title)
+        if existing is not None:
+            target = deduped[existing]
+            if item["source"] and item["source"] not in target["source"].split("|"):
+                target["source"] = f"{target['source']}|{item['source']}" if target["source"] else item["source"]
+            continue
+        index_by_title[title] = len(deduped)
+        deduped.append(item)
+    for index, item in enumerate(deduped, start=1):
         item["headline_id"] = f"N{index:04d}"
-    return rows
+    return deduped
 
 
 def _validated_events(raw_response: Dict[str, Any], headlines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -596,6 +611,7 @@ class AIStockDataProvider:
             "source_status": {
                 "major_news": {"status": "SUCCESS", "headline_count": int(len(major_news_frame))},
                 "headline_count": len(headlines),
+                "headline_raw_count": int(len(major_news_frame)),
             },
         }
 

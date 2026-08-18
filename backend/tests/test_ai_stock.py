@@ -37,8 +37,8 @@ def test_news_snapshot_uses_major_news_only():
                 [
                     {
                         "title": "通讯标题",
-                        "pub_time": "2026-08-10 10:00:00",
-                        "src": "财联社",
+                        "datetime": "2026-08-10 10:00:00",
+                        "source": "财联社",
                     }
                 ]
             )
@@ -47,8 +47,41 @@ def test_news_snapshot_uses_major_news_only():
         datetime(2026, 8, 10, 12, 0)
     )
 
-    assert snapshot["headlines"][0]["kind"] == "major_news"
-    assert set(snapshot["source_status"]) == {"major_news", "headline_count"}
+    assert snapshot["headlines"][0]["title"] == "通讯标题"
+    assert snapshot["headlines"][0]["headline_id"] == "N0001"
+    assert "kind" not in snapshot["headlines"][0]  # 常量字段不再发给模型
+    assert set(snapshot["source_status"]) == {"major_news", "headline_count", "headline_raw_count"}
+    assert snapshot["source_status"]["headline_count"] == 1
+    assert snapshot["source_status"]["headline_raw_count"] == 1
+
+
+def test_news_headlines_dedupe_exact_titles_and_merge_sources():
+    from src.core.services.ai_stock import _serialize_news_headlines
+
+    frame = pd.DataFrame(
+        [
+            {"title": "存储芯片景气度持续提升", "datetime": "2026-08-10 09:00:00", "source": "财联社"},
+            {"title": "存储芯片景气度持续提升", "datetime": "2026-08-10 10:30:00", "source": "新浪财经"},
+            {"title": "存储芯片景气度持续提升", "datetime": "2026-08-10 11:00:00", "source": "财联社"},
+            {"title": "人工智能基础设施投资升温", "datetime": "2026-08-10 09:30:00", "source": "东方财富"},
+            {"title": "  人工智能基础设施投资升温  ", "datetime": "2026-08-10 09:31:00", "source": "界面新闻"},
+            {"title": "", "datetime": "2026-08-10 12:00:00", "source": "财联社"},
+        ]
+    )
+    rows = _serialize_news_headlines(("major_news", frame))
+
+    # 空标题丢弃；相同标题（含首尾空格）只留一条，time 用最早，source 用 | 合并去重
+    assert len(rows) == 2
+    by_title = {row["title"]: row for row in rows}
+    chip = by_title["存储芯片景气度持续提升"]
+    assert chip["time"] == "2026-08-10 09:00:00"
+    assert set(chip["source"].split("|")) == {"财联社", "新浪财经"}
+    ai = by_title["人工智能基础设施投资升温"]
+    assert set(ai["source"].split("|")) == {"东方财富", "界面新闻"}
+    assert ai["time"] == "2026-08-10 09:30:00"
+    # 无 kind 字段，headline_id 连续编号
+    assert all("kind" not in row for row in rows)
+    assert [row["headline_id"] for row in rows] == ["N0001", "N0002"]
 
 
 def test_tushare_account_token_is_write_only_and_used_by_runtime():
