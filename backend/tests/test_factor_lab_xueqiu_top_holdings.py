@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import duckdb
 
-from src.app.api import factor_lab
+from src.app.api import xueqiu_holdings as factor_lab
+from src.app.api import factor_lab as factor_lab_module
 
 
 class FactorLabXueqiuTopHoldingsTest(TestCase):
@@ -235,7 +236,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
 
         self.assertTrue(result["available"])
@@ -265,7 +266,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db_with_rank_trend(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
 
         self.assertTrue(result["available"])
@@ -294,7 +295,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             self._create_snapshot_db_with_rank_trend(db_path)
             self._create_price_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
 
         self.assertTrue(result["available"])
@@ -329,7 +330,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             self._create_snapshot_db(db_path)
             self._create_price_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
 
         self.assertTrue(result["available"])
@@ -376,7 +377,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holdings_history(
                     symbol="SH600001",
                     active_only=True,
@@ -395,7 +396,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holding_details(
                     symbol="SH600001",
                     snapshot_date=date(2026, 6, 22),
@@ -418,7 +419,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db(db_path)
 
-            with patch.object(factor_lab, "ANALYTICS_DB_PATH", db_path):
+            with patch.object(factor_lab_module, "ANALYTICS_DB_PATH", db_path):
                 result = factor_lab.load_xueqiu_top_holding_details(
                     symbol="CASH",
                     snapshot_date=date(2026, 6, 22),

@@ -3249,7 +3249,7 @@ def load_xueqiu_snapshot_signal_history(
         int(sell_rank) if sell_rank is not None else RANK_ACCELERATION_SELL_RANK,
     )
     try:
-        from ..app.api.factor_lab import load_xueqiu_top_holdings_latest
+        from ..app.api.xueqiu_holdings import load_xueqiu_top_holdings_latest
 
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
         try:
@@ -3368,7 +3368,7 @@ def load_xueqiu_weight_price_ratio_map(
     which computes weight_multiple_5d / momentum_multiple_5d together with price data.
     Returns {normalized_xueqiu_symbol: item} so the robot can enrich its own ranking.
     """
-    from ..app.api.factor_lab import load_xueqiu_top_holdings_latest
+    from ..app.api.xueqiu_holdings import load_xueqiu_top_holdings_latest
 
     latest = load_xueqiu_top_holdings_latest(active_only=active_only, limit=limit)
     by_symbol: Dict[str, Dict[str, Any]] = {}
