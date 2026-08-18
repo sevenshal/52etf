@@ -1290,6 +1290,8 @@ class XueqiuStrategyConfig(Base):
     min_weight_increase = Column(Float, nullable=False, default=0.0)
     # 买入候选最少持仓组合数
     min_holding_cubes = Column(Integer, nullable=False, default=8)
+    # 买入确认：今天符合资格且最近快照日中至少 buy_confirm_prior_days 天也符合（0=只看今天）
+    buy_confirm_prior_days = Column(Integer, nullable=False, default=1)
     # 卖出侧参数（贰/叁号）：
     # 硬退出：综合排名>hard_exit_rank 或 组合数<hard_exit_min_cubes 立即卖
     hard_exit_rank = Column(Integer, nullable=False, default=250)
@@ -1695,6 +1697,7 @@ def ensure_table_columns():
             "min_holding_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN min_holding_days INTEGER NOT NULL DEFAULT 5",
             "retain_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_rank_limit INTEGER NOT NULL DEFAULT 200",
             "retain_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_min_cubes INTEGER NOT NULL DEFAULT 5",
+            "buy_confirm_prior_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN buy_confirm_prior_days INTEGER NOT NULL DEFAULT 1",
         },
     }
 

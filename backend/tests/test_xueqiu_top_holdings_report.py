@@ -1095,6 +1095,26 @@ class XueqiuTopHoldingsReportTest(TestCase):
             signal_history=[],
         )
         self.assertEqual([], empty_plan["confirmed_buy_symbols"])
+        # buy_confirm_prior_days=0 → 不看历史，今天符合即可确认
+        today_only_plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            signal_history=[],
+            buy_confirm_prior_days=0,
+        )
+        self.assertEqual(len(today_only_plan["confirmed_buy_symbols"]), 14)
+        # buy_confirm_prior_days=2 → 需最近2个快照日都符合才确认
+        strict_plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            signal_history=self._eligibility_history(top10_symbols[:5]),
+            buy_confirm_prior_days=2,
+        )
+        self.assertEqual(set(strict_plan["confirmed_buy_symbols"]), set(top10_symbols[:5]))
 
     def test_load_xueqiu_buy_eligibility_history_uses_snapshot_sliding_window(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")

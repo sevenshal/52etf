@@ -927,6 +927,7 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     min_holding_days: Optional[int] = Field(None, ge=0, le=120, description="买入后最少持有完整交易日数")
     retain_rank_limit: Optional[int] = Field(None, ge=1, le=5000, description="缓冲候选综合排名上限")
     retain_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="缓冲候选最少持仓组合数")
+    buy_confirm_prior_days: Optional[int] = Field(None, ge=0, le=30, description="买入确认需最近几个快照日也符合（0=只看当天符合即可）")
 
 
 XUEQIU_STRATEGY_CONFIG_KEYS = (

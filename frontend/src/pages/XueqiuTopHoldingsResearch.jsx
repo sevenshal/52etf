@@ -302,6 +302,7 @@ const XUEQIU_BUY_SELL_ONLY_KEYS = [
   'min_holding_days',
   'retain_rank_limit',
   'retain_min_cubes',
+  'buy_confirm_prior_days',
 ];
 const strategyFieldsFor = (strategyKey, allFields) => (
   allFields.filter(field => (
@@ -476,6 +477,15 @@ const XueqiuTopHoldingsResearch = () => {
       max: 1000,
       step: 1,
       suffix: '个',
+    },
+    {
+      key: 'buy_confirm_prior_days',
+      label: '买入确认历史天数',
+      tooltip: '今天符合买入资格后，还需最近几个快照日也符合才确认买入（默认1；0=只看今天符合即可）',
+      min: 0,
+      max: 30,
+      step: 1,
+      suffix: '天',
     },
   ], []);
 

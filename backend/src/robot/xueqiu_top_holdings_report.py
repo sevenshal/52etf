@@ -2709,6 +2709,7 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": 8,
+        "buy_confirm_prior_days": RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS - 1,
         "current_rank_limit": 100,
         "holding_cube_increase": 2,
         "metric_threshold": WEIGHT_PRICE_RATIO_MIN_RATIO,
@@ -2729,6 +2730,7 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": RANK_ACCELERATION_MIN_HOLDING_CUBES,
+        "buy_confirm_prior_days": RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS - 1,
         "current_rank_limit": RANK_ACCELERATION_CURRENT_RANK_LIMIT,
         "holding_cube_increase": RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE,
         "metric_threshold": RANK_ACCELERATION_MIN_RANK_CHANGE,
@@ -2749,6 +2751,7 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES,
+        "buy_confirm_prior_days": RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS - 1,
         "current_rank_limit": WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT,
         "holding_cube_increase": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE,
         "metric_threshold": WEIGHT_PRICE_RATIO_MIN_RATIO,
@@ -2786,6 +2789,7 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "fear_target_count": int(row.fear_target_count),
             "greed_target_count": int(row.greed_target_count),
             "min_holding_cubes": int(row.min_holding_cubes),
+            "buy_confirm_prior_days": int(row.buy_confirm_prior_days),
             "current_rank_limit": int(row.current_rank_limit),
             "holding_cube_increase": int(row.holding_cube_increase),
             "metric_threshold": float(row.metric_threshold),
@@ -3501,6 +3505,7 @@ def build_rank_acceleration_buffer_plan(
     min_holding_days: Optional[int] = None,
     retain_rank_limit: Optional[int] = None,
     retain_min_cubes: Optional[int] = None,
+    buy_confirm_prior_days: Optional[int] = None,
     signal_history: Optional[List[Dict[str, Any]]] = None,
     metric: str = "rank_acceleration",
     min_metric_threshold: Optional[float] = None,
@@ -3617,6 +3622,11 @@ def build_rank_acceleration_buffer_plan(
         if min_holding_days is not None
         else RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS
     )
+    effective_buy_confirm_prior_days = (
+        int(buy_confirm_prior_days)
+        if buy_confirm_prior_days is not None
+        else RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS - 1
+    )
     if not comparison_snapshot.get("available"):
         raise RuntimeError(
             "Rank acceleration comparison snapshot unavailable: "
@@ -3661,7 +3671,7 @@ def build_rank_acceleration_buffer_plan(
         signal_history = load_xueqiu_snapshot_signal_history(
             current_snapshot_date=snapshot_date,
             prior_days=max(
-                RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1,
+                effective_buy_confirm_prior_days,
                 effective_sell_confirm_days - 1,
             ),
             metric=metric,
@@ -3796,7 +3806,7 @@ def build_rank_acceleration_buffer_plan(
             int(symbol in signal_set) for signal_set in previous_buy_signal_sets
         )
         item["buy_confirmation_count"] = 1 + prior_confirmation_days
-        item["buy_confirmed"] = prior_confirmation_days >= 1
+        item["buy_confirmed"] = prior_confirmation_days >= effective_buy_confirm_prior_days
         if item["buy_confirmed"]:
             confirmed_buy_candidates.append(item)
 
@@ -4101,8 +4111,8 @@ def build_rank_acceleration_buffer_plan(
                 f"{effective_min_weight_increase:g}、5日权价比≥{min_metric_threshold:g}"
                 f"（权重涨幅超过股价涨幅，疑似主动加仓）；"
                 f"强势新进需进入Top{effective_new_entry_rank_limit}且≥{effective_new_entry_min_cubes}个组合；"
-                f"当天符合资格且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}个快照日至少"
-                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足（历史资格按快照滑动窗口重算）"
+                f"当天符合资格；历史确认：最近快照日至少{effective_buy_confirm_prior_days}天也符合"
+                f"（{effective_buy_confirm_prior_days}个快照日，0=只看当天，按快照滑动窗口重算）"
             )
             if ratio_metric
             else (
@@ -4110,8 +4120,8 @@ def build_rank_acceleration_buffer_plan(
                 f"持仓组合增加至少{effective_cube_increase}个且总权重上升>"
                 f"{effective_min_weight_increase:g}；旧标的5日上升至少{min_metric_threshold:g}名，"
                 f"强势新进需进入Top{effective_new_entry_rank_limit}且≥{effective_new_entry_min_cubes}个组合；"
-                f"当天符合资格且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}个快照日至少"
-                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足（历史资格按快照滑动窗口重算）"
+                f"当天符合资格；历史确认：最近快照日至少{effective_buy_confirm_prior_days}天也符合"
+                f"（{effective_buy_confirm_prior_days}个快照日，0=只看当天，按快照滑动窗口重算）"
             )
         ),
         "sell_rule": (
@@ -4195,6 +4205,7 @@ def build_weight_price_ratio_buffer_plan(
     min_holding_days: Optional[int] = None,
     retain_rank_limit: Optional[int] = None,
     retain_min_cubes: Optional[int] = None,
+    buy_confirm_prior_days: Optional[int] = None,
     signal_history: Optional[List[Dict[str, Any]]] = None,
     fear_greed_regime: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -4225,6 +4236,7 @@ def build_weight_price_ratio_buffer_plan(
         min_holding_days=min_holding_days,
         retain_rank_limit=retain_rank_limit,
         retain_min_cubes=retain_min_cubes,
+        buy_confirm_prior_days=buy_confirm_prior_days,
         signal_history=signal_history,
         metric="weight_price_ratio",
         strategy_name_override=WEIGHT_PRICE_RATIO_STRATEGY_NAME,
@@ -5550,6 +5562,7 @@ async def execute_rank_acceleration_target_rebalance(
         min_holding_days=strategy_config["min_holding_days"],
         retain_rank_limit=strategy_config["retain_rank_limit"],
         retain_min_cubes=strategy_config["retain_min_cubes"],
+        buy_confirm_prior_days=strategy_config["buy_confirm_prior_days"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot
@@ -5777,6 +5790,7 @@ async def execute_weight_price_ratio_target_rebalance(
         min_holding_days=strategy_config["min_holding_days"],
         retain_rank_limit=strategy_config["retain_rank_limit"],
         retain_min_cubes=strategy_config["retain_min_cubes"],
+        buy_confirm_prior_days=strategy_config["buy_confirm_prior_days"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot
