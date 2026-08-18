@@ -3095,6 +3095,13 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     new_entry_rank_limit: Optional[int] = Field(None, ge=1, le=1000, description="强势新进综合排名上限")
     new_entry_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="强势新进最少持仓组合数")
     min_weight_increase: Optional[float] = Field(None, ge=0, description="买入候选总权重上升下限")
+    hard_exit_rank: Optional[int] = Field(None, ge=1, le=5000, description="硬退出：综合排名超过该值立即卖")
+    hard_exit_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="硬退出：活跃组合数低于该值立即卖")
+    sell_rank: Optional[int] = Field(None, ge=1, le=5000, description="卖出缓冲基数（Top10 时的缓冲大小，随目标仓位等比缩放）")
+    sell_confirm_days: Optional[int] = Field(None, ge=1, le=30, description="连续几日跌出缓冲才确认卖出")
+    min_holding_days: Optional[int] = Field(None, ge=0, le=120, description="买入后最少持有完整交易日数")
+    retain_rank_limit: Optional[int] = Field(None, ge=1, le=5000, description="缓冲候选综合排名上限")
+    retain_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="缓冲候选最少持仓组合数")
 
 
 XUEQIU_STRATEGY_CONFIG_KEYS = (

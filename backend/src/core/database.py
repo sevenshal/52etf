@@ -1290,6 +1290,18 @@ class XueqiuStrategyConfig(Base):
     min_weight_increase = Column(Float, nullable=False, default=0.0)
     # 买入候选最少持仓组合数
     min_holding_cubes = Column(Integer, nullable=False, default=8)
+    # 卖出侧参数（贰/叁号）：
+    # 硬退出：综合排名>hard_exit_rank 或 组合数<hard_exit_min_cubes 立即卖
+    hard_exit_rank = Column(Integer, nullable=False, default=250)
+    hard_exit_min_cubes = Column(Integer, nullable=False, default=3)
+    # 普通退出：跌出卖出缓冲（按指标排序 Top sell_rank，随目标仓位等比缩放）连续 sell_confirm_days 日，
+    # 且持满 min_holding_days 个完整交易日，才与买入配对执行
+    sell_rank = Column(Integer, nullable=False, default=30)
+    sell_confirm_days = Column(Integer, nullable=False, default=2)
+    min_holding_days = Column(Integer, nullable=False, default=5)
+    # 缓冲候选（hold 池）：综合排名≤retain_rank_limit 且组合数≥retain_min_cubes
+    retain_rank_limit = Column(Integer, nullable=False, default=200)
+    retain_min_cubes = Column(Integer, nullable=False, default=5)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class IBKRAccountConfig(Base):
@@ -1676,6 +1688,13 @@ def ensure_table_columns():
             "new_entry_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_rank_limit INTEGER NOT NULL DEFAULT 30",
             "new_entry_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_min_cubes INTEGER NOT NULL DEFAULT 10",
             "min_weight_increase": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN min_weight_increase FLOAT NOT NULL DEFAULT 0.0",
+            "hard_exit_rank": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN hard_exit_rank INTEGER NOT NULL DEFAULT 250",
+            "hard_exit_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN hard_exit_min_cubes INTEGER NOT NULL DEFAULT 3",
+            "sell_rank": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN sell_rank INTEGER NOT NULL DEFAULT 30",
+            "sell_confirm_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN sell_confirm_days INTEGER NOT NULL DEFAULT 2",
+            "min_holding_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN min_holding_days INTEGER NOT NULL DEFAULT 5",
+            "retain_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_rank_limit INTEGER NOT NULL DEFAULT 200",
+            "retain_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_min_cubes INTEGER NOT NULL DEFAULT 5",
         },
     }
 

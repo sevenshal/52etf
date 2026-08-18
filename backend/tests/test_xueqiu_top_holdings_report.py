@@ -41,7 +41,7 @@ from src.robot.xueqiu_top_holdings_report import (
     load_recent_xueqiu_rank_history_cube_sets,
     load_rank_acceleration_strategy_history,
     load_xueqiu_rank_comparison_snapshot,
-    load_xueqiu_buy_eligibility_history,
+    load_xueqiu_snapshot_signal_history,
     load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
@@ -814,6 +814,19 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         fear_target_count=15,
                         greed_target_count=5,
                         min_holding_cubes=6,
+                        current_rank_limit=80,
+                        holding_cube_increase=3,
+                        metric_threshold=1.3,
+                        new_entry_rank_limit=25,
+                        new_entry_min_cubes=12,
+                        min_weight_increase=5.0,
+                        hard_exit_rank=200,
+                        hard_exit_min_cubes=4,
+                        sell_rank=40,
+                        sell_confirm_days=3,
+                        min_holding_days=4,
+                        retain_rank_limit=150,
+                        retain_min_cubes=6,
                     )
                 )
                 db.commit()
@@ -822,6 +835,19 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 self.assertEqual(15, saved["fear_target_count"])
                 self.assertEqual(5, saved["greed_target_count"])
                 self.assertEqual(6, saved["min_holding_cubes"])
+                self.assertEqual(80, saved["current_rank_limit"])
+                self.assertEqual(3, saved["holding_cube_increase"])
+                self.assertEqual(1.3, saved["metric_threshold"])
+                self.assertEqual(25, saved["new_entry_rank_limit"])
+                self.assertEqual(12, saved["new_entry_min_cubes"])
+                self.assertEqual(5.0, saved["min_weight_increase"])
+                self.assertEqual(200, saved["hard_exit_rank"])
+                self.assertEqual(4, saved["hard_exit_min_cubes"])
+                self.assertEqual(40, saved["sell_rank"])
+                self.assertEqual(3, saved["sell_confirm_days"])
+                self.assertEqual(4, saved["min_holding_days"])
+                self.assertEqual(150, saved["retain_rank_limit"])
+                self.assertEqual(6, saved["retain_min_cubes"])
                 # 其他策略不受影响
                 self.assertEqual(10, load_xueqiu_strategy_config("buffer")["fear_target_count"])
 
@@ -956,15 +982,39 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
 
     @staticmethod
-    def _eligibility_history(symbols, days=2):
-        """滑动窗口历史资格 fixture（newest-first），供确认逻辑使用。"""
+    def _eligibility_history(symbols, days=2, exit_symbols=None):
+        """滑动窗口历史信号 fixture（newest-first），供买入/卖出确认逻辑使用。"""
         return [
             {
                 "snapshot_date": f"2026-07-{9 - index:02d}",
                 "eligible_symbols": list(symbols),
+                "normal_exit_symbols": list(exit_symbols or []),
             }
             for index in range(days)
         ]
+
+    def test_sell_params_configurable_in_plan(self):
+        ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
+        buy_signals = [item["stock_symbol"] for item in ranking[:10]]
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
+            hard_exit_rank=100,
+            hard_exit_min_cubes=4,
+            sell_confirm_days=3,
+            min_holding_days=1,
+            retain_rank_limit=50,
+            retain_min_cubes=6,
+        )
+        # 卖出规则文案体现配置值
+        self.assertIn("连续3日跌出", plan["sell_rule"])
+        self.assertIn("持满1个完整交易日", plan["sell_rule"])
+        self.assertIn("综合排名>100", plan["sell_rule"])
+        # 持有期 1 日 → 普通退出不被持有期保护挂起
+        self.assertEqual([], plan["min_holding_blocked_symbols"])
 
     def test_buy_eligible_core_uses_configurable_thresholds(self):
         item = {
@@ -1031,7 +1081,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            buy_eligibility_history=self._eligibility_history(prior_symbols),
+            signal_history=self._eligibility_history(prior_symbols),
         )
         confirmed = set(plan["confirmed_buy_symbols"])
         self.assertTrue(set(prior_symbols).issubset(confirmed))
@@ -1042,7 +1092,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            buy_eligibility_history=[],
+            signal_history=[],
         )
         self.assertEqual([], empty_plan["confirmed_buy_symbols"])
 
@@ -1110,7 +1160,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path), patch(
                 "src.app.api.factor_lab.ANALYTICS_DB_PATH", path
             ):
-                history = load_xueqiu_buy_eligibility_history(
+                history = load_xueqiu_snapshot_signal_history(
                     current_snapshot_date=date(2026, 8, 17),
                     prior_days=2,
                     metric="weight_price_ratio",
@@ -1125,6 +1175,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
             # 8-15 与 8-16 各自对 5 个交易日前对比，权价比均 ≥1.15、组合数增加 ≥2 → 符合
             self.assertIn("SH.600001", history[0]["eligible_symbols"])
             self.assertIn("SH.600001", history[1]["eligible_symbols"])
+            # 唯一股票始终排名第1 → 在缓冲池内，无普通卖出信号
+            self.assertIsInstance(history[0]["normal_exit_symbols"], list)
+            self.assertNotIn("SH.600001", history[0]["normal_exit_symbols"])
         finally:
             try:
                 os.unlink(path)
@@ -1140,7 +1193,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            buy_eligibility_history=self._eligibility_history(buy_signals),
+            signal_history=self._eligibility_history(buy_signals),
         )
 
         self.assertTrue(plan["component_changed"])
@@ -1161,7 +1214,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
             current_snapshot_date=date(2026, 7, 10),
-            buy_eligibility_history=self._eligibility_history(buy_signals),
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
             strategy_history=[
                 self._strategy_history_entry(
                     date(2026, 7, 9),
@@ -1213,6 +1266,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
             strategy_history=history,
             current_snapshot_date=date(2026, 7, 10),
         )
@@ -1245,7 +1299,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
-            buy_eligibility_history=self._eligibility_history(buy_signals),
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
             strategy_history=history,
             current_snapshot_date=date(2026, 7, 10),
         )
@@ -1263,7 +1317,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
-            buy_eligibility_history=self._eligibility_history(buy_signals),
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
             strategy_history=history,
             current_snapshot_date=date(2026, 7, 10),
         )
@@ -1475,7 +1529,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
             return_value=comparison,
         ), patch(
-            "src.robot.xueqiu_top_holdings_report.load_xueqiu_buy_eligibility_history",
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_snapshot_signal_history",
             return_value=self._eligibility_history(buy_signals),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
@@ -1682,7 +1736,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            buy_eligibility_history=self._eligibility_history(buy_signals),
+            signal_history=self._eligibility_history(buy_signals),
         )
 
         self.assertTrue(plan["component_changed"])
@@ -1807,7 +1861,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "src.robot.xueqiu_top_holdings_report.load_xueqiu_weight_price_ratio_map",
             return_value=ratio_by_symbol,
         ), patch(
-            "src.robot.xueqiu_top_holdings_report.load_xueqiu_buy_eligibility_history",
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_snapshot_signal_history",
             return_value=self._eligibility_history(buy_signals),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",

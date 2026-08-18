@@ -2715,6 +2715,13 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "new_entry_rank_limit": WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT,
         "new_entry_min_cubes": WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES,
         "min_weight_increase": 0.0,
+        "hard_exit_rank": 250,
+        "hard_exit_min_cubes": RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES,
+        "sell_rank": RANK_ACCELERATION_SELL_RANK,
+        "sell_confirm_days": RANK_ACCELERATION_SELL_CONFIRM_DAYS,
+        "min_holding_days": RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS,
+        "retain_rank_limit": WEIGHT_PRICE_RATIO_RETAIN_CURRENT_RANK_LIMIT,
+        "retain_min_cubes": WEIGHT_PRICE_RATIO_RETAIN_MIN_HOLDING_CUBES,
     },
     "rank_acceleration": {
         "strategy_key": "rank_acceleration",
@@ -2728,6 +2735,13 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "new_entry_rank_limit": RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT,
         "new_entry_min_cubes": RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES,
         "min_weight_increase": 0.0,
+        "hard_exit_rank": RANK_ACCELERATION_HARD_EXIT_RANK,
+        "hard_exit_min_cubes": RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES,
+        "sell_rank": RANK_ACCELERATION_SELL_RANK,
+        "sell_confirm_days": RANK_ACCELERATION_SELL_CONFIRM_DAYS,
+        "min_holding_days": RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS,
+        "retain_rank_limit": RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT,
+        "retain_min_cubes": RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES,
     },
     "weight_price_ratio": {
         "strategy_key": "weight_price_ratio",
@@ -2741,6 +2755,13 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "new_entry_rank_limit": WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT,
         "new_entry_min_cubes": WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES,
         "min_weight_increase": 0.0,
+        "hard_exit_rank": WEIGHT_PRICE_RATIO_HARD_EXIT_RANK,
+        "hard_exit_min_cubes": WEIGHT_PRICE_RATIO_HARD_EXIT_MIN_HOLDING_CUBES,
+        "sell_rank": RANK_ACCELERATION_SELL_RANK,
+        "sell_confirm_days": RANK_ACCELERATION_SELL_CONFIRM_DAYS,
+        "min_holding_days": RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS,
+        "retain_rank_limit": WEIGHT_PRICE_RATIO_RETAIN_CURRENT_RANK_LIMIT,
+        "retain_min_cubes": WEIGHT_PRICE_RATIO_RETAIN_MIN_HOLDING_CUBES,
     },
 }
 
@@ -2771,6 +2792,13 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "new_entry_rank_limit": int(row.new_entry_rank_limit),
             "new_entry_min_cubes": int(row.new_entry_min_cubes),
             "min_weight_increase": float(row.min_weight_increase),
+            "hard_exit_rank": int(row.hard_exit_rank),
+            "hard_exit_min_cubes": int(row.hard_exit_min_cubes),
+            "sell_rank": int(row.sell_rank),
+            "sell_confirm_days": int(row.sell_confirm_days),
+            "min_holding_days": int(row.min_holding_days),
+            "retain_rank_limit": int(row.retain_rank_limit),
+            "retain_min_cubes": int(row.retain_min_cubes),
             "updated_at": (
                 row.updated_at.isoformat() if row.updated_at else None
             ),
@@ -3091,7 +3119,7 @@ def _xueqiu_buy_eligible_core(
     )
 
 
-def load_xueqiu_buy_eligibility_history(
+def load_xueqiu_snapshot_signal_history(
     *,
     current_snapshot_date: date,
     prior_days: int = 2,
@@ -3104,13 +3132,22 @@ def load_xueqiu_buy_eligibility_history(
     min_weight_increase: Optional[float] = None,
     new_entry_rank_limit: Optional[int] = None,
     new_entry_min_cubes: Optional[int] = None,
+    hard_exit_rank: Optional[int] = None,
+    hard_exit_min_cubes: Optional[int] = None,
+    retain_rank_limit: Optional[int] = None,
+    retain_min_cubes: Optional[int] = None,
+    sell_rank: Optional[int] = None,
     limit: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """在最近 ``prior_days`` 个快照日上重算买入资格（滑动窗口确认）。
+    """在最近 ``prior_days`` 个快照日上重算买入资格与卖出信号（滑动窗口确认）。
 
-    与线上计划共用同一套资格公式（见 _xueqiu_buy_eligible_core），数据来自每日
-    快照 + 行情，不依赖机器人运行记录，因此新策略上线当天即可回溯确认。
-    返回 newest-first：[{snapshot_date, eligible_symbols}, ...]；任何错误返回 []。
+    与线上计划共用同一套公式（_xueqiu_buy_eligible_core），数据来自每日快照 + 行情，
+    不依赖机器人运行记录。
+    - eligible_symbols：当天符合买入资格
+    - normal_exit_symbols：当天跌出缓冲池（按指标排序的 hold 候选 Top sell_rank）
+      且非硬退出 → 普通卖出信号
+    返回 newest-first：[{snapshot_date, eligible_symbols, normal_exit_symbols}, ...]；
+    任何错误返回 []。
     """
     normalized_days = max(1, int(prior_days or 2))
     ratio_metric = metric == "weight_price_ratio"
@@ -3171,6 +3208,46 @@ def load_xueqiu_buy_eligibility_history(
             else RANK_ACCELERATION_MIN_RANK_CHANGE
         )
     )
+    effective_hard_exit_rank = (
+        int(hard_exit_rank)
+        if hard_exit_rank is not None
+        else (
+            WEIGHT_PRICE_RATIO_HARD_EXIT_RANK
+            if ratio_metric
+            else RANK_ACCELERATION_HARD_EXIT_RANK
+        )
+    )
+    effective_hard_exit_min_cubes = (
+        int(hard_exit_min_cubes)
+        if hard_exit_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_HARD_EXIT_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES
+        )
+    )
+    effective_retain_rank_limit = (
+        int(retain_rank_limit)
+        if retain_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_RETAIN_CURRENT_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT
+        )
+    )
+    effective_retain_min_cubes = (
+        int(retain_min_cubes)
+        if retain_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_RETAIN_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES
+        )
+    )
+    effective_sell_rank = max(
+        1,
+        int(sell_rank) if sell_rank is not None else RANK_ACCELERATION_SELL_RANK,
+    )
     try:
         from ..app.api.factor_lab import load_xueqiu_top_holdings_latest
 
@@ -3205,6 +3282,8 @@ def load_xueqiu_buy_eligibility_history(
             comparison_by_symbol = comparison.get("by_symbol") or {}
             comparison_universe_count = len(comparison.get("items") or [])
             eligible: Set[str] = set()
+            hold_entries: List[Tuple[float, int, float, int, str, Dict[str, Any]]] = []
+            hard_exit_by_symbol: Dict[str, bool] = {}
             for item in latest.get("items") or []:
                 symbol = normalize_xueqiu_symbol(item.get("stock_symbol"))
                 if not symbol or is_cash_symbol(symbol):
@@ -3223,13 +3302,58 @@ def load_xueqiu_buy_eligibility_history(
                     new_entry_min_cubes=effective_new_entry_min_cubes,
                 ):
                     eligible.add(symbol)
+                rank = safe_int(item.get("composite_rank"))
+                cubes = safe_int(item.get("holding_cube_count")) or 0
+                previous = comparison_by_symbol.get(symbol)
+                cube_change = cubes - (safe_int((previous or {}).get("holding_cube_count")) or 0)
+                weight_change = (safe_float(item.get("total_weight_pct")) or 0.0) - (
+                    safe_float((previous or {}).get("total_weight_pct")) or 0.0
+                )
+                hard_exit = (
+                    rank is None
+                    or rank > effective_hard_exit_rank
+                    or cubes < effective_hard_exit_min_cubes
+                )
+                hard_exit_by_symbol[symbol] = hard_exit
+                hold_pool_eligible = (
+                    rank is not None
+                    and rank <= effective_retain_rank_limit
+                    and cubes >= effective_retain_min_cubes
+                    and not (cube_change < 0 and weight_change < 0)
+                )
+                if hold_pool_eligible:
+                    hold_entries.append(
+                        (
+                            (
+                                safe_float(item.get("weight_price_ratio_5d"))
+                                if ratio_metric
+                                else safe_float(item.get("acceleration_rank_change_5d"))
+                            ) or 0.0,
+                            cube_change,
+                            weight_change,
+                            -(safe_int(item.get("composite_rank")) or 999999),
+                            symbol,
+                            item,
+                        )
+                    )
+            hold_entries.sort(key=lambda entry: entry[:5], reverse=True)
+            buffer_symbols = {
+                str(entry[4])
+                for entry in hold_entries[:effective_sell_rank]
+            }
+            normal_exit_symbols = sorted(
+                symbol
+                for symbol, is_hard_exit in hard_exit_by_symbol.items()
+                if not is_hard_exit and symbol not in buffer_symbols
+            )
             results.append({
                 "snapshot_date": snapshot_day.isoformat(),
                 "eligible_symbols": sorted(eligible),
+                "normal_exit_symbols": normal_exit_symbols,
             })
         return results
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to load Xueqiu buy eligibility history: %s", exc)
+        logger.warning("Failed to load Xueqiu snapshot signal history: %s", exc)
         return []
 
 
@@ -3371,7 +3495,13 @@ def build_rank_acceleration_buffer_plan(
     min_weight_increase: Optional[float] = None,
     new_entry_rank_limit: Optional[int] = None,
     new_entry_min_cubes: Optional[int] = None,
-    buy_eligibility_history: Optional[List[Dict[str, Any]]] = None,
+    hard_exit_rank: Optional[int] = None,
+    hard_exit_min_cubes: Optional[int] = None,
+    sell_confirm_days: Optional[int] = None,
+    min_holding_days: Optional[int] = None,
+    retain_rank_limit: Optional[int] = None,
+    retain_min_cubes: Optional[int] = None,
+    signal_history: Optional[List[Dict[str, Any]]] = None,
     metric: str = "rank_acceleration",
     min_metric_threshold: Optional[float] = None,
     strategy_name_override: Optional[str] = None,
@@ -3394,14 +3524,22 @@ def build_rank_acceleration_buffer_plan(
             else RANK_ACCELERATION_MIN_RANK_CHANGE
         )
     hard_exit_rank = (
-        WEIGHT_PRICE_RATIO_HARD_EXIT_RANK
-        if ratio_metric
-        else RANK_ACCELERATION_HARD_EXIT_RANK
+        int(hard_exit_rank)
+        if hard_exit_rank is not None
+        else (
+            WEIGHT_PRICE_RATIO_HARD_EXIT_RANK
+            if ratio_metric
+            else RANK_ACCELERATION_HARD_EXIT_RANK
+        )
     )
     hard_exit_min_cubes = (
-        WEIGHT_PRICE_RATIO_HARD_EXIT_MIN_HOLDING_CUBES
-        if ratio_metric
-        else RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES
+        int(hard_exit_min_cubes)
+        if hard_exit_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_HARD_EXIT_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_HARD_EXIT_MIN_HOLDING_CUBES
+        )
     )
     effective_min_cubes = (
         int(min_holding_cubes)
@@ -3451,6 +3589,34 @@ def build_rank_acceleration_buffer_plan(
             else RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES
         )
     )
+    effective_retain_rank_limit = (
+        int(retain_rank_limit)
+        if retain_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_RETAIN_CURRENT_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_RETAIN_CURRENT_RANK_LIMIT
+        )
+    )
+    effective_retain_min_cubes = (
+        int(retain_min_cubes)
+        if retain_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_RETAIN_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_RETAIN_MIN_HOLDING_CUBES
+        )
+    )
+    effective_sell_confirm_days = (
+        int(sell_confirm_days)
+        if sell_confirm_days is not None
+        else RANK_ACCELERATION_SELL_CONFIRM_DAYS
+    )
+    effective_min_holding_days = (
+        int(min_holding_days)
+        if min_holding_days is not None
+        else RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS
+    )
     if not comparison_snapshot.get("available"):
         raise RuntimeError(
             "Rank acceleration comparison snapshot unavailable: "
@@ -3491,10 +3657,13 @@ def build_rank_acceleration_buffer_plan(
             ][:normalized_top_n]
         return {str(value) for value in values if value}
 
-    if buy_eligibility_history is None:
-        buy_eligibility_history = load_xueqiu_buy_eligibility_history(
+    if signal_history is None:
+        signal_history = load_xueqiu_snapshot_signal_history(
             current_snapshot_date=snapshot_date,
-            prior_days=RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1,
+            prior_days=max(
+                RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1,
+                effective_sell_confirm_days - 1,
+            ),
             metric=metric,
             min_holding_cubes=effective_min_cubes,
             min_metric_threshold=min_metric_threshold,
@@ -3503,15 +3672,20 @@ def build_rank_acceleration_buffer_plan(
             min_weight_increase=effective_min_weight_increase,
             new_entry_rank_limit=effective_new_entry_rank_limit,
             new_entry_min_cubes=effective_new_entry_min_cubes,
+            hard_exit_rank=hard_exit_rank,
+            hard_exit_min_cubes=hard_exit_min_cubes,
+            retain_rank_limit=effective_retain_rank_limit,
+            retain_min_cubes=effective_retain_min_cubes,
+            sell_rank=normalized_sell_rank,
         )
-    # 滑动窗口确认：历史资格按快照重算（不依赖运行记录），newest-first
+    # 滑动窗口确认：买入资格/卖出信号均按快照重算（不依赖运行记录），newest-first
     previous_buy_signal_sets = [
         {str(value) for value in (entry.get("eligible_symbols") or []) if value}
-        for entry in (buy_eligibility_history or [])
+        for entry in (signal_history or [])
     ]
     previous_exit_signal_sets = [
-        history_signal_symbols(entry, "normal_exit_signal_symbols")
-        for entry in normalized_history[: RANK_ACCELERATION_SELL_CONFIRM_DAYS - 1]
+        {str(value) for value in (entry.get("normal_exit_symbols") or []) if value}
+        for entry in (signal_history or [])[: effective_sell_confirm_days - 1]
     ]
 
     for index, ranking_item in enumerate(ranking, start=1):
@@ -3675,7 +3849,7 @@ def build_rank_acceleration_buffer_plan(
         normal_exit_signal = not hard_exit and symbol not in buffer_symbols
         exit_confirmed = (
             normal_exit_signal
-            and len(previous_exit_signal_sets) == RANK_ACCELERATION_SELL_CONFIRM_DAYS - 1
+            and len(previous_exit_signal_sets) == effective_sell_confirm_days - 1
             and all(symbol in signal_set for signal_set in previous_exit_signal_sets)
         )
         entry_date = entry_dates[symbol]
@@ -3690,7 +3864,7 @@ def build_rank_acceleration_buffer_plan(
             )
         min_holding_satisfied = (
             completed_holding_days is None
-            or completed_holding_days >= RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS
+            or completed_holding_days >= effective_min_holding_days
         )
         if hard_exit:
             hard_exit_symbols.append(symbol)
@@ -3897,9 +4071,9 @@ def build_rank_acceleration_buffer_plan(
         else:
             action = "sell"
             exit_reason = (
-                f"连续{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出权价比缓冲Top{normalized_sell_rank}"
+                f"连续{effective_sell_confirm_days}日跌出权价比缓冲Top{normalized_sell_rank}"
                 if ratio_metric
-                else f"连续{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出加速Top{normalized_sell_rank}"
+                else f"连续{effective_sell_confirm_days}日跌出加速Top{normalized_sell_rank}"
             )
         item.update(
             {
@@ -3942,14 +4116,14 @@ def build_rank_acceleration_buffer_plan(
         ),
         "sell_rule": (
             (
-                f"持满{RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS}个完整交易日且连续"
-                f"{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出5日权价比Top{normalized_sell_rank}才卖；"
+                f"持满{effective_min_holding_days}个完整交易日且连续"
+                f"{effective_sell_confirm_days}日跌出5日权价比Top{normalized_sell_rank}才卖；"
                 f"综合排名>{hard_exit_rank}或活跃组合数<{hard_exit_min_cubes}立即退出"
             )
             if ratio_metric
             else (
-                f"持满{RANK_ACCELERATION_MIN_HOLDING_TRADING_DAYS}个完整交易日且连续"
-                f"{RANK_ACCELERATION_SELL_CONFIRM_DAYS}日跌出5日排名加速Top{normalized_sell_rank}才卖；"
+                f"持满{effective_min_holding_days}个完整交易日且连续"
+                f"{effective_sell_confirm_days}日跌出5日排名加速Top{normalized_sell_rank}才卖；"
                 f"综合排名>{hard_exit_rank}或活跃组合数<{hard_exit_min_cubes}立即退出"
             )
         ),
@@ -4015,7 +4189,13 @@ def build_weight_price_ratio_buffer_plan(
     min_weight_increase: Optional[float] = None,
     new_entry_rank_limit: Optional[int] = None,
     new_entry_min_cubes: Optional[int] = None,
-    buy_eligibility_history: Optional[List[Dict[str, Any]]] = None,
+    hard_exit_rank: Optional[int] = None,
+    hard_exit_min_cubes: Optional[int] = None,
+    sell_confirm_days: Optional[int] = None,
+    min_holding_days: Optional[int] = None,
+    retain_rank_limit: Optional[int] = None,
+    retain_min_cubes: Optional[int] = None,
+    signal_history: Optional[List[Dict[str, Any]]] = None,
     fear_greed_regime: Optional[str] = None,
 ) -> Dict[str, Any]:
     """星澜叁号：按 5日权价比 排序/买入，缓冲卖出，等同贰号框架。"""
@@ -4039,7 +4219,13 @@ def build_weight_price_ratio_buffer_plan(
         min_weight_increase=min_weight_increase,
         new_entry_rank_limit=new_entry_rank_limit,
         new_entry_min_cubes=new_entry_min_cubes,
-        buy_eligibility_history=buy_eligibility_history,
+        hard_exit_rank=hard_exit_rank,
+        hard_exit_min_cubes=hard_exit_min_cubes,
+        sell_confirm_days=sell_confirm_days,
+        min_holding_days=min_holding_days,
+        retain_rank_limit=retain_rank_limit,
+        retain_min_cubes=retain_min_cubes,
+        signal_history=signal_history,
         metric="weight_price_ratio",
         strategy_name_override=WEIGHT_PRICE_RATIO_STRATEGY_NAME,
         fear_greed_regime=fear_greed_regime,
@@ -5342,7 +5528,7 @@ async def execute_rank_acceleration_target_rebalance(
     )
     strategy_sell_rank = max(
         strategy_top_n,
-        int(round(RANK_ACCELERATION_SELL_RANK * strategy_top_n / RANK_ACCELERATION_TOP_N)),
+        int(round(strategy_config["sell_rank"] * strategy_top_n / RANK_ACCELERATION_TOP_N)),
     )
     strategy_plan = build_rank_acceleration_buffer_plan(
         ranking=aggregate["ranking"],
@@ -5358,6 +5544,12 @@ async def execute_rank_acceleration_target_rebalance(
         min_weight_increase=strategy_config["min_weight_increase"],
         new_entry_rank_limit=strategy_config["new_entry_rank_limit"],
         new_entry_min_cubes=strategy_config["new_entry_min_cubes"],
+        hard_exit_rank=strategy_config["hard_exit_rank"],
+        hard_exit_min_cubes=strategy_config["hard_exit_min_cubes"],
+        sell_confirm_days=strategy_config["sell_confirm_days"],
+        min_holding_days=strategy_config["min_holding_days"],
+        retain_rank_limit=strategy_config["retain_rank_limit"],
+        retain_min_cubes=strategy_config["retain_min_cubes"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot
@@ -5558,7 +5750,7 @@ async def execute_weight_price_ratio_target_rebalance(
     )
     strategy_sell_rank = max(
         strategy_top_n,
-        int(round(WEIGHT_PRICE_RATIO_SELL_RANK_MULTIPLIER * strategy_top_n)),
+        int(round(strategy_config["sell_rank"] * strategy_top_n / WEIGHT_PRICE_RATIO_TOP_N)),
     )
 
     strategy_history = load_rank_acceleration_strategy_history(
@@ -5579,6 +5771,12 @@ async def execute_weight_price_ratio_target_rebalance(
         min_weight_increase=strategy_config["min_weight_increase"],
         new_entry_rank_limit=strategy_config["new_entry_rank_limit"],
         new_entry_min_cubes=strategy_config["new_entry_min_cubes"],
+        hard_exit_rank=strategy_config["hard_exit_rank"],
+        hard_exit_min_cubes=strategy_config["hard_exit_min_cubes"],
+        sell_confirm_days=strategy_config["sell_confirm_days"],
+        min_holding_days=strategy_config["min_holding_days"],
+        retain_rank_limit=strategy_config["retain_rank_limit"],
+        retain_min_cubes=strategy_config["retain_min_cubes"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot

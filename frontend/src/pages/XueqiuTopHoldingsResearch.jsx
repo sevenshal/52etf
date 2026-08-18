@@ -389,6 +389,69 @@ const XueqiuTopHoldingsResearch = () => {
       precision: 1,
       suffix: 'pp',
     },
+    {
+      key: 'hard_exit_rank',
+      label: '硬退出排名',
+      tooltip: '综合排名超过该值立即卖出（不确认、不看持有期；默认叁号250/贰号150）',
+      min: 1,
+      max: 5000,
+      step: 1,
+      suffix: '名',
+    },
+    {
+      key: 'hard_exit_min_cubes',
+      label: '硬退出最少组合数',
+      tooltip: '活跃组合数低于该值立即卖出（默认3）',
+      min: 1,
+      max: 1000,
+      step: 1,
+      suffix: '个',
+    },
+    {
+      key: 'sell_rank',
+      label: '卖出缓冲基数',
+      tooltip: 'Top10 时的卖出缓冲大小，随目标仓位等比缩放（默认30：Top10时跌出Top30才考虑卖，贪婪3只时缩到Top9）',
+      min: 1,
+      max: 5000,
+      step: 1,
+      suffix: '名',
+    },
+    {
+      key: 'sell_confirm_days',
+      label: '卖出确认天数',
+      tooltip: '连续几日跌出缓冲才确认卖出（默认2，按快照滑动窗口重算）',
+      min: 1,
+      max: 30,
+      step: 1,
+      suffix: '日',
+    },
+    {
+      key: 'min_holding_days',
+      label: '最少持有交易日',
+      tooltip: '买入后持满几个完整交易日才允许普通卖出（默认5）',
+      min: 0,
+      max: 120,
+      step: 1,
+      suffix: '日',
+    },
+    {
+      key: 'retain_rank_limit',
+      label: '缓冲候选排名上限',
+      tooltip: '能进缓冲池（可继续持有）的综合排名上限（默认叁号200/贰号100）',
+      min: 1,
+      max: 5000,
+      step: 1,
+      suffix: '名',
+    },
+    {
+      key: 'retain_min_cubes',
+      label: '缓冲候选最少组合数',
+      tooltip: '能进缓冲池的最少活跃组合数（默认5）',
+      min: 1,
+      max: 1000,
+      step: 1,
+      suffix: '个',
+    },
   ], []);
 
   const fetchStrategyConfigs = useCallback(async () => {
@@ -1022,6 +1085,7 @@ const XueqiuTopHoldingsResearch = () => {
                         信号检测参数（恐贪阈值、放/缩量标准差、MA5回看与冷却天数）在「我的 → 系统管理 → 贪恐信号配置」统一设置，星澜壹贰叁号共用同一套。此处配置各策略的目标仓位与买入资格：
                         目标仓位 = 底信号扩仓到「底信号目标仓位」只、顶信号收缩到「顶信号目标仓位」只，其余维持当前（至少顶信号目标仓位只）。
                         买入资格 = 综合排名≤上限、活跃组合≥最少组合数、组合数增加≥下限、总权重上升>下限、指标≥阈值，或强势新进；当天符合且最近3个快照日至少2日符合（历史按快照滑动窗口重算）才确认买入。
+                        卖出 = 硬退出（排名&gt;阈值/组合数&lt;3）立即卖；普通退出需连续2个快照日跌出缓冲池（缓冲=按指标排序的Top卖出缓冲）且持满5个完整交易日，再与买入配对执行。
                       </Text>
                     </Col>
                   </Row>
