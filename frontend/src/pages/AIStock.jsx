@@ -400,6 +400,7 @@ const AIStock = () => {
   const [targetReturnPctMin, setTargetReturnPctMin] = useState(5);
   const [targetReturnPctMax, setTargetReturnPctMax] = useState(10);
   const [newsSignalWeight, setNewsSignalWeight] = useState(0.5);
+  const [xueqiuSignalEnabled, setXueqiuSignalEnabled] = useState(0);
   const [paperConfig, setPaperConfig] = useState(null);
   const [paperConfigOpen, setPaperConfigOpen] = useState(false);
   const [savingPaperConfig, setSavingPaperConfig] = useState(false);
@@ -534,6 +535,7 @@ const AIStock = () => {
     setTargetReturnPctMin(settings?.target_return_pct_min ?? 5);
     setTargetReturnPctMax(settings?.target_return_pct_max ?? 10);
     setNewsSignalWeight(settings?.news_signal_weight ?? 0.5);
+    setXueqiuSignalEnabled(settings?.xueqiu_signal_enabled ?? 0);
     setSettingsOpen(true);
   }, [settings]);
 
@@ -553,6 +555,7 @@ const AIStock = () => {
       payload.target_return_pct_min = targetReturnPctMin;
       payload.target_return_pct_max = targetReturnPctMax;
       payload.news_signal_weight = newsSignalWeight;
+      payload.xueqiu_signal_enabled = xueqiuSignalEnabled ? 1 : 0;
       const response = await request.put('/api/ai-stock/settings', payload);
       setSettings(response.data);
       setDeepseekApiKey('');
@@ -563,7 +566,7 @@ const AIStock = () => {
     } finally {
       setSavingSettings(false);
     }
-  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight]);
+  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled]);
 
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
@@ -845,6 +848,15 @@ const AIStock = () => {
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益下限(%)</Text><Input type="number" value={targetReturnPctMin} onChange={e => setTargetReturnPctMin(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>建议收益上限(%)</Text><Input type="number" value={targetReturnPctMax} onChange={e => setTargetReturnPctMax(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>错价机会权重(0关闭)</Text><Input type="number" value={newsSignalWeight} onChange={e => setNewsSignalWeight(Number(e.target.value) || 0)} min={0} max={1} step={0.1} /></Col>
+          </Row>
+          <Row align="middle" gutter={12}>
+            <Col span={16}>
+              <Text style={{ fontSize: 13 }}>雪球活跃组合行为信号</Text>
+              <div><Text type="secondary" style={{ fontSize: 12 }}>候选在雪球活跃持仓内时附加 xueqiu 行为块（权重/排名/组合数/权价比）供 AI 参考，新批次 prompt 版本为 news-ths-v4</Text></div>
+            </Col>
+            <Col span={8} style={{ textAlign: 'right' }}>
+              <Switch checked={xueqiuSignalEnabled === 1} onChange={v => setXueqiuSignalEnabled(v ? 1 : 0)} checkedChildren="开" unCheckedChildren="关" />
+            </Col>
           </Row>
         </Space>
       </Modal>
