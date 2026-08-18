@@ -330,7 +330,7 @@ def test_xueqiu_guidance_only_present_when_toggle_enabled():
         assert "xueqiu_guidance" in last_instruction
         assert last_instruction["candidates"][0]["xueqiu"]["weight"] == 3.92
         assert last_instruction["candidates"][0]["xueqiu"]["rank"] == 45
-        assert "主动买入" in last_instruction["xueqiu_guidance"]
+        assert "逆势吸筹" in last_instruction["xueqiu_guidance"]
         assert "1.15" in last_instruction["xueqiu_guidance"]
     finally:
         ai_stock_mod.requests.post = original_post
