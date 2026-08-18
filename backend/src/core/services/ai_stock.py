@@ -541,8 +541,9 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
     """Attach the xueqiu behavior block to candidates in the current Xueqiu snapshot.
 
     Candidates absent from the snapshot get no block at all.  The block carries
-    current levels (weight/rank/cube_count) plus pre-computed 5-day changes; the
-    5-day-change fields are None for new entries (not held 5 trading days ago), which
+    current levels (weight/rank/cube_count) plus pre-computed 5-day changes and the
+    deterministic direction label (computed by ``load_xueqiu_top_holdings_latest``);
+    the 5-day-change fields are None for new entries (not held 5 trading days ago), which
     the prompt guidance explains explicitly.  Any snapshot outage only skips the
     enrichment (the recommendation itself must never depend on this data).
     """
@@ -557,6 +558,7 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
             continue
         weight_gain = _clamp_multiple(item.get("weight_multiple_5d"), XUEQIU_WEIGHT_GAIN_CLIP)
         price_gain = _round(item.get("momentum_multiple_5d"), 3)
+        ratio = _clamp_multiple(item.get("weight_price_ratio_5d"), XUEQIU_RATIO_CLIP)
         cube_count = _safe_int_value(item.get("holding_cube_count"))
         cube_count_5d_ago = _safe_int_value(item.get("cube_count_5d_ago"))
         cube_gain = cube_count - cube_count_5d_ago if (cube_count is not None and cube_count_5d_ago is not None) else None
@@ -568,7 +570,8 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
             "price_gain_5d": price_gain,
             "rank_up_5d": _safe_int_value(item.get("rank_change_5d")),
             "cube_gain_5d": cube_gain,
-            "ratio_5d": _clamp_multiple(item.get("weight_price_ratio_5d"), XUEQIU_RATIO_CLIP),
+            "ratio_5d": ratio,
+            "direction": item.get("direction") or "持平",
         }
 
 
@@ -1055,6 +1058,11 @@ class DeepSeekStockSelector:
                 "4) 权重降+价格升=借涨减仓，偏负面。"
                 "持仓组合数上升(cube_gain_5d>0)=扩散(更多组合形成共识，更可信)，下降=收敛。"
                 "weight_gain_5d 与 price_gain_5d 单位一致(倍数，已裁剪到0.2~10)，rank_up_5d 正值=排名进步。"
+                "direction 是系统按双条件判定的确定性方向标签（新进/持平/顺势加仓/逆势吸筹/借涨减仓/减仓），可直接引用："
+                "仅当 权重升幅>5% 且 权价比>1.05 同时成立才判加仓方向（价格跌=逆势吸筹，价格涨=顺势加仓）；"
+                "仅当 权重降幅>5% 且 权价比<0.95 同时成立才判减仓方向（价格涨=借涨减仓，价格跌=减仓）；"
+                "其余（权重变动≤5%、或变动由价格推动、或两轴不一致）一律持平。"
+                "引用时须与 direction 一致，不得把负向(借涨减仓/减仓)或持平描述为增仓加仓。"
                 "经验校准：显著主动买入的分界线约为 权价比≥1.15 且5日持仓组合数增加≥2 且当前持仓组合数≥5 且综合排名≤100"
                 "（新进标的约需排名≤30且组合数≥10），低于此线多为噪声、高于则信号更强；"
                 "本系统按新闻事件链选股，xueqiu 仅作排序与置信度参考，不是准入条件。"

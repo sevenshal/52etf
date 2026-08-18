@@ -184,6 +184,7 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
             "rank_change_5d": 23,
             "cube_count_5d_ago": 3,
             "weight_price_ratio_5d": 1.33,
+            "direction": "顺势加仓",
         },
         "600001.SH": {  # new entry: 5d-ago fields None, but price momentum still real
             "composite_weight_pct": 1.0,
@@ -194,6 +195,7 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
             "rank_change_5d": None,
             "cube_count_5d_ago": None,
             "weight_price_ratio_5d": None,
+            "direction": "新进",
         },
         "600002.SH": {  # extreme multiples must be clipped
             "composite_weight_pct": 20.0,
@@ -204,6 +206,7 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
             "rank_change_5d": -44,
             "cube_count_5d_ago": 20,
             "weight_price_ratio_5d": 153.5,
+            "direction": "顺势加仓",
         },
     }
     monkeypatch = mock.Mock()
@@ -237,6 +240,7 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
     assert xq["rank_up_5d"] == 23
     assert xq["cube_gain_5d"] == 2
     assert xq["ratio_5d"] == 1.33
+    assert xq["direction"] == "顺势加仓"
 
     xq_new = candidates[1]["xueqiu"]
     assert xq_new["weight_gain_5d"] is None
@@ -245,12 +249,14 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
     assert xq_new["ratio_5d"] is None
     assert xq_new["price_gain_5d"] == 1.02  # price momentum is real for new entries too
     assert xq_new["cube_count"] == 12
+    assert xq_new["direction"] == "新进"
 
     xq_extreme = candidates[2]["xueqiu"]
     assert xq_extreme["weight_gain_5d"] == 10.0  # clipped
     assert xq_extreme["ratio_5d"] == 10.0  # clipped
     assert xq_extreme["rank_up_5d"] == -44  # negative = rank dropped
     assert xq_extreme["cube_gain_5d"] == 0
+    assert xq_extreme["direction"] == "顺势加仓"
 
 
 def test_xueqiu_guidance_only_present_when_toggle_enabled():

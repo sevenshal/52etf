@@ -326,6 +326,10 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(6.11, by_symbol["SH.600001"]["weight_price_ratio_5d"])  # 5.5/0.9, 权重升但股价跌
         self.assertEqual(0.38, by_symbol["SH.600002"]["weight_price_ratio_5d"])  # 0.4167/1.1, 权重降股价升
         self.assertIsNone(by_symbol["SH.600003"]["weight_price_ratio_5d"])
+        # deterministic direction labels (weight up>5% AND ratio>1.05, or weight down>5% AND ratio<0.95)
+        self.assertEqual("逆势吸筹", by_symbol["SH.600001"]["direction"])  # 权重升 5.5x + 股价跌 0.9x
+        self.assertEqual("借涨减仓", by_symbol["SH.600002"]["direction"])  # 权重降 0.417x + 股价升 1.1x
+        self.assertEqual("持平", by_symbol["SH.600003"]["direction"])  # 无价格数据兑底
 
     def test_latest_weight_change_null_for_new_entries(self):
         with TemporaryDirectory() as tmpdir:
@@ -346,6 +350,29 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertIsNone(by_symbol["SH.600001"]["momentum_multiple_5d"])
         self.assertIsNone(by_symbol["SH.600001"]["weight_price_ratio_5d"])
         self.assertIsNone(by_symbol["SH.600001"]["cube_count_5d_ago"])
+        self.assertEqual("新进", by_symbol["SH.600001"]["direction"])  # 无5日前权重 = 新进
+
+    def test_direction_classification_is_deterministic(self):
+        direction = factor_lab._xueqiu_direction
+        cases = [
+            # (weight_gain, price_gain, ratio, expected)
+            (None, 1.02, None, "新进"),
+            (1.4, 1.05, 1.33, "顺势加仓"),
+            (1.2, 0.9, 1.33, "逆势吸筹"),
+            (10.0, 1.2, 10.0, "顺势加仓"),
+            (0.9, 1.0, 0.9, "借涨减仓"),
+            (0.72, 0.9, 0.8, "减仓"),
+            (0.5, 1.3, 0.38, "借涨减仓"),
+            # 双条件缺一不可 -> 持平
+            (1.5, 1.5, 1.0, "持平"),
+            (1.06, 1.0, 1.04, "持平"),
+            (1.05, 1.0, 1.05, "持平"),
+            (1.0, 1.1, 0.91, "持平"),
+            (0.96, 0.9, 1.07, "持平"),
+            (1.2, None, None, "持平"),
+        ]
+        for weight, price, ratio, expected in cases:
+            self.assertEqual(expected, direction(weight, price, ratio), (weight, price, ratio))
 
     def test_latest_cube_count_5d_ago_null_for_stock_new_on_latest_date(self):
         """A stock held only on the latest snapshot keeps current cube count but

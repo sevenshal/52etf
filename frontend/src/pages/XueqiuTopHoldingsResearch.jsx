@@ -78,22 +78,43 @@ const renderRankDelta = value => {
   );
 };
 
+// 权重/股价 5日倍数归一化：null/NaN 一律返回 null
 const weightMomentumRatioNumber = value => (
   value === null || value === undefined || Number.isNaN(Number(value))
     ? null
     : Number(value)
 );
 
-// 权重上升但股价下跌：权重变化不是由本身上涨带动的，疑似主动加仓
-const isWeightUpPriceDown = record => {
-  const weightMultiple = weightMomentumRatioNumber(record?.weight_multiple_5d);
-  const momentumMultiple = weightMomentumRatioNumber(record?.momentum_multiple_5d);
-  return (
-    weightMultiple !== null
-    && momentumMultiple !== null
-    && weightMultiple > 1
-    && momentumMultiple < 1
-  );
+// 雪球组合行为方向（与后端 _xueqiu_direction 同规则，后端优先、前端兜底）
+// 双条件判定：权重升幅>5% 且 权价比>1.05 才算加仓方向；权重降幅>5% 且 权价比<0.95 才算减仓方向；其余持平
+const XUEQIU_DIRECTIONS = ['新进', '持平', '顺势加仓', '逆势吸筹', '借涨减仓', '减仓'];
+const XUEQIU_DIRECTION_COLORS = {
+  '新进': 'blue',
+  '持平': 'default',
+  '顺势加仓': 'green',
+  '逆势吸筹': 'cyan',
+  '借涨减仓': 'orange',
+  '减仓': 'red',
+};
+
+const xueqiuDirectionOf = record => {
+  if (record?.direction) return record.direction;
+  const weight = weightMomentumRatioNumber(record?.weight_multiple_5d);
+  const price = weightMomentumRatioNumber(record?.momentum_multiple_5d);
+  const ratio = weightMomentumRatioNumber(record?.weight_price_ratio_5d);
+  if (weight === null) return '新进';
+  if (weight > 1.05 && ratio !== null && ratio > 1.05) {
+    return price !== null && price >= 1 ? '顺势加仓' : '逆势吸筹';
+  }
+  if (weight < 0.95 && ratio !== null && ratio < 0.95) {
+    return price !== null && price >= 1 ? '借涨减仓' : '减仓';
+  }
+  return '持平';
+};
+
+const isCashSymbol = record => {
+  const symbol = String(record?.stock_symbol || '').toUpperCase();
+  return symbol === 'CASH' || symbol === 'CN_CASH';
 };
 
 const signedFixed = value => (
@@ -113,13 +134,13 @@ const renderWeightMomentumRatio = (value, record) => {
   const momentumMultiple = weightMomentumRatioNumber(record?.momentum_multiple_5d);
   const weightChange = weightMomentumRatioNumber(record?.weight_change_5d);
   const momentum = weightMomentumRatioNumber(record?.momentum_5d);
-  const weightUpPriceDown = isWeightUpPriceDown(record);
   let color = '#595959';
   if (ratio > 1.15) color = '#389e0d';
   else if (ratio < 0.85) color = '#cf1322';
   const priceColor = momentumMultiple === null
     ? undefined
     : (momentumMultiple > 1 ? '#389e0d' : momentumMultiple < 1 ? '#cf1322' : undefined);
+  const direction = isCashSymbol(record) ? null : xueqiuDirectionOf(record);
   return (
     <Tooltip
       title={
@@ -127,19 +148,13 @@ const renderWeightMomentumRatio = (value, record) => {
         + `（${weightMultiple !== null ? `${multipleFixed(weightMultiple)}x` : '-'}）`
         + ` / 5日股价 ${momentum !== null ? `${signedFixed(momentum)}%` : '-'}`
         + `（${momentumMultiple !== null ? `${multipleFixed(momentumMultiple)}x` : '-'}）`
+        + (direction ? ` / 行为方向：${direction}` : '')
       }
     >
       <Space size={4} direction="vertical" style={{ gap: 0 }}>
         <Space size={4}>
-          <Text
-            style={{
-              color: weightUpPriceDown ? '#13c2c2' : color,
-              fontWeight: weightUpPriceDown ? 600 : 400,
-            }}
-          >
-            {ratio.toFixed(2)}x
-          </Text>
-          {weightUpPriceDown ? <Tag color="cyan" style={{ marginInlineEnd: 0 }}>权升价跌</Tag> : null}
+          <Text style={{ color, fontWeight: 400 }}>{ratio.toFixed(2)}x</Text>
+          {direction ? <Tag color={XUEQIU_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag> : null}
         </Space>
         <Text type="secondary" style={{ fontSize: 11, lineHeight: '14px' }}>
           权{weightMultiple !== null ? multipleFixed(weightMultiple) : '-'}x
@@ -726,16 +741,9 @@ const XueqiuTopHoldingsResearch = () => {
         - (weightMomentumRatioNumber(b.weight_price_ratio_5d) ?? Number.NEGATIVE_INFINITY)
       ),
       sortDirections: ['descend', 'ascend'],
-      filters: [
-        { text: '权重升价跌', value: 'weight_up_price_down' },
-        { text: '其他', value: 'others' },
-      ],
+      filters: XUEQIU_DIRECTIONS.map(direction => ({ text: direction, value: direction })),
       filterMultiple: false,
-      onFilter: (value, record) => (
-        value === 'weight_up_price_down'
-          ? isWeightUpPriceDown(record)
-          : !isWeightUpPriceDown(record)
-      ),
+      onFilter: (value, record) => xueqiuDirectionOf(record) === value,
       render: renderWeightMomentumRatio,
     },
     {

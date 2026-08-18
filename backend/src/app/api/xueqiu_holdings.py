@@ -288,6 +288,39 @@ _XUEQIU_PRICE_TABLES = (
 )
 
 
+def _xueqiu_direction(
+    weight_gain: Any,
+    price_gain: Any,
+    ratio: Any,
+) -> str:
+    """雪球组合持仓行为方向标签（双条件判定，宁可保守）。
+
+    与 AI 荐股 xueqiu 块共用同一套规则：
+    仅当 权重升幅>5% 且 权价比>1.05 同时成立才判加仓方向（价格跌=逆势吸筹，价格涨=顺势加仓）；
+    仅当 权重降幅>5% 且 权价比<0.95 同时成立才判减仓方向（价格涨=借涨减仓，价格跌=减仓）；
+    其余（权重变动≤5%、或变动由价格推动、或两轴不一致）一律持平；权重数据缺失为新进。
+    """
+
+    def _f(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    weight_gain = _f(weight_gain)
+    price_gain = _f(price_gain)
+    ratio = _f(ratio)
+    if weight_gain is None:
+        return "新进"
+    if weight_gain > 1.05 and ratio is not None and ratio > 1.05:
+        return "顺势加仓" if price_gain is not None and price_gain >= 1.0 else "逆势吸筹"
+    if weight_gain < 0.95 and ratio is not None and ratio < 0.95:
+        return "借涨减仓" if price_gain is not None and price_gain >= 1.0 else "减仓"
+    return "持平"
+
+
 def _attach_xueqiu_5d_momentum(
     connection,
     items: List[Dict[str, Any]],
@@ -588,6 +621,12 @@ def load_xueqiu_top_holdings_latest(
             metadata.get("rank_compare_snapshot_date"),
             snapshot_date,
         )
+        for item in item_rows:
+            item["direction"] = _xueqiu_direction(
+                item.get("weight_multiple_5d"),
+                item.get("momentum_multiple_5d"),
+                item.get("weight_price_ratio_5d"),
+            )
         index_options = _attach_xueqiu_fear_index_memberships(
             connection,
             item_rows,
