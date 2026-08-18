@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -270,22 +270,49 @@ class IBKRService:
             
         return prices
 
+    @staticmethod
+    def _trade_order_time_et(trade) -> Optional[datetime]:
+        """取订单的提交/成交时间并换算到美东时区；无法确定时返回 None。
+
+        IB 网关事件时间（trade.log / lastFillTime）是网关本地时钟的 naive
+        datetime（本机网关容器为 UTC）。统一按 UTC 解析换算到 US/Eastern：
+        对 RTH（09:30-16:00 ET）内产生的订单，UTC 与 ET 日期一致，换算安全。
+        """
+        log = getattr(trade, "log", None)
+        if log:
+            ts = log[0].time
+            if isinstance(ts, datetime) and ts != datetime.min:
+                return ts.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("US/Eastern"))
+        last_fill_time = getattr(getattr(trade, "orderStatus", None), "lastFillTime", None)
+        if isinstance(last_fill_time, datetime) and last_fill_time != datetime.min:
+            return last_fill_time.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("US/Eastern"))
+        return None
+
     async def has_today_orders(self, symbol: str) -> bool:
-        """检查今天是否有针对该代码的非取消订单 (包括待成交和已成交)"""
+        """检查今天(美东)是否有针对该代码的非取消订单 (包括待成交和已成交)。
+
+        ib_insync 的 trades() 包含本次会话内所有订单（含历史已成交单），
+        必须按订单时间过滤到美东当天，否则前一天的 Filled 订单会让
+        “今日已存在订单”永远为真，策略被静默跳过。
+        """
         await self.connect()
         clean_symbol = self._normalize_ib_equity_symbol(symbol)
-        
-        # 获取当前所有的 trades (包括活动的和最近完成的)
+        now_et = datetime.now(ZoneInfo("US/Eastern"))
+
         trades = self.ib.trades()
-        
         for trade in trades:
-            if self._normalize_ib_equity_symbol(trade.contract.symbol) == clean_symbol:
-                status = trade.orderStatus.status
-                # 只要不是取消状态，都认为今天已经有操作了
-                if status not in ('Cancelled', 'ApiCancelled', 'Inactive'):
-                    logger.info(f"Found existing order for {clean_symbol} with status: {status}")
-                    return True
-        
+            if self._normalize_ib_equity_symbol(trade.contract.symbol) != clean_symbol:
+                continue
+            status = trade.orderStatus.status
+            # 已取消/失效的单子不算
+            if status in ('Cancelled', 'ApiCancelled', 'Inactive'):
+                continue
+            order_time_et = self._trade_order_time_et(trade)
+            # 取不到时间的保守视为今天（避免重复下单）；能取到则必须是美东当天
+            if order_time_et is None or order_time_et.date() == now_et.date():
+                logger.info(f"Found existing order for {clean_symbol} with status: {status}, time={order_time_et}")
+                return True
+
         return False
 
     async def is_market_open(self, symbol: str = "SPY") -> bool:

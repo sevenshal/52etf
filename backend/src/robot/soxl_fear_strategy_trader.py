@@ -101,6 +101,7 @@ class SoxlFearStrategyTrader:
         self._thread_started = False
         self._thread_lock = threading.Lock()
         self._last_auto_trigger_date: Optional[date] = None
+        self._worker_loop: Optional[asyncio.AbstractEventLoop] = None
         self.ib_services: Dict[str, IBKRService] = {}
 
     async def _ensure_ib_connected(self, port: int, client_id: int) -> IBKRService:
@@ -1116,7 +1117,12 @@ class SoxlFearStrategyTrader:
 
                 if log_action != "SKIP" and not order_action and is_fear and volume_ratio >= float(config.volume_ratio_threshold) and can_trade:
                     buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
-                    trade_quantity = min(floor(buy_amount / current_price), floor(available_cash / current_price))
+                    # 买入后持仓市值不超过账户净值 100%：IB/长桥的可用资金含保证金
+                    # 额度，若不限制会把仓位打到 100% 净值以上（margin）。
+                    max_addable_value = max(0.0, portfolio_value - shares * current_price)
+                    nav_capped = max_addable_value < portfolio_value * (float(config.buy_position_pct) / 100.0) - 1e-9
+                    buy_amount = min(buy_amount, max_addable_value, available_cash)
+                    trade_quantity = floor(buy_amount / current_price)
                     actual_buy_amount = trade_quantity * current_price
                     trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
@@ -1124,6 +1130,8 @@ class SoxlFearStrategyTrader:
                         order_action = "BUY"
                         order_quantity = trade_quantity
                         order_message_template = f"CNN={cnn_score:.2f} 进入买入区，{volume_detail} 放大，订单ID={{order_id}}"
+                        if nav_capped:
+                            order_message_template += "（仓位已按净值 100% 上限调减）"
                         position_ratio_after = ((shares + trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
                     else:
                         trade_message = "买入信号成立，但可买数量过小或未达到调仓阈值"
@@ -1316,6 +1324,31 @@ class SoxlFearStrategyTrader:
                 await asyncio.sleep(60)
 
     def trigger_manual_run(self, config_id: int, account_id: Optional[str] = None):
+        """后台触发一次手动检查。
+
+        IB(ib_insync) 连接绑定在建立连接的那个事件循环上：跨线程/跨循环复用
+        同一个缓存 IBKRService 时，快照读取虽然能返回数据，但下单
+        （qualifyContracts/placeOrder）会超时；手动线程退出关闭 loop 后，缓存
+        连接的心跳/reader 也会随之失效，进而毒化自动 Worker 的下单。
+        因此优先把任务调度到 SOXL worker 自己的 loop 上执行，让所有 IB
+        交互收敛到同一个循环。
+        """
+        def log_manual_run_future(future):
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("SOXL manual run failed for config=%s: %s", config_id, exc, exc_info=True)
+
+        worker_loop = self._worker_loop
+        if worker_loop is not None and worker_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.run_config_id_once(config_id, account_id, trigger_source="manual", ignore_enabled=True),
+                worker_loop,
+            )
+            future.add_done_callback(log_manual_run_future)
+            return
+
+        # 兜底：worker 尚未启动时退回独立线程执行
         def runner():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -1342,7 +1375,11 @@ def start_soxl_fear_strategy_trader():
     def runner():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(trader.worker_loop())
+        trader._worker_loop = loop
+        try:
+            loop.run_until_complete(trader.worker_loop())
+        finally:
+            trader._worker_loop = None
 
     thread = threading.Thread(target=runner, daemon=True, name="SOXLFearStrategyTrader")
     thread.start()
