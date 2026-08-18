@@ -956,7 +956,7 @@ const XueqiuTopHoldingsResearch = () => {
                             min={field.min}
                             max={field.max}
                             step={field.step}
-                            precision={field.key === 'min_holding_cubes' ? 0 : 2}
+                            precision={field.precision ?? 0}
                             style={{ width: '100%' }}
                           />
                         </Form.Item>
