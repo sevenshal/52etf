@@ -40,6 +40,19 @@ from ...core.database import (
     get_db_ctx,
 )
 from ...core.duckdb_utils import connect_duckdb
+from ...core.services.duckdb_analytics import (
+    A_STOCK_ETF_DAILY_SYMBOL_SET,
+    A_STOCK_INDEX_POOL_CODE_SET,
+    SYMBOL_PATTERN,
+    connect_analytics_db,
+    duckdb_query_dicts as _duckdb_query_dicts,
+    duckdb_table_exists as _duckdb_table_exists,
+    is_a_stock_symbol as _is_a_stock_symbol,
+    load_price_frame as _load_price_frame,
+    quote_sql_string as _quote_sql_string,
+    safe_float as _safe_float,
+    serialize_value as _serialize_value,
+)
 from ...core.event_stream import publish_event
 from ...core.external_trading_database import (
     ExternalTradingAccount,
@@ -48,7 +61,6 @@ from ...core.external_trading_database import (
     get_external_trading_db_ctx,
 )
 from ...core.services.factor_backtest_engine import (
-    A_STOCK_INDEX_POOL_CODES,
     A_STOCK_INNO100_INDEX_CODE,
     A_STOCK_INNO100_POOL,
     A_STOCK_INNO100_SYMBOL,
@@ -112,7 +124,7 @@ from ...core.services.market import MarketService
 from ...core.services.symbol_names import format_symbol_label, load_symbol_name_map, normalize_symbol_for_name
 from ...core.services.tushare import TushareService
 from ...core.utils import normalize_us_equity_symbol, send_alert_email
-from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_ETF_DAILY_SYMBOLS, A_STOCK_INDEX_FEAR_GREED_TARGETS
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES, A_STOCK_INDEX_FEAR_GREED_TARGETS
 from ...robot.us_stock_signal_virtual import (
     DEFAULT_REBALANCE_FREQUENCY,
     DEFAULT_SELL_RANK_MULTIPLIER,
@@ -151,9 +163,7 @@ DEFAULT_HEATMAP_METRIC = "non_overlap_annualized_median_pct"
 DEFAULT_TIMING_HEATMAP_METRIC = "annualized_low_minus_high_avg_return_pct"
 MAX_HEATMAP_CELLS = 20
 FACTOR_DISTRIBUTION_BIN_COUNT = 40
-SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FEAR_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
-A_STOCK_INDEX_POOL_CODE_SET = set(A_STOCK_INDEX_POOL_CODES)
 A_STOCK_FEAR_SOURCE_LABELS = {
     A_STOCK_INNO100_SYMBOL: "A创100 指数贪恐",
     **{
@@ -163,7 +173,6 @@ A_STOCK_FEAR_SOURCE_LABELS = {
         for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
     },
 }
-A_STOCK_ETF_DAILY_SYMBOL_SET = {str(symbol).upper() for symbol in A_STOCK_ETF_DAILY_SYMBOLS}
 A_STOCK_FEAR_SOURCE_ORDER = {
     symbol: index
     for index, symbol in enumerate(
@@ -1066,15 +1075,6 @@ class FactorLabOptionsResponse(BaseModel):
     default_timing_request: Dict[str, Any]
 
 
-def _quote_sql_string(value: str) -> str:
-    return f"'{value.replace(chr(39), chr(39) * 2)}'"
-
-
-def _is_a_stock_symbol(symbol: str) -> bool:
-    text = str(symbol or "").strip().upper()
-    return text.endswith((".SH", ".SZ", ".BJ"))
-
-
 def _is_a_stock_pool(pool: Optional[str]) -> bool:
     pool_key = str(pool or "").strip().upper()
     return pool_key == A_STOCK_INNO100_POOL or pool_key in A_STOCK_INDEX_POOL_CODE_SET
@@ -1129,18 +1129,6 @@ def _weights_for_heatmap_row(
     return _normalize_momentum_weights({str(active_windows[0]): 1.0}, active_windows)
 
 
-def _safe_float(value: Any, digits: Optional[int] = None) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number):
-        return None
-    return round(number, digits) if digits is not None else number
-
-
 def _annualize_period_return_pct(period_return_pct: Any, forward_window: int) -> Optional[float]:
     period_return = _safe_float(period_return_pct)
     if period_return is None or forward_window <= 0:
@@ -1180,14 +1168,6 @@ def _record_float(record: Dict[str, Any], key: str, fallback: float) -> float:
     return number if math.isfinite(number) else fallback
 
 
-def _serialize_value(value: Any) -> Any:
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, float):
-        return _safe_float(value)
-    return value
-
-
 def _request_to_dict(request: Any) -> Dict[str, Any]:
     if isinstance(request, BaseModel):
         if hasattr(request, "model_dump"):
@@ -1215,44 +1195,14 @@ def _records(df: pl.DataFrame, limit: Optional[int] = None) -> List[Dict[str, An
     ]
 
 
-def _import_duckdb():
-    try:
-        import duckdb
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="DuckDB依赖不可用") from exc
-    return duckdb
-
-
 def _connect_duckdb():
-    _import_duckdb()
     try:
-        return connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        return connect_analytics_db()
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"DuckDB分析库当前不可读，可能正在同步写入或被其他进程占用: {exc}",
+            detail=str(exc),
         ) from exc
-
-
-def _duckdb_table_exists(connection, table_name: str) -> bool:
-    row = connection.execute(
-        """
-        SELECT COUNT(*)
-        FROM information_schema.tables
-        WHERE table_name = ?
-        """,
-        [table_name],
-    ).fetchone()
-    return bool(row and row[0])
-
-
-def _duckdb_query_dicts(connection, query: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
-    cursor = connection.execute(query, params or [])
-    columns = [column[0] for column in cursor.description or []]
-    return [
-        {key: _serialize_value(value) for key, value in zip(columns, row)}
-        for row in cursor.fetchall()
-    ]
 
 
 def _get_max_trade_date() -> date:
@@ -1371,145 +1321,6 @@ def _resolve_timing_end_date(request: TimingFactorAnalyzeRequest, db: ORMSession
         candidates = [item for item in [_get_max_a_stock_market_date()] if item is not None]
         return min(candidates) if candidates else date.today()
     return _get_max_trade_date()
-
-
-def _load_price_frame(symbols: List[str], start_date: date, end_date: date) -> pl.DataFrame:
-    safe_symbols = [
-        symbol for symbol in list(dict.fromkeys(symbols))
-        if symbol and SYMBOL_PATTERN.match(symbol)
-    ]
-    schema = {
-        "symbol": pl.Utf8,
-        "trade_date": pl.Date,
-        "open": pl.Float64,
-        "high": pl.Float64,
-        "low": pl.Float64,
-        "close": pl.Float64,
-        "volume": pl.Float64,
-        "turnover": pl.Float64,
-    }
-    if not safe_symbols:
-        return pl.DataFrame(schema=schema)
-
-    frames: List[pl.DataFrame] = []
-    connection = _connect_duckdb()
-    try:
-        us_symbols = [symbol for symbol in safe_symbols if str(symbol).upper().endswith(".US")]
-        if us_symbols:
-            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in us_symbols)
-            query = f"""
-                SELECT
-                    symbol,
-                    CAST(trade_date AS DATE) AS trade_date,
-                    CAST(open AS DOUBLE) AS open,
-                    CAST(high AS DOUBLE) AS high,
-                    CAST(low AS DOUBLE) AS low,
-                    CAST(close AS DOUBLE) AS close,
-                    CAST(volume AS DOUBLE) AS volume,
-                    CAST(turnover AS DOUBLE) AS turnover
-                FROM us_stock_daily
-                WHERE symbol IN ({symbol_sql})
-                  AND trade_date BETWEEN ? AND ?
-                  AND close IS NOT NULL
-                  AND close > 0
-                ORDER BY symbol, trade_date
-            """
-            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
-
-        a_index_symbols = [symbol for symbol in safe_symbols if symbol in A_STOCK_INDEX_POOL_CODE_SET]
-        if a_index_symbols:
-            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_index_symbols)
-            query = f"""
-                SELECT
-                    ts_code AS symbol,
-                    CAST(trade_date AS DATE) AS trade_date,
-                    CAST(open AS DOUBLE) AS open,
-                    CAST(high AS DOUBLE) AS high,
-                    CAST(low AS DOUBLE) AS low,
-                    CAST(close AS DOUBLE) AS close,
-                    CAST(vol AS DOUBLE) AS volume,
-                    CAST(amount AS DOUBLE) AS turnover
-                FROM a_stock_index_daily
-                WHERE ts_code IN ({symbol_sql})
-                  AND trade_date BETWEEN ? AND ?
-                  AND close IS NOT NULL
-                  AND close > 0
-                ORDER BY ts_code, trade_date
-            """
-            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
-
-        a_fund_symbols = [
-            symbol
-            for symbol in safe_symbols
-            if symbol in A_STOCK_ETF_DAILY_SYMBOL_SET
-        ]
-        if a_fund_symbols:
-            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_fund_symbols)
-            query = f"""
-                SELECT
-                    ts_code AS symbol,
-                    CAST(trade_date AS DATE) AS trade_date,
-                    CAST(open AS DOUBLE) AS open,
-                    CAST(high AS DOUBLE) AS high,
-                    CAST(low AS DOUBLE) AS low,
-                    CAST(close AS DOUBLE) AS close,
-                    CAST(vol AS DOUBLE) AS volume,
-                    CAST(amount AS DOUBLE) AS turnover
-                FROM a_stock_fund_daily_qfq
-                WHERE ts_code IN ({symbol_sql})
-                  AND trade_date BETWEEN ? AND ?
-                  AND close IS NOT NULL
-                  AND close > 0
-                ORDER BY ts_code, trade_date
-            """
-            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
-
-        a_symbols = [
-            symbol
-            for symbol in safe_symbols
-            if _is_a_stock_symbol(symbol) and symbol not in A_STOCK_INDEX_POOL_CODE_SET
-            and symbol not in A_STOCK_ETF_DAILY_SYMBOL_SET
-        ]
-        if a_symbols:
-            symbol_sql = ", ".join(_quote_sql_string(symbol) for symbol in a_symbols)
-            query = f"""
-                SELECT
-                    ts_code AS symbol,
-                    CAST(trade_date AS DATE) AS trade_date,
-                    CAST(open AS DOUBLE) AS open,
-                    CAST(high AS DOUBLE) AS high,
-                    CAST(low AS DOUBLE) AS low,
-                    CAST(close AS DOUBLE) AS close,
-                    CAST(vol AS DOUBLE) AS volume,
-                    CAST(amount AS DOUBLE) AS turnover
-                FROM a_stock_market_daily_qfq
-                WHERE ts_code IN ({symbol_sql})
-                  AND trade_date BETWEEN ? AND ?
-                  AND close IS NOT NULL
-                  AND close > 0
-                ORDER BY ts_code, trade_date
-            """
-            frames.append(pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]}))
-    finally:
-        connection.close()
-
-    non_empty_frames = [frame for frame in frames if frame is not None and not frame.is_empty()]
-    if not non_empty_frames:
-        return pl.DataFrame(schema=schema)
-    df = pl.concat(non_empty_frames, how="vertical_relaxed")
-    if df.is_empty():
-        return pl.DataFrame(schema=schema)
-    return df.with_columns(
-        pl.col("trade_date").cast(pl.Date),
-        pl.col("open").cast(pl.Float64),
-        pl.col("high").cast(pl.Float64),
-        pl.col("low").cast(pl.Float64),
-        pl.col("close").cast(pl.Float64),
-        pl.col("volume").cast(pl.Float64),
-        pl.col("turnover").cast(pl.Float64),
-    ).sort(["symbol", "trade_date"]).with_columns(
-        pl.min("trade_date").over("symbol").alias("_first_trade_date")
-    )
 
 
 def _load_inno100_level_price_frame(db: ORMSession, start_date: date, end_date: date) -> pl.DataFrame:

@@ -18,24 +18,37 @@ from ...core.database import (
     Session as DBSession,
     get_db_ctx,
 )
-from ...core.services.factor_backtest_engine import normalize_a_stock_symbol
-from .account import valid_admin_account
-from .factor_lab import (
-    A_STOCK_INDEX_FEAR_GREED_TARGETS,
+from ...core.services.duckdb_analytics import (
+    SYMBOL_PATTERN,
+    connect_analytics_db,
+    duckdb_query_dicts as _duckdb_query_dicts,
+    duckdb_table_exists as _duckdb_table_exists,
+    load_price_frame as _load_price_frame,
+    safe_float as _safe_float,
+)
+from ...core.services.factor_backtest_engine import (
     A_STOCK_INNO100_INDEX_CODE,
     A_STOCK_INNO100_SYMBOL,
-    SYMBOL_PATTERN,
-    _connect_duckdb,
-    _duckdb_query_dicts,
-    _duckdb_table_exists,
-    _load_price_frame,
-    _safe_float,
+    normalize_a_stock_symbol,
 )
+from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
+from .account import valid_admin_account
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/factor-lab", tags=["Factor Lab · 雪球组合"])
+
+
+
+def _connect_duckdb():
+    try:
+        return connect_analytics_db()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
 
 XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
 XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS = 5

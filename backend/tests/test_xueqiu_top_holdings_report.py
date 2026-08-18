@@ -1158,7 +1158,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 connection.close()
 
             with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path), patch(
-                "src.app.api.factor_lab.ANALYTICS_DB_PATH", path
+                "src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", path
             ):
                 history = load_xueqiu_snapshot_signal_history(
                     current_snapshot_date=date(2026, 8, 17),
