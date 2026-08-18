@@ -286,6 +286,31 @@ const getHistoryChartOption = (historyRows = []) => {
   };
 };
 
+
+// 买入/卖出资格参数仅贰号叁号使用（壹号综合权重策略不用）；壹号只用目标仓位+最少组合数
+const XUEQIU_BUY_SELL_ONLY_KEYS = [
+  'current_rank_limit',
+  'holding_cube_increase',
+  'metric_threshold',
+  'new_entry_rank_limit',
+  'new_entry_min_cubes',
+  'min_weight_increase',
+  'hard_exit_rank',
+  'hard_exit_min_cubes',
+  'sell_rank',
+  'sell_confirm_days',
+  'min_holding_days',
+  'retain_rank_limit',
+  'retain_min_cubes',
+];
+const strategyFieldsFor = (strategyKey, allFields) => (
+  allFields.filter(field => (
+    !XUEQIU_BUY_SELL_ONLY_KEYS.includes(field.key)
+    || strategyKey === 'rank_acceleration'
+    || strategyKey === 'weight_price_ratio'
+  ))
+);
+
 const XueqiuTopHoldingsResearch = () => {
   const [activeOnly, setActiveOnly] = useState(true);
   const [searchText, setSearchText] = useState('');
@@ -462,7 +487,7 @@ const XueqiuTopHoldingsResearch = () => {
       setConfigs(items);
       const initialValues = {};
       items.forEach(item => {
-        STRATEGY_CONFIG_FIELDS.forEach(field => {
+        strategyFieldsFor(item.strategy_key, STRATEGY_CONFIG_FIELDS).forEach(field => {
           initialValues[`${item.strategy_key}.${field.key}`] = item[field.key];
         });
       });
@@ -485,7 +510,7 @@ const XueqiuTopHoldingsResearch = () => {
     try {
       for (const item of configs) {
         const payload = {};
-        STRATEGY_CONFIG_FIELDS.forEach(field => {
+        strategyFieldsFor(item.strategy_key, STRATEGY_CONFIG_FIELDS).forEach(field => {
           const value = values[`${item.strategy_key}.${field.key}`];
           if (value !== undefined && value !== null) {
             payload[field.key] = Number(value);
@@ -1060,7 +1085,7 @@ const XueqiuTopHoldingsResearch = () => {
                 label: item.label || item.strategy_key,
                 children: (
                   <Row gutter={16}>
-                    {STRATEGY_CONFIG_FIELDS.map(field => (
+                    {strategyFieldsFor(item.strategy_key, STRATEGY_CONFIG_FIELDS).map(field => (
                       <Col xs={24} md={12} key={field.key}>
                         <Form.Item
                           name={`${item.strategy_key}.${field.key}`}
