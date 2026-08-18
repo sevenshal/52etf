@@ -502,7 +502,7 @@ def test_run_persists_full_news_to_stock_transcript():
     evidence = service.get_run_evidence(run["id"])
     transcript = service.get_run_transcript(run["id"])
     assert evidence["news_snapshot"][0]["title"] == "原始新闻标题必须存档"
-    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v4"
+    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v5"
     assert [stage["stage"] for stage in transcript["ai_raw_response"]["stages"]] == ["NEWS_EVENTS", "EVENTS_TO_THS_BOARDS", "THS_BOARDS_TO_STOCK_SELECTION"]
     assert transcript["ai_raw_response"]["stages"][0]["request"]["messages"][0]["content"] == "原始新闻标题必须存档"
 

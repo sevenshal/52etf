@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v4"  # v4: 候选不再重复携带 board_strength（顶层 board_market_snapshot 已有），第3轮载荷大幅缩小
+PROMPT_VERSION = "news-ths-v5"  # v5: 去掉 xueqiu direction 的否定式引用约束（实验：观察模型能否在方向标签可见时自然引用），v4=去掉候选 board_strength
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -1052,7 +1052,6 @@ class DeepSeekStockSelector:
                 "借涨减仓/减仓=组合在卖出；持平=权重变化由价格推动，无主动行为；"
                 "新进=5日前未持有（排名≤30且组合数≥10属强新进，可提高置信度）。"
                 "组合数上升(cube_gain_5d>0)=扩散更可信，下降=收敛。"
-                "引用须与 direction 一致，不得把减仓/持平表述为增仓。"
                 "xueqiu 缺失=不在雪球持仓，不惩罚。"
                 "参考线：权价比≥1.15 且组合数+2 且排名≤100（仅校准非准入）。"
                 "本系统以新闻事件链选股，xueqiu 仅作排序与置信度参考。"
