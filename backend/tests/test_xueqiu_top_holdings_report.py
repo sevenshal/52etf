@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import AsyncMock, patch
 
+import duckdb
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -40,6 +41,7 @@ from src.robot.xueqiu_top_holdings_report import (
     load_recent_xueqiu_rank_history_cube_sets,
     load_rank_acceleration_strategy_history,
     load_xueqiu_rank_comparison_snapshot,
+    load_xueqiu_buy_eligibility_history,
     load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
     rounded_rebalance_weights,
@@ -53,6 +55,7 @@ from src.robot.xueqiu_top_holdings_report import (
     validate_xueqiu_rank_cache_drift,
     WEIGHT_PRICE_RATIO_STRATEGY_NAME,
     WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
+    _xueqiu_buy_eligible_core,
 )
 
 
@@ -952,6 +955,182 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual("keep", by_symbol["SZ.300757"]["strategy_action"])
         self.assertEqual(9.14, by_symbol["SH.601138"]["rebalance_weight_pct"])
 
+    @staticmethod
+    def _eligibility_history(symbols, days=2):
+        """滑动窗口历史资格 fixture（newest-first），供确认逻辑使用。"""
+        return [
+            {
+                "snapshot_date": f"2026-07-{9 - index:02d}",
+                "eligible_symbols": list(symbols),
+            }
+            for index in range(days)
+        ]
+
+    def test_buy_eligible_core_uses_configurable_thresholds(self):
+        item = {
+            "composite_rank": 50,
+            "holding_cube_count": 10,
+            "total_weight_pct": 200.0,
+            "weight_price_ratio_5d": 1.5,
+        }
+        previous = {
+            "composite_rank": 80,
+            "holding_cube_count": 8,
+            "total_weight_pct": 100.0,
+        }
+        base = dict(
+            comparison_universe_count=500,
+            metric="weight_price_ratio",
+            min_metric_threshold=1.15,
+            min_holding_cubes=8,
+            current_rank_limit=100,
+            holding_cube_increase=2,
+            min_weight_increase=0.0,
+            new_entry_rank_limit=30,
+            new_entry_min_cubes=10,
+        )
+        self.assertTrue(_xueqiu_buy_eligible_core(item, previous, **base))
+        # 排名超限
+        self.assertFalse(_xueqiu_buy_eligible_core(item, previous, **{**base, "current_rank_limit": 40}))
+        # 组合数增加不足
+        self.assertFalse(_xueqiu_buy_eligible_core(item, previous, **{**base, "holding_cube_increase": 3}))
+        # 权价比阈值调高
+        self.assertFalse(_xueqiu_buy_eligible_core(item, previous, **{**base, "min_metric_threshold": 1.6}))
+        # 权重上升不足
+        self.assertFalse(_xueqiu_buy_eligible_core(item, previous, **{**base, "min_weight_increase": 150.0}))
+        # 强势新进：5日前没有、排名靠前、组合数多 → 即使无权价比也满足
+        new_item = {
+            "composite_rank": 20,
+            "holding_cube_count": 12,
+            "total_weight_pct": 300.0,
+            "weight_price_ratio_5d": None,
+        }
+        self.assertTrue(_xueqiu_buy_eligible_core(new_item, None, **base))
+        # 贰号排名指标：5日上升≥阈值
+        rank_base = {**base, "metric": "rank_acceleration", "min_metric_threshold": 20}
+        rank_item = {
+            "composite_rank": 10,
+            "holding_cube_count": 12,
+            "total_weight_pct": 300.0,
+        }
+        self.assertTrue(_xueqiu_buy_eligible_core(rank_item, previous, **rank_base))
+
+    def test_buy_confirmation_uses_snapshot_sliding_window(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        ratio_sorted = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )
+        top10 = ratio_sorted[:10]
+        top10_symbols = [item["stock_symbol"] for item in top10]
+        # 前一日只有前5只符合 → 前5只确认；今天才出现的后5只不确认
+        prior_symbols = top10_symbols[:5]
+        plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            buy_eligibility_history=self._eligibility_history(prior_symbols),
+        )
+        confirmed = set(plan["confirmed_buy_symbols"])
+        self.assertTrue(set(prior_symbols).issubset(confirmed))
+        self.assertEqual(set(), confirmed - set(top10_symbols))
+        # 无历史资格 → 全部不确认
+        empty_plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            current_snapshot_date=date(2026, 7, 10),
+            buy_eligibility_history=[],
+        )
+        self.assertEqual([], empty_plan["confirmed_buy_symbols"])
+
+    def test_load_xueqiu_buy_eligibility_history_uses_snapshot_sliding_window(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            days = [date(2026, 8, day) for day in (10, 11, 12, 13, 14, 15, 16, 17)]
+            weights = [10, 12, 14, 14, 16, 18, 20, 22]
+            cube_counts = [8, 8, 8, 10, 10, 10, 10, 10]
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                for day, weight, cube_count in zip(days, weights, cube_counts):
+                    results = [
+                        CubeCurrentResult(
+                            cube=CubeInfo(
+                                year_rank=cube_index + 1,
+                                symbol=f"ZH{cube_index + 1:06d}",
+                                cube_name=f"组合{cube_index + 1}",
+                            ),
+                            holdings=[
+                                {
+                                    "stock_symbol": "SH600001",
+                                    "stock_name": "股票一",
+                                    "weight": float(weight),
+                                }
+                            ],
+                            active=True,
+                        )
+                        for cube_index in range(cube_count)
+                    ]
+                    save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                        run_at=datetime(2026, 8, day.day, 14, 50, 0),
+                        active_rebalance_days=360,
+                        current_results=results,
+                    )
+            connection = duckdb.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE a_stock_market_daily_qfq (
+                        ts_code VARCHAR, trade_date DATE, open DOUBLE, high DOUBLE,
+                        low DOUBLE, close DOUBLE, vol DOUBLE, amount DOUBLE
+                    )
+                    """
+                )
+                prices = {
+                    "2026-08-10": 100.0,
+                    "2026-08-11": 106.0,
+                    "2026-08-12": 108.0,
+                    "2026-08-13": 110.0,
+                    "2026-08-14": 112.0,
+                    "2026-08-15": 115.0,
+                    "2026-08-16": 118.0,
+                    "2026-08-17": 120.0,
+                }
+                for day, close in prices.items():
+                    connection.execute(
+                        "INSERT INTO a_stock_market_daily_qfq VALUES ('600001.SH', ?, 0, 0, 0, ?, 0, 0)",
+                        [day, close],
+                    )
+            finally:
+                connection.close()
+
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path), patch(
+                "src.app.api.factor_lab.ANALYTICS_DB_PATH", path
+            ):
+                history = load_xueqiu_buy_eligibility_history(
+                    current_snapshot_date=date(2026, 8, 17),
+                    prior_days=2,
+                    metric="weight_price_ratio",
+                    min_holding_cubes=8,
+                )
+
+            self.assertEqual(2, len(history))
+            self.assertEqual(
+                ["2026-08-16", "2026-08-15"],
+                [entry["snapshot_date"] for entry in history],
+            )
+            # 8-15 与 8-16 各自对 5 个交易日前对比，权价比均 ≥1.15、组合数增加 ≥2 → 符合
+            self.assertIn("SH.600001", history[0]["eligible_symbols"])
+            self.assertIn("SH.600001", history[1]["eligible_symbols"])
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def test_rank_acceleration_plan_selects_strong_new_and_breadth_confirmed_risers(self):
         ranking, comparison = self._rank_acceleration_fixture()
         buy_signals = [item["stock_symbol"] for item in ranking[:10]]
@@ -961,12 +1140,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            strategy_history=[
-                self._strategy_history_entry(
-                    date(2026, 7, 9),
-                    buy_signals=buy_signals,
-                )
-            ],
+            buy_eligibility_history=self._eligibility_history(buy_signals),
         )
 
         self.assertTrue(plan["component_changed"])
@@ -987,6 +1161,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
             current_snapshot_date=date(2026, 7, 10),
+            buy_eligibility_history=self._eligibility_history(buy_signals),
             strategy_history=[
                 self._strategy_history_entry(
                     date(2026, 7, 9),
@@ -1070,6 +1245,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
+            buy_eligibility_history=self._eligibility_history(buy_signals),
             strategy_history=history,
             current_snapshot_date=date(2026, 7, 10),
         )
@@ -1087,6 +1263,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             ranking=ranking,
             comparison_snapshot=comparison,
             current_holdings=current_holdings,
+            buy_eligibility_history=self._eligibility_history(buy_signals),
             strategy_history=history,
             current_snapshot_date=date(2026, 7, 10),
         )
@@ -1298,6 +1475,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "src.robot.xueqiu_top_holdings_report.load_xueqiu_rank_comparison_snapshot",
             return_value=comparison,
         ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_buy_eligibility_history",
+            return_value=self._eligibility_history(buy_signals),
+        ), patch(
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3644546, "holdings": []}}),
         ), patch(
@@ -1502,12 +1682,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             comparison_snapshot=comparison,
             current_holdings=[],
             current_snapshot_date=date(2026, 7, 10),
-            strategy_history=[
-                self._strategy_history_entry(
-                    date(2026, 7, 9),
-                    buy_signals=buy_signals,
-                )
-            ],
+            buy_eligibility_history=self._eligibility_history(buy_signals),
         )
 
         self.assertTrue(plan["component_changed"])
@@ -1631,6 +1806,9 @@ class XueqiuTopHoldingsReportTest(TestCase):
         ), patch(
             "src.robot.xueqiu_top_holdings_report.load_xueqiu_weight_price_ratio_map",
             return_value=ratio_by_symbol,
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_xueqiu_buy_eligibility_history",
+            return_value=self._eligibility_history(buy_signals),
         ), patch(
             "src.robot.xueqiu_top_holdings_report.fetch_target_cube_current_payload",
             new=AsyncMock(return_value={"last_rb": {"cube_id": 3664736, "holdings": []}}),

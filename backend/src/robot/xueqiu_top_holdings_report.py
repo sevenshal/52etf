@@ -2709,6 +2709,12 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": 8,
+        "current_rank_limit": 100,
+        "holding_cube_increase": 2,
+        "metric_threshold": WEIGHT_PRICE_RATIO_MIN_RATIO,
+        "new_entry_rank_limit": WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT,
+        "new_entry_min_cubes": WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES,
+        "min_weight_increase": 0.0,
     },
     "rank_acceleration": {
         "strategy_key": "rank_acceleration",
@@ -2716,6 +2722,12 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": RANK_ACCELERATION_MIN_HOLDING_CUBES,
+        "current_rank_limit": RANK_ACCELERATION_CURRENT_RANK_LIMIT,
+        "holding_cube_increase": RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE,
+        "metric_threshold": RANK_ACCELERATION_MIN_RANK_CHANGE,
+        "new_entry_rank_limit": RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT,
+        "new_entry_min_cubes": RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES,
+        "min_weight_increase": 0.0,
     },
     "weight_price_ratio": {
         "strategy_key": "weight_price_ratio",
@@ -2723,6 +2735,12 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "fear_target_count": FEAR_GREED_FEAR_TARGET_COUNT,
         "greed_target_count": FEAR_GREED_GREED_TARGET_COUNT,
         "min_holding_cubes": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES,
+        "current_rank_limit": WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT,
+        "holding_cube_increase": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE,
+        "metric_threshold": WEIGHT_PRICE_RATIO_MIN_RATIO,
+        "new_entry_rank_limit": WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT,
+        "new_entry_min_cubes": WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES,
+        "min_weight_increase": 0.0,
     },
 }
 
@@ -2747,6 +2765,12 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "fear_target_count": int(row.fear_target_count),
             "greed_target_count": int(row.greed_target_count),
             "min_holding_cubes": int(row.min_holding_cubes),
+            "current_rank_limit": int(row.current_rank_limit),
+            "holding_cube_increase": int(row.holding_cube_increase),
+            "metric_threshold": float(row.metric_threshold),
+            "new_entry_rank_limit": int(row.new_entry_rank_limit),
+            "new_entry_min_cubes": int(row.new_entry_min_cubes),
+            "min_weight_increase": float(row.min_weight_increase),
             "updated_at": (
                 row.updated_at.isoformat() if row.updated_at else None
             ),
@@ -3007,6 +3031,208 @@ def load_xueqiu_rank_comparison_snapshot(
         connection.close()
 
 
+def _xueqiu_buy_eligible_core(
+    item: Dict[str, Any],
+    previous: Optional[Dict[str, Any]],
+    *,
+    comparison_universe_count: int,
+    metric: str,
+    min_metric_threshold: float,
+    min_holding_cubes: int,
+    current_rank_limit: int,
+    holding_cube_increase: int,
+    min_weight_increase: float,
+    new_entry_rank_limit: int,
+    new_entry_min_cubes: int,
+) -> bool:
+    """买入资格公式（贰号排名加速/叁号权价比共用，参数均可配置）。
+
+    满足：综合排名≤current_rank_limit、活跃组合数≥min_holding_cubes、
+    组合数增加≥holding_cube_increase、总权重上升>min_weight_increase、
+    策略指标≥min_metric_threshold（权价比≥x 或 排名上升≥x名），
+    或强势新进（5日前未持有、排名≤new_entry_rank_limit 且组合数≥new_entry_min_cubes）。
+    """
+    ratio_metric = metric == "weight_price_ratio"
+    current_rank = safe_int(item.get("composite_rank"))
+    if current_rank is None:
+        return False
+    current_holding_cubes = safe_int(item.get("holding_cube_count")) or 0
+    current_total_weight = safe_float(item.get("total_weight_pct")) or 0.0
+    is_new = previous is None
+    previous_holding_cubes = safe_int((previous or {}).get("holding_cube_count")) or 0
+    previous_total_weight = safe_float((previous or {}).get("total_weight_pct")) or 0.0
+    holding_cube_change = current_holding_cubes - previous_holding_cubes
+    total_weight_change = current_total_weight - previous_total_weight
+    strong_new_entry = (
+        is_new
+        and current_rank <= new_entry_rank_limit
+        and current_holding_cubes >= new_entry_min_cubes
+    )
+    if ratio_metric:
+        metric_eligible = strong_new_entry or (
+            safe_float(item.get("weight_price_ratio_5d")) is not None
+            and safe_float(item.get("weight_price_ratio_5d")) >= min_metric_threshold
+        )
+    else:
+        effective_previous_rank = (
+            safe_int((previous or {}).get("composite_rank"))
+            or (comparison_universe_count + 1)
+        )
+        effective_rank_change = effective_previous_rank - current_rank
+        metric_eligible = strong_new_entry or (
+            not is_new and effective_rank_change >= min_metric_threshold
+        )
+    return (
+        current_rank <= current_rank_limit
+        and current_holding_cubes >= min_holding_cubes
+        and holding_cube_change >= holding_cube_increase
+        and total_weight_change > min_weight_increase
+        and metric_eligible
+    )
+
+
+def load_xueqiu_buy_eligibility_history(
+    *,
+    current_snapshot_date: date,
+    prior_days: int = 2,
+    active_only: bool = True,
+    metric: str = "weight_price_ratio",
+    min_holding_cubes: Optional[int] = None,
+    min_metric_threshold: Optional[float] = None,
+    current_rank_limit: Optional[int] = None,
+    holding_cube_increase: Optional[int] = None,
+    min_weight_increase: Optional[float] = None,
+    new_entry_rank_limit: Optional[int] = None,
+    new_entry_min_cubes: Optional[int] = None,
+    limit: int = 2000,
+) -> List[Dict[str, Any]]:
+    """在最近 ``prior_days`` 个快照日上重算买入资格（滑动窗口确认）。
+
+    与线上计划共用同一套资格公式（见 _xueqiu_buy_eligible_core），数据来自每日
+    快照 + 行情，不依赖机器人运行记录，因此新策略上线当天即可回溯确认。
+    返回 newest-first：[{snapshot_date, eligible_symbols}, ...]；任何错误返回 []。
+    """
+    normalized_days = max(1, int(prior_days or 2))
+    ratio_metric = metric == "weight_price_ratio"
+    effective_min_cubes = (
+        int(min_holding_cubes)
+        if min_holding_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_MIN_HOLDING_CUBES
+        )
+    )
+    effective_rank_limit = (
+        int(current_rank_limit)
+        if current_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_CURRENT_RANK_LIMIT
+        )
+    )
+    effective_cube_increase = (
+        int(holding_cube_increase)
+        if holding_cube_increase is not None
+        else (
+            WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE
+            if ratio_metric
+            else RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE
+        )
+    )
+    effective_min_weight_increase = (
+        float(min_weight_increase) if min_weight_increase is not None else 0.0
+    )
+    effective_new_entry_rank_limit = (
+        int(new_entry_rank_limit)
+        if new_entry_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT
+        )
+    )
+    effective_new_entry_min_cubes = (
+        int(new_entry_min_cubes)
+        if new_entry_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES
+        )
+    )
+    effective_metric_threshold = (
+        min_metric_threshold
+        if min_metric_threshold is not None
+        else (
+            WEIGHT_PRICE_RATIO_MIN_RATIO
+            if ratio_metric
+            else RANK_ACCELERATION_MIN_RANK_CHANGE
+        )
+    )
+    try:
+        from ..app.api.factor_lab import load_xueqiu_top_holdings_latest
+
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT snapshot_date
+                FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+                WHERE snapshot_date < ?
+                ORDER BY snapshot_date DESC
+                LIMIT ?
+                """,
+                [current_snapshot_date, normalized_days],
+            ).fetchall()
+        finally:
+            connection.close()
+        results: List[Dict[str, Any]] = []
+        for (snapshot_day,) in rows:
+            latest = load_xueqiu_top_holdings_latest(
+                snapshot_date=snapshot_day,
+                active_only=active_only,
+                limit=limit,
+            )
+            if not latest.get("available"):
+                continue
+            comparison = load_xueqiu_rank_comparison_snapshot(
+                current_snapshot_date=snapshot_day,
+                trading_days=RANK_ACCELERATION_COMPARE_TRADING_DAYS,
+                active_only=active_only,
+            )
+            comparison_by_symbol = comparison.get("by_symbol") or {}
+            comparison_universe_count = len(comparison.get("items") or [])
+            eligible: Set[str] = set()
+            for item in latest.get("items") or []:
+                symbol = normalize_xueqiu_symbol(item.get("stock_symbol"))
+                if not symbol or is_cash_symbol(symbol):
+                    continue
+                if _xueqiu_buy_eligible_core(
+                    item,
+                    comparison_by_symbol.get(symbol),
+                    comparison_universe_count=comparison_universe_count,
+                    metric=metric,
+                    min_metric_threshold=effective_metric_threshold,
+                    min_holding_cubes=effective_min_cubes,
+                    current_rank_limit=effective_rank_limit,
+                    holding_cube_increase=effective_cube_increase,
+                    min_weight_increase=effective_min_weight_increase,
+                    new_entry_rank_limit=effective_new_entry_rank_limit,
+                    new_entry_min_cubes=effective_new_entry_min_cubes,
+                ):
+                    eligible.add(symbol)
+            results.append({
+                "snapshot_date": snapshot_day.isoformat(),
+                "eligible_symbols": sorted(eligible),
+            })
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load Xueqiu buy eligibility history: %s", exc)
+        return []
+
+
 def load_xueqiu_weight_price_ratio_map(
     *,
     active_only: bool = True,
@@ -3140,6 +3366,12 @@ def build_rank_acceleration_buffer_plan(
     max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
     max_replacements: int = RANK_ACCELERATION_MAX_REPLACEMENTS,
     min_holding_cubes: Optional[int] = None,
+    current_rank_limit: Optional[int] = None,
+    holding_cube_increase: Optional[int] = None,
+    min_weight_increase: Optional[float] = None,
+    new_entry_rank_limit: Optional[int] = None,
+    new_entry_min_cubes: Optional[int] = None,
+    buy_eligibility_history: Optional[List[Dict[str, Any]]] = None,
     metric: str = "rank_acceleration",
     min_metric_threshold: Optional[float] = None,
     strategy_name_override: Optional[str] = None,
@@ -3178,6 +3410,45 @@ def build_rank_acceleration_buffer_plan(
             WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES
             if ratio_metric
             else RANK_ACCELERATION_MIN_HOLDING_CUBES
+        )
+    )
+    effective_rank_limit = (
+        int(current_rank_limit)
+        if current_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_CURRENT_RANK_LIMIT
+        )
+    )
+    effective_cube_increase = (
+        int(holding_cube_increase)
+        if holding_cube_increase is not None
+        else (
+            WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE
+            if ratio_metric
+            else RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE
+        )
+    )
+    effective_min_weight_increase = (
+        float(min_weight_increase) if min_weight_increase is not None else 0.0
+    )
+    effective_new_entry_rank_limit = (
+        int(new_entry_rank_limit)
+        if new_entry_rank_limit is not None
+        else (
+            WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT
+            if ratio_metric
+            else RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT
+        )
+    )
+    effective_new_entry_min_cubes = (
+        int(new_entry_min_cubes)
+        if new_entry_min_cubes is not None
+        else (
+            WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES
+            if ratio_metric
+            else RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES
         )
     )
     if not comparison_snapshot.get("available"):
@@ -3220,9 +3491,23 @@ def build_rank_acceleration_buffer_plan(
             ][:normalized_top_n]
         return {str(value) for value in values if value}
 
+    if buy_eligibility_history is None:
+        buy_eligibility_history = load_xueqiu_buy_eligibility_history(
+            current_snapshot_date=snapshot_date,
+            prior_days=RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1,
+            metric=metric,
+            min_holding_cubes=effective_min_cubes,
+            min_metric_threshold=min_metric_threshold,
+            current_rank_limit=effective_rank_limit,
+            holding_cube_increase=effective_cube_increase,
+            min_weight_increase=effective_min_weight_increase,
+            new_entry_rank_limit=effective_new_entry_rank_limit,
+            new_entry_min_cubes=effective_new_entry_min_cubes,
+        )
+    # 滑动窗口确认：历史资格按快照重算（不依赖运行记录），newest-first
     previous_buy_signal_sets = [
-        history_signal_symbols(entry, "daily_buy_signal_symbols")
-        for entry in normalized_history[: RANK_ACCELERATION_BUY_CONFIRM_WINDOW - 1]
+        {str(value) for value in (entry.get("eligible_symbols") or []) if value}
+        for entry in (buy_eligibility_history or [])
     ]
     previous_exit_signal_sets = [
         history_signal_symbols(entry, "normal_exit_signal_symbols")
@@ -3249,51 +3534,21 @@ def build_rank_acceleration_buffer_plan(
         total_weight_change = current_total_weight - previous_total_weight
         strong_new_entry = (
             is_new
-            and current_rank
-            <= (
-                WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT
-                if ratio_metric
-                else RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT
-            )
-            and current_holding_cubes
-            >= (
-                WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES
-                if ratio_metric
-                else RANK_ACCELERATION_NEW_ENTRY_MIN_HOLDING_CUBES
-            )
+            and current_rank <= effective_new_entry_rank_limit
+            and current_holding_cubes >= effective_new_entry_min_cubes
         )
-        if ratio_metric:
-            metric_eligible = (
-                strong_new_entry
-                or (
-                    safe_float(item.get("weight_price_ratio_5d")) is not None
-                    and safe_float(item.get("weight_price_ratio_5d")) >= min_metric_threshold
-                )
-            )
-        else:
-            metric_eligible = (
-                strong_new_entry
-                or (not is_new and effective_rank_change >= min_metric_threshold)
-            )
-        buy_eligible = (
-            current_rank
-            <= (
-                WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT
-                if ratio_metric
-                else RANK_ACCELERATION_CURRENT_RANK_LIMIT
-            )
-            and current_holding_cubes
-            >= (
-                effective_min_cubes
-            )
-            and holding_cube_change
-            >= (
-                WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE
-                if ratio_metric
-                else RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE
-            )
-            and total_weight_change > 0
-            and metric_eligible
+        buy_eligible = _xueqiu_buy_eligible_core(
+            item,
+            previous,
+            comparison_universe_count=comparison_universe_count,
+            metric=metric,
+            min_metric_threshold=min_metric_threshold,
+            min_holding_cubes=effective_min_cubes,
+            current_rank_limit=effective_rank_limit,
+            holding_cube_increase=effective_cube_increase,
+            min_weight_increase=effective_min_weight_increase,
+            new_entry_rank_limit=effective_new_entry_rank_limit,
+            new_entry_min_cubes=effective_new_entry_min_cubes,
         )
         hold_pool_eligible = (
             current_rank
@@ -3363,14 +3618,11 @@ def build_rank_acceleration_buffer_plan(
     confirmed_buy_candidates: List[Dict[str, Any]] = []
     for item in raw_buy_candidates:
         symbol = item["stock_symbol"]
-        confirmation_count = int(symbol in daily_buy_signal_set) + sum(
+        prior_confirmation_days = sum(
             int(symbol in signal_set) for signal_set in previous_buy_signal_sets
         )
-        item["buy_confirmation_count"] = confirmation_count
-        item["buy_confirmed"] = (
-            symbol in daily_buy_signal_set
-            and confirmation_count >= RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS
-        )
+        item["buy_confirmation_count"] = 1 + prior_confirmation_days
+        item["buy_confirmed"] = prior_confirmation_days >= 1
         if item["buy_confirmed"]:
             confirmed_buy_candidates.append(item)
 
@@ -3670,20 +3922,22 @@ def build_rank_acceleration_buffer_plan(
         "compare_trading_days": comparison_snapshot.get("trading_days"),
         "buy_rule": (
             (
-                f"当前综合排名Top{WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT}、至少{WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES}个活跃组合持有、"
-                f"持仓组合增加至少{WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE}个且总权重上升、"
-                f"5日权价比≥{min_metric_threshold:g}（权重涨幅超过股价涨幅，疑似主动加仓）；"
-                f"强势新进需进入Top{WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT}；"
-                f"当天权价比Top{normalized_top_n}且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}日至少"
-                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足"
+                f"当前综合排名Top{effective_rank_limit}、至少{effective_min_cubes}个活跃组合持有、"
+                f"持仓组合增加至少{effective_cube_increase}个且总权重上升>"
+                f"{effective_min_weight_increase:g}、5日权价比≥{min_metric_threshold:g}"
+                f"（权重涨幅超过股价涨幅，疑似主动加仓）；"
+                f"强势新进需进入Top{effective_new_entry_rank_limit}且≥{effective_new_entry_min_cubes}个组合；"
+                f"当天符合资格且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}个快照日至少"
+                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足（历史资格按快照滑动窗口重算）"
             )
             if ratio_metric
             else (
-                f"当前综合排名Top{RANK_ACCELERATION_CURRENT_RANK_LIMIT}、至少{RANK_ACCELERATION_MIN_HOLDING_CUBES}个活跃组合持有、"
-                f"持仓组合增加至少{RANK_ACCELERATION_MIN_HOLDING_CUBE_INCREASE}个且总权重上升；"
-                f"旧标的5日上升至少{RANK_ACCELERATION_MIN_RANK_CHANGE}名，强势新进需进入Top{RANK_ACCELERATION_NEW_ENTRY_RANK_LIMIT}；"
-                f"当天加速Top{normalized_top_n}且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}日至少"
-                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足"
+                f"当前综合排名Top{effective_rank_limit}、至少{effective_min_cubes}个活跃组合持有、"
+                f"持仓组合增加至少{effective_cube_increase}个且总权重上升>"
+                f"{effective_min_weight_increase:g}；旧标的5日上升至少{min_metric_threshold:g}名，"
+                f"强势新进需进入Top{effective_new_entry_rank_limit}且≥{effective_new_entry_min_cubes}个组合；"
+                f"当天符合资格且最近{RANK_ACCELERATION_BUY_CONFIRM_WINDOW}个快照日至少"
+                f"{RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS}日满足（历史资格按快照滑动窗口重算）"
             )
         ),
         "sell_rule": (
@@ -3756,6 +4010,12 @@ def build_weight_price_ratio_buffer_plan(
     max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
     max_replacements: int = RANK_ACCELERATION_MAX_REPLACEMENTS,
     min_holding_cubes: Optional[int] = None,
+    current_rank_limit: Optional[int] = None,
+    holding_cube_increase: Optional[int] = None,
+    min_weight_increase: Optional[float] = None,
+    new_entry_rank_limit: Optional[int] = None,
+    new_entry_min_cubes: Optional[int] = None,
+    buy_eligibility_history: Optional[List[Dict[str, Any]]] = None,
     fear_greed_regime: Optional[str] = None,
 ) -> Dict[str, Any]:
     """星澜叁号：按 5日权价比 排序/买入，缓冲卖出，等同贰号框架。"""
@@ -3774,6 +4034,12 @@ def build_weight_price_ratio_buffer_plan(
         max_segment_positions=max_segment_positions,
         max_replacements=max_replacements,
         min_holding_cubes=min_holding_cubes,
+        current_rank_limit=current_rank_limit,
+        holding_cube_increase=holding_cube_increase,
+        min_weight_increase=min_weight_increase,
+        new_entry_rank_limit=new_entry_rank_limit,
+        new_entry_min_cubes=new_entry_min_cubes,
+        buy_eligibility_history=buy_eligibility_history,
         metric="weight_price_ratio",
         strategy_name_override=WEIGHT_PRICE_RATIO_STRATEGY_NAME,
         fear_greed_regime=fear_greed_regime,
@@ -5087,6 +5353,11 @@ async def execute_rank_acceleration_target_rebalance(
         top_n=strategy_top_n,
         sell_rank=strategy_sell_rank,
         min_holding_cubes=strategy_config["min_holding_cubes"],
+        current_rank_limit=strategy_config["current_rank_limit"],
+        holding_cube_increase=strategy_config["holding_cube_increase"],
+        min_weight_increase=strategy_config["min_weight_increase"],
+        new_entry_rank_limit=strategy_config["new_entry_rank_limit"],
+        new_entry_min_cubes=strategy_config["new_entry_min_cubes"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot
@@ -5303,6 +5574,11 @@ async def execute_weight_price_ratio_target_rebalance(
         top_n=strategy_top_n,
         sell_rank=strategy_sell_rank,
         min_holding_cubes=strategy_config["min_holding_cubes"],
+        current_rank_limit=strategy_config["current_rank_limit"],
+        holding_cube_increase=strategy_config["holding_cube_increase"],
+        min_weight_increase=strategy_config["min_weight_increase"],
+        new_entry_rank_limit=strategy_config["new_entry_rank_limit"],
+        new_entry_min_cubes=strategy_config["new_entry_min_cubes"],
         fear_greed_regime=fear_greed_regime,
     )
     strategy_plan["fear_greed"] = fear_greed_snapshot

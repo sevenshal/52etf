@@ -1278,6 +1278,16 @@ class XueqiuStrategyConfig(Base):
     # 目标仓位：恐慌放量 → fear_target_count 只；贪婪缩量 → greed_target_count 只
     fear_target_count = Column(Integer, nullable=False, default=10)
     greed_target_count = Column(Integer, nullable=False, default=3)
+    # 买入资格（贰/叁号买入候选筛选）：综合排名≤current_rank_limit、活跃组合数≥min_holding_cubes、
+    # 组合数增加≥holding_cube_increase、总权重上升>min_weight_increase、
+    # 策略指标≥metric_threshold（权价比≥x 或 排名上升≥x名）、
+    # 或强势新进（5日前未持有、排名≤new_entry_rank_limit 且组合数≥new_entry_min_cubes）
+    current_rank_limit = Column(Integer, nullable=False, default=100)
+    holding_cube_increase = Column(Integer, nullable=False, default=2)
+    metric_threshold = Column(Float, nullable=False, default=1.15)
+    new_entry_rank_limit = Column(Integer, nullable=False, default=30)
+    new_entry_min_cubes = Column(Integer, nullable=False, default=10)
+    min_weight_increase = Column(Float, nullable=False, default=0.0)
     # 买入候选最少持仓组合数
     min_holding_cubes = Column(Integer, nullable=False, default=8)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -1660,6 +1670,12 @@ def ensure_table_columns():
             "ma5_bottom_score": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_bottom_score FLOAT NOT NULL DEFAULT 25.0",
             "ma5_top_score": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_top_score FLOAT NOT NULL DEFAULT 75.0",
             "ma5_lookback_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN ma5_lookback_days INTEGER NOT NULL DEFAULT 5",
+            "current_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN current_rank_limit INTEGER NOT NULL DEFAULT 100",
+            "holding_cube_increase": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN holding_cube_increase INTEGER NOT NULL DEFAULT 2",
+            "metric_threshold": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN metric_threshold FLOAT NOT NULL DEFAULT 1.15",
+            "new_entry_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_rank_limit INTEGER NOT NULL DEFAULT 30",
+            "new_entry_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_min_cubes INTEGER NOT NULL DEFAULT 10",
+            "min_weight_increase": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN min_weight_increase FLOAT NOT NULL DEFAULT 0.0",
         },
     }
 

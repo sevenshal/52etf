@@ -1591,12 +1591,27 @@ def _attach_xueqiu_5d_momentum(
             item["weight_price_ratio_5d"] = None
 
 
-def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) -> Dict[str, Any]:
+def load_xueqiu_top_holdings_latest(
+    active_only: bool = True,
+    limit: int = 300,
+    snapshot_date: Optional[date] = None,
+) -> Dict[str, Any]:
+    """最新（或指定 snapshot_date）持仓快照的综合权重/排名/权价比统计。"""
     normalized_limit = max(1, min(int(limit or 300), 2000))
     connection = _connect_duckdb()
     try:
         if not _duckdb_table_exists(connection, XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE):
             return _empty_xueqiu_top_holdings_latest(active_only, normalized_limit, "snapshot_table_missing")
+
+        if snapshot_date is None:
+            latest_snapshot_cte = """
+                SELECT MAX(snapshot_date) AS snapshot_date
+                FROM cube_rows
+            """
+            latest_params: List[Any] = []
+        else:
+            latest_snapshot_cte = "SELECT CAST(? AS DATE) AS snapshot_date"
+            latest_params = [snapshot_date]
 
         cte = _xueqiu_top_holdings_snapshot_cte(active_only)
         metadata_rows = _duckdb_query_dicts(
@@ -1604,8 +1619,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             f"""
             {cte},
             latest_snapshot AS (
-                SELECT MAX(snapshot_date) AS snapshot_date
-                FROM cube_rows
+                {latest_snapshot_cte}
             ),
             rank_dates AS (
                 SELECT DISTINCT snapshot_date
@@ -1656,6 +1670,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             LEFT JOIN latest_cube_summary ON latest_cube_summary.snapshot_date = latest_snapshot.snapshot_date
             LEFT JOIN filtered_latest_summary ON filtered_latest_summary.snapshot_date = latest_snapshot.snapshot_date
             """,
+            latest_params,
         )
         metadata = metadata_rows[0] if metadata_rows else {}
         snapshot_date = metadata.get("snapshot_date")
@@ -1667,8 +1682,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             f"""
             {cte},
             latest_snapshot AS (
-                SELECT MAX(snapshot_date) AS snapshot_date
-                FROM cube_rows
+                {latest_snapshot_cte}
             ),
             rank_dates AS (
                 SELECT DISTINCT snapshot_date
@@ -1768,7 +1782,7 @@ def load_xueqiu_top_holdings_latest(active_only: bool = True, limit: int = 300) 
             ORDER BY ranked.composite_rank
             LIMIT ?
             """,
-            [normalized_limit],
+            [*latest_params, normalized_limit],
         )
         _attach_xueqiu_5d_momentum(
             connection,
@@ -3075,6 +3089,12 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     fear_target_count: Optional[int] = Field(None, ge=1, le=200, description="恐慌放量时的目标持仓数")
     greed_target_count: Optional[int] = Field(None, ge=1, le=200, description="贪婪缩量时的目标持仓数")
     min_holding_cubes: Optional[int] = Field(None, ge=1, le=200, description="买入候选最少持仓组合数")
+    current_rank_limit: Optional[int] = Field(None, ge=1, le=1000, description="买入候选综合排名上限")
+    holding_cube_increase: Optional[int] = Field(None, ge=0, le=100, description="买入候选持仓组合数增加下限")
+    metric_threshold: Optional[float] = Field(None, ge=0, description="策略指标阈值（权价比≥x 或 排名上升≥x名）")
+    new_entry_rank_limit: Optional[int] = Field(None, ge=1, le=1000, description="强势新进综合排名上限")
+    new_entry_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="强势新进最少持仓组合数")
+    min_weight_increase: Optional[float] = Field(None, ge=0, description="买入候选总权重上升下限")
 
 
 XUEQIU_STRATEGY_CONFIG_KEYS = (

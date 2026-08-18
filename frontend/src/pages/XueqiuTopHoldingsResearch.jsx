@@ -334,6 +334,61 @@ const XueqiuTopHoldingsResearch = () => {
       step: 1,
       suffix: '个',
     },
+    {
+      key: 'current_rank_limit',
+      label: '综合排名上限',
+      tooltip: '买入候选的综合排名需 ≤ 该值（默认叁号100 / 贰号50）',
+      min: 1,
+      max: 1000,
+      step: 1,
+      suffix: '名',
+    },
+    {
+      key: 'holding_cube_increase',
+      label: '组合数增加下限',
+      tooltip: '对比5个交易日前，持仓组合数需增加 ≥ 该值（默认叁号2 / 贰号3）',
+      min: 0,
+      max: 100,
+      step: 1,
+      suffix: '个',
+    },
+    {
+      key: 'metric_threshold',
+      label: '策略指标阈值',
+      tooltip: '叁号：5日权价比需 ≥ 该值（默认1.15）；贰号：5日排名上升需 ≥ 该值（默认20名）',
+      min: 0,
+      max: 100,
+      step: 0.05,
+      precision: 2,
+    },
+    {
+      key: 'new_entry_rank_limit',
+      label: '强势新进排名上限',
+      tooltip: '5日前未持有的新进标的，综合排名需 ≤ 该值（默认叁号30 / 贰号20）',
+      min: 1,
+      max: 1000,
+      step: 1,
+      suffix: '名',
+    },
+    {
+      key: 'new_entry_min_cubes',
+      label: '强势新进最少组合数',
+      tooltip: '强势新进标的至少被多少个活跃组合持有（默认10）',
+      min: 1,
+      max: 1000,
+      step: 1,
+      suffix: '个',
+    },
+    {
+      key: 'min_weight_increase',
+      label: '总权重上升下限',
+      tooltip: '对比5个交易日前，总权重需上升 > 该值（默认0）',
+      min: 0,
+      max: 1000,
+      step: 1,
+      precision: 1,
+      suffix: 'pp',
+    },
   ], []);
 
   const fetchStrategyConfigs = useCallback(async () => {
@@ -964,7 +1019,9 @@ const XueqiuTopHoldingsResearch = () => {
                     ))}
                     <Col span={24}>
                       <Text type="secondary">
-                        信号检测参数（恐贪阈值、放/缩量标准差、MA5回看与冷却天数）在「我的 → 系统管理 → 贪恐信号配置」统一设置，星澜壹贰叁号共用同一套。此处仅配置各策略的目标仓位：底信号触发扩仓到「底信号目标仓位」只，顶信号触发收缩到「顶信号目标仓位」只，其余情况维持当前仓位（不足顶信号目标仓位只数时补足）。
+                        信号检测参数（恐贪阈值、放/缩量标准差、MA5回看与冷却天数）在「我的 → 系统管理 → 贪恐信号配置」统一设置，星澜壹贰叁号共用同一套。此处配置各策略的目标仓位与买入资格：
+                        目标仓位 = 底信号扩仓到「底信号目标仓位」只、顶信号收缩到「顶信号目标仓位」只，其余维持当前（至少顶信号目标仓位只）。
+                        买入资格 = 综合排名≤上限、活跃组合≥最少组合数、组合数增加≥下限、总权重上升>下限、指标≥阈值，或强势新进；当天符合且最近3个快照日至少2日符合（历史按快照滑动窗口重算）才确认买入。
                       </Text>
                     </Col>
                   </Row>
