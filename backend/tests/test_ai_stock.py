@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import logging
 from unittest import mock
 
@@ -167,6 +168,170 @@ def test_web_settings_are_redacted_after_the_write_only_key_is_saved():
             config = db.get(AIStockServiceConfig, 1)
             if config:
                 config.deepseek_api_key = orig_key
+                db.commit()
+
+
+def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
+    import src.core.services.ai_stock as ai_stock_mod
+
+    fake_map = {
+        "600000.SH": {  # existing holder: full 5-day change fields
+            "composite_weight_pct": 3.92,
+            "composite_rank": 45,
+            "holding_cube_count": 5,
+            "weight_multiple_5d": 1.4,
+            "momentum_multiple_5d": 1.05,
+            "rank_change_5d": 23,
+            "cube_count_5d_ago": 3,
+            "weight_price_ratio_5d": 1.33,
+        },
+        "600001.SH": {  # new entry: 5d-ago fields None, but price momentum still real
+            "composite_weight_pct": 1.0,
+            "composite_rank": 300,
+            "holding_cube_count": 12,
+            "weight_multiple_5d": None,
+            "momentum_multiple_5d": 1.02,
+            "rank_change_5d": None,
+            "cube_count_5d_ago": None,
+            "weight_price_ratio_5d": None,
+        },
+        "600002.SH": {  # extreme multiples must be clipped
+            "composite_weight_pct": 20.0,
+            "composite_rank": 10,
+            "holding_cube_count": 20,
+            "weight_multiple_5d": 161.9,
+            "momentum_multiple_5d": 1.2,
+            "rank_change_5d": -44,
+            "cube_count_5d_ago": 20,
+            "weight_price_ratio_5d": 153.5,
+        },
+    }
+    monkeypatch = mock.Mock()
+    monkeypatch.setattr = lambda *args, **kwargs: None
+    import src.core.services.ai_stock as ai_stock_mod
+
+    original = ai_stock_mod._load_xueqiu_behavior_map
+    ai_stock_mod._load_xueqiu_behavior_map = lambda limit=2000: fake_map
+    try:
+        candidates = [
+            {"ts_code": "600000.SH"},
+            {"ts_code": "600001.SH"},
+            {"ts_code": "600002.SH"},
+            {"ts_code": "600003.SH"},
+        ]
+        from src.core.services.ai_stock import _attach_xueqiu_behavior
+
+        _attach_xueqiu_behavior(candidates)
+    finally:
+        ai_stock_mod._load_xueqiu_behavior_map = original
+
+    # not in the current snapshot -> no block at all
+    assert "xueqiu" not in candidates[3]
+
+    xq = candidates[0]["xueqiu"]
+    assert xq["weight"] == 3.92
+    assert xq["rank"] == 45
+    assert xq["cube_count"] == 5
+    assert xq["weight_gain_5d"] == 1.4
+    assert xq["price_gain_5d"] == 1.05
+    assert xq["rank_up_5d"] == 23
+    assert xq["cube_gain_5d"] == 2
+    assert xq["ratio_5d"] == 1.33
+
+    xq_new = candidates[1]["xueqiu"]
+    assert xq_new["weight_gain_5d"] is None
+    assert xq_new["rank_up_5d"] is None
+    assert xq_new["cube_gain_5d"] is None
+    assert xq_new["ratio_5d"] is None
+    assert xq_new["price_gain_5d"] == 1.02  # price momentum is real for new entries too
+    assert xq_new["cube_count"] == 12
+
+    xq_extreme = candidates[2]["xueqiu"]
+    assert xq_extreme["weight_gain_5d"] == 10.0  # clipped
+    assert xq_extreme["ratio_5d"] == 10.0  # clipped
+    assert xq_extreme["rank_up_5d"] == -44  # negative = rank dropped
+    assert xq_extreme["cube_gain_5d"] == 0
+
+
+def test_xueqiu_guidance_only_present_when_toggle_enabled():
+    from src.core.database import get_db_ctx, AIStockServiceConfig
+
+    with get_db_ctx() as db:
+        config = db.get(AIStockServiceConfig, 1)
+        orig = config.xueqiu_signal_enabled if config else None
+
+    headlines = [
+        {"headline_id": "N0001", "time": "2026-08-10 10:00:00", "source": "cls", "title": "国产算力项目加速落地"},
+    ]
+    events = _validated_events(
+        {"events": [{"hotword": "算力", "score": 90, "headline_ids": ["N0001"], "aliases": ["人工智能"]}]},
+        headlines,
+    )
+    catalog = {"items": [{"ts_code": "885728.TI", "name": "人工智能", "type": "N", "count": 20}]}
+
+    payloads = []
+    calls = []
+
+    class _Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def _payload_triple():
+        return [
+            {"id": "c1", "usage": {"total_tokens": 1}, "choices": [{"message": {"content": '{"events":[{"hotword":"算力","score":90,"headline_ids":["N0001"],"aliases":["人工智能"]}]}'}}]},
+            {"id": "c2", "usage": {"total_tokens": 2}, "choices": [{"message": {"content": '{"board_mappings":[{"event_id":"E01","boards":[{"ths_code":"885728.TI","relevance":90,"reason":"直接相关"}]}]}'}}]},
+            {"id": "c3", "usage": {"total_tokens": 3}, "choices": [{"message": {"content": '{"picks":[{"ts_code":"600000.SH","confidence":80,"target_return_pct":8,"reason":"测试","evidence":[{"event_id":"E01","headline_id":"N0001","ths_code":"885728.TI"}]}]}'}}]},
+        ]
+
+    payloads[:] = _payload_triple()
+
+    def fake_post(*_args, **kwargs):
+        calls.append(kwargs["json"])
+        return _Response(payloads.pop(0))
+
+    import src.core.services.ai_stock as ai_stock_mod
+
+    original_post = ai_stock_mod.requests.post
+    ai_stock_mod.requests.post = fake_post
+    snapshot = {
+        "candidates": [{"ts_code": "600000.SH", "name": "测试股", "price": 10.0, "listing_days": 365, "event_ids": ["E01"], "board_codes": ["885728.TI"], "themes": ["人工智能"], "xueqiu": {"weight": 3.92, "rank": 45}}],
+        "boards": [{"ths_code": "885728.TI", "name": "人工智能"}],
+    }
+    try:
+        selector = DeepSeekStockSelector(api_key="test-key", model="deepseek-chat")
+        event_stage = selector.extract_events({"headlines": headlines})
+        board_stage = selector.map_events_to_ths(event_stage, catalog)
+
+        # toggle OFF (default): no xueqiu key in candidates, no guidance
+        calls.clear()
+        selector.select_from_ths_conversation(event_stage, board_stage, snapshot)
+        last_instruction = json.loads(calls[-1]["messages"][-1]["content"])
+        assert "xueqiu_guidance" not in last_instruction
+        assert last_instruction["candidates"][0].get("xueqiu") is None
+
+        # toggle ON: xueqiu key + guidance present
+        update_ai_stock_service_settings(deepseek_api_key=None, deepseek_model=None, xueqiu_signal_enabled=1, updated_by="admin")
+        payloads[:] = _payload_triple()[2:]
+        calls.clear()
+        selector.select_from_ths_conversation(event_stage, board_stage, snapshot)
+        last_instruction = json.loads(calls[-1]["messages"][-1]["content"])
+        assert "xueqiu_guidance" in last_instruction
+        assert last_instruction["candidates"][0]["xueqiu"]["weight"] == 3.92
+        assert last_instruction["candidates"][0]["xueqiu"]["rank"] == 45
+        assert "主动买入" in last_instruction["xueqiu_guidance"]
+        assert "1.15" in last_instruction["xueqiu_guidance"]
+    finally:
+        ai_stock_mod.requests.post = original_post
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            if config:
+                config.xueqiu_signal_enabled = orig
                 db.commit()
 
 

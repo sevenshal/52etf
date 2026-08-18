@@ -66,6 +66,9 @@ MIN_LISTING_DAYS = 183
 TARGET_RETURN_PCT_MIN = 5.0
 TARGET_RETURN_PCT_MAX = 10.0
 NEWS_SIGNAL_WEIGHT = 0.5  # 纯新闻信号在排序中的权重，0 = 关闭（回到纯 AI 信心排序）
+XUEQIU_SIGNAL_ENABLED = 0  # 雪球活跃组合行为信号(xueqiu块)是否喂给 AI 选股：0=关（默认，先观察），1=开
+XUEQIU_WEIGHT_GAIN_CLIP = (0.2, 10.0)  # 权重5日升速(倍数)裁剪区间；极端值(如新进小权重被大量买入)会爆到几百倍
+XUEQIU_RATIO_CLIP = (0.0, 10.0)  # 权价比(权重升速÷价格升速)裁剪上限
 MAX_EVENTS = 8
 MAX_BOARDS = 8
 MAX_CANDIDATES_PER_BOARD = 200
@@ -90,12 +93,14 @@ def _load_strategy_params() -> Dict[str, int]:
             tr_min = config.target_return_pct_min if config and config.target_return_pct_min is not None else TARGET_RETURN_PCT_MIN
             tr_max = config.target_return_pct_max if config and config.target_return_pct_max is not None else TARGET_RETURN_PCT_MAX
             nsw = config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT
+            xse = config.xueqiu_signal_enabled if config and config.xueqiu_signal_enabled is not None else XUEQIU_SIGNAL_ENABLED
         return {
             "max_candidates": max_c, "max_events": max_e, "max_boards": max_b,
             "max_candidates_per_board": max_cpb, "min_market_cap": min_mc, "min_avg_turnover": min_to,
             "max_recommendations": max_r, "min_listing_days": min_ld,
             "target_return_pct_min": tr_min, "target_return_pct_max": tr_max,
             "news_signal_weight": nsw,
+            "xueqiu_signal_enabled": xse,
         }
     except Exception:
         return {
@@ -104,6 +109,7 @@ def _load_strategy_params() -> Dict[str, int]:
             "max_recommendations": MAX_RECOMMENDATIONS, "min_listing_days": MIN_LISTING_DAYS,
             "target_return_pct_min": TARGET_RETURN_PCT_MIN, "target_return_pct_max": TARGET_RETURN_PCT_MAX,
             "news_signal_weight": NEWS_SIGNAL_WEIGHT,
+            "xueqiu_signal_enabled": XUEQIU_SIGNAL_ENABLED,
         }
 
 
@@ -149,6 +155,7 @@ def get_ai_stock_service_settings() -> Dict[str, Any]:
             "target_return_pct_min": config.target_return_pct_min if config and config.target_return_pct_min is not None else TARGET_RETURN_PCT_MIN,
             "target_return_pct_max": config.target_return_pct_max if config and config.target_return_pct_max is not None else TARGET_RETURN_PCT_MAX,
             "news_signal_weight": config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT,
+            "xueqiu_signal_enabled": config.xueqiu_signal_enabled if config and config.xueqiu_signal_enabled is not None else XUEQIU_SIGNAL_ENABLED,
             "updated_at": config.updated_at if config else None,
             "updated_by": config.updated_by if config else None,
         }
@@ -181,6 +188,7 @@ def update_ai_stock_service_settings(
     target_return_pct_min: Optional[float] = None,
     target_return_pct_max: Optional[float] = None,
     news_signal_weight: Optional[float] = None,
+    xueqiu_signal_enabled: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Persist write-only DeepSeek key and strategy limits in one short transaction."""
     key = str(deepseek_api_key or "").strip()
@@ -199,6 +207,8 @@ def update_ai_stock_service_settings(
         raise ValueError("目标收益下限不能大于上限")
     if news_signal_weight is not None and (not isinstance(news_signal_weight, (int, float)) or news_signal_weight < 0 or news_signal_weight > 1):
         raise ValueError("新闻信号权重必须是 0-1 之间的比例")
+    if xueqiu_signal_enabled is not None and xueqiu_signal_enabled not in (0, 1):
+        raise ValueError("雪球行为信号开关必须是 0 或 1")
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
         if not config:
@@ -230,6 +240,8 @@ def update_ai_stock_service_settings(
             config.target_return_pct_max = target_return_pct_max
         if news_signal_weight is not None:
             config.news_signal_weight = news_signal_weight
+        if xueqiu_signal_enabled is not None:
+            config.xueqiu_signal_enabled = xueqiu_signal_enabled
         config.updated_by = updated_by
     return get_ai_stock_service_settings()
 
@@ -487,6 +499,77 @@ def _execution_score(candidate: Dict[str, Any]) -> float:
     if turnover > 0:
         score += min(8.0, turnover / 2.0)
     return round(_clamp(score, 0.0, 100.0, 0.0), 3)
+
+
+def _load_xueqiu_behavior_map(limit: int = 2000) -> Dict[str, Dict[str, Any]]:
+    """Latest Xueqiu active-portfolio behavior snapshot, keyed by A-share ts_code.
+
+    Reuses the same analytics query the 星澜 robots rely on
+    (``load_xueqiu_top_holdings_latest``); lazy-import avoids any import-time
+    coupling between the AI-stock service and the robot module.
+    """
+    from ...app.api.xueqiu_holdings import load_xueqiu_top_holdings_latest
+
+    latest = load_xueqiu_top_holdings_latest(active_only=True, limit=limit)
+    by_ts: Dict[str, Dict[str, Any]] = {}
+    for item in latest.get("items") or []:
+        match = re.fullmatch(r"(SH|SZ|BJ)\.(\d{6})", str(item.get("stock_symbol") or ""))
+        if match:
+            by_ts[f"{match.group(2)}.{match.group(1)}"] = item
+    return by_ts
+
+
+def _clamp_multiple(value: Any, bounds: Tuple[float, float]) -> Optional[float]:
+    """Round a positive multiple, clipping extreme values to ``bounds``; None stays None."""
+    number = _safe_float(value)
+    if number is None:
+        return None
+    return round(max(bounds[0], min(bounds[1], number)), 3)
+
+
+def _safe_int_value(value: Any) -> Optional[int]:
+    """int() wrapper that keeps None/blank as None (for optional 5-day-change fields)."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
+    """Attach the xueqiu behavior block to candidates in the current Xueqiu snapshot.
+
+    Candidates absent from the snapshot get no block at all.  The block carries
+    current levels (weight/rank/cube_count) plus pre-computed 5-day changes; the
+    5-day-change fields are None for new entries (not held 5 trading days ago), which
+    the prompt guidance explains explicitly.  Any snapshot outage only skips the
+    enrichment (the recommendation itself must never depend on this data).
+    """
+    try:
+        behavior_map = _load_xueqiu_behavior_map()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Xueqiu behavior snapshot unavailable, skipping xueqiu enrichment: %s", exc)
+        return
+    for candidate in candidates:
+        item = behavior_map.get(candidate.get("ts_code"))
+        if not item:
+            continue
+        weight_gain = _clamp_multiple(item.get("weight_multiple_5d"), XUEQIU_WEIGHT_GAIN_CLIP)
+        price_gain = _round(item.get("momentum_multiple_5d"), 3)
+        cube_count = _safe_int_value(item.get("holding_cube_count"))
+        cube_count_5d_ago = _safe_int_value(item.get("cube_count_5d_ago"))
+        cube_gain = cube_count - cube_count_5d_ago if (cube_count is not None and cube_count_5d_ago is not None) else None
+        candidate["xueqiu"] = {
+            "weight": _round(item.get("composite_weight_pct"), 2),
+            "rank": _safe_int_value(item.get("composite_rank")),
+            "cube_count": cube_count,
+            "weight_gain_5d": weight_gain,
+            "price_gain_5d": price_gain,
+            "rank_up_5d": _safe_int_value(item.get("rank_change_5d")),
+            "cube_gain_5d": cube_gain,
+            "ratio_5d": _clamp_multiple(item.get("weight_price_ratio_5d"), XUEQIU_RATIO_CLIP),
+        }
 
 
 class AIStockDataProvider:
@@ -748,6 +831,10 @@ class AIStockDataProvider:
                 eligible.append(candidate)
         if not eligible:
             raise AIStockError("THS 成分股中没有满足上市/交易条件的股票")
+        if int(params.get("xueqiu_signal_enabled", XUEQIU_SIGNAL_ENABLED)):
+            # 雪球活跃组合行为快照合并（xueqiu 块）：开关开启才查询并附加；
+            # 快照不可用时只跳过合并，绝不影响推荐主流程。
+            _attach_xueqiu_behavior(eligible)
         return {"generated_at": as_of.isoformat(timespec="seconds"), "trade_date": as_of.date().isoformat(), "market_as_of_date": market_date.isoformat(), "events": events, "boards": boards, "candidates": eligible, "source_status": {"ths_index": "SUCCESS", "ths_member": "SUCCESS", "ths_daily": "SUCCESS", "moneyflow_cnt_ths": "SUCCESS", "limit_cpt_list": "SUCCESS", "candidate_count": len(eligible)}}
 
     def minute_entry_confirmed(self, ts_code: str) -> Tuple[bool, Dict[str, Any]]:
@@ -936,10 +1023,14 @@ class DeepSeekStockSelector:
             raise AIStockModelError("已映射 THS 板块没有合格成分股")
         _params = _load_strategy_params()
         _news_enabled = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT)) > 0
+        _xueqiu_enabled = bool(int(_params.get("xueqiu_signal_enabled", XUEQIU_SIGNAL_ENABLED)))
         _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "rps", "board_strength")
         if _news_enabled:
             # 纯新闻信号开启时才把信号与窗口特征喂给模型；权重=0 时保持旧字段集
             _compact_keys = _compact_keys + ("news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d")
+        if _xueqiu_enabled:
+            # 雪球行为快照开启时才附加 xueqiu 块（候选内无该块 = 不在雪球活跃持仓内）
+            _compact_keys = _compact_keys + ("xueqiu",)
         compact_candidates = [{key: item.get(key) for key in _compact_keys} for item in candidates]
         _tr_min = float(_params.get("target_return_pct_min", TARGET_RETURN_PCT_MIN))
         _tr_max = float(_params.get("target_return_pct_max", TARGET_RETURN_PCT_MAX))
@@ -951,6 +1042,23 @@ class DeepSeekStockSelector:
         }
         if _news_enabled:
             instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。"
+        if _xueqiu_enabled:
+            instruction["xueqiu_guidance"] = (
+                "candidates 的 xueqiu 是雪球活跃组合持仓行为快照。"
+                "xueqiu 整体缺失 = 该股不在雪球活跃持仓内，此维度无数据，缺失不惩罚；"
+                "xueqiu 存在但其中 5日变化字段(weight_gain_5d 等)为空 = 该股 5日前未被持有、属新进，新进本身是买入信号，"
+                "若综合排名≤30 且持仓组合数≥10 属强新进，可适度提高置信度。"
+                "解读框架：1) 权重升速>价格升速(ratio_5d>1)=主动买入，权重上涨不是价格涨出来的；"
+                "其中价格也在涨=顺势加仓(可参与但注意已涨)，价格跌或平=逆势吸筹(错杀/低位，信号更强)；"
+                "2) 权重升速≈价格升速=被动，权重变化主要由价格推动，无额外资金信息；"
+                "3) 权重升速<价格升速=被动稀释或权重在降，非买入信号；"
+                "4) 权重降+价格升=借涨减仓，偏负面。"
+                "持仓组合数上升(cube_gain_5d>0)=扩散(更多组合形成共识，更可信)，下降=收敛。"
+                "weight_gain_5d 与 price_gain_5d 单位一致(倍数，已裁剪到0.2~10)，rank_up_5d 正值=排名进步。"
+                "经验校准：显著主动买入的分界线约为 权价比≥1.15 且5日持仓组合数增加≥2 且当前持仓组合数≥5 且综合排名≤100"
+                "（新进标的约需排名≤30且组合数≥10），低于此线多为噪声、高于则信号更强；"
+                "本系统按新闻事件链选股，xueqiu 仅作排序与置信度参考，不是准入条件。"
+            )
         if fear_greed_ref:
             instruction["fear_greed_reference"] = fear_greed_ref
             instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)及其生命周期阶段 stage，与 board_market_snapshot 里的板块按名称对应。阶段含义：启动(恐慌错杀后修复，敢买，可适度提高置信度)、扩散(资金流入、上涨扩散，可参与)、主线(持续强势、健康上涨，正常买)、拥挤(贪婪过热，应降低置信度或要求更强新闻证据)、退潮(从高位回落，回避或减仓)、探底(恐慌延续、尚未企稳，回避等企稳)、中性(无明确方向)。请结合 news_signal、板块强弱、技术面综合判断，不要机械套用。"

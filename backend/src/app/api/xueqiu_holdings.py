@@ -560,6 +560,7 @@ def load_xueqiu_top_holdings_latest(
                 ranked.*,
                 compare_ranked.composite_rank AS rank_5d_ago,
                 compare_ranked.composite_weight_pct AS weight_5d_ago,
+                compare_ranked.holding_cube_count AS cube_count_5d_ago,
                 CASE
                     WHEN compare_ranked.composite_rank IS NULL THEN NULL
                     ELSE compare_ranked.composite_rank - ranked.composite_rank

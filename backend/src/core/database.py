@@ -600,6 +600,8 @@ class AIStockServiceConfig(Base):
     target_return_pct_min = Column(Integer)
     target_return_pct_max = Column(Integer)
     news_signal_weight = Column(Integer)
+    # 雪球活跃组合行为信号（xueqiu 块）是否喂给 AI 选股：0=关（默认），1=开
+    xueqiu_signal_enabled = Column(Integer)
     updated_by = Column(String(128))
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
@@ -1673,6 +1675,9 @@ def ensure_table_columns():
         },
         "ai_stock_paper_portfolios": {
             "last_execution_target": "ALTER TABLE ai_stock_paper_portfolios ADD COLUMN last_execution_target FLOAT",
+        },
+        "ai_stock_service_configs": {
+            "xueqiu_signal_enabled": "ALTER TABLE ai_stock_service_configs ADD COLUMN xueqiu_signal_enabled INTEGER NOT NULL DEFAULT 0",
         },
         "ai_stock_paper_lots": {
             "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",

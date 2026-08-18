@@ -279,6 +279,10 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(2, by_symbol["SH.600001"]["rank_change_5d"])
         self.assertEqual(-1, by_symbol["SH.600002"]["rank_change_5d"])
         self.assertEqual(-1, by_symbol["SH.600003"]["rank_change_5d"])
+        # Holding-cube counts for the compare date (2026-06-15) are attached too.
+        self.assertEqual(1, by_symbol["SH.600001"]["cube_count_5d_ago"])
+        self.assertEqual(1, by_symbol["SH.600002"]["cube_count_5d_ago"])
+        self.assertEqual(1, by_symbol["SH.600003"]["cube_count_5d_ago"])
         # No price tables in this DB → momentum/ratio stay None
         self.assertEqual(10.0, by_symbol["SH.600001"]["weight_5d_ago"])
         self.assertEqual(45.0, by_symbol["SH.600001"]["weight_change_5d"])
@@ -341,6 +345,147 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertIsNone(by_symbol["SH.600001"]["momentum_5d"])
         self.assertIsNone(by_symbol["SH.600001"]["momentum_multiple_5d"])
         self.assertIsNone(by_symbol["SH.600001"]["weight_price_ratio_5d"])
+        self.assertIsNone(by_symbol["SH.600001"]["cube_count_5d_ago"])
+
+    def test_latest_cube_count_5d_ago_null_for_stock_new_on_latest_date(self):
+        """A stock held only on the latest snapshot keeps current cube count but
+        exposes None cube_count_5d_ago / weight / rank change fields."""
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_new_entry(db_path)
+
+            with patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+
+        self.assertTrue(result["available"])
+        self.assertEqual("2026-06-22", result["snapshot_date"])
+        self.assertEqual("2026-06-15", result["rank_compare_snapshot_date"])
+        by_symbol = {row["stock_symbol"]: row for row in result["items"]}
+        # 600003 appears only on the latest date -> new entry
+        self.assertEqual(2, by_symbol["SH.600003"]["holding_cube_count"])
+        self.assertIsNone(by_symbol["SH.600003"]["cube_count_5d_ago"])
+        self.assertIsNone(by_symbol["SH.600003"]["weight_5d_ago"])
+        self.assertIsNone(by_symbol["SH.600003"]["rank_5d_ago"])
+        # 600001/600002 were held by two cubes on the compare date (ZH1+ZH2),
+        # only one cube on the latest date -> 5d-ago cube count present.
+        self.assertEqual(1, by_symbol["SH.600001"]["holding_cube_count"])
+        self.assertEqual(2, by_symbol["SH.600001"]["cube_count_5d_ago"])
+        self.assertEqual(1, by_symbol["SH.600002"]["holding_cube_count"])
+        self.assertEqual(2, by_symbol["SH.600002"]["cube_count_5d_ago"])
+
+    def _create_snapshot_db_with_new_entry(self, path: str) -> None:
+        """Six snapshot dates with SH.600003 appearing only on the latest one."""
+        connection = duckdb.connect(path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE xueqiu_cube_holdings_snapshots (
+                    snapshot_date DATE NOT NULL,
+                    snapshot_at TIMESTAMP NOT NULL,
+                    rank_type VARCHAR NOT NULL,
+                    year_rank INTEGER,
+                    cube_symbol VARCHAR NOT NULL,
+                    cube_id BIGINT,
+                    cube_name VARCHAR,
+                    screen_name VARCHAR,
+                    latest_rebalance_at TIMESTAMP,
+                    latest_rebalance_id BIGINT,
+                    latest_rebalance_status VARCHAR,
+                    active_rebalance_at TIMESTAMP,
+                    active_rebalance_id BIGINT,
+                    active_rebalance_status VARCHAR,
+                    active_rebalance_category VARCHAR,
+                    active_rebalance_source VARCHAR,
+                    holdings_source VARCHAR,
+                    active_rebalance_days INTEGER,
+                    is_active BOOLEAN,
+                    stock_symbol VARCHAR NOT NULL,
+                    raw_stock_symbol VARCHAR,
+                    stock_name VARCHAR,
+                    stock_id BIGINT,
+                    segment_name VARCHAR,
+                    weight_pct DOUBLE,
+                    raw_holding_json VARCHAR,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            base_rows = [
+                ("2026-06-15", "ZH1", "SH.600001", "SH600001", "股票A", 50.0),
+                ("2026-06-15", "ZH1", "SH.600002", "SH600002", "股票B", 50.0),
+                ("2026-06-15", "ZH2", "SH.600001", "SH600001", "股票A", 30.0),
+                ("2026-06-15", "ZH2", "SH.600002", "SH600002", "股票B", 70.0),
+                ("2026-06-16", "ZH1", "SH.600001", "SH600001", "股票A", 50.0),
+                ("2026-06-16", "ZH1", "SH.600002", "SH600002", "股票B", 50.0),
+                ("2026-06-17", "ZH1", "SH.600001", "SH600001", "股票A", 50.0),
+                ("2026-06-17", "ZH1", "SH.600002", "SH600002", "股票B", 50.0),
+                ("2026-06-18", "ZH1", "SH.600001", "SH600001", "股票A", 50.0),
+                ("2026-06-18", "ZH1", "SH.600002", "SH600002", "股票B", 50.0),
+                ("2026-06-19", "ZH1", "SH.600001", "SH600001", "股票A", 50.0),
+                ("2026-06-19", "ZH1", "SH.600002", "SH600002", "股票B", 50.0),
+                ("2026-06-22", "ZH1", "SH.600001", "SH600001", "股票A", 40.0),
+                ("2026-06-22", "ZH1", "SH.600002", "SH600002", "股票B", 40.0),
+                ("2026-06-22", "ZH1", "SH.600003", "SH600003", "股票C", 20.0),
+                ("2026-06-22", "ZH2", "SH.600003", "SH600003", "股票C", 30.0),
+            ]
+            rows = [
+                (
+                    snapshot_date,
+                    f"{snapshot_date} 14:50:00",
+                    1,
+                    cube_symbol,
+                    "趋势组合",
+                    True,
+                    stock_symbol,
+                    raw_stock_symbol,
+                    stock_name,
+                    weight_pct,
+                )
+                for snapshot_date, cube_symbol, stock_symbol, raw_stock_symbol, stock_name, weight_pct in base_rows
+            ]
+            connection.executemany(
+                """
+                INSERT INTO xueqiu_cube_holdings_snapshots (
+                    snapshot_date,
+                    snapshot_at,
+                    rank_type,
+                    year_rank,
+                    cube_symbol,
+                    cube_id,
+                    cube_name,
+                    screen_name,
+                    latest_rebalance_at,
+                    latest_rebalance_id,
+                    latest_rebalance_status,
+                    active_rebalance_at,
+                    active_rebalance_id,
+                    active_rebalance_status,
+                    active_rebalance_category,
+                    active_rebalance_source,
+                    holdings_source,
+                    active_rebalance_days,
+                    is_active,
+                    stock_symbol,
+                    raw_stock_symbol,
+                    stock_name,
+                    stock_id,
+                    segment_name,
+                    weight_pct,
+                    raw_holding_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, 'year', ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'current', 360, ?, ?, ?, ?, NULL, NULL, ?, '{}', ?, ?)
+                """,
+                [
+                    (*row, f"{row[0]} 15:00:00", f"{row[0]} 15:00:00")
+                    for row in rows
+                ],
+            )
+        finally:
+            connection.close()
+
 
     def _create_price_db(self, path: str) -> None:
         connection = duckdb.connect(path)
