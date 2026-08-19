@@ -381,11 +381,8 @@ const AIStock = () => {
   const [paperStats, setPaperStats] = useState(null);
   const [hitRate, setHitRate] = useState(null);
   const [fearGreedRef, setFearGreedRef] = useState([]);
-  const [showInfoAlert, setShowInfoAlert] = useState(false);
   const [showStages, setShowStages] = useState(true);
   const [curve, setCurve] = useState([]);
-  const [benchmark, setBenchmark] = useState(null);
-  const [evaluation, setEvaluation] = useState(null);
   const [settings, setSettings] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -447,8 +444,6 @@ const AIStock = () => {
       ['positions', request.get('/api/ai-stock/paper/positions')],
       ['trades', request.get('/api/ai-stock/paper/trades')],
       ['curve', request.get('/api/ai-stock/paper/equity-curve')],
-      ['benchmark', request.get('/api/ai-stock/benchmark/status')],
-      ['evaluation', request.get('/api/ai-stock/evaluation/latest')],
       // 设置与模拟盘参数仅管理员可读（非管理员请求会 403），直接跳过
       ...(isAdmin ? [
         ['settings', request.get('/api/ai-stock/settings')],
@@ -473,8 +468,6 @@ const AIStock = () => {
     setPositions(data.positions || []);
     setTrades(data.trades?.items || []);
     setCurve(data.curve || []);
-    setBenchmark(data.benchmark);
-    setEvaluation(data.evaluation);
     setSettings(data.settings);
     setPaperConfig(data.paperConfig);
     setHoldEvals(data.holdEvals || []);
@@ -702,14 +695,6 @@ const AIStock = () => {
 
   const recommendationContent = (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      {showInfoAlert && (
-        <Alert
-          type="info"
-          showIcon
-          message="AI 仅从受控候选池选择股票；分钟策略决定是否实际进入模拟盘。"
-          description={`${isAdmin && settings ? `${settings?.deepseek_configured ? `DeepSeek 已配置（${settings.deepseek_model}）` : '尚未配置 DeepSeek API Key；请点击“设置”。'} ` : ''}${benchmark?.configured ? `目标站对标：最近采集 ${dateTime(benchmark.last_captured_at)}` : '目标站对标尚未配置运行环境凭据。'}`}
-        />
-      )}
       <Card
         className="ai-stock-card"
         size="small"
@@ -809,7 +794,7 @@ const AIStock = () => {
 
   return (
     <div className="ai-stock-page">
-      <div className="ai-stock-heading"><div><Title level={3}>AI荐股</Title><Text type="secondary">AI 选股、历史复盘与自动模拟盘</Text></div><Space size={8}>{evaluation ? <Tag color={evaluation.passed ? 'success' : 'default'}>对标门槛：{evaluation.passed ? '已达到' : '尚未达到'}</Tag> : null}<Button size="small" type="text" onClick={() => setShowInfoAlert(v => !v)}>{showInfoAlert ? '隐藏提示' : '提示'}</Button></Space></div>
+      <div className="ai-stock-heading"><div><Title level={3}>AI荐股</Title><Text type="secondary">AI 选股、历史复盘与自动模拟盘</Text></div></div>
       <Spin spinning={loading}>
         <Tabs items={[{ key: 'recommendations', label: 'AI 推荐', children: recommendationContent }, { key: 'today', label: '今日推荐', children: todayContent }, { key: 'history', label: '历史推荐', children: historyContent }, { key: 'paper', label: '模拟盘交易', children: paperContent }]} />
       </Spin>
