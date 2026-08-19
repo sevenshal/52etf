@@ -62,6 +62,19 @@ def _avg(values: Iterable[Optional[float]]) -> Optional[float]:
     return sum(clean) / len(clean)
 
 
+def _percentile(values: Iterable[Optional[float]], percentile: float) -> Optional[float]:
+    clean = sorted(value for value in values if value is not None)
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    position = (len(clean) - 1) * percentile
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(clean) - 1)
+    fraction = position - lower_index
+    return clean[lower_index] + (clean[upper_index] - clean[lower_index]) * fraction
+
+
 def _parse_fiscal_year(value: Any) -> Optional[int]:
     text_value = str(value or "").strip()
     if not text_value:
@@ -201,6 +214,9 @@ def _aggregate_report_rows(
         "target_price_avg": target_price_avg,
         "target_price_min": min(target_lows.values()) if target_lows else min(target_prices.values()),
         "target_price_max": max(target_highs.values()) if target_highs else max(target_prices.values()),
+        "target_price_q25": _percentile(target_prices.values(), 0.25),
+        "target_price_median": _percentile(target_prices.values(), 0.5),
+        "target_price_q75": _percentile(target_prices.values(), 0.75),
         "growth_pct": growth_pct,
         "growth_source": growth_source if growth_pct is not None else None,
         "forecast_year": current_year,
@@ -458,16 +474,21 @@ def load_a_stock_consensus_valuation_map(
             "symbol": symbol,
             "date": aggregate.get("latest_report_date"),
             "last_price": close,
-            "fair_value_lo": aggregate.get("target_price_min"),
-            "fair_value_hi": aggregate.get("target_price_max"),
+            "fair_value_lo": aggregate.get("target_price_q25"),
+            "fair_value_mid": aggregate.get("target_price_median"),
+            "fair_value_hi": aggregate.get("target_price_q75"),
             "forward_next_fy_lo": (
-                aggregate["target_price_min"] * growth_factor if growth_factor is not None else None
+                aggregate["target_price_q25"] * growth_factor if growth_factor is not None else None
+            ),
+            "forward_next_fy_mid": (
+                aggregate["target_price_median"] * growth_factor if growth_factor is not None else None
             ),
             "forward_next_fy_hi": (
-                aggregate["target_price_max"] * growth_factor if growth_factor is not None else None
+                aggregate["target_price_q75"] * growth_factor if growth_factor is not None else None
             ),
             "growth_pct": growth_pct,
             "report_count": aggregate.get("report_count"),
+            "target_report_count": aggregate.get("target_report_count"),
             "organization_count": aggregate.get("organization_count"),
         }
     return result
@@ -562,14 +583,19 @@ def load_a_stock_consensus_valuation_history_map(
                 "symbol": symbol,
                 "date": aggregate.get("latest_report_date"),
                 "last_price": close,
-                "fair_value_lo": aggregate.get("target_price_min"),
-                "fair_value_hi": aggregate.get("target_price_max"),
+                "fair_value_lo": aggregate.get("target_price_q25"),
+                "fair_value_mid": aggregate.get("target_price_median"),
+                "fair_value_hi": aggregate.get("target_price_q75"),
                 "forward_next_fy_lo": (
-                    aggregate["target_price_min"] * growth_factor if growth_factor is not None else None
+                    aggregate["target_price_q25"] * growth_factor if growth_factor is not None else None
+                ),
+                "forward_next_fy_mid": (
+                    aggregate["target_price_median"] * growth_factor if growth_factor is not None else None
                 ),
                 "forward_next_fy_hi": (
-                    aggregate["target_price_max"] * growth_factor if growth_factor is not None else None
+                    aggregate["target_price_q75"] * growth_factor if growth_factor is not None else None
                 ),
+                "target_report_count": aggregate.get("target_report_count"),
             }
     return {day: values for day, values in result.items()}
 

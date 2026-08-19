@@ -1,11 +1,34 @@
 from datetime import date
 
 from src.core.services.a_stock_consensus import (
+    _aggregate_report_rows,
     build_a_stock_consensus_history,
     build_a_stock_consensus_candidates,
     normalize_a_stock_symbol,
     search_a_stock_consensus_candidates,
 )
+
+
+def test_consensus_robust_target_range_limits_outlier_influence():
+    rows = [
+        {
+            "report_date": date(2026, 6, day),
+            "report_title": f"报告{day}",
+            "org_name": f"机构{day}",
+            "author_name": f"分析师{day}",
+            "min_price": target,
+            "max_price": target,
+        }
+        for day, target in enumerate([100.0, 102.0, 104.0, 106.0, 1000.0], start=1)
+    ]
+
+    result = _aggregate_report_rows(rows, date(2026, 6, 8))
+
+    assert result["target_price_min"] == 100.0
+    assert result["target_price_max"] == 1000.0
+    assert result["target_price_q25"] == 102.0
+    assert result["target_price_median"] == 104.0
+    assert result["target_price_q75"] == 106.0
 
 
 def test_normalize_a_stock_symbol_infers_exchange_suffix():

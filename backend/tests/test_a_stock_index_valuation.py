@@ -17,15 +17,18 @@ def _holding(symbol, weight):
     return SimpleNamespace(holding_symbol=symbol, weight=weight)
 
 
-def _valuation(symbol, price, current_low, current_high, forward_low, forward_high):
+def _valuation(symbol, price, current_low, current_high, forward_low, forward_high, report_count=3):
     return SimpleNamespace(
         symbol=symbol,
         date=date(2026, 7, 30),
         last_price=price,
         fair_value_lo=current_low,
+        fair_value_mid=(current_low + current_high) / 2,
         fair_value_hi=current_high,
         forward_next_fy_lo=forward_low,
+        forward_next_fy_mid=(forward_low + forward_high) / 2,
         forward_next_fy_hi=forward_high,
+        target_report_count=report_count,
     )
 
 
@@ -73,6 +76,21 @@ def test_calculate_weighted_index_valuation_tracks_current_and_forward_coverage_
     assert result["fair_value_hi"] == pytest.approx(1430)
     assert result["rating"] == "合理"
     assert result["forward_rating"] == "低估"
+
+
+def test_calculate_weighted_index_valuation_downweights_thin_consensus():
+    result = calculate_weighted_index_valuation(
+        index_level=1000,
+        holdings=[_holding("AAA.SH", 0.5), _holding("BBB.SZ", 0.5)],
+        valuations={
+            "AAA.SH": _valuation("AAA.SH", 10, 20, 20, 20, 20, report_count=1),
+            "BBB.SZ": _valuation("BBB.SZ", 10, 10, 10, 10, 10, report_count=3),
+        },
+    )
+
+    assert result["covered_weight"] == pytest.approx(1)
+    assert result["effective_covered_weight"] == pytest.approx(2 / 3)
+    assert result["fair_value_mid"] == pytest.approx(1250)
 
 
 @pytest.mark.parametrize(
@@ -182,7 +200,8 @@ def test_load_a_stock_consensus_valuation_map_builds_forward_range():
 
     result = load_a_stock_consensus_valuation_map(FakeDb(), ["600519.SH"])
 
-    assert result["600519.SH"]["fair_value_lo"] == pytest.approx(120)
-    assert result["600519.SH"]["fair_value_hi"] == pytest.approx(140)
-    assert result["600519.SH"]["forward_next_fy_lo"] == pytest.approx(144)
-    assert result["600519.SH"]["forward_next_fy_hi"] == pytest.approx(168)
+    assert result["600519.SH"]["fair_value_lo"] == pytest.approx(130)
+    assert result["600519.SH"]["fair_value_mid"] == pytest.approx(130)
+    assert result["600519.SH"]["fair_value_hi"] == pytest.approx(130)
+    assert result["600519.SH"]["forward_next_fy_lo"] == pytest.approx(156)
+    assert result["600519.SH"]["forward_next_fy_hi"] == pytest.approx(156)

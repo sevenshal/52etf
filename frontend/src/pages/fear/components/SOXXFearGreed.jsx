@@ -563,7 +563,12 @@ const SOXXFearGreed = () => {
                   </Tag>
                 </Col>
                 <Col xs={12} sm={8}>
-                  <Statistic title="估值覆盖权重" value={(valuation.coverage_ratio || 0) * 100} precision={1} suffix="%" />
+                  <Statistic
+                    title="有效估值权重"
+                    value={(valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100}
+                    precision={1}
+                    suffix="%"
+                  />
                   <Text type="secondary">
                     {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
                   </Text>
@@ -887,7 +892,9 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
               ? `${formatNumber(valuation.valuation_position_pct, 1)}%分位`
               : '样本不足'}
           </span>
-          <span>覆盖 {(Number(valuation.coverage_ratio || 0) * 100).toFixed(0)}%</span>
+          <span>
+            有效权重 {(Number(valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100).toFixed(0)}%
+          </span>
         </div>
       )}
     </button>

@@ -13,6 +13,7 @@ from .a_stock_consensus import load_a_stock_consensus_valuation_history_map
 VALUATION_POSITION_MAX_WINDOW = 504
 VALUATION_POSITION_SHORT_WINDOW = 252
 VALUATION_POSITION_MIN_SAMPLES = 120
+VALUATION_FULL_CONFIDENCE_REPORT_COUNT = 3
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -35,14 +36,18 @@ def calculate_weighted_index_valuation(
     covered_weight = 0.0
     current_weighted_multiples = {
         "fair_value_lo": 0.0,
+        "fair_value_mid": 0.0,
         "fair_value_hi": 0.0,
     }
     forward_weighted_multiples = {
         "forward_next_fy_lo": 0.0,
+        "forward_next_fy_mid": 0.0,
         "forward_next_fy_hi": 0.0,
     }
     covered_count = 0
     forward_covered_weight = 0.0
+    effective_covered_weight = 0.0
+    forward_effective_covered_weight = 0.0
     forward_covered_count = 0
     valuation_dates: List[date] = []
 
@@ -61,20 +66,31 @@ def calculate_weighted_index_valuation(
         }
         if price is None or any(value is None for value in current_values.values()):
             continue
+        report_count = getattr(valuation, "target_report_count", None)
+        confidence = (
+            min(max(float(report_count), 0.0) / VALUATION_FULL_CONFIDENCE_REPORT_COUNT, 1.0)
+            if report_count is not None
+            else 1.0
+        )
+        effective_weight = weight * confidence
+        if effective_weight <= 0:
+            continue
         covered_weight += weight
+        effective_covered_weight += effective_weight
         covered_count += 1
         valuation_dates.append(valuation.date)
         for key, value in current_values.items():
-            current_weighted_multiples[key] += weight * value / price
+            current_weighted_multiples[key] += effective_weight * value / price
         forward_values = {
             key: _positive_number(getattr(valuation, key, None))
             for key in forward_weighted_multiples
         }
         if all(value is not None for value in forward_values.values()):
             forward_covered_weight += weight
+            forward_effective_covered_weight += effective_weight
             forward_covered_count += 1
             for key, value in forward_values.items():
-                forward_weighted_multiples[key] += weight * value / price
+                forward_weighted_multiples[key] += effective_weight * value / price
 
     coverage_ratio = covered_weight / total_weight if total_weight > 0 else 0.0
     result = {
@@ -85,8 +101,14 @@ def calculate_weighted_index_valuation(
         "forward_covered_count": forward_covered_count,
         "total_weight": round(total_weight, 8),
         "covered_weight": round(covered_weight, 8),
+        "effective_covered_weight": round(effective_covered_weight, 8),
         "forward_covered_weight": round(forward_covered_weight, 8),
+        "forward_effective_covered_weight": round(forward_effective_covered_weight, 8),
         "coverage_ratio": round(coverage_ratio, 6),
+        "effective_coverage_ratio": round(
+            effective_covered_weight / total_weight if total_weight > 0 else 0.0,
+            6,
+        ),
         "forward_coverage_ratio": round(
             forward_covered_weight / total_weight if total_weight > 0 else 0.0,
             6,
@@ -97,19 +119,19 @@ def calculate_weighted_index_valuation(
     }
     for key, weighted_multiple in current_weighted_multiples.items():
         result[key] = (
-            round(level * weighted_multiple / covered_weight, 4)
-            if level is not None and covered_weight > 0
+            round(level * weighted_multiple / effective_covered_weight, 4)
+            if level is not None and effective_covered_weight > 0
             else None
         )
     for key, weighted_multiple in forward_weighted_multiples.items():
         result[key] = (
-            round(level * weighted_multiple / forward_covered_weight, 4)
-            if level is not None and forward_covered_weight > 0
+            round(level * weighted_multiple / forward_effective_covered_weight, 4)
+            if level is not None and forward_effective_covered_weight > 0
             else None
         )
     if level is not None:
-        current_mid = _midpoint(result["fair_value_lo"], result["fair_value_hi"])
-        forward_mid = _midpoint(result["forward_next_fy_lo"], result["forward_next_fy_hi"])
+        current_mid = result["fair_value_mid"]
+        forward_mid = result["forward_next_fy_mid"]
         result["current_gap_pct"] = _gap_pct(current_mid, level)
         result["forward_gap_pct"] = _gap_pct(forward_mid, level)
         result["rating"] = _valuation_rating(level, result["fair_value_lo"], result["fair_value_hi"])
@@ -198,7 +220,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuation_gap_min=round(min(gaps), 2),
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
             valuation_gap_max=round(max(gaps), 2),
-            method="adaptive_up_to_504d_percentile_of_constituent_weighted_consensus_undervaluation",
+            method="adaptive_up_to_504d_percentile_of_robust_consensus_undervaluation",
             _history=daily_results,
         )
         result["index_date"] = latest.date.isoformat()
