@@ -694,26 +694,28 @@ const SOXXFearGreed = () => {
 
             <div className="soxx-fear-industry-groups">
               {MAIN_CN_INDUSTRY_GROUPS.map(group => (
-                <IndustryGroup
-                  key={group.key}
-                  group={group}
-                  summaryBySymbol={summaryBySymbol}
-                  expandedSymbol={expandedSymbol}
-                  onToggle={toggleExpanded}
-                  detailNode={detailNode}
-                />
+                <Fragment key={group.key}>
+                  <IndustryGroup
+                    group={group}
+                    summaryBySymbol={summaryBySymbol}
+                    expandedSymbol={expandedSymbol}
+                    onToggle={toggleExpanded}
+                  />
+                  {industryGroupContains(group, expandedSymbol) && detailNode}
+                </Fragment>
               ))}
             </div>
             <div className="soxx-fear-compact-groups">
               {COMPACT_CN_INDUSTRY_GROUPS.map(group => (
-                <IndustryGroup
-                  key={group.key}
-                  group={group}
-                  summaryBySymbol={summaryBySymbol}
-                  expandedSymbol={expandedSymbol}
-                  onToggle={toggleExpanded}
-                  detailNode={detailNode}
-                />
+                <Fragment key={group.key}>
+                  <IndustryGroup
+                    group={group}
+                    summaryBySymbol={summaryBySymbol}
+                    expandedSymbol={expandedSymbol}
+                    onToggle={toggleExpanded}
+                  />
+                  {industryGroupContains(group, expandedSymbol) && detailNode}
+                </Fragment>
               ))}
             </div>
           </div>
@@ -758,7 +760,12 @@ const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle
   </section>
 );
 
-const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => {
+const industryGroupContains = (group, symbol) => Boolean(symbol) && [
+  ...(group.options || []),
+  ...(group.children || []).flatMap(child => child.options || []),
+].some(item => item.symbol === symbol);
+
+const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
   const count = industryOptionCount(group);
   const options = [
     ...(group.options || []).map(item => ({
@@ -794,7 +801,6 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle, detai
           summaryBySymbol={summaryBySymbol}
           expandedSymbol={expandedSymbol}
           onToggle={onToggle}
-          detailNode={detailNode}
         />
       </div>
     </details>
