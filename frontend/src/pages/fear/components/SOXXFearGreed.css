@@ -59,9 +59,8 @@
 
 .soxx-fear-compact-groups {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 280px));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-auto-flow: row dense;
-  justify-content: start;
   align-items: start;
   gap: 8px;
   margin-top: 8px;
