@@ -130,7 +130,7 @@ GET /api/external-trading-accounts/ws?account_id=vNKp...&identifier=GS6630102752
 签名前先构造如下 JSON，字段按 key 排序，使用紧凑分隔符，不保留空格：
 
 ```json
-{"account_id":"vNKpHJkLMnBQRSTUVWXYZabcdefghijkl","identifier":"GS66301027527","nonce":"2gS3xvBt7CqY0Cbm3S_m3Q","ts":"1780732800"}
+{"account_id":"amNDUzNWU4OTA4NjcyZWYwMGYyZDMyYzQzNDFjYjAwOTUK","identifier":"GS66301027527","nonce":"2gS3xvBt7CqY0Cbm3S_m3Q","ts":"1780732800"}
 ```
 
 规范化规则：
@@ -229,7 +229,7 @@ mac_key = sha256(b"external-trading-mac:" + shared_key)
 ```json
 {
   "type": "connected",
-  "account_id": "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl",
+  "account_id": "amNDUzNWU4OTA4NjcyZWYwMGYyZDMyYzQzNDFjYjAwOTUK",
   "name": "券商实盘账号",
   "identifier": "GS66301027527",
   "market_type": "A_STOCK",
@@ -717,7 +717,7 @@ mac_key = sha256(b"external-trading-mac:" + shared_key)
 
 ```json
 {
-  "account_id": "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl",
+  "account_id": "amNDUzNWU4OTA4NjcyZWYwMGYyZDMyYzQzNDFjYjAwOTUK",
   "identifier": "GS66301027527",
   "backtest": false,
   "current_time": "2026-06-06 10:30:00",

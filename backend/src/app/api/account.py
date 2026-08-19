@@ -12,7 +12,7 @@ from sqlalchemy import func, inspect, text
 from ...core.database import SessionLocal, WebAccount, WebAccountDailyUsage, engine
 
 router = APIRouter(prefix="/api/profile")
-ADMIN_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
+ADMIN_ACCOUNT_ID = "amNDUzNWU4OTA4NjcyZWYwMGYyZDMyYzQzNDFjYjAwOTUK"
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
 

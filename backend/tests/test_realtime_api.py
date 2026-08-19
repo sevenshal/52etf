@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from src.app.api import realtime as realtime_api
 from src.app.api import events as events_api
+from src.app.api.account import ADMIN_ACCOUNT_ID
 from src.core.realtime_quotes import realtime_quotes, PTRADE_BRIDGE_ACCOUNT_ID, MAX_POOL_SIZE
 
 
@@ -32,7 +33,7 @@ def test_report_pool_auth_and_response():
     resp = client.post(
         "/api/realtime/pool",
         json={"quotes": {}},
-        headers={"X-Account-ID": "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"},
+        headers={"X-Account-ID": ADMIN_ACCOUNT_ID},
     )
     assert resp.status_code == 403
 
@@ -57,7 +58,7 @@ def test_ws_watch_register_and_disconnect_cleanup():
     _clear_sessions()
 
     with client.websocket_connect(
-        "/api/events/ws?account_id=vNKpHJkLMnBQRSTUVWXYZabcdefghijkl"
+        f"/api/events/ws?account_id={ADMIN_ACCOUNT_ID}"
     ) as ws:
         assert ws.receive_json()["type"] == "connected"
         ws.send_json({
