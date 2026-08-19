@@ -19,7 +19,7 @@ from ...core.database import (
     Session,
     SnowballCopyConfig,
     SnowballCopyLog,
-    SnowballAccountConfig,
+    SystemServiceCredential,
     SnowballBacktestRun,
     SnowballBacktestCurvePoint,
 )
@@ -119,14 +119,14 @@ async def _refresh_xueqiu_guest_token_task(account_id: str = None, cookie: str =
                     
                     if account_id:
                         with get_db_ctx() as db:
-                            config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-                            if config and config.xueqiu_cookie:
+                            config = db.get(SystemServiceCredential, "snowball")
+                            if config and config.cookie:
                                 now = datetime.now()
-                                old_c = config.xueqiu_cookie
+                                old_c = config.cookie
                                 if "xq_a_token=" in old_c:
-                                    config.xueqiu_cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
+                                    config.cookie = re.sub(r'xq_a_token=[^;]+', f'xq_a_token={new_token}', old_c)
                                 else:
-                                    config.xueqiu_cookie = f"xq_a_token={new_token}; {old_c}"
+                                    config.cookie = f"xq_a_token={new_token}; {old_c}"
                                 config.updated_at = now
                     break
     except Exception as e:
@@ -822,7 +822,7 @@ def _load_snowball_external_sync_items(
                         "reference_price_source": row.reference_price_source,
                     }
 
-            acc_config = db.query(SnowballAccountConfig).filter_by(account_id=config.account_id).first()
+            acc_config = db.get(SystemServiceCredential, "snowball")
             items.append({
                 "id": config.id,
                 "account_id": config.account_id,
@@ -834,7 +834,7 @@ def _load_snowball_external_sync_items(
                 "external_trading_account_id": external_account.id,
                 "live_sub_account_id": sub_account.id,
                 "current_targets": current_targets,
-                "cookie": acc_config.xueqiu_cookie if acc_config else None,
+                "cookie": acc_config.cookie if acc_config else None,
             })
         return items
 
@@ -1306,8 +1306,8 @@ def _run_snowball_backtest_task(run_id: int) -> None:
             ).first()
             if not config:
                 raise ValueError("雪球跟单配置不存在")
-            account_config = db.query(SnowballAccountConfig).filter_by(account_id=run.account_id).first()
-            cookie = account_config.xueqiu_cookie if account_config else None
+            account_config = db.get(SystemServiceCredential, "snowball")
+            cookie = account_config.cookie if account_config else None
             if not cookie:
                 raise ValueError("未配置雪球全局 Cookie")
             now = datetime.now()
@@ -1336,8 +1336,8 @@ async def get_combination_info(
     db: Session = Depends(get_db)
 ):
     """Get combination info (name) from Xueqiu"""
-    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    cookie = acc_config.xueqiu_cookie if acc_config else None
+    acc_config = db.get(SystemServiceCredential, "snowball")
+    cookie = acc_config.cookie if acc_config else None
     
     info = await fetch_xueqiu_cube_info(symbol, cookie)
     if not info:
@@ -1352,9 +1352,9 @@ async def get_account_config(
     account_id: str = Depends(valid_admin_account),
     db: Session = Depends(get_db)
 ):
-    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    config = db.get(SystemServiceCredential, "snowball")
     return SnowballAccountConfigModel(
-        xueqiu_cookie=config.xueqiu_cookie if config else None,
+        xueqiu_cookie=config.cookie if config else None,
         updated_at=config.updated_at if config else None,
     )
 
@@ -1368,13 +1368,13 @@ async def update_account_config(
     if cookie:
         data.xueqiu_cookie = _normalize_xueqiu_cookie(cookie)
 
-    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    config = db.get(SystemServiceCredential, "snowball")
     now = datetime.now()
     if not config:
-        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=data.xueqiu_cookie, updated_at=now)
+        config = SystemServiceCredential(service="snowball", cookie=data.xueqiu_cookie, updated_at=now)
         db.add(config)
     else:
-        config.xueqiu_cookie = data.xueqiu_cookie
+        config.cookie = data.xueqiu_cookie
         config.updated_at = now
     db.commit()
     return {"message": "Success", "updated_at": now.isoformat()}
@@ -1423,13 +1423,13 @@ async def sync_xueqiu_cookie_from_browser_extension(
             "updated_at": datetime.now().isoformat(),
         }
 
-    config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
+    config = db.get(SystemServiceCredential, "snowball")
     now = datetime.now()
     if not config:
-        config = SnowballAccountConfig(account_id=account_id, xueqiu_cookie=normalized_cookie, updated_at=now)
+        config = SystemServiceCredential(service="snowball", cookie=normalized_cookie, updated_at=now)
         db.add(config)
     else:
-        config.xueqiu_cookie = normalized_cookie
+        config.cookie = normalized_cookie
         config.updated_at = now
     db.commit()
     return {"message": "Success", "updated_at": now.isoformat()}
@@ -1452,8 +1452,8 @@ async def create_config(
 ):
     # Auto-fetch name if not provided
     if not config.combination_name:
-        acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-        cookie = acc_config.xueqiu_cookie if acc_config else None
+        acc_config = db.get(SystemServiceCredential, "snowball")
+        cookie = acc_config.cookie if acc_config else None
         
         cube_info = await fetch_xueqiu_cube_info(config.combination_id, cookie)
         if cube_info:
@@ -1490,8 +1490,8 @@ async def update_config(
     
     # If updating combination_id but not name, try to fetch name
     if "combination_id" in update_data and "combination_name" not in update_data:
-            acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-            cookie = acc_config.xueqiu_cookie if acc_config else None
+            acc_config = db.get(SystemServiceCredential, "snowball")
+            cookie = acc_config.cookie if acc_config else None
             
             cube_info = await fetch_xueqiu_cube_info(update_data["combination_id"], cookie)
             if cube_info:
@@ -1569,8 +1569,8 @@ async def start_config_backtest(
     if slippage_pct < 0 or slippage_pct > 10:
         raise HTTPException(status_code=400, detail="滑点必须在 0% 到 10% 之间")
 
-    account_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    if not account_config or not account_config.xueqiu_cookie:
+    account_config = db.get(SystemServiceCredential, "snowball")
+    if not account_config or not account_config.cookie:
         raise HTTPException(status_code=400, detail="请先配置雪球全局 Cookie")
 
     now = datetime.now()
@@ -1728,8 +1728,8 @@ async def get_snapshot(
     if not sub_account:
         raise HTTPException(status_code=400, detail="绑定的虚拟子账户不存在")
 
-    acc_config = db.query(SnowballAccountConfig).filter_by(account_id=account_id).first()
-    cookie = acc_config.xueqiu_cookie if acc_config else None
+    acc_config = db.get(SystemServiceCredential, "snowball")
+    cookie = acc_config.cookie if acc_config else None
     xueqiu_holdings = await fetch_xueqiu_holdings(config.combination_id, cookie)
     blacklist = config.blacklisted_symbols or []
 

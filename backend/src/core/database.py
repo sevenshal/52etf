@@ -1093,12 +1093,16 @@ class SnowballCopyConfig(Base):
     last_external_sync_message = Column(String(500))
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class SnowballAccountConfig(Base):
-    """雪球账户全局配置"""
-    __tablename__ = "snowball_account_configs"
-    
-    account_id = Column(String, primary_key=True) # 归属的 Web 账户 ID
-    xueqiu_cookie = Column(String, nullable=True) # 雪球全局Cookie
+class SystemServiceCredential(Base):
+    """系统基础设施使用的外部服务凭据。"""
+    __tablename__ = "system_service_credentials"
+
+    service = Column(String(32), primary_key=True)
+    username = Column(String)
+    password = Column(String)
+    cookie = Column(String)
+    cookie_expires_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class SnowballCopyLog(Base):
@@ -1354,18 +1358,6 @@ class LongPortAccount(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-class EVCAccountConfig(Base):
-    """EVC 账户配置"""
-    __tablename__ = "evc_account_configs"
-
-    account_id = Column(String, primary_key=True)
-    evc_username = Column(String)
-    evc_password = Column(String)
-    evc_cookie = Column(String)
-    cookie_expires_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
 class ScheduledTaskConfig(Base):
     """系统级定时任务配置"""
     __tablename__ = "scheduled_task_configs"
@@ -1509,6 +1501,47 @@ class FactorBacktestSearchResult(Base):
 # 创建所有表
 Base.metadata.create_all(engine)
 
+
+def migrate_system_service_credentials():
+    """从旧的账户级表导入系统级凭据，保留旧表用于上线回滚。"""
+    with engine.begin() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table'")
+            ).fetchall()
+        }
+        if "evc_account_configs" in tables:
+            conn.execute(text("""
+                INSERT OR IGNORE INTO system_service_credentials (
+                    service, username, password, cookie, cookie_expires_at,
+                    created_at, updated_at
+                )
+                SELECT
+                    'evc', evc_username, evc_password, evc_cookie,
+                    cookie_expires_at, created_at, updated_at
+                FROM evc_account_configs
+                WHERE evc_username IS NOT NULL
+                   OR evc_password IS NOT NULL
+                   OR evc_cookie IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """))
+        if "snowball_account_configs" in tables:
+            conn.execute(text("""
+                INSERT OR IGNORE INTO system_service_credentials (
+                    service, cookie, created_at, updated_at
+                )
+                SELECT 'snowball', xueqiu_cookie, updated_at, updated_at
+                FROM snowball_account_configs
+                WHERE xueqiu_cookie IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """))
+
+
+migrate_system_service_credentials()
+
 def drop_deprecated_tables():
     """删除已经迁移或下线的 SQLite 旧表。"""
     deprecated_tables = [
@@ -1638,12 +1671,6 @@ ensure_performance_indexes()
 def ensure_table_columns():
     """为存量表补充新增字段（幂等执行）。"""
     table_columns = {
-        "evc_account_configs": {
-            "evc_username": "ALTER TABLE evc_account_configs ADD COLUMN evc_username VARCHAR",
-            "evc_password": "ALTER TABLE evc_account_configs ADD COLUMN evc_password VARCHAR",
-            "evc_cookie": "ALTER TABLE evc_account_configs ADD COLUMN evc_cookie VARCHAR",
-            "cookie_expires_at": "ALTER TABLE evc_account_configs ADD COLUMN cookie_expires_at DATETIME",
-        },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
             "external_trading_account_id": "ALTER TABLE snowball_copy_configs ADD COLUMN external_trading_account_id INTEGER",

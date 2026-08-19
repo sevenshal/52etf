@@ -7,7 +7,7 @@ from datetime import datetime, date, timedelta, timezone
 from typing import List, Optional, Tuple
 from dateutil import parser
 
-from ..database import EVCAccountConfig, Session
+from ..database import Session, SystemServiceCredential
 
 def _to_float(value) -> Optional[float]:
     if value is None or value == "":
@@ -165,8 +165,7 @@ class EVCData:
 class EVCService:
     """EasyValueCheck API服务"""
 
-    def __init__(self, account_id: Optional[str] = None):
-        self.account_id = account_id
+    def __init__(self):
         self.login_url = 'https://easyvaluecheck.com/api/v1/auth/login'
         self.search_url = 'https://easyvaluecheck.com/api/v1/stock/search'
         self.tag_url = 'https://easyvaluecheck.com/api/v1/stocktag'
@@ -214,18 +213,13 @@ class EVCService:
         return response.json()
 
     def _get_config_record(self, session):
-        query = session.query(EVCAccountConfig)
-        if self.account_id:
-            query = query.filter(EVCAccountConfig.account_id == self.account_id)
-        else:
-            query = query.filter(EVCAccountConfig.evc_username.isnot(None))
-        return query.order_by(EVCAccountConfig.updated_at.desc()).first()
+        return session.get(SystemServiceCredential, "evc")
 
     def _load_cookie_from_db(self):
         session = Session()
         try:
             config = self._get_config_record(session)
-            return config.evc_cookie if config else None
+            return config.cookie if config else None
         finally:
             session.close()
 
@@ -282,7 +276,7 @@ class EVCService:
             config = self._get_config_record(session)
             if not config:
                 return
-            config.evc_cookie = cookie_value
+            config.cookie = cookie_value
             config.cookie_expires_at = self._to_utc_naive(expires_at)
             config.updated_at = datetime.now()
             session.commit()
@@ -292,8 +286,8 @@ class EVCService:
         finally:
             session.close()
 
-    def _is_cookie_valid(self, config: Optional[EVCAccountConfig]) -> bool:
-        if not config or not config.evc_cookie:
+    def _is_cookie_valid(self, config: Optional[SystemServiceCredential]) -> bool:
+        if not config or not config.cookie:
             return False
         if not config.cookie_expires_at:
             return True
@@ -304,13 +298,13 @@ class EVCService:
         session = Session()
         try:
             config = self._get_config_record(session)
-            if not config or not config.evc_username or not config.evc_password:
+            if not config or not config.username or not config.password:
                 raise ValueError("未配置 EVC 账户，请先在“我的 -> 账户管理 -> EVC账户”中填写用户名和密码")
 
             response = requests.post(
                 self.login_url,
                 headers=self.headers,
-                json={"name": config.evc_username, "password": config.evc_password},
+                json={"name": config.username, "password": config.password},
                 timeout=30,
             )
             response.raise_for_status()
@@ -329,7 +323,7 @@ class EVCService:
             cookie_value = f'G_ENABLED_IDPS=google; G_AUTHUSER_H=0; jwt={jwt_value}'
             expires_at = self._decode_cookie_expiry(cookie_value)
 
-            config.evc_cookie = cookie_value
+            config.cookie = cookie_value
             config.cookie_expires_at = self._to_utc_naive(expires_at)
             config.updated_at = datetime.now()
             session.commit()
@@ -350,8 +344,8 @@ class EVCService:
         try:
             config = self._get_config_record(session)
             has_valid_cookie = self._is_cookie_valid(config)
-            if not force_login and has_valid_cookie and config.evc_cookie:
-                self.headers['cookie'] = config.evc_cookie
+            if not force_login and has_valid_cookie and config.cookie:
+                self.headers['cookie'] = config.cookie
                 return
         finally:
             session.close()

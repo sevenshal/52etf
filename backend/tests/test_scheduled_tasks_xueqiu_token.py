@@ -87,8 +87,7 @@ class XueqiuTokenMonitorTest(TestCase):
         class ExpiringRow:
             def __init__(self):
                 self._data = {
-                    "account_id": "account-1",
-                    "xueqiu_cookie": "xq_a_token=fresh;",
+                    "cookie": "xq_a_token=fresh;",
                     "updated_at": datetime.now() - timedelta(hours=1),
                 }
 
@@ -99,16 +98,10 @@ class XueqiuTokenMonitorTest(TestCase):
                     return self._data[name]
                 raise AttributeError(name)
 
-        class FakeQuery:
-            def filter(self, *_args, **_kwargs):
-                return self
-
-            def all(self):
-                return [ExpiringRow()]
-
         class FakeDB:
-            def query(self, *_args, **_kwargs):
-                return FakeQuery()
+            def get(self, _model, service):
+                self.assert_service = service
+                return ExpiringRow()
 
         @contextmanager
         def fake_get_db_ctx():

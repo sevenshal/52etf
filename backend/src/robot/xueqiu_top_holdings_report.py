@@ -25,7 +25,7 @@ import pandas as pd
 from ..core.database import (
     ETFFearGreedCloneHistory,
     SessionLocal,
-    SnowballAccountConfig,
+    SystemServiceCredential,
     XueqiuCubeActivityCache,
     XueqiuCubeRankCache,
     XueqiuStrategyConfig,
@@ -458,20 +458,12 @@ def calculate_cash_weight_from_holdings(non_cash_weight_pct: float) -> float:
 def get_latest_cookie() -> str:
     db = SessionLocal()
     try:
-        rows = (
-            db.query(SnowballAccountConfig)
-            .filter(SnowballAccountConfig.xueqiu_cookie.isnot(None))
-            .order_by(SnowballAccountConfig.updated_at.desc())
-            .all()
-        )
-        for row in rows:
-            cookie = (row.xueqiu_cookie or "").strip()
-            if "xq_a_token=" in cookie:
-                return cookie
-        for row in rows:
-            cookie = (row.xueqiu_cookie or "").strip()
-            if cookie:
-                return f"xq_a_token={cookie};"
+        row = db.get(SystemServiceCredential, "snowball")
+        cookie = (row.cookie or "").strip() if row else ""
+        if "xq_a_token=" in cookie:
+            return cookie
+        if cookie:
+            return f"xq_a_token={cookie};"
     finally:
         db.close()
     raise RuntimeError("No Xueqiu cookie found in snowball_account_configs.")

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from ..database import SnowballAccountConfig, get_db_ctx
+from ..database import SystemServiceCredential, get_db_ctx
 from ..utils import mask_account_id, send_alert_email
 
 
@@ -135,23 +135,16 @@ def send_xueqiu_token_login_missing_alert(
 
 def process_xueqiu_token_freshness_check_for_robot(max_age_hours: int = XUEQIU_TOKEN_MAX_AGE_HOURS) -> str:
     with get_db_ctx() as db:
-        rows = (
-            db.query(
-                SnowballAccountConfig.account_id,
-                SnowballAccountConfig.xueqiu_cookie,
-                SnowballAccountConfig.updated_at,
+        row = db.get(SystemServiceCredential, "snowball")
+        configs = []
+        if row and row.cookie:
+            configs.append(
+                XueqiuTokenConfigSnapshot(
+                    account_id="system:snowball",
+                    xueqiu_cookie=row.cookie,
+                    updated_at=row.updated_at,
+                )
             )
-            .filter(SnowballAccountConfig.xueqiu_cookie.isnot(None))
-            .all()
-        )
-        configs = [
-            XueqiuTokenConfigSnapshot(
-                account_id=row.account_id,
-                xueqiu_cookie=row.xueqiu_cookie,
-                updated_at=row.updated_at,
-            )
-            for row in rows
-        ]
 
     result = evaluate_xueqiu_token_freshness(configs, max_age_hours=max_age_hours)
     message = format_xueqiu_token_freshness_message(result)
