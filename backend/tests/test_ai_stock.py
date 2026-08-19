@@ -97,6 +97,48 @@ def test_news_snapshot_keeps_existing_prefix_when_later_news_is_appended():
     assert [row["title"] for row in later] == ["前一日下午新闻", "当日早间新闻", "盘中新新闻"]
 
 
+def test_news_anchor_time_is_configurable_and_validated():
+    from src.core.database import get_db_ctx, AIStockServiceConfig
+
+    class _CalendarOnlyTushare:
+        def get_trade_calendar_frame(self, _start_date, _end_date):
+            return pd.DataFrame([{"cal_date": datetime(2026, 8, 18).date(), "is_open": 1}])
+
+    with get_db_ctx() as db:
+        config = db.get(AIStockServiceConfig, 1)
+        original = config.news_anchor_time if config else None
+
+    try:
+        saved = update_ai_stock_service_settings(
+            deepseek_api_key=None,
+            deepseek_model=None,
+            news_anchor_time="13:35",
+            updated_by="admin",
+        )
+        assert saved["news_anchor_time"] == "13:35"
+        anchor = AIStockDataProvider(tushare=_CalendarOnlyTushare()).previous_trading_day_news_anchor(
+            datetime(2026, 8, 19, 10, 0)
+        )
+        assert anchor == datetime(2026, 8, 18, 13, 35)
+
+        try:
+            update_ai_stock_service_settings(
+                deepseek_api_key=None,
+                deepseek_model=None,
+                news_anchor_time="24:00",
+                updated_by="admin",
+            )
+        except ValueError as exc:
+            assert "HH:mm" in str(exc)
+        else:
+            raise AssertionError("非法新闻起点时间必须被拒绝")
+    finally:
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            if config:
+                config.news_anchor_time = original or "14:00"
+
+
 def test_news_headlines_dedupe_exact_titles_and_merge_sources():
     from src.core.services.ai_stock import _serialize_news_headlines
 

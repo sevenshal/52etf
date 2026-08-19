@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v8"  # v8: 新闻窗口固定为上一交易日14:00起并按时间升序，提升跨批前缀缓存命中
+PROMPT_VERSION = "news-ths-v8"  # v8: 新闻窗口固定为上一交易日的可配置时刻起并按时间升序，提升跨批前缀缓存命中
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -75,6 +75,7 @@ MAX_CANDIDATES_PER_BOARD = 200
 MIN_MARKET_CAP = 1_000_000  # 万元 = 100 亿
 MIN_AVG_TURNOVER = 20_000  # 千元 = 2000 万
 THS_INDEX_TYPES = ("N", "TH", "I")
+NEWS_ANCHOR_TIME = "14:00"
 
 
 def _load_strategy_params() -> Dict[str, int]:
@@ -156,6 +157,7 @@ def get_ai_stock_service_settings() -> Dict[str, Any]:
             "target_return_pct_max": config.target_return_pct_max if config and config.target_return_pct_max is not None else TARGET_RETURN_PCT_MAX,
             "news_signal_weight": config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT,
             "xueqiu_signal_enabled": config.xueqiu_signal_enabled if config and config.xueqiu_signal_enabled is not None else XUEQIU_SIGNAL_ENABLED,
+            "news_anchor_time": (config.news_anchor_time if config else None) or NEWS_ANCHOR_TIME,
             "updated_at": config.updated_at if config else None,
             "updated_by": config.updated_by if config else None,
         }
@@ -189,6 +191,7 @@ def update_ai_stock_service_settings(
     target_return_pct_max: Optional[float] = None,
     news_signal_weight: Optional[float] = None,
     xueqiu_signal_enabled: Optional[int] = None,
+    news_anchor_time: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist write-only DeepSeek key and strategy limits in one short transaction."""
     key = str(deepseek_api_key or "").strip()
@@ -209,6 +212,9 @@ def update_ai_stock_service_settings(
         raise ValueError("新闻信号权重必须是 0-1 之间的比例")
     if xueqiu_signal_enabled is not None and xueqiu_signal_enabled not in (0, 1):
         raise ValueError("雪球行为信号开关必须是 0 或 1")
+    anchor_time = str(news_anchor_time or "").strip()
+    if news_anchor_time is not None and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", anchor_time):
+        raise ValueError("新闻起点时间必须是 HH:mm 格式")
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
         if not config:
@@ -242,6 +248,8 @@ def update_ai_stock_service_settings(
             config.news_signal_weight = news_signal_weight
         if xueqiu_signal_enabled is not None:
             config.xueqiu_signal_enabled = xueqiu_signal_enabled
+        if news_anchor_time is not None:
+            config.news_anchor_time = anchor_time
         config.updated_by = updated_by
     return get_ai_stock_service_settings()
 
@@ -597,7 +605,7 @@ class AIStockDataProvider:
         self.tushare = tushare or TushareService.get_instance()
 
     def previous_trading_day_news_anchor(self, now: datetime) -> datetime:
-        """Return 14:00 on the latest open market day strictly before ``now``.
+        """Return the configured clock time on the latest prior open day.
 
         A fixed daily anchor keeps the ordered news list prefix stable across
         recommendation batches.  Unlike a rolling 24-hour window, earlier
@@ -615,20 +623,24 @@ class AIStockDataProvider:
         ]
         if not open_days:
             raise AIStockError("最近没有可用的上一交易日，不能确定新闻窗口起点")
-        return datetime.combine(max(open_days), datetime.min.time()).replace(hour=14)
+        settings = get_ai_stock_service_settings()
+        anchor_text = str(settings.get("news_anchor_time") or NEWS_ANCHOR_TIME)
+        anchor_clock = datetime.strptime(anchor_text, "%H:%M").time()
+        return datetime.combine(max(open_days), anchor_clock)
 
     def build_news_snapshot(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         as_of = _now(now)
         news_anchor = self.previous_trading_day_news_anchor(as_of)
         major_news_frame = self.tushare.get_a_stock_major_news_frame(news_anchor, as_of)
         if major_news_frame is None or major_news_frame.empty:
-            raise AIStockError("Tushare major_news 未返回上一交易日14:00以来的通讯标题，严格模式停止本批次")
+            raise AIStockError(f"Tushare major_news 未返回上一交易日{news_anchor:%H:%M}以来的通讯标题，严格模式停止本批次")
         headlines = _serialize_news_headlines(("major_news", major_news_frame))
         if not headlines:
             raise AIStockError("新闻接口返回内容没有有效标题，严格模式停止本批次")
         return {
             "generated_at": as_of.isoformat(timespec="seconds"),
             "trade_date": as_of.date().isoformat(),
+            "news_anchor_time": news_anchor.strftime("%H:%M"),
             "headlines": headlines,
             "source_status": {
                 "major_news": {
@@ -958,10 +970,11 @@ class DeepSeekStockSelector:
 
     def extract_events(self, news_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         headlines = news_snapshot.get("headlines") or []
+        news_anchor_time = str(news_snapshot.get("news_anchor_time") or NEWS_ANCHOR_TIME)
         if not headlines:
-            raise AIStockModelError("上一交易日14:00以来没有可用新闻标题，不能生成新闻驱动推荐")
+            raise AIStockModelError(f"上一交易日{news_anchor_time}以来没有可用新闻标题，不能生成新闻驱动推荐")
         instruction = {
-            "task": "你是中国A股新闻研究员。只根据下列自上一交易日14:00以来、截至本批次时间且已按时间升序排列的全部新闻标题，识别会影响A股的独立事件；不要根据价格、资金流或任何外部知识补充事件。",
+            "task": f"你是中国A股新闻研究员。只根据下列自上一交易日{news_anchor_time}以来、截至本批次时间且已按时间升序排列的全部新闻标题，识别会影响A股的独立事件；不要根据价格、资金流或任何外部知识补充事件。",
             "constraints": {
                 "max_events": _load_strategy_params()["max_events"],
                 "must_cite_headline_ids": True,

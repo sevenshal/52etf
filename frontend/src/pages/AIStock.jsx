@@ -18,10 +18,12 @@ import {
   Table,
   Tabs,
   Tag,
+  TimePicker,
   Tooltip,
   Typography,
   message,
 } from 'antd';
+import dayjs from 'dayjs';
 import { PlayCircleOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
@@ -400,6 +402,7 @@ const AIStock = () => {
   const [targetReturnPctMax, setTargetReturnPctMax] = useState(10);
   const [newsSignalWeight, setNewsSignalWeight] = useState(0.5);
   const [xueqiuSignalEnabled, setXueqiuSignalEnabled] = useState(0);
+  const [newsAnchorTime, setNewsAnchorTime] = useState('14:00');
   const [paperConfig, setPaperConfig] = useState(null);
   const [paperConfigOpen, setPaperConfigOpen] = useState(false);
   const [savingPaperConfig, setSavingPaperConfig] = useState(false);
@@ -537,6 +540,7 @@ const AIStock = () => {
     setTargetReturnPctMax(settings?.target_return_pct_max ?? 10);
     setNewsSignalWeight(settings?.news_signal_weight ?? 0.5);
     setXueqiuSignalEnabled(settings?.xueqiu_signal_enabled ?? 0);
+    setNewsAnchorTime(settings?.news_anchor_time || '14:00');
     setSettingsOpen(true);
   }, [settings]);
 
@@ -557,6 +561,7 @@ const AIStock = () => {
       payload.target_return_pct_max = targetReturnPctMax;
       payload.news_signal_weight = newsSignalWeight;
       payload.xueqiu_signal_enabled = xueqiuSignalEnabled ? 1 : 0;
+      payload.news_anchor_time = newsAnchorTime;
       const response = await request.put('/api/ai-stock/settings', payload);
       setSettings(response.data);
       setDeepseekApiKey('');
@@ -567,7 +572,7 @@ const AIStock = () => {
     } finally {
       setSavingSettings(false);
     }
-  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled]);
+  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled, newsAnchorTime]);
 
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
@@ -823,6 +828,21 @@ const AIStock = () => {
             addonBefore="模型"
           />
           <Divider style={{ margin: '4px 0' }}>策略参数</Divider>
+          <Row align="middle" gutter={12}>
+            <Col span={16}>
+              <Text style={{ fontSize: 13 }}>新闻窗口起点</Text>
+              <div><Text type="secondary" style={{ fontSize: 12 }}>每批读取“上一交易日该时间”之后的新闻；固定起点有利于跨批缓存命中</Text></div>
+            </Col>
+            <Col span={8} style={{ textAlign: 'right' }}>
+              <TimePicker
+                value={dayjs(`2000-01-01T${newsAnchorTime}:00`)}
+                onChange={value => setNewsAnchorTime(value ? value.format('HH:mm') : '14:00')}
+                format="HH:mm"
+                minuteStep={5}
+                allowClear={false}
+              />
+            </Col>
+          </Row>
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最多候选股</Text><Input type="number" value={maxCandidates} onChange={e => setMaxCandidates(Number(e.target.value) || 1)} min={1} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最多新闻事件</Text><Input type="number" value={maxEvents} onChange={e => setMaxEvents(Number(e.target.value) || 1)} min={1} /></Col>
