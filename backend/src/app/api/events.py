@@ -1,19 +1,90 @@
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+import pandas as pd
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 
 from ...core.event_stream import EventConnection, event_broker
 from ...core.realtime_quotes import realtime_quotes
+from ...core.services.tushare import TushareService
 from .account import is_valid_account
 
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 logger = logging.getLogger(__name__)
+
+
+def _quote_number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _fetch_missing_tushare_quotes(codes: list[str]) -> Dict[str, Dict[str, Any]]:
+    """用 Tushare 实时日线补齐注册时内存中缺失的展示行情。
+
+    不过滤非当日数据：这里用于页面展示，休市/未开盘时最近交易日的收盘价和
+    开盘价比空值更有用；交易执行场景仍由 valuation 模块按日期严格过滤。
+    """
+    if not codes:
+        return {}
+
+    def _fetch() -> Dict[str, Dict[str, Any]]:
+        service = TushareService.get_instance()
+        frames = []
+        for frame in (
+            service.get_a_stock_realtime_rt_k_frame(codes),
+            service.get_a_stock_realtime_etf_rt_k_frame(codes),
+        ):
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                frames.append(frame)
+        if not frames:
+            return {}
+
+        result: Dict[str, Dict[str, Any]] = {}
+        merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"], keep="first")
+        for _, row in merged.iterrows():
+            code = str(row.get("ts_code") or "").strip().upper()
+            last_px = _quote_number(row.get("close"))
+            if not code or not last_px or last_px <= 0:
+                continue
+            trade_time = row.get("trade_time")
+            parsed_time = pd.to_datetime(trade_time, errors="coerce")
+            result[code] = {
+                "last_px": last_px,
+                "preclose_px": _quote_number(row.get("pre_close")),
+                "open_px": _quote_number(row.get("open")),
+                "high_px": _quote_number(row.get("high")),
+                "low_px": _quote_number(row.get("low")),
+                "amount": _quote_number(row.get("amount")),
+                "hs_time": None if pd.isna(parsed_time) else parsed_time.isoformat(),
+                "source": "tushare_rt",
+            }
+        return result
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        logger.warning("Tushare quote backfill failed for realtime registration: %s", exc)
+        return {}
+
+
+def _enqueue_quote_snapshot(connection: EventConnection, quotes: Dict[str, Dict[str, Any]]) -> None:
+    if not quotes:
+        return
+    event_broker._enqueue(connection.queue, {
+        "type": "realtime_quotes",
+        "pushed_at": datetime.now().isoformat(),
+        "ts": datetime.now().isoformat(),
+        "quotes": quotes,
+    })
 
 
 async def _handle_control_message(connection: EventConnection, raw: str) -> None:
@@ -37,11 +108,20 @@ async def _handle_control_message(connection: EventConnection, raw: str) -> None
     if msg_type == "watch_register":
         codes = message.get("codes")
         if isinstance(codes, list):
+            normalized_codes = [str(code) for code in codes]
             realtime_quotes.register(
                 connection.connection_id,
                 source,
-                [str(code) for code in codes],
+                normalized_codes,
             )
+            # 注册后先立即恢复已有内存快照，再仅为缺失标的请求 Tushare。
+            cached = realtime_quotes.snapshot(normalized_codes)
+            _enqueue_quote_snapshot(connection, cached)
+            missing = [code for code in normalized_codes if not realtime_quotes.quote(code)]
+            if missing:
+                fetched = await _fetch_missing_tushare_quotes(missing)
+                filled = realtime_quotes.update_missing_quotes(fetched)
+                _enqueue_quote_snapshot(connection, filled)
     elif msg_type == "watch_unregister":
         codes = message.get("codes")
         if isinstance(codes, list):

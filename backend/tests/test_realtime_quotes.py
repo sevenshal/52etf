@@ -91,3 +91,18 @@ def test_update_quotes_merges_and_prunes_with_pool():
     assert manager.quote("600000.SH") is None
     assert manager.quote("000001.SZ") is None
     assert manager.quote("999999.SH") is None
+
+
+def test_snapshot_and_missing_backfill_do_not_overwrite_live_tick():
+    manager = RealtimeQuoteManager()
+    manager.update_quotes({"600000.SH": {"last_px": 10.2, "source": "ptrade"}})
+
+    snapshot = manager.snapshot(["600000.SS", "000001.SZ"])
+    assert snapshot["600000.SH"]["last_px"] == 10.2
+
+    filled = manager.update_missing_quotes({
+        "600000.SH": {"last_px": 10.0, "source": "tushare_rt"},
+        "000001.SZ": {"last_px": 11.0, "open_px": 10.8, "source": "tushare_rt"},
+    })
+    assert filled["600000.SH"]["last_px"] == 10.2
+    assert manager.quote("000001.SZ")["open_px"] == 10.8

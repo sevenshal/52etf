@@ -128,6 +128,39 @@ class RealtimeQuoteManager:
         with self._lock:
             return self._quotes.get(normalize_code(code))
 
+    def snapshot(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
+        """返回指定代码当前缓存的副本，避免把内部可变对象暴露给调用方。"""
+        with self._lock:
+            result: Dict[str, Dict[str, Any]] = {}
+            for code in codes or []:
+                normalized = normalize_code(code)
+                quote = self._quotes.get(normalized)
+                if quote is not None:
+                    result[normalized] = dict(quote)
+            return result
+
+    def update_missing_quotes(self, quotes: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """只补齐尚无缓存的行情，并返回这些代码最终采用的快照。
+
+        Tushare 请求期间 PTrade 可能已经送来更新鲜的 tick；此时保留 PTrade
+        快照，不让稍旧的补偿行情覆盖它。
+        """
+        if not quotes:
+            return {}
+        now = datetime.now().isoformat()
+        result: Dict[str, Dict[str, Any]] = {}
+        with self._lock:
+            for code, quote in quotes.items():
+                normalized = normalize_code(code)
+                if not normalized:
+                    continue
+                if normalized not in self._quotes:
+                    merged = dict(quote or {})
+                    merged["updated_at"] = now
+                    self._quotes[normalized] = merged
+                result[normalized] = dict(self._quotes[normalized])
+        return result
+
     # ------------------------------------------------------------------ #
     # 只读访问器
     # ------------------------------------------------------------------ #

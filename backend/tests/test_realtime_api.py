@@ -1,4 +1,5 @@
 import time
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -82,6 +83,33 @@ def test_ws_watch_register_and_disconnect_cleanup():
     # 连接断开 → 该会话注册被清理
     time.sleep(0.3)
     assert realtime_quotes.pool() == []
+
+
+def test_ws_watch_register_immediately_pushes_cache_and_backfills_missing(monkeypatch):
+    app = FastAPI()
+    app.include_router(events_api.router)
+    client = TestClient(app)
+    _clear_sessions()
+    realtime_quotes.update_quotes({"600000.SH": {"last_px": 10.5, "open_px": 10.1}})
+    fetch = AsyncMock(return_value={
+        "000001.SZ": {"last_px": 11.2, "open_px": 11.0, "source": "tushare_rt"},
+    })
+    monkeypatch.setattr(events_api, "_fetch_missing_tushare_quotes", fetch)
+
+    with client.websocket_connect(f"/api/events/ws?account_id={ADMIN_ACCOUNT_ID}") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "type": "watch_register",
+            "source": "ai_stock_page",
+            "codes": ["600000.SH", "000001.SZ"],
+        })
+        cached_event = ws.receive_json()
+        filled_event = ws.receive_json()
+
+        assert cached_event["quotes"]["600000.SH"]["last_px"] == 10.5
+        assert filled_event["quotes"]["000001.SZ"]["open_px"] == 11.0
+        fetch.assert_awaited_once_with(["000001.SZ"])
+        assert realtime_quotes.quote("000001.SZ")["source"] == "tushare_rt"
 
 
 def test_max_pool_size_constant_is_sane():
