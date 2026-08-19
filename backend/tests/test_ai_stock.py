@@ -32,7 +32,20 @@ from src.core.services.tushare_account import (
 
 def test_news_snapshot_uses_major_news_only():
     class _MajorNewsOnlyTushare:
-        def get_a_stock_major_news_frame(self, _start_at, _end_at):
+        def __init__(self):
+            self.window = None
+
+        def get_trade_calendar_frame(self, _start_date, _end_date):
+            return pd.DataFrame(
+                [
+                    {"cal_date": datetime(2026, 8, 7).date(), "is_open": 1},
+                    {"cal_date": datetime(2026, 8, 8).date(), "is_open": 0},
+                    {"cal_date": datetime(2026, 8, 9).date(), "is_open": 0},
+                ]
+            )
+
+        def get_a_stock_major_news_frame(self, start_at, end_at):
+            self.window = (start_at, end_at)
             return pd.DataFrame(
                 [
                     {
@@ -43,7 +56,8 @@ def test_news_snapshot_uses_major_news_only():
                 ]
             )
 
-    snapshot = AIStockDataProvider(tushare=_MajorNewsOnlyTushare()).build_news_snapshot(
+    tushare = _MajorNewsOnlyTushare()
+    snapshot = AIStockDataProvider(tushare=tushare).build_news_snapshot(
         datetime(2026, 8, 10, 12, 0)
     )
 
@@ -53,6 +67,34 @@ def test_news_snapshot_uses_major_news_only():
     assert set(snapshot["source_status"]) == {"major_news", "headline_count", "headline_raw_count"}
     assert snapshot["source_status"]["headline_count"] == 1
     assert snapshot["source_status"]["headline_raw_count"] == 1
+    assert tushare.window == (datetime(2026, 8, 7, 14, 0), datetime(2026, 8, 10, 12, 0))
+    assert snapshot["source_status"]["major_news"]["window_start"] == "2026-08-07T14:00:00"
+
+
+def test_news_snapshot_keeps_existing_prefix_when_later_news_is_appended():
+    class _GrowingNewsTushare:
+        def __init__(self):
+            self.end_at = None
+
+        def get_trade_calendar_frame(self, _start_date, _end_date):
+            return pd.DataFrame([{"cal_date": datetime(2026, 8, 18).date(), "is_open": 1}])
+
+        def get_a_stock_major_news_frame(self, _start_at, end_at):
+            rows = [
+                {"title": "前一日下午新闻", "datetime": datetime(2026, 8, 18, 15, 0), "source": "财联社"},
+                {"title": "当日早间新闻", "datetime": datetime(2026, 8, 19, 8, 0), "source": "证券时报"},
+            ]
+            if end_at >= datetime(2026, 8, 19, 10, 0):
+                rows.append({"title": "盘中新新闻", "datetime": datetime(2026, 8, 19, 9, 50), "source": "上证报"})
+            return pd.DataFrame(rows)
+
+    provider = AIStockDataProvider(tushare=_GrowingNewsTushare())
+    early = provider.build_news_snapshot(datetime(2026, 8, 19, 9, 26))["headlines"]
+    later = provider.build_news_snapshot(datetime(2026, 8, 19, 10, 0))["headlines"]
+
+    assert later[: len(early)] == early
+    assert [row["headline_id"] for row in later] == ["N0001", "N0002", "N0003"]
+    assert [row["title"] for row in later] == ["前一日下午新闻", "当日早间新闻", "盘中新新闻"]
 
 
 def test_news_headlines_dedupe_exact_titles_and_merge_sources():
@@ -542,7 +584,7 @@ def test_run_persists_full_news_to_stock_transcript():
     evidence = service.get_run_evidence(run["id"])
     transcript = service.get_run_transcript(run["id"])
     assert evidence["news_snapshot"][0]["title"] == "原始新闻标题必须存档"
-    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v7"
+    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v8"
     assert [stage["stage"] for stage in transcript["ai_raw_response"]["stages"]] == ["NEWS_EVENTS", "EVENTS_TO_THS_BOARDS", "THS_BOARDS_TO_STOCK_SELECTION"]
     assert transcript["ai_raw_response"]["stages"][0]["request"]["messages"][0]["content"] == "原始新闻标题必须存档"
 

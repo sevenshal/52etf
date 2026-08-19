@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v7"  # v7: 轮2自包含目录前置 + 轮3去目录重放；v5=去 xueqiu 引用约束；v4=去候选 board_strength
+PROMPT_VERSION = "news-ths-v8"  # v8: 新闻窗口固定为上一交易日14:00起并按时间升序，提升跨批前缀缓存命中
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -596,11 +596,33 @@ class AIStockDataProvider:
     def __init__(self, tushare: Optional[TushareService] = None):
         self.tushare = tushare or TushareService.get_instance()
 
+    def previous_trading_day_news_anchor(self, now: datetime) -> datetime:
+        """Return 14:00 on the latest open market day strictly before ``now``.
+
+        A fixed daily anchor keeps the ordered news list prefix stable across
+        recommendation batches.  Unlike a rolling 24-hour window, earlier
+        headlines do not fall off and renumber every time the job runs.
+        """
+        as_of = _now(now)
+        end_date = as_of.date() - timedelta(days=1)
+        frame = self.tushare.get_trade_calendar_frame(end_date - timedelta(days=14), end_date)
+        if frame is None or frame.empty:
+            raise AIStockError("Tushare trade_cal 不可用，不能确定新闻窗口起点")
+        open_days = [
+            row.get("cal_date")
+            for _, row in frame.iterrows()
+            if str(row.get("is_open")) in {"1", "1.0"} and row.get("cal_date") and row.get("cal_date") <= end_date
+        ]
+        if not open_days:
+            raise AIStockError("最近没有可用的上一交易日，不能确定新闻窗口起点")
+        return datetime.combine(max(open_days), datetime.min.time()).replace(hour=14)
+
     def build_news_snapshot(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         as_of = _now(now)
-        major_news_frame = self.tushare.get_a_stock_major_news_frame(as_of - timedelta(hours=24), as_of)
+        news_anchor = self.previous_trading_day_news_anchor(as_of)
+        major_news_frame = self.tushare.get_a_stock_major_news_frame(news_anchor, as_of)
         if major_news_frame is None or major_news_frame.empty:
-            raise AIStockError("Tushare major_news 未返回最近 24 小时通讯标题，严格模式停止本批次")
+            raise AIStockError("Tushare major_news 未返回上一交易日14:00以来的通讯标题，严格模式停止本批次")
         headlines = _serialize_news_headlines(("major_news", major_news_frame))
         if not headlines:
             raise AIStockError("新闻接口返回内容没有有效标题，严格模式停止本批次")
@@ -609,7 +631,12 @@ class AIStockDataProvider:
             "trade_date": as_of.date().isoformat(),
             "headlines": headlines,
             "source_status": {
-                "major_news": {"status": "SUCCESS", "headline_count": int(len(major_news_frame))},
+                "major_news": {
+                    "status": "SUCCESS",
+                    "headline_count": int(len(major_news_frame)),
+                    "window_start": news_anchor.isoformat(timespec="seconds"),
+                    "window_end": as_of.isoformat(timespec="seconds"),
+                },
                 "headline_count": len(headlines),
                 "headline_raw_count": int(len(major_news_frame)),
             },
@@ -932,9 +959,9 @@ class DeepSeekStockSelector:
     def extract_events(self, news_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         headlines = news_snapshot.get("headlines") or []
         if not headlines:
-            raise AIStockModelError("最近 24 小时没有可用新闻标题，不能生成新闻驱动推荐")
+            raise AIStockModelError("上一交易日14:00以来没有可用新闻标题，不能生成新闻驱动推荐")
         instruction = {
-            "task": "你是中国A股新闻研究员。只根据下列最近24小时全部新闻标题识别会影响A股的独立事件；不要根据价格、资金流或任何外部知识补充事件。",
+            "task": "你是中国A股新闻研究员。只根据下列自上一交易日14:00以来、截至本批次时间且已按时间升序排列的全部新闻标题，识别会影响A股的独立事件；不要根据价格、资金流或任何外部知识补充事件。",
             "constraints": {
                 "max_events": _load_strategy_params()["max_events"],
                 "must_cite_headline_ids": True,
