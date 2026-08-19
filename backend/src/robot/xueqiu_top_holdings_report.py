@@ -3511,6 +3511,7 @@ def build_rank_acceleration_buffer_plan(
     min_metric_threshold: Optional[float] = None,
     strategy_name_override: Optional[str] = None,
     fear_greed_regime: Optional[str] = None,
+    target_total_weight_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Build a buffered equal-weight plan over a strategy metric.
 
@@ -3634,6 +3635,15 @@ def build_rank_acceleration_buffer_plan(
         )
 
     normalized_top_n = max(1, int(top_n or RANK_ACCELERATION_TOP_N))
+    normalized_target_total_weight_pct = min(
+        100.0,
+        max(
+            0.0,
+            float(target_total_weight_pct)
+            if target_total_weight_pct is not None
+            else float(normalized_top_n * 10),
+        ),
+    )
     normalized_sell_rank = max(normalized_top_n, int(sell_rank or RANK_ACCELERATION_SELL_RANK))
     snapshot_date = current_snapshot_date or date.today()
     comparison_by_symbol = comparison_snapshot.get("by_symbol") or {}
@@ -4030,12 +4040,13 @@ def build_rank_acceleration_buffer_plan(
         ),
     )
     component_changed = set(final_symbols) != set(current_symbols)
-    target_weight = 100.0 / normalized_top_n
+    target_weight = normalized_target_total_weight_pct / normalized_top_n
     execution_weights = (
         build_min_turnover_execution_weights(
             final_symbols=final_symbols,
             added_symbols=added_symbols,
             current_by_symbol=current_by_symbol,
+            target_total_weight_pct=normalized_target_total_weight_pct,
         )
         if len(final_symbols) == normalized_top_n
         else {symbol: target_weight for symbol in final_symbols}
@@ -4063,6 +4074,13 @@ def build_rank_acceleration_buffer_plan(
             }
         )
         target_items.append(item)
+
+    # 星澜贰、叁号的目标持股数变化也会改变目标总仓位。即使成分未变，也要提交一次
+    # 权重调整（例如修正历史上 3 只各 33.33% 为 3 只各约 10%）。
+    weight_adjustment_required = any(
+        item.get("strategy_action") == "adjust" for item in target_items
+    )
+    component_changed = component_changed or weight_adjustment_required
 
     removed_items: List[Dict[str, Any]] = []
     trim_removed_set = set(trim_removed_symbols)
@@ -4101,6 +4119,8 @@ def build_rank_acceleration_buffer_plan(
             WEIGHT_PRICE_RATIO_STRATEGY_NAME if ratio_metric else RANK_ACCELERATION_STRATEGY_NAME
         ),
         "top_n": normalized_top_n,
+        "target_total_weight_pct": normalized_target_total_weight_pct,
+        "target_cash_weight_pct": 100.0 - normalized_target_total_weight_pct,
         "sell_rank": normalized_sell_rank,
         "compare_snapshot_date": comparison_snapshot.get("compare_snapshot_date"),
         "compare_trading_days": comparison_snapshot.get("trading_days"),
@@ -4152,6 +4172,7 @@ def build_rank_acceleration_buffer_plan(
         "added_symbols": added_symbols,
         "final_symbols": final_symbols,
         "component_changed": component_changed,
+        "weight_adjustment_required": weight_adjustment_required,
         "initial_build": initial_build,
         "daily_buy_signal_symbols": daily_buy_signal_symbols,
         "confirmed_buy_symbols": [item["stock_symbol"] for item in confirmed_buy_candidates],

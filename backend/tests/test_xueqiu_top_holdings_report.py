@@ -1249,6 +1249,38 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(10, len(plan["final_symbols"]))
         self.assertEqual(100.0, round(sum(item["rebalance_weight_pct"] for item in plan["target_items"]), 2))
 
+    def test_rank_acceleration_three_positions_keep_ten_percent_each(self):
+        ranking, comparison = self._rank_acceleration_fixture()
+        selected = ranking[:3]
+        symbols = [item["stock_symbol"] for item in selected]
+        current_holdings = [
+            {
+                "stock_symbol": item["stock_symbol"].replace(".", ""),
+                "stock_name": item["stock_name"],
+                "weight": 33.33,
+            }
+            for item in selected
+        ]
+
+        plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+            signal_history=self._eligibility_history(symbols),
+            top_n=3,
+            fear_greed_regime="greed",
+        )
+
+        self.assertTrue(plan["component_changed"])
+        self.assertTrue(plan["weight_adjustment_required"])
+        self.assertEqual(30.0, plan["target_total_weight_pct"])
+        self.assertEqual(70.0, plan["target_cash_weight_pct"])
+        self.assertEqual(
+            [10.0, 10.0, 10.0],
+            [item["rebalance_weight_pct"] for item in plan["target_items"]],
+        )
+
     def test_rank_acceleration_requires_buy_and_sell_confirmation(self):
         ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
 
@@ -1807,7 +1839,14 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(3, plan["top_n"])
         self.assertEqual("greed", plan["fear_greed_regime"])
         self.assertEqual(3, len(plan["final_symbols"]))
-        self.assertEqual(100.0, round(sum(item["rebalance_weight_pct"] for item in plan["target_items"]), 2))
+        self.assertTrue(plan["component_changed"])
+        self.assertTrue(plan["weight_adjustment_required"])
+        self.assertEqual(30.0, plan["target_total_weight_pct"])
+        self.assertEqual(70.0, plan["target_cash_weight_pct"])
+        self.assertEqual(
+            [10.0, 10.0, 10.0],
+            [item["rebalance_weight_pct"] for item in plan["target_items"]],
+        )
 
     def test_robot_rebalance_enables_weight_price_ratio_target_in_same_job(self):
         result = {
