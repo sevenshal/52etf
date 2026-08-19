@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v5"  # v5: 去掉 xueqiu direction 的否定式引用约束（实验：观察模型能否在方向标签可见时自然引用），v4=去掉候选 board_strength
+PROMPT_VERSION = "news-ths-v7"  # v7: 轮2自包含目录前置 + 轮3去目录重放；v5=去 xueqiu 引用约束；v4=去候选 board_strength
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -997,14 +997,15 @@ class DeepSeekStockSelector:
             for item in catalog.get("items") or []
         ]
         instruction: Dict[str, Any] = {
-            "task": "延续上一步新闻事件会话。以下是 Tushare 全量同花顺概念(N)、主题(TH)、行业(I)目录。请为每个事件选择最具直接产业关联的板块代码；只能从目录返回代码，不能选择股票；优先选择包含行业龙头股的板块。",
+            "task": "你是A股题材研究员。以下是 Tushare 全量同花顺概念(N)、主题(TH)、行业(I)目录，以及需要映射到板块的新闻事件。请为每个事件选择最具直接产业关联的板块代码；只能从目录返回代码，不能选择股票；优先选择包含行业龙头股的板块。",
             "constraints": {
                 "max_boards_per_event": 2,
                 "max_unique_boards": _load_strategy_params()["max_boards"],
                 "must_return_json": True,
             },
-            "validated_events": event_stage["events"],
+            # 大而静态的目录前置（跨批命中磁盘缓存），小而动态的事件后置
             "ths_index_catalog": indexes,
+            "validated_events": event_stage["events"],
             "response_schema": {
                 "board_mappings": [
                     {
@@ -1014,10 +1015,9 @@ class DeepSeekStockSelector:
                 ]
             },
         }
-        first_request_messages = event_stage["transcript"]["request"]["messages"]
+        # 自包含请求：system + 目录(前置) + 事件(后置)，不重放轮1新闻；目录为跨批固定前缀 → 缓存命中
         messages = [
-            *first_request_messages,
-            {"role": "assistant", "content": event_stage["transcript"]["response_content"]},
+            {"role": "system", "content": "严格输出 JSON；不得编造标题编号或新闻中没有的热点。"},
             {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)},
         ]
         raw_response, content, request_body, metadata = self._call_json(messages)
@@ -1054,7 +1054,7 @@ class DeepSeekStockSelector:
         _tr_min = float(_params.get("target_return_pct_min", TARGET_RETURN_PCT_MIN))
         _tr_max = float(_params.get("target_return_pct_max", TARGET_RETURN_PCT_MAX))
         instruction = {
-            "task": "延续新闻事件和 THS 板块映射会话。以下是已验证板块的全部合格成分股及板块强弱数据。只能从成分股选择，新闻事件和 THS 板块关联优先；板块强弱只作排序与执行参考。每只股票只能出现一次，严禁重复。",
+            "task": "延续新闻事件会话。以下是已验证的 THS 板块映射及全部合格成分股数据。只能从成分股选择，新闻事件和 THS 板块关联优先；板块强弱只作排序与执行参考。每只股票只能出现一次，严禁重复。",
             "constraints": {"max_picks": min(max(int(top_n or 0), 1), int(_params.get("max_recommendations", MAX_RECOMMENDATIONS))), "confidence_range": [0, 100], "target_return_pct_range": [_tr_min, _tr_max], "must_return_json": True},
             "validated_events": event_stage["events"], "validated_board_mappings": board_stage["board_mappings"], "board_market_snapshot": snapshot.get("boards") or [], "candidates": compact_candidates,
             "response_schema": {"picks": [{"ts_code": "候选列表完整 ts_code", "confidence": 0, "target_return_pct": 5, "reason": "新闻事件→THS板块→股票", "risks": "风险", "themes": ["THS板块"], "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885000.TI"}]}]},
@@ -1075,8 +1075,15 @@ class DeepSeekStockSelector:
         if fear_greed_ref:
             instruction["fear_greed_reference"] = fear_greed_ref
             instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)及其生命周期阶段 stage，与 board_market_snapshot 里的板块按名称对应。阶段含义：启动(恐慌错杀后修复，敢买，可适度提高置信度)、扩散(资金流入、上涨扩散，可参与)、主线(持续强势、健康上涨，正常买)、拥挤(贪婪过热，应降低置信度或要求更强新闻证据)、退潮(从高位回落，回避或减仓)、探底(恐慌延续、尚未企稳，回避等企稳)、中性(无明确方向)。请结合 news_signal、板块强弱、技术面综合判断，不要机械套用。"
-        second_messages = board_stage["transcript"]["request"]["messages"]
-        messages = [*second_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
+        first_messages = event_stage["transcript"]["request"]["messages"]
+        # 轮3自包含：轮1新闻 + 事件回复 + 选股指令（内嵌事件/映射/板块/候选）。
+        # 不再重放轮2目录与映射回复：mappings 已结构化内嵌，目录原文对选股无用，
+        # 省 ~54K tokens/批；[S, 新闻] 前缀仍命中轮1批内缓存。
+        messages = [
+            *first_messages,
+            {"role": "assistant", "content": event_stage["transcript"]["response_content"]},
+            {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)},
+        ]
         raw_response, content, request_body, metadata = self._call_json(messages)
         if not isinstance(raw_response.get("picks"), list):
             raise AIStockModelError("DeepSeek 返回不包含 picks 列表")
@@ -1090,19 +1097,21 @@ class DeepSeekStockSelector:
     ) -> Dict[str, Any]:
         """Round 4: score current paper positions (hold_score 0-100, low = sell).
 
-        Reuses the accumulated news/board context so the model judges each
-        open position against today's events and sector strength.  The score
-        is advisory only: process_minute still enforces the hard price rules.
+        Reuses the round-1 news context (same message pattern as round 3) so the
+        model judges each open position against today's raw headlines, events and
+        sector strength.  The score is advisory only: process_minute still enforces
+        the hard price rules.
         """
         if not positions:
             raise AIStockModelError("没有持仓需要评估")
         instruction = {
-            "task": "延续新闻事件、THS 板块映射和选股会话。以下是模拟盘当前持仓（成本/现价/盈亏/持有天数）。请结合今日新闻事件与板块强弱，为每只持仓给出 hold_score(0-100)：分数越低越倾向卖出，越高越倾向继续持有。只评估现有持仓，不得新增或推荐其他标的。",
+            "task": "延续新闻事件会话。以下是今日事件、THS 板块映射及模拟盘当前持仓（成本/现价/盈亏/持有天数）。请结合今日新闻事件与板块强弱，为每只持仓给出 hold_score(0-100)：分数越低越倾向卖出，越高越倾向继续持有。只评估现有持仓，不得新增或推荐其他标的。",
             "constraints": {
                 "score_meaning": "0-100：≥70=继续持有/加仓(错价机会大、事件与板块强势)；50=中性；≤30=倾向卖出(基本面恶化、过度反应追高风险、事件利空、板块转弱)",
                 "must_return_json": True,
             },
             "validated_events": event_stage["events"],
+            "validated_board_mappings": board_stage.get("board_mappings") or [],
             "board_market_snapshot": board_stage.get("boards") or [],
             "positions": positions,
             "response_schema": {
@@ -1111,8 +1120,8 @@ class DeepSeekStockSelector:
                 ]
             },
         }
-        third_messages = board_stage["transcript"]["request"]["messages"]
-        messages = [*third_messages, {"role": "assistant", "content": board_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
+        first_messages = event_stage["transcript"]["request"]["messages"]
+        messages = [*first_messages, {"role": "assistant", "content": event_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
         if not isinstance(raw_response.get("evaluations"), list):
             raise AIStockModelError("DeepSeek 返回不包含 evaluations 列表")

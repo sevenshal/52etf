@@ -83,7 +83,7 @@ const ConversationViewer = ({ runId }) => {
   }
   return (
     <div className="ai-stock-chat-log">
-      <Text type="secondary">按真实调用顺序展示。第 2、3 轮只展示新增消息；前序新闻和模型回复已随实际 messages 继承。</Text>
+      <Text type="secondary">按真实调用顺序展示。轮 1 发送全部新闻标题；轮 2 为自包含请求（系统规则+THS 全量目录+事件）；轮 3 继承轮 1 的新闻与事件回复并追加选股指令。展开“核验本轮原始 API 记录”可看每轮完整 messages。</Text>
       {stages.map((stage, index) => {
         const requestMessages = stage?.request?.messages || [];
         // The second request replays prior messages for DeepSeek's stateless API.

@@ -482,9 +482,16 @@ def test_events_ths_mapping_and_stock_selection_keep_one_three_round_conversatio
     }
     selection = selector.select_from_ths_conversation(event_stage, board_stage, snapshot)
 
-    # Each later request replays prior messages and assistant output.
-    assert calls[1]["messages"][:2] == calls[0]["messages"]
-    assert calls[2]["messages"][:4] == calls[1]["messages"]
+    # 轮2 自包含：system + 目录事件指令（不重放轮1新闻，目录前置供跨批缓存命中）
+    assert len(calls[1]["messages"]) == 2
+    assert calls[1]["messages"][0] == calls[0]["messages"][0]  # 相同 system
+    assert "ths_index_catalog" in calls[1]["messages"][1]["content"]
+    # 轮3 自包含：轮1新闻 + 事件回复 + 选股指令（不重放轮2目录，映射已结构化内嵌）
+    assert len(calls[2]["messages"]) == 4
+    assert calls[2]["messages"][:2] == calls[0]["messages"]
+    assert calls[2]["messages"][2]["role"] == "assistant"
+    assert "validated_board_mappings" in calls[2]["messages"][3]["content"]
+    assert "ths_index_catalog" not in calls[2]["messages"][3]["content"]
     picks = _validated_picks(snapshot, selection["response"], 10, news_headlines=headlines, hotwords=event_stage["events"], board_mappings=board_stage["board_mappings"])
     assert picks[0]["evidence"][0]["ths_code"] == "885728.TI"
 
@@ -535,7 +542,7 @@ def test_run_persists_full_news_to_stock_transcript():
     evidence = service.get_run_evidence(run["id"])
     transcript = service.get_run_transcript(run["id"])
     assert evidence["news_snapshot"][0]["title"] == "原始新闻标题必须存档"
-    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v5"
+    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v7"
     assert [stage["stage"] for stage in transcript["ai_raw_response"]["stages"]] == ["NEWS_EVENTS", "EVENTS_TO_THS_BOARDS", "THS_BOARDS_TO_STOCK_SELECTION"]
     assert transcript["ai_raw_response"]["stages"][0]["request"]["messages"][0]["content"] == "原始新闻标题必须存档"
 
