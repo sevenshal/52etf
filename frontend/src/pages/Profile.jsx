@@ -34,7 +34,7 @@ const Profile = () => {
       }
 
       // 验证成功后激活
-      login(values.accountId, response.data.is_admin);
+      login(values.accountId, response.data.is_admin, response.data.can_view_ai_stock);
       message.success('账户激活成功');
       navigate('/');
     } catch (error) {

@@ -24,13 +24,16 @@ class AccountCacheTest(TestCase):
         self.session_patch.start()
         self.addCleanup(self.session_patch.stop)
         self.addCleanup(self.engine.dispose)
-        # 清掉模块级缓存，避免用例之间相互污染
+        # 清掉模块级缓存，避免用例之间相互污染；测试结束也还原，避免污染同进程后续测试
         account_api.invalidate_account_cache()
+        self.addCleanup(account_api.invalidate_account_cache)
 
         db = self.session_factory()
         try:
             db.add(WebAccount(account_id="enabled-account", enabled=True))
             db.add(WebAccount(account_id="disabled-account", enabled=False))
+            db.add(WebAccount(account_id="ai-viewer-account", enabled=True, can_view_ai_stock=True))
+            db.add(WebAccount(account_id="disabled-viewer", enabled=False, can_view_ai_stock=True))
             db.commit()
         finally:
             db.close()
@@ -39,6 +42,37 @@ class AccountCacheTest(TestCase):
         self.assertTrue(account_api.is_valid_account("enabled-account"))
         self.assertFalse(account_api.is_valid_account("disabled-account"))
         self.assertFalse(account_api.is_valid_account("unknown-account"))
+
+    def test_can_view_ai_stock_flag(self):
+        self.assertTrue(account_api.can_view_ai_stock("ai-viewer-account"))
+        self.assertFalse(account_api.can_view_ai_stock("enabled-account"))
+        self.assertFalse(account_api.can_view_ai_stock("unknown-account"))
+        # 停用的账户即使带标记也不能通过有效账户校验
+        self.assertFalse(account_api.is_valid_account("disabled-viewer"))
+
+    def test_ai_stock_flag_invalidates_after_update(self):
+        self.assertFalse(account_api.can_view_ai_stock("enabled-account"))  # 预热缓存
+
+        account_api.update_account(
+            "enabled-account", AccountUpdate(can_view_ai_stock=True), _="admin"
+        )
+        self.assertTrue(account_api.can_view_ai_stock("enabled-account"))  # 授权立即生效
+
+    def test_valid_ai_stock_viewer_gates_access(self):
+        import asyncio
+        admin = account_api.ADMIN_ACCOUNT_ID
+
+        async def check(account_id):
+            return await account_api.valid_ai_stock_viewer(account_id)
+
+        # 管理员恒可看
+        self.assertEqual(asyncio.run(check(admin)), admin)
+        # 已授权账户可看
+        self.assertEqual(asyncio.run(check("ai-viewer-account")), "ai-viewer-account")
+        # 未授权账户 → 403
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(check("enabled-account"))
+        self.assertEqual(ctx.exception.status_code, 403)
 
     def test_cache_stays_warm_until_invalidated(self):
         self.assertTrue(account_api.is_valid_account("enabled-account"))  # 加载缓存
@@ -96,6 +130,6 @@ class AccountCacheTest(TestCase):
     def test_reload_failure_keeps_old_cache(self):
         self.assertTrue(account_api.is_valid_account("enabled-account"))  # 预热缓存
 
-        with patch.object(account_api, "_load_enabled_account_ids", side_effect=RuntimeError("db down")):
+        with patch.object(account_api, "_load_account_flags", side_effect=RuntimeError("db down")):
             # 加载失败：保留旧缓存，返回旧结果而不是异常
             self.assertTrue(account_api.is_valid_account("enabled-account"))

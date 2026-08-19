@@ -38,6 +38,7 @@ class WebAccount(Base):
     account_id = Column(String(128), primary_key=True)
     note = Column(String(500), nullable=False, default="")
     enabled = Column(Boolean, nullable=False, default=True, index=True)
+    can_view_ai_stock = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 

@@ -43,10 +43,10 @@ const WebAccountManager = () => {
     setSaving(true);
     try {
       if (editingAccount) {
-        await request.patch(`/api/profile/accounts/${encodeURIComponent(editingAccount.account_id)}`, { note: values.note || '' });
-        message.success('备注已保存');
+        await request.patch(`/api/profile/accounts/${encodeURIComponent(editingAccount.account_id)}`, { note: values.note || '', can_view_ai_stock: Boolean(values.can_view_ai_stock) });
+        message.success('账户信息已保存');
       } else {
-        await request.post('/api/profile/accounts', { account_id: values.accountId, note: values.note || '', enabled: true });
+        await request.post('/api/profile/accounts', { account_id: values.accountId, note: values.note || '', enabled: true, can_view_ai_stock: Boolean(values.can_view_ai_stock) });
         message.success('账户已添加');
       }
       setOpen(false);
@@ -67,6 +67,16 @@ const WebAccountManager = () => {
       loadAccounts();
     } catch (error) {
       message.error(error.response?.data?.detail || '更新账户失败');
+    }
+  };
+
+  const setAiStockView = async (record, enabled) => {
+    try {
+      await request.patch(`/api/profile/accounts/${encodeURIComponent(record.account_id)}`, { can_view_ai_stock: enabled });
+      message.success(enabled ? '已授权该账户查看 AI 荐股' : '已取消该账户的 AI 荐股查看权限');
+      loadAccounts();
+    } catch (error) {
+      message.error(error.response?.data?.detail || '更新 AI 荐股权限失败');
     }
   };
 
@@ -116,7 +126,8 @@ const WebAccountManager = () => {
   const columns = [
     { title: '账户ID', dataIndex: 'account_id', render: (value, record) => <Space>{value}{record.is_admin && <Tag color="gold">管理员</Tag>}</Space> },
     { title: '备注', dataIndex: 'note', render: (value) => value || '-' },
-    { title: '状态', dataIndex: 'enabled', width: 120, render: (enabled) => <Tag color={enabled ? 'green' : 'default'}>{enabled ? '已启用' : '已停用'}</Tag> },
+    { title: '状态', dataIndex: 'enabled', width: 100, render: (enabled) => <Tag color={enabled ? 'green' : 'default'}>{enabled ? '已启用' : '已停用'}</Tag> },
+    { title: 'AI荐股', dataIndex: 'can_view_ai_stock', width: 90, render: (value, record) => <Switch size="small" checked={Boolean(value)} disabled={record.is_admin} onChange={(checked) => setAiStockView(record, checked)} /> },
     { title: '今日请求', dataIndex: 'today_request_count', width: 110, align: 'right', render: (value) => Number(value || 0).toLocaleString() },
     { title: '近30日请求', dataIndex: 'last_30_days_request_count', width: 130, align: 'right', render: (value) => Number(value || 0).toLocaleString() },
     { title: '创建时间', dataIndex: 'created_at', width: 210, render: (value) => value ? new Date(value).toLocaleString() : '-' },
@@ -125,9 +136,9 @@ const WebAccountManager = () => {
         <Button type="link" onClick={() => showUsage(record)}>每日明细</Button>
         <Button type="link" onClick={() => {
           setEditingAccount(record);
-          form.setFieldsValue({ note: record.note || '' });
+          form.setFieldsValue({ note: record.note || '', can_view_ai_stock: Boolean(record.can_view_ai_stock) });
           setOpen(true);
-        }}>备注</Button>
+        }}>备注/权限</Button>
         <Switch checked={record.enabled} disabled={record.is_admin} onChange={(checked) => setEnabled(record, checked)} />
         <Popconfirm title="确定删除这个账户？" disabled={record.is_admin} onConfirm={() => removeAccount(record)}>
           <Button danger type="link" disabled={record.is_admin}>删除</Button>
@@ -161,13 +172,16 @@ const WebAccountManager = () => {
         />
       </Space>
     </Drawer>
-    <Modal title={editingAccount ? '设置备注' : '添加账户'} open={open} onCancel={() => { setOpen(false); setEditingAccount(null); }} onOk={() => form.submit()} confirmLoading={saving} destroyOnClose>
+    <Modal title={editingAccount ? '编辑账户（备注 / AI荐股权限）' : '添加账户'} open={open} onCancel={() => { setOpen(false); setEditingAccount(null); }} onOk={() => form.submit()} confirmLoading={saving} destroyOnClose>
       <Form form={form} layout="vertical" onFinish={createAccount} preserve={false}>
         {!editingAccount && <Form.Item name="accountId" label="账户ID" rules={[{ required: true, whitespace: true, message: '请输入账户ID' }, { max: 128 }]}>
           <Input placeholder="请输入新账户ID" autoComplete="off" />
         </Form.Item>}
         <Form.Item name="note" label="备注" rules={[{ max: 500, message: '备注不能超过500个字符' }]}>
           <Input.TextArea placeholder="例如：家人账户、测试账户" rows={3} />
+        </Form.Item>
+        <Form.Item name="can_view_ai_stock" label="AI荐股查看权限" valuePropName="checked">
+          <Switch checkedChildren="允许" unCheckedChildren="不允许" />
         </Form.Item>
       </Form>
     </Modal>

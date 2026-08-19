@@ -90,7 +90,7 @@ const getActiveTabKey = (pathname, state) => {
 const AppLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { accountId, isAdmin } = useAccount();
+  const { accountId, isAdmin, canViewAiStock } = useAccount();
 
   const renderTabLabel = (icon, text) => (
     <span className="app-shell__tab-label">
@@ -122,13 +122,16 @@ const AppLayout = () => {
         disabled: false
       },
       {
-        key: '/ai-stock',
-        label: renderTabLabel(<RobotOutlined />, 'AI荐股'),
-        disabled: false
-      },
-      {
         key: '/live',
         label: renderTabLabel(<ThunderboltOutlined />, '实盘'),
+        disabled: false
+      }
+    ] : []),
+    // AI 荐股：管理员或已被授权的账户可见
+    ...(accountId && (isAdmin || canViewAiStock) ? [
+      {
+        key: '/ai-stock',
+        label: renderTabLabel(<RobotOutlined />, 'AI荐股'),
         disabled: false
       }
     ] : []),

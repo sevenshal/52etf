@@ -27,7 +27,7 @@ from ...core.services.ai_stock import (
     trigger_recommendation_async,
     update_ai_stock_service_settings,
 )
-from .account import valid_admin_account
+from .account import valid_admin_account, valid_ai_stock_viewer
 
 
 router = APIRouter(prefix="/api/ai-stock", tags=["AI Stock"])
@@ -94,7 +94,7 @@ def save_ai_stock_settings(
 @router.get("/recommendations/current")
 def get_current_recommendations(
     limit: Optional[int] = Query(None, ge=1, le=50),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_ai_stock_viewer),
 ):
     return AIStockRecommendationService().current(limit=limit)
 
@@ -120,18 +120,18 @@ def get_recommendation_history(
     trade_date: Optional[date] = None,
     run_type: Optional[str] = Query(None, pattern="^(PREOPEN|OPENING|INTRADAY)$"),
     limit: int = Query(60, ge=1, le=200),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_ai_stock_viewer),
 ):
     return AIStockRecommendationService().history(trade_date=trade_date, run_type=run_type, limit=limit)
 
 
 @router.get("/recommendations/today")
-def get_today_recommendations(_: str = Depends(valid_admin_account)):
+def get_today_recommendations(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockRecommendationService().today()
 
 
 @router.get("/recommendations/runs/{run_id}")
-def get_recommendation_run(run_id: int, _: str = Depends(valid_admin_account)):
+def get_recommendation_run(run_id: int, _: str = Depends(valid_ai_stock_viewer)):
     try:
         return AIStockRecommendationService().get_run(run_id)
     except AIStockError as exc:
@@ -139,7 +139,7 @@ def get_recommendation_run(run_id: int, _: str = Depends(valid_admin_account)):
 
 
 @router.get("/recommendations/runs/{run_id}/evidence")
-def get_recommendation_run_evidence(run_id: int, _: str = Depends(valid_admin_account)):
+def get_recommendation_run_evidence(run_id: int, _: str = Depends(valid_ai_stock_viewer)):
     try:
         return AIStockRecommendationService().get_run_evidence(run_id)
     except AIStockError as exc:
@@ -147,7 +147,7 @@ def get_recommendation_run_evidence(run_id: int, _: str = Depends(valid_admin_ac
 
 
 @router.get("/recommendations/runs/{run_id}/transcript")
-def get_recommendation_run_transcript(run_id: int, _: str = Depends(valid_admin_account)):
+def get_recommendation_run_transcript(run_id: int, _: str = Depends(valid_ai_stock_viewer)):
     try:
         return AIStockRecommendationService().get_run_transcript(run_id)
     except AIStockError as exc:
@@ -155,7 +155,7 @@ def get_recommendation_run_transcript(run_id: int, _: str = Depends(valid_admin_
 
 
 @router.get("/recommendations/runs/{run_id}/performance")
-def get_recommendation_run_performance(run_id: int, _: str = Depends(valid_admin_account)):
+def get_recommendation_run_performance(run_id: int, _: str = Depends(valid_ai_stock_viewer)):
     try:
         return AIStockRecommendationService().run_performance(run_id)
     except AIStockError as exc:
@@ -165,12 +165,12 @@ def get_recommendation_run_performance(run_id: int, _: str = Depends(valid_admin
 
 
 @router.get("/paper/overview")
-def get_paper_overview(_: str = Depends(valid_admin_account)):
+def get_paper_overview(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockPaperTradingService().overview()
 
 
 @router.get("/paper/positions")
-def get_paper_positions(_: str = Depends(valid_admin_account)):
+def get_paper_positions(_: str = Depends(valid_ai_stock_viewer)):
     try:
         return AIStockPaperTradingService().positions()
     except Exception as exc:
@@ -181,23 +181,23 @@ def get_paper_positions(_: str = Depends(valid_admin_account)):
 def get_paper_trades(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_ai_stock_viewer),
 ):
     return AIStockPaperTradingService().trades(page=page, page_size=page_size)
 
 
 @router.get("/paper/equity-curve")
-def get_paper_equity_curve(_: str = Depends(valid_admin_account)):
+def get_paper_equity_curve(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockPaperTradingService().equity_curve()
 
 
 @router.get("/paper/hold-evaluations")
-def get_paper_hold_evaluations(limit: int = Query(100, ge=1, le=500), _: str = Depends(valid_admin_account)):
+def get_paper_hold_evaluations(limit: int = Query(100, ge=1, le=500), _: str = Depends(valid_ai_stock_viewer)):
     return AIStockPaperTradingService().hold_evaluations(limit=limit)
 
 
 @router.get("/paper/statistics")
-def get_paper_statistics(_: str = Depends(valid_admin_account)):
+def get_paper_statistics(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockPaperTradingService().paper_statistics()
 
 
@@ -240,7 +240,7 @@ def update_paper_strategy_config(
 
 
 @router.get("/benchmark/status")
-def get_benchmark_status(_: str = Depends(valid_admin_account)):
+def get_benchmark_status(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockBenchmarkCollector().status()
 
 
@@ -258,17 +258,17 @@ def run_benchmark_evaluation(
 
 
 @router.get("/recommendations/hit-rate")
-def get_recommendation_hit_rate(_: str = Depends(valid_admin_account)):
+def get_recommendation_hit_rate(_: str = Depends(valid_ai_stock_viewer)):
     return latest_recommendation_hit_rate()
 
 
 @router.get("/fear-greed-reference")
-def get_fear_greed_reference(_: str = Depends(valid_admin_account)):
+def get_fear_greed_reference(_: str = Depends(valid_ai_stock_viewer)):
     return _a_stock_fear_greed_reference()
 
 
 @router.get("/evaluation/latest")
-def get_latest_benchmark_evaluation(_: str = Depends(valid_admin_account)):
+def get_latest_benchmark_evaluation(_: str = Depends(valid_ai_stock_viewer)):
     with get_db_ctx() as db:
         row = db.query(AIStockEvaluation).order_by(desc(AIStockEvaluation.evaluated_at)).first()
         if not row:

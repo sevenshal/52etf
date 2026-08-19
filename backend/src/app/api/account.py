@@ -20,17 +20,20 @@ class AccountValidation(BaseModel):
     valid: bool
     message: str = ""
     is_admin: bool = False
+    can_view_ai_stock: bool = False
 
 
 class AccountCreate(BaseModel):
     account_id: str
     note: str = ""
     enabled: bool = True
+    can_view_ai_stock: bool = False
 
 
 class AccountUpdate(BaseModel):
     enabled: Optional[bool] = None
     note: Optional[str] = None
+    can_view_ai_stock: Optional[bool] = None
 
 
 class AccountItem(BaseModel):
@@ -38,6 +41,7 @@ class AccountItem(BaseModel):
     note: str
     enabled: bool
     is_admin: bool
+    can_view_ai_stock: bool = False
     today_request_count: int = 0
     last_30_days_request_count: int = 0
     created_at: Optional[str] = None
@@ -130,60 +134,78 @@ def _ensure_web_account_schema() -> None:
     if "note" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE web_accounts ADD COLUMN note VARCHAR(500) NOT NULL DEFAULT ''"))
+    if "can_view_ai_stock" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE web_accounts ADD COLUMN can_view_ai_stock BOOLEAN NOT NULL DEFAULT 0"))
 
 
 # ---------------------------------------------------------------------------
 # web_accounts 有效账户集内存缓存（TTL 24h）
 # ---------------------------------------------------------------------------
 # valid_account / is_valid_account 命中每个带 X-Account-ID 的 API 请求，原实现
-# 每次请求都查 SQLite（PRAGMA 建表检查 + 2 次 SELECT）。这里把「已启用账户 id
-# 集合」在内存缓存 24 小时；账户增删改（create/update/delete）成功后调用
-# invalidate_account_cache() 立即失效，保证页面上的删除/停用即时生效。
+# 每次请求都查 SQLite（PRAGMA 建表检查 + 2 次 SELECT）。这里把「账户 id → 权限
+# 标记」在内存缓存 24 小时；账户增删改（create/update/delete）成功后调用
+# invalidate_account_cache() 立即失效，保证页面上的删除/停用/授权即时生效。
 _ACCOUNT_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 _account_cache = {
     # 用 -inf 而非 0：monotonic 时钟刚开机时远小于 TTL，0 会被误判为“新鲜”而跳过首次加载
     "loaded_at": float("-inf"),
-    "ids": frozenset(),
+    "accounts": {},
 }
 _account_cache_lock = threading.Lock()
 
 
 def invalidate_account_cache() -> None:
-    """web_accounts 发生写入后调用：让下一次 is_valid_account 重新加载。"""
+    """web_accounts 发生写入后调用：让下一次校验重新加载。"""
     with _account_cache_lock:
         _account_cache["loaded_at"] = float("-inf")
-        _account_cache["ids"] = frozenset()
+        _account_cache["accounts"] = {}
 
 
-def _load_enabled_account_ids() -> frozenset:
-    """从数据库加载全部已启用账户 id（含首次 seed）。"""
+def _load_account_flags() -> dict:
+    """从数据库加载全部账户的启用与权限标记（含首次 seed）。"""
     _seed_accounts_if_needed()
     db = SessionLocal()
     try:
-        rows = (
-            db.query(WebAccount.account_id)
-            .filter(WebAccount.enabled.is_(True))
-            .all()
-        )
-        return frozenset(row[0] for row in rows)
+        rows = db.query(
+            WebAccount.account_id,
+            WebAccount.enabled,
+            WebAccount.can_view_ai_stock,
+        ).all()
+        return {
+            row[0]: {
+                "enabled": bool(row[1]),
+                "can_view_ai_stock": bool(row[2]),
+            }
+            for row in rows
+        }
     finally:
         db.close()
 
 
-def is_valid_account(account_id: str) -> bool:
-    """检查账户是否存在且已启用（带 24h 内存缓存）。"""
+def _account_flag(account_id: str, key: str) -> bool:
     now = time.monotonic()
     with _account_cache_lock:
         if now - _account_cache["loaded_at"] >= _ACCOUNT_CACHE_TTL_SECONDS:
             try:
-                ids = _load_enabled_account_ids()
+                accounts = _load_account_flags()
                 _account_cache["loaded_at"] = now
-                _account_cache["ids"] = ids
+                _account_cache["accounts"] = accounts
             except Exception:
                 # 加载失败（如 DB 暂时不可用）时保留旧缓存并重试，避免误伤存量请求
-                logger.exception("Failed to load enabled account ids")
-        return account_id in _account_cache["ids"]
+                logger.exception("Failed to load account flags")
+        return bool(_account_cache["accounts"].get(account_id, {}).get(key, False))
+
+
+def is_valid_account(account_id: str) -> bool:
+    """检查账户是否存在且已启用（带 24h 内存缓存）。"""
+    return _account_flag(account_id, "enabled")
+
+
+def can_view_ai_stock(account_id: str) -> bool:
+    """检查账户是否被授权查看 AI 荐股页面（带 24h 内存缓存）。"""
+    return _account_flag(account_id, "can_view_ai_stock")
 
 
 async def valid_account(x_account_id: Optional[str] = Header(None)) -> str:
@@ -197,6 +219,13 @@ async def valid_account(x_account_id: Optional[str] = Header(None)) -> str:
 async def valid_admin_account(account_id: str = Depends(valid_account)) -> str:
     if account_id != ADMIN_ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="仅管理员可操作")
+    return account_id
+
+
+async def valid_ai_stock_viewer(account_id: str = Depends(valid_account)) -> str:
+    """管理员或已被授权查看 AI 荐股的账户。"""
+    if account_id != ADMIN_ACCOUNT_ID and not can_view_ai_stock(account_id):
+        raise HTTPException(status_code=403, detail="无 AI 荐股查看权限")
     return account_id
 
 @router.get("/validate-account", response_model=AccountValidation)
@@ -215,7 +244,11 @@ async def validate_account(account_id: str):
         return AccountValidation(valid=False, message="缺少账户ID")
     
     if is_valid_account(account_id):
-        return AccountValidation(valid=True, is_admin=account_id == ADMIN_ACCOUNT_ID)
+        return AccountValidation(
+            valid=True,
+            is_admin=account_id == ADMIN_ACCOUNT_ID,
+            can_view_ai_stock=can_view_ai_stock(account_id),
+        )
     else:
         return AccountValidation(valid=False, message="无效或已停用的账户ID")
 
@@ -231,6 +264,7 @@ def _account_item(
         note=account.note or "",
         enabled=account.enabled,
         is_admin=account.account_id == ADMIN_ACCOUNT_ID,
+        can_view_ai_stock=bool(account.can_view_ai_stock),
         today_request_count=today_request_count,
         last_30_days_request_count=last_30_days_request_count,
         created_at=account.created_at.isoformat() if account.created_at else None,
@@ -327,7 +361,12 @@ def create_account(payload: AccountCreate, _: str = Depends(valid_admin_account)
     try:
         if db.get(WebAccount, account_id):
             raise HTTPException(status_code=409, detail="账户ID已存在")
-        account = WebAccount(account_id=account_id, note=note, enabled=payload.enabled)
+        account = WebAccount(
+            account_id=account_id,
+            note=note,
+            enabled=payload.enabled,
+            can_view_ai_stock=payload.can_view_ai_stock,
+        )
         db.add(account)
         db.commit()
         invalidate_account_cache()
@@ -352,6 +391,8 @@ def update_account(account_id: str, payload: AccountUpdate, _: str = Depends(val
             account.enabled = payload.enabled
         if payload.note is not None:
             account.note = payload.note.strip()
+        if payload.can_view_ai_stock is not None:
+            account.can_view_ai_stock = payload.can_view_ai_stock
         db.commit()
         invalidate_account_cache()
         db.refresh(account)

@@ -13,6 +13,8 @@ const ETFReport = lazy(() => import('./pages/ETFReport'));
 const ETFDetail = lazy(() => import('./pages/ETFDetail'));
 const EVCValuation = lazy(() => import('./pages/EVCValuation'));
 const StockDetail = lazy(() => import('./pages/StockDetail'));
+// AI 荐股：管理员或已被授权（canViewAiStock）的账户可看，独立 chunk
+const AIStock = lazy(() => import(/* webpackChunkName: "ai-stock" */ './pages/AIStock'));
 
 // ---- 管理员页面：见 ./routes/adminRoutes.js（独立 admin chunk，仅管理员加载）----
 
@@ -31,6 +33,17 @@ const AdminRoute = ({ children }) => {
   }
 
   return isAdmin ? children : <Navigate to="/profile" replace />;
+};
+
+// AI 荐股：管理员或已被授权（canViewAiStock）的账户可看
+const AiStockRoute = ({ children }) => {
+  const { isAdmin, canViewAiStock, accountReady } = useAccount();
+
+  if (!accountReady) {
+    return null;
+  }
+
+  return isAdmin || canViewAiStock ? children : <Navigate to="/profile" replace />;
 };
 
 const LoadingFallback = ({ fullScreen = false }) => (
@@ -70,6 +83,8 @@ function AppRoutes() {
           <Route path="/stock/:symbol" element={<StockDetail />} />
           <Route path="/external-trading-accounts" element={<LiveTabRedirect tab="accounts" />} />
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
+          {/* AI 荐股：管理员或已授权账户可看（独立 ai-stock chunk，不进 admin chunk） */}
+          <Route path="/ai-stock" element={<AiStockRoute><AIStock /></AiStockRoute>} />
 
           {/* 管理员专属路由：仅 isAdmin 时注册。非管理员访问这些 URL 会命中下面的
               "*" 兜底路由重定向到 /profile，且永远不会加载 admin chunk。 */}

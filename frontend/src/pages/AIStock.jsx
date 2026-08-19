@@ -27,6 +27,7 @@ import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
+import { useAccount } from '../contexts/AccountContext';
 import './AIStock.css';
 
 const { Text, Title } = Typography;
@@ -366,6 +367,7 @@ const HitRateCard = ({ hitRate }) => {
 };
 
 const AIStock = () => {
+  const { isAdmin } = useAccount();
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [current, setCurrent] = useState({ run: null, recommendations: [] });
@@ -438,43 +440,49 @@ const AIStock = () => {
   const loadAll = useCallback(async () => {
     setLoading(true);
     const calls = [
-      request.get('/api/ai-stock/recommendations/current'),
-      request.get('/api/ai-stock/recommendations/today'),
-      request.get('/api/ai-stock/recommendations/history'),
-      request.get('/api/ai-stock/paper/overview'),
-      request.get('/api/ai-stock/paper/positions'),
-      request.get('/api/ai-stock/paper/trades'),
-      request.get('/api/ai-stock/paper/equity-curve'),
-      request.get('/api/ai-stock/benchmark/status'),
-      request.get('/api/ai-stock/evaluation/latest'),
-      request.get('/api/ai-stock/settings'),
-      request.get('/api/ai-stock/paper/config'),
-      request.get('/api/ai-stock/paper/hold-evaluations'),
-      request.get('/api/ai-stock/paper/statistics'),
-      request.get('/api/ai-stock/recommendations/hit-rate'),
-      request.get('/api/ai-stock/fear-greed-reference'),
+      ['current', request.get('/api/ai-stock/recommendations/current')],
+      ['today', request.get('/api/ai-stock/recommendations/today')],
+      ['history', request.get('/api/ai-stock/recommendations/history')],
+      ['overview', request.get('/api/ai-stock/paper/overview')],
+      ['positions', request.get('/api/ai-stock/paper/positions')],
+      ['trades', request.get('/api/ai-stock/paper/trades')],
+      ['curve', request.get('/api/ai-stock/paper/equity-curve')],
+      ['benchmark', request.get('/api/ai-stock/benchmark/status')],
+      ['evaluation', request.get('/api/ai-stock/evaluation/latest')],
+      // 设置与模拟盘参数仅管理员可读（非管理员请求会 403），直接跳过
+      ...(isAdmin ? [
+        ['settings', request.get('/api/ai-stock/settings')],
+        ['paperConfig', request.get('/api/ai-stock/paper/config')],
+      ] : []),
+      ['holdEvals', request.get('/api/ai-stock/paper/hold-evaluations')],
+      ['paperStats', request.get('/api/ai-stock/paper/statistics')],
+      ['hitRate', request.get('/api/ai-stock/recommendations/hit-rate')],
+      ['fearGreedRef', request.get('/api/ai-stock/fear-greed-reference')],
     ];
-    const results = await Promise.allSettled(calls);
-    const data = index => (results[index].status === 'fulfilled' ? results[index].value.data : null);
+    const results = await Promise.allSettled(calls.map(([, promise]) => promise));
+    const data = {};
+    calls.forEach(([key], index) => {
+      if (results[index].status === 'fulfilled') data[key] = results[index].value.data;
+    });
     const failed = results.find(result => result.status === 'rejected');
     if (failed) message.warning(errorText(failed.reason, '部分 AI 荐股数据暂时不可用'));
-    setCurrent(data(0) || { run: null, recommendations: [] });
-    setTodayRecs(data(1) || []);
-    setHistory(data(2) || []);
-    setOverview(data(3));
-    setPositions(data(4) || []);
-    setTrades(data(5)?.items || []);
-    setCurve(data(6) || []);
-    setBenchmark(data(7));
-    setEvaluation(data(8));
-    setSettings(data(9));
-    setPaperConfig(data(10));
-    setHoldEvals(data(11) || []);
-    setPaperStats(data(12) || null);
-    setHitRate(data(13) || null);
-    setFearGreedRef(data(14) || []);
+    setCurrent(data.current || { run: null, recommendations: [] });
+    setTodayRecs(data.today || []);
+    setHistory(data.history || []);
+    setOverview(data.overview);
+    setPositions(data.positions || []);
+    setTrades(data.trades?.items || []);
+    setCurve(data.curve || []);
+    setBenchmark(data.benchmark);
+    setEvaluation(data.evaluation);
+    setSettings(data.settings);
+    setPaperConfig(data.paperConfig);
+    setHoldEvals(data.holdEvals || []);
+    setPaperStats(data.paperStats || null);
+    setHitRate(data.hitRate || null);
+    setFearGreedRef(data.fearGreedRef || []);
     setLoading(false);
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -699,7 +707,7 @@ const AIStock = () => {
           type="info"
           showIcon
           message="AI 仅从受控候选池选择股票；分钟策略决定是否实际进入模拟盘。"
-          description={`${settings?.deepseek_configured ? `DeepSeek 已配置（${settings.deepseek_model}）` : '尚未配置 DeepSeek API Key；请点击“设置”。'} ${benchmark?.configured ? `目标站对标：最近采集 ${dateTime(benchmark.last_captured_at)}` : '目标站对标尚未配置运行环境凭据。'}`}
+          description={`${isAdmin && settings ? `${settings?.deepseek_configured ? `DeepSeek 已配置（${settings.deepseek_model}）` : '尚未配置 DeepSeek API Key；请点击“设置”。'} ` : ''}${benchmark?.configured ? `目标站对标：最近采集 ${dateTime(benchmark.last_captured_at)}` : '目标站对标尚未配置运行环境凭据。'}`}
         />
       )}
       <Card
@@ -718,7 +726,7 @@ const AIStock = () => {
           ) : <Text type="secondary">暂无板块生命周期数据</Text>
         ) : null}
       </Card>
-      <Card className="ai-stock-card" title="当前 AI 推荐" extra={<Space><Button icon={<SettingOutlined />} onClick={openSettings}>设置</Button><Button icon={<ReloadOutlined />} onClick={loadAll}>刷新</Button><Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={runNow}>立即生成</Button></Space>}>
+      <Card className="ai-stock-card" title="当前 AI 推荐" extra={<Space>{isAdmin && <Button icon={<SettingOutlined />} onClick={openSettings}>设置</Button>}<Button icon={<ReloadOutlined />} onClick={loadAll}>刷新</Button>{isAdmin && <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={runNow}>立即生成</Button>}</Space>}>
         {current.run ? (
           <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} className="ai-stock-run-meta">
             <Descriptions.Item label="批次">{current.run.run_type}</Descriptions.Item>
@@ -771,7 +779,7 @@ const AIStock = () => {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Row justify="space-between" align="middle" gutter={[12, 12]}>
         <Col flex="auto"><Alert type="warning" showIcon message="仅自动模拟交易，不连接真实券商。费用、T+1 和 FIFO 已按 A 股规则计入。" /></Col>
-        <Col><Button icon={<SettingOutlined />} onClick={openPaperConfig}>{paperConfig?.enabled === false ? '模拟盘已停用 · 参数设置' : '模拟盘参数设置'}</Button></Col>
+        {isAdmin && <Col><Button icon={<SettingOutlined />} onClick={openPaperConfig}>{paperConfig?.enabled === false ? '模拟盘已停用 · 参数设置' : '模拟盘参数设置'}</Button></Col>}
       </Row>
       <Row gutter={[12, 12]}>
         {[
