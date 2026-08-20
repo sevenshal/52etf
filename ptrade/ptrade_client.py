@@ -17,9 +17,10 @@ except ImportError:
 USE_HTTPS = False
 API_HOST = "api.52etf.vip"
 
-# The backend validates account_id + account name + unique identifier.
-# Create the same account in the web "外部交易账号" page before starting this script.
-DEFAULT_ACCOUNT_ID = "vNKpHJkLMnBQRSTUVWXYZabcdefghijkl" #poiuytrewqLKJHGFDSAMNBVCXZasdfgh
+# Use the same dedicated machine account as the realtime quote bridge. Keeping
+# this separate from an administrator account avoids breaking the WebSocket
+# handshake when administrator accounts are migrated.
+DEFAULT_ACCOUNT_ID = "ptrade-bridge"
 DEFAULT_IDENTIFIER = "GS66301027527" #GS66010000018
 
 HEARTBEAT_INTERVAL_SECONDS = 10
