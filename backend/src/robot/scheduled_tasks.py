@@ -1545,11 +1545,11 @@ class ScheduledTaskManager:
                 task_key="xueqiu_top_holdings_rebalance",
                 name="雪球年榜多组合自动调仓",
                 description="A股交易日共享一次雪球年榜活跃组合持仓快照，同时调仓星澜壹号综合权重策略、星澜贰号5日排名加速策略与星澜叁号5日权价比策略。",
-                default_time="14:50",
+                default_time="09:30",
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
-                default_cron_rule="50 14 * * mon-fri",
+                default_cron_rule="30 9 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="top_n",
@@ -1762,12 +1762,19 @@ class ScheduledTaskManager:
                 config.sort_order = task.sort_order
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
-                    and str(config.cron_rule or "").strip() in {"40 14 * * mon-fri", "40 14 * * *"}
+                    and str(config.cron_rule or "").strip() in {
+                        "45 10 * * mon-fri",
+                        "45 10 * * *",
+                        "40 14 * * mon-fri",
+                        "40 14 * * *",
+                        "50 14 * * mon-fri",
+                        "50 14 * * *",
+                    }
                 ):
                     config.cron_rule = default_cron_rule
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
-                    and str(config.schedule_time or "").strip() == "14:40"
+                    and str(config.schedule_time or "").strip() in {"10:45", "14:40", "14:50"}
                 ):
                     config.schedule_time = task.default_time
                 if not self.is_valid_time(config.schedule_time):

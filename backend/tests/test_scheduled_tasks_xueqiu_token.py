@@ -166,6 +166,8 @@ class XueqiuTokenMonitorTest(TestCase):
         self.assertIn("top_n", schema_keys)
         self.assertIn("active_rebalance_days", schema_keys)
         self.assertIn("sell_rank", schema_keys)
+        self.assertEqual("09:30", task.default_time)
+        self.assertEqual("30 9 * * mon-fri", task.default_cron_rule)
 
         params = manager._normalize_task_parameters(
             task,
