@@ -37,6 +37,7 @@ SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9_*.-]+$")
 SIGNAL_LOOKBACK_DAYS = 90
 VOLUME_LOOKBACK_DAYS = 20
 MAX_VOLUME_RATIO_CONSECUTIVE_DAYS = 20
+TURN_SIGNAL_MODES = {"legacy", "volume", "ma5", "any", "all"}
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ",)
 
@@ -192,6 +193,47 @@ class SOXLFearStrategyParams(BaseModel):
     slippage_pct: float = -1.0
     # 印花税%（卖出收取，按卖出金额；A股 ETF 不收取，默认 0）
     stamp_duty_pct: float = 0.0
+    # 顶底信号模式：legacy=原阈值逻辑；volume/ma5=单类；any=任一；all=两类同时。
+    buy_turn_signal_mode: str = "legacy"
+    sell_turn_signal_mode: str = "legacy"
+    ma5_bottom_score: float = 25.0
+    ma5_top_score: float = 75.0
+    ma5_lookback_days: int = 5
+    volume_bottom_score: float = 30.0
+    volume_top_score: float = 75.0
+    volume_expand_std: float = 1.25
+    volume_shrink_std: float = 0.25
+    turn_signal_cooldown_days: int = 5
+
+    @validator("buy_turn_signal_mode", "sell_turn_signal_mode")
+    def validate_turn_signal_mode(cls, value):
+        if value not in TURN_SIGNAL_MODES:
+            raise ValueError("顶底信号模式仅支持 legacy、volume、ma5、any、all")
+        return value
+
+    @validator("ma5_bottom_score", "ma5_top_score", "volume_bottom_score", "volume_top_score")
+    def validate_turn_signal_score(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("顶底信号恐贪阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("ma5_lookback_days")
+    def validate_ma5_lookback_days(cls, value):
+        if value < 1 or value > 30:
+            raise ValueError("MA5 回看天数必须在 1 到 30 之间")
+        return value
+
+    @validator("volume_expand_std", "volume_shrink_std")
+    def validate_turn_signal_std(cls, value):
+        if value < 0 or value > 10:
+            raise ValueError("顶底信号量能标准差必须在 0 到 10 之间")
+        return value
+
+    @validator("turn_signal_cooldown_days")
+    def validate_turn_signal_cooldown_days(cls, value):
+        if value < 0 or value > 60:
+            raise ValueError("顶底信号冷却天数必须在 0 到 60 之间")
+        return value
 
     @validator("slippage_pct")
     def validate_slippage_pct(cls, value):
@@ -345,6 +387,23 @@ class SOXLFearSearchParams(BaseModel):
     volume_z_threshold_values: List[Optional[float]] = Field(default_factory=lambda: [1.25])
     # 卖出缩量阈值候选（参与网格搜索）：<=0 关闭（贪恐即卖）；>0 贪恐>=greed 且当日缩量达该标准差才卖
     sell_shrink_z_values: List[float] = Field(default_factory=lambda: [-1.0])
+    buy_turn_signal_mode_values: List[str] = Field(default_factory=lambda: ["legacy"])
+    sell_turn_signal_mode_values: List[str] = Field(default_factory=lambda: ["legacy"])
+    ma5_bottom_score_values: List[float] = Field(default_factory=lambda: [25.0])
+    ma5_top_score_values: List[float] = Field(default_factory=lambda: [75.0])
+    ma5_lookback_days_values: List[int] = Field(default_factory=lambda: [5])
+    volume_bottom_score_values: List[float] = Field(default_factory=lambda: [30.0])
+    volume_top_score_values: List[float] = Field(default_factory=lambda: [75.0])
+    volume_expand_std_values: List[float] = Field(default_factory=lambda: [1.25])
+    volume_shrink_std_values: List[float] = Field(default_factory=lambda: [0.25])
+    turn_signal_cooldown_days_values: List[int] = Field(default_factory=lambda: [5])
+
+    @validator("buy_turn_signal_mode_values", "sell_turn_signal_mode_values")
+    def validate_turn_signal_mode_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized or any(item not in TURN_SIGNAL_MODES for item in normalized):
+            raise ValueError("顶底信号模式候选仅支持 legacy、volume、ma5、any、all")
+        return normalized
 
     @validator("slippage_pct")
     def validate_search_slippage_pct(cls, value):
@@ -1293,6 +1352,65 @@ def _compute_equity_metrics(date_values: List, equity_values: np.ndarray) -> Tup
     }, drawdowns
 
 
+def _compute_turn_signal_arrays(base_df: pd.DataFrame, params: SOXLFearStrategyParams) -> Dict[str, np.ndarray]:
+    """按历史曲线同口径计算顶底信号，并只映射到源信号日的首次可交易日。"""
+    size = len(base_df)
+    kinds = ("ma5_bottom", "ma5_top", "volume_bottom", "volume_top")
+    if size == 0:
+        return {kind: np.zeros(0, dtype=bool) for kind in kinds}
+    signal_dates = base_df["signal_date"] if "signal_date" in base_df.columns else base_df["date"]
+    work = pd.DataFrame({
+        "row_index": np.arange(size),
+        "signal_date": signal_dates,
+        "score": pd.to_numeric(base_df["fear_greed"], errors="coerce"),
+        "log_z": pd.to_numeric(base_df.get("log_z", pd.Series(np.nan, index=base_df.index)), errors="coerce"),
+    })
+    unique = work.drop_duplicates(subset=["signal_date"], keep="first").reset_index(drop=True)
+    scores = unique["score"].to_numpy(dtype=float)
+    log_z = unique["log_z"].to_numpy(dtype=float)
+    ma5 = pd.Series(scores).rolling(5, min_periods=5).mean().to_numpy(dtype=float)
+    flags = {kind: np.zeros(len(unique), dtype=bool) for kind in kinds}
+    cooldown = int(params.turn_signal_cooldown_days)
+    last = {kind: -cooldown - 1 for kind in kinds}
+    lookback = int(params.ma5_lookback_days)
+
+    for index, score in enumerate(scores):
+        if not np.isfinite(score):
+            continue
+        recent = scores[max(0, index - lookback + 1): index + 1]
+        candidates = {
+            "ma5_bottom": index >= 1 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1])
+                and ma5[index] > ma5[index - 1]
+                and np.any(np.isfinite(recent) & (recent <= float(params.ma5_bottom_score))),
+            "ma5_top": index >= 1 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1])
+                and ma5[index] < ma5[index - 1]
+                and np.any(np.isfinite(recent) & (recent >= float(params.ma5_top_score))),
+            "volume_bottom": score <= float(params.volume_bottom_score) and np.isfinite(log_z[index])
+                and log_z[index] >= float(params.volume_expand_std),
+            "volume_top": score >= float(params.volume_top_score) and np.isfinite(log_z[index])
+                and log_z[index] <= -float(params.volume_shrink_std),
+        }
+        for kind, matched in candidates.items():
+            if matched and index - last[kind] > cooldown:
+                flags[kind][index] = True
+                last[kind] = index
+
+    aligned = {kind: np.zeros(size, dtype=bool) for kind in kinds}
+    row_indexes = unique["row_index"].to_numpy(dtype=int)
+    for kind, values in flags.items():
+        aligned[kind][row_indexes] = values
+    return aligned
+
+
+def _turn_signal_matches(mode: str, volume_flag: bool, ma5_flag: bool) -> bool:
+    return {
+        "volume": volume_flag,
+        "ma5": ma5_flag,
+        "any": volume_flag or ma5_flag,
+        "all": volume_flag and ma5_flag,
+    }.get(mode, False)
+
+
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
     dates = base_df["date"].tolist()
     date_strings = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
@@ -1335,6 +1453,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     else:
         raise ValueError(f"缺少连续 {volume_ratio_consecutive_days} 天量比基准列")
     fear_values = base_df["fear_greed"].to_numpy(dtype=float, copy=False)
+    turn_signals = _compute_turn_signal_arrays(base_df, params)
+    ma5_bottom_values = turn_signals["ma5_bottom"]
+    ma5_top_values = turn_signals["ma5_top"]
+    volume_bottom_values = turn_signals["volume_bottom"]
+    volume_top_values = turn_signals["volume_top"]
     signal_volumes = (
         base_df["signal_volume"].to_numpy(dtype=float, copy=False)
         if "signal_volume" in base_df.columns
@@ -1356,6 +1479,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_close_prices = np.concatenate([[np.nan], close_prices[:-1]])
         decision_high_prices = np.concatenate([[np.nan], high_prices[:-1]])
         decision_fear_values = np.concatenate([[np.nan], fear_values[:-1]])
+        decision_ma5_bottom = np.concatenate([[False], ma5_bottom_values[:-1]])
+        decision_ma5_top = np.concatenate([[False], ma5_top_values[:-1]])
+        decision_volume_bottom = np.concatenate([[False], volume_bottom_values[:-1]])
+        decision_volume_top = np.concatenate([[False], volume_top_values[:-1]])
         decision_volume_ratios = np.concatenate([[np.nan], volume_ratios[:-1]])
         decision_buy_volume_ratios = np.concatenate([[np.nan], buy_volume_ratios[:-1]])
         decision_log_z = np.concatenate([[np.nan], log_z_values[:-1]])
@@ -1368,6 +1495,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         decision_close_prices = close_prices
         decision_high_prices = high_prices
         decision_fear_values = fear_values
+        decision_ma5_bottom = ma5_bottom_values
+        decision_ma5_top = ma5_top_values
+        decision_volume_bottom = volume_bottom_values
+        decision_volume_top = volume_top_values
         decision_volume_ratios = volume_ratios
         decision_buy_volume_ratios = buy_volume_ratios
         decision_log_z = log_z_values
@@ -1437,8 +1568,22 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             cooldown_remaining -= 1
             can_trade = False
 
-        is_fear = fear_score <= params.buy_threshold
-        is_greedy = fear_score >= params.greed_threshold
+        bottom_signal = _turn_signal_matches(
+            params.buy_turn_signal_mode,
+            bool(decision_volume_bottom[index]),
+            bool(decision_ma5_bottom[index]),
+        )
+        top_signal = _turn_signal_matches(
+            params.sell_turn_signal_mode,
+            bool(decision_volume_top[index]),
+            bool(decision_ma5_top[index]),
+        )
+        is_fear = (
+            fear_score <= params.buy_threshold and buy_volume_signal_ok
+            if params.buy_turn_signal_mode == "legacy"
+            else bottom_signal
+        )
+        is_greedy = fear_score >= params.greed_threshold if params.sell_turn_signal_mode == "legacy" else top_signal
         # 缩量卖出确认：sell_shrink_z > 0 时需持仓标的自有成交量缩量（log_z_self <= -sell_shrink_z）
         shrink_sell_ok = True
         if float(params.sell_shrink_z) > 0:
@@ -1561,7 +1706,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "signal_volume": float(decision_signal_volumes[index]),
                     })
 
-        if not action_taken and is_fear and buy_volume_signal_ok and can_trade:
+        if not action_taken and is_fear and can_trade:
             execution_price = buy_fill_price
             portfolio_value = cash + shares * execution_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
@@ -1584,7 +1729,13 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
 
-                    if volume_ratio_consecutive_days == 1:
+                    if params.buy_turn_signal_mode != "legacy":
+                        buy_reason = (
+                            f"{fear_source_label} 顶底信号买入({params.buy_turn_signal_mode})"
+                            f"：量能底={'是' if decision_volume_bottom[index] else '否'}"
+                            f"，MA5底={'是' if decision_ma5_bottom[index] else '否'}"
+                        )
+                    elif volume_ratio_consecutive_days == 1:
                         buy_reason = f"{fear_source_label} {fear_score:.2f} 进入买入区 + 成交量放大 {buy_volume_ratio:.2f}"
                     else:
                         buy_reason = (
@@ -1739,6 +1890,7 @@ def _run_seesaw_backtest(
         high_p = df["high"].to_numpy(dtype=float, copy=False)
         close_p = df["close"].to_numpy(dtype=float, copy=False)
         fear = df["fear_greed"].to_numpy(dtype=float, copy=False)
+        turn = _compute_turn_signal_arrays(df, params)
         if buy_volume_ratio_column in df.columns:
             buy_vr = df[buy_volume_ratio_column].to_numpy(dtype=float, copy=False)
         else:
@@ -1747,6 +1899,10 @@ def _run_seesaw_backtest(
             exec_p = open_p
             d_fear = np.concatenate([[np.nan], fear[:-1]])
             d_buy_vr = np.concatenate([[np.nan], buy_vr[:-1]])
+            d_ma5_bottom = np.concatenate([[False], turn["ma5_bottom"][:-1]])
+            d_ma5_top = np.concatenate([[False], turn["ma5_top"][:-1]])
+            d_volume_bottom = np.concatenate([[False], turn["volume_bottom"][:-1]])
+            d_volume_top = np.concatenate([[False], turn["volume_top"][:-1]])
         else:
             exec_p = (
                 df["execution_price"].to_numpy(dtype=float, copy=False)
@@ -1754,6 +1910,10 @@ def _run_seesaw_backtest(
             )
             d_fear = fear
             d_buy_vr = buy_vr
+            d_ma5_bottom = turn["ma5_bottom"]
+            d_ma5_top = turn["ma5_top"]
+            d_volume_bottom = turn["volume_bottom"]
+            d_volume_top = turn["volume_top"]
         raw_log_z = (
             df["log_z"].to_numpy(dtype=float, copy=False)
             if "log_z" in df.columns else np.full(len(date_texts), np.nan)
@@ -1777,6 +1937,10 @@ def _run_seesaw_backtest(
                 "log_z": float(d_log_z[index]),
                 "log_z_self": float(d_log_z_self[index]),
                 "volume": float(df["volume"].to_numpy(dtype=float, copy=False)[index]),
+                "ma5_bottom": bool(d_ma5_bottom[index]),
+                "ma5_top": bool(d_ma5_top[index]),
+                "volume_bottom": bool(d_volume_bottom[index]),
+                "volume_top": bool(d_volume_top[index]),
             }
         return {"dates": dates, "date_texts": date_texts, "by_date": by_date}
 
@@ -1992,6 +2156,10 @@ def _run_seesaw_backtest(
             and main_vol_ok
         )
         main_greedy = np.isfinite(main_fear) and main_fear >= float(params.greed_threshold)
+        if params.buy_turn_signal_mode != "legacy":
+            main_signal = _turn_signal_matches(params.buy_turn_signal_mode, main_info["volume_bottom"], main_info["ma5_bottom"])
+        if params.sell_turn_signal_mode != "legacy":
+            main_greedy = _turn_signal_matches(params.sell_turn_signal_mode, main_info["volume_top"], main_info["ma5_top"])
         sub_info = sub["by_date"].get(day_text)
         sub_fear = float(sub_info["fear"]) if sub_info else np.nan
         sub_vr = float(sub_info["buy_vr"]) if sub_info else np.nan
@@ -2005,6 +2173,10 @@ def _run_seesaw_backtest(
             and sub_vol_ok
         )
         sub_greedy = np.isfinite(sub_fear) and sub_fear >= float(params.greed_threshold)
+        if sub_info and params.buy_turn_signal_mode != "legacy":
+            sub_signal = _turn_signal_matches(params.buy_turn_signal_mode, sub_info["volume_bottom"], sub_info["ma5_bottom"])
+        if sub_info and params.sell_turn_signal_mode != "legacy":
+            sub_greedy = _turn_signal_matches(params.sell_turn_signal_mode, sub_info["volume_top"], sub_info["ma5_top"])
 
         can_trade = cooldown_remaining == 0
         if cooldown_remaining > 0:
@@ -2041,6 +2213,10 @@ def _run_seesaw_backtest(
                 and sub2_vol_ok
             )
             sub2_greedy = np.isfinite(sub2_fear) and sub2_fear >= float(params.greed_threshold)
+            if sub2_info and params.buy_turn_signal_mode != "legacy":
+                sub2_signal = _turn_signal_matches(params.buy_turn_signal_mode, sub2_info["volume_bottom"], sub2_info["ma5_bottom"])
+            if sub2_info and params.sell_turn_signal_mode != "legacy":
+                sub2_greedy = _turn_signal_matches(params.sell_turn_signal_mode, sub2_info["volume_top"], sub2_info["ma5_top"])
             sig["sub2"] = {
                 "fear": sub2_fear, "vr": sub2_vr, "symbol": sub2_symbol, "label": sub2_fear_label,
                 "signal": sub2_signal, "greedy": sub2_greedy,
@@ -2059,7 +2235,9 @@ def _run_seesaw_backtest(
                     shrink_ok = np.isfinite(held_log_z) and held_log_z <= -float(params.sell_shrink_z)
                 if shrink_ok:
                     action = do_sell(day_text)
-                    if float(params.sell_shrink_z) > 0:
+                    if params.sell_turn_signal_mode != "legacy":
+                        reason = f"{held_sig['label']} 顶信号卖出({params.sell_turn_signal_mode})"
+                    elif float(params.sell_shrink_z) > 0:
                         reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值且缩量{held_log_z:.2f}σ即卖（移动止盈=0）"
                     else:
                         reason = f"{held_sig['label']} {held_fear:.2f} 到达贪恐阈值即卖（移动止盈=0）"
@@ -2281,6 +2459,16 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.sub2_volume_ratio_threshold_values,
         payload.volume_z_threshold_values,
         payload.sell_shrink_z_values,
+        payload.buy_turn_signal_mode_values,
+        payload.sell_turn_signal_mode_values,
+        payload.ma5_bottom_score_values,
+        payload.ma5_top_score_values,
+        payload.ma5_lookback_days_values,
+        payload.volume_bottom_score_values,
+        payload.volume_top_score_values,
+        payload.volume_expand_std_values,
+        payload.volume_shrink_std_values,
+        payload.turn_signal_cooldown_days_values,
     ]
     total = 1
     for values in value_groups:
@@ -2345,6 +2533,16 @@ def _evaluate_search_candidates(
                 payload.sub2_volume_ratio_threshold_values,
                 payload.volume_z_threshold_values,
                 payload.sell_shrink_z_values,
+                payload.buy_turn_signal_mode_values,
+                payload.sell_turn_signal_mode_values,
+                payload.ma5_bottom_score_values,
+                payload.ma5_top_score_values,
+                payload.ma5_lookback_days_values,
+                payload.volume_bottom_score_values,
+                payload.volume_top_score_values,
+                payload.volume_expand_std_values,
+                payload.volume_shrink_std_values,
+                payload.turn_signal_cooldown_days_values,
             ):
                 index += 1
                 batch.append((index, values))
@@ -2529,6 +2727,16 @@ def _evaluate_search_batch(
                 sub2_volume_ratio_threshold,
                 volume_z_threshold,
                 sell_shrink_z,
+                buy_turn_signal_mode,
+                sell_turn_signal_mode,
+                ma5_bottom_score,
+                ma5_top_score,
+                ma5_lookback_days,
+                volume_bottom_score,
+                volume_top_score,
+                volume_expand_std,
+                volume_shrink_std,
+                turn_signal_cooldown_days,
             ) = values
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),
@@ -2560,6 +2768,16 @@ def _evaluate_search_batch(
                 sub2_volume_ratio_threshold=float(sub2_volume_ratio_threshold if sub2_volume_ratio_threshold is not None else 1.3),
                 volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
                 sell_shrink_z=float(sell_shrink_z),
+                buy_turn_signal_mode=str(buy_turn_signal_mode),
+                sell_turn_signal_mode=str(sell_turn_signal_mode),
+                ma5_bottom_score=float(ma5_bottom_score),
+                ma5_top_score=float(ma5_top_score),
+                ma5_lookback_days=int(ma5_lookback_days),
+                volume_bottom_score=float(volume_bottom_score),
+                volume_top_score=float(volume_top_score),
+                volume_expand_std=float(volume_expand_std),
+                volume_shrink_std=float(volume_shrink_std),
+                turn_signal_cooldown_days=int(turn_signal_cooldown_days),
             )
         except ValidationError as exc:
             skipped_combinations += 1
