@@ -291,6 +291,48 @@ def load_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
         Session.remove()
 
 
+def load_a_stock_index_valuation_history(
+    symbol: str,
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    db = Session()
+    try:
+        query = db.query(AStockIndexValuationSnapshot).filter(
+            AStockIndexValuationSnapshot.symbol == normalized_symbol
+        )
+        if start_date is not None:
+            query = query.filter(AStockIndexValuationSnapshot.date >= start_date)
+        if end_date is not None:
+            query = query.filter(AStockIndexValuationSnapshot.date <= end_date)
+        rows = query.order_by(AStockIndexValuationSnapshot.date.asc()).all()
+        history = []
+        for row in rows:
+            payload = dict(row.payload or {})
+            valuation_ratio = _valuation_ratio(payload.get("current_gap_pct"))
+            history.append({
+                "date": row.date.isoformat(),
+                "valuation_ratio": valuation_ratio,
+                "current_gap_pct": payload.get("current_gap_pct"),
+            })
+        return history
+    finally:
+        Session.remove()
+
+
+def _valuation_ratio(current_gap_pct: Any) -> Optional[float]:
+    try:
+        current_gap = float(current_gap_pct)
+    except (TypeError, ValueError):
+        return None
+    ratio = 1.0 - current_gap / 100.0
+    if ratio < 0 or ratio > 1:
+        return None
+    return round(ratio, 6)
+
+
 def _midpoint(low: Optional[float], high: Optional[float]) -> Optional[float]:
     if low is None or high is None:
         return None

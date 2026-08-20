@@ -290,18 +290,34 @@ const SOXXFearGreed = () => {
     const volumeTurnSignals = ['volume_bottom', 'volume_top'].flatMap(kind => buildSignalMarkPoints(kind, filteredData));
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
+    const valuationHistoryByDate = new Map(
+      (expandedDetail?.valuation_history || []).map(item => [item.date, item])
+    );
+    const valuationRatios = filteredData.map(item => (
+      valuationHistoryByDate.get(item.date)?.valuation_ratio ?? null
+    ));
+    const showValuationRatio = valuationRatios.some(isFiniteNumber);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
     const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
-    const priceValues = prices.filter(value => value !== null && value !== undefined);
+    const priceValues = prices.filter(isFiniteNumber).map(Number);
     const priceMin = priceValues.length ? Math.floor(Math.min(...priceValues) * 0.92) : undefined;
     const priceMax = priceValues.length ? Math.ceil(Math.max(...priceValues) * 1.08) : undefined;
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { data: [`${ticker}贪恐`, '贪恐5日均线', priceSeriesName, '成交量'], top: 0 },
+      legend: {
+        data: [
+          `${ticker}贪恐`,
+          '贪恐5日均线',
+          priceSeriesName,
+          ...(showValuationRatio ? ['估值系数'] : []),
+          '成交量',
+        ],
+        top: 0,
+      },
       grid: [
-        { left: 56, right: 64, top: 48, height: '57%' },
-        { left: 56, right: 64, top: '72%', bottom: 58 },
+        { left: 56, right: showValuationRatio ? 112 : 64, top: 48, height: '57%' },
+        { left: 56, right: showValuationRatio ? 112 : 64, top: '72%', bottom: 58 },
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
@@ -348,6 +364,18 @@ const SOXXFearGreed = () => {
           axisLabel: { formatter: formatCompactVolume },
           axisLine: { show: true, lineStyle: { color: '#8c8c8c' } },
           splitLine: { lineStyle: { color: '#f5f5f5' } },
+        },
+        {
+          type: 'value',
+          name: showValuationRatio ? '估值' : '',
+          min: 0,
+          max: 1,
+          position: 'right',
+          offset: 54,
+          axisLabel: { show: showValuationRatio, formatter: value => Number(value).toFixed(1) },
+          axisLine: { show: showValuationRatio, lineStyle: { color: '#389e0d' } },
+          axisTick: { show: showValuationRatio },
+          splitLine: { show: false },
         },
       ],
       series: [
@@ -409,6 +437,17 @@ const SOXXFearGreed = () => {
           lineStyle: { width: 2, color: '#fa8c16' },
           itemStyle: { color: '#fa8c16' },
         },
+        ...(showValuationRatio ? [{
+          name: '估值系数',
+          type: 'line',
+          yAxisIndex: 3,
+          smooth: true,
+          showSymbol: false,
+          connectNulls: false,
+          data: valuationRatios,
+          lineStyle: { width: 1.8, type: 'dashed', color: '#389e0d' },
+          itemStyle: { color: '#389e0d' },
+        }] : []),
         {
           name: '成交量',
           type: 'bar',
