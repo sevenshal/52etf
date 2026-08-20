@@ -130,6 +130,39 @@ class ExternalTradingHubConnectTest(IsolatedAsyncioTestCase):
 
 
 class ExternalTradingWebSocketApiTest(IsolatedAsyncioTestCase):
+    async def test_ptrade_bridge_can_connect_to_migrated_external_account(self):
+        websocket = _ApiWebSocket()
+        websocket.query_params["account_id"] = api_module.PTRADE_BRIDGE_ACCOUNT_ID
+        migrated_account = _account()
+        migrated_account.account_id = "migrated-admin-account"
+        db_session = _DBSession(migrated_account)
+        connection = SimpleNamespace(account_pk=1, connection_id="conn-1")
+        connect_mock = AsyncMock(return_value=connection)
+        websocket.receive_text = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
+        disconnect_mock = AsyncMock()
+
+        with patch.object(api_module, "is_valid_account", return_value=False) as valid_account_mock, patch.object(
+            api_module,
+            "verify_handshake_signature",
+            return_value=None,
+        ), patch.object(api_module, "ExternalTradingDBSession", return_value=db_session), patch.object(
+            api_module.external_trading_hub,
+            "connect",
+            connect_mock,
+        ), patch.object(
+            api_module.external_trading_hub,
+            "disconnect",
+            disconnect_mock,
+        ):
+            result = await api_module.external_trading_websocket(websocket)
+
+        self.assertIsNone(result)
+        self.assertTrue(db_session.closed)
+        self.assertEqual([], websocket.close_calls)
+        valid_account_mock.assert_not_called()
+        connect_mock.assert_awaited_once_with(websocket, migrated_account)
+        disconnect_mock.assert_awaited_once_with(1, "conn-1", reason="client disconnected")
+
     async def test_initial_connect_disconnect_or_asgi_state_error_is_swallowed(self):
         for exc in (
             WebSocketDisconnect(code=1006),

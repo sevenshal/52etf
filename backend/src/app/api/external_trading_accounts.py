@@ -33,6 +33,7 @@ from ...core.external_trading_database import (
     ExternalTradingSessionLocal as ExternalTradingDBSession,
     get_external_trading_db,
 )
+from ...core.realtime_quotes import PTRADE_BRIDGE_ACCOUNT_ID
 from ...core.services.external_trading import (
     ExternalTradingConnectionError,
     external_trading_hub,
@@ -3772,7 +3773,8 @@ async def external_trading_websocket(websocket: WebSocket):
         )
         await websocket.close(code=1008, reason="account_id and identifier are required")
         return
-    if not is_valid_account(account_id):
+    is_ptrade_bridge = account_id == PTRADE_BRIDGE_ACCOUNT_ID
+    if not is_ptrade_bridge and not is_valid_account(account_id):
         logger.warning("Rejected external trading WebSocket: invalid account_id=%r identifier=%r", account_id, identifier)
         await websocket.close(code=1008, reason="invalid account_id")
         return
@@ -3790,10 +3792,15 @@ async def external_trading_websocket(websocket: WebSocket):
 
     db = ExternalTradingDBSession()
     try:
-        account = db.query(ExternalTradingAccount).filter(
-            ExternalTradingAccount.account_id == account_id,
+        account_query = db.query(ExternalTradingAccount).filter(
             ExternalTradingAccount.identifier == identifier,
-        ).first()
+        )
+        # PTrade uses a dedicated machine identity for the transport. The
+        # external account itself remains owned by the administrator account so
+        # it stays visible to the UI and existing strategy bindings.
+        if not is_ptrade_bridge:
+            account_query = account_query.filter(ExternalTradingAccount.account_id == account_id)
+        account = account_query.first()
         if not account:
             logger.warning(
                 "Rejected external trading WebSocket: account not found account_id=%r identifier=%r",
