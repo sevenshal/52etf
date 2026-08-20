@@ -9,7 +9,10 @@ from fastapi.concurrency import run_in_threadpool
 
 from ...core.database import AStockFearGreedIntraday, Session
 from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
-from ...core.services.a_stock_index_valuation import load_a_stock_index_valuation
+from ...core.services.a_stock_index_valuation import (
+    load_a_stock_index_valuation,
+    load_a_stock_index_valuation_history,
+)
 from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
 from ...core.services.market import MarketService
@@ -161,6 +164,13 @@ async def get_etf_fear_greed_clone_history(
         if str(symbol or "").strip().upper() in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
             result["valuation"] = await run_in_threadpool(
                 lambda: load_a_stock_index_valuation(symbol)
+            )
+            result["valuation_history"] = await run_in_threadpool(
+                lambda: load_a_stock_index_valuation_history(
+                    symbol,
+                    start_date=_parse_date(start_date),
+                    end_date=_parse_date(end_date),
+                )
             )
         return result
     except Exception as e:

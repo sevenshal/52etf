@@ -110,6 +110,14 @@ const executeNextOpenOptions = [
   { label: '开启(次日开盘成交)', value: 'true' },
   { label: '关闭(信号日收盘成交)', value: 'false' },
 ];
+const turnSignalModeOptions = [
+  { label: '原阈值逻辑', value: 'legacy' },
+  { label: '仅量能顶底', value: 'volume' },
+  { label: '仅MA5顶底', value: 'ma5' },
+  { label: '量能或MA5（任一）', value: 'any' },
+  { label: '量能且MA5（同时）', value: 'all' },
+];
+const getTurnSignalModeLabel = value => turnSignalModeOptions.find(item => item.value === value)?.label || value;
 
 const DEFAULT_FEAR_SOURCE_OPTIONS = [
   { label: 'CNN贪恐', value: 'cnn' },
@@ -240,6 +248,16 @@ const SoxlFearBacktest = () => {
       sell_shrink_z_values: parseNumberList(values.sell_shrink_z_values).length
         ? parseNumberList(values.sell_shrink_z_values)
         : [-1],
+      buy_turn_signal_mode_values: values.buy_turn_signal_mode_values?.length ? values.buy_turn_signal_mode_values : ['legacy'],
+      sell_turn_signal_mode_values: values.sell_turn_signal_mode_values?.length ? values.sell_turn_signal_mode_values : ['legacy'],
+      ma5_bottom_score_values: parseNumberList(values.ma5_bottom_score_values),
+      ma5_top_score_values: parseNumberList(values.ma5_top_score_values),
+      ma5_lookback_days_values: parseNumberList(values.ma5_lookback_days_values, true),
+      volume_bottom_score_values: parseNumberList(values.volume_bottom_score_values),
+      volume_top_score_values: parseNumberList(values.volume_top_score_values),
+      volume_expand_std_values: parseNumberList(values.volume_expand_std_values),
+      volume_shrink_std_values: parseNumberList(values.volume_shrink_std_values),
+      turn_signal_cooldown_days_values: parseNumberList(values.turn_signal_cooldown_days_values, true),
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
@@ -287,6 +305,16 @@ const SoxlFearBacktest = () => {
     execute_next_open: record.execute_next_open ?? false,
     slippage_pct: record.slippage_pct ?? -1,
     stamp_duty_pct: record.stamp_duty_pct ?? 0,
+    buy_turn_signal_mode: record.buy_turn_signal_mode ?? 'legacy',
+    sell_turn_signal_mode: record.sell_turn_signal_mode ?? 'legacy',
+    ma5_bottom_score: record.ma5_bottom_score ?? 25,
+    ma5_top_score: record.ma5_top_score ?? 75,
+    ma5_lookback_days: record.ma5_lookback_days ?? 5,
+    volume_bottom_score: record.volume_bottom_score ?? 30,
+    volume_top_score: record.volume_top_score ?? 75,
+    volume_expand_std: record.volume_expand_std ?? 1.25,
+    volume_shrink_std: record.volume_shrink_std ?? 0.25,
+    turn_signal_cooldown_days: record.turn_signal_cooldown_days ?? 5,
     sub_symbol: record.sub_symbol ?? undefined,
     sub_fear_source: record.sub_fear_source ?? 'a_stock_000688_sh',
     sub_volume_signal_symbol: record.sub_volume_signal_symbol ?? undefined,
@@ -474,6 +502,8 @@ const SoxlFearBacktest = () => {
       onFilter: (value, record) => record.fear_source === value,
     },
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
+    { title: '买入顶底信号', dataIndex: 'buy_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
+    { title: '卖出顶底信号', dataIndex: 'sell_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
     { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
     { title: '连续量比天数', dataIndex: 'volume_ratio_consecutive_days', width: 110 },
@@ -1094,6 +1124,16 @@ const SoxlFearBacktest = () => {
             stamp_duty_pct: 0,
             volume_z_threshold_values: '1.25',
             sell_shrink_z_values: '-1',
+            buy_turn_signal_mode_values: ['legacy', 'volume', 'ma5', 'any', 'all'],
+            sell_turn_signal_mode_values: ['volume', 'ma5', 'any', 'all'],
+            ma5_bottom_score_values: '25',
+            ma5_top_score_values: '75',
+            ma5_lookback_days_values: '5',
+            volume_bottom_score_values: '30',
+            volume_top_score_values: '75',
+            volume_expand_std_values: '1.25',
+            volume_shrink_std_values: '0.25',
+            turn_signal_cooldown_days_values: '5',
             date_range: [dayjs('2023-03-22'), dayjs()],
             buy_threshold_values: '30',
             greed_threshold_values: '70',
@@ -1271,6 +1311,27 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={24}>
+              <Alert type="info" showIcon style={{ marginBottom: 12 }} message="历史曲线顶底信号实验" description="买入与卖出可分别选择：仅量能、仅恐贪MA5、任一满足或两者同时满足。选择原阈值逻辑时继续使用上面的买入/贪婪阈值与量比规则。" />
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="buy_turn_signal_mode_values" label="买入信号组合候选">
+                <Select mode="multiple" options={turnSignalModeOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="sell_turn_signal_mode_values" label="卖出信号组合候选">
+                <Select mode="multiple" options={turnSignalModeOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={3}><Form.Item name="ma5_bottom_score_values" label="MA5底阈值"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="ma5_top_score_values" label="MA5顶阈值"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="ma5_lookback_days_values" label="MA5回看天数"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="turn_signal_cooldown_days_values" label="顶底冷却天数"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="volume_bottom_score_values" label="量能底阈值"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="volume_top_score_values" label="量能顶阈值"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="volume_expand_std_values" label="量能底放量σ"><Input /></Form.Item></Col>
+            <Col xs={24} md={3}><Form.Item name="volume_shrink_std_values" label="量能顶缩量σ"><Input /></Form.Item></Col>
+            <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
@@ -1400,7 +1461,7 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.fear_source}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}`}
             pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 1980 }}
             onRow={(record) => ({
@@ -1449,6 +1510,11 @@ const SoxlFearBacktest = () => {
           <Card title="参数明细" style={{ marginBottom: 24 }} loading={detailLoading}>
             <Descriptions column={{ xs: 1, md: 2, lg: 3 }} bordered size="small">
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
+              <Descriptions.Item label="买入顶底信号">{getTurnSignalModeLabel(detailedResult.params?.buy_turn_signal_mode)}</Descriptions.Item>
+              <Descriptions.Item label="卖出顶底信号">{getTurnSignalModeLabel(detailedResult.params?.sell_turn_signal_mode)}</Descriptions.Item>
+              <Descriptions.Item label="MA5底/顶阈值">{detailedResult.params?.ma5_bottom_score} / {detailedResult.params?.ma5_top_score}</Descriptions.Item>
+              <Descriptions.Item label="量能底/顶阈值">{detailedResult.params?.volume_bottom_score} / {detailedResult.params?.volume_top_score}</Descriptions.Item>
+              <Descriptions.Item label="量能放量/缩量σ">{detailedResult.params?.volume_expand_std} / {detailedResult.params?.volume_shrink_std}</Descriptions.Item>
               <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
               <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>

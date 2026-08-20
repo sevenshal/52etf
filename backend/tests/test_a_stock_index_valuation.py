@@ -8,6 +8,7 @@ from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation
 from src.core.services.a_stock_index_valuation import (
     _build_valuation_position_fields,
     _percentile_rank,
+    _valuation_ratio,
     _valuation_position_label,
     calculate_weighted_index_valuation,
 )
@@ -103,6 +104,11 @@ def test_valuation_position_labels(position, label):
 
 def test_percentile_rank_uses_midrank_for_current_value():
     assert _percentile_rank([10, 20, 30, 40], 30) == pytest.approx(62.5)
+
+
+def test_valuation_ratio_inverts_current_target_space():
+    assert _valuation_ratio(34.84) == pytest.approx(0.6516)
+    assert _valuation_ratio(None) is None
 
 
 def test_valuation_position_uses_504_days_and_keeps_252_day_comparison():
