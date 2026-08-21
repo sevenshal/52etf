@@ -259,7 +259,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
 
   const fetchIbAccounts = useCallback(async () => {
     try {
-      const { data } = await request.get('/api/ib-accounts');
+      const { data } = await request.get('/api/ib-accounts/options');
       setIbAccounts(data);
     } catch (error) {
       message.error('获取 IB 账户失败');

@@ -16,7 +16,7 @@ export const SZDTConfigForm = ({ onSuccess }) => {
     try {
       const [configRes, ibRes] = await Promise.all([
         request.get('/api/szdt-configs/'),
-        request.get('/api/ib-accounts')
+        request.get('/api/ib-accounts/options')
       ]);
       setConfig(configRes.data);
       setIbAccounts(ibRes.data);

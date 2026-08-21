@@ -27,6 +27,28 @@ class IBKRAccountSchema(BaseModel):
     class Config:
         from_attributes = True
 
+class IBKRAccountOptionSchema(BaseModel):
+    id: int
+    name: str
+    ib_port: int
+
+    class Config:
+        from_attributes = True
+
+@router.get("/options", response_model=List[IBKRAccountOptionSchema])
+async def list_ib_account_options(
+    db: Session = Depends(get_db),
+    account_id: str = Depends(valid_admin_account)
+):
+    """Return only the non-sensitive fields needed by account selectors."""
+    return db.query(
+        IBKRAccountConfig.id,
+        IBKRAccountConfig.name,
+        IBKRAccountConfig.ib_port,
+    ).filter(
+        IBKRAccountConfig.account_id == account_id
+    ).order_by(IBKRAccountConfig.id.asc()).all()
+
 @router.get("", response_model=List[IBKRAccountSchema])
 async def list_ib_accounts(
     db: Session = Depends(get_db),

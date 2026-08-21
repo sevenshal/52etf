@@ -210,7 +210,7 @@ const PortfolioCopyTrading = () => {
 
     const fetchIbAccounts = useCallback(async () => {
         try {
-            const response = await request.get('/api/ib-accounts');
+            const response = await request.get('/api/ib-accounts/options');
             setIbAccounts(response.data);
         } catch (error) {
             message.error('获取 IB 账户列表失败');
