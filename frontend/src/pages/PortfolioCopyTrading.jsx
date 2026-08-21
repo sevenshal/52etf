@@ -10,11 +10,15 @@ import {
     SettingOutlined, DeleteOutlined, EditOutlined, LineChartOutlined, LinkOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
+import {
+    XueqiuPortfolioLink,
+    toXueqiuPortfolioUrl,
+} from '../components/XueqiuStockLink';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import { useAccount } from '../contexts/AccountContext';
 
-const { Title, Text, Link } = Typography;
+const { Title, Text } = Typography;
 
 const PORTFOLIO_COPY_PLATFORMS = {
     futu: { label: '富途牛牛', color: 'cyan' },
@@ -662,9 +666,7 @@ const PortfolioCopyTrading = () => {
     }, [snowballLiveSubAccounts, snowballEditingConfig]);
 
     const snowballOfficialSymbol = String(watchedSnowballCombinationId || '').trim().toUpperCase();
-    const snowballOfficialUrl = snowballOfficialSymbol
-        ? `https://xueqiu.com/P/${encodeURIComponent(snowballOfficialSymbol)}`
-        : undefined;
+    const snowballOfficialUrl = toXueqiuPortfolioUrl(snowballOfficialSymbol);
 
     const configColumns = [
         {
@@ -934,13 +936,9 @@ const PortfolioCopyTrading = () => {
                                         <Space direction="vertical" size={0}>
                                             <Text strong>{r.combination_name || '未命名'}</Text>
                                             {r.combination_id ? (
-                                                <Link
-                                                    href={`https://xueqiu.com/P/${encodeURIComponent(String(r.combination_id).trim().toUpperCase())}`}
-                                                    target="_blank"
-                                                    style={{ fontSize: 12 }}
-                                                >
+                                                <XueqiuPortfolioLink symbol={r.combination_id} style={{ fontSize: 12 }}>
                                                     ID: {r.combination_id}
-                                                </Link>
+                                                </XueqiuPortfolioLink>
                                             ) : (
                                                 <Text type="secondary">ID: -</Text>
                                             )}

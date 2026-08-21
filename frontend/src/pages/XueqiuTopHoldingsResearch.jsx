@@ -29,6 +29,7 @@ import {
   StockOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
+import XueqiuStockLink, { XueqiuPortfolioLink } from '../components/XueqiuStockLink';
 import request from '../utils/request';
 import './XueqiuTopHoldingsResearch.css';
 
@@ -45,9 +46,6 @@ const numberFormatter = value => {
 };
 
 const normalizeSearchText = value => String(value || '').trim().toUpperCase();
-const getXueqiuStockUrl = symbol => (
-  `https://xueqiu.com/S/${String(symbol || '').replace('.', '').toUpperCase()}`
-);
 const rankDeltaNumber = value => (
   value === null || value === undefined || Number.isNaN(Number(value))
     ? null
@@ -776,8 +774,10 @@ const XueqiuTopHoldingsResearch = () => {
       fixed: 'left',
       render: (value, record) => (
         <Space size={6}>
-          <Text strong>{value}</Text>
-          {record.stock_symbol === 'CASH' ? <Tag color="gold">现金</Tag> : null}
+          {isCashSymbol(record)
+            ? <Text strong>{value}</Text>
+            : <XueqiuStockLink symbol={value}><Text strong>{value}</Text></XueqiuStockLink>}
+          {isCashSymbol(record) ? <Tag color="gold">现金</Tag> : null}
         </Space>
       ),
     },
@@ -892,7 +892,7 @@ const XueqiuTopHoldingsResearch = () => {
       width: 112,
       render: value => (
         value
-          ? <a href={`https://xueqiu.com/P/${value}`} target="_blank" rel="noreferrer">{value}</a>
+          ? <XueqiuPortfolioLink symbol={value}>{value}</XueqiuPortfolioLink>
           : '-'
       ),
     },
@@ -1036,13 +1036,9 @@ const XueqiuTopHoldingsResearch = () => {
                   <div>
                     <Text type="secondary">当前标的</Text>
                     <h2>
-                      <a
-                        href={getXueqiuStockUrl(selectedSymbol)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
+                      <XueqiuStockLink symbol={selectedSymbol}>
                         {selectedSymbol}
-                      </a>
+                      </XueqiuStockLink>
                       {' '}
                       {selectedItem?.stock_name || historyData?.latest?.stock_name || ''}
                     </h2>
