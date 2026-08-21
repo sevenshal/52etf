@@ -4051,7 +4051,8 @@ def build_rank_acceleration_buffer_plan(
         execution_weight = execution_weights.get(symbol, target_weight)
         strategy_action = "buy" if symbol in added_symbols else "keep"
         if strategy_action == "keep" and (
-            current_weight is None or abs(execution_weight - current_weight) > 0.005
+            current_weight is None
+            or abs(execution_weight - current_weight) > BUFFER_RETAIN_WEIGHT_TOLERANCE_PCT
         ):
             strategy_action = "adjust"
         item.update(

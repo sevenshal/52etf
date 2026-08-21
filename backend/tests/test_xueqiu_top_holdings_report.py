@@ -1848,6 +1848,44 @@ class XueqiuTopHoldingsReportTest(TestCase):
             [item["rebalance_weight_pct"] for item in plan["target_items"]],
         )
 
+    def test_weight_price_ratio_plan_skips_sub_one_percent_weight_drift(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        top3 = sorted(
+            ranking,
+            key=lambda item: item["weight_price_ratio_5d"],
+            reverse=True,
+        )[:3]
+        symbols = [item["stock_symbol"] for item in top3]
+        current_holdings = [
+            {
+                "stock_symbol": item["stock_symbol"].replace(".", ""),
+                "stock_name": item["stock_name"],
+                "weight": weight,
+            }
+            for item, weight in zip(top3, (10.13, 9.94, 9.89))
+        ]
+
+        plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            current_snapshot_date=date(2026, 7, 10),
+            strategy_history=[
+                self._strategy_history_entry(
+                    date(2026, 7, 9),
+                    buy_signals=symbols,
+                )
+            ],
+            top_n=3,
+            fear_greed_regime="greed",
+        )
+
+        self.assertFalse(plan["component_changed"])
+        self.assertFalse(plan["weight_adjustment_required"])
+        self.assertTrue(
+            all(item["strategy_action"] == "keep" for item in plan["target_items"])
+        )
+
     def test_robot_rebalance_enables_weight_price_ratio_target_in_same_job(self):
         result = {
             "skipped": False,

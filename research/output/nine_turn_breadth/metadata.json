@@ -1,0 +1,8 @@
+{
+  "source": "/home/quantd/quant_prod/quant_robot/analytics.duckdb",
+  "indices_with_500_days": 56,
+  "breadth_rows": 81991,
+  "events": 8486,
+  "definition": "close vs close four trading days earlier; exact ninth or stages seven through nine",
+  "signal": "cross above trailing 252-day 90th percentile after a prior 20-day index move of at least 3%; 10-day cooldown"
+}

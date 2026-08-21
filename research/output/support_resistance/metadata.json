@@ -1,0 +1,21 @@
+{
+  "config": {
+    "start_date": "2019-01-01",
+    "end_date": "2026-08-20",
+    "train_end": "2023-12-31",
+    "universe_size": 200,
+    "min_history": 500,
+    "lookback": 120,
+    "candle_lookback": 252,
+    "volume_ratio": 1.8,
+    "breakout_atr": 0.15,
+    "horizon": 20
+  },
+  "source": "/home/quantd/quant_prod/quant_robot/analytics.duckdb",
+  "source_table": "a_stock_market_daily_qfq",
+  "rows_loaded": 361940,
+  "symbols_loaded": 200,
+  "min_date": "2019-01-02 00:00:00",
+  "max_date": "2026-08-20 00:00:00",
+  "events": 24254
+}

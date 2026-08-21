@@ -1,0 +1,66 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "A股支撑压力与有效突破：第一轮样本外研究",
+    "generatedAt": "2026-08-21T00:00:00+08:00",
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# A股支撑压力与有效突破：第一轮样本外研究"},
+      {"id": "executive", "type": "markdown", "sourceId": "study_results", "body": "## Executive Summary\n\n**第一轮不支持把任何一种画线方法单独当作稳定交易信号。** 在训练期成交额最高的200只A股中，2024年至2026年样本外共有10,061次突破/跌破事件。三种方法的突破当日信号都高度依赖市场方向：向上突破20日均值为+1.7%至+2.9%，但中位数仅-0.4%至+0.6%；向下跌破的做空方向20日均值全部为负。\n\n**三日站稳适合作为状态标签，但不是已经验证的入场优势。** 等到第三日收盘确认后再计算未来20日，向上信号中位收益仅-0.1%至+0.6%，向下信号仍为负。建议下一轮优先加入指数趋势、行业相对强弱与市场宽度，而不是继续微调画线参数。"},
+      {"id": "scope", "type": "markdown", "body": "## 数据、定义与比较口径\n\n数据来自生产只读 DuckDB 的前复权A股日线，覆盖2019年1月至2026年8月；股票池仅用2019—2023年信息选取训练期成交额最高且历史不少于500日的200只股票。训练期截至2023年末，2024年起为样本外。\n\n比较三种区间：120日结构高低点（Donchian）、过去252日放量实体区、过去120日按相对成交量加权的价格穿越密集区。统一以收盘越过边界0.15 ATR作为突破；同股票同方向同方法设20日冷却。主要观察三日站稳、未来20日先达到+2 ATR还是-1 ATR，以及方向调整后的5/20日收益。"},
+      {"id": "headline", "type": "metric-strip", "cardIds": ["events_card", "test_card", "stocks_card"]},
+      {"id": "oos_heading", "type": "markdown", "sourceId": "study_results", "body": "## 样本外结果：方法差异小于市场方向差异\n\n下图展示2024年至2026年突破当日起算的方向调整后20日平均收益。向上结果为正但中位数接近零，说明均值受到少数大涨事件影响；所有向下结果均为负，表明这组高流动性A股在样本外不适合把破位直接解释为可做空趋势。"},
+      {"id": "oos_chart_block", "type": "chart", "chartId": "oos_chart"},
+      {"id": "confirm_heading", "type": "markdown", "sourceId": "validation_results", "body": "## 三日确认：避免把确认日前走势算成策略收益\n\n三日仍在区间外的事件，从突破日起算看起来明显更好；但这包含了用于确认的三天。将入场点移到第三日收盘后，优势显著衰减。下表只列样本外、三日站稳后的可执行口径。"},
+      {"id": "confirm_table_block", "type": "table", "tableId": "confirm_table"},
+      {"id": "implications", "type": "markdown", "body": "## 交易含义与下一步\n\n1. **保留区间，降低对画线方法的执念。** 放量实体区可继续作为筹码成本候选，但没有证据表明它稳定优于简单结构高低点。\n2. **突破必须与市场状态联合。** 下一轮加入中证全指/沪深300趋势、行业相对强弱、市场宽度与波动状态，检验这些条件能否解释年度反转。\n3. **回踩确认需要重新定义。** 用第三日站稳只能筛掉快速失败，不能自动产生后续收益；应测试缩量回踩、重新放量和相对强度保持。\n4. **暂不进入生产策略。** 在全市场、滚动股票池、交易成本和涨跌停可成交性验证前，只把本轮结论视为研究假设筛选。"},
+      {"id": "caveats", "type": "markdown", "body": "## Caveats\n\n这是高流动性股票的第一轮探索，不代表小盘股、ST股或上市不足500日的股票。股票池由训练期流动性固定，降低但没有消除幸存者与样本选择偏差；没有计入交易成本、冲击成本、涨跌停无法成交和停牌；成交穿越密集区使用日线近似而非逐笔真实Volume Profile；本轮参数尚未做嵌套走步优化，因此不应据此下单。"}
+    ],
+    "cards": [
+      {"id": "events_card", "dataset": "headline", "sourceId": "study_results", "description": "训练期与样本外的独立突破/跌破事件总数。", "metrics": [{"label": "总事件", "field": "events", "format": "number"}]},
+      {"id": "test_card", "dataset": "headline", "sourceId": "study_results", "description": "2024年以后样本外事件。", "metrics": [{"label": "样本外事件", "field": "test_events", "format": "number"}]},
+      {"id": "stocks_card", "dataset": "headline", "sourceId": "study_results", "description": "按训练期成交额选择的高流动性股票。", "metrics": [{"label": "股票数", "field": "stocks", "format": "number"}]}
+    ],
+    "charts": [
+      {"id": "oos_chart", "title": "样本外方向调整后20日平均收益", "subtitle": "2024年至2026年；向下为做空方向收益", "type": "bar", "dataset": "oos_returns", "sourceId": "study_results", "encodings": {"x": {"field": "label", "type": "nominal"}, "y": {"field": "mean_return_20d", "type": "quantitative", "format": "percent"}}}
+    ],
+    "tables": [
+      {"id": "confirm_table", "title": "三日站稳后再入场的20日结果", "subtitle": "2024年至2026年；仅保留三日确认事件", "dataset": "confirmed_results", "sourceId": "validation_results", "defaultSort": {"field": "confirmed_median_return_20d", "direction": "desc"}, "columns": [
+        {"field": "method", "label": "方法"}, {"field": "direction", "label": "方向"}, {"field": "signals", "label": "事件数", "format": "number"}, {"field": "confirmed_win_rate", "label": "先+2ATR比例", "format": "percent"}, {"field": "confirmed_median_return_20d", "label": "20日中位收益", "format": "percent", "movement": true}, {"field": "confirmed_mean_return_20d", "label": "20日平均收益", "format": "percent", "movement": true}
+      ]}
+    ],
+    "sources": [
+      {"id": "study_results", "label": "生产A股日线研究结果", "path": "research/output/support_resistance/summary.csv", "query": {"engine": "duckdb", "sql": "SELECT split, method, direction, signals, stocks, retained_3d, win_before_loss, median_return_5d, median_return_20d, mean_return_20d FROM read_csv_auto('research/output/support_resistance/summary.csv')", "description": "读取研究脚本生成的训练期与样本外聚合结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_basic"]}},
+      {"id": "validation_results", "label": "确认期与分股票验证", "path": "research/output/support_resistance/retention_validation.csv", "query": {"engine": "duckdb", "sql": "SELECT split, method, direction, retained_3d, signals, confirmed_win_rate, confirmed_median_return_20d, confirmed_mean_return_20d FROM read_csv_auto('research/output/support_resistance/retention_validation.csv')", "description": "读取三日确认后重新设定入场点的验证结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_basic"]}}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-21T00:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [{"events": 24254, "test_events": 10061, "stocks": 200}],
+      "oos_returns": [
+        {"label": "穿越密集·向上", "method": "crossing_density", "direction": "up", "signals": 2264, "mean_return_20d": 0.019977, "median_return_20d": -0.001811},
+        {"label": "结构高点·向上", "method": "donchian", "direction": "up", "signals": 878, "mean_return_20d": 0.017302, "median_return_20d": -0.004361},
+        {"label": "放量实体·向上", "method": "volume_candle", "direction": "up", "signals": 2125, "mean_return_20d": 0.028966, "median_return_20d": 0.005806},
+        {"label": "穿越密集·向下", "method": "crossing_density", "direction": "down", "signals": 1957, "mean_return_20d": -0.017701, "median_return_20d": -0.008446},
+        {"label": "结构低点·向下", "method": "donchian", "direction": "down", "signals": 807, "mean_return_20d": -0.026701, "median_return_20d": -0.022462},
+        {"label": "放量实体·向下", "method": "volume_candle", "direction": "down", "signals": 2030, "mean_return_20d": -0.022128, "median_return_20d": -0.003663}
+      ],
+      "confirmed_results": [
+        {"method": "穿越密集区", "direction": "向上", "signals": 1567, "confirmed_win_rate": 0.342055, "confirmed_median_return_20d": 0.001474, "confirmed_mean_return_20d": 0.019599},
+        {"method": "结构高点", "direction": "向上", "signals": 570, "confirmed_win_rate": 0.336842, "confirmed_median_return_20d": -0.000836, "confirmed_mean_return_20d": 0.024231},
+        {"method": "放量实体区", "direction": "向上", "signals": 1487, "confirmed_win_rate": 0.349025, "confirmed_median_return_20d": 0.005867, "confirmed_mean_return_20d": 0.022420},
+        {"method": "穿越密集区", "direction": "向下", "signals": 1331, "confirmed_win_rate": 0.344102, "confirmed_median_return_20d": -0.007177, "confirmed_mean_return_20d": -0.020427},
+        {"method": "结构低点", "direction": "向下", "signals": 588, "confirmed_win_rate": 0.326531, "confirmed_median_return_20d": -0.025944, "confirmed_mean_return_20d": -0.038455},
+        {"method": "放量实体区", "direction": "向下", "signals": 1404, "confirmed_win_rate": 0.279915, "confirmed_median_return_20d": -0.009532, "confirmed_mean_return_20d": -0.030363}
+      ]
+    }
+  },
+  "sources": [
+    {"id": "study_results", "query": {"engine": "duckdb", "sql": "SELECT d.ts_code, d.trade_date, d.open, d.high, d.low, d.close, d.volume, d.amount, d.turnover_rate FROM a_stock_market_daily_qfq d WHERE d.trade_date BETWEEN DATE '2019-01-01' AND DATE '2026-08-20'", "description": "读取生产前复权A股日线，并由研究脚本按训练期流动性选股、逐股票计算支撑压力事件。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_basic"], "filters": ["训练期成交额最高的200只", "训练期至少500个交易日", "剔除15条OHLC逻辑异常记录"], "metric_definitions": ["突破：收盘越过区间边界0.15 ATR", "方向调整收益：向上使用普通收益，向下使用收益的相反数"]}},
+    {"id": "validation_results", "path": "research/output/support_resistance/retention_validation.csv"}
+  ]
+}

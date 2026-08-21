@@ -1,0 +1,67 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "A股神奇九转宽度：指数转向有效性研究",
+    "generatedAt": "2026-08-21T00:00:00+08:00",
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# A股神奇九转宽度：指数转向有效性研究"},
+      {"id": "executive", "type": "markdown", "sourceId": "summary_source", "body": "## Executive Summary\n\n**跨指数总体结论是不显著，不能把神奇九转成分占比作为独立反转信号。** 生产数据覆盖56个具备至少500日历史的指数，按历史成分股计算8,486次极端宽度事件。对指数重叠按日期聚类后，六种口径的20日反转收益均未达到统计显著。\n\n**低九第7～9阶段占比比“刚好第9天”更值得保留。** 等权第7～9阶段低九宽度相对同趋势基准的20日平均超额约+0.11%，逐指数仅55%为正；但沪深300、中证500和中证全指分别约+1.09%、+1.76%和+1.24%，样本数只有18至23次。建议将其定位为大盘超跌宽度辅助指标，并与趋势、估值、成交和市场宽度联合验证。"},
+      {"id": "definitions", "type": "markdown", "body": "## 定义与实验口径\n\n低九条件为收盘价连续低于4个交易日前收盘，第9次为低九；高九反向。除当日刚好完成第9次外，同时测试第7～9阶段占比，以减少精确同步造成的稀疏性。指数成分使用每个交易日之前最新的历史权重快照，分别计算等权与指数权重占比。\n\n候选事件要求宽度从下方突破自身过去252日第90百分位，并且指数此前20日已经下跌至少3%（低九）或上涨至少3%（高九），同指数同口径设置10日冷却。基准是所有满足相同20日趋势条件的指数日。"},
+      {"id": "metrics", "type": "metric-strip", "cardIds": ["indices", "days", "events"]},
+      {"id": "overall_heading", "type": "markdown", "sourceId": "summary_source", "body": "## 总体效果：没有稳定反转优势\n\n图中正值表示沿预期反转方向盈利，负值表示趋势继续。低九第7～9阶段略偏正，但幅度很小；精确低九低于同趋势基准。三种高九口径也没有提供可靠顶部信号。"},
+      {"id": "overall_chart_block", "type": "chart", "chartId": "overall_chart"},
+      {"id": "core_heading", "type": "markdown", "sourceId": "index_source", "body": "## 核心宽基指数：存在局部线索但样本很少\n\n低九第7～9阶段在几个宽基指数上优于同趋势基准，但创业板没有复现；单指数事件数不足30次，置信度有限。下表的“超额”是事件后20日平均收益减去该指数所有20日跌幅超过3%日期的平均后续收益。"},
+      {"id": "core_table_block", "type": "table", "tableId": "core_table"},
+      {"id": "validation", "type": "markdown", "sourceId": "validation_source", "body": "## 稳健性检查\n\n按事件日期聚类后，低九第7～9阶段的20日反转均值为+0.28%，p=0.44；精确低九为-0.39%，p=0.19。逐指数看，低九第7～9阶段只有55.4%的指数超越各自基准，中位超额约+0.10%。年度方向也明显变化，例如该信号在2020、2024和2025年偏正，在2022、2023和2026年偏负。"},
+      {"id": "recommendation", "type": "markdown", "body": "## 建议\n\n1. 保留 `低九7—9阶段等权占比`，暂不使用精确低九或高九作为独立买卖信号。\n2. 下一轮只针对沪深300、中证500、中证全指等宽基指数做走步检验，并加入指数位于200日均线下方、估值分位、成交缩量和上涨家数等状态变量。\n3. 将信号解释为“超跌拥挤度”，等待价格确认后使用，而不是预测当天就是最低点。\n4. 在独立样本、交易成本和可成交性验证前，不接入生产自动交易。"},
+      {"id": "caveats", "type": "markdown", "body": "## Caveats\n\n指数历史成分从2019年中开始，研究窗口主要为2020年至2026年；不同指数高度重叠，因此已按日期聚类但仍不能完全视为独立资产；第90百分位和3%趋势阈值尚未做嵌套走步选择；没有计入发布日期、指数成分调整生效细节、停牌和涨跌停可成交性。"}
+    ],
+    "cards": [
+      {"id": "indices", "dataset": "headline", "sourceId": "summary_source", "description": "具备至少500个聚合交易日的指数。", "metrics": [{"label": "指数数", "field": "indices", "format": "number"}]},
+      {"id": "days", "dataset": "headline", "sourceId": "summary_source", "description": "使用历史成分股计算的指数日。", "metrics": [{"label": "指数日", "field": "breadth_rows", "format": "number"}]},
+      {"id": "events", "dataset": "headline", "sourceId": "summary_source", "description": "六种口径合计的极端宽度事件。", "metrics": [{"label": "候选事件", "field": "events", "format": "number"}]}
+    ],
+    "charts": [
+      {"id": "overall_chart", "title": "神奇九转宽度事件相对同趋势基准的20日超额", "subtitle": "正值代表沿预期反转方向跑赢；56个指数", "type": "bar", "dataset": "overall", "sourceId": "summary_source", "encodings": {"x": {"field": "label", "type": "nominal"}, "y": {"field": "excess_20d", "type": "quantitative", "format": "percent"}}}
+    ],
+    "tables": [
+      {"id": "core_table", "title": "宽基指数低九第7～9阶段结果", "subtitle": "事件日要求此前20日跌幅至少3%", "dataset": "core_indices", "sourceId": "index_source", "defaultSort": {"field": "excess_20d", "direction": "desc"}, "columns": [
+        {"field": "index_name", "label": "指数"}, {"field": "index_code", "label": "代码"}, {"field": "events", "label": "事件数", "format": "number"}, {"field": "event_mean_20d", "label": "事件后20日均值", "format": "percent", "movement": true}, {"field": "baseline_mean_20d", "label": "同趋势基准", "format": "percent", "movement": true}, {"field": "excess_20d", "label": "超额", "format": "percent", "movement": true}
+      ]}
+    ],
+    "sources": [
+      {"id": "summary_source", "label": "九转宽度汇总", "path": "research/output/nine_turn_breadth/summary.csv", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/summary.csv')", "description": "读取神奇九转宽度事件与同趋势基准的聚合比较。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}},
+      {"id": "index_source", "label": "逐指数超额验证", "path": "research/output/nine_turn_breadth/index_excess_validation.csv", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/index_excess_validation.csv')", "description": "读取逐指数事件表现与该指数同趋势基准。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}},
+      {"id": "validation_source", "label": "日期聚类验证", "path": "research/output/nine_turn_breadth/date_cluster_validation.csv", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/date_cluster_validation.csv')", "description": "读取按事件日期聚类后的显著性检验。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-21T00:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [{"indices": 56, "breadth_rows": 81991, "events": 8486}],
+      "overall": [
+        {"label": "低九7—9·等权", "metric": "low7_9_share", "side": "low", "events": 1397, "excess_20d": 0.001111, "event_mean_20d": 0.007828},
+        {"label": "低九7—9·加权", "metric": "low7_9_weighted", "side": "low", "events": 1356, "excess_20d": 0.000289, "event_mean_20d": 0.007007},
+        {"label": "精确低九", "metric": "low9_share", "side": "low", "events": 1744, "excess_20d": -0.001632, "event_mean_20d": 0.005085},
+        {"label": "高九7—9·等权", "metric": "high7_9_share", "side": "high", "events": 1214, "excess_20d": -0.000982, "event_mean_20d": -0.006586},
+        {"label": "高九7—9·加权", "metric": "high7_9_weighted", "side": "high", "events": 1215, "excess_20d": -0.000938, "event_mean_20d": -0.006543},
+        {"label": "精确高九", "metric": "high9_share", "side": "high", "events": 1560, "excess_20d": -0.001708, "event_mean_20d": -0.007313}
+      ],
+      "core_indices": [
+        {"index_name": "中证500", "index_code": "000905.SH", "events": 23, "event_mean_20d": 0.036626, "baseline_mean_20d": 0.019058, "excess_20d": 0.017568},
+        {"index_name": "中证全指", "index_code": "000985.SH", "events": 23, "event_mean_20d": 0.026697, "baseline_mean_20d": 0.014313, "excess_20d": 0.012384},
+        {"index_name": "沪深300", "index_code": "000300.SH", "events": 18, "event_mean_20d": 0.019407, "baseline_mean_20d": 0.008514, "excess_20d": 0.010893},
+        {"index_name": "创业板指", "index_code": "399006.SZ", "events": 28, "event_mean_20d": 0.006844, "baseline_mean_20d": 0.006750, "excess_20d": 0.000094}
+      ]
+    }
+  },
+  "sources": [
+    {"id": "summary_source", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/summary.csv')", "description": "神奇九转宽度事件汇总。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}},
+    {"id": "index_source", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/index_excess_validation.csv')", "description": "逐指数结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}},
+    {"id": "validation_source", "query": {"engine": "duckdb", "sql": "SELECT * FROM read_csv_auto('research/output/nine_turn_breadth/date_cluster_validation.csv')", "description": "日期聚类显著性结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "a_stock_index_daily"]}}
+  ]
+}

@@ -33,6 +33,11 @@ export const adminRouteDescriptors = [
     props: { initialTab: 'xueqiu-holdings' },
   },
   {
+    path: '/factor-lab/nine-turn-breadth',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
+    props: { initialTab: 'nine-turn-breadth' },
+  },
+  {
     path: '/live',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/LiveTrading')),
   },
