@@ -86,6 +86,23 @@ const rollingAverage = (values, windowSize) => values.map((_, index) => {
   return Number((window.reduce((sum, value) => sum + Number(value), 0) / windowSize).toFixed(4));
 });
 
+// 让数据最高/最低值之间的跨度占 y 轴约 80%，上下各保留约 10% 空间。
+const getFocusedAxisRange = (values) => {
+  const finiteValues = values.filter(isFiniteNumber).map(Number);
+  if (!finiteValues.length) return {};
+
+  const dataMin = Math.min(...finiteValues);
+  const dataMax = Math.max(...finiteValues);
+  const dataSpan = dataMax - dataMin;
+  if (dataSpan === 0) {
+    const fallbackSpan = Math.max(Math.abs(dataMin) * 0.1, 1);
+    return { min: dataMin - fallbackSpan / 2, max: dataMax + fallbackSpan / 2 };
+  }
+
+  const padding = dataSpan * 0.125;
+  return { min: dataMin - padding, max: dataMax + padding };
+};
+
 // 底/顶信号由后端统一计算（history 接口每行 signals 字段），前端只负责渲染。
 // 两种信号类型用不同色系 + 形状区分：ma5 均线型 = 绿底/红顶方标；量能型 = 紫底/粉顶菱形。
 const SIGNAL_MARK_STYLE = {
@@ -299,9 +316,8 @@ const SOXXFearGreed = () => {
     const showValuationRatio = valuationRatios.some(isFiniteNumber);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
     const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
-    const priceValues = prices.filter(isFiniteNumber).map(Number);
-    const priceMin = priceValues.length ? Math.floor(Math.min(...priceValues) * 0.92) : undefined;
-    const priceMax = priceValues.length ? Math.ceil(Math.max(...priceValues) * 1.08) : undefined;
+    const priceAxisRange = getFocusedAxisRange(prices);
+    const valuationAxisRange = getFocusedAxisRange(valuationRatios);
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
@@ -351,8 +367,7 @@ const SOXXFearGreed = () => {
         {
           type: 'value',
           name: '价格',
-          min: priceMin,
-          max: priceMax,
+          ...priceAxisRange,
           axisLine: { show: true, lineStyle: { color: '#fa8c16' } },
           splitLine: { show: false },
         },
@@ -368,8 +383,7 @@ const SOXXFearGreed = () => {
         {
           type: 'value',
           name: showValuationRatio ? '估值' : '',
-          min: 0,
-          max: 1,
+          ...valuationAxisRange,
           position: 'right',
           offset: 54,
           axisLabel: { show: showValuationRatio, formatter: value => Number(value).toFixed(1) },
