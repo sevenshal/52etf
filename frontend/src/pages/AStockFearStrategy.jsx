@@ -479,6 +479,16 @@ const AStockFearStrategy = ({ embedded = false }) => {
     }
   };
 
+  const handleTabChange = async (tabKey) => {
+    setActiveTab(tabKey);
+    if (!selectedConfig?.id) return;
+    if (tabKey === 'logs') {
+      await fetchLogs(selectedConfig.id);
+    } else if (tabKey === 'state') {
+      await fetchState(selectedConfig.id);
+    }
+  };
+
   const handleSaveState = async (values) => {
     if (!selectedConfig?.id) {
       message.warning('请先保存配置');
@@ -702,7 +712,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
           >
             <Tabs
               activeKey={activeTab}
-              onChange={setActiveTab}
+              onChange={handleTabChange}
               items={[
                 {
                   key: 'config',

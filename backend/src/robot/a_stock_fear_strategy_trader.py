@@ -76,6 +76,16 @@ MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
 MAIN_DB_WRITE_RETRY_MAX_SECONDS = 8.0
 
 
+def _strategy_config_id(config) -> int:
+    """兼容 ORM 配置的 ``id`` 与执行快照的 ``config_id``。"""
+    value = getattr(config, "id", None)
+    if value is None:
+        value = getattr(config, "config_id", None)
+    if value is None:
+        raise ValueError("策略配置缺少配置ID")
+    return int(value)
+
+
 def _fear_source_index_symbol(fear_source: str) -> Optional[str]:
     """恐贪来源 key → 指数标的。a_stock_000015_sh → 000015.SH；qqq_clone → QQQ.US（美股自算贪恐）。"""
     key = (fear_source or "").strip().lower()
@@ -296,7 +306,8 @@ class AStockFearStrategyTrader:
             ).first()
             if not sub_account:
                 raise ValueError("外部交易虚拟子账户不存在或未启用")
-            if sub_account.strategy_type != STRATEGY_A_STOCK_FEAR or sub_account.strategy_config_id != config.config_id:
+            config_id = _strategy_config_id(config)
+            if sub_account.strategy_type != STRATEGY_A_STOCK_FEAR or sub_account.strategy_config_id != config_id:
                 raise ValueError("外部交易虚拟子账户归属不匹配")
 
             positions = get_ledger_positions(db, sub_account.id)
@@ -347,7 +358,7 @@ class AStockFearStrategyTrader:
             ).first() is not None
 
             return SimpleNamespace(
-                config_id=config.config_id,
+                config_id=config_id,
                 account_id=config.account_id,
                 symbol=main_symbol,
                 sub_symbol=sub_symbol,
@@ -402,7 +413,8 @@ class AStockFearStrategyTrader:
         else:
             raise ValueError("外部交易仅支持 BUY 或 SELL")
 
-        signal_version = datetime.now().strftime(f"a_stock_fear:{config.config_id}:%Y%m%d%H%M%S")
+        config_id = _strategy_config_id(config)
+        signal_version = datetime.now().strftime(f"a_stock_fear:{config_id}:%Y%m%d%H%M%S")
         target = {
             "symbol": symbol,
             "target_quantity": target_quantity,
@@ -422,7 +434,7 @@ class AStockFearStrategyTrader:
                 ExternalTradingSubAccount.account_id == config.account_id,
                 ExternalTradingSubAccount.external_trading_account_id == snapshot.external_trading_account_id,
                 ExternalTradingSubAccount.strategy_type == STRATEGY_A_STOCK_FEAR,
-                ExternalTradingSubAccount.strategy_config_id == config.config_id,
+                ExternalTradingSubAccount.strategy_config_id == config_id,
             ).first()
             if not sub_account:
                 raise ValueError("外部交易虚拟子账户归属不匹配")
@@ -430,7 +442,7 @@ class AStockFearStrategyTrader:
                 db,
                 sub_account=sub_account,
                 targets=[target],
-                signal_id=f"a_stock_fear:{config.config_id}:{action.lower()}",
+                signal_id=f"a_stock_fear:{config_id}:{action.lower()}",
                 signal_version=signal_version,
                 source_execution_id=None,
             )

@@ -9,6 +9,7 @@ from src.robot.a_stock_fear_strategy_trader import (
     AStockFearStrategyTrader,
     _fear_source_index_symbol,
     _fear_source_label,
+    _strategy_config_id,
 )
 
 
@@ -37,6 +38,12 @@ class AStockFearStrategyTraderTest(TestCase):
         self.assertEqual("09:30", self.trader._parse_run_time("09:30").strftime("%H:%M"))
         self.assertEqual("09:30", self.trader._parse_run_time("bad").strftime("%H:%M"))
         self.assertEqual("14:58", self.trader._parse_run_time("14:58").strftime("%H:%M"))
+
+    def test_strategy_config_id_supports_orm_and_snapshot_shapes(self):
+        self.assertEqual(7, _strategy_config_id(SimpleNamespace(id=7)))
+        self.assertEqual(8, _strategy_config_id(SimpleNamespace(config_id=8)))
+        with self.assertRaisesRegex(ValueError, "缺少配置ID"):
+            _strategy_config_id(SimpleNamespace())
 
     def test_volume_ratio_at_matches_backtest_shift_one_semantics(self):
         # 前 20 日均量（shift(1)）作为基准，与回测 prepare_market_features 一致
