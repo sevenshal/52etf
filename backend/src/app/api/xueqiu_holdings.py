@@ -735,6 +735,30 @@ def load_xueqiu_top_holdings_history(
             """,
             [normalized_symbol, raw_symbol, normalized_limit],
         )
+        for row in rows:
+            row["close_price"] = None
+        price_symbol = _xueqiu_symbol_to_ts_code(normalized_symbol)
+        if (
+            rows
+            and price_symbol
+            and SYMBOL_PATTERN.match(price_symbol)
+            and any(_duckdb_table_exists(connection, table) for table in _XUEQIU_PRICE_TABLES)
+        ):
+            try:
+                snapshot_days = [date.fromisoformat(str(row["snapshot_date"])) for row in rows]
+                price_df = _load_price_frame(
+                    [price_symbol],
+                    min(snapshot_days) - timedelta(days=10),
+                    max(snapshot_days) + timedelta(days=1),
+                ).sort("trade_date")
+                if not price_df.is_empty():
+                    for row, snapshot_day in zip(rows, snapshot_days):
+                        available = price_df.filter(pl.col("trade_date") <= snapshot_day)
+                        if not available.is_empty():
+                            close_price = available.tail(1).select("close").to_series()[0]
+                            row["close_price"] = round(float(close_price), 3) if close_price is not None else None
+            except Exception as exc:
+                logger.warning("Unable to load price history for 雪球持仓 %s: %s", normalized_symbol, exc)
         return {
             "available": True,
             "active_only": active_only,
@@ -1018,5 +1042,4 @@ def update_xueqiu_strategy_config(
         for key, value in updates.items():
             setattr(row, key, value)
     return load_xueqiu_strategy_config(strategy_key)
-
 

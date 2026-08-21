@@ -562,6 +562,22 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual([1, 1], [row["composite_rank"] for row in result["history"]])
         self.assertEqual("2026-06-22", result["latest"]["snapshot_date"])
 
+    def test_history_returns_latest_close_on_or_before_snapshot_date(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+            self._create_price_db(db_path)
+
+            with patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holdings_history(
+                    symbol="SH600001",
+                    active_only=True,
+                    limit=10,
+                )
+
+        self.assertEqual([100.0, 90.0], [row["close_price"] for row in result["history"]])
+        self.assertEqual(90.0, result["latest"]["close_price"])
+
     def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"

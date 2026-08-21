@@ -230,11 +230,16 @@ const getHistoryChartOption = (historyRows = []) => {
       ? null
       : Number(row.composite_rank)
   ));
+  const prices = historyRows.map(row => (
+    row.close_price === null || row.close_price === undefined
+      ? null
+      : Number(row.close_price)
+  ));
   const maxRank = Math.max(12, ...ranks.filter(value => Number.isFinite(value)));
 
   return {
-    color: ['#1677ff', '#fa8c16'],
-    grid: { left: 54, right: 58, top: 48, bottom: 54 },
+    color: ['#1677ff', '#fa8c16', '#52c41a'],
+    grid: { left: 54, right: 112, top: 48, bottom: 54 },
     tooltip: {
       trigger: 'axis',
       valueFormatter: value => (
@@ -245,7 +250,7 @@ const getHistoryChartOption = (historyRows = []) => {
     },
     legend: {
       top: 8,
-      data: ['综合权重', '综合排名'],
+      data: ['综合权重', '综合排名', '收盘价'],
     },
     xAxis: {
       type: 'category',
@@ -268,6 +273,15 @@ const getHistoryChartOption = (historyRows = []) => {
         min: 1,
         max: maxRank,
         axisLabel: { formatter: value => `#${Math.round(value)}`, color: '#64748b' },
+        splitLine: { show: false },
+      },
+      {
+        type: 'value',
+        name: '价格',
+        position: 'right',
+        offset: 54,
+        scale: true,
+        axisLabel: { formatter: value => Number(value).toFixed(2), color: '#64748b' },
         splitLine: { show: false },
       },
     ],
@@ -295,6 +309,15 @@ const getHistoryChartOption = (historyRows = []) => {
         data: ranks,
         symbol: 'diamond',
         symbolSize: 5,
+        lineStyle: { width: 1.8 },
+      },
+      {
+        name: '收盘价',
+        type: 'line',
+        yAxisIndex: 2,
+        data: prices,
+        symbol: 'none',
+        connectNulls: true,
         lineStyle: { width: 1.8 },
       },
     ],
@@ -846,6 +869,7 @@ const XueqiuTopHoldingsResearch = () => {
 
   const historyColumns = useMemo(() => [
     { title: '日期', dataIndex: 'snapshot_date', width: 118 },
+    { title: '收盘价', dataIndex: 'close_price', width: 100, align: 'right', render: value => (value == null ? '-' : Number(value).toFixed(2)) },
     { title: '排名', dataIndex: 'composite_rank', width: 88, align: 'right', render: value => (value ? `#${value}` : '-') },
     { title: '综合权重', dataIndex: 'composite_weight_pct', width: 116, align: 'right', render: percentFormatter },
     { title: '持仓组合', dataIndex: 'holding_cube_count', width: 112, align: 'right' },
