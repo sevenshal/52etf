@@ -22,7 +22,6 @@ const PROFILE_ROUTES = [
   '/fear/stocks',
   '/portfolio-copy-trading',
   '/options',
-  '/ib-account-manager',
   '/longport-account-manager',
   '/evc-account-manager',
   '/lev-etf-backtest',
@@ -67,6 +66,7 @@ const getActiveTabKey = (pathname, state) => {
     isRouteOrChild(pathname, '/executor-status') ||
     isRouteOrChild(pathname, '/soxl-fear-strategy') ||
     isRouteOrChild(pathname, '/external-trading-accounts') ||
+    isRouteOrChild(pathname, '/ib-account-manager') ||
     isRouteOrChild(pathname, '/factor-lab/live')
   ) {
     return '/live';

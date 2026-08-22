@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { Tabs } from 'antd';
 import {
   BarChartOutlined,
+  BankOutlined,
   FireOutlined,
   ThunderboltOutlined,
   WalletOutlined,
@@ -12,9 +13,10 @@ import ExternalTradingAccountManager from './ExternalTradingAccountManager';
 import FactorLab from './FactorLab';
 import SoxlFearStrategy from './SoxlFearStrategy';
 import AStockFearStrategy from './AStockFearStrategy';
+import IBKRAccountManager from './IBKRAccountManager';
 import './LiveTrading.css';
 
-const LIVE_TAB_KEYS = ['executor', 'accounts', 'factor', 'sentiment', 'sentiment_a'];
+const LIVE_TAB_KEYS = ['executor', 'accounts', 'factor', 'sentiment', 'sentiment_a', 'ibkr_accounts'];
 
 const LiveTrading = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -72,6 +74,16 @@ const LiveTrading = () => {
         </span>
       ),
       children: <AStockFearStrategy embedded />,
+    },
+    {
+      key: 'ibkr_accounts',
+      label: (
+        <span className="live-trading-tab-label">
+          <BankOutlined />
+          <span>IBKR账户</span>
+        </span>
+      ),
+      children: <IBKRAccountManager embedded />,
     },
   ], []);
 

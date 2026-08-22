@@ -15,7 +15,7 @@ import request from '../utils/request';
 
 const { Title, Text } = Typography;
 
-const IBKRAccountManager = () => {
+const IBKRAccountManager = ({ embedded = false }) => {
     const [accounts, setAccounts] = useState([]);
     const [loading, setLoading] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -251,7 +251,7 @@ const IBKRAccountManager = () => {
     ];
 
     return (
-        <div style={{ padding: '24px' }}>
+        <div style={{ padding: embedded ? '16px' : '24px' }}>
             <Card
                 title={
                     <Space>
