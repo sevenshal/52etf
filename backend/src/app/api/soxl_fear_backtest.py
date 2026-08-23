@@ -1379,11 +1379,13 @@ def _compute_turn_signal_arrays(base_df: pd.DataFrame, params: SOXLFearStrategyP
             continue
         recent = scores[max(0, index - lookback + 1): index + 1]
         candidates = {
-            "ma5_bottom": index >= 1 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1])
+            "ma5_bottom": index >= 2 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1]) and np.isfinite(ma5[index - 2])
                 and ma5[index] > ma5[index - 1]
+                and ma5[index - 1] < ma5[index - 2]
                 and np.any(np.isfinite(recent) & (recent <= float(params.ma5_bottom_score))),
-            "ma5_top": index >= 1 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1])
+            "ma5_top": index >= 2 and np.isfinite(ma5[index]) and np.isfinite(ma5[index - 1]) and np.isfinite(ma5[index - 2])
                 and ma5[index] < ma5[index - 1]
+                and ma5[index - 1] > ma5[index - 2]
                 and np.any(np.isfinite(recent) & (recent >= float(params.ma5_top_score))),
             "volume_bottom": score <= float(params.volume_bottom_score) and np.isfinite(log_z[index])
                 and log_z[index] >= float(params.volume_expand_std),
@@ -2278,7 +2280,8 @@ def _run_seesaw_backtest(
                     "date": sell_action["date"], "action": "SELL", "symbol": sell_action.get("symbol"),
                     "quantity": sell_action["quantity"], "price": sell_action["price"], "amount": sell_action["amount"],
                     "profit": sell_action.get("profit"), "signal_date": day_text,
-                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr, "reason": reason,
+                    "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
+                    "buy_volume_ratio": trade_signal_vr, "reason": reason,
                     "shares": sell_action.get("shares"), "position_after": sell_action.get("position_after"),
                     "cash_after": sell_action.get("cash_after"), "position_pct_after": sell_action.get("position_pct_after"),
                     "holdings_value_after": sell_action.get("holdings_value_after"), "net_value_after": sell_action.get("net_value_after"),
@@ -2290,6 +2293,7 @@ def _run_seesaw_backtest(
                     "quantity": buy_action["quantity"], "price": buy_action["price"], "amount": buy_action["amount"],
                     "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
+                    "buy_volume_ratio": trade_signal_vr,
                     "reason": f"买入 {target_sig['symbol']}",
                     "shares": buy_action.get("shares"), "position_after": buy_action.get("position_after"),
                     "cash_after": buy_action.get("cash_after"), "position_pct_after": buy_action.get("position_pct_after"),
@@ -2341,6 +2345,7 @@ def _run_seesaw_backtest(
                     "quantity": action["quantity"], "price": action["price"], "amount": action["amount"],
                     "profit": action.get("profit"), "signal_date": day_text,
                     "fear_score": trade_signal_fear, "volume_ratio": trade_signal_vr,
+                    "buy_volume_ratio": trade_signal_vr,
                     "reason": reason or "",
                     "shares": action.get("shares"), "position_after": action.get("position_after"),
                     "cash_after": action.get("cash_after"), "position_pct_after": action.get("position_pct_after"),

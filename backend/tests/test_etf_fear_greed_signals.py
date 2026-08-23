@@ -1,7 +1,7 @@
 """自算贪恐历史曲线底/顶信号（后端统一计算）测试。
 
 覆盖 `compute_turn_signals`：
-- ma5 均线型：MA5 上穿 + 近 5 日恐贪 <= 25 为底；MA5 下穿 + 近 5 日恐贪 >= 75 为顶。
+- ma5 均线型：MA5 由降转升 + 近 5 日恐贪 <= 25 为底；MA5 由升转降 + 近 5 日恐贪 >= 75 为顶。
 - 量能型：恐贪 <= 30 且放量（log 量 > 过去 20 日均值 1.25 个标准差）为底；
   恐贪 >= 75 且缩量（log 量 < 过去 20 日均值 0.25 个标准差）为顶。
 - 每类信号的顶/底分别独立 5 个交易日冷却，冷却期内不重复出同类信号。
@@ -32,7 +32,7 @@ def _dates(result):
 
 
 def test_ma5_bottom_on_rising_ma_after_extreme_fear():
-    # 分数一路跌到 20 后回升：MA5 上穿且近 5 日恐贪 <= 25 → 均线底
+    # 分数一路跌到 20 后回升：MA5 由降转升且近 5 日恐贪 <= 25 → 均线底
     scores = [70, 68, 66, 64, 62, 60, 58, 56, 54, 52,
               50, 48, 46, 44, 42, 40, 38, 36, 34, 32,
               30, 28, 26, 24, 22, 20, 22, 24, 26, 28, 30, 32]
@@ -45,7 +45,7 @@ def test_ma5_bottom_on_rising_ma_after_extreme_fear():
 
 
 def test_ma5_top_on_falling_ma_after_extreme_greed():
-    # 分数一路涨到 80 后回落：MA5 下穿且近 5 日恐贪 >= 75 → 均线顶
+    # 分数一路涨到 80 后回落：MA5 由升转降且近 5 日恐贪 >= 75 → 均线顶
     scores = [30, 32, 34, 36, 38, 40, 42, 44, 46, 48,
               50, 52, 54, 56, 58, 60, 62, 64, 66, 68,
               70, 72, 74, 76, 78, 80, 78, 76, 74, 72, 70, 68]
@@ -129,9 +129,8 @@ def test_same_kind_cooldown_suppresses_repeat_within_5_days():
     # 2024-02-01 之后的 5 个交易日（02-02 ~ 02-06）无同类信号
     for blocked in ("2024-02-02", "2024-02-03", "2024-02-04", "2024-02-05", "2024-02-06"):
         assert blocked not in result
-    # 冷却满后（02-07、02-13）恢复出信号
-    assert result["2024-02-07"] == ["ma5_bottom"]
-    assert result["2024-02-13"] == ["ma5_bottom"]
+    # 冷却满后，只在下一个真正的 MA5 由降转升拐点出信号
+    assert result["2024-02-12"] == ["ma5_bottom"]
 
 
 def test_cooldown_tracked_per_kind_and_direction():
@@ -176,12 +175,19 @@ def test_custom_cooldown_days_param():
     default_result = _dates(compute_turn_signals(rows))
     assert default_result == {
         "2024-02-01": ["ma5_bottom"],
-        "2024-02-07": ["ma5_bottom"],
-        "2024-02-13": ["ma5_bottom"],
+        "2024-02-12": ["ma5_bottom"],
     }
     short_result = _dates(compute_turn_signals(rows, {"cooldown_days": 2}))
-    assert "2024-02-04" in short_result  # 默认 5 日冷却时该日无信号
-    assert "2024-02-04" not in default_result
+    assert short_result == default_result
+
+
+def test_ma5_continuing_same_direction_is_not_a_new_turn_signal():
+    # 已经转升后继续上升，不应在冷却结束后重复报底。
+    scores = [40, 35, 30, 25, 20, 22, 24, 26, 28, 30, 32, 34, 36]
+    result = _dates(compute_turn_signals(
+        _rows(scores, [100.0] * len(scores)), {"cooldown_days": 0}
+    ))
+    assert list(result.values()).count(["ma5_bottom"]) == 1
 
 
 def test_custom_ma5_lookback_days_param():

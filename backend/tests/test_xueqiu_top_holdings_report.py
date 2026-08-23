@@ -138,27 +138,28 @@ class XueqiuTopHoldingsReportTest(TestCase):
         )
 
     def test_position_target_ma5_cross_signals(self):
-        # MA5底：MA5上穿（当日>前一日）且最近5日任意恐贪≤25
+        # MA5底：MA5由降转升（当日>昨日<前日）且最近5日任意恐贪≤25
         self.assertEqual(
             (10, "ma5_bottom"),
             resolve_xueqiu_strategy_position_target(
                 {
                     "score": 40.0,
                     "log_volume_z": 0.0,
-                    # 最近6日：前5日低企稳，第6日(今日)跳升 → MA5上穿；窗口内含 20≤25
+                    # 最近7日：昨日 MA5 仍在下降，今日转升；窗口内含 20≤25
                     "recent_scores": [
+                        {"date": "2026-06-30", "score": 30.0},
                         {"date": "2026-07-01", "score": 20.0},
                         {"date": "2026-07-02", "score": 22.0},
                         {"date": "2026-07-03", "score": 24.0},
                         {"date": "2026-07-06", "score": 26.0},
-                        {"date": "2026-07-07", "score": 28.0},
+                        {"date": "2026-07-07", "score": 25.0},
                         {"date": "2026-07-08", "score": 60.0},
                     ],
                 },
                 current_holding_count=3,
             ),
         )
-        # MA5顶：MA5下穿（当日<前一日）且最近5日任意恐贪≥75
+        # MA5顶：MA5由升转降（当日<昨日>前日）且最近5日任意恐贪≥75
         self.assertEqual(
             (3, "ma5_top"),
             resolve_xueqiu_strategy_position_target(
@@ -166,11 +167,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
                     "score": 60.0,
                     "log_volume_z": 0.0,
                     "recent_scores": [
-                        {"date": "2026-07-01", "score": 78.0},
-                        {"date": "2026-07-02", "score": 76.0},
-                        {"date": "2026-07-03", "score": 74.0},
-                        {"date": "2026-07-06", "score": 72.0},
-                        {"date": "2026-07-07", "score": 70.0},
+                        {"date": "2026-06-30", "score": 70.0},
+                        {"date": "2026-07-01", "score": 80.0},
+                        {"date": "2026-07-02", "score": 78.0},
+                        {"date": "2026-07-03", "score": 76.0},
+                        {"date": "2026-07-06", "score": 74.0},
+                        {"date": "2026-07-07", "score": 75.0},
                         {"date": "2026-07-08", "score": 40.0},
                     ],
                 },
@@ -179,7 +181,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
         )
 
     def test_position_target_ma5_cross_requires_extreme_score_in_window(self):
-        # MA5上穿但最近5日无 ≤25 的分数 → 无MA5底信号
+        # MA5由降转升但最近5日无 ≤25 的分数 → 无MA5底信号
         self.assertEqual(
             (5, "neutral_keep_current"),
             resolve_xueqiu_strategy_position_target(
@@ -227,11 +229,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
                     "score": 20.0,
                     "log_volume_z": 1.5,
                     "recent_scores": [
+                        {"date": "2026-06-30", "score": 30.0},
                         {"date": "2026-07-01", "score": 20.0},
                         {"date": "2026-07-02", "score": 22.0},
                         {"date": "2026-07-03", "score": 24.0},
                         {"date": "2026-07-06", "score": 26.0},
-                        {"date": "2026-07-07", "score": 28.0},
+                        {"date": "2026-07-07", "score": 25.0},
                         {"date": "2026-07-08", "score": 60.0},
                     ],
                 },

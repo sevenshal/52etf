@@ -122,7 +122,7 @@ def _finite_or_none(value: Any) -> Optional[float]:
 # 参数默认值（与 XueqiuStrategyConfig 表「fear_greed_signals」行对齐）；
 # 实际计算时优先读取该表配置，表里没有时才用这里的默认值兜底。
 
-# ma5 均线型：MA5 上穿/下穿 + 最近 N 个交易日恐贪触及极值（MA5 均线本身固定 5 日）
+# ma5 均线型：MA5 由降转升/由升转降 + 最近 N 个交易日恐贪触及极值（MA5 均线本身固定 5 日）
 SIGNAL_MA5_WINDOW = 5
 SIGNAL_MA5_BOTTOM_THRESHOLD_DEFAULT = 25.0
 SIGNAL_MA5_TOP_THRESHOLD_DEFAULT = 75.0
@@ -202,9 +202,9 @@ def compute_turn_signals(
     缺省时使用模块默认值：
 
     - ma5 均线型：
-      - 底：恐贪 MA5 较前一交易日上穿（当日 > 前一日），且最近 N 日任意一天
+      - 底：恐贪 MA5 在昨日形成低点（当日 > 昨日 < 前日），且最近 N 日任意一天
         恐贪值 <= ma5_bottom_score；
-      - 顶：恐贪 MA5 较前一交易日下穿（当日 < 前一日），且最近 N 日任意一天
+      - 顶：恐贪 MA5 在昨日形成高点（当日 < 昨日 > 前日），且最近 N 日任意一天
         恐贪值 >= ma5_top_score。
     - 量能型：
       - 底：恐贪 <= volume_bottom_score 且放量（log(成交量) 高于不含当日过去 20 个
@@ -252,11 +252,12 @@ def compute_turn_signals(
             last_signal_index[kind] = i
 
         # ---- ma5 均线型 ----
-        if i >= 1 and _finite(ma5[i]) and _finite(ma5[i - 1]):
+        if i >= 2 and _finite(ma5[i]) and _finite(ma5[i - 1]) and _finite(ma5[i - 2]):
             recent = scores[max(0, i - ma5_lookback_days + 1): i + 1]
             if (
                 i - last_signal_index["ma5_bottom"] > cooldown_days
                 and ma5[i] > ma5[i - 1]
+                and ma5[i - 1] < ma5[i - 2]
                 and any(
                     _finite(v) and v <= ma5_bottom_score for v in recent
                 )
@@ -265,6 +266,7 @@ def compute_turn_signals(
             if (
                 i - last_signal_index["ma5_top"] > cooldown_days
                 and ma5[i] < ma5[i - 1]
+                and ma5[i - 1] > ma5[i - 2]
                 and any(
                     _finite(v) and v >= ma5_top_score for v in recent
                 )

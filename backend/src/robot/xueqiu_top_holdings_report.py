@@ -2653,7 +2653,7 @@ def load_latest_csi_all_share_fear_greed() -> Optional[Dict[str, Any]]:
     """Read a plain snapshot so no ORM object/session crosses external I/O.
 
     Includes the proxy-ETF log-volume z-score (放量/缩量确认) computed by the
-    shared 自算贪恐 summary service for 中证全指, plus the most recent 6 daily
+    shared 自算贪恐 summary service for 中证全指, plus the most recent 7 daily
     scores (chronological) for the MA5 moving-average signal.
     """
     with SessionLocal() as db:
@@ -2661,7 +2661,7 @@ def load_latest_csi_all_share_fear_greed() -> Optional[Dict[str, Any]]:
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == CSI_ALL_SHARE_FEAR_GREED_SYMBOL)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .limit(6)
+            .limit(7)
             .all()
         )
         if not rows:
@@ -2802,14 +2802,15 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
 
 
 def _ma5_cross_state(recent_scores: List[float]) -> Optional[str]:
-    """MA5 上穿/下穿：当日 MA5 > 前一日 MA5 → up；< → down。需要至少 6 个连续分数。"""
-    if len(recent_scores) < 6:
+    """MA5 拐点：当日 > 昨日 < 前日 → up；当日 < 昨日 > 前日 → down。"""
+    if len(recent_scores) < 7:
         return None
     ma5_today = sum(recent_scores[-5:]) / 5.0
     ma5_yesterday = sum(recent_scores[-6:-1]) / 5.0
-    if ma5_today > ma5_yesterday:
+    ma5_day_before = sum(recent_scores[-7:-2]) / 5.0
+    if ma5_today > ma5_yesterday < ma5_day_before:
         return "up"
-    if ma5_today < ma5_yesterday:
+    if ma5_today < ma5_yesterday > ma5_day_before:
         return "down"
     return None
 
@@ -2833,10 +2834,10 @@ def resolve_xueqiu_strategy_position_target(
 
     底（扩仓 3→x）：
       - 量能型：恐贪 ≤ fear_threshold 且放量（log量比z > fear_volume_std）
-      - MA5型：恐贪MA5上穿 且 最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
+      - MA5型：恐贪MA5由降转升 且 最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
     顶（收缩 10→y）：
       - 量能型：恐贪 ≥ greed_threshold 且缩量（log量比z < -greed_volume_std）
-      - MA5型：恐贪MA5下穿 且 最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
+      - MA5型：恐贪MA5由升转降 且 最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
     其余情况维持当前仓位（当前不足 y 只时补到 y），避免无信号时来回切换或持仓过少锁死。
     """
     if not fear_greed:

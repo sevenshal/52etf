@@ -162,23 +162,25 @@ def prepare_fear_features(fear: pd.DataFrame, bottom_ma_window: int) -> pd.DataF
         lambda values: values.rolling(bottom_ma_window, min_periods=bottom_ma_window).max()
     )
     result["prior_fear_ma"] = result.groupby("index_symbol")["fear_ma"].shift(1)
+    result["prior_prior_fear_ma"] = result.groupby("index_symbol")["fear_ma"].shift(2)
     return result
 
 
 def fear_reversal_flags(
     current_ma: float,
     previous_ma: float,
+    previous_previous_ma: float,
     recent_fear_min: float,
     recent_fear_max: float,
     *,
     bottom_threshold: float = 25.0,
     top_threshold: float = 75.0,
 ) -> tuple[bool, bool]:
-    values = (current_ma, previous_ma, recent_fear_min, recent_fear_max)
+    values = (current_ma, previous_ma, previous_previous_ma, recent_fear_min, recent_fear_max)
     if not all(np.isfinite(value) for value in values):
         return False, False
-    is_bottom = current_ma > previous_ma and recent_fear_min < bottom_threshold
-    is_top = current_ma < previous_ma and recent_fear_max > top_threshold
+    is_bottom = current_ma > previous_ma < previous_previous_ma and recent_fear_min < bottom_threshold
+    is_top = current_ma < previous_ma > previous_previous_ma and recent_fear_max > top_threshold
     return bool(is_bottom), bool(is_top)
 
 
@@ -215,6 +217,7 @@ def build_signal_rows(
         bottom, _ = fear_reversal_flags(
             row.fear_ma,
             row.prior_fear_ma,
+            row.prior_prior_fear_ma,
             row.recent_fear_min,
             row.recent_fear_max,
             bottom_threshold=bottom_fear_threshold,

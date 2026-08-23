@@ -1249,8 +1249,8 @@ class FearGreedSignalConfig(Base):
     """自算贪恐底/顶信号统一配置（全局单份，星澜壹贰叁号与历史曲线共用）。
 
     两种信号类型（均线型 / 量能型）的阈值、放缩量标准差、回看与冷却天数统一配置：
-    - 均线型底：恐贪 MA5 上穿(当日>前一日)且最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
-    - 均线型顶：恐贪 MA5 下穿(当日<前一日)且最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
+    - 均线型底：恐贪 MA5 由降转升(当日>昨日<前日)且最近 ma5_lookback_days 日任意恐贪 ≤ ma5_bottom_score
+    - 均线型顶：恐贪 MA5 由升转降(当日<昨日>前日)且最近 ma5_lookback_days 日任意恐贪 ≥ ma5_top_score
     - 量能型底：恐贪 ≤ volume_bottom_score 且放量（log 量比 z > volume_expand_std）
     - 量能型顶：恐贪 ≥ volume_top_score 且缩量（log 量比 z < -volume_shrink_std）
     同类信号（各类型顶/底分别独立）出后 cooldown_days 个交易日不重复出信号。

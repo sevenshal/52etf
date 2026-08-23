@@ -12,19 +12,19 @@ from src.core.services.a_stock_fear_etf_backtest_engine import (
 
 
 def test_bottom_signal_uses_any_extreme_fear_day_in_recent_window():
-    dates = [date(2024, 1, 2) + timedelta(days=index) for index in range(6)]
+    dates = [date(2024, 1, 2) + timedelta(days=index) for index in range(7)]
     fear = pd.DataFrame({
-        "index_symbol": ["IDX"] * 6,
+        "index_symbol": ["IDX"] * 7,
         "date": dates,
         # The current score is above 25, but the latest five rows contain 20.
         # Since 31 replaces 30, MA5 turns upward on the final row.
-        "score": [30, 20, 21, 22, 23, 31],
+        "score": [35, 30, 20, 21, 22, 23, 31],
     })
     featured_fear = prepare_fear_features(fear, 5)
     bars = pd.DataFrame({
         "trade_date": dates,
-        "etf_symbol": ["ETF"] * 6,
-        "volume_ratio": [1.0] * 6,
+        "etf_symbol": ["ETF"] * 7,
+        "volume_ratio": [1.0] * 7,
     })
     signals = build_signal_rows(
         bars, featured_fear, {"IDX": "ETF"},
@@ -32,25 +32,26 @@ def test_bottom_signal_uses_any_extreme_fear_day_in_recent_window():
         bottom_fear_threshold=25, extreme_buy_fraction=1,
         bottom_buy_fraction=0.5, start_date=str(dates[0]), end_date=str(dates[-1]),
     )
-    assert dates[5] in signals
-    assert signals[dates[5]][0]["fear_score"] == 31
-    assert signals[dates[5]][0]["recent_fear_min"] == 20
-    assert signals[dates[5]][0]["reason"] == "fear_bottom_reversal"
-    assert signals[dates[5]][0]["target_fraction"] == 0.5
+    assert dates[6] in signals
+    assert signals[dates[6]][0]["fear_score"] == 31
+    assert signals[dates[6]][0]["recent_fear_min"] == 20
+    assert signals[dates[6]][0]["reason"] == "fear_bottom_reversal"
+    assert signals[dates[6]][0]["target_fraction"] == 0.5
 
 
 def test_top_signal_uses_any_extreme_greed_day_in_recent_window():
-    dates = [date(2024, 2, 1) + timedelta(days=index) for index in range(6)]
+    dates = [date(2024, 2, 1) + timedelta(days=index) for index in range(7)]
     fear = pd.DataFrame({
-        "index_symbol": ["IDX"] * 6,
+        "index_symbol": ["IDX"] * 7,
         "date": dates,
         # The current score is below 75, but the latest five rows contain 80.
         # Since 69 replaces 70, MA5 turns downward on the final row.
-        "score": [70, 80, 79, 78, 77, 69],
+        "score": [65, 70, 80, 79, 78, 77, 69],
     })
     row = prepare_fear_features(fear, 5).iloc[-1]
     is_bottom, is_top = fear_reversal_flags(
         row["fear_ma"], row["prior_fear_ma"],
+        row["prior_prior_fear_ma"],
         row["recent_fear_min"], row["recent_fear_max"],
     )
     assert is_bottom is False
@@ -67,6 +68,7 @@ def test_same_day_buy_signals_prioritize_highest_volume_ratio():
         "score": [18, 22],
         "fear_ma": [20, 23],
         "prior_fear_ma": [21, 24],
+        "prior_prior_fear_ma": [22, 25],
         "recent_fear_min": [18, 22],
         "recent_fear_max": [23, 25],
     })
