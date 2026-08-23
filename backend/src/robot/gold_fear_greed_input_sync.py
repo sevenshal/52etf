@@ -1,18 +1,18 @@
 import logging
+import os
 from datetime import date, datetime, timedelta
-from io import BytesIO, StringIO
+from io import BytesIO
 from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-
 from ..core.database import GoldFearGreedInput, Session
 
 
-FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_API_KEY = os.getenv("FRED_API_KEY", "f969b4eb2a07325467cffb3f100fa6ea")
 CFTC_GOLD_URL = "https://publicreporting.cftc.gov/resource/72hh-3qpy.json"
-WGC_GOLD_ETF_URL = "https://www.gold.org/goldhub/data/gold-etfs-holdings-and-flows"
+SPDR_GLD_ARCHIVE_URL = "https://api.spdrgoldshares.com/api/v1/historical-archive"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; 52etf-gold-fear/1.0)"}
 
 
@@ -36,7 +36,7 @@ class GoldFearGreedInputSync:
         for name, loader in (
             ("fred", lambda: self._fetch_fred(start_value, end_value)),
             ("cftc_cot", lambda: self._fetch_cot(start_value, end_value)),
-            ("world_gold_council", self._fetch_gold_etf_holdings),
+            ("spdr_gld_archive", self._fetch_gold_etf_holdings),
         ):
             try:
                 frame = loader()
@@ -59,10 +59,16 @@ class GoldFearGreedInputSync:
     def _fetch_fred(self, start_date: date, end_date: date) -> pd.DataFrame:
         parts = []
         for series in ("DFII10", "DTWEXBGS"):
-            response = self._get(FRED_URL, params={"id": series})
-            frame = pd.read_csv(StringIO(response.text), na_values=["."])
-            frame["date"] = pd.to_datetime(frame["observation_date"], errors="coerce").dt.date
-            frame[series] = pd.to_numeric(frame[series], errors="coerce")
+            payload = self._get(FRED_URL, params={
+                "series_id": series,
+                "file_type": "json",
+                "observation_start": start_date.isoformat(),
+                "observation_end": end_date.isoformat(),
+                "api_key": FRED_API_KEY,
+            }).json()
+            frame = pd.DataFrame(payload.get("observations") or [])
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
+            frame[series] = pd.to_numeric(frame["value"], errors="coerce")
             parts.append(frame[["date", series]])
         result = parts[0].merge(parts[1], on="date", how="outer")
         result = result[(result["date"] >= start_date) & (result["date"] <= end_date)]
@@ -95,24 +101,24 @@ class GoldFearGreedInputSync:
         return pd.DataFrame(values)
 
     def _fetch_gold_etf_holdings(self) -> pd.DataFrame:
-        page = self._get(WGC_GOLD_ETF_URL)
-        soup = BeautifulSoup(page.text, "html.parser")
-        links = []
-        for anchor in soup.find_all("a", href=True):
-            href = str(anchor["href"])
-            text = anchor.get_text(" ", strip=True).lower()
-            if ("xlsx" in href.lower() or "excel" in text or "xlsx" in text) and "etf" in (href + text).lower():
-                links.append(requests.compat.urljoin(WGC_GOLD_ETF_URL, href))
-        if not links:
-            raise RuntimeError("World Gold Council page returned no ETF xlsx link")
-        workbook = self._get(links[0]).content
-        sheets = pd.read_excel(BytesIO(workbook), sheet_name=None)
-        records = []
-        for frame in sheets.values():
-            records.extend(self._extract_gld_holdings_rows(frame))
-        if not records:
-            raise RuntimeError("World Gold Council workbook returned no recognizable GLD holdings history")
-        return pd.DataFrame(records).drop_duplicates(subset=["date"], keep="last")
+        workbook = self._get(SPDR_GLD_ARCHIVE_URL, params={
+            "product": "gld",
+            "exchange": "NYSE",
+            "lang": "en",
+        }).content
+        frame = pd.read_excel(BytesIO(workbook), sheet_name="US GLD Historical Archive")
+        date_col = "Date"
+        tonnes_col = "Tonnes of Gold"
+        ounces_col = "Total Ounces of Gold in the Trust"
+        if date_col not in frame or tonnes_col not in frame:
+            raise RuntimeError("SPDR GLD archive columns changed")
+        result = pd.DataFrame({
+            "date": pd.to_datetime(frame[date_col], errors="coerce").dt.date,
+            "gold_etf_holdings_tonnes": pd.to_numeric(frame[tonnes_col], errors="coerce"),
+            # 官方历史档案不直接给份额；总黄金盎司仍作为持仓口径的备用原始值。
+            "gold_etf_shares": pd.to_numeric(frame.get(ounces_col), errors="coerce"),
+        })
+        return result.dropna(subset=["date", "gold_etf_holdings_tonnes"]).drop_duplicates("date", keep="last")
 
     def _extract_gld_holdings_rows(self, frame: pd.DataFrame) -> Iterable[Dict[str, Any]]:
         frame = frame.copy()
@@ -155,7 +161,7 @@ class GoldFearGreedInputSync:
                 for key, value in item.items():
                     if key in {"real_yield_10y", "broad_dollar_index", "cot_managed_money_long", "cot_managed_money_short", "cot_open_interest", "gold_etf_holdings_tonnes", "gold_etf_shares"} and pd.notna(value):
                         setattr(row, key, float(value))
-                row.sources = {"fred": FRED_URL, "cftc": CFTC_GOLD_URL, "gold_etf": WGC_GOLD_ETF_URL}
+                row.sources = {"fred": FRED_URL, "cftc": CFTC_GOLD_URL, "gold_etf": SPDR_GLD_ARCHIVE_URL}
                 row.updated_at = datetime.now()
                 if existing is None:
                     db.add(row)

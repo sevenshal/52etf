@@ -76,11 +76,10 @@ def test_gld_is_after_dia_in_frontend_taxonomy():
 def test_world_gold_council_gld_holdings_workbook_is_parsed(monkeypatch):
     workbook = BytesIO()
     pd.DataFrame({
-        "Date": ["2026-08-20", "2026-08-20"],
-        "Ticker": ["GLD", "IAU"],
-        "Gold Holdings (tonnes)": [950.5, 420.0],
-        "Shares Outstanding": [310_000_000, 500_000_000],
-    }).to_excel(workbook, index=False)
+        "Date": ["2026-08-20", "US Holiday"],
+        "Tonnes of Gold": [950.5, "US Holiday"],
+        "Total Ounces of Gold in the Trust": [30_559_000, "US Holiday"],
+    }).to_excel(workbook, index=False, sheet_name="US GLD Historical Archive")
 
     class Response:
         def __init__(self, text="", content=b""):
@@ -88,14 +87,11 @@ def test_world_gold_council_gld_holdings_workbook_is_parsed(monkeypatch):
             self.content = content
 
     syncer = GoldFearGreedInputSync()
-    monkeypatch.setattr(syncer, "_get", lambda url, **kwargs: (
-        Response(text='<a href="/downloads/gold-etf-data.xlsx">ETF xlsx</a>')
-        if url.endswith("holdings-and-flows") else Response(content=workbook.getvalue())
-    ))
+    monkeypatch.setattr(syncer, "_get", lambda url, **kwargs: Response(content=workbook.getvalue()))
     frame = syncer._fetch_gold_etf_holdings()
     assert len(frame) == 1
     assert frame.iloc[0]["gold_etf_holdings_tonnes"] == 950.5
-    assert frame.iloc[0]["gold_etf_shares"] == 310_000_000
+    assert frame.iloc[0]["gold_etf_shares"] == 30_559_000
     syncer.close()
 
 
