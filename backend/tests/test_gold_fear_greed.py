@@ -5,6 +5,7 @@ import textwrap
 from io import BytesIO
 
 import pandas as pd
+import pytest
 
 from src.robot.gold_fear_greed_input_sync import GoldFearGreedInputSync
 
@@ -79,6 +80,7 @@ def test_world_gold_council_gld_holdings_workbook_is_parsed(monkeypatch):
         "Date": ["2026-08-20", "US Holiday"],
         "Tonnes of Gold": [950.5, "US Holiday"],
         "Total Ounces of Gold in the Trust": [30_559_000, "US Holiday"],
+        "Ounces of Gold per Share": [0.098577419, "US Holiday"],
     }).to_excel(workbook, index=False, sheet_name="US GLD Historical Archive")
 
     class Response:
@@ -91,7 +93,7 @@ def test_world_gold_council_gld_holdings_workbook_is_parsed(monkeypatch):
     frame = syncer._fetch_gold_etf_holdings()
     assert len(frame) == 1
     assert frame.iloc[0]["gold_etf_holdings_tonnes"] == 950.5
-    assert frame.iloc[0]["gold_etf_shares"] == 30_559_000
+    assert frame.iloc[0]["gold_etf_shares"] == pytest.approx(310_000_000, abs=2)
     syncer.close()
 
 

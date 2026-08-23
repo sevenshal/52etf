@@ -110,13 +110,16 @@ class GoldFearGreedInputSync:
         date_col = "Date"
         tonnes_col = "Tonnes of Gold"
         ounces_col = "Total Ounces of Gold in the Trust"
+        ounces_per_share_col = "Ounces of Gold per Share"
         if date_col not in frame or tonnes_col not in frame:
             raise RuntimeError("SPDR GLD archive columns changed")
+        total_ounces = pd.to_numeric(frame.get(ounces_col), errors="coerce")
+        ounces_per_share = pd.to_numeric(frame.get(ounces_per_share_col), errors="coerce")
         result = pd.DataFrame({
             "date": pd.to_datetime(frame[date_col], errors="coerce").dt.date,
             "gold_etf_holdings_tonnes": pd.to_numeric(frame[tonnes_col], errors="coerce"),
-            # 官方历史档案不直接给份额；总黄金盎司仍作为持仓口径的备用原始值。
-            "gold_etf_shares": pd.to_numeric(frame.get(ounces_col), errors="coerce"),
+            # 流通份额 = 信托总黄金盎司 / 每份额对应黄金盎司。
+            "gold_etf_shares": total_ounces / ounces_per_share.replace(0, pd.NA),
         })
         return result.dropna(subset=["date", "gold_etf_holdings_tonnes"]).drop_duplicates("date", keep="last")
 
