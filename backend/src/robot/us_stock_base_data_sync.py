@@ -37,7 +37,7 @@ US_STOCK_DAILY_ADJUST_PRICE_REL_TOL = max(
 )
 US_STOCK_BASE_DATA_CANDIDATE_ETFS = [
     item.strip().upper()
-    for item in os.getenv("US_STOCK_BASE_DATA_CANDIDATE_ETFS", "SPY.US,QQQ.US").split(",")
+    for item in os.getenv("US_STOCK_BASE_DATA_CANDIDATE_ETFS", "SPY.US,QQQ.US,GLD.US").split(",")
     if item.strip()
 ]
 NASDAQ_TRADER_NASDAQ_LISTED_URL = os.getenv(

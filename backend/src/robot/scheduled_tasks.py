@@ -128,6 +128,36 @@ def _run_us_stock_base_data_sync(
     parsed_start_date = _parse_optional_task_date(start_date, "开始日期")
     parsed_end_date = _parse_optional_task_date(end_date, "结束日期")
     us_result = sync_us_stock_base_data(start_date=parsed_start_date, end_date=parsed_end_date)
+    from .gold_fear_greed_input_sync import sync_gold_fear_greed_inputs
+    from .etf_putcallratio_sync import BarchartETFPutCallRatioSync
+    from ..core.database import ETFPutCallRatio, Session
+
+    gold_input_result = sync_gold_fear_greed_inputs(
+        start_date=parsed_start_date,
+        end_date=parsed_end_date,
+    )
+    option_db = Session()
+    try:
+        has_gld_option_history = option_db.query(ETFPutCallRatio).filter(
+            ETFPutCallRatio.symbol == "GLD"
+        ).first() is not None
+    finally:
+        option_db.close()
+        Session.remove()
+    option_syncer = BarchartETFPutCallRatioSync(symbols=["GLD"])
+    try:
+        gold_option_result = option_syncer.sync_all(full=not has_gld_option_history)
+    finally:
+        option_syncer.close()
+    from ..core.services.gold_fear_greed_service import GoldFearGreedCalculator
+    gold_end_date = parsed_end_date or date.today()
+    gold_output_start = parsed_start_date or (gold_end_date - timedelta(days=10))
+    gold_fear_result = GoldFearGreedCalculator().backfill_to_db(
+        start_date=gold_output_start - timedelta(days=1600),
+        end_date=gold_end_date,
+        output_start_date=gold_output_start,
+        history_days=1600,
+    )
     static_result = us_result.get("static_snapshot") or {}
     daily_errors = us_result.get("daily_errors") or []
 
@@ -158,6 +188,9 @@ def _run_us_stock_base_data_sync(
         f"daily_fetched_symbols={us_result.get('daily_fetched_symbols')} "
         f"daily_saved_rows={us_result.get('daily_saved_rows')} "
         f"daily_adjustment_refreshes={us_result.get('daily_adjustment_refresh_count')} "
+        f"gold_inputs_saved={gold_input_result.get('saved')} "
+        f"gld_option_history_saved={gold_option_result.get('saved_history')} "
+        f"gld_fear_saved={gold_fear_result.get('saved')} "
         f"daily_errors={len(daily_errors)} "
         f"tables={us_result.get('tables')}"
     )
@@ -1054,7 +1087,7 @@ class ScheduledTaskManager:
             "evc_static_info_sync": TaskDefinition(
                 task_key="evc_static_info_sync",
                 name="美股基础数据同步",
-                description="同步 EVC 全量股票池 LongPort static_info 快照/历史记录，并将标普500/纳指100成分股和 ETFManager 杠杆映射中的单倍/多倍 ETF 日K落到 DuckDB。",
+                description="同步美股基础行情（含 GLD 日K），并同步 GLD 的期权历史/快照、CFTC COT、黄金ETF持仓及 FRED 实际利率/美元数据。",
                 default_time="07:15",
                 default_enabled=True,
                 sort_order=11,
@@ -1228,7 +1261,7 @@ class ScheduledTaskManager:
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
                 name="美股ETF贪恐回跑入库",
-                description="计算 SOXX/SPY/QQQ/DIA 贪恐复刻指数并保存历史、价格和持仓明细。",
+                description="计算 SOXX/SPY/QQQ/DIA 七因子贪恐指数并保存历史；GLD黄金五因子随美股基础数据同步任务计算。",
                 default_time="06:00",
                 default_enabled=True,
                 sort_order=60,

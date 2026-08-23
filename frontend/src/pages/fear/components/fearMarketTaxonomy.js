@@ -14,6 +14,7 @@ export const US_ETF_OPTIONS = [
   { symbol: 'SPY.US', ticker: 'SPY', label: '标普500', market: 'US' },
   { symbol: 'QQQ.US', ticker: 'QQQ', label: '纳指100', market: 'US' },
   { symbol: 'DIA.US', ticker: 'DIA', label: '道琼斯', market: 'US' },
+  { symbol: 'GLD.US', ticker: 'GLD', label: '黄金', market: 'US', realtime: false },
 ];
 
 export const HK_ETF_OPTIONS = [

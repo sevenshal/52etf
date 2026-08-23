@@ -907,6 +907,16 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         max_holdings: int = 0,
         use_historical_holdings: bool = True,
     ) -> Dict[str, Any]:
+        if self._normalize_etf_symbol(symbol) == "GLD.US":
+            from .gold_fear_greed_service import GoldFearGreedCalculator
+            return GoldFearGreedCalculator().backfill_to_db(
+                start_date=start_date,
+                end_date=end_date,
+                output_start_date=output_start_date,
+                history_days=history_days,
+                score_window=score_window,
+                min_periods=min_periods,
+            )
         result = self.calculate_history(
             symbol=symbol,
             start_date=start_date,

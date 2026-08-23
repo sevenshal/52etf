@@ -420,6 +420,22 @@ class ETFOptionExpiration(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class GoldFearGreedInput(Base):
+    """黄金五因子使用的外部基础数据，按实际可用日保存以避免回测未来函数。"""
+    __tablename__ = 'gold_fear_greed_inputs'
+
+    date = Column(Date, primary_key=True)
+    real_yield_10y = Column(Float)
+    broad_dollar_index = Column(Float)
+    cot_managed_money_long = Column(Float)
+    cot_managed_money_short = Column(Float)
+    cot_open_interest = Column(Float)
+    gold_etf_holdings_tonnes = Column(Float)
+    gold_etf_shares = Column(Float)
+    sources = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class StockFavorite(Base):
     """用户股票收藏表"""
     __tablename__ = 'stock_favorites'
