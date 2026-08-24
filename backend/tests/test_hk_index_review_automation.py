@@ -137,6 +137,7 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
             )
             result = self.automation._run_deepseek(text_path, candidate_path)
 
+        selector_class.assert_called_once_with(model="deepseek-chat")
         self.assertEqual(candidate, result)
         self.assertEqual(
             candidate,

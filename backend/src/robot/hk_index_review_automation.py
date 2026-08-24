@@ -28,6 +28,12 @@ DEFAULT_DISCOVERY_LOOKBACK_DAYS = int(os.getenv("HK_REVIEW_DISCOVERY_LOOKBACK_DA
 DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("HK_REVIEW_DEEPSEEK_TIMEOUT_SECONDS", "600"))
 # HSI+HSCEI+HSTECH 三个快照共约 160 行成分，JSON 输出需要接近 8K token。
 DEEPSEEK_MAX_OUTPUT_TOKENS = int(os.getenv("HK_REVIEW_DEEPSEEK_MAX_OUTPUT_TOKENS", "8192"))
+# 结构化抽取需要把输出预算留给 JSON 正文；deepseek-reasoner 可能把完整
+# completion 预算耗尽在 reasoning_tokens，最终返回空 content。
+DEEPSEEK_EXTRACTION_MODEL = os.getenv(
+    "HK_REVIEW_DEEPSEEK_MODEL",
+    "deepseek-chat",
+).strip() or "deepseek-chat"
 PRESS_RELEASE_URL = (
     "https://www.hsi.com.hk/static/uploads/contents/en/news/pressRelease/"
     "{release_stamp}.pdf"
@@ -331,7 +337,7 @@ class HKIndexReviewAutomation:
             {"role": "user", "content": prompt},
         ]
         log_path = candidate_path.with_suffix(".deepseek.log")
-        selector = DeepSeekStockSelector()
+        selector = DeepSeekStockSelector(model=DEEPSEEK_EXTRACTION_MODEL)
         try:
             candidate, content, _, _ = selector._call_json(
                 messages,
