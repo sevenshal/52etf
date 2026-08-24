@@ -1921,6 +1921,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             message = process_xueqiu_top_holdings_rebalance_for_robot()
 
         self.assertEqual("ZH3664736", run_job.await_args.kwargs["weight_price_ratio_target_cube_symbol"])
+        self.assertTrue(run_job.await_args.kwargs["use_previous_saved_snapshot"])
         self.assertIn("weight_price_ratio_target=ZH3664736", message)
 
     def test_weight_price_ratio_target_rebalance_uses_target_cube_in_same_run(self):

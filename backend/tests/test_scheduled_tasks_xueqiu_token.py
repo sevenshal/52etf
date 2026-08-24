@@ -132,6 +132,7 @@ class XueqiuTokenMonitorTest(TestCase):
 
         manager = ScheduledTaskManager()
         task = manager.task_definitions["xueqiu_top_holdings_cache_refresh"]
+        self.assertEqual("20:00", task.default_time)
         schema_keys = [definition.key for definition in task.parameter_schema]
 
         self.assertIn("rank_limit", schema_keys)
@@ -161,6 +162,7 @@ class XueqiuTokenMonitorTest(TestCase):
 
         manager = ScheduledTaskManager()
         task = manager.task_definitions["xueqiu_top_holdings_rebalance"]
+        self.assertEqual("09:35", task.default_time)
         schema_keys = [definition.key for definition in task.parameter_schema]
 
         self.assertIn("top_n", schema_keys)

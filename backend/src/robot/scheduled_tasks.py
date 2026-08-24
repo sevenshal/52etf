@@ -1577,12 +1577,12 @@ class ScheduledTaskManager:
             "xueqiu_top_holdings_rebalance": TaskDefinition(
                 task_key="xueqiu_top_holdings_rebalance",
                 name="雪球年榜多组合自动调仓",
-                description="A股交易日共享一次雪球年榜活跃组合持仓快照，同时调仓星澜壹号综合权重策略、星澜贰号5日排名加速策略与星澜叁号5日权价比策略。",
-                default_time="14:50",
+                description="A股交易日开盘后使用前一交易日晚间冻结的完整持仓快照和同日收盘价，计算并执行星澜壹号、贰号与叁号策略。",
+                default_time="09:35",
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
-                default_cron_rule="50 14 * * mon-fri",
+                default_cron_rule="35 9 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="top_n",
@@ -1622,12 +1622,12 @@ class ScheduledTaskManager:
             "xueqiu_top_holdings_cache_refresh": TaskDefinition(
                 task_key="xueqiu_top_holdings_cache_refresh",
                 name="雪球年榜榜单和主理人调仓缓存刷新",
-                description="A股交易日刷新雪球年榜缓存，并更新缺失或过期的主理人最新调仓时间缓存，供收盘前自动调仓直接使用。",
-                default_time="18:00",
+                description="A股交易日收盘后刷新雪球年榜和主理人调仓缓存，随后拉取并冻结完整组合持仓，供下一交易日计算和执行。",
+                default_time="20:00",
                 default_enabled=True,
                 sort_order=26,
                 runner=_run_xueqiu_top_holdings_cache_refresh,
-                default_cron_rule="0 18 * * mon-fri",
+                default_cron_rule="0 20 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="rank_limit",
@@ -1795,14 +1795,23 @@ class ScheduledTaskManager:
                 config.sort_order = task.sort_order
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
-                    and str(config.cron_rule or "").strip() in {"40 14 * * mon-fri", "40 14 * * *"}
+                    and str(config.cron_rule or "").strip() in {
+                        "40 14 * * mon-fri", "40 14 * * *", "50 14 * * mon-fri",
+                        "50 14 * * *", "30 10 * * *", "30 10 * * mon-fri",
+                    }
                 ):
                     config.cron_rule = default_cron_rule
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
-                    and str(config.schedule_time or "").strip() == "14:40"
+                    and str(config.schedule_time or "").strip() in {"14:40", "14:50", "10:30"}
                 ):
                     config.schedule_time = task.default_time
+                if (
+                    task.task_key == "xueqiu_top_holdings_cache_refresh"
+                    and str(config.schedule_time or "").strip() == "18:00"
+                ):
+                    config.schedule_time = task.default_time
+                    config.cron_rule = default_cron_rule
                 if not self.is_valid_time(config.schedule_time):
                     config.schedule_time = task.default_time
                 if not self.is_valid_cron_rule(config.cron_rule):

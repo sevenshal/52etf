@@ -2049,6 +2049,105 @@ def save_xueqiu_cube_holdings_snapshots_to_duckdb(
         connection.close()
 
 
+def load_latest_saved_cube_holdings_snapshot(
+    *,
+    before_date: date,
+    active_only: bool = True,
+) -> Tuple[date, List[CubeInfo], List[CubeCurrentResult]]:
+    """Load the latest completed holdings snapshot before an execution day.
+
+    The evening cache job owns snapshot collection.  The next trading day's
+    rebalance must consume that frozen snapshot instead of fetching manager
+    holdings again, otherwise weights and end-of-day prices have different
+    timestamps.
+    """
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+    try:
+        row = connection.execute(
+            f"""
+            SELECT MAX(snapshot_date)
+            FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+            WHERE snapshot_date < ?
+              {"AND COALESCE(is_active, FALSE)" if active_only else ""}
+            """,
+            [before_date],
+        ).fetchone()
+        snapshot_date = row[0] if row else None
+        if not snapshot_date:
+            raise RuntimeError(f"No saved Xueqiu holdings snapshot before {before_date.isoformat()}")
+        price_row = connection.execute(
+            "SELECT MAX(trade_date) FROM a_stock_market_daily_qfq WHERE trade_date < ?",
+            [before_date],
+        ).fetchone()
+        expected_signal_date = price_row[0] if price_row else None
+        if expected_signal_date is None or snapshot_date != expected_signal_date:
+            raise RuntimeError(
+                "Frozen Xueqiu holdings snapshot is stale or has no matching A-share close: "
+                f"snapshot_date={snapshot_date} expected_signal_date={expected_signal_date}"
+            )
+        rows = connection.execute(
+            f"""
+            SELECT year_rank, cube_symbol, cube_id, cube_name, screen_name,
+                   latest_rebalance_at, latest_rebalance_id, latest_rebalance_status,
+                   active_rebalance_at, active_rebalance_id, active_rebalance_status,
+                   active_rebalance_category, active_rebalance_source, holdings_source,
+                   COALESCE(is_active, FALSE), raw_holding_json, stock_symbol,
+                   stock_name, stock_id, segment_name, weight_pct
+            FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
+            WHERE snapshot_date = ?
+              {"AND COALESCE(is_active, FALSE)" if active_only else ""}
+            ORDER BY year_rank, cube_symbol, stock_symbol
+            """,
+            [snapshot_date],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        cube_symbol = str(row[1])
+        entry = grouped.setdefault(
+            cube_symbol,
+            {"meta": row, "holdings": []},
+        )
+        try:
+            holding = json.loads(row[15]) if row[15] else {}
+        except (TypeError, ValueError):
+            holding = {}
+        holding.update({
+            "symbol": row[16],
+            "name": row[17],
+            "stock_id": row[18],
+            "segment_name": row[19],
+            "weight": row[20],
+        })
+        entry["holdings"].append(holding)
+
+    cubes: List[CubeInfo] = []
+    results: List[CubeCurrentResult] = []
+    for entry in grouped.values():
+        row = entry["meta"]
+        cube = CubeInfo(
+            year_rank=safe_int(row[0]), symbol=str(row[1]), cube_id=safe_int(row[2]),
+            cube_name=str(row[3] or ""), screen_name=str(row[4] or ""),
+        )
+        cubes.append(cube)
+        results.append(CubeCurrentResult(
+            cube=cube,
+            holdings=entry["holdings"],
+            latest_rebalance_at=row[5], latest_rebalance_id=safe_int(row[6]),
+            latest_rebalance_status=str(row[7] or ""),
+            active_rebalance_at=row[8], active_rebalance_id=safe_int(row[9]),
+            active_rebalance_status=str(row[10] or ""),
+            active_rebalance_category=str(row[11] or ""),
+            active_rebalance_source=str(row[12] or ""),
+            holdings_source=str(row[13] or "snapshot"), active=bool(row[14]),
+        ))
+    if not results:
+        raise RuntimeError(f"Saved Xueqiu snapshot {snapshot_date} contains no usable holdings")
+    return snapshot_date, cubes, results
+
+
 async def fetch_target_cube_current_payload(
     *,
     cookie: str,
@@ -3358,6 +3457,7 @@ def load_xueqiu_weight_price_ratio_map(
     *,
     active_only: bool = True,
     limit: int = 2000,
+    snapshot_date: Optional[date] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Load the latest holdings snapshot with 5-day weight/price ratio per symbol.
 
@@ -3367,7 +3467,11 @@ def load_xueqiu_weight_price_ratio_map(
     """
     from ..app.api.xueqiu_holdings import load_xueqiu_top_holdings_latest
 
-    latest = load_xueqiu_top_holdings_latest(active_only=active_only, limit=limit)
+    latest = load_xueqiu_top_holdings_latest(
+        active_only=active_only,
+        limit=limit,
+        snapshot_date=snapshot_date,
+    )
     by_symbol: Dict[str, Dict[str, Any]] = {}
     for item in latest.get("items") or []:
         symbol = normalize_xueqiu_symbol(item.get("stock_symbol"))
@@ -5680,7 +5784,11 @@ async def execute_weight_price_ratio_target_rebalance(
         }
 
     try:
-        ratio_by_symbol = load_xueqiu_weight_price_ratio_map(active_only=True, limit=2000)
+        ratio_by_symbol = load_xueqiu_weight_price_ratio_map(
+            active_only=True,
+            limit=2000,
+            snapshot_date=current_snapshot_date,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load 5d weight/price ratio map for 星澜叁号: %s", exc)
         return {
@@ -5892,6 +6000,7 @@ async def run_top_holdings_job(
     active_rebalance_days: Optional[int] = None,
     sell_rank: int = BUFFER_STRATEGY_SELL_RANK,
     refresh_activity_cache: bool = True,
+    use_previous_saved_snapshot: bool = False,
 ) -> Dict[str, Any]:
     run_at = datetime.now(CHINA_TZ)
     if not force and not is_china_trading_day(run_at.date()):
@@ -5900,6 +6009,7 @@ async def run_top_holdings_job(
         return {"skipped": True, "message": message}
 
     cookie = get_latest_cookie()
+    signal_snapshot_date = run_at.date()
     rank_cache_fetched_at: Optional[datetime] = None
     rank_cache_refreshed = False
     if list_path:
@@ -5922,16 +6032,26 @@ async def run_top_holdings_job(
         if active_rebalance_days and active_rebalance_days > 0
         else None
     )
-    current_results = await fetch_all_cube_current(
-        cubes,
-        cookie=cookie,
-        workers=workers,
-        timeout=timeout,
-        retries=retries,
-        active_since=active_since,
-        refresh_activity_cache=refresh_activity_cache,
-    )
-    ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
+    if use_previous_saved_snapshot:
+        signal_snapshot_date, cubes, current_results = load_latest_saved_cube_holdings_snapshot(
+            before_date=run_at.date(),
+            active_only=bool(active_since),
+        )
+        logger.info(
+            "Using frozen Xueqiu holdings snapshot for rebalance: signal_date=%s execution_date=%s cubes=%s",
+            signal_snapshot_date, run_at.date(), len(cubes),
+        )
+    else:
+        current_results = await fetch_all_cube_current(
+            cubes,
+            cookie=cookie,
+            workers=workers,
+            timeout=timeout,
+            retries=retries,
+            active_since=active_since,
+            refresh_activity_cache=refresh_activity_cache,
+        )
+        ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
     snapshot_results = list(current_results)
     holdings_snapshot_result: Optional[Dict[str, Any]] = None
     if active_rebalance_days and active_rebalance_days > 0 and active_since is not None:
@@ -5966,11 +6086,18 @@ async def run_top_holdings_job(
             raise RuntimeError(f"No Xueqiu cubes rebalanced within {active_rebalance_days} days.")
 
     try:
-        holdings_snapshot_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
-            run_at=run_at,
-            current_results=snapshot_results,
-            active_rebalance_days=active_rebalance_days,
-        )
+        if use_previous_saved_snapshot:
+            holdings_snapshot_result = {
+                "table": XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
+                "snapshot_date": signal_snapshot_date.isoformat(),
+                "reused": True,
+            }
+        else:
+            holdings_snapshot_result = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                run_at=run_at,
+                current_results=snapshot_results,
+                active_rebalance_days=active_rebalance_days,
+            )
         logger.info(
             "Saved Xueqiu cube holdings snapshots to DuckDB: table=%s date=%s rows=%s cubes=%s failed=%s",
             holdings_snapshot_result.get("table"),
@@ -6101,7 +6228,7 @@ async def run_top_holdings_job(
             rank_acceleration_result = await execute_rank_acceleration_target_rebalance(
                 cookie=cookie,
                 aggregate=aggregate,
-                current_snapshot_date=run_at.date(),
+                current_snapshot_date=signal_snapshot_date,
                 target_cube_symbol=rank_acceleration_target_cube_symbol,
                 target_cube_id=rank_acceleration_target_cube_id,
                 active_filter_summary=active_filter_summary,
@@ -6134,7 +6261,7 @@ async def run_top_holdings_job(
             weight_price_ratio_result = await execute_weight_price_ratio_target_rebalance(
                 cookie=cookie,
                 aggregate=aggregate,
-                current_snapshot_date=run_at.date(),
+                current_snapshot_date=signal_snapshot_date,
                 target_cube_symbol=weight_price_ratio_target_cube_symbol,
                 target_cube_id=weight_price_ratio_target_cube_id,
                 active_filter_summary=active_filter_summary,
@@ -6246,7 +6373,7 @@ async def run_top_holdings_job(
     if rank_acceleration_result:
         secondary_response = rank_acceleration_result.get("rebalance_response") or {}
         secondary_message = (
-            f"shared_snapshot={run_at.date().isoformat()} "
+            f"shared_snapshot={signal_snapshot_date.isoformat()} "
             f"compare_snapshot={(rank_acceleration_result.get('comparison_snapshot') or {}).get('compare_snapshot_date')} "
             f"status={rank_acceleration_result.get('status')} "
             f"target={rank_acceleration_result.get('target_cube_symbol')}"
@@ -6270,7 +6397,7 @@ async def run_top_holdings_job(
     if weight_price_ratio_result:
         tertiary_response = weight_price_ratio_result.get("rebalance_response") or {}
         tertiary_message = (
-            f"shared_snapshot={run_at.date().isoformat()} "
+            f"shared_snapshot={signal_snapshot_date.isoformat()} "
             f"compare_snapshot={(weight_price_ratio_result.get('comparison_snapshot') or {}).get('compare_snapshot_date')} "
             f"status={weight_price_ratio_result.get('status')} "
             f"target={weight_price_ratio_result.get('target_cube_symbol')}"
@@ -6340,6 +6467,7 @@ async def run_top_holdings_job(
         "rebalance_skipped": rebalance_skipped_items,
         "active_filter": active_filter_summary,
         "holdings_snapshot": holdings_snapshot_result,
+        "signal_snapshot_date": signal_snapshot_date.isoformat(),
         "top": top_items,
         "rank_acceleration_target": rank_acceleration_result,
         "weight_price_ratio_target": weight_price_ratio_result,
@@ -6383,6 +6511,7 @@ def process_xueqiu_top_holdings_rebalance_for_robot(
             active_rebalance_days=normalized_active_days,
             sell_rank=normalized_sell_rank,
             refresh_activity_cache=False,
+            use_previous_saved_snapshot=True,
         )
     )
     if result.get("skipped"):
@@ -6512,6 +6641,26 @@ async def run_top_holdings_cache_refresh_job(
     saved_activity_count = save_cube_activity_cache(activity_results)
     failed_results = [result for result in activity_results if result.error]
 
+    # Freeze the complete manager holdings after the rank/activity refresh.  The
+    # next trading-day rebalance consumes this EOD snapshot and matching close;
+    # it must not fetch a new intraday weight snapshot.
+    active_since = run_at - timedelta(days=ACTIVE_REBALANCE_LOOKBACK_DAYS)
+    current_results = await fetch_all_cube_current(
+        cubes,
+        cookie=cookie,
+        workers=workers,
+        timeout=timeout,
+        retries=retries,
+        active_since=active_since,
+        refresh_activity_cache=False,
+    )
+    ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
+    holdings_snapshot = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+        run_at=run_at,
+        current_results=current_results,
+        active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
+    )
+
     return {
         "run_at": run_at.isoformat(),
         "rank_cache_fetched_at": rank_cache_fetched_at.isoformat() if rank_cache_fetched_at else None,
@@ -6521,6 +6670,7 @@ async def run_top_holdings_cache_refresh_job(
         "refresh_cube_count": len(refresh_cubes),
         "saved_activity_count": saved_activity_count,
         "failed_count": len(failed_results),
+        "holdings_snapshot": holdings_snapshot,
         "activity_source": ACTIVE_REBALANCE_ACTIVITY_TYPE,
         "activity_label": ACTIVE_REBALANCE_ACTIVITY_LABEL,
         "activity_cache_ttl_hours": activity_cache_ttl_hours,
@@ -6577,6 +6727,7 @@ def process_xueqiu_top_holdings_cache_refresh_for_robot(
         f"fresh_cache={result.get('fresh_cache_count')} "
         f"refresh={result.get('refresh_cube_count')} "
         f"saved={result.get('saved_activity_count')} "
+        f"snapshot_rows={(result.get('holdings_snapshot') or {}).get('saved_rows')} "
         f"failed={result.get('failed_count')}"
     )
 
