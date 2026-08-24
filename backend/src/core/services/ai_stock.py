@@ -938,9 +938,9 @@ class DeepSeekStockSelector:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         # Long read timeout: round-3 payloads (news + boards + hundreds of
-        # candidates) can take DeepSeek well over a minute.  Transient network
-        # errors get one retry; parse errors do not (a bad model reply will
-        # just repeat itself).
+        # candidates) can take DeepSeek well over a minute. Transient network
+        # errors and successful-but-empty replies get one retry. A malformed
+        # non-empty model reply is not retried because it will usually repeat.
         last_exc: Optional[Exception] = None
         for attempt in range(2):
             try:
@@ -952,7 +952,20 @@ class DeepSeekStockSelector:
                 )
                 response.raise_for_status()
                 payload = response.json()
-                content = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                choice = (payload.get("choices") or [{}])[0]
+                content = choice.get("message", {}).get("content", "")
+                if not isinstance(content, str) or not content.strip():
+                    finish_reason = choice.get("finish_reason")
+                    usage = payload.get("usage") or {}
+                    detail = (
+                        "DeepSeek 返回空内容"
+                        f" (finish_reason={finish_reason!r}, usage={usage!r})"
+                    )
+                    if attempt == 0:
+                        logger.warning("%s（第 1 次，准备重试）", detail)
+                        time.sleep(1)
+                        continue
+                    raise AIStockModelError(f"{detail}（已重试）")
                 parsed = json.loads(content)
                 if not isinstance(parsed, dict):
                     raise AIStockModelError("DeepSeek 返回不是 JSON 对象")

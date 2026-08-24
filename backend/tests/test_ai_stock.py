@@ -4,6 +4,7 @@ import logging
 from unittest import mock
 
 import pandas as pd
+import pytest
 
 from src.core.services.ai_stock import (
     AIStockError,
@@ -28,6 +29,58 @@ from src.core.services.tushare_account import (
     get_tushare_token_for_runtime,
     update_tushare_account_settings,
 )
+
+
+def test_deepseek_call_json_retries_a_successful_empty_response():
+    empty_response = mock.Mock()
+    empty_response.raise_for_status.return_value = None
+    empty_response.json.return_value = {
+        "id": "empty-1",
+        "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 8192},
+    }
+    valid_response = mock.Mock()
+    valid_response.raise_for_status.return_value = None
+    valid_response.json.return_value = {
+        "id": "valid-2",
+        "choices": [{"message": {"content": '{"events": []}'}, "finish_reason": "stop"}],
+        "usage": {"completion_tokens": 10},
+    }
+    selector = DeepSeekStockSelector(api_key="test-key", model="deepseek-chat")
+
+    with (
+        mock.patch(
+            "src.core.services.ai_stock.requests.post",
+            side_effect=[empty_response, valid_response],
+        ) as post,
+        mock.patch("src.core.services.ai_stock.time.sleep"),
+    ):
+        parsed, content, _, metadata = selector._call_json([])
+
+    assert post.call_count == 2
+    assert parsed == {"events": []}
+    assert content == '{"events": []}'
+    assert metadata["completion_id"] == "valid-2"
+
+
+def test_deepseek_call_json_reports_empty_response_diagnostics_after_retry():
+    response = mock.Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": "  "}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 8192},
+    }
+    selector = DeepSeekStockSelector(api_key="test-key", model="deepseek-chat")
+
+    with (
+        mock.patch("src.core.services.ai_stock.requests.post", return_value=response),
+        mock.patch("src.core.services.ai_stock.time.sleep"),
+        pytest.raises(
+            AIStockError,
+            match="finish_reason='length'.*completion_tokens.*已重试",
+        ),
+    ):
+        selector._call_json([])
 
 
 def test_news_snapshot_uses_major_news_only():
