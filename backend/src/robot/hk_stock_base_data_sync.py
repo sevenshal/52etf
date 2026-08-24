@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +37,35 @@ HK_REVIEW_CACHE_DIR = os.getenv(
     "HK_REVIEW_CACHE_DIR",
     "/var/lib/quant_robot/cache/hk_index_reviews",
 )
+HK_YAHOO_PROXY = os.getenv(
+    "HK_YAHOO_PROXY",
+    "socks5h://127.0.0.1:7891",
+).strip()
+HK_YAHOO_MAX_WORKERS = max(1, int(os.getenv("HK_YAHOO_MAX_WORKERS", "1")))
+HK_YAHOO_MIN_INTERVAL_SECONDS = max(
+    0.0,
+    float(os.getenv("HK_YAHOO_MIN_INTERVAL_SECONDS", "1.5")),
+)
+_YAHOO_RATE_LOCK = threading.Lock()
+_YAHOO_LAST_REQUEST_AT = 0.0
+
+
+def _yahoo_request_proxies() -> Optional[Dict[str, str]]:
+    if not HK_YAHOO_PROXY:
+        return None
+    return {"http": HK_YAHOO_PROXY, "https": HK_YAHOO_PROXY}
+
+
+def _wait_for_yahoo_request_slot() -> None:
+    global _YAHOO_LAST_REQUEST_AT
+    with _YAHOO_RATE_LOCK:
+        remaining = (
+            HK_YAHOO_MIN_INTERVAL_SECONDS
+            - (time.monotonic() - _YAHOO_LAST_REQUEST_AT)
+        )
+        if remaining > 0:
+            time.sleep(remaining)
+        _YAHOO_LAST_REQUEST_AT = time.monotonic()
 
 
 def _parse_date(value) -> Optional[date]:
@@ -314,7 +344,8 @@ class HKStockBaseDataSyncService:
             symbols = [symbol for symbol in symbols if symbol not in covered]
         frames = {}
         errors = []
-        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), 16))) as executor:
+        max_workers = max(1, min(int(workers), HK_YAHOO_MAX_WORKERS, 16))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self._fetch_yahoo_history, symbol, start_date, end_date): symbol
                 for symbol in symbols
@@ -371,6 +402,7 @@ class HKStockBaseDataSyncService:
         yahoo_symbol = f"{int(code):04d}.HK"
         period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
         period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
+        _wait_for_yahoo_request_slot()
         response = requests.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
             params={
@@ -380,6 +412,7 @@ class HKStockBaseDataSyncService:
                 "events": "div,splits",
             },
             headers={"User-Agent": "Mozilla/5.0"},
+            proxies=_yahoo_request_proxies(),
             timeout=30,
         )
         response.raise_for_status()
@@ -422,10 +455,12 @@ class HKStockBaseDataSyncService:
     ) -> int:
         period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
         period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
+        _wait_for_yahoo_request_slot()
         response = requests.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
             params={"period1": period1, "period2": period2, "interval": "1d"},
             headers={"User-Agent": "Mozilla/5.0"},
+            proxies=_yahoo_request_proxies(),
             timeout=30,
         )
         response.raise_for_status()

@@ -11,6 +11,7 @@ polars==1.36.1
 pandas==2.3.3
 APScheduler==3.11.2
 requests==2.32.5
+PySocks==1.7.1
 pypdf==6.6.0
 ratelimit==2.2.1
 longport==3.0.17
