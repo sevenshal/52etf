@@ -763,7 +763,7 @@ const XueqiuTopHoldingsResearch = () => {
       ),
       sortDirections: ['descend', 'ascend'],
       filters: XUEQIU_DIRECTIONS.map(direction => ({ text: direction, value: direction })),
-      filterMultiple: false,
+      filterMultiple: true,
       onFilter: (value, record) => xueqiuDirectionOf(record) === value,
       render: renderWeightMomentumRatio,
     },
