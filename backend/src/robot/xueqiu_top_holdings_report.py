@@ -119,10 +119,12 @@ RANK_ACCELERATION_STRATEGY_NAME = (
 WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL = "ZH3664736"
 WEIGHT_PRICE_RATIO_TOP_N = 10
 WEIGHT_PRICE_RATIO_MIN_RATIO = 1.15
+WEIGHT_PRICE_RATIO_DEFAULT_MIN_RATIO = 1.23
 WEIGHT_PRICE_RATIO_SELL_RANK_MULTIPLIER = 3.0
 WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT = 100
-WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES = 8
-WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE = 2
+WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBES = 5
+WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE = 1
+WEIGHT_PRICE_RATIO_MAX_RATIO = 6.0
 WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT = 30
 WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES = 10
 WEIGHT_PRICE_RATIO_RETAIN_CURRENT_RANK_LIMIT = 200
@@ -2845,7 +2847,8 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "buy_confirm_prior_days": RANK_ACCELERATION_BUY_CONFIRM_MIN_DAYS - 1,
         "current_rank_limit": WEIGHT_PRICE_RATIO_CURRENT_RANK_LIMIT,
         "holding_cube_increase": WEIGHT_PRICE_RATIO_MIN_HOLDING_CUBE_INCREASE,
-        "metric_threshold": WEIGHT_PRICE_RATIO_MIN_RATIO,
+        "metric_threshold": WEIGHT_PRICE_RATIO_DEFAULT_MIN_RATIO,
+        "metric_upper_threshold": WEIGHT_PRICE_RATIO_MAX_RATIO,
         "new_entry_rank_limit": WEIGHT_PRICE_RATIO_NEW_ENTRY_RANK_LIMIT,
         "new_entry_min_cubes": WEIGHT_PRICE_RATIO_NEW_ENTRY_MIN_HOLDING_CUBES,
         "min_weight_increase": 0.0,
@@ -2858,6 +2861,13 @@ XUEQIU_STRATEGY_CONFIG_DEFAULTS = {
         "retain_min_cubes": WEIGHT_PRICE_RATIO_RETAIN_MIN_HOLDING_CUBES,
     },
 }
+for _strategy_defaults in XUEQIU_STRATEGY_CONFIG_DEFAULTS.values():
+    _strategy_defaults.setdefault("max_replacements", RANK_ACCELERATION_MAX_REPLACEMENTS)
+    _strategy_defaults.setdefault("rolling_replacement_days", RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS)
+    _strategy_defaults.setdefault("rolling_max_replacements", RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS)
+    _strategy_defaults.setdefault("take_profit_pct", 7.0)
+    _strategy_defaults.setdefault("take_profit_max_holding_days", 20)
+    _strategy_defaults.setdefault("take_profit_cooldown_days", 3)
 
 
 def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
@@ -2881,9 +2891,16 @@ def load_xueqiu_strategy_config(strategy_key: str) -> Dict[str, Any]:
             "greed_target_count": int(row.greed_target_count),
             "min_holding_cubes": int(row.min_holding_cubes),
             "buy_confirm_prior_days": int(row.buy_confirm_prior_days),
+            "max_replacements": int(row.max_replacements),
+            "rolling_replacement_days": int(row.rolling_replacement_days),
+            "rolling_max_replacements": int(row.rolling_max_replacements),
+            "take_profit_pct": float(row.take_profit_pct),
+            "take_profit_max_holding_days": int(row.take_profit_max_holding_days),
+            "take_profit_cooldown_days": int(row.take_profit_cooldown_days),
             "current_rank_limit": int(row.current_rank_limit),
             "holding_cube_increase": int(row.holding_cube_increase),
             "metric_threshold": float(row.metric_threshold),
+            "metric_upper_threshold": float(row.metric_upper_threshold),
             "new_entry_rank_limit": int(row.new_entry_rank_limit),
             "new_entry_min_cubes": int(row.new_entry_min_cubes),
             "min_weight_increase": float(row.min_weight_increase),
@@ -3168,6 +3185,7 @@ def _xueqiu_buy_eligible_core(
     min_weight_increase: float,
     new_entry_rank_limit: int,
     new_entry_min_cubes: int,
+    max_metric_threshold: Optional[float] = None,
 ) -> bool:
     """买入资格公式（贰号排名加速/叁号权价比共用，参数均可配置）。
 
@@ -3193,9 +3211,17 @@ def _xueqiu_buy_eligible_core(
         and current_holding_cubes >= new_entry_min_cubes
     )
     if ratio_metric:
+        weight_multiple = safe_float(item.get("weight_multiple_5d"))
+        price_multiple = safe_float(item.get("momentum_multiple_5d"))
+        ratio = safe_float(item.get("weight_price_ratio_5d"))
         metric_eligible = strong_new_entry or (
-            safe_float(item.get("weight_price_ratio_5d")) is not None
-            and safe_float(item.get("weight_price_ratio_5d")) >= min_metric_threshold
+            weight_multiple is not None
+            and weight_multiple > 1.05
+            and price_multiple is not None
+            and price_multiple < 1.0
+            and ratio is not None
+            and ratio >= min_metric_threshold
+            and (max_metric_threshold is None or ratio <= max_metric_threshold)
         )
     else:
         effective_previous_rank = (
@@ -3223,6 +3249,7 @@ def load_xueqiu_snapshot_signal_history(
     metric: str = "weight_price_ratio",
     min_holding_cubes: Optional[int] = None,
     min_metric_threshold: Optional[float] = None,
+    max_metric_threshold: Optional[float] = None,
     current_rank_limit: Optional[int] = None,
     holding_cube_increase: Optional[int] = None,
     min_weight_increase: Optional[float] = None,
@@ -3303,6 +3330,16 @@ def load_xueqiu_snapshot_signal_history(
             if ratio_metric
             else RANK_ACCELERATION_MIN_RANK_CHANGE
         )
+    )
+    if ratio_metric:
+        effective_metric_threshold = max(
+            float(effective_metric_threshold),
+            WEIGHT_PRICE_RATIO_MIN_RATIO,
+        )
+    effective_max_metric_threshold = (
+        float(max_metric_threshold)
+        if ratio_metric and max_metric_threshold is not None
+        else (WEIGHT_PRICE_RATIO_MAX_RATIO if ratio_metric else None)
     )
     effective_hard_exit_rank = (
         int(hard_exit_rank)
@@ -3390,6 +3427,7 @@ def load_xueqiu_snapshot_signal_history(
                     comparison_universe_count=comparison_universe_count,
                     metric=metric,
                     min_metric_threshold=effective_metric_threshold,
+                    max_metric_threshold=effective_max_metric_threshold,
                     min_holding_cubes=effective_min_cubes,
                     current_rank_limit=effective_rank_limit,
                     holding_cube_increase=effective_cube_increase,
@@ -3567,6 +3605,11 @@ def load_rank_acceleration_strategy_history(
                     "run_date": run_date,
                     "status": record.status,
                     "strategy_plan": plan,
+                    "top_holdings": [
+                        dict(item)
+                        for item in (record.top_holdings or [])
+                        if isinstance(item, dict)
+                    ],
                     "rebalance_executed": executed,
                     "added_symbols": executed_added_symbols if executed else [],
                     "replacement_count": (
@@ -3590,6 +3633,8 @@ def build_rank_acceleration_buffer_plan(
     sell_rank: int = RANK_ACCELERATION_SELL_RANK,
     max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
     max_replacements: int = RANK_ACCELERATION_MAX_REPLACEMENTS,
+    rolling_replacement_days: int = RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS,
+    rolling_max_replacements: int = RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS,
     min_holding_cubes: Optional[int] = None,
     current_rank_limit: Optional[int] = None,
     holding_cube_increase: Optional[int] = None,
@@ -3606,9 +3651,13 @@ def build_rank_acceleration_buffer_plan(
     signal_history: Optional[List[Dict[str, Any]]] = None,
     metric: str = "rank_acceleration",
     min_metric_threshold: Optional[float] = None,
+    max_metric_threshold: Optional[float] = None,
     strategy_name_override: Optional[str] = None,
     fear_greed_regime: Optional[str] = None,
     target_total_weight_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+    take_profit_max_holding_days: Optional[int] = None,
+    take_profit_cooldown_days: int = 0,
 ) -> Dict[str, Any]:
     """Build a buffered equal-weight plan over a strategy metric.
 
@@ -3626,6 +3675,8 @@ def build_rank_acceleration_buffer_plan(
             if ratio_metric
             else RANK_ACCELERATION_MIN_RANK_CHANGE
         )
+    elif ratio_metric:
+        min_metric_threshold = max(float(min_metric_threshold), WEIGHT_PRICE_RATIO_MIN_RATIO)
     hard_exit_rank = (
         int(hard_exit_rank)
         if hard_exit_rank is not None
@@ -3774,6 +3825,43 @@ def build_rank_acceleration_buffer_plan(
             ][:normalized_top_n]
         return {str(value) for value in values if value}
 
+    effective_take_profit_pct = (
+        max(0.0, float(take_profit_pct))
+        if ratio_metric and take_profit_pct is not None
+        else None
+    )
+    effective_take_profit_max_days = (
+        max(1, int(take_profit_max_holding_days))
+        if effective_take_profit_pct is not None
+        and take_profit_max_holding_days is not None
+        else None
+    )
+    effective_take_profit_cooldown_days = (
+        max(0, int(take_profit_cooldown_days)) if ratio_metric else 0
+    )
+    latest_take_profit_dates: Dict[str, date] = {}
+    for history_entry in normalized_history:
+        if not history_entry.get("rebalance_executed"):
+            continue
+        plan = _rank_acceleration_history_plan(history_entry)
+        for value in plan.get("take_profit_symbols") or []:
+            symbol = normalize_xueqiu_symbol(value)
+            if symbol and symbol not in latest_take_profit_dates:
+                latest_take_profit_dates[symbol] = history_entry["run_date"]
+
+    take_profit_cooldown_symbols: List[str] = []
+    for symbol, exit_date in latest_take_profit_dates.items():
+        elapsed_trading_days = len(
+            {
+                entry["run_date"]
+                for entry in normalized_history
+                if exit_date < entry["run_date"] < snapshot_date
+            }
+        )
+        if elapsed_trading_days < effective_take_profit_cooldown_days:
+            take_profit_cooldown_symbols.append(symbol)
+    take_profit_cooldown_set = set(take_profit_cooldown_symbols)
+
     if signal_history is None:
         signal_history = load_xueqiu_snapshot_signal_history(
             current_snapshot_date=snapshot_date,
@@ -3784,6 +3872,7 @@ def build_rank_acceleration_buffer_plan(
             metric=metric,
             min_holding_cubes=effective_min_cubes,
             min_metric_threshold=min_metric_threshold,
+            max_metric_threshold=max_metric_threshold,
             current_rank_limit=effective_rank_limit,
             holding_cube_increase=effective_cube_increase,
             min_weight_increase=effective_min_weight_increase,
@@ -3834,6 +3923,7 @@ def build_rank_acceleration_buffer_plan(
             comparison_universe_count=comparison_universe_count,
             metric=metric,
             min_metric_threshold=min_metric_threshold,
+            max_metric_threshold=max_metric_threshold,
             min_holding_cubes=effective_min_cubes,
             current_rank_limit=effective_rank_limit,
             holding_cube_increase=effective_cube_increase,
@@ -3869,6 +3959,7 @@ def build_rank_acceleration_buffer_plan(
                 "is_new_5d": is_new,
                 "strong_new_entry": strong_new_entry,
                 "buy_eligible": buy_eligible,
+                "take_profit_cooldown": symbol in take_profit_cooldown_set,
                 "hold_pool_eligible": hold_pool_eligible,
             }
         )
@@ -3876,7 +3967,10 @@ def build_rank_acceleration_buffer_plan(
 
     def primary_metric(item: Dict[str, Any]) -> float:
         if ratio_metric:
-            return safe_float(item.get("weight_price_ratio_5d")) or 0.0
+            return min(
+                safe_float(item.get("weight_price_ratio_5d")) or 0.0,
+                max_metric_threshold or WEIGHT_PRICE_RATIO_MAX_RATIO,
+            )
         return safe_float(item.get("acceleration_rank_change_5d")) or 0.0
 
     def acceleration_sort_key(item: Dict[str, Any]) -> Tuple[float, int, float, int, str]:
@@ -3894,16 +3988,31 @@ def build_rank_acceleration_buffer_plan(
         item["strategy_rank"] = index
 
     raw_buy_candidates = sorted(
-        [item for item in enriched_items if item.get("buy_eligible")],
+        [
+            item
+            for item in enriched_items
+            if item.get("buy_eligible")
+            and item.get("stock_symbol") not in take_profit_cooldown_set
+        ],
         key=acceleration_sort_key,
         reverse=True,
     )
     daily_buy_signal_symbols: List[str] = []
+    selected_new_entries = 0
     for index, item in enumerate(raw_buy_candidates, start=1):
         item["buy_signal_rank"] = index
-        item["daily_buy_signal"] = index <= normalized_top_n
+        new_entry_allowed = not (
+            ratio_metric
+            and item.get("strong_new_entry")
+            and selected_new_entries >= 1
+        )
+        item["daily_buy_signal"] = (
+            len(daily_buy_signal_symbols) < normalized_top_n and new_entry_allowed
+        )
         if item["daily_buy_signal"]:
             daily_buy_signal_symbols.append(item["stock_symbol"])
+            if ratio_metric and item.get("strong_new_entry"):
+                selected_new_entries += 1
 
     daily_buy_signal_set = set(daily_buy_signal_symbols)
     confirmed_buy_candidates: List[Dict[str, Any]] = []
@@ -3938,17 +4047,31 @@ def build_rank_acceleration_buffer_plan(
         return {str(value) for value in values if value}
 
     entry_dates: Dict[str, Optional[date]] = {}
+    entry_prices: Dict[str, Optional[float]] = {}
     for symbol in current_symbols:
-        entry_dates[symbol] = next(
+        entry_history = next(
             (
-                entry["run_date"]
+                entry
                 for entry in normalized_history
                 if entry.get("rebalance_executed") and symbol in history_added_symbols(entry)
             ),
             None,
         )
+        entry_dates[symbol] = entry_history["run_date"] if entry_history else None
+        entry_prices[symbol] = None
+        if entry_history:
+            for history_item in entry_history.get("top_holdings") or []:
+                if not isinstance(history_item, dict):
+                    continue
+                if normalize_xueqiu_symbol(history_item.get("stock_symbol")) != symbol:
+                    continue
+                price = safe_float(history_item.get("rebalance_price"))
+                if price is not None and price > 0:
+                    entry_prices[symbol] = price
+                break
 
     hard_exit_symbols: List[str] = []
+    take_profit_symbols: List[str] = []
     normal_exit_signal_symbols: List[str] = []
     confirmed_normal_exit_symbols: List[str] = []
     min_holding_blocked_symbols: List[str] = []
@@ -3983,8 +4106,28 @@ def build_rank_acceleration_buffer_plan(
             completed_holding_days is None
             or completed_holding_days >= effective_min_holding_days
         )
+        entry_price = entry_prices.get(symbol)
+        current_price = safe_float(item.get("current_price"))
+        holding_return_pct = (
+            (current_price / entry_price - 1.0) * 100.0
+            if entry_price is not None
+            and entry_price > 0
+            and current_price is not None
+            and current_price > 0
+            else None
+        )
+        take_profit = bool(
+            effective_take_profit_pct is not None
+            and effective_take_profit_max_days is not None
+            and completed_holding_days is not None
+            and completed_holding_days < effective_take_profit_max_days
+            and holding_return_pct is not None
+            and holding_return_pct >= effective_take_profit_pct
+        )
         if hard_exit:
             hard_exit_symbols.append(symbol)
+        if take_profit:
+            take_profit_symbols.append(symbol)
         if normal_exit_signal:
             normal_exit_signal_symbols.append(symbol)
         if exit_confirmed:
@@ -3998,6 +4141,10 @@ def build_rank_acceleration_buffer_plan(
                 "stock_symbol": symbol,
                 "entry_date": entry_date.isoformat() if entry_date else None,
                 "completed_holding_days": completed_holding_days,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "holding_return_pct": holding_return_pct,
+                "take_profit": take_profit,
                 "hold_buffer_rank": safe_int(item.get("hold_buffer_rank")),
                 "hard_exit": hard_exit,
                 "normal_exit_signal": normal_exit_signal,
@@ -4017,11 +4164,13 @@ def build_rank_acceleration_buffer_plan(
             return 0
         return len(history_added_symbols(entry))
 
-    rolling_history = normalized_history[: RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS - 1]
+    effective_rolling_days = max(1, int(rolling_replacement_days))
+    effective_rolling_max = max(0, int(rolling_max_replacements))
+    rolling_history = normalized_history[: effective_rolling_days - 1]
     rolling_prior_replacements = sum(history_replacement_count(entry) for entry in rolling_history)
     rolling_replacement_capacity = max(
         0,
-        RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS - rolling_prior_replacements,
+        effective_rolling_max - rolling_prior_replacements,
     )
     initial_build = not current_symbols
     addition_capacity = (
@@ -4041,7 +4190,9 @@ def build_rank_acceleration_buffer_plan(
 
     normal_exit_ready = sorted(normal_exit_ready, key=normal_exit_sort_key, reverse=True)
     hard_exit_set = set(hard_exit_symbols)
-    retained_symbols = [symbol for symbol in current_symbols if symbol not in hard_exit_set]
+    take_profit_set = set(take_profit_symbols)
+    forced_exit_set = hard_exit_set | take_profit_set
+    retained_symbols = [symbol for symbol in current_symbols if symbol not in forced_exit_set]
 
     # 恐贪择时收缩目标仓位（如贪婪10只→3只）时，按策略指标排名直接裁剪超配部分，
     # 与壹号的行为一致。贰号 top_n 固定，retained 不会超过 top_n，因此不受影响。
@@ -4122,8 +4273,11 @@ def build_rank_acceleration_buffer_plan(
         added_symbols.append(replacement_symbol)
         remaining_additions -= 1
 
-    removed_symbols = hard_exit_symbols + trim_removed_symbols + normal_removed_symbols
-    planned_removed = hard_exit_symbols + trim_removed_symbols + normal_exit_ready
+    take_profit_only_symbols = [
+        symbol for symbol in take_profit_symbols if symbol not in hard_exit_set
+    ]
+    removed_symbols = hard_exit_symbols + take_profit_only_symbols + trim_removed_symbols + normal_removed_symbols
+    planned_removed = hard_exit_symbols + take_profit_only_symbols + trim_removed_symbols + normal_exit_ready
     deferred_normal_exit_symbols = [
         symbol for symbol in normal_exit_ready if symbol not in set(normal_removed_symbols)
     ]
@@ -4191,6 +4345,16 @@ def build_rank_acceleration_buffer_plan(
                 if ratio_metric
                 else f"目标仓位降至{normalized_top_n}只，按加速排名调出"
             )
+        elif symbol in take_profit_set:
+            action = "take_profit"
+            status = next(
+                (value for value in holding_statuses if value["stock_symbol"] == symbol),
+                {},
+            )
+            exit_reason = (
+                f"持有{status.get('completed_holding_days')}个完整交易日内，"
+                f"按成交成本收益达到{effective_take_profit_pct:g}%全额止盈"
+            )
         elif symbol in hard_exit_set:
             action = "hard_sell"
             exit_reason = f"综合排名>{hard_exit_rank}或活跃组合数<{hard_exit_min_cubes}"
@@ -4226,8 +4390,8 @@ def build_rank_acceleration_buffer_plan(
             (
                 f"当前综合排名Top{effective_rank_limit}、至少{effective_min_cubes}个活跃组合持有、"
                 f"持仓组合增加至少{effective_cube_increase}个且总权重上升>"
-                f"{effective_min_weight_increase:g}、5日权价比≥{min_metric_threshold:g}"
-                f"（权重涨幅超过股价涨幅，疑似主动加仓）；"
+                f"{effective_min_weight_increase:g}、逆势吸筹且5日权价比"
+                f"{min_metric_threshold:g}～{(max_metric_threshold or WEIGHT_PRICE_RATIO_MAX_RATIO):g}；"
                 f"强势新进需进入Top{effective_new_entry_rank_limit}且≥{effective_new_entry_min_cubes}个组合；"
                 f"当天符合资格；历史确认：最近快照日至少{effective_buy_confirm_prior_days}天也符合"
                 f"（{effective_buy_confirm_prior_days}个快照日，0=只看当天，按快照滑动窗口重算）"
@@ -4247,6 +4411,14 @@ def build_rank_acceleration_buffer_plan(
                 f"持满{effective_min_holding_days}个完整交易日且连续"
                 f"{effective_sell_confirm_days}日跌出5日权价比Top{normalized_sell_rank}才卖；"
                 f"综合排名>{hard_exit_rank}或活跃组合数<{hard_exit_min_cubes}立即退出"
+                + (
+                    f"；买入后{effective_take_profit_max_days}个交易日内按成交成本收益达到"
+                    f"{effective_take_profit_pct:g}%全额止盈，止盈后冷却"
+                    f"{effective_take_profit_cooldown_days}个交易日"
+                    if effective_take_profit_pct is not None
+                    and effective_take_profit_max_days is not None
+                    else ""
+                )
             )
             if ratio_metric
             else (
@@ -4258,8 +4430,7 @@ def build_rank_acceleration_buffer_plan(
         "execution_weight_rule": (
             f"Top{normalized_top_n}每只目标上限{target_weight:g}%；不足{normalized_top_n}只时剩余资金留现金；"
             f"新增成分按板块最多{max_segment_positions}只；每次最多替换{max_replacements}只，"
-            f"滚动{RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS}日最多"
-            f"{RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS}只"
+            f"滚动{effective_rolling_days}日最多{effective_rolling_max}只"
         ),
         "metric": metric,
         "fear_greed_regime": fear_greed_regime,
@@ -4277,6 +4448,11 @@ def build_rank_acceleration_buffer_plan(
         "normal_exit_signal_symbols": normal_exit_signal_symbols,
         "confirmed_normal_exit_symbols": confirmed_normal_exit_symbols,
         "hard_exit_symbols": hard_exit_symbols,
+        "take_profit_symbols": take_profit_symbols,
+        "take_profit_cooldown_symbols": sorted(take_profit_cooldown_symbols),
+        "take_profit_pct": effective_take_profit_pct,
+        "take_profit_max_holding_days": effective_take_profit_max_days,
+        "take_profit_cooldown_days": effective_take_profit_cooldown_days,
         "trim_removed_symbols": trim_removed_symbols,
         "normal_removed_symbols": normal_removed_symbols,
         "min_holding_blocked_symbols": min_holding_blocked_symbols,
@@ -4284,6 +4460,9 @@ def build_rank_acceleration_buffer_plan(
         "holding_statuses": holding_statuses,
         "rolling_prior_replacements": rolling_prior_replacements,
         "rolling_replacement_capacity": rolling_replacement_capacity,
+        "max_replacements": max_replacements,
+        "rolling_replacement_days": effective_rolling_days,
+        "rolling_max_replacements": effective_rolling_max,
         "replacement_count": 0 if initial_build else len(added_symbols),
         "eligible_buy_count": len(buy_candidates),
         "eligible_retain_count": len(hold_candidates),
@@ -4312,6 +4491,8 @@ def build_weight_price_ratio_buffer_plan(
     sell_rank: Optional[int] = None,
     max_segment_positions: int = RANK_ACCELERATION_MAX_SEGMENT_POSITIONS,
     max_replacements: int = RANK_ACCELERATION_MAX_REPLACEMENTS,
+    rolling_replacement_days: int = RANK_ACCELERATION_ROLLING_REPLACEMENT_DAYS,
+    rolling_max_replacements: int = RANK_ACCELERATION_ROLLING_MAX_REPLACEMENTS,
     min_holding_cubes: Optional[int] = None,
     current_rank_limit: Optional[int] = None,
     holding_cube_increase: Optional[int] = None,
@@ -4326,6 +4507,11 @@ def build_weight_price_ratio_buffer_plan(
     retain_min_cubes: Optional[int] = None,
     buy_confirm_prior_days: Optional[int] = None,
     signal_history: Optional[List[Dict[str, Any]]] = None,
+    min_metric_threshold: Optional[float] = WEIGHT_PRICE_RATIO_MIN_RATIO,
+    max_metric_threshold: Optional[float] = WEIGHT_PRICE_RATIO_MAX_RATIO,
+    take_profit_pct: Optional[float] = 7.0,
+    take_profit_max_holding_days: Optional[int] = 20,
+    take_profit_cooldown_days: int = 3,
     fear_greed_regime: Optional[str] = None,
 ) -> Dict[str, Any]:
     """星澜叁号：按 5日权价比 排序/买入，缓冲卖出，等同贰号框架。"""
@@ -4343,6 +4529,8 @@ def build_weight_price_ratio_buffer_plan(
         sell_rank=normalized_sell_rank,
         max_segment_positions=max_segment_positions,
         max_replacements=max_replacements,
+        rolling_replacement_days=rolling_replacement_days,
+        rolling_max_replacements=rolling_max_replacements,
         min_holding_cubes=min_holding_cubes,
         current_rank_limit=current_rank_limit,
         holding_cube_increase=holding_cube_increase,
@@ -4358,6 +4546,11 @@ def build_weight_price_ratio_buffer_plan(
         buy_confirm_prior_days=buy_confirm_prior_days,
         signal_history=signal_history,
         metric="weight_price_ratio",
+        min_metric_threshold=min_metric_threshold,
+        max_metric_threshold=max_metric_threshold,
+        take_profit_pct=take_profit_pct,
+        take_profit_max_holding_days=take_profit_max_holding_days,
+        take_profit_cooldown_days=take_profit_cooldown_days,
         strategy_name_override=WEIGHT_PRICE_RATIO_STRATEGY_NAME,
         fear_greed_regime=fear_greed_regime,
     )
@@ -5669,6 +5862,10 @@ async def execute_rank_acceleration_target_rebalance(
         current_snapshot_date=current_snapshot_date,
         top_n=strategy_top_n,
         sell_rank=strategy_sell_rank,
+        max_replacements=strategy_config["max_replacements"],
+        rolling_replacement_days=strategy_config["rolling_replacement_days"],
+        rolling_max_replacements=strategy_config["rolling_max_replacements"],
+        min_metric_threshold=strategy_config["metric_threshold"],
         min_holding_cubes=strategy_config["min_holding_cubes"],
         current_rank_limit=strategy_config["current_rank_limit"],
         holding_cube_increase=strategy_config["holding_cube_increase"],
@@ -5893,6 +6090,26 @@ async def execute_weight_price_ratio_target_rebalance(
         target_cube_symbol=target_cube_symbol,
         current_snapshot_date=current_snapshot_date,
     )
+    current_symbols = [
+        item["stock_symbol"]
+        for item in extract_current_target_holdings(current_holdings)
+    ]
+    try:
+        current_quotes = await fetch_batch_quotes(
+            cookie=cookie,
+            symbols=current_symbols,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        # 行情不可用时不能猜测收益率；保守跳过本次止盈判断，其余调仓照常执行。
+        logger.warning("Weight-price take-profit quote fetch skipped: %s", exc)
+        current_quotes = {}
+    current_price_by_symbol = {
+        normalize_xueqiu_symbol(symbol): safe_float(payload.get("price"))
+        for symbol, payload in current_quotes.items()
+    }
+    for item in ranking_with_ratio:
+        item["current_price"] = current_price_by_symbol.get(item["stock_symbol"])
     strategy_plan = build_weight_price_ratio_buffer_plan(
         ranking=ranking_with_ratio,
         comparison_snapshot=comparison_snapshot,
@@ -5901,6 +6118,14 @@ async def execute_weight_price_ratio_target_rebalance(
         current_snapshot_date=current_snapshot_date,
         top_n=strategy_top_n,
         sell_rank=strategy_sell_rank,
+        max_replacements=strategy_config["max_replacements"],
+        rolling_replacement_days=strategy_config["rolling_replacement_days"],
+        rolling_max_replacements=strategy_config["rolling_max_replacements"],
+        min_metric_threshold=strategy_config["metric_threshold"],
+        max_metric_threshold=strategy_config["metric_upper_threshold"],
+        take_profit_pct=strategy_config["take_profit_pct"],
+        take_profit_max_holding_days=strategy_config["take_profit_max_holding_days"],
+        take_profit_cooldown_days=strategy_config["take_profit_cooldown_days"],
         min_holding_cubes=strategy_config["min_holding_cubes"],
         current_rank_limit=strategy_config["current_rank_limit"],
         holding_cube_increase=strategy_config["holding_cube_increase"],

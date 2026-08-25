@@ -1309,6 +1309,7 @@ class XueqiuStrategyConfig(Base):
     current_rank_limit = Column(Integer, nullable=False, default=100)
     holding_cube_increase = Column(Integer, nullable=False, default=2)
     metric_threshold = Column(Float, nullable=False, default=1.15)
+    metric_upper_threshold = Column(Float, nullable=False, default=6.0)
     new_entry_rank_limit = Column(Integer, nullable=False, default=30)
     new_entry_min_cubes = Column(Integer, nullable=False, default=10)
     min_weight_increase = Column(Float, nullable=False, default=0.0)
@@ -1316,6 +1317,12 @@ class XueqiuStrategyConfig(Base):
     min_holding_cubes = Column(Integer, nullable=False, default=8)
     # 买入确认：今天符合资格且最近快照日中至少 buy_confirm_prior_days 天也符合（0=只看今天）
     buy_confirm_prior_days = Column(Integer, nullable=False, default=1)
+    max_replacements = Column(Integer, nullable=False, default=2)
+    rolling_replacement_days = Column(Integer, nullable=False, default=5)
+    rolling_max_replacements = Column(Integer, nullable=False, default=3)
+    take_profit_pct = Column(Float, nullable=False, default=7.0)
+    take_profit_max_holding_days = Column(Integer, nullable=False, default=20)
+    take_profit_cooldown_days = Column(Integer, nullable=False, default=3)
     # 卖出侧参数（贰/叁号）：
     # 硬退出：综合排名>hard_exit_rank 或 组合数<hard_exit_min_cubes 立即卖
     hard_exit_rank = Column(Integer, nullable=False, default=250)
@@ -1738,6 +1745,7 @@ def ensure_table_columns():
             "current_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN current_rank_limit INTEGER NOT NULL DEFAULT 100",
             "holding_cube_increase": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN holding_cube_increase INTEGER NOT NULL DEFAULT 2",
             "metric_threshold": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN metric_threshold FLOAT NOT NULL DEFAULT 1.15",
+            "metric_upper_threshold": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN metric_upper_threshold FLOAT NOT NULL DEFAULT 6.0",
             "new_entry_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_rank_limit INTEGER NOT NULL DEFAULT 30",
             "new_entry_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN new_entry_min_cubes INTEGER NOT NULL DEFAULT 10",
             "min_weight_increase": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN min_weight_increase FLOAT NOT NULL DEFAULT 0.0",
@@ -1749,6 +1757,12 @@ def ensure_table_columns():
             "retain_rank_limit": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_rank_limit INTEGER NOT NULL DEFAULT 200",
             "retain_min_cubes": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN retain_min_cubes INTEGER NOT NULL DEFAULT 5",
             "buy_confirm_prior_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN buy_confirm_prior_days INTEGER NOT NULL DEFAULT 1",
+            "max_replacements": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN max_replacements INTEGER NOT NULL DEFAULT 2",
+            "rolling_replacement_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN rolling_replacement_days INTEGER NOT NULL DEFAULT 5",
+            "rolling_max_replacements": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN rolling_max_replacements INTEGER NOT NULL DEFAULT 3",
+            "take_profit_pct": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN take_profit_pct FLOAT NOT NULL DEFAULT 7.0",
+            "take_profit_max_holding_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN take_profit_max_holding_days INTEGER NOT NULL DEFAULT 20",
+            "take_profit_cooldown_days": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN take_profit_cooldown_days INTEGER NOT NULL DEFAULT 3",
         },
     }
 

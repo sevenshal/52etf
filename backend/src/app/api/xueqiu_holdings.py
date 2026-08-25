@@ -981,6 +981,7 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     current_rank_limit: Optional[int] = Field(None, ge=1, le=1000, description="买入候选综合排名上限")
     holding_cube_increase: Optional[int] = Field(None, ge=0, le=100, description="买入候选持仓组合数增加下限")
     metric_threshold: Optional[float] = Field(None, ge=0, description="策略指标阈值（权价比≥x 或 排名上升≥x名）")
+    metric_upper_threshold: Optional[float] = Field(None, ge=0, description="策略指标上限（叁号权价比≤x）")
     new_entry_rank_limit: Optional[int] = Field(None, ge=1, le=1000, description="强势新进综合排名上限")
     new_entry_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="强势新进最少持仓组合数")
     min_weight_increase: Optional[float] = Field(None, ge=0, description="买入候选总权重上升下限")
@@ -992,6 +993,12 @@ class XueqiuStrategyConfigUpdate(BaseModel):
     retain_rank_limit: Optional[int] = Field(None, ge=1, le=5000, description="缓冲候选综合排名上限")
     retain_min_cubes: Optional[int] = Field(None, ge=1, le=1000, description="缓冲候选最少持仓组合数")
     buy_confirm_prior_days: Optional[int] = Field(None, ge=0, le=30, description="买入确认需最近几个快照日也符合（0=只看当天符合即可）")
+    max_replacements: Optional[int] = Field(None, ge=0, le=200, description="每次调仓最多替换几只")
+    rolling_replacement_days: Optional[int] = Field(None, ge=1, le=120, description="滚动替换限制的回看天数")
+    rolling_max_replacements: Optional[int] = Field(None, ge=0, le=500, description="滚动窗口内最多替换几只")
+    take_profit_pct: Optional[float] = Field(None, gt=0, le=1000, description="短期全额止盈收益率")
+    take_profit_max_holding_days: Optional[int] = Field(None, ge=1, le=500, description="止盈规则适用的最大持有交易日")
+    take_profit_cooldown_days: Optional[int] = Field(None, ge=0, le=120, description="止盈后禁止重新买入的交易日数")
 
 
 XUEQIU_STRATEGY_CONFIG_KEYS = (
@@ -1042,4 +1049,3 @@ def update_xueqiu_strategy_config(
         for key, value in updates.items():
             setattr(row, key, value)
     return load_xueqiu_strategy_config(strategy_key)
-

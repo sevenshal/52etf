@@ -432,6 +432,8 @@ class XueqiuTopHoldingsReportTest(TestCase):
         added_symbols=None,
         replacement_count=0,
         executed=False,
+        top_holdings=None,
+        take_profit_symbols=None,
     ):
         return {
             "run_date": run_date,
@@ -439,10 +441,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 "daily_buy_signal_symbols": buy_signals or [],
                 "normal_exit_signal_symbols": exit_signals or [],
                 "added_symbols": added_symbols or [],
+                "take_profit_symbols": take_profit_symbols or [],
             },
             "rebalance_executed": executed,
             "added_symbols": added_symbols or [],
             "replacement_count": replacement_count,
+            "top_holdings": top_holdings or [],
         }
 
     def test_save_year_top_cubes_deduplicates_symbols_and_reassigns_ranks(self):
@@ -820,6 +824,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         current_rank_limit=80,
                         holding_cube_increase=3,
                         metric_threshold=1.3,
+                        metric_upper_threshold=5.5,
                         new_entry_rank_limit=25,
                         new_entry_min_cubes=12,
                         min_weight_increase=5.0,
@@ -830,6 +835,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         min_holding_days=4,
                         retain_rank_limit=150,
                         retain_min_cubes=6,
+                        max_replacements=4,
+                        rolling_replacement_days=7,
+                        rolling_max_replacements=8,
+                        take_profit_pct=8.5,
+                        take_profit_max_holding_days=18,
+                        take_profit_cooldown_days=4,
                     )
                 )
                 db.commit()
@@ -841,6 +852,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 self.assertEqual(80, saved["current_rank_limit"])
                 self.assertEqual(3, saved["holding_cube_increase"])
                 self.assertEqual(1.3, saved["metric_threshold"])
+                self.assertEqual(5.5, saved["metric_upper_threshold"])
                 self.assertEqual(25, saved["new_entry_rank_limit"])
                 self.assertEqual(12, saved["new_entry_min_cubes"])
                 self.assertEqual(5.0, saved["min_weight_increase"])
@@ -851,6 +863,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 self.assertEqual(4, saved["min_holding_days"])
                 self.assertEqual(150, saved["retain_rank_limit"])
                 self.assertEqual(6, saved["retain_min_cubes"])
+                self.assertEqual(4, saved["max_replacements"])
+                self.assertEqual(7, saved["rolling_replacement_days"])
+                self.assertEqual(8, saved["rolling_max_replacements"])
+                self.assertEqual(8.5, saved["take_profit_pct"])
+                self.assertEqual(18, saved["take_profit_max_holding_days"])
+                self.assertEqual(4, saved["take_profit_cooldown_days"])
                 # 其他策略不受影响
                 self.assertEqual(10, load_xueqiu_strategy_config("buffer")["fear_target_count"])
 
@@ -1025,6 +1043,8 @@ class XueqiuTopHoldingsReportTest(TestCase):
             "holding_cube_count": 10,
             "total_weight_pct": 200.0,
             "weight_price_ratio_5d": 1.5,
+            "weight_multiple_5d": 1.5,
+            "momentum_multiple_5d": 0.9,
         }
         previous = {
             "composite_rank": 80,
@@ -1043,6 +1063,12 @@ class XueqiuTopHoldingsReportTest(TestCase):
             new_entry_min_cubes=10,
         )
         self.assertTrue(_xueqiu_buy_eligible_core(item, previous, **base))
+        self.assertFalse(_xueqiu_buy_eligible_core(
+            {**item, "weight_price_ratio_5d": 6.1},
+            previous,
+            **base,
+            max_metric_threshold=6.0,
+        ))
         # 排名超限
         self.assertFalse(_xueqiu_buy_eligible_core(item, previous, **{**base, "current_rank_limit": 40}))
         # 组合数增加不足
@@ -1163,14 +1189,14 @@ class XueqiuTopHoldingsReportTest(TestCase):
                     """
                 )
                 prices = {
-                    "2026-08-10": 100.0,
-                    "2026-08-11": 106.0,
-                    "2026-08-12": 108.0,
-                    "2026-08-13": 110.0,
+                    "2026-08-10": 120.0,
+                    "2026-08-11": 118.0,
+                    "2026-08-12": 116.0,
+                    "2026-08-13": 114.0,
                     "2026-08-14": 112.0,
-                    "2026-08-15": 115.0,
-                    "2026-08-16": 118.0,
-                    "2026-08-17": 120.0,
+                    "2026-08-15": 110.0,
+                    "2026-08-16": 108.0,
+                    "2026-08-17": 106.0,
                 }
                 for day, close in prices.items():
                     connection.execute(
@@ -1380,6 +1406,22 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertEqual(3, blocked_plan["rolling_prior_replacements"])
         self.assertEqual(0, blocked_plan["replacement_count"])
         self.assertFalse(blocked_plan["component_changed"])
+
+        configurable_plan = build_rank_acceleration_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            signal_history=self._eligibility_history(buy_signals, exit_symbols=current_symbols),
+            strategy_history=history,
+            current_snapshot_date=date(2026, 7, 10),
+            max_replacements=4,
+            rolling_replacement_days=2,
+            rolling_max_replacements=5,
+        )
+        self.assertEqual(1, configurable_plan["rolling_prior_replacements"])
+        self.assertEqual(4, configurable_plan["replacement_count"])
+        self.assertEqual(2, configurable_plan["rolling_replacement_days"])
+        self.assertEqual(5, configurable_plan["rolling_max_replacements"])
 
     def test_rank_acceleration_hard_exit_ignores_confirmation_and_holding_period(self):
         ranking, comparison, current_holdings, current_symbols = self._rank_acceleration_turnover_fixture()
@@ -1758,7 +1800,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
                     "composite_weight_pct": 5.0 - index / 100.0,
                     "weight_price_ratio_5d": ratios.get(index, 1.5 + (10 - index) * 0.01),
                     "weight_multiple_5d": 2.0,
-                    "momentum_multiple_5d": 1.0,
+                    "momentum_multiple_5d": 0.9,
                 }
             )
             if index > 1:
@@ -1850,6 +1892,91 @@ class XueqiuTopHoldingsReportTest(TestCase):
             [10.0, 10.0, 10.0],
             [item["rebalance_weight_pct"] for item in plan["target_items"]],
         )
+
+    def test_weight_price_ratio_take_profit_forces_full_exit(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        symbol = "SH.600002"
+        next(item for item in ranking if item["stock_symbol"] == symbol)["current_price"] = 107.1
+        current_holdings = [
+            {"stock_symbol": "SH600002", "stock_name": "权价比股票2", "weight": 10.0}
+        ]
+        history = [
+            self._strategy_history_entry(date(2026, 7, 9)),
+            self._strategy_history_entry(
+                date(2026, 7, 8),
+                added_symbols=[symbol],
+                executed=True,
+                top_holdings=[
+                    {
+                        "stock_symbol": symbol,
+                        "strategy_action": "buy",
+                        "rebalance_price": 100.0,
+                    }
+                ],
+            ),
+        ]
+
+        plan = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=current_holdings,
+            strategy_history=history,
+            signal_history=[],
+            current_snapshot_date=date(2026, 7, 10),
+            top_n=1,
+            max_replacements=0,
+            min_holding_days=10,
+        )
+
+        self.assertEqual([symbol], plan["take_profit_symbols"])
+        self.assertEqual([symbol], plan["removed_symbols"])
+        self.assertEqual([], plan["final_symbols"])
+        self.assertEqual(0, plan["replacement_count"])
+        status = plan["holding_statuses"][0]
+        self.assertEqual(100.0, status["entry_price"])
+        self.assertAlmostEqual(7.1, status["holding_return_pct"])
+        self.assertTrue(status["take_profit"])
+        self.assertEqual("take_profit", plan["removed_items"][0]["strategy_action"])
+
+    def test_weight_price_ratio_take_profit_cooldown_blocks_reentry(self):
+        ranking, comparison = self._weight_price_ratio_fixture()
+        symbol = "SH.600002"
+        take_profit_entry = self._strategy_history_entry(
+            date(2026, 7, 9),
+            executed=True,
+            take_profit_symbols=[symbol],
+        )
+
+        blocked = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            strategy_history=[take_profit_entry],
+            signal_history=[],
+            current_snapshot_date=date(2026, 7, 10),
+            buy_confirm_prior_days=0,
+            take_profit_cooldown_days=3,
+        )
+        self.assertIn(symbol, blocked["take_profit_cooldown_symbols"])
+        self.assertNotIn(symbol, blocked["confirmed_buy_symbols"])
+        self.assertNotIn(symbol, blocked["added_symbols"])
+
+        elapsed_history = [
+            self._strategy_history_entry(date(2026, 7, day))
+            for day in (10, 11, 14)
+        ] + [take_profit_entry]
+        allowed = build_weight_price_ratio_buffer_plan(
+            ranking=ranking,
+            comparison_snapshot=comparison,
+            current_holdings=[],
+            strategy_history=elapsed_history,
+            signal_history=[],
+            current_snapshot_date=date(2026, 7, 15),
+            buy_confirm_prior_days=0,
+            take_profit_cooldown_days=3,
+        )
+        self.assertNotIn(symbol, allowed["take_profit_cooldown_symbols"])
+        self.assertIn(symbol, allowed["confirmed_buy_symbols"])
 
     def test_weight_price_ratio_plan_skips_sub_one_percent_weight_drift(self):
         ranking, comparison = self._weight_price_ratio_fixture()

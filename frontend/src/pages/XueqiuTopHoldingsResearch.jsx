@@ -328,6 +328,7 @@ const XUEQIU_BUY_SELL_ONLY_KEYS = [
   'current_rank_limit',
   'holding_cube_increase',
   'metric_threshold',
+  'metric_upper_threshold',
   'new_entry_rank_limit',
   'new_entry_min_cubes',
   'min_weight_increase',
@@ -339,12 +340,25 @@ const XUEQIU_BUY_SELL_ONLY_KEYS = [
   'retain_rank_limit',
   'retain_min_cubes',
   'buy_confirm_prior_days',
+  'max_replacements',
+  'rolling_replacement_days',
+  'rolling_max_replacements',
+  'take_profit_pct',
+  'take_profit_max_holding_days',
+  'take_profit_cooldown_days',
+];
+const WEIGHT_PRICE_RATIO_ONLY_KEYS = [
+  'metric_upper_threshold',
+  'take_profit_pct',
+  'take_profit_max_holding_days',
+  'take_profit_cooldown_days',
 ];
 const strategyFieldsFor = (strategyKey, allFields) => (
   allFields.filter(field => (
-    !XUEQIU_BUY_SELL_ONLY_KEYS.includes(field.key)
-    || strategyKey === 'rank_acceleration'
-    || strategyKey === 'weight_price_ratio'
+    (!XUEQIU_BUY_SELL_ONLY_KEYS.includes(field.key)
+      || strategyKey === 'rank_acceleration'
+      || strategyKey === 'weight_price_ratio')
+    && (!WEIGHT_PRICE_RATIO_ONLY_KEYS.includes(field.key) || strategyKey === 'weight_price_ratio')
   ))
 );
 
@@ -419,6 +433,15 @@ const XueqiuTopHoldingsResearch = () => {
       label: '策略指标阈值',
       tooltip: '叁号：5日权价比需 ≥ 该值（默认1.15）；贰号：5日排名上升需 ≥ 该值（默认20名）',
       min: 0,
+      max: 100,
+      step: 0.05,
+      precision: 2,
+    },
+    {
+      key: 'metric_upper_threshold',
+      label: '权价比上限',
+      tooltip: '叁号：5日权价比需 ≤ 该值，用于过滤低分母造成的极端比值（默认6）',
+      min: 1.15,
       max: 100,
       step: 0.05,
       precision: 2,
@@ -522,6 +545,61 @@ const XueqiuTopHoldingsResearch = () => {
       max: 30,
       step: 1,
       suffix: '天',
+    },
+    {
+      key: 'max_replacements',
+      label: '单次最多替换',
+      tooltip: '一次调仓最多替换几只成分；0表示普通换仓暂停，硬退出仍可执行',
+      min: 0,
+      max: 200,
+      step: 1,
+      suffix: '只',
+    },
+    {
+      key: 'rolling_replacement_days',
+      label: '滚动替换窗口',
+      tooltip: '统计近期累计替换数量的滚动窗口长度（默认5日）',
+      min: 1,
+      max: 120,
+      step: 1,
+      suffix: '日',
+    },
+    {
+      key: 'rolling_max_replacements',
+      label: '滚动窗口最多替换',
+      tooltip: '在滚动窗口内累计最多替换几只（默认5日最多3只）',
+      min: 0,
+      max: 500,
+      step: 1,
+      suffix: '只',
+    },
+    {
+      key: 'take_profit_pct',
+      label: '短期止盈收益率',
+      tooltip: '按策略实际买入成交价计算；在有效持有期内达到该收益率时全额止盈（默认7%）',
+      min: 0.1,
+      max: 1000,
+      step: 0.1,
+      precision: 1,
+      suffix: '%',
+    },
+    {
+      key: 'take_profit_max_holding_days',
+      label: '止盈有效持有期',
+      tooltip: '买入后多少个交易日内启用短期止盈规则（默认20个交易日）',
+      min: 1,
+      max: 500,
+      step: 1,
+      suffix: '交易日',
+    },
+    {
+      key: 'take_profit_cooldown_days',
+      label: '止盈后冷却期',
+      tooltip: '全额止盈后，多少个交易日内禁止重新买入该标的（默认3个交易日）',
+      min: 0,
+      max: 120,
+      step: 1,
+      suffix: '交易日',
     },
   ], []);
 
