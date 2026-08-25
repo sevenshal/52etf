@@ -37,6 +37,8 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_option_basic",
         "a_stock_option_daily",
         "a_stock_repo_daily",
+        "a_stock_ths_member",
+        "a_stock_ths_daily",
         "hk_stock_basic",
         "hk_stock_daily",
         "hk_stock_daily_qfq",
@@ -83,6 +85,41 @@ class AStockNameChange(AnalyticsBase):
     start_date = Column(Date)
     end_date = Column(Date)
     change_reason = Column(String(64))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockTHSMember(AnalyticsBase):
+    """同花顺行业/概念/主题板块成分缓存。板块目录继续由主库统一维护。"""
+    __tablename__ = "a_stock_ths_member"
+
+    ths_code = Column(String(24), primary_key=True)
+    con_code = Column(String(16), primary_key=True)
+    con_name = Column(String(128))
+    weight = Column(Float)
+    in_date = Column(Date)
+    out_date = Column(Date)
+    is_new = Column(String(8))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockTHSDaily(AnalyticsBase):
+    """同花顺行业/概念/主题板块日行情。"""
+    __tablename__ = "a_stock_ths_daily"
+
+    ths_code = Column(String(24), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    open = Column(Float)
+    close = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    pre_close = Column(Float)
+    avg_price = Column(Float)
+    change = Column(Float)
+    pct_change = Column(Float)
+    vol = Column(Float)
+    turnover_rate = Column(Float)
+    total_mv = Column(Float)
+    float_mv = Column(Float)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -462,6 +499,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_date_quarter ON a_stock_report_rc(report_date, quarter)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_org_date ON a_stock_report_rc(org_name, report_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_name_changes_symbol_dates ON a_stock_name_changes(ts_code, start_date, end_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_ths_member_constituent ON a_stock_ths_member(con_code, ths_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_ths_daily_date ON a_stock_ths_daily(trade_date, ths_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_symbol_date ON a_stock_fund_flow_daily(ts_code, trade_date)",

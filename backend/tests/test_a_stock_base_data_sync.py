@@ -29,6 +29,70 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_sync_ths_board_data_updates_main_catalog_and_duckdb_caches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analytics_path = os.path.join(tmpdir, "analytics.duckdb")
+            sqlite_path = os.path.join(tmpdir, "main.db")
+            code = textwrap.dedent(
+                """
+                from datetime import date
+                import pandas as pd
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AnalyticsSession
+                from src.core.database import Session
+                from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+                class FakeTushare:
+                    def get_ths_index_frame(self, index_type):
+                        suffix = {"N": "1", "TH": "2", "I": "3"}[index_type]
+                        return pd.DataFrame([{
+                            "ts_code": f"88500{suffix}.TI",
+                            "name": f"板块{index_type}", "count": 1,
+                            "exchange": "A", "list_date": "20200101",
+                        }])
+
+                    def get_ths_member_frame(self, ths_code):
+                        return pd.DataFrame([{
+                            "ts_code": ths_code, "con_code": "600001.SH",
+                            "con_name": "测试股", "weight": 1.0,
+                            "in_date": "20200101", "out_date": None, "is_new": "Y",
+                        }])
+
+                    def get_trade_calendar_frame(self, start_date, end_date):
+                        return pd.DataFrame([{"cal_date": end_date, "is_open": 1}])
+
+                    def get_ths_daily_frame(self, trade_date):
+                        return pd.DataFrame([{
+                            "ts_code": "885001.N", "trade_date": trade_date,
+                            "open": 99, "close": 100, "high": 101, "low": 98,
+                            "pre_close": 99, "pct_change": 1.01,
+                        }])
+
+                db = AnalyticsSession()
+                service = AStockBaseDataSyncService(analytics_db=db, tushare_service=FakeTushare())
+                try:
+                    result = service.sync_ths_board_data(date(2026, 8, 24))
+                    member_count = db.execute(text("SELECT COUNT(*) FROM a_stock_ths_member")).scalar()
+                    daily_count = db.execute(text("SELECT COUNT(*) FROM a_stock_ths_daily")).scalar()
+                    catalog_count = Session().execute(text("SELECT COUNT(*) FROM ai_stock_ths_index_cache")).scalar()
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+                    Session.remove()
+
+                assert result["catalog_rows"] == 3
+                assert result["member_refreshed"] is True
+                assert member_count == 3
+                assert daily_count == 1
+                assert catalog_count == 3
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = analytics_path
+            env["QUANT_SQLITE_PATH"] = sqlite_path
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+
     def test_sync_fund_basic_handles_duplicate_provider_symbols(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)

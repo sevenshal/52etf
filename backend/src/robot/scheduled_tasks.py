@@ -1297,7 +1297,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、名称变更、全市场日行情、基准/贪恐目标指数日行情、A股ETF日行情、贪恐/因子指数成分权重、期权/回购行情、中债信用曲线、利润表和主力资金流到DuckDB分析库。",
+                description="同步A股基础信息、同花顺细分板块目录/成分/行情、名称变更、全市场与指数/ETF行情、指数成分权重、期权/回购行情、中债信用曲线、利润表和主力资金流到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,

@@ -94,6 +94,7 @@ const XUEQIU_DIRECTION_COLORS = {
   '借涨减仓': 'orange',
   '减仓': 'red',
 };
+const THS_BOARD_TYPE_LABELS = { I: '行业', N: '概念', TH: '主题' };
 
 const xueqiuDirectionOf = record => {
   if (record?.direction) return record.direction;
@@ -652,6 +653,8 @@ const XueqiuTopHoldingsResearch = () => {
   };
 
   const latestItems = useMemo(() => latestData?.items || [], [latestData]);
+  const boardItems = useMemo(() => latestData?.board_items || [], [latestData]);
+  const contrarianBoards = useMemo(() => latestData?.contrarian_boards || [], [latestData]);
   const ratioStats = useMemo(() => {
     const values = latestItems
       .map(item => weightMomentumRatioNumber(item.weight_price_ratio_5d))
@@ -945,6 +948,70 @@ const XueqiuTopHoldingsResearch = () => {
     },
   ], [hasRankCompareSnapshot, latestData?.cube_count, latestData?.index_options]);
 
+  const boardColumns = useMemo(() => [
+    {
+      title: '细分板块',
+      dataIndex: 'name',
+      width: 180,
+      fixed: 'left',
+      render: (value, record) => (
+        <Space size={6}>
+          <Text strong>{value}</Text>
+          <Tag>{THS_BOARD_TYPE_LABELS[record.board_type] || record.board_type}</Tag>
+        </Space>
+      ),
+    },
+    {
+      title: '方向',
+      dataIndex: 'direction',
+      width: 112,
+      filters: XUEQIU_DIRECTIONS.filter(value => value !== '新进').map(value => ({ text: value, value })),
+      onFilter: (value, record) => record.direction === value,
+      render: value => <Tag color={XUEQIU_DIRECTION_COLORS[value]}>{value}</Tag>,
+    },
+    {
+      title: '5日权价比',
+      dataIndex: 'weight_price_ratio_5d',
+      width: 112,
+      align: 'right',
+      defaultSortOrder: 'descend',
+      sorter: (a, b) => Number(a.weight_price_ratio_5d || 0) - Number(b.weight_price_ratio_5d || 0),
+      render: value => (value == null ? '-' : `${Number(value).toFixed(2)}x`),
+    },
+    {
+      title: '权重变化',
+      dataIndex: 'weight_change_5d',
+      width: 110,
+      align: 'right',
+      sorter: (a, b) => Number(a.weight_change_5d || 0) - Number(b.weight_change_5d || 0),
+      render: value => `${signedFixed(value)}pp`,
+    },
+    {
+      title: '板块涨跌',
+      dataIndex: 'momentum_5d',
+      width: 110,
+      align: 'right',
+      sorter: (a, b) => Number(a.momentum_5d || 0) - Number(b.momentum_5d || 0),
+      render: value => `${signedFixed(value)}%`,
+    },
+    {
+      title: '雪球综合权重',
+      dataIndex: 'composite_weight_pct',
+      width: 132,
+      align: 'right',
+      sorter: (a, b) => Number(a.composite_weight_pct || 0) - Number(b.composite_weight_pct || 0),
+      render: percentFormatter,
+    },
+    {
+      title: '覆盖持仓股',
+      dataIndex: 'stock_count',
+      width: 110,
+      align: 'right',
+      sorter: (a, b) => Number(a.stock_count || 0) - Number(b.stock_count || 0),
+      render: value => `${numberFormatter(value)}只`,
+    },
+  ], []);
+
   const historyColumns = useMemo(() => [
     { title: '日期', dataIndex: 'snapshot_date', width: 118 },
     { title: '收盘价', dataIndex: 'close_price', width: 100, align: 'right', render: value => (value == null ? '-' : Number(value).toFixed(2)) },
@@ -1057,6 +1124,47 @@ const XueqiuTopHoldingsResearch = () => {
           </Card>
         </Col>
       </Row>
+
+      <Card
+        bordered={false}
+        title={(
+          <Tooltip title="板块综合权重5日增长超过5%、权价比大于1.05，同时板块指数下跌；至少覆盖3只雪球持仓股。">
+            正在逆势吸筹的细分板块
+          </Tooltip>
+        )}
+        style={{ marginBottom: 12 }}
+      >
+        {contrarianBoards.length ? (
+          <Space size={[8, 8]} wrap>
+            {contrarianBoards.map(board => (
+              <Tooltip
+                key={board.ths_code}
+                title={`雪球综合权重 ${percentFormatter(board.composite_weight_pct)}，覆盖 ${board.stock_count} 只持仓股`}
+              >
+                <Tag color="cyan">
+                  {board.name} {Number(board.weight_price_ratio_5d).toFixed(2)}x · 权重{signedFixed(board.weight_change_5d)}pp · 板块{signedFixed(board.momentum_5d)}%
+                </Tag>
+              </Tooltip>
+            ))}
+          </Space>
+        ) : (
+          <Text type="secondary">
+            {boardItems.length ? '当前没有满足条件的板块' : '暂无板块成分或行情缓存，请先运行A股基础数据同步'}
+          </Text>
+        )}
+      </Card>
+
+      <Card bordered={false} title="细分板块5日权价比" style={{ marginBottom: 12 }}>
+        <Table
+          rowKey="ths_code"
+          size="small"
+          columns={boardColumns}
+          dataSource={boardItems}
+          pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+          scroll={{ x: 900 }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+        />
+      </Card>
 
       <Row gutter={[12, 12]}>
         <Col xs={24} xl={14}>

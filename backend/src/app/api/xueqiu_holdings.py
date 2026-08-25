@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...core.database import (
+    AIStockTHSIndexCache,
     AStockInnovation100Constituent,
     Session as DBSession,
     get_db_ctx,
@@ -52,6 +53,7 @@ def _connect_duckdb():
 
 XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
 XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS = 5
+XUEQIU_BOARD_MIN_STOCKS = 3
 
 
 def _normalize_xueqiu_snapshot_symbol(symbol: Any) -> str:
@@ -188,6 +190,8 @@ def _empty_xueqiu_top_holdings_latest(active_only: bool, limit: int, reason: str
         "active_cube_count": 0,
         "active_rebalance_days": None,
         "index_options": [],
+        "board_items": [],
+        "contrarian_boards": [],
         "items": [],
     }
 
@@ -421,6 +425,174 @@ def _attach_xueqiu_5d_momentum(
             item["weight_price_ratio_5d"] = None
 
 
+def _load_xueqiu_board_momentum(
+    connection,
+    active_only: bool,
+    snapshot_date: Any,
+    compare_snapshot_date: Any,
+) -> List[Dict[str, Any]]:
+    """Aggregate Xueqiu holdings into cached THS boards and calculate 5-day ratios."""
+    required = ("a_stock_ths_member", "a_stock_ths_daily")
+    if not snapshot_date or not compare_snapshot_date or not all(
+        _duckdb_table_exists(connection, table) for table in required
+    ):
+        return []
+
+    # ORM values are copied before the short session closes (expire_on_commit=True).
+    with DBSession() as db:
+        catalog = {
+            row.ts_code: {
+                "ths_code": row.ts_code,
+                "name": row.name,
+                "board_type": row.index_type,
+            }
+            for row in db.query(AIStockTHSIndexCache).all()
+        }
+    if not catalog:
+        return []
+
+    cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+    rows = _duckdb_query_dicts(
+        connection,
+        f"""
+        {cte},
+        current_holdings AS (
+            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
+        ),
+        compare_holdings AS (
+            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
+        ),
+        current_cube_count AS (
+            SELECT COUNT(DISTINCT cube_symbol) AS value FROM current_holdings
+        ),
+        compare_cube_count AS (
+            SELECT COUNT(DISTINCT cube_symbol) AS value FROM compare_holdings
+        ),
+        current_stocks AS (
+            SELECT
+                stock_symbol,
+                SUM(weight_pct) / NULLIF(MAX(current_cube_count.value), 0) AS composite_weight_pct,
+                COUNT(DISTINCT cube_symbol) AS holding_cube_count
+            FROM current_holdings CROSS JOIN current_cube_count
+            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
+            GROUP BY stock_symbol
+        ),
+        compare_stocks AS (
+            SELECT
+                stock_symbol,
+                SUM(weight_pct) / NULLIF(MAX(compare_cube_count.value), 0) AS composite_weight_pct
+            FROM compare_holdings CROSS JOIN compare_cube_count
+            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
+            GROUP BY stock_symbol
+        ),
+        normalized_members AS (
+            SELECT
+                ths_code,
+                con_code,
+                CASE
+                    WHEN con_code LIKE '%.SH' THEN 'SH.' || LEFT(con_code, 6)
+                    WHEN con_code LIKE '%.SZ' THEN 'SZ.' || LEFT(con_code, 6)
+                    WHEN con_code LIKE '%.BJ' THEN 'BJ.' || LEFT(con_code, 6)
+                    ELSE con_code
+                END AS stock_symbol,
+                in_date,
+                out_date
+            FROM a_stock_ths_member
+        ),
+        current_board_weights AS (
+            SELECT
+                members.ths_code,
+                COUNT(DISTINCT current_stocks.stock_symbol) AS stock_count,
+                SUM(current_stocks.composite_weight_pct) AS composite_weight_pct,
+                SUM(current_stocks.holding_cube_count) AS stock_cube_links
+            FROM normalized_members members
+            JOIN current_stocks ON current_stocks.stock_symbol = members.stock_symbol
+            WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
+              AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
+            GROUP BY members.ths_code
+        ),
+        compare_board_weights AS (
+            SELECT
+                members.ths_code,
+                SUM(compare_stocks.composite_weight_pct) AS weight_5d_ago
+            FROM normalized_members members
+            JOIN compare_stocks ON compare_stocks.stock_symbol = members.stock_symbol
+            WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
+              AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
+            GROUP BY members.ths_code
+        ),
+        latest_prices AS (
+            SELECT ths_code, close
+            FROM a_stock_ths_daily
+            WHERE trade_date <= CAST(? AS DATE)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY ths_code ORDER BY trade_date DESC) = 1
+        ),
+        compare_prices AS (
+            SELECT ths_code, close
+            FROM a_stock_ths_daily
+            WHERE trade_date <= CAST(? AS DATE)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY ths_code ORDER BY trade_date DESC) = 1
+        )
+        SELECT
+            current_board_weights.*,
+            compare_board_weights.weight_5d_ago,
+            latest_prices.close AS close_price,
+            compare_prices.close AS close_5d_ago
+        FROM current_board_weights
+        JOIN compare_board_weights USING (ths_code)
+        JOIN latest_prices USING (ths_code)
+        JOIN compare_prices USING (ths_code)
+        WHERE current_board_weights.stock_count >= {XUEQIU_BOARD_MIN_STOCKS}
+        """,
+        [
+            snapshot_date,
+            compare_snapshot_date,
+            snapshot_date,
+            snapshot_date,
+            compare_snapshot_date,
+            compare_snapshot_date,
+            snapshot_date,
+            compare_snapshot_date,
+        ],
+    )
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        meta = catalog.get(str(row.get("ths_code") or "").upper())
+        current_weight = _safe_float(row.get("composite_weight_pct"))
+        old_weight = _safe_float(row.get("weight_5d_ago"))
+        close_price = _safe_float(row.get("close_price"))
+        old_close = _safe_float(row.get("close_5d_ago"))
+        if not meta or not current_weight or not old_weight or not close_price or not old_close:
+            continue
+        weight_multiple = current_weight / old_weight
+        price_multiple = close_price / old_close
+        ratio = weight_multiple / price_multiple if price_multiple > 0 else None
+        direction = _xueqiu_direction(weight_multiple, price_multiple, ratio)
+        items.append(
+            {
+                **meta,
+                "stock_count": int(row.get("stock_count") or 0),
+                "stock_cube_links": int(row.get("stock_cube_links") or 0),
+                "composite_weight_pct": round(current_weight, 4),
+                "weight_5d_ago": round(old_weight, 4),
+                "weight_change_5d": round(current_weight - old_weight, 4),
+                "weight_multiple_5d": round(weight_multiple, 3),
+                "momentum_5d": round((price_multiple - 1.0) * 100.0, 2),
+                "momentum_multiple_5d": round(price_multiple, 3),
+                "weight_price_ratio_5d": round(ratio, 2) if ratio is not None else None,
+                "direction": direction,
+            }
+        )
+    return sorted(
+        items,
+        key=lambda item: (
+            item["direction"] != "逆势吸筹",
+            -(item.get("weight_price_ratio_5d") or 0),
+            -item["composite_weight_pct"],
+        ),
+    )
+
+
 def load_xueqiu_top_holdings_latest(
     active_only: bool = True,
     limit: int = 300,
@@ -632,6 +804,12 @@ def load_xueqiu_top_holdings_latest(
             item_rows,
             snapshot_date,
         )
+        board_items = _load_xueqiu_board_momentum(
+            connection,
+            active_only,
+            snapshot_date,
+            metadata.get("rank_compare_snapshot_date"),
+        )
         return {
             "available": True,
             "active_only": active_only,
@@ -646,6 +824,10 @@ def load_xueqiu_top_holdings_latest(
             "active_cube_count": metadata.get("active_cube_count") or 0,
             "active_rebalance_days": metadata.get("active_rebalance_days"),
             "index_options": index_options,
+            "board_items": board_items,
+            "contrarian_boards": [
+                item for item in board_items if item.get("direction") == "逆势吸筹"
+            ][:12],
             "items": item_rows,
         }
     finally:

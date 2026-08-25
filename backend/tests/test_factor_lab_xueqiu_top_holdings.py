@@ -9,6 +9,25 @@ from src.app.api import xueqiu_holdings as factor_lab
 
 
 class FactorLabXueqiuTopHoldingsTest(TestCase):
+    class _CatalogRow:
+        ts_code = "885001.TI"
+        name = "测试细分板块"
+        index_type = "N"
+
+    class _CatalogQuery:
+        def all(self):
+            return [FactorLabXueqiuTopHoldingsTest._CatalogRow()]
+
+    class _CatalogSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def query(self, *_args):
+            return FactorLabXueqiuTopHoldingsTest._CatalogQuery()
+
     def _create_snapshot_db(self, path: str) -> None:
         connection = duckdb.connect(path)
         try:
@@ -621,3 +640,58 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(15.0, result["average_weight_pct"])
         self.assertEqual(["ZH2", "ZH1"], [row["cube_symbol"] for row in result["details"]])
         self.assertEqual([20.0, 10.0], [row["weight_pct"] for row in result["details"]])
+
+    def test_latest_aggregates_contrarian_ths_board(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_rank_trend(db_path)
+            connection = duckdb.connect(db_path)
+            try:
+                connection.execute(
+                    "UPDATE xueqiu_cube_holdings_snapshots SET weight_pct = 60 "
+                    "WHERE snapshot_date = '2026-06-22' AND stock_symbol = 'SH.600003'"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE a_stock_ths_member (
+                        ths_code VARCHAR, con_code VARCHAR, con_name VARCHAR,
+                        weight DOUBLE, in_date DATE, out_date DATE, is_new VARCHAR,
+                        updated_at TIMESTAMP
+                    )
+                    """
+                )
+                connection.executemany(
+                    "INSERT INTO a_stock_ths_member VALUES (?, ?, ?, NULL, NULL, NULL, 'Y', NOW())",
+                    [
+                        ("885001.TI", "600001.SH", "股票A"),
+                        ("885001.TI", "600002.SH", "股票B"),
+                        ("885001.TI", "600003.SH", "股票C"),
+                    ],
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE a_stock_ths_daily (
+                        ths_code VARCHAR, trade_date DATE, close DOUBLE
+                    )
+                    """
+                )
+                connection.executemany(
+                    "INSERT INTO a_stock_ths_daily VALUES (?, ?, ?)",
+                    [("885001.TI", "2026-06-15", 100.0), ("885001.TI", "2026-06-22", 90.0)],
+                )
+            finally:
+                connection.close()
+
+            with (
+                patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path),
+                patch.object(factor_lab, "DBSession", self._CatalogSession),
+            ):
+                result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+
+        self.assertEqual(1, len(result["board_items"]))
+        board = result["board_items"][0]
+        self.assertEqual("测试细分板块", board["name"])
+        self.assertEqual("逆势吸筹", board["direction"])
+        self.assertEqual(3, board["stock_count"])
+        self.assertGreater(board["weight_price_ratio_5d"], 1.05)
+        self.assertEqual([board], result["contrarian_boards"])

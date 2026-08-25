@@ -28,8 +28,11 @@ from ..core.analytics_database import (
     AStockOptionDaily,
     AStockReportRc,
     AStockRepoDaily,
+    AStockTHSDaily,
+    AStockTHSMember,
     AnalyticsSession,
 )
+from ..core.database import AIStockTHSIndexCache, get_db_ctx
 from ..core.duckdb_utils import connect_duckdb
 from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
@@ -73,6 +76,9 @@ A_STOCK_CHINABOND_CHUNK_CALENDAR_DAYS = 30
 A_STOCK_OPTION_DAILY_SYNC_EXCHANGES = ("SSE", "SZSE")
 A_STOCK_FUND_DAILY_BATCH_BY_DATE_MAX_DAYS = 10
 A_STOCK_FUND_ADJ_FACTOR_BATCH_BY_DATE_MAX_DAYS = 10
+THS_INDEX_TYPES = ("N", "TH", "I")
+THS_DAILY_REFRESH_DAYS = 30
+THS_MEMBER_REFRESH_DAYS = 7
 
 
 def _clean_text(value) -> Optional[str]:
@@ -85,6 +91,17 @@ def _clean_text(value) -> Optional[str]:
         pass
     text_value = str(value).strip()
     return text_value or None
+
+
+def _safe_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_date(value) -> Optional[date]:
@@ -434,6 +451,148 @@ class AStockBaseDataSyncService:
         if name_frames:
             name_frame = pd.concat(name_frames, ignore_index=True).drop_duplicates()
             self._replace_name_changes_range(name_frame, name_start, name_end)
+
+    def sync_ths_board_data(self, end_date: date) -> Dict:
+        """刷新主库板块目录，并把成分和近期行情缓存到 DuckDB。
+
+        网络请求全部在数据库事务外完成。成分按成功板块逐个替换，单个板块
+        拉取失败时保留旧缓存，避免一次 Tushare 抖动清空可用数据。
+        """
+        fetched_at = datetime.now()
+        catalog: List[Dict] = []
+        catalog_errors: List[str] = []
+        for index_type in THS_INDEX_TYPES:
+            frame = self.tushare.get_ths_index_frame(index_type)
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                catalog_errors.append(index_type)
+                continue
+            for _, row in frame.iterrows():
+                ths_code = str(row.get("ts_code") or "").strip().upper()
+                name = _clean_text(row.get("name"))
+                if not ths_code or not name:
+                    continue
+                catalog.append(
+                    {
+                        "index_type": index_type,
+                        "ts_code": ths_code,
+                        "name": name,
+                        "constituent_count": int(_safe_float(row.get("count")) or 0),
+                        "exchange": _clean_text(row.get("exchange")) or "A",
+                        "list_date": _parse_date(row.get("list_date")),
+                    }
+                )
+        if catalog_errors or not catalog:
+            self.logger.warning(
+                "同花顺板块目录同步不完整，保留主库旧目录: missing=%s",
+                ",".join(catalog_errors),
+            )
+            with get_db_ctx() as db:
+                catalog = [
+                    {
+                        "index_type": row.index_type,
+                        "ts_code": row.ts_code,
+                        "name": row.name,
+                        "constituent_count": row.constituent_count,
+                        "exchange": row.exchange,
+                        "list_date": row.list_date,
+                    }
+                    for row in db.query(AIStockTHSIndexCache).all()
+                ]
+        else:
+            # 主库只保留小而稳定的目录；先完成网络读取，再开启短写事务。
+            with get_db_ctx() as db:
+                db.query(AIStockTHSIndexCache).delete(synchronize_session=False)
+                db.add_all(
+                    [AIStockTHSIndexCache(**item, fetched_at=fetched_at) for item in catalog]
+                )
+
+        member_saved = 0
+        member_errors: List[str] = []
+        now = datetime.now()
+        latest_member_update = self.analytics_db.execute(
+            text("SELECT MAX(updated_at) FROM a_stock_ths_member")
+        ).scalar()
+        member_refresh_due = (
+            latest_member_update is None
+            or latest_member_update < now - timedelta(days=THS_MEMBER_REFRESH_DAYS)
+        )
+        if member_refresh_due:
+            for position, board in enumerate(catalog, start=1):
+                ths_code = board["ts_code"]
+                frame = self.tushare.get_ths_member_frame(ths_code)
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    member_errors.append(ths_code)
+                    continue
+                mappings = []
+                for _, row in frame.iterrows():
+                    con_code = str(row.get("con_code") or "").strip().upper()
+                    if not con_code:
+                        continue
+                    mappings.append(
+                        {
+                            "ths_code": ths_code,
+                            "con_code": con_code,
+                            "con_name": _clean_text(row.get("con_name")),
+                            "weight": _safe_float(row.get("weight")),
+                            "in_date": _parse_date(row.get("in_date")),
+                            "out_date": _parse_date(row.get("out_date")),
+                            "is_new": _clean_text(row.get("is_new")),
+                            "updated_at": now,
+                        }
+                    )
+                if not mappings:
+                    member_errors.append(ths_code)
+                    continue
+                self.analytics_db.execute(
+                    text("DELETE FROM a_stock_ths_member WHERE ths_code = :ths_code"),
+                    {"ths_code": ths_code},
+                )
+                self._insert_analytics_mappings(AStockTHSMember, mappings)
+                member_saved += len(mappings)
+                if position % 100 == 0:
+                    self.analytics_db.commit()
+        self.analytics_db.commit()
+
+        daily_start = end_date - timedelta(days=THS_DAILY_REFRESH_DAYS)
+        trading_dates = self._trading_dates(daily_start, end_date)
+        daily_saved = 0
+        daily_errors: List[str] = []
+        for trade_date in trading_dates:
+            frame = self.tushare.get_ths_daily_frame(trade_date)
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                daily_errors.append(trade_date.isoformat())
+                continue
+            mappings = []
+            for _, row in frame.iterrows():
+                ths_code = str(row.get("ts_code") or "").strip().upper()
+                row_date = _parse_date(row.get("trade_date")) or trade_date
+                if not ths_code:
+                    continue
+                mappings.append(
+                    {
+                        "ths_code": ths_code,
+                        "trade_date": row_date,
+                        **{field: _safe_float(row.get(field)) for field in (
+                            "open", "close", "high", "low", "pre_close", "avg_price",
+                            "change", "pct_change", "vol", "turnover_rate", "total_mv", "float_mv",
+                        )},
+                        "updated_at": now,
+                    }
+                )
+            self._insert_analytics_mappings(AStockTHSDaily, mappings)
+            daily_saved += len(mappings)
+        self.analytics_db.commit()
+        return {
+            "catalog_rows": len(catalog),
+            "catalog_errors": catalog_errors,
+            "member_saved_rows": member_saved,
+            "member_errors": member_errors,
+            "member_refreshed": member_refresh_due,
+            "daily_saved_rows": daily_saved,
+            "daily_errors": daily_errors,
+            "daily_start_date": daily_start.isoformat(),
+            "daily_end_date": end_date.isoformat(),
+        }
 
     def _upsert_stock_basic(self, frame: pd.DataFrame):
         now = datetime.now()
@@ -2191,6 +2350,9 @@ class AStockBaseDataSyncService:
         else:
             self.sync_reference_data_incremental(reference_start, end_value)
 
+        self._progress("同步同花顺细分板块目录、成分和行情", 10)
+        ths_board_result = self.sync_ths_board_data(end_value)
+
         market_warmup_days = max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS)
         market_default_start = _warmup_start(DEFAULT_START_DATE, market_warmup_days)
         if explicit_start:
@@ -2416,6 +2578,8 @@ class AStockBaseDataSyncService:
         repo_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockRepoDaily.__tablename__)
         chinabond_curve_def_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDef.__tablename__)
         chinabond_curve_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockChinaBondYieldCurveDaily.__tablename__)
+        ths_member_rows = _count_analytics_table_rows(self.analytics_db, AStockTHSMember.__tablename__)
+        ths_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockTHSDaily.__tablename__)
         if trading_dates:
             market_qfq_coverage = _adj_factor_coverage_stats(
                 self.analytics_db,
@@ -2480,6 +2644,15 @@ class AStockBaseDataSyncService:
                 "report_rc": SYNC_INCREMENTAL_REPAIR_WINDOW_DAYS,
             },
             "reference_full_refresh": reference_full_refresh,
+            "ths_catalog_rows": ths_board_result.get("catalog_rows"),
+            "ths_catalog_errors": ths_board_result.get("catalog_errors"),
+            "ths_member_rows": ths_member_rows,
+            "ths_member_saved_rows": ths_board_result.get("member_saved_rows"),
+            "ths_member_refreshed": ths_board_result.get("member_refreshed"),
+            "ths_member_errors": ths_board_result.get("member_errors"),
+            "ths_daily_rows": ths_daily_rows,
+            "ths_daily_saved_rows": ths_board_result.get("daily_saved_rows"),
+            "ths_daily_errors": ths_board_result.get("daily_errors"),
             "fund_basic_rows": fund_basic_rows,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),
