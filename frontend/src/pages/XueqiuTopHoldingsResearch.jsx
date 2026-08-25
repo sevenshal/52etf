@@ -1056,7 +1056,6 @@ const XueqiuTopHoldingsResearch = () => {
       dataIndex: 'weight_price_ratio_5d',
       width: 112,
       align: 'right',
-      defaultSortOrder: 'descend',
       sorter: (a, b) => Number(a.weight_price_ratio_5d || 0) - Number(b.weight_price_ratio_5d || 0),
       render: value => (value == null ? '-' : `${Number(value).toFixed(2)}x`),
     },
@@ -1069,6 +1068,7 @@ const XueqiuTopHoldingsResearch = () => {
       dataIndex: 'contrarian_stock_ratio_pct',
       width: 112,
       align: 'right',
+      defaultSortOrder: 'descend',
       sorter: (a, b) => Number(a.contrarian_stock_ratio_pct || 0) - Number(b.contrarian_stock_ratio_pct || 0),
       render: (value, record) => (
         <Tooltip title={`${numberFormatter(record.contrarian_stock_count || 0)} / ${numberFormatter(record.stock_count || 0)} 只`}>
@@ -1243,7 +1243,7 @@ const XueqiuTopHoldingsResearch = () => {
       <Card
         bordered={false}
         title={(
-          <Tooltip title="按板块覆盖持仓股中‘逆势吸筹且至少被3个活跃组合持有’的个股占比从高到低排列；汇总仅显示覆盖持仓股大于10只且吸筹股不为空的板块。">
+          <Tooltip title="仅显示板块自身方向为逆势吸筹、覆盖持仓股大于10只且吸筹股不为空的板块；按‘逆势吸筹且至少被3个活跃组合持有’的个股占比从高到低取前15。">
             正在逆势吸筹的细分板块
           </Tooltip>
         )}

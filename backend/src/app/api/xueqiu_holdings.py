@@ -993,7 +993,8 @@ def load_xueqiu_top_holdings_latest(
                 [
                     item
                     for item in board_items
-                    if int(item.get("stock_count") or 0) >= XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS
+                    if item.get("direction") == "逆势吸筹"
+                    and int(item.get("stock_count") or 0) >= XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS
                     and float(item.get("contrarian_stock_ratio_pct") or 0) > 0
                 ],
                 key=lambda item: (
@@ -1001,7 +1002,7 @@ def load_xueqiu_top_holdings_latest(
                     -int(item.get("contrarian_stock_count") or 0),
                     -float(item.get("composite_weight_pct") or 0),
                 ),
-            )[:12],
+            )[:15],
             "items": item_rows,
         }
     finally:

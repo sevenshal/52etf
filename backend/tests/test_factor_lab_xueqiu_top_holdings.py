@@ -717,6 +717,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             with (
                 patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path),
                 patch.object(factor_lab, "DBSession", self._CatalogSession),
+                patch.object(factor_lab, "XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS", 3),
             ):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
                 board_holdings = factor_lab.load_xueqiu_board_holding_symbols(
@@ -732,7 +733,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(2, board["contrarian_stock_count"])
         self.assertEqual(66.67, board["contrarian_stock_ratio_pct"])
         self.assertGreater(board["weight_price_ratio_5d"], 1.05)
-        self.assertEqual([], result["contrarian_boards"])
+        self.assertEqual(["885001.TI"], [item["ths_code"] for item in result["contrarian_boards"]])
         self.assertEqual("测试细分板块", board_holdings["name"])
         self.assertEqual(
             ["SH.600001", "SH.600002", "SH.600003"],
