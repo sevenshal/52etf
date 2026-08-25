@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from ...core.analytics_database import AnalyticsSession
 from ...core.database import AIStockTHSIndexCache, get_db_ctx
@@ -43,6 +44,63 @@ class ScanRequest(BaseModel):
     signal_side: str = Field(default="buy", pattern="^(buy|sell|all)$")
     realtime: bool = False
     filters: StockPoolFilters = Field(default_factory=StockPoolFilters)
+
+
+@router.get("/symbols")
+def search_stock_symbols(
+    q: str = Query(default="", max_length=64),
+    limit: int = Query(default=20, ge=1, le=50),
+    _: str = Depends(valid_admin_account),
+):
+    """Search active A-shares by code or Chinese stock name."""
+    search_text = str(q or "").strip().upper()
+    like_pattern = f"%{search_text}%"
+    prefix_pattern = f"{search_text}%"
+    db = AnalyticsSession()
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT ts_code, symbol, name, industry, market
+                FROM a_stock_basic
+                WHERE list_status = 'L'
+                  AND (
+                        :query = ''
+                     OR UPPER(ts_code) LIKE :pattern
+                     OR UPPER(symbol) LIKE :pattern
+                     OR UPPER(COALESCE(name, '')) LIKE :pattern
+                  )
+                ORDER BY
+                    CASE
+                        WHEN UPPER(ts_code) = :query OR UPPER(symbol) = :query THEN 0
+                        WHEN UPPER(ts_code) LIKE :prefix OR UPPER(symbol) LIKE :prefix THEN 1
+                        WHEN UPPER(COALESCE(name, '')) LIKE :prefix THEN 2
+                        ELSE 3
+                    END,
+                    ts_code
+                LIMIT :limit
+                """
+            ),
+            {
+                "query": search_text,
+                "pattern": like_pattern,
+                "prefix": prefix_pattern,
+                "limit": limit,
+            },
+        ).mappings().all()
+        return [
+            {
+                "value": row["ts_code"],
+                "label": f"{row['name']} · {row['ts_code']}" if row["name"] else row["ts_code"],
+                "name": row["name"],
+                "industry": row["industry"],
+                "market": row["market"],
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+        AnalyticsSession.remove()
 
 
 @router.get("/chart/{symbol}")

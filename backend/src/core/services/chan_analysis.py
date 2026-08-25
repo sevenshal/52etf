@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable
 
-from czsc import CZSC, Freq, RawBar
+from czsc import CZSC, Freq, RawBar, Signal, generate_czsc_signals
 from czsc._native import signals as native_signals
 
 
@@ -153,18 +153,111 @@ def _recognized_signals(c: CZSC, confirmed: bool) -> list[dict[str, Any]]:
     return result
 
 
+def _signal_replay_descriptors(c: CZSC) -> list[dict[str, Any]]:
+    """Resolve stable output keys for the configured native signal functions."""
+    descriptors: list[dict[str, Any]] = []
+    for name, params, expected in DEFAULT_SIGNAL_SPECS:
+        category = name.split("_", 1)[0]
+        namespace = getattr(native_signals, category)
+        signals = namespace.call_signal(name, c, params)
+        if not signals:
+            continue
+        descriptors.append(
+            {
+                "name": name,
+                "key": signals[0].key,
+                "expected": expected,
+                "config": {"name": name, "freq": str(c.freq), **params},
+            }
+        )
+    return descriptors
+
+
+def _extract_activation_events(
+    replay_rows: Iterable[dict[str, Any]],
+    descriptors: list[dict[str, Any]],
+    bars_by_id: dict[int, RawBar],
+    *,
+    latest_bar_id: int,
+    latest_confirmed: bool,
+) -> list[dict[str, Any]]:
+    """Collapse a persistent signal into one event per neutral-to-active transition."""
+    previous_types: dict[str, str | None] = {item["name"]: None for item in descriptors}
+    events: list[dict[str, Any]] = []
+    for row in replay_rows:
+        try:
+            bar_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+        bar = bars_by_id.get(bar_id)
+        if bar is None:
+            continue
+        for descriptor in descriptors:
+            value = row.get(descriptor["key"])
+            current_type: str | None = None
+            signal: Signal | None = None
+            if value:
+                try:
+                    signal = Signal(key=descriptor["key"], value=str(value))
+                except (TypeError, ValueError):
+                    signal = None
+                if signal is not None and signal.v1 in descriptor["expected"]:
+                    current_type = signal.v1
+
+            previous_type = previous_types[descriptor["name"]]
+            if current_type is not None and current_type != previous_type and signal is not None:
+                events.append(
+                    {
+                        "name": descriptor["name"],
+                        "key": signal.key,
+                        "value": signal.value,
+                        "type": signal.v1,
+                        "detail": signal.v2,
+                        "score": int(signal.score),
+                        "confirmed": latest_confirmed if bar_id == latest_bar_id else True,
+                        "bar_time": _iso(bar.dt),
+                    }
+                )
+            previous_types[descriptor["name"]] = current_type
+    return events
+
+
+def _replay_signal_history(c: CZSC, raw_bars: list[RawBar], confirmed: bool) -> list[dict[str, Any]]:
+    """Replay configured signals bar by bar without using future market data."""
+    descriptors = _signal_replay_descriptors(c)
+    if not descriptors or len(raw_bars) < 2:
+        return []
+    replay_rows = generate_czsc_signals(
+        raw_bars,
+        [item["config"] for item in descriptors],
+        sdt=raw_bars[0].dt.strftime("%Y%m%d"),
+        init_n=1,
+        df=False,
+    )
+    return _extract_activation_events(
+        replay_rows,
+        descriptors,
+        {int(bar.id): bar for bar in raw_bars},
+        latest_bar_id=int(raw_bars[-1].id),
+        latest_confirmed=confirmed,
+    )
+
+
 def analyze_bars(
     symbol: str,
     rows: Iterable[dict[str, Any]],
     freq: str = "d",
     *,
     confirmed: bool = True,
+    include_history: bool = True,
 ) -> dict[str, Any]:
     """Return chart-ready Chan structures and official CZSC signals."""
     raw_bars = rows_to_raw_bars(symbol, rows, freq)
     if len(raw_bars) < 20:
         raise ValueError("At least 20 bars are required for Chan analysis")
     c = CZSC(raw_bars)
+    current_signals = _recognized_signals(c, confirmed)
+    signal_history = _replay_signal_history(c, raw_bars, confirmed) if include_history else []
     return {
         "symbol": symbol,
         "freq": freq,
@@ -174,5 +267,8 @@ def analyze_bars(
         "fractals": [_serialize_fx(item) for item in c.fx_list],
         "strokes": [_serialize_bi(item) for item in c.bi_list],
         "centers": [_serialize_zs(item) for item in c.zs_list],
-        "signals": _recognized_signals(c, confirmed),
+        "signals": current_signals,
+        "signal_history": signal_history,
+        "signal_history_count": len(signal_history),
+        "signal_replay_mode": "bar_close_activation",
     }

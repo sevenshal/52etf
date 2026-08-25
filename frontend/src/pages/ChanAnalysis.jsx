@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Checkbox, Empty, Form, Input, InputNumber, Progress, Segmented, Select, Space, Spin, Table, Tag, Typography } from 'antd';
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Card, Checkbox, Empty, Form, InputNumber, Progress, Segmented, Select, Space, Spin, Table, Tag, Typography } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import request from '../utils/request';
@@ -14,33 +14,42 @@ const PERIODS = [
   { label: '日K', value: 'd' },
 ];
 
-const compactSymbol = value => {
-  const text = String(value || '').trim().toUpperCase();
-  if (/^\d{6}\.(SH|SZ|BJ)$/.test(text)) return text;
-  if (/^\d{6}$/.test(text)) {
-    if (text.startsWith('6')) return `${text}.SH`;
-    if (text.startsWith('8') || text.startsWith('4')) return `${text}.BJ`;
-    return `${text}.SZ`;
-  }
-  return text;
-};
-
 const fxIsTop = mark => String(mark || '').toLowerCase().includes('g') || String(mark || '').includes('顶');
 const isUp = direction => String(direction || '').toLowerCase().includes('up') || String(direction || '').includes('向上');
 
 const ChanAnalysis = () => {
-  const [symbolInput, setSymbolInput] = useState('000001.SZ');
   const [symbol, setSymbol] = useState('000001.SZ');
+  const [symbolOptions, setSymbolOptions] = useState([{ label: '平安银行 · 000001.SZ', value: '000001.SZ' }]);
+  const [symbolSearching, setSymbolSearching] = useState(false);
+  const symbolSearchTimer = useRef(null);
+  const symbolSearchSequence = useRef(0);
   const [freq, setFreq] = useState('d');
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [layers, setLayers] = useState(['fractals', 'strokes', 'centers', 'signals']);
   const [scanForm] = Form.useForm();
   const [poolPreview, setPoolPreview] = useState(null);
   const [scan, setScan] = useState(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [boardOptions, setBoardOptions] = useState([]);
+
+  const searchSymbols = useCallback(query => {
+    if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
+    const sequence = ++symbolSearchSequence.current;
+    symbolSearchTimer.current = window.setTimeout(async () => {
+      setSymbolSearching(true);
+      try {
+        const response = await request.get('/api/chan-analysis/symbols', {
+          params: { q: String(query || '').trim(), limit: 30 },
+        });
+        if (sequence === symbolSearchSequence.current) setSymbolOptions(response.data || []);
+      } catch (err) {
+        console.error('股票搜索失败', err);
+      } finally {
+        if (sequence === symbolSearchSequence.current) setSymbolSearching(false);
+      }
+    }, 250);
+  }, []);
 
   const scanPayload = useCallback(values => ({
     freq: values.freq || 'd',
@@ -115,6 +124,10 @@ const ChanAnalysis = () => {
     }).catch(err => console.error('板块目录加载失败', err));
   }, []);
 
+  useEffect(() => () => {
+    if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
+  }, []);
+
   const chartOption = useMemo(() => {
     const bars = payload?.bars || [];
     const analysis = payload?.analysis || {};
@@ -128,40 +141,50 @@ const ChanAnalysis = () => {
       return dates.findIndex(item => item.startsWith(dayKey));
     };
 
-    const strokeLines = layers.includes('strokes') ? (analysis.strokes || []).map(item => {
+    const strokeLines = (analysis.strokes || []).map(item => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const startPrice = isUp(item.direction) ? item.low : item.high;
       const endPrice = isUp(item.direction) ? item.high : item.low;
       return [{ coord: [start, startPrice] }, { coord: [end, endPrice] }];
-    }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0) : [];
+    }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
 
-    const centerAreas = layers.includes('centers') ? (analysis.centers || []).filter(item => item.valid).map(item => [
+    const centerAreas = (analysis.centers || []).filter(item => item.valid).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
       { xAxis: Math.max(0, findIndex(item.end)), yAxis: item.zg },
-    ]) : [];
+    ]);
 
-    const fractals = layers.includes('fractals') ? (analysis.fractals || []).map(item => ({
+    const fractals = (analysis.fractals || []).map(item => ({
       coord: [findIndex(item.dt), item.price],
       name: fxIsTop(item.mark) ? '顶分型' : '底分型',
       value: fxIsTop(item.mark) ? '顶' : '底',
       symbolRotate: fxIsTop(item.mark) ? 180 : 0,
       itemStyle: { color: fxIsTop(item.mark) ? '#cf1322' : '#389e0d' },
-    })).filter(item => item.coord[0] >= 0) : [];
-    const signalMarkers = layers.includes('signals') ? (analysis.signals || []).map(item => {
+    })).filter(item => item.coord[0] >= 0);
+    const signalSlots = new Map();
+    const signalMarkers = (analysis.signal_history || analysis.signals || []).map(item => {
       const index = findIndex(item.bar_time);
       const bar = bars[Math.max(0, index)];
       const buy = String(item.type).includes('买');
+      const slotKey = `${index}-${buy ? 'buy' : 'sell'}`;
+      const slot = signalSlots.get(slotKey) || 0;
+      signalSlots.set(slotKey, slot + 1);
+      const horizontalOffset = slot === 0 ? 0 : Math.ceil(slot / 2) * 18 * (slot % 2 ? 1 : -1);
+      const detail = item.detail && item.detail !== '任意' ? ` · ${item.detail}` : '';
       return {
         coord: [index, buy ? bar?.low : bar?.high],
         name: item.type,
         value: item.type,
         symbol: 'pin',
         symbolSize: 38,
+        symbolOffset: [horizontalOffset, 0],
         itemStyle: { color: item.confirmed ? (buy ? '#389e0d' : '#cf1322') : '#faad14' },
         label: { show: true, formatter: item.type, color: '#fff', fontSize: 10 },
+        tooltip: {
+          formatter: `${item.type}${detail}<br/>${dayjs(item.bar_time).format('YYYY-MM-DD HH:mm')}<br/>${item.name}`,
+        },
       };
-    }).filter(item => item.coord[0] >= 0) : [];
+    }).filter(item => item.coord[0] >= 0);
 
     return {
       animation: false,
@@ -211,31 +234,26 @@ const ChanAnalysis = () => {
         },
       ],
     };
-  }, [layers, payload]);
-
-  const submitSymbol = () => {
-    const normalized = compactSymbol(symbolInput);
-    if (normalized) setSymbol(normalized);
-  };
+  }, [payload]);
 
   return (
     <div className="chan-page">
       <div className="chan-heading">
         <div><Title level={3}>缠论</Title><Text type="secondary">专业K线、缠论结构与官方CZSC信号</Text></div>
         <Space wrap>
-          <Input.Search value={symbolInput} onChange={event => setSymbolInput(event.target.value)} onSearch={submitSymbol}
-            enterButton={<SearchOutlined />} placeholder="000001.SZ" style={{ width: 190 }} />
+          <Select showSearch value={symbol} options={symbolOptions} loading={symbolSearching}
+            filterOption={false} onSearch={searchSymbols} onDropdownVisibleChange={open => { if (open) searchSymbols(''); }}
+            onChange={setSymbol} placeholder="输入股票名称或代码" notFoundContent={symbolSearching ? <Spin size="small" /> : '没有匹配股票'}
+            style={{ width: 240 }} />
           <Segmented options={PERIODS} value={freq} onChange={setFreq} />
           <Button icon={<ReloadOutlined />} onClick={loadChart}>刷新</Button>
         </Space>
       </div>
       {error && <Alert type="error" showIcon message={error} />}
       <Card className="chan-chart-card" title={`${symbol} · ${freq === 'd' ? '日K' : freq}`}
-        extra={payload?.analysis && <Text type="secondary">CZSC {payload.analysis.czsc_version} · {payload.analysis.bar_count}根</Text>}>
-        <Checkbox.Group options={[
-          { label: '分型', value: 'fractals' }, { label: '笔', value: 'strokes' },
-          { label: '中枢', value: 'centers' }, { label: '信号', value: 'signals' },
-        ]} value={layers} onChange={setLayers} />
+        extra={payload?.analysis && <Text type="secondary">
+          CZSC {payload.analysis.czsc_version} · {payload.analysis.bar_count}根 · 历史信号触发 {payload.analysis.signal_history_count || 0} 次
+        </Text>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
             {chartOption ? <ReactECharts option={chartOption} notMerge style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
@@ -244,8 +262,8 @@ const ChanAnalysis = () => {
       </Card>
       <Card title="当前缠论信号" className="chan-signal-card">
         {payload?.analysis?.signals?.length ? <Space wrap>{payload.analysis.signals.map(item => (
-          <Tag color={String(item.type).includes('买') ? 'green' : 'red'} key={`${item.name}-${item.value}`}>
-            {item.type} · {item.detail} · 已确认
+          <Tag color={item.confirmed ? (String(item.type).includes('买') ? 'green' : 'red') : 'gold'} key={`${item.name}-${item.value}`}>
+            {item.type} · {item.detail} · {item.confirmed ? '已确认' : '盘中预判'}
           </Tag>
         ))}</Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前最后一根K线没有一、二、三类买卖点" />}
       </Card>
@@ -277,7 +295,15 @@ const ChanAnalysis = () => {
             <Text>买点 {scan.signal_count ?? 0}</Text><Text type={scan.error_count ? 'danger' : 'secondary'}>失败 {scan.error_count ?? 0}</Text></Space>
           {['PENDING', 'RUNNING'].includes(scan.status) && <Progress percent={scan.candidate_count ? Math.round((scan.processed_count || 0) / scan.candidate_count * 100) : 0} />}
           <Table size="small" rowKey="id" pagination={{ pageSize: 20 }} dataSource={scan.signals || []}
-            onRow={row => ({ onDoubleClick: () => { setSymbol(row.ts_code); setSymbolInput(row.ts_code); setFreq(scan.freq); window.scrollTo({ top: 0, behavior: 'smooth' }); } })}
+            onRow={row => ({ onDoubleClick: () => {
+              setSymbolOptions(previous => [
+                { label: `${row.name || row.ts_code} · ${row.ts_code}`, value: row.ts_code },
+                ...previous.filter(item => item.value !== row.ts_code),
+              ]);
+              setSymbol(row.ts_code);
+              setFreq(scan.freq);
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            } })}
             columns={[
               { title: '代码', dataIndex: 'ts_code', width: 110 }, { title: '名称', dataIndex: 'name', width: 100 },
               { title: '信号', dataIndex: 'signal_type', render: (value, row) => <Tag color={row.confirmed ? 'green' : 'gold'}>{value}{row.confirmed ? '' : '·预判'}</Tag>, width: 110 },

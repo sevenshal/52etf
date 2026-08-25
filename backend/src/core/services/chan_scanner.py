@@ -192,7 +192,13 @@ class ChanScanManager:
                 symbol = candidate["ts_code"]
                 try:
                     rows = _load_scan_rows(symbol, freq)
-                    analysis = analyze_bars(symbol, rows, freq, confirmed=not realtime)
+                    analysis = analyze_bars(
+                        symbol,
+                        rows,
+                        freq,
+                        confirmed=not realtime,
+                        include_history=False,
+                    )
                     for signal in analysis["signals"]:
                         if signal["type"] in expected:
                             signal_rows.append({"symbol": symbol, **signal})
