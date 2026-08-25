@@ -132,6 +132,26 @@ def _collect_disk_usage() -> List[dict]:
     return disks
 
 
+def _collect_process_info() -> dict:
+    """采样当前后端进程信息。"""
+    proc = psutil.Process(os.getpid())
+    # cpu_percent 返回本次阻塞采样区间的结果；不要随后再次调用，否则极短的
+    # 第二个采样区间通常会把刚得到的有效结果覆盖成 0.0。
+    cpu_percent = proc.cpu_percent(interval=0.1)
+    with proc.oneshot():
+        return {
+            "pid": proc.pid,
+            "name": proc.name(),
+            "cmdline": " ".join(proc.cmdline() or []),
+            "cpu_percent": round(cpu_percent, 2),
+            "memory_percent": round(proc.memory_percent(), 2),
+            "memory_rss": proc.memory_info().rss,
+            "num_threads": proc.num_threads(),
+            "start_time": int(proc.create_time()),
+            "username": proc.username(),
+        }
+
+
 @router.get("/info")
 def get_system_info(_account_id: str = Depends(valid_admin_account)):
     """返回后端服务所在机器的系统信息（CPU/内存/磁盘/温度/进程等）。"""
@@ -207,20 +227,7 @@ def get_system_info(_account_id: str = Depends(valid_admin_account)):
 
     # 后端进程信息
     try:
-        proc = psutil.Process(os.getpid())
-        proc.cpu_percent(interval=0.1)
-        with proc.oneshot():
-            info["process"] = {
-                "pid": proc.pid,
-                "name": proc.name(),
-                "cmdline": " ".join(proc.cmdline() or []),
-                "cpu_percent": round(proc.cpu_percent(interval=None), 2),
-                "memory_percent": round(proc.memory_percent(), 2),
-                "memory_rss": proc.memory_info().rss,
-                "num_threads": proc.num_threads(),
-                "start_time": int(proc.create_time()),
-                "username": proc.username(),
-            }
+        info["process"] = _collect_process_info()
     except Exception as e:
         logger.warning("Failed to collect process info: %s", e)
         info["process"] = {"error": str(e)}
