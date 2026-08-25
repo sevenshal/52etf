@@ -12,7 +12,12 @@ import pandas as pd
 
 from ..duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 from .chan_analysis import analyze_bars
-from .chan_minute_data import aggregate_minute_rows, fetch_realtime_minute_rows, load_minute_rows
+from .chan_minute_data import (
+    aggregate_minute_rows,
+    fetch_realtime_minute_rows,
+    load_minute_rows,
+    merge_minute_rows,
+)
 
 
 BUY_SIGNALS = {"一买", "二买", "三买"}
@@ -124,15 +129,7 @@ def _load_scan_rows(
     )
     rows = aggregate_minute_rows(symbol, rows, freq)
     if realtime_rows:
-        rows_by_time = {}
-        for row in [*rows, *realtime_rows]:
-            timestamp = pd.to_datetime(row.get("timestamp"), errors="coerce")
-            if pd.isna(timestamp):
-                continue
-            normalized = dict(row)
-            normalized["timestamp"] = timestamp.to_pydatetime()
-            rows_by_time[normalized["timestamp"]] = normalized
-        rows = [rows_by_time[timestamp] for timestamp in sorted(rows_by_time)]
+        rows = merge_minute_rows(rows, realtime_rows)
     return rows
 
 

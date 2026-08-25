@@ -10,6 +10,8 @@ from src.core.services.chan_minute_data import (
     fetch_realtime_minute_rows,
     historical_minute_batch_size,
     incremental_minute_sync_groups,
+    is_complete_a_share_minute_day,
+    merge_minute_rows,
     normalize_minute_frame,
     plan_incremental_minute_groups,
 )
@@ -54,6 +56,32 @@ def test_aggregate_minute_rows_uses_a_share_buckets():
     assert result
     assert result[0]["timestamp"].minute % 5 == 0
     assert sum(item["volume"] for item in result) == 6000
+
+
+def test_complete_a_share_minute_day_requires_all_241_regular_minutes():
+    trade_date = date(2026, 8, 25)
+    timestamps = [
+        *pd.date_range(f"{trade_date} 09:30:00", f"{trade_date} 11:30:00", freq="1min"),
+        *pd.date_range(f"{trade_date} 13:01:00", f"{trade_date} 15:00:00", freq="1min"),
+    ]
+    rows = [{"timestamp": timestamp} for timestamp in timestamps]
+
+    assert len(rows) == 241
+    assert is_complete_a_share_minute_day(rows, trade_date) is True
+    assert is_complete_a_share_minute_day(rows[:-1], trade_date) is False
+
+
+def test_merge_minute_rows_realtime_overrides_same_timestamp():
+    timestamp = datetime(2026, 8, 25, 10, 0)
+    historical = [{"timestamp": timestamp, "close": 10.0}]
+    realtime = [
+        {"timestamp": timestamp, "close": 10.2},
+        {"timestamp": datetime(2026, 8, 25, 10, 1), "close": 10.3},
+    ]
+
+    result = merge_minute_rows(historical, realtime)
+
+    assert [row["close"] for row in result] == [10.2, 10.3]
 
 
 def test_historical_minute_batch_size_respects_row_limit():

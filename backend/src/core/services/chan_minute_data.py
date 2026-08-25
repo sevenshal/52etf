@@ -275,6 +275,39 @@ def aggregate_minute_rows(symbol: str, rows: list[dict[str, Any]], freq: str) ->
     ]
 
 
+def is_complete_a_share_minute_day(rows: list[dict[str, Any]], trade_date: date) -> bool:
+    """Return whether raw 1m rows contain every regular A-share minute for a closed day."""
+    actual = {
+        timestamp.to_pydatetime().replace(second=0, microsecond=0)
+        for row in rows
+        if not pd.isna(timestamp := pd.to_datetime(row.get("timestamp"), errors="coerce"))
+        and timestamp.date() == trade_date
+    }
+    morning_start = datetime.combine(trade_date, time(9, 30))
+    morning_end = datetime.combine(trade_date, time(11, 30))
+    afternoon_start = datetime.combine(trade_date, time(13, 1))
+    afternoon_end = datetime.combine(trade_date, time(15, 0))
+    expected = set(pd.date_range(morning_start, morning_end, freq="1min").to_pydatetime())
+    expected.update(pd.date_range(afternoon_start, afternoon_end, freq="1min").to_pydatetime())
+    return expected.issubset(actual)
+
+
+def merge_minute_rows(
+    historical_rows: list[dict[str, Any]],
+    realtime_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge normalized bars in memory, with realtime rows winning timestamp collisions."""
+    rows_by_time: dict[datetime, dict[str, Any]] = {}
+    for row in [*historical_rows, *realtime_rows]:
+        timestamp = pd.to_datetime(row.get("timestamp"), errors="coerce")
+        if pd.isna(timestamp):
+            continue
+        normalized = dict(row)
+        normalized["timestamp"] = timestamp.to_pydatetime()
+        rows_by_time[normalized["timestamp"]] = normalized
+    return [rows_by_time[timestamp] for timestamp in sorted(rows_by_time)]
+
+
 def backfill_symbol_minutes(symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
     """Fetch in <=30-calendar-day chunks so every response stays below 8000 rows."""
     normalized_symbol = normalize_a_stock_symbol(symbol)

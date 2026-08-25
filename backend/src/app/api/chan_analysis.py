@@ -1,7 +1,8 @@
 """Administrator-only Chan theory analysis endpoints."""
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -13,7 +14,10 @@ from ...core.services.chan_analysis import analyze_bars
 from ...core.services.chan_minute_data import (
     aggregate_minute_rows,
     backfill_symbol_minutes,
+    fetch_realtime_minute_rows,
+    is_complete_a_share_minute_day,
     load_minute_rows,
+    merge_minute_rows,
     minute_data_status,
 )
 from ...core.services.chan_minute_sync import ChanMinuteSyncManager
@@ -120,6 +124,8 @@ def get_chan_chart(
     if range_start > range_end:
         raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
 
+    realtime_merged = False
+    historical_today_complete = None
     if freq == "d":
         db = AnalyticsSession()
         try:
@@ -133,15 +139,46 @@ def get_chan_chart(
             datetime.combine(range_start, datetime.min.time()),
             datetime.combine(range_end, datetime.max.time()),
         )
+        today = date.today()
+        today_in_range = range_start <= today <= range_end
+        historical_today_complete = (
+            is_complete_a_share_minute_day(minute_rows, today) if today_in_range else None
+        )
         bars = aggregate_minute_rows(normalized_symbol, minute_rows, freq)
+        now = datetime.now()
+        should_fetch_realtime = (
+            today_in_range
+            and today.weekday() < 5
+            and now.time() >= time(9, 30)
+            and not historical_today_complete
+        )
+        if should_fetch_realtime:
+            realtime_freq = {"1m": "1MIN", "5m": "5MIN", "30m": "30MIN"}[freq]
+            realtime_rows = fetch_realtime_minute_rows([normalized_symbol], realtime_freq).get(
+                normalized_symbol, []
+            )
+            realtime_rows = [
+                row
+                for row in realtime_rows
+                if pd.notna(timestamp := pd.to_datetime(row.get("timestamp"), errors="coerce"))
+                and timestamp.date() == today
+            ]
+            if realtime_rows:
+                bars = merge_minute_rows(bars, realtime_rows)
+                realtime_merged = True
     if len(bars) < 20:
         raise HTTPException(status_code=404, detail="可用K线不足20根")
 
     try:
-        analysis = analyze_bars(normalized_symbol, bars, freq=freq)
+        analysis = analyze_bars(normalized_symbol, bars, freq=freq, confirmed=not realtime_merged)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"bars": bars, "analysis": analysis}
+    return {
+        "bars": bars,
+        "analysis": analysis,
+        "realtime_merged": realtime_merged,
+        "historical_today_complete": historical_today_complete,
+    }
 
 
 @router.get("/minute-data/status")
