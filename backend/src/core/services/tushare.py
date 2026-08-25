@@ -592,6 +592,7 @@ class TushareService(QuoteProvider):
         normalized_freq = str(freq or "1MIN").upper()
         if normalized_freq not in {"1MIN", "5MIN", "15MIN", "30MIN", "60MIN"}:
             raise ValueError("分钟频率必须为 1MIN、5MIN、15MIN、30MIN 或 60MIN")
+        self._minute_rate_limiter.wait()
         try:
             frame = self.pro.rt_min_daily(
                 ts_code=symbol,
@@ -621,28 +622,60 @@ class TushareService(QuoteProvider):
         symbol = self.normalize_symbol(ts_code)
         if not self.is_cn_equity_symbol(symbol):
             return pd.DataFrame()
+        try:
+            return self.get_a_stock_historical_minute_batch_frame(
+                [symbol],
+                start_time,
+                end_time,
+                freq=freq,
+                raise_on_error=True,
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare stk_mins fetch failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+    def get_a_stock_historical_minute_batch_frame(
+        self,
+        ts_codes: List[str],
+        start_time: datetime,
+        end_time: datetime,
+        freq: str = "1min",
+        *,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """Return historical minute bars for comma-separated A-share symbols."""
+        symbols = [self.normalize_symbol(item) for item in ts_codes]
+        symbols = list(dict.fromkeys(item for item in symbols if self.is_cn_equity_symbol(item)))
+        if not symbols:
+            return pd.DataFrame()
         normalized_freq = str(freq or "1min").lower()
         if normalized_freq not in {"1min", "5min", "15min", "30min", "60min"}:
             raise ValueError("分钟频率必须为 1min、5min、15min、30min 或 60min")
         self._minute_rate_limiter.wait()
         try:
             frame = self.pro.stk_mins(
-                ts_code=symbol,
+                ts_code=",".join(symbols),
                 freq=normalized_freq,
                 start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 fields="ts_code,trade_time,open,close,high,low,vol,amount",
             )
         except Exception as exc:
-            self.logger.warning("Tushare stk_mins fetch failed for %s: %s", symbol, exc)
+            if raise_on_error:
+                raise
+            self.logger.warning("Tushare stk_mins batch fetch failed for %s: %s", symbols, exc)
             return pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return pd.DataFrame()
         result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
         result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
         for column in ("open", "close", "high", "low", "vol", "amount"):
             result[column] = pd.to_numeric(result[column], errors="coerce")
-        return result.dropna(subset=["trade_time", "open", "close", "high", "low"]).sort_values("trade_time")
+        result = result[result["ts_code"].isin(symbols)]
+        return result.dropna(subset=["trade_time", "open", "close", "high", "low"]).sort_values(
+            ["ts_code", "trade_time"]
+        )
 
     def get_a_stock_realtime_minute_batch_frame(self, ts_codes: List[str], freq: str = "1MIN") -> pd.DataFrame:
         """Fetch the latest realtime minute bar for up to 300 A-share symbols."""

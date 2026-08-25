@@ -560,7 +560,7 @@ def _run_a_stock_base_data_sync(
 
 
 def _run_chan_minute_sync(full: bool = False):
-    """Run the daily incremental sync, or the administrator-requested 60-day bootstrap."""
+    """Run the precise daily incremental sync, or the administrator-requested 32-day bootstrap."""
     from ..core.services.chan_minute_sync import ChanMinuteSyncManager
 
     state = ChanMinuteSyncManager.start(full=full)
@@ -1343,7 +1343,7 @@ class ScheduledTaskManager:
             "chan_minute_sync": TaskDefinition(
                 task_key="chan_minute_sync",
                 name="缠论分钟行情同步",
-                description="盘后增量同步全市场1分钟行情；首次启用时可手动开启全量模式回补最近60个交易日。",
+                description="盘后按实际缺口增量同步并额外重叠1个交易日；首次启用时可回补最近32个交易日。",
                 default_time="21:30",
                 default_enabled=True,
                 sort_order=75,
@@ -1351,7 +1351,7 @@ class ScheduledTaskManager:
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="full",
-                        label="回补60个交易日",
+                        label="回补32个交易日",
                         value_type="boolean",
                         default=False,
                         description="日常定时任务保持关闭；首次初始化或修复数据时手动开启。",

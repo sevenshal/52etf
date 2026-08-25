@@ -12,11 +12,12 @@ import pandas as pd
 
 from ..duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 from .chan_analysis import analyze_bars
-from .chan_minute_data import aggregate_minute_rows, load_minute_rows, refresh_realtime_minutes
+from .chan_minute_data import aggregate_minute_rows, fetch_realtime_minute_rows, load_minute_rows
 
 
 BUY_SIGNALS = {"一买", "二买", "三买"}
 SELL_SIGNALS = {"一卖", "二卖", "三卖"}
+REALTIME_FREQ_MAP = {"1m": "1MIN", "5m": "5MIN", "30m": "30MIN"}
 
 
 def _placeholders(values: list[Any]) -> str:
@@ -109,7 +110,11 @@ def _load_daily_rows(symbol: str, years: int = 4) -> list[dict[str, Any]]:
     return frame.to_dict("records")
 
 
-def _load_scan_rows(symbol: str, freq: str) -> list[dict[str, Any]]:
+def _load_scan_rows(
+    symbol: str,
+    freq: str,
+    realtime_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     if freq == "d":
         return _load_daily_rows(symbol)
     rows = load_minute_rows(
@@ -117,7 +122,18 @@ def _load_scan_rows(symbol: str, freq: str) -> list[dict[str, Any]]:
         datetime.combine(date.today() - timedelta(days=100), time.min),
         datetime.combine(date.today(), time.max),
     )
-    return aggregate_minute_rows(symbol, rows, freq)
+    rows = aggregate_minute_rows(symbol, rows, freq)
+    if realtime_rows:
+        rows_by_time = {}
+        for row in [*rows, *realtime_rows]:
+            timestamp = pd.to_datetime(row.get("timestamp"), errors="coerce")
+            if pd.isna(timestamp):
+                continue
+            normalized = dict(row)
+            normalized["timestamp"] = timestamp.to_pydatetime()
+            rows_by_time[normalized["timestamp"]] = normalized
+        rows = [rows_by_time[timestamp] for timestamp in sorted(rows_by_time)]
+    return rows
 
 
 def _write_run(run_id: str, **updates: Any) -> None:
@@ -182,8 +198,12 @@ class ChanScanManager:
         try:
             candidates = filter_stock_pool(filters)
             _write_run(run_id, candidate_count=len(candidates))
+            realtime_rows_by_symbol = {}
             if realtime and freq != "d" and candidates:
-                refresh_realtime_minutes([item["ts_code"] for item in candidates])
+                realtime_rows_by_symbol = fetch_realtime_minute_rows(
+                    [item["ts_code"] for item in candidates],
+                    REALTIME_FREQ_MAP[freq],
+                )
             expected = BUY_SIGNALS if signal_side == "buy" else SELL_SIGNALS if signal_side == "sell" else BUY_SIGNALS | SELL_SIGNALS
             for candidate in candidates:
                 if cls._is_cancelled(run_id):
@@ -191,7 +211,7 @@ class ChanScanManager:
                     return
                 symbol = candidate["ts_code"]
                 try:
-                    rows = _load_scan_rows(symbol, freq)
+                    rows = _load_scan_rows(symbol, freq, realtime_rows_by_symbol.get(symbol))
                     analysis = analyze_bars(
                         symbol,
                         rows,

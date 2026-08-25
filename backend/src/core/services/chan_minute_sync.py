@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any
 
 from .chan_minute_data import (
     ROLLING_TRADING_DAYS,
-    backfill_symbol_minutes,
+    fetch_historical_minute_batch,
+    historical_minute_batch_size,
+    incremental_minute_sync_groups,
     prune_minute_history,
     recent_market_universe,
+    upsert_minute_frame,
 )
+from .tushare import TushareService
+
+
+CHAN_MINUTE_FETCH_WORKERS = max(1, min(32, int(os.getenv("CHAN_MINUTE_FETCH_WORKERS", "16"))))
 
 
 class ChanMinuteSyncManager:
@@ -23,6 +32,9 @@ class ChanMinuteSyncManager:
         "cancel_requested": False,
         "processed": 0,
         "total": 0,
+        "completed_batches": 0,
+        "total_batches": 0,
+        "fetched_rows": 0,
         "saved_rows": 0,
         "errors": [],
     }
@@ -44,6 +56,9 @@ class ChanMinuteSyncManager:
                 "cancel_requested": False,
                 "processed": 0,
                 "total": 0,
+                "completed_batches": 0,
+                "total_batches": 0,
+                "fetched_rows": 0,
                 "saved_rows": 0,
                 "errors": [],
                 "started_at": datetime.now().isoformat(),
@@ -69,32 +84,141 @@ class ChanMinuteSyncManager:
     @classmethod
     def _run(cls, job_id: str, trading_days: int, full: bool) -> None:
         try:
-            symbols, start_date, end_date = recent_market_universe(trading_days if full else 1)
+            requested_days = min(ROLLING_TRADING_DAYS, max(1, int(trading_days)))
+            if full:
+                symbols, calendar_start, calendar_end = recent_market_universe(requested_days)
+                groups = [
+                    {
+                        "symbols": symbols,
+                        "start_date": calendar_start,
+                        "end_date": calendar_end,
+                        "run_days": requested_days,
+                        "missing_days": requested_days,
+                    }
+                ]
+            else:
+                groups, calendar_start, calendar_end = incremental_minute_sync_groups(ROLLING_TRADING_DAYS)
+
+            requests = []
+            batch_sizes = {}
+            for group in groups:
+                run_days = int(group["run_days"])
+                batch_size = historical_minute_batch_size(run_days)
+                batch_sizes[run_days] = batch_size
+                group_symbols = group["symbols"]
+                for offset in range(0, len(group_symbols), batch_size):
+                    requests.append(
+                        {
+                            **group,
+                            "symbols": group_symbols[offset : offset + batch_size],
+                            "batch_size": batch_size,
+                        }
+                    )
+
+            work_total = sum(len(item["symbols"]) for item in requests)
+            unique_symbols = len({symbol for item in requests for symbol in item["symbols"]})
+            workers = min(CHAN_MINUTE_FETCH_WORKERS, len(requests)) if requests else 0
+            start_date = min((item["start_date"] for item in requests), default=calendar_end)
+            end_date = max((item["end_date"] for item in requests), default=calendar_end)
             with cls._lock:
                 if cls._state.get("job_id") != job_id:
                     return
-                cls._state.update(total=len(symbols), start_date=start_date.isoformat(), end_date=end_date.isoformat())
-            for symbol in symbols:
-                with cls._lock:
-                    if cls._state.get("cancel_requested"):
-                        cls._state["status"] = "CANCELLED"
-                        break
+                cls._state.update(
+                    mode="FULL" if full else "INCREMENTAL",
+                    total=work_total,
+                    unique_symbols=unique_symbols,
+                    total_batches=len(requests),
+                    trading_days=requested_days if full else None,
+                    max_run_days=max(batch_sizes, default=0),
+                    batch_size=next(iter(batch_sizes.values())) if len(batch_sizes) == 1 else None,
+                    batch_sizes={str(days): size for days, size in sorted(batch_sizes.items())},
+                    fetch_workers=workers,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                )
+
+            cancelled = False
+            if requests:
+                service = TushareService.get_instance()
+                executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chan-minute-fetch")
+                request_iter = iter(requests)
+                pending = {}
+
+                def submit_until_full() -> None:
+                    while len(pending) < workers:
+                        try:
+                            request = next(request_iter)
+                        except StopIteration:
+                            return
+                        future = executor.submit(
+                            fetch_historical_minute_batch,
+                            service,
+                            request["symbols"],
+                            request["start_date"],
+                            request["end_date"],
+                        )
+                        pending[future] = request
+
                 try:
-                    result = backfill_symbol_minutes(symbol, start_date, end_date)
-                    saved = int(result.get("saved_rows") or 0)
-                    error = None
-                except Exception as exc:  # continue the market job and expose a bounded error sample
-                    saved = 0
-                    error = f"{symbol}: {exc}"
-                with cls._lock:
-                    cls._state["processed"] += 1
-                    cls._state["saved_rows"] += saved
-                    if error and len(cls._state["errors"]) < 200:
-                        cls._state["errors"].append(error)
-            else:
+                    submit_until_full()
+                    while pending:
+                        done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            request = pending.pop(future)
+                            batch = request["symbols"]
+                            with cls._lock:
+                                if cls._state.get("cancel_requested"):
+                                    cls._state["status"] = "CANCELLED"
+                                    cancelled = True
+                            if cancelled:
+                                break
+
+                            errors = []
+                            try:
+                                result = future.result()
+                                frame = result.get("frame")
+                                errors.extend(result.get("errors") or [])
+                                fetched = len(frame) if frame is not None else 0
+                            except Exception as exc:
+                                frame = None
+                                fetched = 0
+                                errors.append(f"{batch[0]}~{batch[-1]}: {exc}")
+
+                            saved = 0
+                            if frame is not None and not frame.empty:
+                                try:
+                                    # Network workers never access DuckDB; this manager thread is the only writer.
+                                    saved = upsert_minute_frame(frame)
+                                except Exception as exc:
+                                    errors.append(f"{batch[0]}~{batch[-1]} 写入失败: {exc}")
+
+                            with cls._lock:
+                                cls._state["processed"] += len(batch)
+                                cls._state["completed_batches"] += 1
+                                cls._state["fetched_rows"] += fetched
+                                cls._state["saved_rows"] += saved
+                                remaining_error_slots = max(0, 200 - len(cls._state["errors"]))
+                                cls._state["errors"].extend(errors[:remaining_error_slots])
+                        if cancelled:
+                            break
+                        submit_until_full()
+                finally:
+                    if cancelled:
+                        for future in pending:
+                            future.cancel()
+                    executor.shutdown(wait=True, cancel_futures=cancelled)
+
+            if not cancelled:
+                pruned_rows = 0
                 if full:
-                    prune_minute_history(start_date)
+                    try:
+                        pruned_rows = prune_minute_history(start_date)
+                    except Exception as exc:
+                        with cls._lock:
+                            if len(cls._state["errors"]) < 200:
+                                cls._state["errors"].append(f"清理过期分钟行情失败: {exc}")
                 with cls._lock:
+                    cls._state["pruned_rows"] = pruned_rows
                     cls._state["status"] = "SUCCESS" if not cls._state["errors"] else "PARTIAL_SUCCESS"
         except Exception as exc:
             with cls._lock:
