@@ -54,6 +54,7 @@ def _connect_duckdb():
 XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
 XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS = 5
 XUEQIU_BOARD_MIN_STOCKS = 3
+XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS = 11
 
 
 def _normalize_xueqiu_snapshot_symbol(symbol: Any) -> str:
@@ -593,6 +594,73 @@ def _load_xueqiu_board_momentum(
     )
 
 
+def load_xueqiu_board_holding_symbols(
+    ths_code: str,
+    active_only: bool = True,
+) -> Dict[str, Any]:
+    """Return current Xueqiu-held stocks belonging to one cached THS board."""
+    normalized_code = str(ths_code or "").strip().upper()
+    if not normalized_code or len(normalized_code) > 24:
+        raise HTTPException(status_code=400, detail="无效的同花顺板块代码")
+    connection = _connect_duckdb()
+    try:
+        if not all(
+            _duckdb_table_exists(connection, table)
+            for table in (XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE, "a_stock_ths_member")
+        ):
+            return {
+                "ths_code": normalized_code,
+                "name": None,
+                "snapshot_date": None,
+                "stock_symbols": [],
+            }
+        cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+        rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            {cte},
+            latest_snapshot AS (
+                SELECT MAX(snapshot_date) AS snapshot_date FROM filtered_holdings
+            ),
+            normalized_members AS (
+                SELECT
+                    CASE
+                        WHEN con_code LIKE '%.SH' THEN 'SH.' || LEFT(con_code, 6)
+                        WHEN con_code LIKE '%.SZ' THEN 'SZ.' || LEFT(con_code, 6)
+                        WHEN con_code LIKE '%.BJ' THEN 'BJ.' || LEFT(con_code, 6)
+                        ELSE con_code
+                    END AS stock_symbol,
+                    in_date,
+                    out_date
+                FROM a_stock_ths_member
+                WHERE ths_code = ?
+            )
+            SELECT DISTINCT holdings.stock_symbol, latest_snapshot.snapshot_date
+            FROM filtered_holdings holdings
+            JOIN latest_snapshot ON holdings.snapshot_date = latest_snapshot.snapshot_date
+            JOIN normalized_members members ON members.stock_symbol = holdings.stock_symbol
+            WHERE holdings.stock_symbol NOT IN ('CASH', 'CN_CASH')
+              AND (members.in_date IS NULL OR members.in_date <= latest_snapshot.snapshot_date)
+              AND (members.out_date IS NULL OR members.out_date > latest_snapshot.snapshot_date)
+            ORDER BY holdings.stock_symbol
+            """,
+            [normalized_code],
+        )
+        with DBSession() as db:
+            catalog_row = db.query(AIStockTHSIndexCache).filter(
+                AIStockTHSIndexCache.ts_code == normalized_code
+            ).first()
+            board_name = catalog_row.name if catalog_row else None
+        return {
+            "ths_code": normalized_code,
+            "name": board_name,
+            "snapshot_date": rows[0].get("snapshot_date") if rows else None,
+            "stock_symbols": [row["stock_symbol"] for row in rows],
+        }
+    finally:
+        connection.close()
+
+
 def load_xueqiu_top_holdings_latest(
     active_only: bool = True,
     limit: int = 300,
@@ -826,7 +894,10 @@ def load_xueqiu_top_holdings_latest(
             "index_options": index_options,
             "board_items": board_items,
             "contrarian_boards": [
-                item for item in board_items if item.get("direction") == "逆势吸筹"
+                item
+                for item in board_items
+                if item.get("direction") == "逆势吸筹"
+                and int(item.get("stock_count") or 0) >= XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS
             ][:12],
             "items": item_rows,
         }
@@ -1119,6 +1190,18 @@ def get_xueqiu_top_holdings_latest(
     _: str = Depends(valid_admin_account),
 ):
     return load_xueqiu_top_holdings_latest(active_only=active_only, limit=limit)
+
+
+@router.get("/xueqiu-top-holdings/board-holdings")
+def get_xueqiu_board_holding_symbols(
+    ths_code: str = Query(..., min_length=1, max_length=24),
+    active_only: bool = Query(True, description="只统计主理人活跃组合"),
+    _: str = Depends(valid_admin_account),
+):
+    return load_xueqiu_board_holding_symbols(
+        ths_code=ths_code,
+        active_only=active_only,
+    )
 
 
 @router.get("/xueqiu-top-holdings/history")

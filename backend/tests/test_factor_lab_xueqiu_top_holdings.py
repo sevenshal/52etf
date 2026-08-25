@@ -15,6 +15,12 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         index_type = "N"
 
     class _CatalogQuery:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return FactorLabXueqiuTopHoldingsTest._CatalogRow()
+
         def all(self):
             return [FactorLabXueqiuTopHoldingsTest._CatalogRow()]
 
@@ -687,6 +693,10 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 patch.object(factor_lab, "DBSession", self._CatalogSession),
             ):
                 result = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+                board_holdings = factor_lab.load_xueqiu_board_holding_symbols(
+                    "885001.TI",
+                    active_only=True,
+                )
 
         self.assertEqual(1, len(result["board_items"]))
         board = result["board_items"][0]
@@ -694,4 +704,9 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual("逆势吸筹", board["direction"])
         self.assertEqual(3, board["stock_count"])
         self.assertGreater(board["weight_price_ratio_5d"], 1.05)
-        self.assertEqual([board], result["contrarian_boards"])
+        self.assertEqual([], result["contrarian_boards"])
+        self.assertEqual("测试细分板块", board_holdings["name"])
+        self.assertEqual(
+            ["SH.600001", "SH.600002", "SH.600003"],
+            board_holdings["stock_symbols"],
+        )

@@ -41,9 +41,15 @@ class AStockBaseDataSyncTest(TestCase):
 
                 from src.core.analytics_database import AnalyticsSession
                 from src.core.database import Session
+                import src.robot.a_stock_base_data_sync as sync_module
                 from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
 
+                sync_module.THS_DAILY_MIN_ROWS = 1
+
                 class FakeTushare:
+                    member_calls = []
+                    daily_calls = []
+
                     def get_ths_index_frame(self, index_type):
                         suffix = {"N": "1", "TH": "2", "I": "3"}[index_type]
                         return pd.DataFrame([{
@@ -53,6 +59,7 @@ class AStockBaseDataSyncTest(TestCase):
                         }])
 
                     def get_ths_member_frame(self, ths_code):
+                        self.member_calls.append(ths_code)
                         return pd.DataFrame([{
                             "ts_code": ths_code, "con_code": "600001.SH",
                             "con_name": "测试股", "weight": 1.0,
@@ -60,9 +67,16 @@ class AStockBaseDataSyncTest(TestCase):
                         }])
 
                     def get_trade_calendar_frame(self, start_date, end_date):
-                        return pd.DataFrame([{"cal_date": end_date, "is_open": 1}])
+                        return pd.DataFrame([
+                            {"cal_date": value, "is_open": 1}
+                            for value in [
+                                date(2026, 8, 18), date(2026, 8, 19), date(2026, 8, 20),
+                                date(2026, 8, 21), date(2026, 8, 24),
+                            ]
+                        ])
 
                     def get_ths_daily_frame(self, trade_date):
+                        self.daily_calls.append(trade_date)
                         return pd.DataFrame([{
                             "ts_code": "885001.N", "trade_date": trade_date,
                             "open": 99, "close": 100, "high": 101, "low": 98,
@@ -73,6 +87,7 @@ class AStockBaseDataSyncTest(TestCase):
                 service = AStockBaseDataSyncService(analytics_db=db, tushare_service=FakeTushare())
                 try:
                     result = service.sync_ths_board_data(date(2026, 8, 24))
+                    second = service.sync_ths_board_data(date(2026, 8, 24))
                     member_count = db.execute(text("SELECT COUNT(*) FROM a_stock_ths_member")).scalar()
                     daily_count = db.execute(text("SELECT COUNT(*) FROM a_stock_ths_daily")).scalar()
                     catalog_count = Session().execute(text("SELECT COUNT(*) FROM ai_stock_ths_index_cache")).scalar()
@@ -83,15 +98,79 @@ class AStockBaseDataSyncTest(TestCase):
 
                 assert result["catalog_rows"] == 3
                 assert result["member_refreshed"] is True
+                assert second["member_refreshed"] is True
                 assert member_count == 3
-                assert daily_count == 1
+                assert daily_count == 5
                 assert catalog_count == 3
+                assert len(FakeTushare.member_calls) == 6
+                assert FakeTushare.daily_calls == [
+                    date(2026, 8, 18), date(2026, 8, 19), date(2026, 8, 20),
+                    date(2026, 8, 21), date(2026, 8, 24),
+                    date(2026, 8, 20), date(2026, 8, 21), date(2026, 8, 24),
+                ]
                 """
             )
             env = os.environ.copy()
             env["ANALYTICS_DB_PATH"] = analytics_path
             env["QUANT_SQLITE_PATH"] = sqlite_path
             subprocess.run([sys.executable, "-c", code], env=env, check=True)
+
+    def test_ths_bulk_replace_preserves_boards_and_dates_not_in_refresh(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            code = textwrap.dedent(
+                """
+                import pandas as pd
+                import src.robot.a_stock_base_data_sync as sync_module
+                from src.core.analytics_database import AnalyticsSession
+                from src.robot.a_stock_base_data_sync import (
+                    _bulk_replace_ths_daily_frame,
+                    _bulk_replace_ths_member_frame,
+                )
+
+                sync_module.THS_DAILY_MIN_ROWS = 1
+                db = AnalyticsSession()
+                try:
+                    _bulk_replace_ths_member_frame(db, pd.DataFrame([
+                        {"ts_code": "A.TI", "con_code": "000001.SZ", "con_name": "旧A"},
+                        {"ts_code": "B.TI", "con_code": "000002.SZ", "con_name": "保留B"},
+                    ]))
+                    _bulk_replace_ths_member_frame(db, pd.DataFrame([
+                        {"ts_code": "A.TI", "con_code": "000003.SZ", "con_name": "新A"},
+                    ]))
+                    members = db.execute(sync_module.text(
+                        "SELECT ths_code, con_code FROM a_stock_ths_member ORDER BY ths_code"
+                    )).fetchall()
+
+                    _bulk_replace_ths_daily_frame(db, pd.DataFrame([
+                        {"ts_code": "A.TI", "trade_date": "20260820", "close": 10},
+                        {"ts_code": "A.TI", "trade_date": "20260821", "close": 11},
+                    ]))
+                    _bulk_replace_ths_daily_frame(db, pd.DataFrame([
+                        {"ts_code": "A.TI", "trade_date": "20260821", "close": 12},
+                    ]))
+                    daily = db.execute(sync_module.text(
+                        "SELECT trade_date, close FROM a_stock_ths_daily ORDER BY trade_date"
+                    )).fetchall()
+                finally:
+                    AnalyticsSession.remove()
+
+                assert members == [("A.TI", "000003.SZ"), ("B.TI", "000002.SZ")]
+                assert [(str(row[0]), row[1]) for row in daily] == [
+                    ("2026-08-20", 10.0), ("2026-08-21", 12.0)
+                ]
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = path
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def test_sync_fund_basic_handles_duplicate_provider_symbols(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")

@@ -42,6 +42,10 @@ TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "450")),
 )
+TUSHARE_THS_MEMBER_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_THS_MEMBER_MAX_REQUESTS_PER_MINUTE", "420")),
+)
 
 # 沪深 ETF 代码前缀（rt_k 对沪市 ETF 返回空，需走 rt_etf_k 接口）
 TUSHARE_A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
@@ -129,6 +133,10 @@ class TushareService(QuoteProvider):
     )
     _rt_k_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _ths_member_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_THS_MEMBER_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
 
@@ -528,6 +536,7 @@ class TushareService(QuoteProvider):
 
     def get_ths_member_frame(self, ths_code: str) -> pd.DataFrame:
         try:
+            self._ths_member_rate_limiter.wait()
             frame = self.pro.ths_member(
                 ts_code=str(ths_code or "").upper(),
                 fields="ts_code,con_code,con_name,weight,in_date,out_date,is_new",

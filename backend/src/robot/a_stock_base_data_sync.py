@@ -78,7 +78,8 @@ A_STOCK_FUND_DAILY_BATCH_BY_DATE_MAX_DAYS = 10
 A_STOCK_FUND_ADJ_FACTOR_BATCH_BY_DATE_MAX_DAYS = 10
 THS_INDEX_TYPES = ("N", "TH", "I")
 THS_DAILY_REFRESH_DAYS = 30
-THS_MEMBER_REFRESH_DAYS = 7
+THS_DAILY_REPAIR_TRADING_DAYS = 3
+THS_DAILY_MIN_ROWS = 1000
 
 
 def _clean_text(value) -> Optional[str]:
@@ -455,8 +456,9 @@ class AStockBaseDataSyncService:
     def sync_ths_board_data(self, end_date: date) -> Dict:
         """刷新主库板块目录，并把成分和近期行情缓存到 DuckDB。
 
-        网络请求全部在数据库事务外完成。成分按成功板块逐个替换，单个板块
-        拉取失败时保留旧缓存，避免一次 Tushare 抖动清空可用数据。
+        网络请求全部在数据库事务外完成。每天全量抓取成分，但只用一次事务
+        批量替换成功板块；失败板块保留旧缓存。行情只抓缺失日期并回刷最近
+        3 个交易日。
         """
         fetched_at = datetime.now()
         catalog: List[Dict] = []
@@ -506,91 +508,96 @@ class AStockBaseDataSyncService:
                     [AIStockTHSIndexCache(**item, fetched_at=fetched_at) for item in catalog]
                 )
 
-        member_saved = 0
+        member_frames: List[pd.DataFrame] = []
         member_errors: List[str] = []
-        now = datetime.now()
-        latest_member_update = self.analytics_db.execute(
-            text("SELECT MAX(updated_at) FROM a_stock_ths_member")
-        ).scalar()
-        member_refresh_due = (
-            latest_member_update is None
-            or latest_member_update < now - timedelta(days=THS_MEMBER_REFRESH_DAYS)
-        )
-        if member_refresh_due:
-            for position, board in enumerate(catalog, start=1):
-                ths_code = board["ts_code"]
-                frame = self.tushare.get_ths_member_frame(ths_code)
-                if not isinstance(frame, pd.DataFrame) or frame.empty:
-                    member_errors.append(ths_code)
-                    continue
-                mappings = []
-                for _, row in frame.iterrows():
-                    con_code = str(row.get("con_code") or "").strip().upper()
-                    if not con_code:
-                        continue
-                    mappings.append(
-                        {
-                            "ths_code": ths_code,
-                            "con_code": con_code,
-                            "con_name": _clean_text(row.get("con_name")),
-                            "weight": _safe_float(row.get("weight")),
-                            "in_date": _parse_date(row.get("in_date")),
-                            "out_date": _parse_date(row.get("out_date")),
-                            "is_new": _clean_text(row.get("is_new")),
-                            "updated_at": now,
-                        }
-                    )
-                if not mappings:
-                    member_errors.append(ths_code)
-                    continue
-                self.analytics_db.execute(
-                    text("DELETE FROM a_stock_ths_member WHERE ths_code = :ths_code"),
-                    {"ths_code": ths_code},
-                )
-                self._insert_analytics_mappings(AStockTHSMember, mappings)
-                member_saved += len(mappings)
-                if position % 100 == 0:
-                    self.analytics_db.commit()
-        self.analytics_db.commit()
+        board_codes = [board["ts_code"] for board in catalog]
 
-        daily_start = end_date - timedelta(days=THS_DAILY_REFRESH_DAYS)
-        trading_dates = self._trading_dates(daily_start, end_date)
-        daily_saved = 0
+        def fetch_member(ths_code: str) -> Tuple[str, pd.DataFrame]:
+            return ths_code, self.tushare.get_ths_member_frame(ths_code)
+
+        workers = min(SYNC_WORKERS, len(board_codes))
+        completed_members = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(fetch_member, code): code for code in board_codes}
+            for future in as_completed(futures):
+                ths_code = futures[future]
+                try:
+                    _, frame = future.result()
+                except Exception as exc:
+                    self.logger.warning("THS member fetch failed for %s: %s", ths_code, exc)
+                    frame = pd.DataFrame()
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    member_frames.append(frame)
+                else:
+                    member_errors.append(ths_code)
+                completed_members += 1
+                if completed_members % 100 == 0 or completed_members == len(board_codes):
+                    self._progress(
+                        f"同步同花顺板块成分 {completed_members}/{len(board_codes)}",
+                        10,
+                        ths_member_processed=completed_members,
+                        ths_member_total=len(board_codes),
+                        ths_member_errors=len(member_errors),
+                    )
+
+        # 空结果/瞬时失败统一串行重试一次；仍失败的板块不参与删除，保留旧缓存。
+        if member_errors:
+            retry_errors: List[str] = []
+            for ths_code in member_errors:
+                frame = self.tushare.get_ths_member_frame(ths_code)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    member_frames.append(frame)
+                else:
+                    retry_errors.append(ths_code)
+            member_errors = retry_errors
+        member_frame = (
+            pd.concat(member_frames, ignore_index=True)
+            if member_frames
+            else pd.DataFrame()
+        )
+        member_saved = _bulk_replace_ths_member_frame(self.analytics_db, member_frame)
+
+        latest_daily_date = _latest_analytics_date(self.analytics_db, AStockTHSDaily, "trade_date")
+        self.analytics_db.commit()
+        calendar_start = (
+            end_date - timedelta(days=THS_DAILY_REFRESH_DAYS)
+            if latest_daily_date is None
+            else min(latest_daily_date, end_date) - timedelta(days=14)
+        )
+        available_dates = self._trading_dates(calendar_start, end_date)
+        if latest_daily_date is None:
+            trading_dates = available_dates
+        else:
+            missing_dates = [value for value in available_dates if value > latest_daily_date]
+            repair_dates = [value for value in available_dates if value <= latest_daily_date][
+                -THS_DAILY_REPAIR_TRADING_DAYS:
+            ]
+            trading_dates = sorted(set([*repair_dates, *missing_dates]))
+        daily_frames: List[pd.DataFrame] = []
         daily_errors: List[str] = []
         for trade_date in trading_dates:
             frame = self.tushare.get_ths_daily_frame(trade_date)
             if not isinstance(frame, pd.DataFrame) or frame.empty:
                 daily_errors.append(trade_date.isoformat())
                 continue
-            mappings = []
-            for _, row in frame.iterrows():
-                ths_code = str(row.get("ts_code") or "").strip().upper()
-                row_date = _parse_date(row.get("trade_date")) or trade_date
-                if not ths_code:
-                    continue
-                mappings.append(
-                    {
-                        "ths_code": ths_code,
-                        "trade_date": row_date,
-                        **{field: _safe_float(row.get(field)) for field in (
-                            "open", "close", "high", "low", "pre_close", "avg_price",
-                            "change", "pct_change", "vol", "turnover_rate", "total_mv", "float_mv",
-                        )},
-                        "updated_at": now,
-                    }
-                )
-            self._insert_analytics_mappings(AStockTHSDaily, mappings)
-            daily_saved += len(mappings)
-        self.analytics_db.commit()
+            daily_frames.append(frame)
+        daily_frame = pd.concat(daily_frames, ignore_index=True) if daily_frames else pd.DataFrame()
+        daily_saved, rejected_daily_dates = _bulk_replace_ths_daily_frame(
+            self.analytics_db,
+            daily_frame,
+        )
+        daily_errors.extend(value.isoformat() for value in rejected_daily_dates)
+        daily_start = min(trading_dates) if trading_dates else None
         return {
             "catalog_rows": len(catalog),
             "catalog_errors": catalog_errors,
             "member_saved_rows": member_saved,
             "member_errors": member_errors,
-            "member_refreshed": member_refresh_due,
+            "member_refreshed": True,
+            "member_board_count": len(board_codes) - len(member_errors),
             "daily_saved_rows": daily_saved,
             "daily_errors": daily_errors,
-            "daily_start_date": daily_start.isoformat(),
+            "daily_start_date": daily_start.isoformat() if daily_start else None,
             "daily_end_date": end_date.isoformat(),
         }
 
@@ -3073,6 +3080,133 @@ def _bulk_replace_index_weight_frame(analytics_db: Session, frame: pd.DataFrame)
     finally:
         connection.close()
     return len(normalized)
+
+
+def _normalize_ths_member_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ths_code", "con_code", "con_name", "weight", "in_date", "out_date",
+        "is_new", "updated_at",
+    ]
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ths_code"] = _clean_text_series(frame, "ts_code").str.upper()
+    normalized["con_code"] = _clean_text_series(frame, "con_code").str.upper()
+    normalized["con_name"] = _clean_text_series(frame, "con_name")
+    normalized["weight"] = _numeric_series(frame, "weight", 6)
+    normalized["in_date"] = _date_series(frame, "in_date")
+    normalized["out_date"] = _date_series(frame, "out_date")
+    normalized["is_new"] = _clean_text_series(frame, "is_new")
+    normalized["updated_at"] = datetime.now()
+    normalized = normalized.dropna(subset=["ths_code", "con_code"])
+    normalized = normalized.drop_duplicates(["ths_code", "con_code"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_ths_member_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    normalized = _normalize_ths_member_frame(frame)
+    if normalized.empty:
+        return 0
+    refreshed_boards = normalized.loc[:, ["ths_code"]].drop_duplicates()
+    columns = list(normalized.columns)
+    quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
+    analytics_db.commit()
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    try:
+        connection.register("ths_member_refreshed_boards", refreshed_boards)
+        connection.register("ths_member_insert_frame", normalized)
+        connection.execute("BEGIN TRANSACTION")
+        connection.execute(
+            """
+            DELETE FROM a_stock_ths_member
+            USING ths_member_refreshed_boards
+            WHERE a_stock_ths_member.ths_code = ths_member_refreshed_boards.ths_code
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO a_stock_ths_member ({quoted_columns})
+            SELECT {quoted_columns} FROM ths_member_insert_frame
+            """
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
+    return len(normalized)
+
+
+def _normalize_ths_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ths_code", "trade_date", "open", "close", "high", "low", "pre_close",
+        "avg_price", "change", "pct_change", "vol", "turnover_rate", "total_mv",
+        "float_mv", "updated_at",
+    ]
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame(columns=columns)
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ths_code"] = _clean_text_series(frame, "ts_code").str.upper()
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    for column in columns[2:-1]:
+        normalized[column] = _numeric_series(frame, column, 6)
+    normalized["updated_at"] = datetime.now()
+    normalized = normalized.dropna(subset=["ths_code", "trade_date"])
+    normalized = normalized.drop_duplicates(["ths_code", "trade_date"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_replace_ths_daily_frame(
+    analytics_db: Session,
+    frame: pd.DataFrame,
+) -> Tuple[int, List[date]]:
+    normalized = _normalize_ths_daily_frame(frame)
+    if normalized.empty:
+        return 0, []
+    counts = normalized["trade_date"].value_counts()
+    valid_dates = sorted(
+        value for value, count in counts.items() if int(count) >= THS_DAILY_MIN_ROWS
+    )
+    rejected_dates = sorted(set(normalized["trade_date"]) - set(valid_dates))
+    normalized = normalized[normalized["trade_date"].isin(valid_dates)]
+    if normalized.empty:
+        return 0, rejected_dates
+    replace_dates = pd.DataFrame({"trade_date": valid_dates})
+    columns = list(normalized.columns)
+    quoted_columns = ", ".join(_quote_duckdb_identifier(column) for column in columns)
+    analytics_db.commit()
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    try:
+        connection.register("ths_daily_replace_dates", replace_dates)
+        connection.register("ths_daily_insert_frame", normalized)
+        connection.execute("BEGIN TRANSACTION")
+        connection.execute(
+            """
+            DELETE FROM a_stock_ths_daily
+            USING ths_daily_replace_dates
+            WHERE a_stock_ths_daily.trade_date = ths_daily_replace_dates.trade_date
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO a_stock_ths_daily ({quoted_columns})
+            SELECT {quoted_columns} FROM ths_daily_insert_frame
+            """
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
+    return len(normalized), rejected_dates
 
 
 def _normalize_option_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:

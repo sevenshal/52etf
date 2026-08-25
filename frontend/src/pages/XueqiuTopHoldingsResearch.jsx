@@ -179,6 +179,8 @@ const numericRangeFilterDropdown = ({
   selectedKeys,
   confirm,
   clearFilters,
+  minPlaceholder = '最小组合数',
+  maxPlaceholder = '最大组合数',
 }) => {
   const value = selectedKeys[0] || {};
   return (
@@ -187,7 +189,7 @@ const numericRangeFilterDropdown = ({
         <InputNumber
           min={0}
           precision={0}
-          placeholder="最小组合数"
+          placeholder={minPlaceholder}
           value={value.min}
           onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'min', nextValue)}
           style={{ width: '100%' }}
@@ -195,7 +197,7 @@ const numericRangeFilterDropdown = ({
         <InputNumber
           min={0}
           precision={0}
-          placeholder="最大组合数"
+          placeholder={maxPlaceholder}
           value={value.max}
           onChange={nextValue => setNumericFilterValue(setSelectedKeys, value, 'max', nextValue)}
           style={{ width: '100%' }}
@@ -216,6 +218,38 @@ const numericRangeFilterDropdown = ({
     </div>
   );
 };
+
+const textSearchFilterDropdown = ({
+  selectedKeys,
+  setSelectedKeys,
+  confirm,
+  clearFilters,
+}) => (
+  <div style={{ padding: 8, width: 220 }} onKeyDown={event => event.stopPropagation()}>
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      <Input
+        allowClear
+        autoFocus
+        placeholder="输入板块名"
+        value={selectedKeys[0] || ''}
+        onChange={event => setSelectedKeys(event.target.value ? [event.target.value] : [])}
+        onPressEnter={() => confirm()}
+      />
+      <Space>
+        <Button size="small" type="primary" onClick={() => confirm()}>筛选</Button>
+        <Button
+          size="small"
+          onClick={() => {
+            clearFilters?.();
+            confirm();
+          }}
+        >
+          重置
+        </Button>
+      </Space>
+    </Space>
+  </div>
+);
 
 const getHistoryChartOption = (historyRows = []) => {
   const dates = historyRows.map(row => row.snapshot_date);
@@ -371,12 +405,15 @@ const XueqiuTopHoldingsResearch = () => {
   const [detailData, setDetailData] = useState(null);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [selectedHistoryDate, setSelectedHistoryDate] = useState('');
+  const [selectedBoard, setSelectedBoard] = useState(null);
+  const [boardHoldingsLoading, setBoardHoldingsLoading] = useState(false);
   const [latestLoading, setLatestLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const latestRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
+  const boardHoldingsRequestRef = useRef(0);
   const [configOpen, setConfigOpen] = useState(false);
   const [configs, setConfigs] = useState([]);
   const [configLoading, setConfigLoading] = useState(false);
@@ -676,9 +713,15 @@ const XueqiuTopHoldingsResearch = () => {
   const detailRows = detailData?.details || [];
 
   const filteredItems = useMemo(() => {
+    const boardSymbols = selectedBoard
+      ? new Set(selectedBoard.stockSymbols || [])
+      : null;
+    const boardFilteredItems = boardSymbols
+      ? latestItems.filter(item => boardSymbols.has(item.stock_symbol))
+      : latestItems;
     const keyword = normalizeSearchText(searchText);
-    if (!keyword) return latestItems;
-    return latestItems.filter(item => (
+    if (!keyword) return boardFilteredItems;
+    return boardFilteredItems.filter(item => (
       normalizeSearchText(item.stock_symbol).includes(keyword)
       || normalizeSearchText(item.raw_stock_symbol).includes(keyword)
       || normalizeSearchText(item.stock_name).includes(keyword)
@@ -688,7 +731,39 @@ const XueqiuTopHoldingsResearch = () => {
         || normalizeSearchText(index.label).includes(keyword)
       ))
     ));
-  }, [latestItems, searchText]);
+  }, [latestItems, searchText, selectedBoard]);
+
+  const clearBoardSelection = useCallback(() => {
+    boardHoldingsRequestRef.current += 1;
+    setSelectedBoard(null);
+    setBoardHoldingsLoading(false);
+  }, []);
+
+  const selectBoard = useCallback(async board => {
+    const requestId = boardHoldingsRequestRef.current + 1;
+    boardHoldingsRequestRef.current = requestId;
+    setBoardHoldingsLoading(true);
+    try {
+      const response = await request.get('/api/factor-lab/xueqiu-top-holdings/board-holdings', {
+        params: { ths_code: board.ths_code, active_only: activeOnly },
+      });
+      if (boardHoldingsRequestRef.current !== requestId) return;
+      const stockSymbols = response.data?.stock_symbols || [];
+      setSelectedBoard({
+        thsCode: board.ths_code,
+        name: board.name,
+        stockSymbols,
+      });
+      const firstVisible = latestItems.find(item => stockSymbols.includes(item.stock_symbol));
+      if (firstVisible) setSelectedSymbol(firstVisible.stock_symbol);
+    } catch (error) {
+      if (boardHoldingsRequestRef.current === requestId) {
+        message.error(error?.response?.data?.detail || error.message || '加载板块持仓股失败');
+      }
+    } finally {
+      if (boardHoldingsRequestRef.current === requestId) setBoardHoldingsLoading(false);
+    }
+  }, [activeOnly, latestItems]);
 
   const fetchLatest = useCallback(async () => {
     const requestId = latestRequestRef.current + 1;
@@ -954,6 +1029,13 @@ const XueqiuTopHoldingsResearch = () => {
       dataIndex: 'name',
       width: 180,
       fixed: 'left',
+      filterIcon: filtered => (
+        <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
+      ),
+      filterDropdown: textSearchFilterDropdown,
+      onFilter: (value, record) => (
+        normalizeSearchText(record.name).includes(normalizeSearchText(value))
+      ),
       render: (value, record) => (
         <Space size={6}>
           <Text strong>{value}</Text>
@@ -1008,6 +1090,23 @@ const XueqiuTopHoldingsResearch = () => {
       width: 110,
       align: 'right',
       sorter: (a, b) => Number(a.stock_count || 0) - Number(b.stock_count || 0),
+      filterIcon: filtered => (
+        <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
+      ),
+      filterDropdown: props => numericRangeFilterDropdown({
+        ...props,
+        minPlaceholder: '最少持仓股',
+        maxPlaceholder: '最多持仓股',
+      }),
+      onFilter: (value, record) => {
+        const count = Number(record.stock_count);
+        if (!Number.isFinite(count)) return false;
+        const hasMin = value?.min !== null && value?.min !== undefined && value?.min !== '';
+        const hasMax = value?.max !== null && value?.max !== undefined && value?.max !== '';
+        const min = hasMin ? Number(value.min) : null;
+        const max = hasMax ? Number(value.max) : null;
+        return (min === null || count >= min) && (max === null || count <= max);
+      },
       render: value => `${numberFormatter(value)}只`,
     },
   ], []);
@@ -1128,7 +1227,7 @@ const XueqiuTopHoldingsResearch = () => {
       <Card
         bordered={false}
         title={(
-          <Tooltip title="板块综合权重5日增长超过5%、权价比大于1.05，同时板块指数下跌；至少覆盖3只雪球持仓股。">
+          <Tooltip title="板块综合权重5日增长超过5%、权价比大于1.05，同时板块指数下跌；汇总仅显示覆盖持仓股大于10只的板块。">
             正在逆势吸筹的细分板块
           </Tooltip>
         )}
@@ -1154,14 +1253,31 @@ const XueqiuTopHoldingsResearch = () => {
         )}
       </Card>
 
-      <Card bordered={false} title="细分板块5日权价比" style={{ marginBottom: 12 }}>
+      <Card
+        bordered={false}
+        title={(
+          <Space wrap>
+            <span>细分板块5日权价比</span>
+            {selectedBoard ? (
+              <Tag color="blue" closable onClose={clearBoardSelection}>
+                已联动：{selectedBoard.name}（{selectedBoard.stockSymbols.length}只）
+              </Tag>
+            ) : null}
+          </Space>
+        )}
+        extra={selectedBoard ? <Button size="small" onClick={clearBoardSelection}>查看全部持仓</Button> : null}
+        style={{ marginBottom: 12 }}
+      >
         <Table
           rowKey="ths_code"
           size="small"
           columns={boardColumns}
           dataSource={boardItems}
+          loading={boardHoldingsLoading}
           pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
           scroll={{ x: 900 }}
+          rowClassName={record => (record.ths_code === selectedBoard?.thsCode ? 'xueqiu-holdings-row-selected' : '')}
+          onRow={record => ({ onClick: () => selectBoard(record) })}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
         />
       </Card>
@@ -1170,14 +1286,22 @@ const XueqiuTopHoldingsResearch = () => {
         <Col xs={24} xl={14}>
           <Card
             bordered={false}
-            title={<Space><StockOutlined />最新综合持仓</Space>}
+            title={(
+              <Space wrap>
+                <StockOutlined />最新综合持仓
+                {selectedBoard ? <Tag color="blue">{selectedBoard.name}</Tag> : null}
+              </Space>
+            )}
             extra={(
               <Space wrap className="xueqiu-holdings-toolbar">
                 <Switch
                   checked={activeOnly}
                   checkedChildren="活跃"
                   unCheckedChildren="全部"
-                  onChange={setActiveOnly}
+                  onChange={value => {
+                    clearBoardSelection();
+                    setActiveOnly(value);
+                  }}
                 />
                 <Input
                   allowClear
