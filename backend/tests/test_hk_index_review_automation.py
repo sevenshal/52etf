@@ -195,6 +195,29 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
         self.assertEqual(0, result["pending"])
         process_document.assert_not_called()
 
+    def test_bootstrap_skips_symbols_with_existing_history(self):
+        sync_service = mock_sync = unittest.mock.Mock()
+        mock_sync.sync_symbols_history_yahoo.return_value = {
+            "symbols": 1,
+            "completed": 1,
+            "rows": 500,
+            "errors": [],
+        }
+        automation = HKIndexReviewAutomation(
+            sync_service=sync_service,
+            cache_dir=self.temporary.name,
+        )
+
+        result = automation._bootstrap_new_symbols(
+            ["00005.HK", "01929.HK"],
+            date(2026, 8, 25),
+        )
+
+        self.assertEqual(1, result["completed"])
+        self.assertTrue(
+            mock_sync.sync_symbols_history_yahoo.call_args.kwargs["skip_covered"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ HK_YAHOO_MIN_INTERVAL_SECONDS = max(
     0.0,
     float(os.getenv("HK_YAHOO_MIN_INTERVAL_SECONDS", "1.5")),
 )
+HK_YAHOO_MAX_ATTEMPTS = max(1, int(os.getenv("HK_YAHOO_MAX_ATTEMPTS", "3")))
 _YAHOO_RATE_LOCK = threading.Lock()
 _YAHOO_LAST_REQUEST_AT = 0.0
 
@@ -66,6 +67,34 @@ def _wait_for_yahoo_request_slot() -> None:
         if remaining > 0:
             time.sleep(remaining)
         _YAHOO_LAST_REQUEST_AT = time.monotonic()
+
+
+def _get_yahoo_chart(url: str, params: Dict) -> requests.Response:
+    for attempt in range(1, HK_YAHOO_MAX_ATTEMPTS + 1):
+        try:
+            _wait_for_yahoo_request_slot()
+            response = requests.get(
+                url,
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies=_yahoo_request_proxies(),
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status is None or status == 429 or status >= 500
+            if not retryable or attempt >= HK_YAHOO_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "Yahoo chart request failed attempt=%s/%s status=%s; retrying: %s",
+                attempt,
+                HK_YAHOO_MAX_ATTEMPTS,
+                status,
+                exc,
+            )
+    raise RuntimeError("unreachable Yahoo retry state")
 
 
 def _parse_date(value) -> Optional[date]:
@@ -402,20 +431,15 @@ class HKStockBaseDataSyncService:
         yahoo_symbol = f"{int(code):04d}.HK"
         period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
         period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
-        _wait_for_yahoo_request_slot()
-        response = requests.get(
+        response = _get_yahoo_chart(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
-            params={
+            {
                 "period1": period1,
                 "period2": period2,
                 "interval": "1d",
                 "events": "div,splits",
             },
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies=_yahoo_request_proxies(),
-            timeout=30,
         )
-        response.raise_for_status()
         result = response.json().get("chart", {}).get("result")
         if not result:
             return pd.DataFrame()
@@ -455,15 +479,10 @@ class HKStockBaseDataSyncService:
     ) -> int:
         period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
         period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
-        _wait_for_yahoo_request_slot()
-        response = requests.get(
+        response = _get_yahoo_chart(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
-            params={"period1": period1, "period2": period2, "interval": "1d"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies=_yahoo_request_proxies(),
-            timeout=30,
+            {"period1": period1, "period2": period2, "interval": "1d"},
         )
-        response.raise_for_status()
         result = response.json().get("chart", {}).get("result")
         if not result:
             return 0

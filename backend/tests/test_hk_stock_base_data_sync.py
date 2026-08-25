@@ -1,6 +1,8 @@
 from datetime import date
 from unittest import mock
 
+import requests
+
 from src.robot.hk_stock_base_data_sync import HKStockBaseDataSyncService
 
 
@@ -55,3 +57,22 @@ def test_yahoo_index_history_uses_dedicated_proxy():
         "http": "socks5h://127.0.0.1:7891",
         "https": "socks5h://127.0.0.1:7891",
     }
+
+
+def test_yahoo_history_retries_transient_ssl_failure():
+    response = _empty_yahoo_response()
+    with mock.patch(
+        "src.robot.hk_stock_base_data_sync.requests.get",
+        side_effect=[requests.exceptions.SSLError("unexpected EOF"), response],
+    ) as get, mock.patch(
+        "src.robot.hk_stock_base_data_sync._wait_for_yahoo_request_slot"
+    ) as wait:
+        frame = HKStockBaseDataSyncService._fetch_yahoo_history(
+            "01929.HK",
+            date(2026, 1, 1),
+            date(2026, 8, 25),
+        )
+
+    assert frame.empty
+    assert get.call_count == 2
+    assert wait.call_count == 2

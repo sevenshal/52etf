@@ -437,8 +437,9 @@ class HKIndexReviewAutomation:
             symbols,
             start_date=start_date,
             end_date=as_of,
+            skip_covered=True,
         )
-        if result.get("errors") or result.get("completed") != len(symbols):
+        if result.get("errors") or result.get("completed") != result.get("symbols"):
             raise RuntimeError(f"new constituent history bootstrap incomplete: {result}")
         return result
 
