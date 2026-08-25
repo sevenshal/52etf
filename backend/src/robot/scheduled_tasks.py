@@ -559,6 +559,20 @@ def _run_a_stock_base_data_sync(
     )
 
 
+def _run_chan_minute_sync(full: bool = False):
+    """Run the daily incremental sync, or the administrator-requested 60-day bootstrap."""
+    from ..core.services.chan_minute_sync import ChanMinuteSyncManager
+
+    state = ChanMinuteSyncManager.start(full=full)
+    if state.get("status") == "RUNNING" and state.get("job_id"):
+        while state.get("status") == "RUNNING":
+            threading.Event().wait(5)
+            state = ChanMinuteSyncManager.snapshot()
+    if state.get("status") not in {"SUCCESS", "PARTIAL_SUCCESS"}:
+        raise RuntimeError(f"缠论分钟行情同步失败: {state}")
+    logging.getLogger("ScheduledTaskManager").info("Chan minute data synced: %s", state)
+
+
 def _run_a_stock_innovation100_rebuild(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1323,6 +1337,24 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=True,
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
+            ),
+            "chan_minute_sync": TaskDefinition(
+                task_key="chan_minute_sync",
+                name="缠论分钟行情同步",
+                description="盘后增量同步全市场1分钟行情；首次启用时可手动开启全量模式回补最近60个交易日。",
+                default_time="21:30",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_chan_minute_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="full",
+                        label="回补60个交易日",
+                        value_type="boolean",
+                        default=False,
+                        description="日常定时任务保持关闭；首次初始化或修复数据时手动开启。",
                     ),
                 ),
             ),

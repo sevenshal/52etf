@@ -14,6 +14,10 @@ import { lazy } from 'react';
  */
 export const adminRouteDescriptors = [
   {
+    path: '/chan-analysis',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/ChanAnalysis')),
+  },
+  {
     path: '/db',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
     props: { initialTab: 'db' },

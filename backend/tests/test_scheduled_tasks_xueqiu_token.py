@@ -204,6 +204,7 @@ class XueqiuTokenMonitorTest(TestCase):
                 "recent_days",
             },
             "a_stock_base_data_sync": {"start_date", "end_date", "incremental"},
+            "chan_minute_sync": {"full"},
             "a_stock_innovation100_rebuild": {"start_date", "end_date", "full_rebuild"},
             "a_stock_etf_fear_greed_backfill": {
                 "start_date",

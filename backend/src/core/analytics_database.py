@@ -2,7 +2,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime, Float, String, create_engine, text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text, create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -30,6 +30,10 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_index_weight",
         "a_stock_market_daily",
         "a_stock_market_daily_qfq",
+        "a_stock_minute_bar",
+        "a_stock_minute_bar_qfq",
+        "chan_scan_run",
+        "chan_scan_signal",
         "a_stock_fund_flow_daily",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
@@ -192,6 +196,55 @@ class AStockMarketDaily(AnalyticsBase):
     turnover_rate = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockMinuteBar(AnalyticsBase):
+    """Rolling unadjusted A-share one-minute bars from Tushare."""
+    __tablename__ = "a_stock_minute_bar"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_time = Column(DateTime, primary_key=True)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    vol = Column(Float, default=0.0, nullable=False)
+    amount = Column(Float, default=0.0, nullable=False)
+    source = Column(String(24), default="tushare_stk_mins", nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class ChanScanRun(AnalyticsBase):
+    """Persistent metadata for administrator-triggered Chan scans."""
+    __tablename__ = "chan_scan_run"
+
+    id = Column(String(40), primary_key=True)
+    status = Column(String(24), nullable=False)
+    freq = Column(String(8), nullable=False)
+    filters_json = Column(Text, nullable=False)
+    candidate_count = Column(Integer, default=0, nullable=False)
+    processed_count = Column(Integer, default=0, nullable=False)
+    signal_count = Column(Integer, default=0, nullable=False)
+    error_count = Column(Integer, default=0, nullable=False)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime)
+
+
+class ChanScanSignal(AnalyticsBase):
+    """Confirmed official CZSC signal found by one scan run."""
+    __tablename__ = "chan_scan_signal"
+
+    id = Column(String(80), primary_key=True)
+    run_id = Column(String(40), nullable=False)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(128), nullable=False)
+    signal_type = Column(String(16), nullable=False)
+    detail = Column(String(128))
+    signal_key = Column(String(256))
+    signal_value = Column(String(256))
+    bar_time = Column(DateTime)
+    confirmed = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
 class AStockFundFlowDaily(AnalyticsBase):
@@ -502,6 +555,10 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_ths_member_constituent ON a_stock_ths_member(con_code, ths_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_ths_daily_date ON a_stock_ths_daily(trade_date, ths_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_minute_symbol_time ON a_stock_minute_bar(ts_code, trade_time)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_minute_time_symbol ON a_stock_minute_bar(trade_time, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_chan_scan_signal_run ON chan_scan_signal(run_id, signal_type)",
+        "CREATE INDEX IF NOT EXISTS idx_chan_scan_signal_symbol_time ON chan_scan_signal(ts_code, bar_time)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_symbol_date ON a_stock_fund_flow_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_date_main ON a_stock_fund_flow_daily(trade_date, main_net)",
@@ -531,6 +588,37 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_us_stock_daily_date_symbol ON us_stock_daily(trade_date, symbol)",
     ]
     view_sqls = [
+        """
+        CREATE OR REPLACE VIEW a_stock_minute_bar_qfq AS
+        WITH anchor_factors AS (
+            SELECT ts_code, adj_factor AS anchor_adj_factor
+            FROM (
+                SELECT ts_code, adj_factor,
+                       ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+                FROM a_stock_adj_factor
+                WHERE adj_factor IS NOT NULL AND adj_factor > 0
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            m.ts_code,
+            m.trade_time,
+            CAST(m.open * COALESCE(f.adj_factor / NULLIF(a.anchor_adj_factor, 0), 1.0) AS DOUBLE) AS open,
+            CAST(m.high * COALESCE(f.adj_factor / NULLIF(a.anchor_adj_factor, 0), 1.0) AS DOUBLE) AS high,
+            CAST(m.low * COALESCE(f.adj_factor / NULLIF(a.anchor_adj_factor, 0), 1.0) AS DOUBLE) AS low,
+            CAST(m.close * COALESCE(f.adj_factor / NULLIF(a.anchor_adj_factor, 0), 1.0) AS DOUBLE) AS close,
+            m.vol,
+            m.amount,
+            f.adj_factor,
+            a.anchor_adj_factor,
+            m.source,
+            m.updated_at
+        FROM a_stock_minute_bar m
+        LEFT JOIN a_stock_adj_factor f
+          ON f.ts_code = m.ts_code
+         AND f.trade_date = CAST(m.trade_time AS DATE)
+        LEFT JOIN anchor_factors a ON a.ts_code = m.ts_code
+        """,
         """
         CREATE OR REPLACE VIEW a_stock_market_daily_qfq AS
         WITH anchor_factors AS (

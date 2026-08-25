@@ -6,6 +6,7 @@ import {
   FireOutlined,
   HomeOutlined,
   RobotOutlined,
+  StockOutlined,
   ThunderboltOutlined,
   UserOutlined,
 } from '@ant-design/icons';
@@ -15,7 +16,7 @@ import './Layout.css';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/ai-stock', '/live', '/profile'];
+const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/ai-stock', '/chan-analysis', '/live', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -84,6 +85,10 @@ const getActiveTabKey = (pathname, state) => {
     return '/ai-stock';
   }
 
+  if (isRouteOrChild(pathname, '/chan-analysis')) {
+    return '/chan-analysis';
+  }
+
   return '/profile';
 };
 
@@ -132,6 +137,13 @@ const AppLayout = () => {
       {
         key: '/ai-stock',
         label: renderTabLabel(<RobotOutlined />, 'AI荐股'),
+        disabled: false
+      }
+    ] : []),
+    ...(accountId && isAdmin ? [
+      {
+        key: '/chan-analysis',
+        label: renderTabLabel(<StockOutlined />, '缠论'),
         disabled: false
       }
     ] : []),

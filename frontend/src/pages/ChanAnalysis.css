@@ -1,0 +1,11 @@
+.chan-page { display: flex; flex-direction: column; gap: 16px; padding: 20px; }
+.chan-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.chan-heading .ant-typography { margin: 0; }
+.chan-chart-card, .chan-signal-card { border-radius: 12px; }
+.chan-chart-wrap { min-height: 650px; margin-top: 12px; }
+.chan-pool-alert { margin: 14px 0; }
+.chan-scan-result { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+@media (max-width: 768px) {
+  .chan-page { padding: 12px; }
+  .chan-chart-wrap { min-height: 520px; }
+}
