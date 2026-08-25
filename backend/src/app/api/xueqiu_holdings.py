@@ -52,6 +52,7 @@ def _connect_duckdb():
         ) from exc
 
 XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE = "xueqiu_cube_holdings_snapshots"
+XUEQIU_HOLDINGS_VALID_FROM = date(2026, 6, 25)
 XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS = 5
 XUEQIU_BOARD_MIN_STOCKS = 3
 XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS = 11
@@ -119,6 +120,7 @@ def _xueqiu_top_holdings_snapshot_cte(active_only: bool) -> str:
             FROM {table}
             WHERE weight_pct IS NOT NULL
               AND weight_pct > 0
+              AND snapshot_date >= DATE '{XUEQIU_HOLDINGS_VALID_FROM.isoformat()}'
         ),
         cube_rows AS (
             SELECT

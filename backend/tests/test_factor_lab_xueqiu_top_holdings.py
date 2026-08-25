@@ -9,6 +9,16 @@ from src.app.api import xueqiu_holdings as factor_lab
 
 
 class FactorLabXueqiuTopHoldingsTest(TestCase):
+    def setUp(self):
+        self.assertEqual(date(2026, 6, 25), factor_lab.XUEQIU_HOLDINGS_VALID_FROM)
+        cutoff_patch = patch.object(
+            factor_lab,
+            "XUEQIU_HOLDINGS_VALID_FROM",
+            date(2000, 1, 1),
+        )
+        cutoff_patch.start()
+        self.addCleanup(cutoff_patch.stop)
+
     class _CatalogRow:
         ts_code = "885001.TI"
         name = "测试细分板块"

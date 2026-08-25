@@ -80,6 +80,7 @@ THS_INDEX_TYPES = ("N", "TH", "I")
 THS_DAILY_REFRESH_DAYS = 30
 THS_DAILY_REPAIR_TRADING_DAYS = 3
 THS_DAILY_MIN_ROWS = 1000
+THS_DAILY_HISTORY_START_DATE = date(2026, 6, 25)
 
 
 def _clean_text(value) -> Optional[str]:
@@ -565,7 +566,10 @@ class AStockBaseDataSyncService:
         except Exception:
             earliest_snapshot_date = None
             self.analytics_db.rollback()
-        calendar_start = earliest_snapshot_date or (end_date - timedelta(days=THS_DAILY_REFRESH_DAYS))
+        calendar_start = max(
+            earliest_snapshot_date or (end_date - timedelta(days=THS_DAILY_REFRESH_DAYS)),
+            THS_DAILY_HISTORY_START_DATE,
+        )
         available_dates = self._trading_dates(calendar_start, end_date)
         existing_dates = {
             row[0]
