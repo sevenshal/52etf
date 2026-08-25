@@ -654,6 +654,16 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             connection = duckdb.connect(db_path)
             try:
                 connection.execute(
+                    "INSERT INTO xueqiu_cube_holdings_snapshots "
+                    "SELECT * REPLACE ('ZH2' AS cube_symbol) "
+                    "FROM xueqiu_cube_holdings_snapshots WHERE cube_symbol = 'ZH1'"
+                )
+                connection.execute(
+                    "INSERT INTO xueqiu_cube_holdings_snapshots "
+                    "SELECT * REPLACE ('ZH3' AS cube_symbol) "
+                    "FROM xueqiu_cube_holdings_snapshots WHERE cube_symbol = 'ZH1'"
+                )
+                connection.execute(
                     "UPDATE xueqiu_cube_holdings_snapshots SET weight_pct = 60 "
                     "WHERE snapshot_date = '2026-06-22' AND stock_symbol = 'SH.600003'"
                 )
@@ -685,6 +695,22 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                     "INSERT INTO a_stock_ths_daily VALUES (?, ?, ?)",
                     [("885001.TI", "2026-06-15", 100.0), ("885001.TI", "2026-06-22", 90.0)],
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE a_stock_market_daily_qfq (
+                        ts_code VARCHAR, trade_date DATE, open DOUBLE, high DOUBLE,
+                        low DOUBLE, close DOUBLE, vol DOUBLE, amount DOUBLE
+                    )
+                    """
+                )
+                connection.executemany(
+                    "INSERT INTO a_stock_market_daily_qfq VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (symbol, trade_date, close, close, close, close, 1.0, 1.0)
+                        for symbol in ("600001.SH", "600002.SH", "600003.SH")
+                        for trade_date, close in (("2026-06-15", 100.0), ("2026-06-22", 90.0))
+                    ],
+                )
             finally:
                 connection.close()
 
@@ -703,6 +729,8 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual("测试细分板块", board["name"])
         self.assertEqual("逆势吸筹", board["direction"])
         self.assertEqual(3, board["stock_count"])
+        self.assertEqual(2, board["contrarian_stock_count"])
+        self.assertEqual(66.67, board["contrarian_stock_ratio_pct"])
         self.assertGreater(board["weight_price_ratio_5d"], 1.05)
         self.assertEqual([], result["contrarian_boards"])
         self.assertEqual("测试细分板块", board_holdings["name"])

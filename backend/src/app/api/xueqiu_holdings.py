@@ -453,6 +453,88 @@ def _load_xueqiu_board_momentum(
         return []
 
     cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+    stock_rows = _duckdb_query_dicts(
+        connection,
+        f"""
+        {cte},
+        current_holdings AS (
+            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
+        ),
+        compare_holdings AS (
+            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
+        ),
+        current_cube_count AS (
+            SELECT COUNT(DISTINCT cube_symbol) AS value FROM current_holdings
+        ),
+        compare_cube_count AS (
+            SELECT COUNT(DISTINCT cube_symbol) AS value FROM compare_holdings
+        ),
+        current_stocks AS (
+            SELECT
+                stock_symbol,
+                SUM(weight_pct) / NULLIF(MAX(current_cube_count.value), 0) AS composite_weight_pct,
+                COUNT(DISTINCT cube_symbol) AS holding_cube_count
+            FROM current_holdings CROSS JOIN current_cube_count
+            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
+            GROUP BY stock_symbol
+        ),
+        compare_stocks AS (
+            SELECT
+                stock_symbol,
+                SUM(weight_pct) / NULLIF(MAX(compare_cube_count.value), 0) AS composite_weight_pct
+            FROM compare_holdings CROSS JOIN compare_cube_count
+            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
+            GROUP BY stock_symbol
+        )
+        SELECT
+            current_stocks.stock_symbol,
+            current_stocks.composite_weight_pct,
+            current_stocks.holding_cube_count,
+            compare_stocks.composite_weight_pct AS weight_5d_ago,
+            CASE
+                WHEN compare_stocks.composite_weight_pct IS NULL
+                     OR compare_stocks.composite_weight_pct = 0
+                THEN NULL
+                ELSE current_stocks.composite_weight_pct / compare_stocks.composite_weight_pct
+            END AS weight_multiple_5d
+        FROM current_stocks
+        LEFT JOIN compare_stocks USING (stock_symbol)
+        """,
+        [snapshot_date, compare_snapshot_date],
+    )
+    _attach_xueqiu_5d_momentum(
+        connection,
+        stock_rows,
+        compare_snapshot_date,
+        snapshot_date,
+    )
+    for stock in stock_rows:
+        stock["direction"] = _xueqiu_direction(
+            stock.get("weight_multiple_5d"),
+            stock.get("momentum_multiple_5d"),
+            stock.get("weight_price_ratio_5d"),
+        )
+    connection.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE xueqiu_stock_directions (
+            stock_symbol VARCHAR,
+            direction VARCHAR,
+            holding_cube_count INTEGER
+        )
+        """
+    )
+    if stock_rows:
+        connection.executemany(
+            "INSERT INTO xueqiu_stock_directions VALUES (?, ?, ?)",
+            [
+                (
+                    stock["stock_symbol"],
+                    stock["direction"],
+                    int(stock.get("holding_cube_count") or 0),
+                )
+                for stock in stock_rows
+            ],
+        )
     rows = _duckdb_query_dicts(
         connection,
         f"""
@@ -504,10 +586,17 @@ def _load_xueqiu_board_momentum(
             SELECT
                 members.ths_code,
                 COUNT(DISTINCT current_stocks.stock_symbol) AS stock_count,
+                COUNT(DISTINCT CASE
+                    WHEN directions.direction = '逆势吸筹'
+                         AND directions.holding_cube_count >= 3
+                    THEN current_stocks.stock_symbol
+                END) AS contrarian_stock_count,
                 SUM(current_stocks.composite_weight_pct) AS composite_weight_pct,
                 SUM(current_stocks.holding_cube_count) AS stock_cube_links
             FROM normalized_members members
             JOIN current_stocks ON current_stocks.stock_symbol = members.stock_symbol
+            LEFT JOIN xueqiu_stock_directions directions
+              ON directions.stock_symbol = current_stocks.stock_symbol
             WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
               AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
             GROUP BY members.ths_code
@@ -573,6 +662,13 @@ def _load_xueqiu_board_momentum(
             {
                 **meta,
                 "stock_count": int(row.get("stock_count") or 0),
+                "contrarian_stock_count": int(row.get("contrarian_stock_count") or 0),
+                "contrarian_stock_ratio_pct": round(
+                    int(row.get("contrarian_stock_count") or 0)
+                    * 100.0
+                    / int(row.get("stock_count") or 1),
+                    2,
+                ),
                 "stock_cube_links": int(row.get("stock_cube_links") or 0),
                 "composite_weight_pct": round(current_weight, 4),
                 "weight_5d_ago": round(old_weight, 4),
@@ -893,12 +989,19 @@ def load_xueqiu_top_holdings_latest(
             "active_rebalance_days": metadata.get("active_rebalance_days"),
             "index_options": index_options,
             "board_items": board_items,
-            "contrarian_boards": [
-                item
-                for item in board_items
-                if item.get("direction") == "逆势吸筹"
-                and int(item.get("stock_count") or 0) >= XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS
-            ][:12],
+            "contrarian_boards": sorted(
+                [
+                    item
+                    for item in board_items
+                    if int(item.get("stock_count") or 0) >= XUEQIU_CONTRARIAN_BOARD_MIN_STOCKS
+                    and float(item.get("contrarian_stock_ratio_pct") or 0) > 0
+                ],
+                key=lambda item: (
+                    -float(item.get("contrarian_stock_ratio_pct") or 0),
+                    -int(item.get("contrarian_stock_count") or 0),
+                    -float(item.get("composite_weight_pct") or 0),
+                ),
+            )[:12],
             "items": item_rows,
         }
     finally:

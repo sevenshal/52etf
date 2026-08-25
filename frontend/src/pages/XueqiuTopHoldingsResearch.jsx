@@ -1061,6 +1061,22 @@ const XueqiuTopHoldingsResearch = () => {
       render: value => (value == null ? '-' : `${Number(value).toFixed(2)}x`),
     },
     {
+      title: (
+        <Tooltip title="板块覆盖的雪球持仓股中，个股方向为逆势吸筹且至少被3个活跃组合持有的数量占比。">
+          吸筹占比
+        </Tooltip>
+      ),
+      dataIndex: 'contrarian_stock_ratio_pct',
+      width: 112,
+      align: 'right',
+      sorter: (a, b) => Number(a.contrarian_stock_ratio_pct || 0) - Number(b.contrarian_stock_ratio_pct || 0),
+      render: (value, record) => (
+        <Tooltip title={`${numberFormatter(record.contrarian_stock_count || 0)} / ${numberFormatter(record.stock_count || 0)} 只`}>
+          {percentFormatter(value)}
+        </Tooltip>
+      ),
+    },
+    {
       title: '权重变化',
       dataIndex: 'weight_change_5d',
       width: 110,
@@ -1227,7 +1243,7 @@ const XueqiuTopHoldingsResearch = () => {
       <Card
         bordered={false}
         title={(
-          <Tooltip title="板块综合权重5日增长超过5%、权价比大于1.05，同时板块指数下跌；汇总仅显示覆盖持仓股大于10只的板块。">
+          <Tooltip title="按板块覆盖持仓股中‘逆势吸筹且至少被3个活跃组合持有’的个股占比从高到低排列；汇总仅显示覆盖持仓股大于10只且吸筹股不为空的板块。">
             正在逆势吸筹的细分板块
           </Tooltip>
         )}
@@ -1238,10 +1254,10 @@ const XueqiuTopHoldingsResearch = () => {
             {contrarianBoards.map(board => (
               <Tooltip
                 key={board.ths_code}
-                title={`雪球综合权重 ${percentFormatter(board.composite_weight_pct)}，覆盖 ${board.stock_count} 只持仓股`}
+                title={`逆势吸筹 ${board.contrarian_stock_count} / ${board.stock_count} 只；雪球综合权重 ${percentFormatter(board.composite_weight_pct)}`}
               >
                 <Tag color="cyan">
-                  {board.name} {Number(board.weight_price_ratio_5d).toFixed(2)}x · 权重{signedFixed(board.weight_change_5d)}pp · 板块{signedFixed(board.momentum_5d)}%
+                  {board.name} 吸筹{percentFormatter(board.contrarian_stock_ratio_pct)} · {board.contrarian_stock_count}/{board.stock_count}只 · 板块{signedFixed(board.momentum_5d)}%
                 </Tag>
               </Tooltip>
             ))}
