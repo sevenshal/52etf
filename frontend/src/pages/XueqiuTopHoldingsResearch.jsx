@@ -357,6 +357,53 @@ const getHistoryChartOption = (historyRows = []) => {
   };
 };
 
+const getBoardHistoryChartOption = (historyRows = []) => {
+  const dates = historyRows.map(row => row.snapshot_date);
+  return {
+    color: ['#1677ff', '#fa8c16'],
+    grid: { left: 56, right: 62, top: 48, bottom: dates.length > 80 ? 72 : 42 },
+    tooltip: { trigger: 'axis' },
+    legend: { top: 8, data: ['板块综合权重', '板块收盘价'] },
+    xAxis: { type: 'category', data: dates, boundaryGap: false },
+    yAxis: [
+      {
+        type: 'value',
+        name: '权重%',
+        min: 0,
+        axisLabel: { formatter: value => `${value}%` },
+        splitLine: { lineStyle: { color: '#edf1f7' } },
+      },
+      {
+        type: 'value',
+        name: '价格',
+        scale: true,
+        axisLabel: { formatter: value => Number(value).toFixed(2) },
+        splitLine: { show: false },
+      },
+    ],
+    dataZoom: dates.length > 80
+      ? [{ type: 'inside', start: 70, end: 100 }, { type: 'slider', start: 70, end: 100, height: 18 }]
+      : [],
+    series: [
+      {
+        name: '板块综合权重',
+        type: 'line',
+        showSymbol: false,
+        smooth: true,
+        data: historyRows.map(row => row.composite_weight_pct),
+      },
+      {
+        name: '板块收盘价',
+        type: 'line',
+        yAxisIndex: 1,
+        showSymbol: false,
+        connectNulls: false,
+        data: historyRows.map(row => row.close_price),
+      },
+    ],
+  };
+};
+
 
 // 买入/卖出资格参数仅贰号叁号使用（壹号综合权重策略不用）；壹号只用目标仓位+最少组合数
 const XUEQIU_BUY_SELL_ONLY_KEYS = [
@@ -406,7 +453,9 @@ const XueqiuTopHoldingsResearch = () => {
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [selectedHistoryDate, setSelectedHistoryDate] = useState('');
   const [selectedBoard, setSelectedBoard] = useState(null);
+  const [boardHistoryData, setBoardHistoryData] = useState(null);
   const [boardHoldingsLoading, setBoardHoldingsLoading] = useState(false);
+  const [boardHistoryLoading, setBoardHistoryLoading] = useState(false);
   const [latestLoading, setLatestLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -414,6 +463,7 @@ const XueqiuTopHoldingsResearch = () => {
   const historyRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const boardHoldingsRequestRef = useRef(0);
+  const boardHistoryRequestRef = useRef(0);
   const [configOpen, setConfigOpen] = useState(false);
   const [configs, setConfigs] = useState([]);
   const [configLoading, setConfigLoading] = useState(false);
@@ -735,25 +785,44 @@ const XueqiuTopHoldingsResearch = () => {
 
   const clearBoardSelection = useCallback(() => {
     boardHoldingsRequestRef.current += 1;
+    boardHistoryRequestRef.current += 1;
     setSelectedBoard(null);
+    setBoardHistoryData(null);
     setBoardHoldingsLoading(false);
+    setBoardHistoryLoading(false);
   }, []);
 
   const selectBoard = useCallback(async board => {
     const requestId = boardHoldingsRequestRef.current + 1;
+    const historyRequestId = boardHistoryRequestRef.current + 1;
     boardHoldingsRequestRef.current = requestId;
+    boardHistoryRequestRef.current = historyRequestId;
     setBoardHoldingsLoading(true);
+    setBoardHistoryLoading(true);
+    setBoardHistoryData(null);
     try {
-      const response = await request.get('/api/factor-lab/xueqiu-top-holdings/board-holdings', {
-        params: { ths_code: board.ths_code, active_only: activeOnly },
-      });
+      const [holdingsResult, historyResult] = await Promise.allSettled([
+        request.get('/api/factor-lab/xueqiu-top-holdings/board-holdings', {
+          params: { ths_code: board.ths_code, active_only: activeOnly },
+        }),
+        request.get('/api/factor-lab/xueqiu-top-holdings/board-history', {
+          params: { ths_code: board.ths_code, active_only: activeOnly, limit: 800 },
+        }),
+      ]);
       if (boardHoldingsRequestRef.current !== requestId) return;
+      if (holdingsResult.status !== 'fulfilled') throw holdingsResult.reason;
+      const response = holdingsResult.value;
       const stockSymbols = response.data?.stock_symbols || [];
       setSelectedBoard({
         thsCode: board.ths_code,
         name: board.name,
         stockSymbols,
       });
+      if (boardHistoryRequestRef.current === historyRequestId && historyResult.status === 'fulfilled') {
+        setBoardHistoryData(historyResult.value.data || null);
+      } else if (historyResult.status === 'rejected') {
+        message.error(historyResult.reason?.response?.data?.detail || '加载板块历史失败');
+      }
       const firstVisible = latestItems.find(item => stockSymbols.includes(item.stock_symbol));
       if (firstVisible) setSelectedSymbol(firstVisible.stock_symbol);
     } catch (error) {
@@ -762,6 +831,7 @@ const XueqiuTopHoldingsResearch = () => {
       }
     } finally {
       if (boardHoldingsRequestRef.current === requestId) setBoardHoldingsLoading(false);
+      if (boardHistoryRequestRef.current === historyRequestId) setBoardHistoryLoading(false);
     }
   }, [activeOnly, latestItems]);
 
@@ -1186,6 +1256,11 @@ const XueqiuTopHoldingsResearch = () => {
   ], []);
 
   const chartOption = useMemo(() => getHistoryChartOption(historyRows), [historyRows]);
+  const boardHistoryRows = boardHistoryData?.history || [];
+  const boardChartOption = useMemo(
+    () => getBoardHistoryChartOption(boardHistoryRows),
+    [boardHistoryRows],
+  );
   const latestRow = historyData?.latest || selectedItem;
   const detailSummaryText = selectedHistoryDate
     ? `${selectedHistoryDate} · ${numberFormatter(detailData?.holding_cube_count || 0)} / ${numberFormatter(detailData?.cube_count || 0)} 个组合 · 合计 ${percentFormatter(detailData?.total_weight_pct)}`
@@ -1269,34 +1344,57 @@ const XueqiuTopHoldingsResearch = () => {
         )}
       </Card>
 
-      <Card
-        bordered={false}
-        title={(
-          <Space wrap>
-            <span>细分板块5日权价比</span>
-            {selectedBoard ? (
-              <Tag color="blue" closable onClose={clearBoardSelection}>
-                已联动：{selectedBoard.name}（{selectedBoard.stockSymbols.length}只）
-              </Tag>
-            ) : null}
-          </Space>
-        )}
-        extra={selectedBoard ? <Button size="small" onClick={clearBoardSelection}>查看全部持仓</Button> : null}
-        style={{ marginBottom: 12 }}
-      >
-        <Table
-          rowKey="ths_code"
-          size="small"
-          columns={boardColumns}
-          dataSource={boardItems}
-          loading={boardHoldingsLoading}
-          pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
-          scroll={{ x: 900 }}
-          rowClassName={record => (record.ths_code === selectedBoard?.thsCode ? 'xueqiu-holdings-row-selected' : '')}
-          onRow={record => ({ onClick: () => selectBoard(record) })}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-        />
-      </Card>
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={24} xl={15}>
+          <Card
+            bordered={false}
+            title={(
+              <Space wrap>
+                <span>细分板块5日权价比</span>
+                {selectedBoard ? (
+                  <Tag color="blue" closable onClose={clearBoardSelection}>
+                    已联动：{selectedBoard.name}（{selectedBoard.stockSymbols.length}只）
+                  </Tag>
+                ) : null}
+              </Space>
+            )}
+            extra={selectedBoard ? <Button size="small" onClick={clearBoardSelection}>查看全部持仓</Button> : null}
+          >
+            <Table
+              rowKey="ths_code"
+              size="small"
+              columns={boardColumns}
+              dataSource={boardItems}
+              loading={boardHoldingsLoading}
+              pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+              scroll={{ x: 900 }}
+              rowClassName={record => (record.ths_code === selectedBoard?.thsCode ? 'xueqiu-holdings-row-selected' : '')}
+              onRow={record => ({ onClick: () => selectBoard(record) })}
+              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} xl={9}>
+          <Card
+            bordered={false}
+            title={<Space><LineChartOutlined />板块历史权重与价格</Space>}
+            loading={boardHistoryLoading}
+          >
+            {selectedBoard && boardHistoryRows.length ? (
+              <>
+                <Text strong>{selectedBoard.name}</Text>
+                <ReactECharts option={boardChartOption} style={{ height: 390 }} notMerge lazyUpdate />
+              </>
+            ) : (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={selectedBoard ? '暂无板块历史数据' : '点击左侧板块查看历史曲线'}
+                style={{ margin: '118px 0' }}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
 
       <Row gutter={[12, 12]}>
         <Col xs={24} xl={14}>

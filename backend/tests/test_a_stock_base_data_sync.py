@@ -84,6 +84,17 @@ class AStockBaseDataSyncTest(TestCase):
                         }])
 
                 db = AnalyticsSession()
+                db.execute(text(
+                    "CREATE TABLE xueqiu_cube_holdings_snapshots (snapshot_date DATE)"
+                ))
+                db.execute(text(
+                    "INSERT INTO xueqiu_cube_holdings_snapshots VALUES ('2026-08-18')"
+                ))
+                db.execute(text(
+                    "INSERT INTO a_stock_ths_daily (ths_code, trade_date, close, updated_at) "
+                    "VALUES ('885001.N', '2026-08-24', 99, CURRENT_TIMESTAMP)"
+                ))
+                db.commit()
                 service = AStockBaseDataSyncService(analytics_db=db, tushare_service=FakeTushare())
                 try:
                     result = service.sync_ths_board_data(date(2026, 8, 24))

@@ -757,6 +757,101 @@ def load_xueqiu_board_holding_symbols(
         connection.close()
 
 
+def load_xueqiu_board_history(
+    ths_code: str,
+    active_only: bool = True,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Aggregate one board's Xueqiu weight on every snapshot and attach board price."""
+    normalized_code = str(ths_code or "").strip().upper()
+    normalized_limit = max(1, min(int(limit or 500), 2000))
+    if not normalized_code or len(normalized_code) > 24:
+        raise HTTPException(status_code=400, detail="无效的同花顺板块代码")
+    connection = _connect_duckdb()
+    try:
+        required = (
+            XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE,
+            "a_stock_ths_member",
+            "a_stock_ths_daily",
+        )
+        if not all(_duckdb_table_exists(connection, table) for table in required):
+            return {"ths_code": normalized_code, "name": None, "history": []}
+        cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+        rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            {cte},
+            date_summary AS (
+                SELECT snapshot_date, COUNT(DISTINCT cube_symbol) AS cube_count
+                FROM filtered_holdings
+                GROUP BY snapshot_date
+            ),
+            normalized_members AS (
+                SELECT
+                    CASE
+                        WHEN con_code LIKE '%.SH' THEN 'SH.' || LEFT(con_code, 6)
+                        WHEN con_code LIKE '%.SZ' THEN 'SZ.' || LEFT(con_code, 6)
+                        WHEN con_code LIKE '%.BJ' THEN 'BJ.' || LEFT(con_code, 6)
+                        ELSE con_code
+                    END AS stock_symbol,
+                    in_date,
+                    out_date
+                FROM a_stock_ths_member
+                WHERE ths_code = ?
+            ),
+            board_weights AS (
+                SELECT
+                    holdings.snapshot_date,
+                    COUNT(DISTINCT holdings.stock_symbol) AS stock_count,
+                    SUM(holdings.weight_pct) / NULLIF(MAX(summary.cube_count), 0)
+                        AS composite_weight_pct
+                FROM filtered_holdings holdings
+                JOIN date_summary summary USING (snapshot_date)
+                JOIN normalized_members members ON members.stock_symbol = holdings.stock_symbol
+                WHERE holdings.stock_symbol NOT IN ('CASH', 'CN_CASH')
+                  AND (members.in_date IS NULL OR members.in_date <= holdings.snapshot_date)
+                  AND (members.out_date IS NULL OR members.out_date > holdings.snapshot_date)
+                GROUP BY holdings.snapshot_date
+            ),
+            selected AS (
+                SELECT * FROM board_weights ORDER BY snapshot_date DESC LIMIT ?
+            )
+            SELECT
+                selected.*,
+                prices.trade_date AS price_date,
+                prices.close AS close_price
+            FROM selected
+            ASOF LEFT JOIN (
+                SELECT trade_date, close
+                FROM a_stock_ths_daily
+                WHERE ths_code = ?
+            ) prices
+              ON selected.snapshot_date >= prices.trade_date
+            ORDER BY selected.snapshot_date
+            """,
+            [normalized_code, normalized_limit, normalized_code],
+        )
+        for row in rows:
+            weight = _safe_float(row.get("composite_weight_pct"))
+            price = _safe_float(row.get("close_price"))
+            row["composite_weight_pct"] = round(weight, 4) if weight is not None else None
+            row["close_price"] = round(price, 3) if price is not None else None
+            row["stock_count"] = int(row.get("stock_count") or 0)
+        with DBSession() as db:
+            catalog_row = db.query(AIStockTHSIndexCache).filter(
+                AIStockTHSIndexCache.ts_code == normalized_code
+            ).first()
+            board_name = catalog_row.name if catalog_row else None
+        return {
+            "ths_code": normalized_code,
+            "name": board_name,
+            "active_only": active_only,
+            "history": rows,
+        }
+    finally:
+        connection.close()
+
+
 def load_xueqiu_top_holdings_latest(
     active_only: bool = True,
     limit: int = 300,
@@ -1305,6 +1400,20 @@ def get_xueqiu_board_holding_symbols(
     return load_xueqiu_board_holding_symbols(
         ths_code=ths_code,
         active_only=active_only,
+    )
+
+
+@router.get("/xueqiu-top-holdings/board-history")
+def get_xueqiu_board_history(
+    ths_code: str = Query(..., min_length=1, max_length=24),
+    active_only: bool = Query(True, description="只统计主理人活跃组合"),
+    limit: int = Query(500, ge=1, le=2000),
+    _: str = Depends(valid_admin_account),
+):
+    return load_xueqiu_board_history(
+        ths_code=ths_code,
+        active_only=active_only,
+        limit=limit,
     )
 
 

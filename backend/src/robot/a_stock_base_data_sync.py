@@ -557,22 +557,26 @@ class AStockBaseDataSyncService:
         )
         member_saved = _bulk_replace_ths_member_frame(self.analytics_db, member_frame)
 
-        latest_daily_date = _latest_analytics_date(self.analytics_db, AStockTHSDaily, "trade_date")
         self.analytics_db.commit()
-        calendar_start = (
-            end_date - timedelta(days=THS_DAILY_REFRESH_DAYS)
-            if latest_daily_date is None
-            else min(latest_daily_date, end_date) - timedelta(days=14)
-        )
+        try:
+            earliest_snapshot_date = self.analytics_db.execute(text(
+                "SELECT MIN(snapshot_date) FROM xueqiu_cube_holdings_snapshots"
+            )).scalar()
+        except Exception:
+            earliest_snapshot_date = None
+            self.analytics_db.rollback()
+        calendar_start = earliest_snapshot_date or (end_date - timedelta(days=THS_DAILY_REFRESH_DAYS))
         available_dates = self._trading_dates(calendar_start, end_date)
-        if latest_daily_date is None:
-            trading_dates = available_dates
-        else:
-            missing_dates = [value for value in available_dates if value > latest_daily_date]
-            repair_dates = [value for value in available_dates if value <= latest_daily_date][
-                -THS_DAILY_REPAIR_TRADING_DAYS:
-            ]
-            trading_dates = sorted(set([*repair_dates, *missing_dates]))
+        existing_dates = {
+            row[0]
+            for row in self.analytics_db.execute(text(
+                "SELECT DISTINCT trade_date FROM a_stock_ths_daily "
+                "WHERE trade_date BETWEEN :start_date AND :end_date"
+            ), {"start_date": calendar_start, "end_date": end_date}).fetchall()
+        }
+        missing_dates = [value for value in available_dates if value not in existing_dates]
+        repair_dates = available_dates[-THS_DAILY_REPAIR_TRADING_DAYS:]
+        trading_dates = sorted(set([*missing_dates, *repair_dates]))
         daily_frames: List[pd.DataFrame] = []
         daily_errors: List[str] = []
         for trade_date in trading_dates:

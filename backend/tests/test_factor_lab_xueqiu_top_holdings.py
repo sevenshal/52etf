@@ -724,6 +724,10 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                     "885001.TI",
                     active_only=True,
                 )
+                board_history = factor_lab.load_xueqiu_board_history(
+                    "885001.TI",
+                    active_only=True,
+                )
 
         self.assertEqual(1, len(result["board_items"]))
         board = result["board_items"][0]
@@ -739,3 +743,9 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             ["SH.600001", "SH.600002", "SH.600003"],
             board_holdings["stock_symbols"],
         )
+        board_history_rows = board_history["history"]
+        self.assertEqual("2026-06-15", str(board_history_rows[0]["snapshot_date"]))
+        self.assertEqual("2026-06-22", str(board_history_rows[-1]["snapshot_date"]))
+        self.assertEqual(100.0, board_history_rows[0]["close_price"])
+        self.assertEqual(90.0, board_history_rows[-1]["close_price"])
+        self.assertTrue(all(row["composite_weight_pct"] is not None for row in board_history_rows))
