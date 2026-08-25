@@ -527,6 +527,7 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         # 信号日 day0（候补 fear=20 < 25, 量比 2.0）→ 次日 day1 开盘成交
         self.assertEqual(dates[1].isoformat(), buys[0]["date"])
         self.assertAlmostEqual(101.0, buys[0]["price"])
+        self.assertAlmostEqual(2.0, buys[0]["buy_volume_ratio"])
 
     def test_seesaw_main_signal_switches_back_from_sub(self):
         """跷跷板：持有候补时主标的出信号 → 卖出候补换回主标的"""
@@ -547,6 +548,8 @@ class SoxlFearBacktestVolumeSignalTest(TestCase):
         self.assertEqual(dates[2].isoformat(), actions[2][0])
         self.assertEqual("BUY", actions[2][1])
         self.assertEqual("510880.SH", actions[2][2])
+        switch_trades = result["trades"][1:3]
+        self.assertTrue(all(item["buy_volume_ratio"] == 2.0 for item in switch_trades))
 
     def test_seesaw_sub_greedy_sells_to_flat(self):
         """跷跷板：持有候补且候补到达贪恐阈值 → 卖出保持空仓"""

@@ -670,7 +670,15 @@ const SoxlFearBacktest = () => {
         </span>
       ),
     },
-    { title: '触发量比', dataIndex: 'buy_volume_ratio', width: 100, render: value => (value == null ? '-' : Number(value).toFixed(2)) },
+    {
+      title: '触发量比',
+      dataIndex: 'buy_volume_ratio',
+      width: 100,
+      render: (value, record) => {
+        const triggerVolumeRatio = value ?? record.volume_ratio;
+        return triggerVolumeRatio == null ? '-' : Number(triggerVolumeRatio).toFixed(2);
+      },
+    },
     { title: '原因', dataIndex: 'reason' },
   ];
 
