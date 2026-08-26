@@ -821,10 +821,13 @@ def load_xueqiu_board_history(
             SELECT
                 selected.*,
                 prices.trade_date AS price_date,
+                prices.open AS open_price,
+                prices.high AS high_price,
+                prices.low AS low_price,
                 prices.close AS close_price
             FROM selected
             ASOF LEFT JOIN (
-                SELECT trade_date, close
+                SELECT trade_date, open, high, low, close
                 FROM a_stock_ths_daily
                 WHERE ths_code = ?
             ) prices
@@ -835,9 +838,10 @@ def load_xueqiu_board_history(
         )
         for row in rows:
             weight = _safe_float(row.get("composite_weight_pct"))
-            price = _safe_float(row.get("close_price"))
+            for field in ("open_price", "high_price", "low_price", "close_price"):
+                price = _safe_float(row.get(field))
+                row[field] = round(price, 3) if price is not None else None
             row["composite_weight_pct"] = round(weight, 4) if weight is not None else None
-            row["close_price"] = round(price, 3) if price is not None else None
             row["stock_count"] = int(row.get("stock_count") or 0)
         with DBSession() as db:
             catalog_row = db.query(AIStockTHSIndexCache).filter(
@@ -1190,7 +1194,9 @@ def load_xueqiu_top_holdings_history(
             [normalized_symbol, raw_symbol, normalized_limit],
         )
         for row in rows:
-            row["close_price"] = None
+            row["price_date"] = None
+            for field in ("open_price", "high_price", "low_price", "close_price"):
+                row[field] = None
         price_symbol = _xueqiu_symbol_to_ts_code(normalized_symbol)
         if (
             rows
@@ -1209,8 +1215,16 @@ def load_xueqiu_top_holdings_history(
                     for row, snapshot_day in zip(rows, snapshot_days):
                         available = price_df.filter(pl.col("trade_date") <= snapshot_day)
                         if not available.is_empty():
-                            close_price = available.tail(1).select("close").to_series()[0]
-                            row["close_price"] = round(float(close_price), 3) if close_price is not None else None
+                            price_row = available.tail(1).to_dicts()[0]
+                            row["price_date"] = price_row.get("trade_date")
+                            for source, target in (
+                                ("open", "open_price"),
+                                ("high", "high_price"),
+                                ("low", "low_price"),
+                                ("close", "close_price"),
+                            ):
+                                price = _safe_float(price_row.get(source))
+                                row[target] = round(price, 3) if price is not None else None
             except Exception as exc:
                 logger.warning("Unable to load price history for 雪球持仓 %s: %s", normalized_symbol, exc)
         return {

@@ -597,7 +597,7 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual([1, 1], [row["composite_rank"] for row in result["history"]])
         self.assertEqual("2026-06-22", result["latest"]["snapshot_date"])
 
-    def test_history_returns_latest_close_on_or_before_snapshot_date(self):
+    def test_history_returns_latest_ohlc_on_or_before_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"
             self._create_snapshot_db(db_path)
@@ -611,6 +611,9 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 )
 
         self.assertEqual([100.0, 90.0], [row["close_price"] for row in result["history"]])
+        self.assertEqual([100.0, 90.0], [row["open_price"] for row in result["history"]])
+        self.assertEqual([100.0, 90.0], [row["high_price"] for row in result["history"]])
+        self.assertEqual([100.0, 90.0], [row["low_price"] for row in result["history"]])
         self.assertEqual(90.0, result["latest"]["close_price"])
 
     def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
@@ -697,13 +700,17 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 connection.execute(
                     """
                     CREATE TABLE a_stock_ths_daily (
-                        ths_code VARCHAR, trade_date DATE, close DOUBLE
+                        ths_code VARCHAR, trade_date DATE, open DOUBLE,
+                        high DOUBLE, low DOUBLE, close DOUBLE
                     )
                     """
                 )
                 connection.executemany(
-                    "INSERT INTO a_stock_ths_daily VALUES (?, ?, ?)",
-                    [("885001.TI", "2026-06-15", 100.0), ("885001.TI", "2026-06-22", 90.0)],
+                    "INSERT INTO a_stock_ths_daily VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("885001.TI", "2026-06-15", 98.0, 102.0, 97.0, 100.0),
+                        ("885001.TI", "2026-06-22", 95.0, 96.0, 89.0, 90.0),
+                    ],
                 )
                 connection.execute(
                     """
@@ -758,4 +765,10 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual("2026-06-22", str(board_history_rows[-1]["snapshot_date"]))
         self.assertEqual(100.0, board_history_rows[0]["close_price"])
         self.assertEqual(90.0, board_history_rows[-1]["close_price"])
+        self.assertEqual(98.0, board_history_rows[0]["open_price"])
+        self.assertEqual(95.0, board_history_rows[-1]["open_price"])
+        self.assertEqual(102.0, board_history_rows[0]["high_price"])
+        self.assertEqual(96.0, board_history_rows[-1]["high_price"])
+        self.assertEqual(97.0, board_history_rows[0]["low_price"])
+        self.assertEqual(89.0, board_history_rows[-1]["low_price"])
         self.assertTrue(all(row["composite_weight_pct"] is not None for row in board_history_rows))

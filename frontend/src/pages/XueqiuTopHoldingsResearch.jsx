@@ -263,11 +263,12 @@ const getHistoryChartOption = (historyRows = []) => {
       ? null
       : Number(row.composite_rank)
   ));
-  const prices = historyRows.map(row => (
-    row.close_price === null || row.close_price === undefined
-      ? null
-      : Number(row.close_price)
-  ));
+  const priceKlines = historyRows.map(row => {
+    const values = [row.open_price, row.close_price, row.low_price, row.high_price];
+    return values.every(value => value !== null && value !== undefined && Number.isFinite(Number(value)))
+      ? values.map(Number)
+      : '-';
+  });
   const maxRank = Math.max(12, ...ranks.filter(value => Number.isFinite(value)));
 
   return {
@@ -283,12 +284,12 @@ const getHistoryChartOption = (historyRows = []) => {
     },
     legend: {
       top: 8,
-      data: ['综合权重', '综合排名', '收盘价'],
+      data: ['综合权重', '综合排名', '价格K线'],
     },
     xAxis: {
       type: 'category',
       data: dates,
-      boundaryGap: false,
+      boundaryGap: true,
       axisLabel: { color: '#64748b' },
     },
     yAxis: [
@@ -345,13 +346,16 @@ const getHistoryChartOption = (historyRows = []) => {
         lineStyle: { width: 1.8 },
       },
       {
-        name: '收盘价',
-        type: 'line',
+        name: '价格K线',
+        type: 'candlestick',
         yAxisIndex: 2,
-        data: prices,
-        symbol: 'none',
-        connectNulls: true,
-        lineStyle: { width: 1.8 },
+        data: priceKlines,
+        itemStyle: {
+          color: '#ef4444',
+          color0: '#22c55e',
+          borderColor: '#ef4444',
+          borderColor0: '#22c55e',
+        },
       },
     ],
   };
@@ -359,12 +363,18 @@ const getHistoryChartOption = (historyRows = []) => {
 
 const getBoardHistoryChartOption = (historyRows = []) => {
   const dates = historyRows.map(row => row.snapshot_date);
+  const priceKlines = historyRows.map(row => {
+    const values = [row.open_price, row.close_price, row.low_price, row.high_price];
+    return values.every(value => value !== null && value !== undefined && Number.isFinite(Number(value)))
+      ? values.map(Number)
+      : '-';
+  });
   return {
     color: ['#1677ff', '#fa8c16'],
     grid: { left: 56, right: 62, top: 48, bottom: dates.length > 80 ? 72 : 42 },
     tooltip: { trigger: 'axis' },
-    legend: { top: 8, data: ['板块综合权重', '板块收盘价'] },
-    xAxis: { type: 'category', data: dates, boundaryGap: false },
+    legend: { top: 8, data: ['板块综合权重', '板块价格K线'] },
+    xAxis: { type: 'category', data: dates, boundaryGap: true },
     yAxis: [
       {
         type: 'value',
@@ -393,12 +403,16 @@ const getBoardHistoryChartOption = (historyRows = []) => {
         data: historyRows.map(row => row.composite_weight_pct),
       },
       {
-        name: '板块收盘价',
-        type: 'line',
+        name: '板块价格K线',
+        type: 'candlestick',
         yAxisIndex: 1,
-        showSymbol: false,
-        connectNulls: false,
-        data: historyRows.map(row => row.close_price),
+        data: priceKlines,
+        itemStyle: {
+          color: '#ef4444',
+          color0: '#22c55e',
+          borderColor: '#ef4444',
+          borderColor0: '#22c55e',
+        },
       },
     ],
   };
