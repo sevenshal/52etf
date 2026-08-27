@@ -14,7 +14,7 @@ import re
 import threading
 import time
 from bisect import bisect_left
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -52,7 +52,7 @@ from .tushare import TushareService
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
-PROMPT_VERSION = "news-ths-v8"  # v8: 新闻窗口固定为上一交易日的可配置时刻起并按时间升序，提升跨批前缀缓存命中
+PROMPT_VERSION = "news-ths-v14"  # v14: 行情时点改为业务语义，提示词不暴露供应商或存储实现
 DEFAULT_MODEL = "deepseek-chat"
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
@@ -69,6 +69,9 @@ NEWS_SIGNAL_WEIGHT = 0.5  # 纯新闻信号在排序中的权重，0 = 关闭（
 XUEQIU_SIGNAL_ENABLED = 0  # 雪球活跃组合行为信号(xueqiu块)是否喂给 AI 选股：0=关（默认，先观察），1=开
 XUEQIU_WEIGHT_GAIN_CLIP = (0.2, 10.0)  # 权重5日升速(倍数)裁剪区间；极端值(如新进小权重被大量买入)会爆到几百倍
 XUEQIU_RATIO_CLIP = (0.0, 10.0)  # 权价比(权重升速÷价格升速)裁剪上限
+XUEQIU_EXTREME_RATIO = 6.0  # 历史回测显示 >6 的逆势吸筹不具备常规加分效果，多为低基数倍数失真
+_TRADING_DAYS_ELAPSED_CACHE: Dict[Tuple[date, date], int] = {}
+_TRADING_DAYS_ELAPSED_LOCK = threading.Lock()
 MAX_EVENTS = 8
 MAX_BOARDS = 8
 MAX_CANDIDATES_PER_BOARD = 200
@@ -376,12 +379,12 @@ def _validated_events(raw_response: Dict[str, Any], headlines: List[Dict[str, An
                 "aliases": aliases[:8],
                 "direction": str(item.get("direction") or "中性")[:16],
                 "rationale": str(item.get("rationale") or "")[:500],
-                # 文本内在属性：tone/quantitative/ambiguity 不需要股票特征即可判断，
-                # text_surprise 是"标题本身出乎常识的程度"，与个股/板块特征无关
+                # 标题级 pure-news 近似属性；真正的价格反应与个股特征留到候选阶段合并。
                 "tone": str(item.get("tone") or "neutral")[:16],
                 "quantitative": _clamp(item.get("quantitative"), 0.0, 100.0, 0.0),
                 "ambiguity": _clamp(item.get("ambiguity"), 0.0, 100.0, 0.0),
                 "text_surprise": _clamp(item.get("text_surprise"), 0.0, 100.0, 0.0),
+                "attention": _clamp(item.get("attention"), 0.0, 100.0, 0.0),
             }
         )
     accepted = sorted(accepted, key=lambda item: (-item["score"], item["hotword"]))[:_load_strategy_params()["max_events"]]
@@ -477,37 +480,51 @@ def _window_features(rows: List[Tuple[Optional[float], Optional[float], Optional
 
 
 def _news_signal_score(candidate: Dict[str, Any]) -> float:
-    """Pure-news signal 0-100 (The Inefficient Pricing of News, NBER w35093).
+    """Long-only news-mispricing proxy inspired by NBER w35093.
 
-    Combines LLM text attributes (tone / quantitative / ambiguity /
-    text_surprise) with a data-computed characteristic residual (momentum /
-    price position).  Underreaction setups — negative or neutral tone with
-    concrete numbers, price sitting low in its 20d range — score high
-    (market over-pessimism, drift opportunity).  Overreaction setups — vague
-    high-attention topics on extended momentum — score low (chase risk).
-    Neutral 50 when the candidate has no linked news.
+    The paper's exact ``pure news`` signal residualizes text embeddings against
+    stock characteristics; headline-only production data cannot reproduce that
+    estimator.  This transparent proxy keeps the economically important sign:
+    novel, quantitative, low-ambiguity *favourable* news with a muted price
+    response scores high.  Hard adverse news scores low because underreaction
+    to bad news implies further downside, not a long opportunity.  Ambiguous,
+    high-attention or already-chased stories are penalized as overreaction risk.
+    A candidate without linked news remains neutral at 50.
     """
     events = candidate.get("events") or []
     if not events:
         return 50.0
     scores = []
     for ev in events:
-        tone = str(ev.get("tone") or "neutral").lower()
+        direction = str(ev.get("direction") or "中性")
         quantitative = _clamp(ev.get("quantitative"), 0.0, 100.0, 0.0) / 100.0
         ambiguity = _clamp(ev.get("ambiguity"), 0.0, 100.0, 0.0) / 100.0
         text_surprise = _clamp(ev.get("text_surprise"), 0.0, 100.0, 0.0) / 100.0
-        tone_bonus = 30.0 if tone == "negative" else (10.0 if tone == "neutral" else -10.0)
-        under_score = 50.0 + text_surprise * 30.0 + quantitative * 20.0 + tone_bonus
-        over_penalty = ambiguity * 25.0
+        attention = _clamp(ev.get("attention"), 0.0, 100.0, 0.0) / 100.0
+        if direction in {"利多", "positive", "正面"}:
+            score = 45.0 + text_surprise * 25.0 + quantitative * 25.0
+        elif direction in {"利空", "negative", "负面"}:
+            # 对坏消息反应不足通常意味着负向信息尚未完全计价，纯多头应回避。
+            score = 30.0 - text_surprise * 10.0 - quantitative * 10.0
+        else:
+            score = 40.0 + text_surprise * 10.0 + quantitative * 10.0
+        score -= ambiguity * 25.0 + attention * 15.0
+
+        change = _safe_float(candidate.get("change_pct"))
+        mom5 = _safe_float(candidate.get("mom_5d"))
         mom20 = _safe_float(candidate.get("mom_20d"))
         position = _safe_float(candidate.get("price_position"))
-        if mom20 is not None and mom20 > 15:
-            # extended momentum: news is largely expected content, not shock
-            over_penalty += min(25.0, (mom20 - 15) * 1.0)
-        if position is not None and position < 0.3 and tone == "negative":
-            # low price position + negative news -> market already pessimistic
-            under_score += 10.0
-        scores.append(max(0.0, min(100.0, under_score - over_penalty)))
+        if direction in {"利多", "positive", "正面"}:
+            # 正向硬新闻出现后尚未上涨，是多头所需的“反应不足”；涨幅越充分越像已定价。
+            if change is not None:
+                score += 10.0 if change <= 1.0 else -min(20.0, max(0.0, change - 3.0) * 3.0)
+            if mom5 is not None:
+                score += 5.0 if mom5 <= 3.0 else -min(15.0, max(0.0, mom5 - 8.0))
+            if mom20 is not None and mom20 > 15.0:
+                score -= min(20.0, mom20 - 15.0)
+            if position is not None:
+                score += 5.0 if position < 0.5 else (-10.0 if position > 0.8 else 0.0)
+        scores.append(max(0.0, min(100.0, score)))
     if not scores:
         return 50.0
     return round(sum(scores) / len(scores), 1)
@@ -524,7 +541,31 @@ def _execution_score(candidate: Dict[str, Any]) -> float:
     return round(_clamp(score, 0.0, 100.0, 0.0), 3)
 
 
-def _load_xueqiu_behavior_map(limit: int = 2000) -> Dict[str, Dict[str, Any]]:
+def _realtime_price_fields(quote: Dict[str, Any], duckdb_previous_close: Any) -> Dict[str, Any]:
+    """Normalize a live quote and fill rt_min's missing previous close.
+
+    Tushare ``rt_min`` provides the latest minute OHLC but not ``pre_close``.
+    The candidate builder already reads the latest completed daily close from
+    DuckDB, so use it only when the realtime source does not provide its own
+    previous close/percentage change (the Sina fallback normally does).
+    """
+    price = _safe_float(quote.get("price"))
+    source_prev_close = _safe_float(quote.get("prev_close"))
+    fallback_prev_close = _safe_float(duckdb_previous_close)
+    prev_close = source_prev_close if source_prev_close and source_prev_close > 0 else fallback_prev_close
+    percent_change = _safe_float(quote.get("percent_change"))
+    if percent_change is None and price is not None and prev_close and prev_close > 0:
+        percent_change = (price / prev_close - 1.0) * 100.0
+    return {
+        "price": price,
+        "prev_close": prev_close,
+        "change_pct": round(percent_change, 4) if percent_change is not None else None,
+        "turnover": _safe_float(quote.get("turnover")),
+        "quote_source": str(quote.get("source") or "realtime_unknown"),
+    }
+
+
+def _load_xueqiu_behavior_snapshot(limit: int = 2000) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     """Latest Xueqiu active-portfolio behavior snapshot, keyed by A-share ts_code.
 
     Reuses the same analytics query the 星澜 robots rely on
@@ -539,7 +580,10 @@ def _load_xueqiu_behavior_map(limit: int = 2000) -> Dict[str, Dict[str, Any]]:
         match = re.fullmatch(r"(SH|SZ|BJ)\.(\d{6})", str(item.get("stock_symbol") or ""))
         if match:
             by_ts[f"{match.group(2)}.{match.group(1)}"] = item
-    return by_ts
+    return by_ts, {
+        "snapshot_date": _json_safe(latest.get("snapshot_date")),
+        "snapshot_at": _json_safe(latest.get("snapshot_at")),
+    }
 
 
 def _clamp_multiple(value: Any, bounds: Tuple[float, float]) -> Optional[float]:
@@ -560,7 +604,7 @@ def _safe_int_value(value: Any) -> Optional[int]:
         return None
 
 
-def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
+def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Attach the xueqiu behavior block to candidates in the current Xueqiu snapshot.
 
     Candidates absent from the snapshot get no block at all.  The block carries
@@ -571,10 +615,10 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
     enrichment (the recommendation itself must never depend on this data).
     """
     try:
-        behavior_map = _load_xueqiu_behavior_map()
+        behavior_map, metadata = _load_xueqiu_behavior_snapshot()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Xueqiu behavior snapshot unavailable, skipping xueqiu enrichment: %s", exc)
-        return
+        return {}
     for candidate in candidates:
         item = behavior_map.get(candidate.get("ts_code"))
         if not item:
@@ -585,6 +629,7 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
         cube_count = _safe_int_value(item.get("holding_cube_count"))
         cube_count_5d_ago = _safe_int_value(item.get("cube_count_5d_ago"))
         cube_gain = cube_count - cube_count_5d_ago if (cube_count is not None and cube_count_5d_ago is not None) else None
+        direction = item.get("direction") or "持平"
         candidate["xueqiu"] = {
             "weight": _round(item.get("composite_weight_pct"), 2),
             "rank": _safe_int_value(item.get("composite_rank")),
@@ -594,8 +639,58 @@ def _attach_xueqiu_behavior(candidates: List[Dict[str, Any]]) -> None:
             "rank_up_5d": _safe_int_value(item.get("rank_change_5d")),
             "cube_gain_5d": cube_gain,
             "ratio_5d": ratio,
-            "direction": item.get("direction") or "持平",
+            "direction": direction,
         }
+        if direction == "逆势吸筹" and ratio is not None and ratio > XUEQIU_EXTREME_RATIO:
+            # 保留方向标签以维持行为口径稳定，另用正交质量标签标记回测弱/低基数失真。
+            candidate["xueqiu"]["signal_quality"] = "极端权价比_回测弱"
+    return metadata
+
+
+def _quote_batch_metadata(
+    candidates: List[Dict[str, Any]],
+    *,
+    generated_at: str,
+    daily_features_as_of: str,
+    xueqiu_snapshot_date: Optional[str],
+) -> Dict[str, Any]:
+    """Build shared, vendor-neutral quote timing plus per-symbol exceptions."""
+    generated_date = str(generated_at or "")[:10]
+
+    def _semantic_mode(item: Dict[str, Any]) -> str:
+        source = str(item.get("quote_source") or "")
+        quote_date = str(item.get("quote_time") or "")[:10]
+        if source in {"tushare_rt_min", "sina_realtime"}:
+            return "REALTIME" if quote_date == generated_date else "STALE"
+        if source == "duckdb_daily":
+            return "DAILY_CLOSE"
+        return "UNKNOWN"
+
+    pairs = [
+        (str(item.get("quote_time") or ""), _semantic_mode(item))
+        for item in candidates
+        if item.get("quote_time") or item.get("quote_source")
+    ]
+    default_time, default_mode = Counter(pairs).most_common(1)[0][0] if pairs else (None, "UNKNOWN")
+    exceptions = {
+        item["ts_code"]: {
+            "quote_as_of": item.get("quote_time"),
+            "quote_mode": _semantic_mode(item),
+        }
+        for item in candidates
+        if (str(item.get("quote_time") or ""), _semantic_mode(item))
+        != (default_time or "", default_mode)
+    }
+    metadata: Dict[str, Any] = {
+        "generated_at": generated_at,
+        "quote_as_of": default_time,
+        "quote_mode": default_mode,
+        "daily_features_as_of": daily_features_as_of,
+        "xueqiu_as_of": f"{xueqiu_snapshot_date}_CLOSE" if xueqiu_snapshot_date else None,
+    }
+    if exceptions:
+        metadata["quote_exceptions"] = exceptions
+    return metadata
 
 
 class AIStockDataProvider:
@@ -773,26 +868,29 @@ class AIStockDataProvider:
             codes = [c["ts_code"] for c in pre_filtered]
             try:
                 with connect_duckdb(analytics_path, prefer_read_only=True) as ddb:
+                    placeholders = ",".join(["?" for _ in codes])
                     row = ddb.execute("SELECT MAX(trade_date) FROM a_stock_market_daily").fetchone()
                     data_date = row[0] if row and row[0] else None
                     if data_date is not None:
-                        placeholders = ",".join(["?" for _ in codes])
                         rows = ddb.execute(
                             f"SELECT ts_code, total_mv, amount, close, pct_chg FROM a_stock_market_daily WHERE trade_date = ? AND ts_code IN ({placeholders})",
                             [data_date, *codes],
                         ).fetchall()
                     else:
                         rows = []
+                    # Keep the trailing-window query in the same live read-only
+                    # connection; querying after leaving this block can fail on
+                    # a closed DuckDB connection and silently erase all features.
+                    wrows = ddb.execute(
+                        f"SELECT ts_code, close, pct_chg, turnover_rate FROM a_stock_market_daily WHERE ts_code IN ({placeholders}) ORDER BY ts_code, trade_date",
+                        codes,
+                    ).fetchall()
                 for ts_code, total_mv, amount, close, pct_chg in rows:
                     daily_lookup[ts_code] = {"total_mv": float(total_mv or 0), "amount": float(amount or 0), "close": float(close or 0), "pct_chg": float(pct_chg or 0)}
                 # Trailing-window features (momentum/volatility/price position /
                 # avg turnover) used as the stock-characteristic baseline for the
                 # pure-news residual.  One batched read, computed in memory.
                 window_lookup: Dict[str, Dict[str, Any]] = {}
-                wrows = ddb.execute(
-                    f"SELECT ts_code, close, pct_chg, turnover_rate FROM a_stock_market_daily WHERE ts_code IN ({placeholders}) ORDER BY ts_code, trade_date",
-                    codes,
-                ).fetchall()
                 bucket: List[Tuple[Optional[float], Optional[float], Optional[float]]] = []
                 current_code: Optional[str] = None
                 for w_ts_code, w_close, w_pct, w_turn in wrows:
@@ -862,10 +960,11 @@ class AIStockDataProvider:
         # after-hours / weekend runs so recommendations never depend on a
         # live tape being open.
         quote_map: Dict[str, Dict[str, Any]] = {}
-        for offset in range(0, len(filtered), 50):
-            quotes = self.tushare.get_quote_batch([item["ts_code"] for item in filtered[offset:offset + 50]])
-            for quote in quotes or []:
-                quote_map[_normalize_ts_code(quote.get("symbol"))] = quote
+        # TushareService internally batches rt_min at 300 symbols, so pass the
+        # whole candidate set once and avoid an extra 50-symbol outer loop.
+        quotes = self.tushare.get_quote_batch([item["ts_code"] for item in filtered])
+        for quote in quotes or []:
+            quote_map[_normalize_ts_code(quote.get("symbol"))] = quote
         for candidate in filtered:
             candidate.update(window_lookup.get(candidate["ts_code"]) or {})
         eligible = []
@@ -873,27 +972,39 @@ class AIStockDataProvider:
             quote = quote_map.get(candidate["ts_code"])
             if quote:
                 quote_time = quote.get("timestamp")
-                candidate.update({"name": quote.get("name") or candidate["name"], "price": _safe_float(quote.get("price")), "change_pct": _safe_float(quote.get("percent_change")), "turnover": _safe_float(quote.get("turnover")), "quote_time": quote_time.isoformat() if hasattr(quote_time, "isoformat") else None, "data_fresh": True})
+                candidate.update(_realtime_price_fields(quote, daily_lookup.get(candidate["ts_code"], {}).get("close")))
+                candidate.update({"name": quote.get("name") or candidate["name"], "quote_time": quote_time.isoformat() if hasattr(quote_time, "isoformat") else None, "data_fresh": True})
             else:
                 # No live tape (closed market / missing quote): use the last
                 # available DuckDB close as the price basis.
                 daily = daily_lookup.get(candidate["ts_code"], {})
                 fallback_price = daily.get("close")
                 if fallback_price and fallback_price > 0:
-                    candidate.update({"name": candidate["name"], "price": fallback_price, "change_pct": daily.get("pct_chg"), "turnover": (daily.get("amount") or 0) * 1000, "quote_time": (data_date or market_date).isoformat() + "T00:00:00", "data_fresh": True})
+                    candidate.update({"name": candidate["name"], "price": fallback_price, "prev_close": None, "change_pct": daily.get("pct_chg"), "turnover": (daily.get("amount") or 0) * 1000, "quote_time": (data_date or market_date).isoformat() + "T00:00:00", "quote_source": "duckdb_daily", "data_fresh": True})
                 else:
                     candidate["data_fresh"] = False
             if _is_candidate_eligible(candidate, int(params.get("min_listing_days", MIN_LISTING_DAYS))):
                 candidate["execution_score"] = _execution_score(candidate)
                 candidate["events"] = [event_map[event_id] for event_id in candidate["event_ids"] if event_id in event_map]
+                # 必须在第三轮选股前计算，避免提示词拿到 null、只能在 AI 返回后才排序。
+                candidate["news_signal"] = _news_signal_score(candidate)
                 eligible.append(candidate)
         if not eligible:
             raise AIStockError("THS 成分股中没有满足上市/交易条件的股票")
+        xueqiu_metadata: Dict[str, Any] = {}
         if int(params.get("xueqiu_signal_enabled", XUEQIU_SIGNAL_ENABLED)):
             # 雪球活跃组合行为快照合并（xueqiu 块）：开关开启才查询并附加；
             # 快照不可用时只跳过合并，绝不影响推荐主流程。
-            _attach_xueqiu_behavior(eligible)
-        return {"generated_at": as_of.isoformat(timespec="seconds"), "trade_date": as_of.date().isoformat(), "market_as_of_date": market_date.isoformat(), "events": events, "boards": boards, "candidates": eligible, "source_status": {"ths_index": "SUCCESS", "ths_member": "SUCCESS", "ths_daily": "SUCCESS", "moneyflow_cnt_ths": "SUCCESS", "limit_cpt_list": "SUCCESS", "candidate_count": len(eligible)}}
+            xueqiu_metadata = _attach_xueqiu_behavior(eligible)
+        generated_at = as_of.isoformat(timespec="seconds")
+        data_as_of = _quote_batch_metadata(
+            eligible,
+            generated_at=generated_at,
+            # DuckDB日线可能比交易日历基准再滞后一天，必须报告实际数据日。
+            daily_features_as_of=(data_date or market_date).isoformat(),
+            xueqiu_snapshot_date=xueqiu_metadata.get("snapshot_date"),
+        )
+        return {"generated_at": generated_at, "trade_date": as_of.date().isoformat(), "market_as_of_date": market_date.isoformat(), "data_as_of": data_as_of, "events": events, "boards": boards, "candidates": eligible, "source_status": {"ths_index": "SUCCESS", "ths_member": "SUCCESS", "ths_daily": "SUCCESS", "moneyflow_cnt_ths": "SUCCESS", "limit_cpt_list": "SUCCESS", "candidate_count": len(eligible)}}
 
     def minute_entry_confirmed(self, ts_code: str) -> Tuple[bool, Dict[str, Any]]:
         bars = self.tushare.get_a_stock_realtime_minute_frame(ts_code, "1MIN")
@@ -999,7 +1110,17 @@ class DeepSeekStockSelector:
                 "tone": "按标题措辞情绪方向判断: negative=利空措辞/positive=利好措辞/neutral=中性，不要用外部知识",
                 "quantitative": "0-100，标题包含多少具体可验证的量化信息(业绩数字/订单金额/增速/比例)，无数字=0",
                 "ambiguity": "0-100，信息模糊度('有望''或将''可能'等不确定措辞=高分；确定数字=低分)",
-                "text_surprise": "0-100，标题本身多大程度超出市场对该公司的普遍预期，仅凭常识判断，不需要个股数据",
+                "text_surprise": "0-100，新闻含有多少无法从公司身份、行业热门叙事和常规经营措辞预先猜到的具体新事实；模板化表述=低分",
+                "attention": "0-100，同一事件在本窗口内的标题/来源是否高度重复、是否属于人人都在讨论的拥挤热点；重复越多、泛热点越强则越高",
+            },
+            "research_basis": {
+                "paper": "The Inefficient Pricing of News, NBER Working Paper 35093 (2026)",
+                "rules": [
+                    "不要求你预先知道论文；严格使用这里给出的规则。新闻中可由公司特征、行业和热门叙事预测的内容接近模板信息，不是错价来源。",
+                    "真正有预测力的是剔除可预测内容后的意外新闻；本系统用 text_surprise、quantitative、ambiguity、attention 作标题级近似，不声称复现论文模型。",
+                    "投资者对负面语气和密集量化信息往往反应不足，对高关注和高歧义信息往往过度反应。",
+                    "这是纯多头系统：利空硬新闻的反应不足意味着仍有下跌风险，不得把负面新闻或低位本身解释为买入错价。",
+                ],
             },
             "response_schema": {
                 "events": [
@@ -1014,6 +1135,7 @@ class DeepSeekStockSelector:
                         "quantitative": 0,
                         "ambiguity": 0,
                         "text_surprise": 0,
+                        "attention": 0,
                     }
                 ]
             },
@@ -1096,7 +1218,7 @@ class DeepSeekStockSelector:
         _params = _load_strategy_params()
         _news_enabled = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT)) > 0
         _xueqiu_enabled = bool(int(_params.get("xueqiu_signal_enabled", XUEQIU_SIGNAL_ENABLED)))
-        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "change_pct", "turnover", "execution_score", "rps")
+        _compact_keys = ("ts_code", "name", "industry", "themes", "board_codes", "event_ids", "price", "prev_close", "change_pct", "turnover", "execution_score", "rps")
         if _news_enabled:
             # 纯新闻信号开启时才把信号与窗口特征喂给模型；权重=0 时保持旧字段集
             _compact_keys = _compact_keys + ("news_signal", "mom_5d", "mom_20d", "volatility_20d", "price_position", "turnover_avg_20d")
@@ -1107,27 +1229,46 @@ class DeepSeekStockSelector:
         _tr_min = float(_params.get("target_return_pct_min", TARGET_RETURN_PCT_MIN))
         _tr_max = float(_params.get("target_return_pct_max", TARGET_RETURN_PCT_MAX))
         instruction = {
-            "task": "延续新闻事件会话。以下是已验证的 THS 板块映射及全部合格成分股数据。只能从成分股选择，新闻事件和 THS 板块关联优先；板块强弱只作排序与执行参考。每只股票只能出现一次，严禁重复。",
-            "constraints": {"max_picks": min(max(int(top_n or 0), 1), int(_params.get("max_recommendations", MAX_RECOMMENDATIONS))), "confidence_range": [0, 100], "target_return_pct_range": [_tr_min, _tr_max], "must_return_json": True},
+            "task": "延续新闻事件会话。你是纯多头A股错价研究员，只按下述新闻低效定价框架寻找正向意外信息尚未被价格充分反映的股票，并优先选择同时出现非极端雪球逆势吸筹确认的标的。只能从候选成分股选择；允许少选或返回空 picks，严禁为了凑数选择热门题材、一般利好或已经大涨的股票。每只股票只能出现一次。",
+            "constraints": {"max_picks": min(max(int(top_n or 0), 1), int(_params.get("max_recommendations", MAX_RECOMMENDATIONS))), "may_return_fewer_or_zero": True, "confidence_range": [0, 100], "target_return_pct_range": [_tr_min, _tr_max], "must_return_json": True},
             "validated_events": event_stage["events"], "validated_board_mappings": board_stage["board_mappings"], "board_market_snapshot": snapshot.get("boards") or [], "candidates": compact_candidates,
-            "response_schema": {"picks": [{"ts_code": "候选列表完整 ts_code", "confidence": 0, "target_return_pct": 5, "reason": "新闻事件→THS板块→股票", "risks": "风险", "themes": ["THS板块"], "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885000.TI"}]}]},
+            "data_as_of": snapshot.get("data_as_of") or {"generated_at": snapshot.get("generated_at"), "daily_features_as_of": snapshot.get("market_as_of_date")},
+            "research_basis": {
+                "paper": "The Inefficient Pricing of News, NBER Working Paper 35093 (2026)",
+                "core": "新闻本身大量内容可由公司特征与既有叙事预测；应寻找剔除这类模板内容后的意外信息。负面语气和密集量化信息容易被低效处理，高关注与高歧义信息容易被过度反应。纯多头必须先判断信息方向：只买正向意外信息的反应不足；负向硬新闻的反应不足代表潜在继续下跌。",
+                "proxy_limit": "当前只有标题与候选特征，news_signal 是论文 pure-news residual 的透明近似，不是论文模型复现。",
+            },
+            "selection_policy": [
+                "第一步只保留直接利多、具体可验证、量化或高意外、低歧义的新闻；泛行业口号、例行表态、可能/有望类叙事不是有效催化。",
+                "第二步确认价格尚未充分反应：当日涨幅温和或为负、5日/20日未明显拉升、价格位置不拥挤。已经大涨不是反应不足。",
+                "第三步优先选择 xueqiu.direction=逆势吸筹 且 signal_quality 不是极端权价比_回测弱的股票；这是价格走弱时活跃组合加仓的独立确认。",
+                "严格优先级：正向硬新闻反应不足+有效逆势吸筹 > 正向硬新闻反应不足但无雪球信号。只有逆势吸筹而没有正向意外新闻，不得入选。",
+                "利空硬新闻、高关注高歧义热点、借涨减仓/减仓、极端权价比_回测弱均应降级或排除。板块强弱、RPS、execution_score、恐贪只用于风险否决和成交可行性，不得单独构成推荐理由。",
+                "confidence 必须代表上述错价证据链强度；缺少正向意外信息或价格反应不足证据时不得给高分。",
+            ],
+            "response_schema": {"picks": [{"ts_code": "候选列表完整 ts_code", "confidence": 0, "target_return_pct": 5, "reason": "正向意外新闻→为何尚未充分定价→雪球逆势吸筹确认（如有）", "risks": "可能已定价/新闻方向判断/雪球信号质量等风险", "themes": ["THS板块"], "evidence": [{"event_id": "E01", "headline_id": "N0001", "ths_code": "885000.TI"}]}]},
         }
         if _news_enabled:
-            instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是新闻定价效率信号，高分(≥65)=市场可能反应不足的潜在机会(负面/量化/低位组合)，低分(≤35)=高关注模糊主题的追高风险。请把它作为排序参考之一，与新闻证据链、板块强弱、技术面综合判断，不要仅凭信号选股，也不要机械拒绝低分股票。"
+            instruction["news_signal_guidance"] = "candidates 的 news_signal(0-100) 是面向纯多头的新闻错价近似：高分(≥65)=正向、意外、量化、低歧义新闻出现后价格反应仍温和；低分(≤35)=利空硬新闻仍可能继续下跌，或高关注/高歧义/已大涨新闻存在过度反应风险。它是主要筛选依据之一；不得把负面新闻、低价位或热门题材本身当成买入机会。"
+        instruction["quote_guidance"] = "data_as_of 是全体候选共享的数据时点；quote_exceptions（如有）只覆盖时点或行情模式不同的个股。quote_mode=REALTIME 才可将 price/change_pct 作为盘中反应；DAILY_CLOSE、STALE 或 UNKNOWN 只能作为历史参考，不得当成盘中价格。prev_close 是上一完成交易日收盘价。"
         if _xueqiu_enabled:
             instruction["xueqiu_guidance"] = (
                 "candidates 的 xueqiu 是雪球活跃组合持仓行为快照，direction 是系统判定的确定性方向标签，"
-                "直接按标签解读、勿自行计算：顺势加仓/逆势吸筹=组合在买入（逆势吸筹=价格跌而权重加，错杀/低位信号更强）；"
-                "借涨减仓/减仓=组合在卖出；持平=权重变化由价格推动，无主动行为；"
+                "直接按标签解读、勿自行计算：顺势加仓/逆势吸筹=组合在买入；其中逆势吸筹=价格跌而权重加，"
+                "属于更强的错杀/低位信号，在其他证据不冲突时可适当提高该股票的置信度；"
+                "但若 signal_quality=极端权价比_回测弱（ratio_5d>6），历史回测表现不佳且常由低基数造成倍数失真，"
+                "不得因逆势吸筹标签提高置信度，应按低可靠性风险信号处理；没有更强新闻与基本面证据时可适当降低置信度；"
+                "借涨减仓/减仓=组合在卖出；其中借涨减仓=价格上涨而权重下降，显示组合趁上涨减持，"
+                "在其他证据无法抵消时可适当降低该股票的置信度；持平=权重变化由价格推动，无主动行为；"
                 "新进=5日前未持有（排名≤30且组合数≥10属强新进，可提高置信度）。"
                 "组合数上升(cube_gain_5d>0)=扩散更可信，下降=收敛。"
                 "xueqiu 缺失=不在雪球持仓，不惩罚。"
                 "参考线：权价比≥1.15 且组合数+2 且排名≤100（仅校准非准入）。"
-                "本系统以新闻事件链选股，xueqiu 仅作排序与置信度参考。"
+                "本系统以正向新闻反应不足为必要条件，xueqiu 只作独立确认；有效逆势吸筹应显著优先，无正向意外新闻时不得仅凭雪球信号入选。"
             )
         if fear_greed_ref:
             instruction["fear_greed_reference"] = fear_greed_ref
-            instruction["fear_greed_guidance"] = "本系统另提供了一批行业/主题的恐慌贪婪指数(0-100，越低越恐慌/超卖，越高越贪婪/拥挤)及其生命周期阶段 stage，与 board_market_snapshot 里的板块按名称对应。阶段含义：启动(恐慌错杀后修复，敢买，可适度提高置信度)、扩散(资金流入、上涨扩散，可参与)、主线(持续强势、健康上涨，正常买)、拥挤(贪婪过热，应降低置信度或要求更强新闻证据)、退潮(从高位回落，回避或减仓)、探底(恐慌延续、尚未企稳，回避等企稳)、中性(无明确方向)。请结合 news_signal、板块强弱、技术面综合判断，不要机械套用。"
+            instruction["fear_greed_guidance"] = "恐慌贪婪指数和 stage 只用于风险否决，不是选股依据，也不得提高置信度：拥挤/退潮/探底可降低置信度或排除；启动/扩散/主线/中性仅表示不额外否决，不能替代正向意外新闻反应不足与雪球确认。"
         first_messages = event_stage["transcript"]["request"]["messages"]
         # 轮3自包含：轮1新闻 + 事件回复 + 选股指令（内嵌事件/映射/板块/候选）。
         # 不再重放轮2目录与映射回复：mappings 已结构化内嵌，目录原文对选股无用，
@@ -1329,8 +1470,21 @@ def _validated_picks(
                 "candidate_snapshot": candidate,
             }
         )
-    _nsw = float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT))
-    accepted.sort(key=lambda item: (-item["ai_confidence"], -item.get("news_signal", 50.0) * _nsw, -item["execution_score"], item["ts_code"]))
+    _nsw = max(0.0, min(1.0, float(_params.get("news_signal_weight", NEWS_SIGNAL_WEIGHT))))
+    if _nsw > 0:
+        # news_signal_weight 必须真正参与主排序，而不是仅在 AI 置信度恰好相同时才生效。
+        # 这也为旧模型未完全遵循论文规则提供一层确定性的排序校正。
+        accepted.sort(
+            key=lambda item: (
+                -(item["ai_confidence"] * (1.0 - _nsw) + item.get("news_signal", 50.0) * _nsw),
+                -item.get("news_signal", 50.0),
+                -item["ai_confidence"],
+                -item["execution_score"],
+                item["ts_code"],
+            )
+        )
+    else:
+        accepted.sort(key=lambda item: (-item["ai_confidence"], -item["execution_score"], item["ts_code"]))
     for index, item in enumerate(accepted[:top_n], start=1):
         item["rank"] = index
         item["target_price"] = round(item["recommendation_price"] * (1 + item["target_return_pct"] / 100), 3)
@@ -1396,7 +1550,9 @@ class AIStockRecommendationService:
                 hotwords=event_stage["events"],
                 board_mappings=board_stage["board_mappings"],
             )
-            if not picks:
+            # 明确返回空列表代表模型按严格错价门槛主动弃权，应作为成功的“无推荐”批次保存；
+            # 非空回复却全部无法通过证据链校验，才属于模型输出错误。
+            if not picks and selection["response"].get("picks") != []:
                 raise AIStockModelError("DeepSeek 未返回带新闻→THS板块→股票证据的有效候选")
         except Exception as exc:
             with get_db_ctx() as db:
@@ -1868,6 +2024,49 @@ def _holding_days(bought_at: datetime, today: date) -> int:
     return max(0, (today - bought_at.date()).days)
 
 
+def _a_stock_trading_days_elapsed(start_exclusive: date, end_inclusive: date) -> Optional[int]:
+    """Count open A-share days in ``(start_exclusive, end_inclusive]``.
+
+    A stale-position rotation must not treat weekends or exchange holidays as
+    days without a recommendation.  If the authoritative calendar is
+    unavailable, return ``None`` so this optional rotation signal is skipped
+    rather than silently falling back to calendar days.
+    """
+    if start_exclusive >= end_inclusive:
+        return 0
+    cache_key = (start_exclusive, end_inclusive)
+    with _TRADING_DAYS_ELAPSED_LOCK:
+        cached = _TRADING_DAYS_ELAPSED_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        frame = TushareService.get_instance().get_trade_calendar_frame(
+            start_exclusive + timedelta(days=1), end_inclusive
+        )
+    except Exception as exc:
+        logger.warning("A-share trading calendar unavailable for stale rotation: %s", exc)
+        return None
+    if frame is None or frame.empty:
+        logger.warning(
+            "A-share trading calendar empty for stale rotation: %s~%s",
+            start_exclusive,
+            end_inclusive,
+        )
+        return None
+    elapsed = sum(
+        1
+        for _, row in frame.iterrows()
+        if str(row.get("is_open")) in {"1", "1.0"}
+        and row.get("cal_date")
+        and start_exclusive < row.get("cal_date") <= end_inclusive
+    )
+    with _TRADING_DAYS_ELAPSED_LOCK:
+        if len(_TRADING_DAYS_ELAPSED_CACHE) >= 512:
+            _TRADING_DAYS_ELAPSED_CACHE.clear()
+        _TRADING_DAYS_ELAPSED_CACHE[cache_key] = elapsed
+    return elapsed
+
+
 @dataclass
 class PlannedTrade:
     side: str
@@ -2133,6 +2332,9 @@ class AIStockPaperTradingService:
         slot_value = equity_before * execution_target / max(int(sp.get("slot_count", 5)), 1)
 
         planned_codes = {plan.ts_code for plan in plans if plan.side == "BUY"}
+        # 同一轮处理内只要某标的已有卖出计划，就禁止再买回；否则轮换/AI卖出
+        # 可能与后续推荐相撞，形成同一分钟原价卖出又买入的无效双边成交。
+        blocked_buy_codes = {plan.ts_code for plan in plans if plan.side == "SELL"}
         position_count = len(projected_positions)
         entry_price_cap = 1.0 + _safe_float(sp.get("entry_price_cap_pct"), 1.0) / 100.0
         max_positions = max(int(sp.get("max_positions", 10)), 1)
@@ -2143,7 +2345,7 @@ class AIStockPaperTradingService:
             if buys_today >= max_buys_per_day:
                 break
             ts_code = recommendation["ts_code"]
-            if ts_code in planned_codes or (ts_code, recommendation["id"]) in state["today_buys"]:
+            if ts_code in planned_codes or ts_code in blocked_buy_codes or (ts_code, recommendation["id"]) in state["today_buys"]:
                 continue
             quote = quotes.get(ts_code) or {}
             price = _safe_float(quote.get("price"), 0.0) or 0.0
@@ -2169,12 +2371,18 @@ class AIStockPaperTradingService:
                 ]
                 # 信号1：最久未获再推荐
                 if sellable:
+                    stale_days_by_symbol: Dict[str, Optional[int]] = {}
+
                     def _stale_days(held):
-                        rec = last_rec.get(held["ts_code"])
-                        return (today - rec).days if rec else 9999
-                    most_stale = max(sellable, key=_stale_days)
-                    stale_days = _stale_days(most_stale)
-                    if stale_days >= rotation_stale_days:
+                        rec = last_rec.get(held["ts_code"]) or held["bought_at"].date()
+                        if held["ts_code"] not in stale_days_by_symbol:
+                            stale_days_by_symbol[held["ts_code"]] = _a_stock_trading_days_elapsed(rec, today)
+                        return stale_days_by_symbol[held["ts_code"]]
+
+                    stale_candidates = [(days, held) for held in sellable if (days := _stale_days(held)) is not None]
+                    most_stale_pair = max(stale_candidates, key=lambda item: item[0], default=None)
+                    if most_stale_pair is not None and most_stale_pair[0] >= rotation_stale_days:
+                        stale_days, most_stale = most_stale_pair
                         out_lot = most_stale
                         out_reason = f"轮换让位：已{stale_days}个交易日未获再推荐，为今日新推荐 {recommendation['name']}(#{recommendation['rank']}) 腾位"
                         out_state["stale_days"] = stale_days
@@ -2210,6 +2418,7 @@ class AIStockPaperTradingService:
                         state_snapshot=out_state,
                     )
                 )
+                blocked_buy_codes.add(out_lot["ts_code"])
                 projected_cash += out_price * out_lot["remaining_quantity"] - _sell_fee(out_price * out_lot["remaining_quantity"])
                 projected_positions.pop(out_lot["ts_code"], None)
                 position_count -= 1
@@ -2245,6 +2454,7 @@ class AIStockPaperTradingService:
                     state_snapshot={"fear_greed": fg, "execution_target": execution_target, "minute": minute_state},
                 )
             )
+            planned_codes.add(ts_code)
             projected_cash -= amount + _buy_fee(amount)
             projected_positions[ts_code] = current_value + amount
             if not is_add:

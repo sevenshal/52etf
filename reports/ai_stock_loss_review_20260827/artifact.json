@@ -1,0 +1,226 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "AI荐股模拟仓亏损复盘",
+    "description": "基于生产环境推荐、模拟成交、权益曲线和策略代码的只读诊断",
+    "generatedAt": "2026-08-27T12:00:00+08:00",
+    "sources": [
+      {
+        "id": "prod-equity",
+        "label": "生产模拟仓权益与成交",
+        "query": {
+          "engine": "SQLite",
+          "description": "模拟仓逐分钟权益、成交、持仓批次和交易原因汇总",
+          "executed_at": "2026-08-27T12:00:00+08:00",
+          "tables_used": ["ai_stock_paper_equity", "ai_stock_paper_trades", "ai_stock_paper_lots", "ai_stock_paper_portfolios"],
+          "filters": ["portfolio_id = 1", "数据截至 2026-08-27 11:30 Asia/Shanghai"],
+          "metric_definitions": ["组合收益率 = 最新总权益 / 初始资金 - 1", "已实现盈亏包含卖出费用但不包含买入费用", "持仓天数按成交时间的自然日差计算"],
+          "sql": "SELECT recorded_at, total_equity FROM ai_stock_paper_equity WHERE portfolio_id=1 ORDER BY recorded_at; SELECT reason_code, COUNT(*) trades, SUM(realized_pnl) realized_pnl FROM ai_stock_paper_trades WHERE portfolio_id=1 AND side='SELL' GROUP BY reason_code;"
+        }
+      },
+      {
+        "id": "prod-hit-rate",
+        "label": "生产推荐命中率快照",
+        "query": {
+          "engine": "SQLite",
+          "description": "最近一次推荐命中率及批次类型拆分",
+          "executed_at": "2026-08-27T12:00:00+08:00",
+          "tables_used": ["ai_stock_recommendation_hit_rates", "ai_stock_recommendations", "ai_stock_recommendation_runs"],
+          "filters": ["最近一次快照 evaluated_at = 2026-08-26 16:20:26", "推荐窗口 2026-07-17 至 2026-08-26"],
+          "metric_definitions": ["次日收益 = 下一交易日收盘价 / 推荐价 - 1", "一周收益 = D+5 收盘价 / 推荐价 - 1", "目标命中 = 推荐日起前五个交易日最高价达到目标价"],
+          "sql": "SELECT payload FROM ai_stock_recommendation_hit_rates ORDER BY evaluated_at DESC LIMIT 1;"
+        }
+      },
+      {
+        "id": "prod-config",
+        "label": "生产策略配置与运行状态",
+        "query": {
+          "engine": "SQLite",
+          "description": "当前策略配置、推荐运行版本与异常状态",
+          "executed_at": "2026-08-27T12:00:00+08:00",
+          "tables_used": ["ai_stock_strategy_configs", "ai_stock_service_configs", "ai_stock_recommendation_runs"],
+          "filters": ["配置 id = 1", "推荐运行自 2026-08-12 起"],
+          "sql": "SELECT enabled, parameters, updated_at FROM ai_stock_strategy_configs WHERE id=1; SELECT prompt_version, status, COUNT(*) FROM ai_stock_recommendation_runs GROUP BY prompt_version, status;"
+        }
+      },
+      {
+        "id": "strategy-code",
+        "label": "AI荐股模拟盘策略代码",
+        "path": "backend/src/core/services/ai_stock.py"
+      }
+    ],
+    "cards": [
+      {"id": "return-card", "dataset": "headline", "sourceId": "prod-equity", "description": "初始资金100万元至最新总权益", "metrics": [{"label": "模拟仓累计收益(%)", "field": "return_pct", "format": "number"}, {"label": "最新权益", "field": "latest_equity", "format": "currency"}]},
+      {"id": "dd-card", "dataset": "headline", "sourceId": "prod-equity", "description": "逐分钟权益相对历史峰值的最大回撤", "metrics": [{"label": "最大回撤(%)", "field": "max_drawdown_pct", "format": "number"}]},
+      {"id": "week-card", "dataset": "headline", "sourceId": "prod-hit-rate", "description": "593条已满D+5观察期推荐的平均收益", "metrics": [{"label": "推荐一周平均收益(%)", "field": "avg_week_return_pct", "format": "number"}, {"label": "一周上涨命中率(%)", "field": "week_hit_pct", "format": "number"}]},
+      {"id": "turnover-card", "dataset": "headline", "sourceId": "prod-equity", "description": "12个交易日内买卖成交额合计", "metrics": [{"label": "累计成交额", "field": "turnover", "format": "currency"}, {"label": "交易费用", "field": "fees", "format": "currency"}]}
+    ],
+    "charts": [
+      {
+        "id": "equity-chart",
+        "title": "模拟仓每日收盘权益",
+        "subtitle": "8月12日至27日，单位：元；虚线为100万元初始资金",
+        "showDescription": true,
+        "intent": "trend",
+        "question": "亏损是一次性冲击还是持续累积？",
+        "rationale": "11个交易日的有序权益点适合用折线展示损失累积路径",
+        "type": "line",
+        "dataset": "daily_equity",
+        "sourceId": "prod-equity",
+        "encodings": {
+          "x": {"field": "date", "type": "temporal", "label": "日期"},
+          "y": {"field": "close_equity", "type": "quantitative", "label": "权益", "format": "currency"}
+        },
+        "referenceLines": [{"axis": "y", "value": 1000000, "label": "初始资金", "color": "neutral", "lineStyle": "dashed"}],
+        "layout": "full",
+        "maxRows": 20
+      },
+      {
+        "id": "daily-pnl-chart",
+        "title": "每日已实现盈亏",
+        "subtitle": "8月14日至27日，包含卖出费用；多数交易日兑现亏损",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "已实现亏损集中在哪些交易日？",
+        "rationale": "按日期的有正有负比较适合零基准柱状图",
+        "type": "bar",
+        "dataset": "daily_realized",
+        "sourceId": "prod-equity",
+        "encodings": {
+          "x": {"field": "date", "type": "ordinal", "label": "日期"},
+          "y": {"field": "realized_pnl", "type": "quantitative", "label": "已实现盈亏", "format": "currency"}
+        },
+        "valueFormat": "currency",
+        "layout": "full",
+        "maxRows": 20
+      }
+    ],
+    "tables": [
+      {
+        "id": "hit-rate-table",
+        "title": "推荐后表现（按批次类型）",
+        "subtitle": "截至8月26日；次日与D+5均按推荐价计算",
+        "dataset": "hit_rate_by_type",
+        "sourceId": "prod-hit-rate",
+        "defaultSort": {"field": "avg_week_return_pct", "direction": "desc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "label", "label": "批次", "type": "text"},
+          {"field": "count", "label": "推荐数", "format": "number"},
+          {"field": "avg_next_day_return_pct", "label": "次日平均收益(%)", "format": "number", "movement": true},
+          {"field": "avg_week_return_pct", "label": "一周平均收益(%)", "format": "number", "movement": true},
+          {"field": "week_hit_pct", "label": "一周上涨率(%)", "format": "number"},
+          {"field": "target_hit_pct", "label": "目标命中率(%)", "format": "number"}
+        ]
+      },
+      {
+        "id": "exit-reason-table",
+        "title": "卖出原因与盈亏贡献",
+        "subtitle": "34笔卖出；已实现盈亏包含卖出费用",
+        "dataset": "exit_reasons",
+        "sourceId": "prod-equity",
+        "defaultSort": {"field": "realized_pnl", "direction": "asc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "reason", "label": "卖出原因", "type": "text"},
+          {"field": "trades", "label": "笔数", "format": "number"},
+          {"field": "realized_pnl", "label": "已实现盈亏", "format": "currency", "movement": true},
+          {"field": "win_rate_pct", "label": "盈利笔数占比(%)", "format": "number"},
+          {"field": "avg_hold_days", "label": "平均持仓天数", "format": "number"}
+        ]
+      },
+      {
+        "id": "confidence-table",
+        "title": "实际买入的置信度校准",
+        "subtitle": "按买入推荐置信度分桶；当前样本较小，仅用于识别方向",
+        "dataset": "confidence_calibration",
+        "sourceId": "prod-equity",
+        "defaultSort": {"field": "realized_pnl", "direction": "asc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "bucket", "label": "置信度", "type": "text"},
+          {"field": "lots", "label": "买入批次", "format": "number"},
+          {"field": "closed", "label": "已平仓批次", "format": "number"},
+          {"field": "realized_pnl", "label": "已实现盈亏", "format": "currency", "movement": true},
+          {"field": "avg_closed_pnl", "label": "每个已平仓批次平均盈亏", "format": "currency", "movement": true}
+        ]
+      }
+    ],
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# AI荐股模拟仓亏损复盘", "layout": "full"},
+      {"id": "summary", "type": "markdown", "body": "## Executive Summary\n\n- **首要原因是推荐没有产生正收益。** 最近快照覆盖1,039条推荐，次日平均收益为 **-1.07%**，593条可观察到D+5的推荐一周平均为 **-4.54%**；竞价、开盘、盘中三类全部为负。\n- **模拟盘逻辑又放大了坏推荐的损失。** 12个交易日产生38笔买入、34笔卖出，平均持仓仅 **2.32天**；AI持仓评分卖出贡献 **-2.21万元**，占已实现亏损的64%。\n- **系统存在可复现的交易逻辑缺陷。** 自然日被当作交易日计算“长期未获推荐”，周末会提前触发轮换；同一分钟还可能先卖后买同一股票。\n- **结论不是二选一。** 推荐质量是根因，执行周期错配、高换手和规则缺陷是放大器；缺失基准数据与配置历史又让系统无法可靠判断到底改善了没有。", "layout": "full"},
+      {"id": "headline-strip", "type": "metric-strip", "cardIds": ["return-card", "dd-card", "week-card", "turnover-card"], "layout": "full"},
+      {"id": "equity-finding", "type": "markdown", "body": "## 亏损不是单日事故，而是持续负期望累积\n\n组合从100万元降至 **969,889元（-3.01%）**，期间最大回撤 **5.02%**。只有8月18日与26日出现较明显的正已实现盈亏，其余多数交易日持续兑现亏损。当前5个持仓浮盈约5,396元，暂时抵消了部分 **-34,766元** 已实现亏损。\n\n**含义：** 这不是某一笔止损或一次行情故障造成的，而是推荐与退出机制共同形成的连续负期望。", "sourceId": "prod-equity", "layout": "full"},
+      {"id": "equity-visual", "type": "chart", "chartId": "equity-chart", "layout": "full"},
+      {"id": "daily-pnl-text", "type": "markdown", "body": "每日盈亏柱状图显示，8月19日单日已实现亏损约 **-1.15万元**，8月14日约 **-1.15万元**。盈利日不足以覆盖亏损日；34笔卖出的盈利率仅35.3%，平均盈利约1,083元，而平均亏损约2,171元。", "sourceId": "prod-equity", "layout": "full"},
+      {"id": "daily-pnl-visual", "type": "chart", "chartId": "daily-pnl-chart", "layout": "full"},
+      {"id": "recommendation-finding", "type": "markdown", "body": "## 推荐质量本身没有通过最基本的收益检验\n\n三种批次的次日与一周平均收益全部为负，开盘9:40批次最差：次日 **-2.12%**、一周 **-5.89%**。盘中批次相对较好，但一周仍为 **-4.08%**。系统给出的平均目标收益约12%，而五日窗口目标命中率只有4.5%，说明目标收益严重缺乏校准。\n\n**含义：** 即使完全重写模拟盘执行器，只要继续无门槛买入这些推荐，策略仍很难转正。", "sourceId": "prod-hit-rate", "layout": "full"},
+      {"id": "hit-rate-data", "type": "table", "tableId": "hit-rate-table", "layout": "full"},
+      {"id": "confidence-finding", "type": "markdown", "body": "## AI置信度不能有效区分好坏推荐\n\n实际买入的平均置信度为75.45，但70–79分档的已平仓批次合计亏损约 **-2.00万元**，80分以上仍亏约 **-1.47万元**；反而70分以下接近持平。样本量尚小，不能据此认定低分更好，但足以说明当前置信度不能当作仓位或换仓的可靠尺度。\n\n**含义：** 用“新推荐置信度减持仓评分超过20分”触发换仓，是在比较两个没有共同校准基准的分数。", "sourceId": "prod-equity", "layout": "full"},
+      {"id": "confidence-data", "type": "table", "tableId": "confidence-table", "layout": "full"},
+      {"id": "execution-finding", "type": "markdown", "body": "## 执行器把中短期推荐做成了高换手超短线\n\nAI推荐的平均目标收益约11.8%，但34次卖出的平均持仓只有 **2.32天**，最长仅6.01天，而且没有一次触发目标止盈。12个交易日累计成交额 **533.7万元**，相当于初始资金的5.34倍，费用2,631元，占当前净亏损的8.7%。\n\n最大的亏损出口是 `AI_SIGNAL`：13笔合计 **-22,071元**，盈利率仅15.4%。持仓评分提示词把当前盈亏也提供给AI，执行器又在评分≤40时卖出，容易形成“已经下跌 → AI降低评分 → 立即兑现亏损”的顺周期反馈。", "sourceId": "prod-equity", "layout": "full"},
+      {"id": "exit-data", "type": "table", "tableId": "exit-reason-table", "layout": "full"},
+      {"id": "bugs", "type": "markdown", "body": "## 两个明确缺陷会制造无效换手\n\n1. **“未获再推荐天数”实际按自然日计算。** 代码注释写的是交易日，但实现是日期直接相减。周五到周一会被算作3天，达到当前轮换阈值，周末会虚假加速换仓。\n2. **卖出计划没有阻止同一分钟重新买入同一股票。** 生产记录中，中国平安在8月26日09:45:17以55.54元卖出1,200股，又在同一秒以同价买回1,200股；次日再次卖出。这一来回没有改变风险暴露，只产生费用并污染绩效归因。\n\n此外，首日8笔买入发生在9:31–9:32，而当前规则要求9:45后才交易，说明配置曾发生重要变化，但数据库没有配置版本历史，难以把不同规则阶段公平比较。", "sourceId": "strategy-code", "layout": "full"},
+      {"id": "next-steps", "type": "markdown", "body": "## 建议按止血、隔离、再验证的顺序处理\n\n1. **先暂停自动新增仓位，保留只读推荐和绩效采集。** 当前推荐一周收益显著为负，继续交易只会增加样本成本。\n2. **修复两个确定性执行缺陷。** 轮换天数改用A股交易日；同一处理周期内禁止同标的卖出后再买入，并禁止同日无新信息回补。\n3. **把推荐与执行分开做影子对照。** 每条推荐固定记录D+1、D+3、D+5、D+10相对上证指数的超额收益；按批次、置信度、排名、模型版本和雪球方向分层。\n4. **重新设计退出逻辑。** 暂停用AI持仓评分直接卖出，先离线验证评分的后续收益单调性；给策略设定与推荐预测期限一致的最短持有期，并限制日换手。\n5. **设置重新开仓门槛。** 至少连续20个交易日满足：D+5超额收益为正、置信度分层单调、扣费后影子组合为正，再恢复模拟自动交易。", "layout": "full"},
+      {"id": "questions", "type": "markdown", "body": "## 仍需回答的问题\n\n- 哪个模型版本、提示词版本和批次真正产生正的指数超额收益？目前命中率快照没有按版本、置信度和重复推荐去重拆分。\n- 同一股票在多个批次反复出现时，应算一个信号还是多个信号？当前1,039条记录并非1,039个独立样本。\n- 推荐目标收益对应的预测期限究竟是几天？目前模型输出、命中率评估窗口和实际持仓周期不一致。", "layout": "full"},
+      {"id": "caveats", "type": "markdown", "body": "## Caveats and assumptions\n\n- 分析窗口仅从8月12日至27日，足以识别执行缺陷和明显负期望，但不足以证明长期策略无效。\n- `benchmark_close` 全部为空，基准快照也未落库，因此本报告不能把亏损严格拆成市场贝塔与选股阿尔法；这是当前监控链路的重要缺口。\n- 生产库有3个长期停留在 `RUNNING` 的推荐批次，提示任务状态清理不完整，但没有证据表明它们直接造成成交亏损。\n- 当前策略配置在8月27日更新，数据库没有配置历史；报告以成交事实为主，不把当前配置误认为整个窗口始终生效。", "layout": "full"}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-27T12:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {"return_pct": -3.01, "latest_equity": 969889.33, "max_drawdown_pct": 5.02, "avg_week_return_pct": -4.54, "week_hit_pct": 26.5, "turnover": 5336556.0, "fees": 2630.67}
+      ],
+      "daily_equity": [
+        {"date": "2026-08-12", "close_equity": 1003792.34, "initial_cash": 1000000.0},
+        {"date": "2026-08-13", "close_equity": 998943.34, "initial_cash": 1000000.0},
+        {"date": "2026-08-14", "close_equity": 990752.48, "initial_cash": 1000000.0},
+        {"date": "2026-08-17", "close_equity": 993411.79, "initial_cash": 1000000.0},
+        {"date": "2026-08-18", "close_equity": 995344.43, "initial_cash": 1000000.0},
+        {"date": "2026-08-19", "close_equity": 974427.74, "initial_cash": 1000000.0},
+        {"date": "2026-08-20", "close_equity": 974224.31, "initial_cash": 1000000.0},
+        {"date": "2026-08-21", "close_equity": 975326.20, "initial_cash": 1000000.0},
+        {"date": "2026-08-24", "close_equity": 967178.05, "initial_cash": 1000000.0},
+        {"date": "2026-08-25", "close_equity": 964308.82, "initial_cash": 1000000.0},
+        {"date": "2026-08-26", "close_equity": 964644.14, "initial_cash": 1000000.0},
+        {"date": "2026-08-27", "close_equity": 969889.33, "initial_cash": 1000000.0}
+      ],
+      "daily_realized": [
+        {"date": "08-14", "realized_pnl": -11526.11, "trades": 8, "fees": 493.86},
+        {"date": "08-17", "realized_pnl": -3976.06, "trades": 7, "fees": 338.69},
+        {"date": "08-18", "realized_pnl": 8519.91, "trades": 6, "fees": 260.36},
+        {"date": "08-19", "realized_pnl": -11489.45, "trades": 9, "fees": 272.69},
+        {"date": "08-20", "realized_pnl": -4661.25, "trades": 5, "fees": 149.43},
+        {"date": "08-21", "realized_pnl": -3427.53, "trades": 5, "fees": 140.11},
+        {"date": "08-24", "realized_pnl": -3695.38, "trades": 7, "fees": 205.15},
+        {"date": "08-25", "realized_pnl": -5337.65, "trades": 6, "fees": 178.23},
+        {"date": "08-26", "realized_pnl": 1492.49, "trades": 5, "fees": 152.68},
+        {"date": "08-27", "realized_pnl": -664.57, "trades": 6, "fees": 179.81}
+      ],
+      "hit_rate_by_type": [
+        {"label": "竞价 9:26", "count": 156, "avg_next_day_return_pct": -1.69, "avg_week_return_pct": -5.81, "week_hit_pct": 27.8, "target_hit_pct": 4.5},
+        {"label": "开盘 9:40", "count": 91, "avg_next_day_return_pct": -2.12, "avg_week_return_pct": -5.89, "week_hit_pct": 26.1, "target_hit_pct": 4.4},
+        {"label": "盘中", "count": 792, "avg_next_day_return_pct": -0.82, "avg_week_return_pct": -4.08, "week_hit_pct": 26.2, "target_hit_pct": 4.5}
+      ],
+      "exit_reasons": [
+        {"reason": "AI持仓评分卖出", "trades": 13, "realized_pnl": -22070.59, "win_rate_pct": 15.4, "avg_hold_days": 2.10},
+        {"reason": "轮换让位", "trades": 19, "realized_pnl": -8006.92, "win_rate_pct": 52.6, "avg_hold_days": 2.55},
+        {"reason": "半仓止损", "trades": 2, "realized_pnl": -4688.09, "win_rate_pct": 0.0, "avg_hold_days": 1.57}
+      ],
+      "confidence_calibration": [
+        {"bucket": "<70", "bucket_order": 1, "lots": 8, "closed": 7, "realized_pnl": -70.07, "avg_closed_pnl": -10.01},
+        {"bucket": "70–79", "bucket_order": 2, "lots": 15, "closed": 12, "realized_pnl": -19976.53, "avg_closed_pnl": -1664.71},
+        {"bucket": "80+", "bucket_order": 3, "lots": 15, "closed": 14, "realized_pnl": -14719.00, "avg_closed_pnl": -1051.36}
+      ]
+    }
+  },
+  "sources": []
+}

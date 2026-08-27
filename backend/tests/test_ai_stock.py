@@ -9,12 +9,16 @@ import pytest
 from src.core.services.ai_stock import (
     AIStockError,
     AIStockDataProvider,
+    AIStockModelError,
     AIStockRecommendationService,
     AIStockPaperTradingService,
     DeepSeekStockSelector,
     _aggregate_hit_metrics,
     _buy_fee,
     get_ai_stock_service_settings,
+    _news_signal_score,
+    _quote_batch_metadata,
+    _realtime_price_fields,
     _scheduled_recommendation_type,
     _sell_fee,
     _validated_board_mappings,
@@ -81,6 +85,42 @@ def test_deepseek_call_json_reports_empty_response_diagnostics_after_retry():
         ),
     ):
         selector._call_json([])
+
+
+def test_tushare_realtime_quotes_try_all_symbols_then_retry_only_missing_by_1000():
+    calls = []
+
+    class _FakePro:
+        def rt_min(self, *, ts_code, freq, fields):
+            codes = ts_code.split(",")
+            calls.append(codes)
+            returned = codes[:1] if len(codes) > 1000 else codes
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": code,
+                        "time": "2026-08-27 10:00:00",
+                        "open": 10.0,
+                        "close": 10.1,
+                        "high": 10.2,
+                        "low": 9.9,
+                        "vol": 1000,
+                        "amount": 10100,
+                    }
+                    for code in returned
+                ]
+            )
+
+    service = object.__new__(TushareService)
+    service.pro = _FakePro()
+    service.logger = logging.getLogger("test-tushare-rt-min")
+    symbols = [f"{600000 + index:06d}.SH" for index in range(1201)]
+
+    quotes = service.get_quote_batch(symbols)
+
+    assert [len(batch) for batch in calls] == [1201, 1000, 200]
+    assert len(quotes) == 1201
+    assert {quote["source"] for quote in quotes} == {"tushare_rt_min"}
 
 
 def test_news_snapshot_uses_major_news_only():
@@ -294,6 +334,134 @@ def test_ai_output_target_return_uses_configured_range_instead_of_db_globals():
     assert picks[0]["target_price"] == 11.0
 
 
+def test_news_signal_scores_long_only_underreaction_not_negative_news_as_bargain():
+    positive_underreaction = {
+        "events": [{"direction": "利多", "quantitative": 90, "ambiguity": 10, "text_surprise": 90, "attention": 10}],
+        "change_pct": 0.5, "mom_5d": 1.0, "mom_20d": 2.0, "price_position": 0.3,
+    }
+    adverse_underreaction = {
+        **positive_underreaction,
+        "events": [{"direction": "利空", "quantitative": 90, "ambiguity": 10, "text_surprise": 90, "attention": 10}],
+    }
+    already_chased = {
+        **positive_underreaction,
+        "change_pct": 7.0, "mom_5d": 15.0, "mom_20d": 30.0, "price_position": 0.95,
+    }
+    vague_high_attention = {
+        **positive_underreaction,
+        "events": [{"direction": "利多", "quantitative": 20, "ambiguity": 90, "text_surprise": 40, "attention": 90}],
+    }
+
+    assert _news_signal_score(positive_underreaction) >= 65
+    assert _news_signal_score(adverse_underreaction) <= 35
+    assert _news_signal_score(already_chased) < _news_signal_score(positive_underreaction)
+    assert _news_signal_score(vague_high_attention) < 65
+
+
+def test_realtime_price_fields_fill_tushare_rt_min_change_from_duckdb_close():
+    fields = _realtime_price_fields(
+        {
+            "price": 10.5,
+            "prev_close": None,
+            "percent_change": None,
+            "turnover": 123456,
+            "source": "tushare_rt_min",
+        },
+        duckdb_previous_close=10.0,
+    )
+
+    assert fields == {
+        "price": 10.5,
+        "prev_close": 10.0,
+        "change_pct": 5.0,
+        "turnover": 123456.0,
+        "quote_source": "tushare_rt_min",
+    }
+
+
+def test_realtime_price_fields_prefer_source_previous_close_and_change():
+    fields = _realtime_price_fields(
+        {
+            "price": 10.0,
+            "prev_close": 9.0,
+            "percent_change": 11.1111,
+            "source": "sina_realtime",
+        },
+        duckdb_previous_close=8.0,
+    )
+
+    assert fields["prev_close"] == 9.0
+    assert fields["change_pct"] == 11.1111
+    assert fields["quote_source"] == "sina_realtime"
+
+
+def test_quote_timestamps_are_shared_at_batch_level_with_only_exceptions_per_symbol():
+    candidates = [
+        {"ts_code": "600000.SH", "quote_time": "2026-08-27T10:00:00", "quote_source": "tushare_rt_min"},
+        {"ts_code": "000001.SZ", "quote_time": "2026-08-27T10:00:00", "quote_source": "tushare_rt_min"},
+        {"ts_code": "000002.SZ", "quote_time": "2026-08-26T00:00:00", "quote_source": "duckdb_daily"},
+    ]
+
+    metadata = _quote_batch_metadata(
+        candidates,
+        generated_at="2026-08-27T10:00:03",
+        daily_features_as_of="2026-08-26",
+        xueqiu_snapshot_date="2026-08-26",
+    )
+
+    assert metadata["quote_as_of"] == "2026-08-27T10:00:00"
+    assert metadata["quote_mode"] == "REALTIME"
+    assert "quote_source" not in metadata
+    assert metadata["daily_features_as_of"] == "2026-08-26"
+    assert metadata["xueqiu_as_of"] == "2026-08-26_CLOSE"
+    assert metadata["quote_exceptions"] == {
+        "000002.SZ": {
+            "quote_as_of": "2026-08-26T00:00:00",
+            "quote_mode": "DAILY_CLOSE",
+        }
+    }
+
+
+def test_news_signal_weight_is_a_real_blended_ranking_weight():
+    snapshot = {
+        "candidates": [
+            {
+                "ts_code": "600000.SH", "name": "高AI低新闻", "price": 10.0, "listing_days": 365,
+                "events": [{"direction": "利空", "quantitative": 90, "ambiguity": 10, "text_surprise": 90, "attention": 10}],
+            },
+            {
+                "ts_code": "000001.SZ", "name": "新闻反应不足", "price": 10.0, "listing_days": 365,
+                "change_pct": 0.5, "mom_5d": 1.0, "mom_20d": 2.0, "price_position": 0.3,
+                "events": [{"direction": "利多", "quantitative": 90, "ambiguity": 10, "text_surprise": 90, "attention": 10}],
+            },
+        ]
+    }
+    raw_response = {
+        "picks": [
+            {"ts_code": "600000.SH", "confidence": 90, "target_return_pct": 8, "reason": "模型主观高分"},
+            {"ts_code": "000001.SZ", "confidence": 80, "target_return_pct": 8, "reason": "正向新闻反应不足"},
+        ]
+    }
+    base_params = {
+        "min_listing_days": 183,
+        "target_return_pct_min": 5.0,
+        "target_return_pct_max": 10.0,
+    }
+    with mock.patch(
+        "src.core.services.ai_stock._load_strategy_params",
+        return_value={**base_params, "news_signal_weight": 0.5},
+    ):
+        news_weighted = _validated_picks(snapshot, raw_response, top_n=2)
+    with mock.patch(
+        "src.core.services.ai_stock._load_strategy_params",
+        return_value={**base_params, "news_signal_weight": 0.0},
+    ):
+        ai_only = _validated_picks(snapshot, raw_response, top_n=2)
+
+    assert news_weighted[0]["ts_code"] == "000001.SZ"
+    assert ai_only[0]["ts_code"] == "600000.SH"
+
+
 def test_a_share_costs_include_minimum_commission_transfer_and_stamp_duty():
     assert _buy_fee(10_000) == 5.1
     assert _sell_fee(10_000) == 10.1
@@ -367,24 +535,24 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
             "weight_price_ratio_5d": None,
             "direction": "新进",
         },
-        "600002.SH": {  # extreme multiples must be clipped
+        "600002.SH": {  # extreme inverse-absorption multiples: clip + weak-backtest quality tag
             "composite_weight_pct": 20.0,
             "composite_rank": 10,
             "holding_cube_count": 20,
             "weight_multiple_5d": 161.9,
-            "momentum_multiple_5d": 1.2,
+            "momentum_multiple_5d": 0.98,
             "rank_change_5d": -44,
             "cube_count_5d_ago": 20,
             "weight_price_ratio_5d": 153.5,
-            "direction": "顺势加仓",
+            "direction": "逆势吸筹",
         },
     }
     monkeypatch = mock.Mock()
     monkeypatch.setattr = lambda *args, **kwargs: None
     import src.core.services.ai_stock as ai_stock_mod
 
-    original = ai_stock_mod._load_xueqiu_behavior_map
-    ai_stock_mod._load_xueqiu_behavior_map = lambda limit=2000: fake_map
+    original = ai_stock_mod._load_xueqiu_behavior_snapshot
+    ai_stock_mod._load_xueqiu_behavior_snapshot = lambda limit=2000: (fake_map, {"snapshot_date": "2026-08-26"})
     try:
         candidates = [
             {"ts_code": "600000.SH"},
@@ -396,7 +564,7 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
 
         _attach_xueqiu_behavior(candidates)
     finally:
-        ai_stock_mod._load_xueqiu_behavior_map = original
+        ai_stock_mod._load_xueqiu_behavior_snapshot = original
 
     # not in the current snapshot -> no block at all
     assert "xueqiu" not in candidates[3]
@@ -426,7 +594,9 @@ def test_xueqiu_behavior_block_attached_with_clip_and_new_entry():
     assert xq_extreme["ratio_5d"] == 10.0  # clipped
     assert xq_extreme["rank_up_5d"] == -44  # negative = rank dropped
     assert xq_extreme["cube_gain_5d"] == 0
-    assert xq_extreme["direction"] == "顺势加仓"
+    assert xq_extreme["direction"] == "逆势吸筹"
+    assert xq_extreme["signal_quality"] == "极端权价比_回测弱"
+    assert "signal_quality" not in xq
 
 
 def test_xueqiu_guidance_only_present_when_toggle_enabled():
@@ -500,8 +670,11 @@ def test_xueqiu_guidance_only_present_when_toggle_enabled():
         assert "xueqiu_guidance" in last_instruction
         assert last_instruction["candidates"][0]["xueqiu"]["weight"] == 3.92
         assert last_instruction["candidates"][0]["xueqiu"]["rank"] == 45
-        assert "逆势吸筹" in last_instruction["xueqiu_guidance"]
-        assert "1.15" in last_instruction["xueqiu_guidance"]
+        guidance = last_instruction["xueqiu_guidance"]
+        assert "逆势吸筹" in guidance and "适当提高该股票的置信度" in guidance
+        assert "借涨减仓" in guidance and "适当降低该股票的置信度" in guidance
+        assert "极端权价比_回测弱" in guidance and "不得因逆势吸筹标签提高置信度" in guidance
+        assert "1.15" in guidance
     finally:
         ai_stock_mod.requests.post = original_post
         with get_db_ctx() as db:
@@ -619,6 +792,14 @@ def test_events_ths_mapping_and_stock_selection_keep_one_three_round_conversatio
     }
     selection = selector.select_from_ths_conversation(event_stage, board_stage, snapshot)
 
+    event_instruction = json.loads(calls[0]["messages"][1]["content"])
+    selection_instruction = json.loads(calls[2]["messages"][3]["content"])
+    assert event_instruction["research_basis"]["paper"].startswith("The Inefficient Pricing of News")
+    assert "不得把负面新闻或低位本身解释为买入错价" in event_instruction["research_basis"]["rules"][-1]
+    assert selection_instruction["constraints"]["may_return_fewer_or_zero"] is True
+    assert any("正向硬新闻反应不足+有效逆势吸筹" in rule for rule in selection_instruction["selection_policy"])
+    assert "负向硬新闻的反应不足代表潜在继续下跌" in selection_instruction["research_basis"]["core"]
+
     # 轮2 自包含：system + 目录事件指令（不重放轮1新闻，目录前置供跨批缓存命中）
     assert len(calls[1]["messages"]) == 2
     assert calls[1]["messages"][0] == calls[0]["messages"][0]  # 相同 system
@@ -670,6 +851,18 @@ class _TranscriptSelector:
         }
 
 
+class _SelectionResponseSelector(_TranscriptSelector):
+    def __init__(self, response):
+        self.response = response
+
+    def select_from_ths_conversation(self, _event_stage, _board_stage, _snapshot, top_n, fear_greed_ref=None):
+        return {
+            "model": "fake-deepseek",
+            "response": self.response,
+            "transcript": {"stage": "THS_BOARDS_TO_STOCK_SELECTION", "request": {"messages": []}, "response_content": json.dumps(self.response), "response_json": self.response},
+        }
+
+
 def test_run_persists_full_news_to_stock_transcript():
     service = AIStockRecommendationService(provider=_TranscriptProvider(), selector=_TranscriptSelector())
     run = service.run_recommendation(now=datetime(2026, 8, 10, 16, 0), allow_after_hours=True)
@@ -679,9 +872,27 @@ def test_run_persists_full_news_to_stock_transcript():
     evidence = service.get_run_evidence(run["id"])
     transcript = service.get_run_transcript(run["id"])
     assert evidence["news_snapshot"][0]["title"] == "原始新闻标题必须存档"
-    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v8"
+    assert transcript["ai_raw_response"]["conversation_version"] == "news-ths-v14"
     assert [stage["stage"] for stage in transcript["ai_raw_response"]["stages"]] == ["NEWS_EVENTS", "EVENTS_TO_THS_BOARDS", "THS_BOARDS_TO_STOCK_SELECTION"]
     assert transcript["ai_raw_response"]["stages"][0]["request"]["messages"][0]["content"] == "原始新闻标题必须存档"
+
+
+def test_run_accepts_only_explicit_empty_picks_as_model_abstention():
+    service = AIStockRecommendationService(
+        provider=_TranscriptProvider(),
+        selector=_SelectionResponseSelector({"picks": []}),
+    )
+    run = service.run_recommendation(now=datetime(2026, 8, 12, 16, 0), allow_after_hours=True)
+
+    assert run["status"] == "SUCCESS"
+    assert run["recommendations"] == []
+
+    malformed_service = AIStockRecommendationService(
+        provider=_TranscriptProvider(),
+        selector=_SelectionResponseSelector({}),
+    )
+    with pytest.raises(AIStockModelError, match="未返回带新闻"):
+        malformed_service.run_recommendation(now=datetime(2026, 8, 13, 16, 0), allow_after_hours=True)
 
 
 class _StaticQuoteProvider:
@@ -794,7 +1005,7 @@ def test_paper_rotation_sells_low_score_and_buys_high_confidence():
     assert [b.ts_code for b in buys] == ["000001.SZ"]
 
 
-def test_paper_rotation_sells_stale_position_without_hold_score():
+def test_paper_rotation_sells_stale_position_without_hold_score(monkeypatch):
     # 信号1：持仓多日未获再推荐（无需 hold_score/持仓评估）→ 轮换让位
     held_lot = {
         "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
@@ -811,6 +1022,8 @@ def test_paper_rotation_sells_stale_position_without_hold_score():
         "hold_scores": {},
         "last_recommended_dates": {"600000.SH": datetime(2026, 7, 20).date()},
     }
+    from src.core.services import ai_stock as ai_stock_module
+    monkeypatch.setattr(ai_stock_module, "_a_stock_trading_days_elapsed", lambda _start, _end: 10)
     service = _CapturingPaperService(state, price=10.0)
     service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
     sells = [p for p in service.captured_plans if p.side == "SELL"]
@@ -818,6 +1031,83 @@ def test_paper_rotation_sells_stale_position_without_hold_score():
     assert [(s.reason_code, s.quantity) for s in sells] == [("ROTATION_OUT", 1000)]
     assert "未获再推荐" in sells[0].reason
     assert [b.ts_code for b in buys] == ["000001.SZ"]
+
+
+def test_paper_rotation_stale_days_exclude_weekend(monkeypatch):
+    held_lot = {
+        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
+        "bought_at": datetime(2026, 8, 20, 10, 0), "buy_price": 10.0,
+        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
+        "peak_price": 10.0,
+    }
+    state = {
+        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "rotation_stale_days": 3}},
+        "lots": [held_lot],
+        "recommendations": [_recommendation("000001.SZ", 1, confidence=70.0, rec_price=10.0)],
+        "today_buys": set(),
+        "today_buy_count": 0,
+        "hold_scores": {},
+        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 21).date()},
+    }
+    from src.core.services import ai_stock as ai_stock_module
+    calls = []
+    monkeypatch.setattr(
+        ai_stock_module,
+        "_a_stock_trading_days_elapsed",
+        lambda start, end: calls.append((start, end)) or 1,
+    )
+    service = _CapturingPaperService(state, price=10.0)
+    service.process_minute(now=datetime(2026, 8, 24, 10, 0), fear_greed=50)
+    assert calls == [(datetime(2026, 8, 21).date(), datetime(2026, 8, 24).date())]
+    assert service.captured_plans == []
+
+
+def test_a_stock_trading_days_elapsed_uses_exchange_calendar(monkeypatch):
+    from src.core.services import ai_stock as ai_stock_module
+
+    tushare = mock.Mock()
+    tushare.get_trade_calendar_frame.return_value = pd.DataFrame(
+        [
+            {"cal_date": datetime(2026, 8, 22).date(), "is_open": 0},
+            {"cal_date": datetime(2026, 8, 23).date(), "is_open": 0},
+            {"cal_date": datetime(2026, 8, 24).date(), "is_open": 1},
+        ]
+    )
+    monkeypatch.setattr(ai_stock_module.TushareService, "get_instance", lambda: tushare)
+
+    assert ai_stock_module._a_stock_trading_days_elapsed(
+        datetime(2026, 8, 21).date(), datetime(2026, 8, 24).date()
+    ) == 1
+    tushare.get_trade_calendar_frame.assert_called_once_with(
+        datetime(2026, 8, 22).date(), datetime(2026, 8, 24).date()
+    )
+
+
+def test_paper_rotation_does_not_rebuy_sold_symbol_in_same_minute():
+    held_lot = {
+        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
+        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 10.0,
+        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
+        "peak_price": 10.0,
+    }
+    state = {
+        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "hold_evaluation_enabled": True, "rotation_confidence_gap": 20.0, "max_buys_per_day": 5}},
+        "lots": [held_lot],
+        "recommendations": [
+            _recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0),
+            _recommendation("600000.SH", 2, confidence=85.0, rec_price=10.0),
+        ],
+        "today_buys": set(),
+        "today_buy_count": 0,
+        "hold_scores": {"600000.SH": {"hold_score": 40.0, "reason": "走弱"}},
+        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 11).date()},
+    }
+    service = _CapturingPaperService(state, price=10.0)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.ts_code) for p in service.captured_plans] == [
+        ("SELL", "600000.SH"),
+        ("BUY", "000001.SZ"),
+    ]
 
 
 def test_paper_stop_loss_halves_once_and_t_plus_one_blocks_same_day_sell():

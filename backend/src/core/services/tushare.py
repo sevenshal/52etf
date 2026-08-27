@@ -2176,14 +2176,18 @@ class TushareService(QuoteProvider):
             if not self.is_cn_equity_symbol(symbol):
                 self._unsupported(f"realtime quote for non-CN symbol {symbol}")
 
-        # Primary source: Tushare Pro rt_min (official, batched, up to 100/call).
+        # Primary source: Tushare Pro rt_min.  Send the complete candidate set
+        # first (the service currently returns the full A-share universe in one
+        # call), then diff response symbols and retry only missing names in
+        # official-limit chunks of 1000.  This remains safe if Tushare restores
+        # its documented 1000-row cap while keeping the common path one call.
         # rt_min returns the latest 1-minute bar per symbol; its `close` is the
         # live price during trading and the session close after hours.  Legacy
         # Sina quotes remain as a fallback when rt_min is unavailable.
+        unique_symbols = list(dict.fromkeys(normalized_symbols))
         quotes_by_symbol: Dict[str, Dict] = {}
-        for offset in range(0, len(normalized_symbols), 100):
-            batch = normalized_symbols[offset:offset + 100]
-            frame = None
+
+        def _merge_rt_min(batch: List[str], phase: str) -> None:
             try:
                 frame = self.pro.rt_min(
                     ts_code=",".join(batch),
@@ -2191,55 +2195,67 @@ class TushareService(QuoteProvider):
                     fields="ts_code,time,open,close,high,low,vol,amount",
                 )
             except Exception as exc:
-                self.logger.error("Tushare rt_min batch failed for %s: %s", batch, exc)
-            if isinstance(frame, pd.DataFrame) and not frame.empty:
-                for _, row in frame.iterrows():
-                    data = self._row_to_dict(row)
-                    symbol = self.normalize_symbol(data.get("ts_code") or "")
-                    price = self._to_float(data.get("close"))
-                    if not symbol or price is None or price <= 0:
+                self.logger.error("Tushare rt_min %s failed for %d symbols: %s", phase, len(batch), exc)
+                return
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return
+            for _, row in frame.iterrows():
+                data = self._row_to_dict(row)
+                symbol = self.normalize_symbol(data.get("ts_code") or "")
+                price = self._to_float(data.get("close"))
+                if not symbol or price is None or price <= 0:
+                    continue
+                timestamp = None
+                time_text = str(data.get("time") or "").strip()
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                    try:
+                        timestamp = datetime.strptime(time_text, fmt)
+                        break
+                    except ValueError:
                         continue
-                    timestamp = None
-                    time_text = str(data.get("time") or "").strip()
-                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-                        try:
-                            timestamp = datetime.strptime(time_text, fmt)
-                            break
-                        except ValueError:
+                quotes_by_symbol[symbol] = {
+                    "symbol": symbol,
+                    "code": self._strip_exchange(symbol),
+                    "name": None,
+                    "name_cn": None,
+                    "price": price,
+                    "change": None,
+                    "percent_change": None,
+                    "high": self._to_float(data.get("high"), price),
+                    "low": self._to_float(data.get("low"), price),
+                    "open": self._to_float(data.get("open"), price),
+                    "prev_close": None,
+                    "volume": int(round(self._to_float(data.get("vol"), 0.0) or 0.0)),
+                    "turnover": self._to_float(data.get("amount"), 0.0) or 0.0,
+                    "timestamp": timestamp,
+                    "source": "tushare_rt_min",
+                }
+
+        _merge_rt_min(unique_symbols, "all-symbol request")
+        missing = [symbol for symbol in unique_symbols if symbol not in quotes_by_symbol]
+        for offset in range(0, len(missing), 1000):
+            _merge_rt_min(missing[offset:offset + 1000], "missing-symbol retry")
+
+        # Final fallback for names still absent after the bounded Tushare retry.
+        missing = [symbol for symbol in unique_symbols if symbol not in quotes_by_symbol]
+        for offset in range(0, len(missing), 800):
+            batch = missing[offset:offset + 800]
+            try:
+                codes = [self._strip_exchange(s) for s in batch]
+                code_to_symbol = {self._strip_exchange(s): s for s in batch}
+                sina_frame = ts.get_realtime_quotes(codes)
+                if isinstance(sina_frame, pd.DataFrame) and not sina_frame.empty:
+                    for _, row in sina_frame.iterrows():
+                        data = self._row_to_dict(row)
+                        code = (data.get("code") or "").strip().upper()
+                        if not code:
                             continue
-                    quotes_by_symbol[symbol] = {
-                        "symbol": symbol,
-                        "code": self._strip_exchange(symbol),
-                        "name": None,
-                        "name_cn": None,
-                        "price": price,
-                        "change": None,
-                        "percent_change": None,
-                        "high": self._to_float(data.get("high"), price),
-                        "low": self._to_float(data.get("low"), price),
-                        "open": self._to_float(data.get("open"), price),
-                        "prev_close": None,
-                        "volume": int(round(self._to_float(data.get("vol"), 0.0) or 0.0)),
-                        "turnover": self._to_float(data.get("amount"), 0.0) or 0.0,
-                        "timestamp": timestamp,
-                    }
-            else:
-                # Fallback: legacy Sina realtime quotes (no Tushare quota cost).
-                try:
-                    codes = [self._strip_exchange(s) for s in batch]
-                    code_to_symbol = {self._strip_exchange(s): s for s in batch}
-                    sina_frame = ts.get_realtime_quotes(codes)
-                    if isinstance(sina_frame, pd.DataFrame) and not sina_frame.empty:
-                        for _, row in sina_frame.iterrows():
-                            data = self._row_to_dict(row)
-                            code = (data.get("code") or "").strip().upper()
-                            if not code:
-                                continue
-                            quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
-                            if quote:
-                                quotes_by_symbol[quote["symbol"]] = quote
-                except Exception as exc:
-                    self.logger.error("Sina realtime quote fallback failed for %s: %s", batch, exc)
+                        quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
+                        if quote:
+                            quote["source"] = "sina_realtime"
+                            quotes_by_symbol[quote["symbol"]] = quote
+            except Exception as exc:
+                self.logger.error("Sina realtime quote fallback failed for %d symbols: %s", len(batch), exc)
 
         return [quotes_by_symbol[s] for s in normalized_symbols if s in quotes_by_symbol]
 
