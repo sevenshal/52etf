@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the Xueqiu 5-day weight/price ratio without look-ahead.
+"""Evaluate a Xueqiu weight/price-ratio lookback without look-ahead.
 
 Reads the production DuckDB in read-only mode and writes reproducible CSV/JSON/MD
 artifacts. A signal observed after snapshot-date close enters at next trading-day
@@ -23,8 +23,15 @@ def parse_args():
     p.add_argument("--db", type=Path, required=True)
     p.add_argument("--start", default="2026-07-01")
     p.add_argument("--end", default="2026-08-24")
+    p.add_argument("--valid-from", default="2026-06-25")
     p.add_argument("--output", type=Path, default=Path("lab/output/xueqiu_weight_price_ratio_20260701"))
     p.add_argument("--cost-bps", type=float, default=20.0, help="Round-trip cost")
+    p.add_argument(
+        "--lookback-days",
+        type=int,
+        default=5,
+        help="Number of prior snapshot trading days used by the ratio",
+    )
     return p.parse_args()
 
 
@@ -42,32 +49,42 @@ def pct(x):
 
 def main():
     args = parse_args()
+    lookback_days = max(1, int(args.lookback_days))
     args.output.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(args.db), read_only=True)
-    # Match production aggregation and its fifth-prior-snapshot comparison.
-    query = """
-    WITH base AS (
+    # Match production aggregation and compare against the selected prior snapshot.
+    query = f"""
+    WITH raw AS (
       SELECT snapshot_date, cube_symbol, stock_symbol, any_value(stock_name) stock_name,
              sum(weight_pct) weight_pct
       FROM xueqiu_cube_holdings_snapshots
-      WHERE coalesce(is_active,false) AND weight_pct>0 AND stock_symbol<>'CASH'
+      WHERE coalesce(is_active,false) AND weight_pct>0
+        AND snapshot_date >= CAST(? AS DATE)
       GROUP BY 1,2,3
+    ), date_summary AS (
+      SELECT snapshot_date,count(distinct cube_symbol) cube_count
+      FROM raw GROUP BY 1
+    ), base AS (
+      SELECT * FROM raw WHERE stock_symbol<>'CASH'
     ), agg AS (
       SELECT snapshot_date,stock_symbol,any_value(stock_name) stock_name,
-             count(distinct cube_symbol) holding_cubes,sum(weight_pct) total_weight
-      FROM base GROUP BY 1,2
+             count(distinct cube_symbol) holding_cubes,sum(weight_pct) total_weight,
+             sum(weight_pct)/nullif(max(date_summary.cube_count),0) composite_weight
+      FROM base JOIN date_summary USING(snapshot_date) GROUP BY 1,2
     ), ranked AS (
       SELECT *,row_number() over(partition by snapshot_date order by total_weight desc,holding_cubes desc,stock_symbol desc) composite_rank
       FROM agg
     ), dates AS (
-      SELECT snapshot_date,lag(snapshot_date,5) over(order by snapshot_date) compare_date FROM (select distinct snapshot_date from ranked)
+      SELECT snapshot_date,lag(snapshot_date,{lookback_days}) over(order by snapshot_date) compare_date FROM (select distinct snapshot_date from ranked)
     )
-    SELECT r.*,d.compare_date,p.holding_cubes prior_cubes,p.total_weight prior_weight,p.composite_rank prior_rank
+    SELECT r.*,d.compare_date,p.holding_cubes prior_cubes,
+           p.total_weight prior_total_weight,p.composite_weight prior_composite_weight,
+           p.composite_rank prior_rank
     FROM ranked r JOIN dates d using(snapshot_date)
     LEFT JOIN ranked p ON p.snapshot_date=d.compare_date AND p.stock_symbol=r.stock_symbol
     WHERE r.snapshot_date BETWEEN ? AND ?
     """
-    signals = con.execute(query, [args.start, args.end]).df()
+    signals = con.execute(query, [args.valid_from, args.start, args.end]).df()
     dates = {pd.Timestamp(x).date() for x in con.execute("select distinct trade_date from a_stock_market_daily_qfq where trade_date between ? and ? order by 1", [args.start, args.end]).df()["trade_date"]}
     snapshot_dates = {pd.Timestamp(x).date() for x in signals.snapshot_date.unique()}
     missing_weekdays = [str(d.date()) for d in pd.date_range(args.start, args.end, freq="B") if d.date() not in snapshot_dates and d.date() in dates]
@@ -88,8 +105,8 @@ def main():
         if not now or not old: continue
         pm=now[1]/old[1]
         if pm<=0: continue
-        is_new = pd.isna(r.prior_weight) or r.prior_weight <= 0
-        wm = np.nan if is_new else r.total_weight/r.prior_weight
+        is_new = pd.isna(r.prior_total_weight) or r.prior_total_weight <= 0
+        wm = np.nan if is_new else r.composite_weight/r.prior_composite_weight
         ratio = np.nan if is_new else wm/pm
         if is_new: direction="新进"
         elif wm > 1.05 and ratio > 1.05: direction="顺势加仓" if pm >= 1 else "逆势吸筹"
@@ -97,8 +114,8 @@ def main():
         else: direction="持平"
         item=r._asdict(); item.update(weight_multiple=wm,price_multiple=pm,ratio=ratio,direction=direction,
           cube_change=(r.holding_cubes-r.prior_cubes) if not is_new else np.nan,
-          weight_change=(r.total_weight-r.prior_weight) if not is_new else np.nan,
-          momentum_5d=pm-1)
+          weight_change=(r.total_weight-r.prior_total_weight) if not is_new else np.nan,
+          **{f"momentum_{lookback_days}d": pm-1})
         pos=date_pos.get(r.snapshot_date)
         if pos is None or pos+1>=len(calendar): continue
         entry_date=calendar[pos+1]; entry=price_map.get((r.ts_code,entry_date))
@@ -134,7 +151,7 @@ def main():
           "eligible_win":(elig[f"excess_{h}d"]>0).mean()})
     summary=pd.DataFrame(summaries)
     # Same-universe top-10 event portfolios: ratio and key ablations.
-    methods={"ratio":"ratio_w","weight_multiple":"weight_multiple","cube_change":"cube_change","rank":"composite_rank","price_momentum":"momentum_5d"}
+    methods={"ratio":"ratio_w","weight_multiple":"weight_multiple","cube_change":"cube_change","rank":"composite_rank","price_momentum":f"momentum_{lookback_days}d"}
     portfolio=[]
     base=panel[(panel.composite_rank<=100)&(panel.holding_cubes>=8)&(panel.cube_change>=2)&(panel.weight_change>0)]
     for h in [5,10]:
@@ -206,9 +223,10 @@ def main():
     cutpoints.to_csv(args.output/"behavior_global_quintile_cutpoints.csv",index=False)
     quality={"snapshot_min":str(signals.snapshot_date.min()),"snapshot_max":str(signals.snapshot_date.max()),
       "snapshot_days":int(signals.snapshot_date.nunique()),"panel_rows":len(panel),"symbols":int(panel.ts_code.nunique()),"minimum_holding_cubes":5,
-      "missing_snapshot_trading_days":missing_weekdays,"price_max":str(prices.trade_date.max()),"round_trip_cost_bps":args.cost_bps}
+      "missing_snapshot_trading_days":missing_weekdays,"price_max":str(prices.trade_date.max()),"round_trip_cost_bps":args.cost_bps,
+      "comparison_lookback_days":lookback_days,"holdings_valid_from":args.valid_from}
     (args.output/"metrics.json").write_text(json.dumps(quality,ensure_ascii=False,indent=2,default=str))
-    lines=["# 雪球5日权价比有效性实验", "", f"区间：{args.start}—{args.end}；信号后下一交易日开盘成交；组合消融扣双边合计 {args.cost_bps:.0f} bps。", "",
+    lines=[f"# 雪球{lookback_days}日权价比有效性实验", "", f"区间：{args.start}—{args.end}；信号后下一交易日开盘成交；组合消融扣双边合计 {args.cost_bps:.0f} bps。", "",
       "## 数据质量", "", f"- 仅保留当前至少被5个活跃组合持仓的股票：{quality['snapshot_days']} 个快照日、{quality['panel_rows']} 个股票-日、{quality['symbols']} 只股票。", f"- 缺失交易日快照：{', '.join(missing_weekdays) or '无'}。", f"- 行情截至 {quality['price_max']}；靠近结束日的远期收益自动不纳入。", "", "## 六类行为结果（每日等权，避免某天股票多而过度加权）", "",
       "|持有期|行为|股票日|截面数|每日平均股票数|绝对收益|相对同日股票池|超额胜率|p值|", "|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in behavior.itertuples(): lines.append(f"|{r.horizon}日|{r.direction}|{r.stock_days}|{r.dates}|{r.avg_stocks_per_date:.1f}|{pct(r.absolute_return)}|{pct(r.excess_return)}|{pct(r.excess_win)}|{r.excess_p:.3f}|")
