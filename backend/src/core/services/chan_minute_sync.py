@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from .chan_minute_data import (
+    MAX_BACKFILL_TRADING_DAYS,
     ROLLING_TRADING_DAYS,
     fetch_historical_minute_batch,
     historical_minute_batch_size,
@@ -84,7 +85,7 @@ class ChanMinuteSyncManager:
     @classmethod
     def _run(cls, job_id: str, trading_days: int, full: bool) -> None:
         try:
-            requested_days = min(ROLLING_TRADING_DAYS, max(1, int(trading_days)))
+            requested_days = min(MAX_BACKFILL_TRADING_DAYS, max(1, int(trading_days)))
             if full:
                 symbols, calendar_start, calendar_end = recent_market_universe(requested_days)
                 groups = [

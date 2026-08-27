@@ -559,11 +559,14 @@ def _run_a_stock_base_data_sync(
     )
 
 
-def _run_chan_minute_sync(full: bool = False):
-    """Run the precise daily incremental sync, or the administrator-requested 32-day bootstrap."""
+def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
+    """Run daily incremental sync; manual API runs request a 128-trading-day backfill."""
     from ..core.services.chan_minute_sync import ChanMinuteSyncManager
 
-    state = ChanMinuteSyncManager.start(full=full)
+    state = ChanMinuteSyncManager.start(
+        full=full,
+        trading_days=trading_days,
+    )
     if state.get("status") == "RUNNING" and state.get("job_id"):
         while state.get("status") == "RUNNING":
             threading.Event().wait(5)
@@ -1343,20 +1346,12 @@ class ScheduledTaskManager:
             "chan_minute_sync": TaskDefinition(
                 task_key="chan_minute_sync",
                 name="缠论分钟行情同步",
-                description="盘后按实际缺口增量同步并额外重叠1个交易日；首次启用时可回补最近32个交易日。",
+                description="日常盘后按实际缺口增量同步并额外重叠1个交易日；点击手动执行时回补最近128个交易日。",
                 default_time="21:30",
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_chan_minute_sync,
-                parameter_schema=(
-                    TaskParameterDefinition(
-                        key="full",
-                        label="回补32个交易日",
-                        value_type="boolean",
-                        default=False,
-                        description="日常定时任务保持关闭；首次初始化或修复数据时手动开启。",
-                    ),
-                ),
+                parameter_schema=(),
             ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",

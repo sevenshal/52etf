@@ -21,6 +21,7 @@ from .tushare import TushareService
 
 
 ROLLING_TRADING_DAYS = 32
+MAX_BACKFILL_TRADING_DAYS = 128
 DISPLAY_TRADING_DAYS = 20
 HISTORICAL_MINUTE_SYMBOL_DAYS_PER_BATCH = 32
 HISTORICAL_MINUTE_COMPLETE_DAY_MIN_BARS = 200
@@ -94,7 +95,7 @@ def incremental_minute_sync_groups(
     try:
         dates = connection.execute(
             "SELECT DISTINCT trade_date FROM a_stock_market_daily ORDER BY trade_date DESC LIMIT ?",
-            [max(1, min(ROLLING_TRADING_DAYS, int(trading_days)))],
+            [max(1, min(MAX_BACKFILL_TRADING_DAYS, int(trading_days)))],
         ).fetchall()
         if not dates:
             raise ValueError("A股日行情为空，无法确定分钟行情同步区间")

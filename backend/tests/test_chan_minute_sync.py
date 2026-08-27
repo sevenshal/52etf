@@ -22,7 +22,7 @@ def _running_state(job_id):
     }
 
 
-def test_full_sync_fetches_32_days_concurrently_and_writes_on_manager_thread(monkeypatch):
+def test_full_sync_fetches_requested_days_concurrently_and_writes_on_manager_thread(monkeypatch):
     symbols = ["000001.SZ", "000002.SZ", "600000.SH", "600001.SH"]
     manager_thread = threading.current_thread().name
     fetch_threads = []
@@ -70,6 +70,16 @@ def test_full_sync_fetches_32_days_concurrently_and_writes_on_manager_thread(mon
     assert write_threads == [manager_thread] * len(symbols)
     assert prune_calls == [(date(2026, 7, 10), manager_thread)]
     assert state["pruned_rows"] == 7
+
+
+def test_full_sync_caps_manual_backfill_at_128_days(monkeypatch):
+    monkeypatch.setattr(sync_module, "recent_market_universe", lambda trading_days: ([], date(2026, 1, 1), date(2026, 8, 24)))
+    monkeypatch.setattr(sync_module, "prune_minute_history", lambda _keep_from: 0)
+    monkeypatch.setattr(ChanMinuteSyncManager, "_state", _running_state("cap-job"))
+    ChanMinuteSyncManager._run("cap-job", trading_days=999, full=True)
+    state = ChanMinuteSyncManager.snapshot()
+    assert state["status"] == "SUCCESS"
+    assert state["trading_days"] == 128
 
 
 def test_incremental_sync_adds_one_day_and_uses_sixteen_symbol_batches(monkeypatch):

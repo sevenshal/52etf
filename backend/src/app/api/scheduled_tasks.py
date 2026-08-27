@@ -98,6 +98,10 @@ def run_scheduled_task_now(
             "hk_index_fear_greed_backfill",
         } and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
+        if task_key == "chan_minute_sync":
+            # Manual execution is the explicit 128-trading-day repair action;
+            # the scheduled runner keeps its default incremental behavior.
+            runner_kwargs.update(full=True, trading_days=128)
         if (
             task_key in {
                 "a_stock_etf_fear_greed_backfill",
