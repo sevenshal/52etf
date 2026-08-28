@@ -9,6 +9,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any
 
+import pandas as pd
+
 from .chan_minute_data import (
     MAX_BACKFILL_TRADING_DAYS,
     ROLLING_TRADING_DAYS,
@@ -37,6 +39,7 @@ class ChanMinuteSyncManager:
         "total_batches": 0,
         "fetched_rows": 0,
         "saved_rows": 0,
+        "request_count": 0,
         "errors": [],
     }
 
@@ -61,6 +64,7 @@ class ChanMinuteSyncManager:
                 "total_batches": 0,
                 "fetched_rows": 0,
                 "saved_rows": 0,
+                "request_count": 0,
                 "errors": [],
                 "started_at": datetime.now().isoformat(),
                 "finished_at": None,
@@ -164,6 +168,12 @@ class ChanMinuteSyncManager:
                     submit_until_full()
                     while pending:
                         done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        completed_frames = []
+                        completed_batches = 0
+                        completed_symbols = 0
+                        completed_fetched = 0
+                        completed_request_count = 0
+                        completed_errors = []
                         for future in done:
                             request = pending.pop(future)
                             batch = request["symbols"]
@@ -179,27 +189,44 @@ class ChanMinuteSyncManager:
                                 result = future.result()
                                 frame = result.get("frame")
                                 errors.extend(result.get("errors") or [])
+                                request_count = int(result.get("request_count") or 0)
                                 fetched = len(frame) if frame is not None else 0
                             except Exception as exc:
                                 frame = None
                                 fetched = 0
+                                request_count = 0
                                 errors.append(f"{batch[0]}~{batch[-1]}: {exc}")
 
-                            saved = 0
                             if frame is not None and not frame.empty:
-                                try:
-                                    # Network workers never access DuckDB; this manager thread is the only writer.
-                                    saved = upsert_minute_frame(frame)
-                                except Exception as exc:
-                                    errors.append(f"{batch[0]}~{batch[-1]} 写入失败: {exc}")
+                                completed_frames.append(frame)
+                            completed_batches += 1
+                            completed_symbols += len(batch)
+                            completed_fetched += fetched
+                            completed_request_count += request_count
+                            completed_errors.extend(errors)
 
+                        saved = 0
+                        if completed_frames and not cancelled:
+                            try:
+                                # Coalesce futures that completed together to avoid thousands of tiny DuckDB writes.
+                                write_frame = (
+                                    completed_frames[0]
+                                    if len(completed_frames) == 1
+                                    else pd.concat(completed_frames, ignore_index=True)
+                                )
+                                saved = upsert_minute_frame(write_frame)
+                            except Exception as exc:
+                                completed_errors.append(f"批量写入失败: {exc}")
+
+                        if completed_batches:
                             with cls._lock:
-                                cls._state["processed"] += len(batch)
-                                cls._state["completed_batches"] += 1
-                                cls._state["fetched_rows"] += fetched
+                                cls._state["processed"] += completed_symbols
+                                cls._state["completed_batches"] += completed_batches
+                                cls._state["fetched_rows"] += completed_fetched
                                 cls._state["saved_rows"] += saved
+                                cls._state["request_count"] += completed_request_count
                                 remaining_error_slots = max(0, 200 - len(cls._state["errors"]))
-                                cls._state["errors"].extend(errors[:remaining_error_slots])
+                                cls._state["errors"].extend(completed_errors[:remaining_error_slots])
                         if cancelled:
                             break
                         submit_until_full()

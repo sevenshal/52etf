@@ -18,6 +18,7 @@ def _running_state(job_id):
         "total_batches": 0,
         "fetched_rows": 0,
         "saved_rows": 0,
+        "request_count": 0,
         "errors": [],
     }
 
@@ -67,7 +68,8 @@ def test_full_sync_fetches_requested_days_concurrently_and_writes_on_manager_thr
     assert state["completed_batches"] == len(symbols)
     assert len(set(fetch_threads)) > 1
     assert all(name.startswith("chan-minute-fetch") for name in fetch_threads)
-    assert write_threads == [manager_thread] * len(symbols)
+    assert 1 <= len(write_threads) <= len(symbols)
+    assert all(name == manager_thread for name in write_threads)
     assert prune_calls == [(date(2026, 7, 10), manager_thread)]
     assert state["pruned_rows"] == 7
 

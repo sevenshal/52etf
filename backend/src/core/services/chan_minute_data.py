@@ -24,6 +24,8 @@ ROLLING_TRADING_DAYS = 32
 MAX_BACKFILL_TRADING_DAYS = 128
 DISPLAY_TRADING_DAYS = 20
 HISTORICAL_MINUTE_SYMBOL_DAYS_PER_BATCH = 32
+HISTORICAL_MINUTE_MAX_CALENDAR_DAYS_PER_REQUEST = 44
+HISTORICAL_MINUTE_RESPONSE_ROW_LIMIT = 8_000
 HISTORICAL_MINUTE_COMPLETE_DAY_MIN_BARS = 200
 REALTIME_MINUTE_FREQS = {"1MIN", "5MIN", "15MIN", "30MIN", "60MIN"}
 REALTIME_MINUTE_FETCH_WORKERS = max(
@@ -38,6 +40,22 @@ _MINUTE_WRITE_LOCK = threading.Lock()
 def historical_minute_batch_size(trading_days: int) -> int:
     """Keep each request within 32 symbol-days: 32/16/10/.../1 symbols."""
     return max(1, HISTORICAL_MINUTE_SYMBOL_DAYS_PER_BATCH // max(1, int(trading_days)))
+
+
+def historical_minute_date_chunks(start_date: date, end_date: date) -> list[tuple[date, date]]:
+    """Split long ranges so a one-symbol 1m response stays below Tushare's row cap."""
+    if start_date > end_date:
+        return []
+    chunks = []
+    cursor = start_date
+    while cursor <= end_date:
+        chunk_end = min(
+            end_date,
+            cursor + timedelta(days=HISTORICAL_MINUTE_MAX_CALENDAR_DAYS_PER_REQUEST - 1),
+        )
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
 
 
 def plan_incremental_minute_groups(
@@ -144,50 +162,70 @@ def fetch_historical_minute_batch(
     if not normalized:
         return {"symbols": [], "frame": pd.DataFrame(), "errors": []}
 
-    start_time = datetime.combine(start_date, time.min)
-    end_time = datetime.combine(end_date, time.max)
     frames: list[pd.DataFrame] = []
     errors: list[str] = []
-    batch_failed = False
-    try:
-        frame = service.get_a_stock_historical_minute_batch_frame(
-            normalized,
-            start_time,
-            end_time,
-            freq="1min",
-            raise_on_error=True,
-        )
-    except Exception as exc:
-        batch_failed = True
-        frame = pd.DataFrame()
-        logger.warning("Tushare minute batch failed for %s symbols; retrying separately: %s", len(normalized), exc)
-    if isinstance(frame, pd.DataFrame) and not frame.empty:
-        frames.append(frame)
-        returned = set(frame["ts_code"].astype(str).str.strip().str.upper())
-    else:
-        returned = set()
-
-    missing = [symbol for symbol in normalized if symbol not in returned]
-    retry_symbols = missing if len(normalized) > 1 or batch_failed else []
-    for symbol in retry_symbols:
+    request_count = 0
+    for chunk_start, chunk_end in historical_minute_date_chunks(start_date, end_date):
+        start_time = datetime.combine(chunk_start, time.min)
+        end_time = datetime.combine(chunk_end, time.max)
+        batch_failed = False
         try:
-            retry = service.get_a_stock_historical_minute_batch_frame(
-                [symbol],
+            request_count += 1
+            frame = service.get_a_stock_historical_minute_batch_frame(
+                normalized,
                 start_time,
                 end_time,
                 freq="1min",
                 raise_on_error=True,
             )
         except Exception as exc:
-            errors.append(f"{symbol}: {exc}")
-            continue
-        if isinstance(retry, pd.DataFrame) and not retry.empty:
-            frames.append(retry)
+            batch_failed = True
+            frame = pd.DataFrame()
+            logger.warning(
+                "Tushare minute batch failed for %s symbols (%s~%s); retrying separately: %s",
+                len(normalized),
+                chunk_start,
+                chunk_end,
+                exc,
+            )
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            frames.append(frame)
+            returned = set(frame["ts_code"].astype(str).str.strip().str.upper())
+            if len(frame) >= HISTORICAL_MINUTE_RESPONSE_ROW_LIMIT:
+                errors.append(
+                    f"{normalized[0]}~{normalized[-1]} {chunk_start}~{chunk_end}: "
+                    f"返回{len(frame)}行，疑似触及Tushare单次行数上限"
+                )
+        else:
+            returned = set()
+
+        missing = [symbol for symbol in normalized if symbol not in returned]
+        retry_symbols = missing if len(normalized) > 1 or batch_failed else []
+        for symbol in retry_symbols:
+            try:
+                request_count += 1
+                retry = service.get_a_stock_historical_minute_batch_frame(
+                    [symbol],
+                    start_time,
+                    end_time,
+                    freq="1min",
+                    raise_on_error=True,
+                )
+            except Exception as exc:
+                errors.append(f"{symbol} {chunk_start}~{chunk_end}: {exc}")
+                continue
+            if isinstance(retry, pd.DataFrame) and not retry.empty:
+                frames.append(retry)
 
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not combined.empty:
         combined = combined.drop_duplicates(["ts_code", "trade_time"], keep="last")
-    return {"symbols": normalized, "frame": combined, "errors": errors}
+    return {
+        "symbols": normalized,
+        "frame": combined,
+        "errors": errors,
+        "request_count": request_count,
+    }
 
 
 def normalize_minute_frame(frame: pd.DataFrame, source: str = "tushare_stk_mins") -> pd.DataFrame:

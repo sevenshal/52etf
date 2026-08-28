@@ -9,6 +9,7 @@ from src.core.services.chan_minute_data import (
     fetch_historical_minute_batch,
     fetch_realtime_minute_rows,
     historical_minute_batch_size,
+    historical_minute_date_chunks,
     incremental_minute_sync_groups,
     is_complete_a_share_minute_day,
     merge_minute_rows,
@@ -89,6 +90,66 @@ def test_historical_minute_batch_size_respects_row_limit():
     assert historical_minute_batch_size(2) == 16
     assert historical_minute_batch_size(3) == 10
     assert historical_minute_batch_size(32) == 1
+
+
+def test_historical_minute_date_chunks_keep_long_ranges_below_row_limit():
+    chunks = historical_minute_date_chunks(date(2026, 2, 24), date(2026, 8, 27))
+
+    assert chunks == [
+        (date(2026, 2, 24), date(2026, 4, 8)),
+        (date(2026, 4, 9), date(2026, 5, 22)),
+        (date(2026, 5, 23), date(2026, 7, 5)),
+        (date(2026, 7, 6), date(2026, 8, 18)),
+        (date(2026, 8, 19), date(2026, 8, 27)),
+    ]
+
+
+def test_fetch_historical_minute_batch_splits_long_date_range():
+    class FakeService:
+        def __init__(self):
+            self.calls = []
+
+        def get_a_stock_historical_minute_batch_frame(
+            self, symbols, start_time, end_time, **_kwargs
+        ):
+            self.calls.append((symbols, start_time, end_time))
+            return pd.DataFrame(
+                [{"ts_code": symbols[0], "trade_time": start_time, "close": len(self.calls)}]
+            )
+
+    service = FakeService()
+    result = fetch_historical_minute_batch(
+        service,
+        ["000001.SZ"],
+        date(2026, 2, 24),
+        date(2026, 8, 27),
+    )
+
+    assert len(service.calls) == 5
+    assert result["request_count"] == 5
+    assert len(result["frame"]) == 5
+    assert service.calls[0][1] == datetime(2026, 2, 24)
+    assert service.calls[-1][2] == datetime(2026, 8, 27, 23, 59, 59, 999999)
+
+
+def test_fetch_historical_minute_batch_reports_suspected_truncation():
+    class FakeService:
+        def get_a_stock_historical_minute_batch_frame(self, symbols, *_args, **_kwargs):
+            return pd.DataFrame(
+                {
+                    "ts_code": [symbols[0]] * 8000,
+                    "trade_time": pd.date_range("2026-07-01", periods=8000, freq="1min"),
+                }
+            )
+
+    result = fetch_historical_minute_batch(
+        FakeService(),
+        ["000001.SZ"],
+        date(2026, 7, 1),
+        date(2026, 7, 31),
+    )
+
+    assert "疑似触及Tushare单次行数上限" in result["errors"][0]
 
 
 def test_plan_incremental_minute_groups_adds_one_overlap_day_per_contiguous_gap():
