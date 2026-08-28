@@ -154,11 +154,12 @@ const ChanAnalysis = () => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const up = isUp(item.direction);
-      return {
-        coords: [{ coord: [start, up ? item.low : item.high] }, { coord: [end, up ? item.high : item.low] }],
-        lineStyle: { color: up ? '#722ed1' : '#eb2f96', width: 3 },
-      };
-    }).filter(item => item.coords[0].coord[0] >= 0 && item.coords[1].coord[0] >= 0);
+      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 3 };
+      return [
+        { coord: [start, up ? item.low : item.high], lineStyle },
+        { coord: [end, up ? item.high : item.low], lineStyle },
+      ];
+    }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
 
     const centerAreas = (analysis.centers || []).filter(item => item.valid).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
@@ -234,7 +235,7 @@ const ChanAnalysis = () => {
             lineStyle: { width: 2, color: '#1677ff' },
             data: [
               ...strokeLines,
-              ...(showSegments ? segmentLines : []).map(item => ({ ...item, symbol: ['none', 'none'], silent: true })),
+              ...(showSegments ? segmentLines : []),
             ],
           },
           markArea: {
