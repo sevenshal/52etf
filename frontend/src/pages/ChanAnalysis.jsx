@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Checkbox, Empty, Form, InputNumber, Progress, Segmented, Select, Space, Spin, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Checkbox, Empty, Form, InputNumber, Progress, Segmented, Select, Space, Spin, Switch, Table, Tag, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
@@ -32,6 +32,8 @@ const ChanAnalysis = () => {
   const [scan, setScan] = useState(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [boardOptions, setBoardOptions] = useState([]);
+  const [showHistorySignals, setShowHistorySignals] = useState(false);
+  const [showSegments, setShowSegments] = useState(true);
 
   const searchSymbols = useCallback(query => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -148,6 +150,15 @@ const ChanAnalysis = () => {
       const endPrice = isUp(item.direction) ? item.high : item.low;
       return [{ coord: [start, startPrice] }, { coord: [end, endPrice] }];
     }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
+    const segmentLines = (analysis.segments || []).map(item => {
+      const start = findIndex(item.start);
+      const end = findIndex(item.end);
+      const up = isUp(item.direction);
+      return {
+        coords: [{ coord: [start, up ? item.low : item.high] }, { coord: [end, up ? item.high : item.low] }],
+        lineStyle: { color: up ? '#722ed1' : '#eb2f96', width: 3 },
+      };
+    }).filter(item => item.coords[0].coord[0] >= 0 && item.coords[1].coord[0] >= 0);
 
     const centerAreas = (analysis.centers || []).filter(item => item.valid).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
@@ -162,7 +173,8 @@ const ChanAnalysis = () => {
       itemStyle: { color: fxIsTop(item.mark) ? '#cf1322' : '#389e0d' },
     })).filter(item => item.coord[0] >= 0);
     const signalSlots = new Map();
-    const signalMarkers = (analysis.signal_history || analysis.signals || []).map(item => {
+    const visibleSignals = showHistorySignals ? (analysis.signal_history || analysis.signals || []) : (analysis.signals || []);
+    const signalMarkers = visibleSignals.map(item => {
       const index = findIndex(item.bar_time);
       const bar = bars[Math.max(0, index)];
       const buy = String(item.type).includes('买');
@@ -220,7 +232,10 @@ const ChanAnalysis = () => {
             silent: true,
             label: { show: false },
             lineStyle: { width: 2, color: '#1677ff' },
-            data: strokeLines,
+            data: [
+              ...strokeLines,
+              ...(showSegments ? segmentLines : []).map(item => ({ ...item, symbol: ['none', 'none'], silent: true })),
+            ],
           },
           markArea: {
             silent: true,
@@ -234,7 +249,7 @@ const ChanAnalysis = () => {
         },
       ],
     };
-  }, [payload]);
+  }, [payload, showHistorySignals, showSegments]);
 
   return (
     <div className="chan-page">
@@ -251,9 +266,11 @@ const ChanAnalysis = () => {
       </div>
       {error && <Alert type="error" showIcon message={error} />}
       <Card className="chan-chart-card" title={`${symbol} · ${freq === 'd' ? '日K' : freq}`}
-        extra={payload?.analysis && <Text type="secondary">
-          CZSC {payload.analysis.czsc_version} · {payload.analysis.bar_count}根 · 历史信号触发 {payload.analysis.signal_history_count || 0} 次
-        </Text>}>
+        extra={payload?.analysis && <Space size="middle" wrap>
+          <Space size={6}><Text type="secondary">历史买卖点</Text><Switch size="small" checked={showHistorySignals} onChange={setShowHistorySignals} /></Space>
+          <Space size={6}><Text type="secondary">方向性线段</Text><Switch size="small" checked={showSegments} onChange={setShowSegments} /></Space>
+          <Text type="secondary">CZSC {payload.analysis.czsc_version} · {payload.analysis.bar_count}根</Text>
+        </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
             {chartOption ? <ReactECharts option={chartOption} notMerge style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}

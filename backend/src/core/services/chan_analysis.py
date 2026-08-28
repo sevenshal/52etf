@@ -117,6 +117,55 @@ def _serialize_bi(bi: Any) -> dict[str, Any]:
     }
 
 
+def _build_directional_segments(bis: list[Any]) -> list[dict[str, Any]]:
+    """Build confirmed directional segments from CZSC finished strokes.
+
+    CZSC 1.0.1 exposes strokes and centers but not a public segment object. The
+    segment state is therefore reconstructed from confirmed strokes only.
+    """
+    if not bis:
+        return []
+
+    def is_down(bi: Any) -> bool:
+        value = str(getattr(bi, "direction", ""))
+        return "down" in value.lower() or "向下" in value
+
+    def serialize(items: list[Any], down: bool) -> dict[str, Any]:
+        return {
+            "start": _iso(items[0].sdt),
+            "end": _iso(items[-1].edt),
+            "direction": "向下" if down else "向上",
+            "high": max(float(x.high) for x in items),
+            "low": min(float(x.low) for x in items),
+            "stroke_count": len(items),
+            "power_price": sum(abs(float(getattr(x, "power_price", 0) or 0)) for x in items),
+            "power_volume": sum(abs(float(getattr(x, "power_volume", 0) or 0)) for x in items),
+        }
+
+    segments: list[dict[str, Any]] = []
+    current = [bis[0]]
+    down = is_down(bis[0])
+    extreme = float(getattr(bis[0], "low" if down else "high"))
+    for bi in bis[1:]:
+        if is_down(bi) != down:
+            current.append(bi)
+            continue
+        value = float(getattr(bi, "low" if down else "high"))
+        extends = value <= extreme if down else value >= extreme
+        if extends:
+            current.append(bi)
+            extreme = value
+            continue
+        if len(current) >= 2:
+            segments.append(serialize(current, down))
+        current = [bi]
+        down = is_down(bi)
+        extreme = value
+    if len(current) >= 2:
+        segments.append(serialize(current, down))
+    return segments
+
+
 def _serialize_zs(zs: Any) -> dict[str, Any]:
     return {
         "start": _iso(zs.sdt),
@@ -266,6 +315,7 @@ def analyze_bars(
         "latest_bar_time": _iso(raw_bars[-1].dt),
         "fractals": [_serialize_fx(item) for item in c.fx_list],
         "strokes": [_serialize_bi(item) for item in c.bi_list],
+        "segments": _build_directional_segments(c.bi_list),
         "centers": [_serialize_zs(item) for item in c.zs_list],
         "signals": current_signals,
         "signal_history": signal_history,
