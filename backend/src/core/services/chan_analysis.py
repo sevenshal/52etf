@@ -159,6 +159,8 @@ def _build_directional_segments(bis: list[Any]) -> list[dict[str, Any]]:
             "stroke_count": len(items),
             "power_price": sum(abs(float(getattr(x, "power_price", 0) or 0)) for x in items),
             "power_volume": sum(abs(float(getattr(x, "power_volume", 0) or 0)) for x in items),
+            "start_price": float(items[0].high if down else items[0].low),
+            "end_price": float(items[-1].low if down else items[-1].high),
         }
 
     segments: list[dict[str, Any]] = []
@@ -342,6 +344,7 @@ def _native_analysis(symbol: str, rows: list[dict[str, Any]], freq: str, *, conf
         serialized_segments.append({
             "start": dt_for(start_stroke.start.i), "end": dt_for(end_stroke.end.i),
             "direction": "向上" if item.direction == "up" else "向下", "high": item.high, "low": item.low,
+            "start_price": item.start_price, "end_price": item.end_price,
             "stroke_count": item.end_stroke - item.start_stroke + 1, "power_price": item.power_price,
             "power_volume": None, "confirm_dt": dt_for(item.confirm_i),
         })

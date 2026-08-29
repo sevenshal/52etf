@@ -157,10 +157,12 @@ const ChanAnalysis = () => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const up = isUp(item.direction);
-      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 3 };
+      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72 };
+      const startPrice = item.start_price ?? (up ? item.low : item.high);
+      const endPrice = item.end_price ?? (up ? item.high : item.low);
       return [
-        { coord: [start, up ? item.low : item.high], lineStyle },
-        { coord: [end, up ? item.high : item.low], lineStyle },
+        { coord: [start, startPrice], lineStyle },
+        { coord: [end, endPrice], lineStyle },
       ];
     }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
 
@@ -172,13 +174,18 @@ const ChanAnalysis = () => {
       } },
     ]);
 
-    const fractals = (analysis.fractals || []).map(item => ({
-      coord: [findIndex(item.dt), item.price],
-      name: fxIsTop(item.mark) ? '顶分型' : '底分型',
-      value: fxIsTop(item.mark) ? '顶' : '底',
-      symbolRotate: fxIsTop(item.mark) ? 180 : 0,
-      itemStyle: { color: fxIsTop(item.mark) ? '#cf1322' : '#389e0d' },
-    })).filter(item => item.coord[0] >= 0);
+    const fractalPoints = (analysis.fractals || []).map(item => ({
+      index: findIndex(item.dt), price: item.price,
+      top: fxIsTop(item.mark),
+    })).filter(item => item.index >= 0);
+    // 分型只用极细的折线连接，保留“高-低-高/低-高-低”的节奏，避免三角标记遮挡K线。
+    const fractalLines = fractalPoints.slice(1).map((point, index) => {
+      const previous = fractalPoints[index];
+      return [
+        { coord: [previous.index, previous.price], lineStyle: { color: '#8c8c8c', width: 0.8, opacity: 0.55 } },
+        { coord: [point.index, point.price], lineStyle: { color: '#8c8c8c', width: 0.8, opacity: 0.55 } },
+      ];
+    });
     const signalSlots = new Map();
     const visibleSignals = showHistorySignals ? (analysis.signal_history || analysis.signals || []) : (analysis.signals || []);
     const signalMarkers = visibleSignals.map(item => {
@@ -233,13 +240,14 @@ const ChanAnalysis = () => {
           type: 'candlestick',
           data: bars.map(item => [item.open, item.close, item.low, item.high]),
           itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
-          markPoint: { symbol: 'triangle', symbolSize: 9, label: { show: false }, data: [...fractals, ...signalMarkers] },
+          markPoint: { label: { show: false }, data: signalMarkers },
           markLine: {
             symbol: ['none', 'none'],
             silent: true,
             label: { show: false },
             lineStyle: { width: 2, color: '#1677ff' },
             data: [
+              ...fractalLines,
               ...strokeLines,
               ...(showSegments ? segmentLines : []),
             ],
