@@ -14,7 +14,10 @@ const PERIODS = [
   { label: '日K', value: 'd' },
 ];
 
-const fxIsTop = mark => String(mark || '').toLowerCase().includes('g') || String(mark || '').includes('顶');
+const fxIsTop = mark => {
+  const value = String(mark || '').toLowerCase();
+  return value.includes('top') || value.includes('g') || String(mark || '').includes('顶');
+};
 const isUp = direction => String(direction || '').toLowerCase().includes('up') || String(direction || '').includes('向上');
 
 const ChanAnalysis = () => {
@@ -161,9 +164,12 @@ const ChanAnalysis = () => {
       ];
     }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
 
-    const centerAreas = (analysis.centers || []).filter(item => item.valid).map(item => [
+    const centerAreas = (analysis.centers || []).filter(item => item.start && item.end).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
-      { xAxis: Math.max(0, findIndex(item.end)), yAxis: item.zg },
+      { xAxis: Math.max(0, findIndex(item.end)), yAxis: item.zg, itemStyle: {
+        color: item.status === 'broken' ? 'rgba(140, 140, 140, 0.10)' : 'rgba(250, 173, 20, 0.16)',
+        borderColor: item.status === 'broken' ? '#999' : '#faad14', borderWidth: 1,
+      } },
     ]);
 
     const fractals = (analysis.fractals || []).map(item => ({
@@ -255,7 +261,7 @@ const ChanAnalysis = () => {
   return (
     <div className="chan-page">
       <div className="chan-heading">
-        <div><Title level={3}>缠论</Title><Text type="secondary">专业K线、缠论结构与官方CZSC信号</Text></div>
+        <div><Title level={3}>缠论</Title><Text type="secondary">专业K线、笔/线段/中枢与递归结构</Text></div>
         <Space wrap>
           <Select showSearch value={symbol} options={symbolOptions} loading={symbolSearching}
             filterOption={false} onSearch={searchSymbols} onDropdownVisibleChange={open => { if (open) searchSymbols(''); }}
@@ -270,7 +276,7 @@ const ChanAnalysis = () => {
         extra={payload?.analysis && <Space size="middle" wrap>
           <Space size={6}><Text type="secondary">历史买卖点</Text><Switch size="small" checked={showHistorySignals} onChange={setShowHistorySignals} /></Space>
           <Space size={6}><Text type="secondary">方向性线段</Text><Switch size="small" checked={showSegments} onChange={setShowSegments} /></Space>
-          <Text type="secondary">CZSC {payload.analysis.czsc_version} · {payload.analysis.bar_count}根</Text>
+          <Text type="secondary">{payload.analysis.engine === 'native_structural' ? '自算结构引擎' : `CZSC ${payload.analysis.czsc_version}`} · {payload.analysis.bar_count}根</Text>
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
@@ -286,7 +292,7 @@ const ChanAnalysis = () => {
         ))}</Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前最后一根K线没有一、二、三类买卖点" />}
       </Card>
       <Card title="股票池缠论扫描" className="chan-signal-card"
-        extra={<Text type="secondary">先按市值、流动性、指数过滤，再运行CZSC</Text>}>
+        extra={<Text type="secondary">先按市值、流动性、指数过滤，再运行严格结构引擎</Text>}>
         <Form form={scanForm} layout="inline" initialValues={{ freq: 'd', minTotalMv: 50, minAvgAmount: 1, limit: 500, realtime: false }}>
           <Form.Item name="freq" label="周期"><Select style={{ width: 90 }} options={[
             { label: '日K', value: 'd' }, { label: '30m', value: '30m' }, { label: '5m', value: '5m' }, { label: '1m', value: '1m' },

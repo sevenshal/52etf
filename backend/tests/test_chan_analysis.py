@@ -33,6 +33,7 @@ def _bars(count=800):
 def test_analyze_bars_returns_plain_chart_structures():
     result = analyze_bars("000001.SZ", _bars(), "d")
     assert result["czsc_version"] == CZSC_VERSION == "1.0.1"
+    assert result["engine"] == "native_structural"
     assert result["bar_count"] == 800
     assert result["fractals"]
     assert result["strokes"]
@@ -40,6 +41,7 @@ def test_analyze_bars_returns_plain_chart_structures():
     assert all(item["type"] in {"一买", "二买", "三买", "一卖", "二卖", "三卖"} for item in result["signals"])
     assert result["signal_history_count"] == len(result["signal_history"])
     assert all(item["type"] in {"一买", "二买", "三买", "一卖", "二卖", "三卖"} for item in result["signal_history"])
+    assert all("center_start_stroke" in item for item in result["signal_history"])
 
 
 def test_rows_to_raw_bars_rejects_invalid_ohlc():

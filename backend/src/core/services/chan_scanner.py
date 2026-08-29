@@ -1,4 +1,4 @@
-"""Filtered, persistent background scans using official CZSC signals."""
+"""Filtered, persistent background scans using the strict native Chan engine."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _placeholders(values: list[Any]) -> str:
 
 
 def filter_stock_pool(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    """Filter with DuckDB before invoking CZSC; all values use parameters."""
+    """Filter with DuckDB before invoking the structural engine; all values use parameters."""
     clauses = ["b.list_status = 'L'", "m.close IS NOT NULL", "m.amount IS NOT NULL"]
     params: list[Any] = []
     mappings = (

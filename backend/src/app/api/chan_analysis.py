@@ -115,7 +115,7 @@ def get_chan_chart(
     end_date: date | None = Query(default=None),
     _: str = Depends(valid_admin_account),
 ):
-    """Return chart bars plus CZSC fractals, strokes, centers and signals."""
+    """Return chart bars plus strict native Chan fractals, strokes, centers and signals."""
     normalized_symbol = normalize_a_stock_symbol(symbol)
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="无效的A股代码")
