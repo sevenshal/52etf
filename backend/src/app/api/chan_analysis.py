@@ -120,7 +120,9 @@ def get_chan_chart(
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="无效的A股代码")
     range_end = end_date or date.today()
-    range_start = start_date or (range_end - timedelta(days=730 if freq == "d" else 100))
+    # Minute charts need roughly 120 trading days of context; 180 calendar
+    # days leaves room for weekends and exchange holidays.
+    range_start = start_date or (range_end - timedelta(days=730 if freq == "d" else 180))
     if range_start > range_end:
         raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
 

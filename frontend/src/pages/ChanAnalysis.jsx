@@ -13,6 +13,8 @@ const PERIODS = [
   { label: '30m', value: '30m' },
   { label: '日K', value: 'd' },
 ];
+// 120 个交易日约对应 180 个自然日，实际交易日由后端行情数据决定。
+const MINUTE_LOOKBACK_CALENDAR_DAYS = 180;
 
 const fxIsTop = mark => {
   const value = String(mark || '').toLowerCase();
@@ -108,7 +110,9 @@ const ChanAnalysis = () => {
       const response = await request.get(`/api/chan-analysis/chart/${symbol}`, {
         params: {
           freq,
-          start_date: (freq === 'd' ? dayjs().subtract(3, 'year') : dayjs().subtract(35, 'day')).format('YYYY-MM-DD'),
+          start_date: (freq === 'd'
+            ? dayjs().subtract(3, 'year')
+            : dayjs().subtract(MINUTE_LOOKBACK_CALENDAR_DAYS, 'day')).format('YYYY-MM-DD'),
           end_date: dayjs().format('YYYY-MM-DD'),
         },
       });

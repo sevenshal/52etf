@@ -1,0 +1,294 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "AI推荐 × 严格缠论1分钟联合回测",
+    "description": "历史AI推荐与自有缠论native一买/一卖、20%仓位和A股T+1规则的只读联合回测",
+    "generatedAt": "2026-08-29T17:30:00+08:00",
+    "sources": [
+      {
+        "id": "backtest",
+        "label": "联合回测脚本与输出",
+        "path": "lab/ai_chan_joint_backtest.py",
+        "query": {
+          "engine": "Python/Pandas",
+          "executed_at": "2026-08-29T17:26:00+08:00",
+          "tables_used": [
+            "summary.csv",
+            "trades_lookback_*d.csv",
+            "equity_lookback_*d.csv"
+          ],
+          "filters": [
+            "AI SUCCESS推荐 trade_date 2026-08-12..2026-08-28",
+            "每个股票每日首次出现去重",
+            "严格native confirm_i事件"
+          ],
+          "sql": "SELECT * FROM summary.csv"
+        }
+      },
+      {
+        "id": "recommendations",
+        "label": "生产历史AI推荐",
+        "query": {
+          "engine": "SQLite",
+          "tables_used": [
+            "ai_stock_recommendation_runs",
+            "ai_stock_recommendations"
+          ],
+          "filters": [
+            "status=SUCCESS",
+            "trade_date 2026-08-12..2026-08-28",
+            "548个每日首次推荐行、229只股票"
+          ]
+        }
+      },
+      {
+        "id": "market",
+        "label": "生产行情数据",
+        "query": {
+          "engine": "DuckDB",
+          "tables_used": [
+            "a_stock_market_daily_qfq",
+            "a_stock_minute_bar_qfq"
+          ],
+          "filters": [
+            "日线截至2026-08-28",
+            "1m覆盖2026-02-25..2026-08-28"
+          ]
+        }
+      },
+      {
+        "id": "chan",
+        "label": "缠论研究结论",
+        "path": "lab/chan_backtest_final_report.md"
+      }
+    ],
+    "cards": [
+      {
+        "id": "result",
+        "dataset": "headline",
+        "sourceId": "backtest",
+        "description": "所有日线一买回看窗口的联合回测结果",
+        "metrics": [
+          {
+            "label": "最佳/最长回看收益(%)",
+            "field": "return_pct",
+            "format": "number"
+          },
+          {
+            "label": "触发买入笔数",
+            "field": "buy_count",
+            "format": "number"
+          },
+          {
+            "label": "推荐每日首次行",
+            "field": "candidate_day_symbols",
+            "format": "number"
+          },
+          {
+            "label": "覆盖日历日",
+            "field": "recommendation_days",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "return-chart",
+        "title": "不同日线回看窗口的标记收益",
+        "subtitle": "所有配置均未触发成交",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "回看窗口是否改变结果？",
+        "rationale": "按窗口比较收益",
+        "type": "bar",
+        "dataset": "summary",
+        "sourceId": "backtest",
+        "source": {
+          "query": {
+            "engine": "Python/Pandas",
+            "sql": "SELECT lookback_days, return_pct FROM summary.csv",
+            "description": "联合回测汇总",
+            "tables_used": [
+              "summary.csv"
+            ],
+            "filters": [
+              "lookback_days in 20,40,60,90,120"
+            ]
+          }
+        },
+        "encodings": {
+          "x": {
+            "field": "lookback_days",
+            "type": "ordinal",
+            "label": "回看天数"
+          },
+          "y": {
+            "field": "return_pct",
+            "type": "quantitative",
+            "label": "标记收益(%)"
+          }
+        },
+        "layout": "full",
+        "maxRows": 10
+      }
+    ],
+    "tables": [
+      {
+        "id": "summary",
+        "title": "回看窗口敏感性",
+        "subtitle": "20/40/60/90/120个交易日；标记权益含未平仓头寸",
+        "dataset": "summary",
+        "sourceId": "backtest",
+        "defaultSort": {
+          "field": "lookback_days",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "lookback_days",
+            "label": "日线一买回看(交易日)",
+            "format": "number"
+          },
+          {
+            "field": "buy_count",
+            "label": "买入笔数",
+            "format": "number"
+          },
+          {
+            "field": "sell_count",
+            "label": "卖出笔数",
+            "format": "number"
+          },
+          {
+            "field": "open_positions",
+            "label": "期末持仓",
+            "format": "number"
+          },
+          {
+            "field": "return_pct",
+            "label": "标记收益(%)",
+            "format": "number",
+            "movement": true
+          },
+          {
+            "field": "realized_pnl",
+            "label": "已实现盈亏",
+            "format": "currency",
+            "movement": true
+          },
+          {
+            "field": "fees",
+            "label": "费用",
+            "format": "currency"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# AI推荐 × 严格缠论1分钟联合回测",
+        "layout": "full"
+      },
+      {
+        "id": "summary-text",
+        "type": "markdown",
+        "body": "## 结论\n\n在当前可用的历史推荐窗口（2026-08-12 至 2026-08-28）内，548条每日首次AI推荐、229只股票，按严格 native 缠论‘新的逻辑一买/一卖’执行，20%单股上限和A股T+1全部五个日线回看窗口均 **0笔买入、0笔卖出，收益0%**。这不是策略赚了0%，而是没有形成可评估的成交样本。严格 native 一买在研究池本身非常稀疏，且推荐历史只有约13个日历日。\n\n规则已实现：推荐时间之后才有效；近期日线一买且开盘相对昨收不超过1%才开盘买；高开或盘中推荐等待推荐后确认的新1m一买并下一根开盘成交；日线一卖下一交易日开盘卖；非买入日的新1m一卖立即卖；买入日1m卖出顺延到下一交易日，严格T+1。",
+        "layout": "full"
+      },
+      {
+        "id": "table",
+        "type": "table",
+        "tableId": "summary",
+        "layout": "full"
+      },
+      {
+        "id": "chart",
+        "type": "chart",
+        "chartId": "return-chart",
+        "layout": "full"
+      },
+      {
+        "id": "interpretation",
+        "type": "markdown",
+        "body": "## 应如何解读\n\n这次结果首先暴露的是信号覆盖问题：在短历史窗内，AI推荐与严格1m一买没有交集，无法判断该组合规则的收益优劣。不能为了得到成交而把未确认状态当成新一买，也不能把推荐日前的事件倒推成推荐后触发。下一步应延长AI推荐留存窗口，或先对 native 一买的稀疏性、确认延迟和推荐池交集做单独统计，再决定是否放宽信号。\n\n缠论研究报告显示native 1m一买样本量也很小（研究池43个事件），其平均后续收益为正但中位数为负，尚不足以支持生产化。",
+        "sourceId": "chan",
+        "layout": "full"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## 数据与假设\n\n- 推荐按每日每股首次出现去重；不把重复的盘前/盘中刷新当成多个独立信号。\n- ‘今日推荐’只在同一交易日有效，不跨日追买。\n- 使用前复权行情；费用采用生产费率近似。\n- 观察窗极短、提示词版本从 news-ths-v3 至 v14 有变化；结果不能外推长期收益。\n- 本次只做离线研究，没有修改生产策略、数据库或部署。",
+        "layout": "full"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-29T17:30:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "return_pct": 0,
+          "buy_count": 0,
+          "candidate_day_symbols": 538,
+          "recommendation_days": 13
+        }
+      ],
+      "summary": [
+        {
+          "lookback_days": 20,
+          "buy_count": 0,
+          "sell_count": 0,
+          "open_positions": 0,
+          "return_pct": 0,
+          "realized_pnl": 0,
+          "fees": 0
+        },
+        {
+          "lookback_days": 40,
+          "buy_count": 0,
+          "sell_count": 0,
+          "open_positions": 0,
+          "return_pct": 0,
+          "realized_pnl": 0,
+          "fees": 0
+        },
+        {
+          "lookback_days": 60,
+          "buy_count": 0,
+          "sell_count": 0,
+          "open_positions": 0,
+          "return_pct": 0,
+          "realized_pnl": 0,
+          "fees": 0
+        },
+        {
+          "lookback_days": 90,
+          "buy_count": 0,
+          "sell_count": 0,
+          "open_positions": 0,
+          "return_pct": 0,
+          "realized_pnl": 0,
+          "fees": 0
+        },
+        {
+          "lookback_days": 120,
+          "buy_count": 0,
+          "sell_count": 0,
+          "open_positions": 0,
+          "return_pct": 0,
+          "realized_pnl": 0,
+          "fees": 0
+        }
+      ]
+    }
+  }
+}
