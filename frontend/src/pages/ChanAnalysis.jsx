@@ -39,6 +39,7 @@ const ChanAnalysis = () => {
   const [boardOptions, setBoardOptions] = useState([]);
   const [showHistorySignals, setShowHistorySignals] = useState(false);
   const [showSegments, setShowSegments] = useState(true);
+  const [selectedSegment, setSelectedSegment] = useState(null);
 
   const searchSymbols = useCallback(query => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -161,14 +162,36 @@ const ChanAnalysis = () => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const up = isUp(item.direction);
-      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72 };
+      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72, type: 'dashed' };
       const startPrice = item.start_price ?? (up ? item.low : item.high);
       const endPrice = item.end_price ?? (up ? item.high : item.low);
       return [
-        { coord: [start, startPrice], lineStyle },
+        { coord: [start, startPrice], lineStyle, segmentInfo: { ...item, confirmed: true } },
         { coord: [end, endPrice], lineStyle },
       ];
     }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
+    const confirmedSegments = analysis.segments || [];
+    const strokes = analysis.strokes || [];
+    const lastSegment = confirmedSegments[confirmedSegments.length - 1];
+    const lastStroke = strokes[strokes.length - 1];
+    const candidateLines = [];
+    if (lastStroke && lastSegment && dayjs(lastStroke.end).isAfter(dayjs(lastSegment.end))) {
+      const up = isUp(lastStroke.direction);
+      const start = findIndex(lastSegment.end);
+      const end = findIndex(lastStroke.end);
+      if (start >= 0 && end >= 0 && end > start) {
+        const startPrice = lastSegment.end_price ?? (up ? lastSegment.high : lastSegment.low);
+        const endPrice = up ? lastStroke.high : lastStroke.low;
+        candidateLines.push([
+          { coord: [start, startPrice], lineStyle: { color: up ? '#722ed1' : '#eb2f96', width: 1.8, opacity: 0.78, type: [2, 3] }, segmentInfo: {
+            direction: lastStroke.direction, start: lastSegment.end, end: lastStroke.end,
+            start_price: startPrice, end_price: endPrice, stroke_count: 1,
+            power_price: Math.abs(Number(endPrice) - Number(startPrice)), confirmed: false,
+          } },
+          { coord: [end, endPrice] },
+        ]);
+      }
+    }
 
     const centerAreas = (analysis.centers || []).filter(item => item.start && item.end).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
@@ -253,7 +276,7 @@ const ChanAnalysis = () => {
             data: [
               ...fractalLines,
               ...strokeLines,
-              ...(showSegments ? segmentLines : []),
+              ...(showSegments ? [...segmentLines, ...candidateLines] : []),
             ],
           },
           markArea: {
@@ -292,9 +315,16 @@ const ChanAnalysis = () => {
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
-            {chartOption ? <ReactECharts option={chartOption} notMerge style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
+            {chartOption ? <ReactECharts option={chartOption} notMerge onEvents={{ click: params => {
+              const info = params?.data?.segmentInfo;
+              if (info) setSelectedSegment(info);
+            } }} style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
           </div>
         </Spin>
+        {selectedSegment && <div className="chan-segment-detail">
+          <Text strong>{selectedSegment.confirmed ? '方向性线段' : '当前方向候选 · 未确认'}</Text>
+          <Text type="secondary">{selectedSegment.direction} · {selectedSegment.start || '-'} → {selectedSegment.end || '-'} · 笔数 {selectedSegment.stroke_count || 1} · 强度 {Number(selectedSegment.power_price || 0).toFixed(4)}</Text>
+        </div>}
       </Card>
       <Card title="当前缠论信号" className="chan-signal-card">
         {payload?.analysis?.signals?.length ? <Space wrap>{payload.analysis.signals.map(item => (
