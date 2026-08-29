@@ -18,17 +18,22 @@ from czsc._native import signals as native_signals
 
 CZSC_VERSION = "1.0.1"
 
-# The research engine is kept in lab/chan_native.py while it is being
-# validated against hand-labelled structures.  The API adapter imports that
-# single implementation so the chart and scanner cannot silently use a
-# different signal definition.
-_NATIVE_DIR = Path(__file__).resolve().parents[4] / "lab"
-if str(_NATIVE_DIR) not in sys.path:
-    sys.path.insert(0, str(_NATIVE_DIR))
-from chan_native import Kline as NativeKline  # noqa: E402
-from chan_native import build_segments as native_build_segments  # noqa: E402
-from chan_native import calculate as native_calculate  # noqa: E402
-from chan_native import detect_buy_sell as native_detect_buy_sell  # noqa: E402
+# The production copy lives inside backend/src so deployment artifacts are
+# self-contained.  Keep a lab fallback for local research checkouts that use
+# the un-packaged adapter directly.
+try:
+    from .chan_native import Kline as NativeKline
+    from .chan_native import build_segments as native_build_segments
+    from .chan_native import calculate as native_calculate
+    from .chan_native import detect_buy_sell as native_detect_buy_sell
+except ImportError:  # pragma: no cover - only for legacy research layouts
+    _NATIVE_DIR = Path(__file__).resolve().parents[4] / "lab"
+    if str(_NATIVE_DIR) not in sys.path:
+        sys.path.insert(0, str(_NATIVE_DIR))
+    from chan_native import Kline as NativeKline  # noqa: E402
+    from chan_native import build_segments as native_build_segments  # noqa: E402
+    from chan_native import calculate as native_calculate  # noqa: E402
+    from chan_native import detect_buy_sell as native_detect_buy_sell  # noqa: E402
 
 FREQ_MAP = {
     "1m": Freq.F1,
