@@ -270,7 +270,9 @@ const ChanAnalysis = () => {
           markPoint: { label: { show: false }, data: signalMarkers },
           markLine: {
             symbol: ['none', 'none'],
-            silent: true,
+            // 允许点击线段；详情通过线段起点携带的 segmentInfo 返回。
+            silent: false,
+            emphasis: { lineStyle: { width: 3.5, opacity: 1 } },
             label: { show: false },
             lineStyle: { width: 2, color: '#1677ff' },
             data: [
