@@ -39,7 +39,6 @@ const ChanAnalysis = () => {
   const [boardOptions, setBoardOptions] = useState([]);
   const [showHistorySignals, setShowHistorySignals] = useState(false);
   const [showSegments, setShowSegments] = useState(true);
-  const [selectedSegment, setSelectedSegment] = useState(null);
 
   const searchSymbols = useCallback(query => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -156,13 +155,17 @@ const ChanAnalysis = () => {
       const end = findIndex(item.end);
       const startPrice = isUp(item.direction) ? item.low : item.high;
       const endPrice = isUp(item.direction) ? item.high : item.low;
-      return [{ coord: [start, startPrice] }, { coord: [end, endPrice] }];
+      const lineStyle = { color: '#595959', width: 1.4, opacity: 0.72, type: [3, 3] };
+      return [
+        { coord: [start, startPrice], lineStyle, segmentInfo: { ...item, start_price: startPrice, end_price: endPrice, confirmed: true, structure: '笔' } },
+        { coord: [end, endPrice] },
+      ];
     }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
     const segmentLines = (analysis.segments || []).map(item => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const up = isUp(item.direction);
-      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72, type: 'dashed' };
+      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72, type: [7, 5] };
       const startPrice = item.start_price ?? (up ? item.low : item.high);
       const endPrice = item.end_price ?? (up ? item.high : item.low);
       return [
@@ -273,6 +276,12 @@ const ChanAnalysis = () => {
             // 允许点击线段；详情通过线段起点携带的 segmentInfo 返回。
             silent: false,
             emphasis: { lineStyle: { width: 3.5, opacity: 1 } },
+            tooltip: { formatter: params => {
+              const info = params?.data?.segmentInfo;
+              if (!info) return '';
+              const label = info.structure || (info.confirmed ? '方向性线段' : '当前方向候选 · 未确认');
+              return `${label}<br/>方向：${info.direction || '-'}<br/>区间：${info.start || '-'} → ${info.end || '-'}<br/>笔数：${info.stroke_count || 1}<br/>强度：${Number(info.power_price || 0).toFixed(4)}`;
+            } },
             label: { show: false },
             lineStyle: { width: 2, color: '#1677ff' },
             data: [
@@ -317,16 +326,9 @@ const ChanAnalysis = () => {
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
-            {chartOption ? <ReactECharts option={chartOption} notMerge onEvents={{ click: params => {
-              const info = params?.data?.segmentInfo;
-              if (info) setSelectedSegment(info);
-            } }} style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
+            {chartOption ? <ReactECharts option={chartOption} notMerge style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
           </div>
         </Spin>
-        {selectedSegment && <div className="chan-segment-detail">
-          <Text strong>{selectedSegment.confirmed ? '方向性线段' : '当前方向候选 · 未确认'}</Text>
-          <Text type="secondary">{selectedSegment.direction} · {selectedSegment.start || '-'} → {selectedSegment.end || '-'} · 笔数 {selectedSegment.stroke_count || 1} · 强度 {Number(selectedSegment.power_price || 0).toFixed(4)}</Text>
-        </div>}
       </Card>
       <Card title="当前缠论信号" className="chan-signal-card">
         {payload?.analysis?.signals?.length ? <Space wrap>{payload.analysis.signals.map(item => (

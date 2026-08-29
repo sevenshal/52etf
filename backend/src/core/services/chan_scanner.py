@@ -148,6 +148,19 @@ def _write_run(run_id: str, **updates: Any) -> None:
         connection.close()
 
 
+def _recover_stale_runs() -> None:
+    """Mark RUNNING rows left by a process restart as failed."""
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    try:
+        connection.execute(
+            "UPDATE chan_scan_run SET status = 'FAILED', finished_at = ? "
+            "WHERE status = 'RUNNING'",
+            [datetime.now()],
+        )
+    finally:
+        connection.close()
+
+
 class ChanScanManager:
     _lock = threading.Lock()
     _cancelled: set[str] = set()
@@ -158,6 +171,7 @@ class ChanScanManager:
         with cls._lock:
             if cls._active:
                 raise ValueError("已有缠论扫描正在运行")
+        _recover_stale_runs()
         run_id = uuid.uuid4().hex
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
         try:
@@ -222,7 +236,9 @@ class ChanScanManager:
                 except Exception:
                     errors += 1
                 processed += 1
-                if processed % 20 == 0:
+                # Frequent progress writes prevent a slow minute-data symbol
+                # from making the UI appear frozen at the previous batch.
+                if processed % 5 == 0 or processed == len(candidates):
                     _write_run(run_id, processed_count=processed, signal_count=len(signal_rows), error_count=errors)
 
             if signal_rows:
