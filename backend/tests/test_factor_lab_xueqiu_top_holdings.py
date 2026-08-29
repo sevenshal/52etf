@@ -295,6 +295,23 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             [row["symbol"] for row in result["index_options"]],
         )
 
+    def test_latest_can_calculate_an_explicit_historical_snapshot(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+
+            with patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path):
+                result = factor_lab.load_xueqiu_top_holdings_latest(
+                    active_only=True,
+                    limit=10,
+                    snapshot_date=date(2026, 6, 21),
+                )
+
+        self.assertTrue(result["available"])
+        self.assertEqual("2026-06-21", result["snapshot_date"])
+        self.assertEqual(2, result["cube_count"])
+        self.assertIn("SH.600001", {row["stock_symbol"] for row in result["items"]})
+
     def test_latest_includes_rank_change_vs_five_trading_days_ago(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"

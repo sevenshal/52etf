@@ -3,6 +3,7 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Empty,
   Form,
   Input,
@@ -20,6 +21,7 @@ import {
   Typography,
   message,
 } from 'antd';
+import dayjs from 'dayjs';
 import {
   FilterOutlined,
   LineChartOutlined,
@@ -460,6 +462,7 @@ const strategyFieldsFor = (strategyKey, allFields) => (
 
 const XueqiuTopHoldingsResearch = () => {
   const [activeOnly, setActiveOnly] = useState(true);
+  const [snapshotDate, setSnapshotDate] = useState('');
   const [searchText, setSearchText] = useState('');
   const [latestData, setLatestData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
@@ -817,7 +820,11 @@ const XueqiuTopHoldingsResearch = () => {
     try {
       const [holdingsResult, historyResult] = await Promise.allSettled([
         request.get('/api/factor-lab/xueqiu-top-holdings/board-holdings', {
-          params: { ths_code: board.ths_code, active_only: activeOnly },
+          params: {
+            ths_code: board.ths_code,
+            active_only: activeOnly,
+            snapshot_date: snapshotDate || undefined,
+          },
         }),
         request.get('/api/factor-lab/xueqiu-top-holdings/board-history', {
           params: { ths_code: board.ths_code, active_only: activeOnly, limit: 800 },
@@ -847,7 +854,7 @@ const XueqiuTopHoldingsResearch = () => {
       if (boardHoldingsRequestRef.current === requestId) setBoardHoldingsLoading(false);
       if (boardHistoryRequestRef.current === historyRequestId) setBoardHistoryLoading(false);
     }
-  }, [activeOnly, latestItems]);
+  }, [activeOnly, latestItems, snapshotDate]);
 
   const fetchLatest = useCallback(async () => {
     const requestId = latestRequestRef.current + 1;
@@ -855,7 +862,11 @@ const XueqiuTopHoldingsResearch = () => {
     setLatestLoading(true);
     try {
       const response = await request.get('/api/factor-lab/xueqiu-top-holdings/latest', {
-        params: { active_only: activeOnly, limit: 800 },
+        params: {
+          active_only: activeOnly,
+          limit: 800,
+          snapshot_date: snapshotDate || undefined,
+        },
       });
       if (latestRequestRef.current !== requestId) return;
       const payload = response.data || {};
@@ -876,7 +887,7 @@ const XueqiuTopHoldingsResearch = () => {
         setLatestLoading(false);
       }
     }
-  }, [activeOnly]);
+  }, [activeOnly, snapshotDate]);
 
   const fetchHistory = useCallback(async symbol => {
     if (!symbol) {
@@ -1285,7 +1296,7 @@ const XueqiuTopHoldingsResearch = () => {
       <Row gutter={[12, 12]} className="xueqiu-holdings-metrics">
         <Col xs={12} md={4}>
           <Card bordered={false}>
-            <Statistic title="最新日期" value={latestData?.snapshot_date || '-'} />
+            <Statistic title={snapshotDate ? '所选日期' : '最新日期'} value={latestData?.snapshot_date || snapshotDate || '-'} />
           </Card>
         </Col>
         <Col xs={12} md={4}>
@@ -1416,7 +1427,7 @@ const XueqiuTopHoldingsResearch = () => {
             bordered={false}
             title={(
               <Space wrap>
-                <StockOutlined />最新综合持仓
+                <StockOutlined />{snapshotDate ? '历史综合持仓' : '最新综合持仓'}
                 {selectedBoard ? <Tag color="blue">{selectedBoard.name}</Tag> : null}
               </Space>
             )}
@@ -1429,6 +1440,21 @@ const XueqiuTopHoldingsResearch = () => {
                   onChange={value => {
                     clearBoardSelection();
                     setActiveOnly(value);
+                  }}
+                />
+                <DatePicker
+                  allowClear
+                  placeholder="选择持仓日期"
+                  value={snapshotDate ? dayjs(snapshotDate) : null}
+                  disabledDate={current => (
+                    current && (
+                      current.isAfter(dayjs(), 'day')
+                      || current.isBefore(dayjs('2026-06-25'), 'day')
+                    )
+                  )}
+                  onChange={value => {
+                    clearBoardSelection();
+                    setSnapshotDate(value ? value.format('YYYY-MM-DD') : '');
                   }}
                 />
                 <Input

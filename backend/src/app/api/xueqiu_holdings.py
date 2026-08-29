@@ -695,8 +695,9 @@ def _load_xueqiu_board_momentum(
 def load_xueqiu_board_holding_symbols(
     ths_code: str,
     active_only: bool = True,
+    snapshot_date: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Return current Xueqiu-held stocks belonging to one cached THS board."""
+    """Return Xueqiu-held stocks for one board at the requested snapshot."""
     normalized_code = str(ths_code or "").strip().upper()
     if not normalized_code or len(normalized_code) > 24:
         raise HTTPException(status_code=400, detail="无效的同花顺板块代码")
@@ -713,12 +714,18 @@ def load_xueqiu_board_holding_symbols(
                 "stock_symbols": [],
             }
         cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+        snapshot_cte = (
+            "SELECT MAX(snapshot_date) AS snapshot_date FROM filtered_holdings"
+            if snapshot_date is None
+            else "SELECT CAST(? AS DATE) AS snapshot_date"
+        )
+        query_params: List[Any] = [] if snapshot_date is None else [snapshot_date]
         rows = _duckdb_query_dicts(
             connection,
             f"""
             {cte},
             latest_snapshot AS (
-                SELECT MAX(snapshot_date) AS snapshot_date FROM filtered_holdings
+                {snapshot_cte}
             ),
             normalized_members AS (
                 SELECT
@@ -742,7 +749,7 @@ def load_xueqiu_board_holding_symbols(
               AND (members.out_date IS NULL OR members.out_date > latest_snapshot.snapshot_date)
             ORDER BY holdings.stock_symbol
             """,
-            [normalized_code],
+            [*query_params, normalized_code],
         )
         with DBSession() as db:
             catalog_row = db.query(AIStockTHSIndexCache).filter(
@@ -1402,20 +1409,27 @@ def load_xueqiu_top_holding_details(
 def get_xueqiu_top_holdings_latest(
     active_only: bool = Query(True, description="只统计主理人活跃组合"),
     limit: int = Query(300, ge=1, le=2000),
+    snapshot_date: Optional[date] = Query(None, description="指定持仓快照日期；为空时取最新日期"),
     _: str = Depends(valid_admin_account),
 ):
-    return load_xueqiu_top_holdings_latest(active_only=active_only, limit=limit)
+    return load_xueqiu_top_holdings_latest(
+        active_only=active_only,
+        limit=limit,
+        snapshot_date=snapshot_date,
+    )
 
 
 @router.get("/xueqiu-top-holdings/board-holdings")
 def get_xueqiu_board_holding_symbols(
     ths_code: str = Query(..., min_length=1, max_length=24),
     active_only: bool = Query(True, description="只统计主理人活跃组合"),
+    snapshot_date: Optional[date] = Query(None, description="指定持仓快照日期；为空时取最新日期"),
     _: str = Depends(valid_admin_account),
 ):
     return load_xueqiu_board_holding_symbols(
         ths_code=ths_code,
         active_only=active_only,
+        snapshot_date=snapshot_date,
     )
 
 
