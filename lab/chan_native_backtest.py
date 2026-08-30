@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 import duckdb, numpy as np, pandas as pd
 ROOT=Path(__file__).resolve().parents[1]; sys.path[:0]=[str(ROOT/'backend'),str(ROOT/'lab')]
-from chan_native import Kline, calculate, build_segments, detect_buy_sell, recursive_levels
+from chan_native import Kline, calculate, build_segments, detect_buy_sell, detect_buy_sell_classic, recursive_levels
 from chan_signal_pair_backtest import (BacktestConfig, INDEX_CODES, _in_intervals,
                                        _load_bars, _load_daily_filters,
                                        _membership_intervals)
@@ -41,7 +41,7 @@ def recursive_up_states(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--database',required=True); ap.add_argument('--start-date',default='2026-02-01'); ap.add_argument('--end-date',default='2026-08-28'); ap.add_argument('--output',default='lab/output/chan_signal_pair_backtest_20260829_120d/native_chan_1m_t1_summary.csv'); ap.add_argument('--symbol-limit',type=int); ap.add_argument('--supplemental-weights', help='补充指数权重CSV；必须含 index_code,con_code,trade_date[,weight]')
+    ap=argparse.ArgumentParser(); ap.add_argument('--database',required=True); ap.add_argument('--start-date',default='2026-02-01'); ap.add_argument('--end-date',default='2026-08-28'); ap.add_argument('--output',default='lab/output/chan_signal_pair_backtest_20260829_120d/native_chan_1m_t1_summary.csv'); ap.add_argument('--symbol-limit',type=int); ap.add_argument('--classic-macd',action='store_true'); ap.add_argument('--supplemental-weights', help='补充指数权重CSV；必须含 index_code,con_code,trade_date[,weight]')
     a=ap.parse_args(); cfg=BacktestConfig(a.database,date.fromisoformat(a.start_date),date.fromisoformat(a.end_date),100000,20,15,25,a.supplemental_weights)
     con=duckdb.connect(a.database,read_only=True)
     # Build the pool from historical membership intervals, never from the
@@ -76,8 +76,8 @@ def main():
         try:
             b=_load_bars(con,sym,'1m',cfg)
             if len(b)<100: continue
-            raw=[Kline(i=i,high=float(r.high),low=float(r.low),dt=pd.Timestamp(r.timestamp)) for i,r in enumerate(b.itertuples())]
-            norm,fx,st,zs=calculate(raw,min_gap=4); seg=build_segments(st); events=detect_buy_sell(st,seg,zs)
+            raw=[Kline(i=i,high=float(r.high),low=float(r.low),close=float(r.close),dt=pd.Timestamp(r.timestamp)) for i,r in enumerate(b.itertuples())]
+            norm,fx,st,zs=calculate(raw,min_gap=4); seg=build_segments(st); events=(detect_buy_sell_classic(st,seg,zs,raw) if a.classic_macd else detect_buy_sell(st,seg,zs))
             events=[e for e in events if e.kind in ('一买','二买','三买') and e.confirm_i+1<len(b)]
             if not events: continue
             # Higher-level recursion needs warm-up history.  The evaluation

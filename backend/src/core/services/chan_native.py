@@ -20,6 +20,7 @@ class Kline:
     high: float
     low: float
     dt: object | None = None
+    close: float | None = None
 
 
 @dataclass
@@ -94,7 +95,7 @@ def remove_inclusion(bars: Iterable[Kline]) -> list[Kline]:
     out: list[Kline] = []
     direction: Direction = "up"
     for bar in bars:
-        cur = Kline(bar.i, float(bar.high), float(bar.low), bar.dt)
+        cur = Kline(bar.i, float(bar.high), float(bar.low), bar.dt, bar.close)
         if not out:
             out.append(cur)
             continue
@@ -114,6 +115,7 @@ def remove_inclusion(bars: Iterable[Kline]) -> list[Kline]:
             prev.low = min(prev.low, cur.low)
         prev.i = cur.i
         prev.dt = cur.dt
+        prev.close = cur.close
     return out
 
 
@@ -395,12 +397,15 @@ def detect_buy_sell(strokes: list[Stroke], segments: list[Segment], centers: lis
             # looking up the center before ``b`` can accidentally select a
             # later extending center that already contains ``a``.
             z = _center_before(centers, a.start_stroke)
-            if z and z.kind == "bottom_candidate" and z.status == "broken" and z.break_stroke == a.start_stroke and z.break_direction == "down" and b.low < a.low and a.low <= z.zd and weakening(a, b):
-                append_once(SignalEvent("一买", b.end_stroke, b.confirm_i, "底部中枢下破后同向下跌创新低且力度衰减", z.start_stroke, z.end_stroke, z.break_stroke, a.start_stroke, b.end_stroke), ("一买", z.start_stroke, z.end_stroke))
+            # 宽松实验口径：一买只要求确认的同向下跌段出现力度衰减。
+            # 中枢边界、创新低和破坏方向保留在 detail/metadata 中供对照，
+            # 不再作为触发门槛；二买/三买仍使用严格中枢离开条件。
+            if weakening(a, b):
+                append_once(SignalEvent("一买", b.end_stroke, b.confirm_i, "同向下跌力度衰减（宽松口径）", z.start_stroke if z else None, z.end_stroke if z else None, z.break_stroke if z else None, a.start_stroke, b.end_stroke), ("一买", z.start_stroke, z.end_stroke) if z else None)
         if a.direction == b.direction and a.direction == "up" and mid.direction == "down":
             z = _center_before(centers, a.start_stroke)
-            if z and z.kind == "top_candidate" and z.status == "broken" and z.break_stroke == a.start_stroke and z.break_direction == "up" and b.high > a.high and a.high >= z.zg and weakening(a, b):
-                append_once(SignalEvent("一卖", b.end_stroke, b.confirm_i, "顶部中枢上破后同向上涨创新高且力度衰减", z.start_stroke, z.end_stroke, z.break_stroke, a.start_stroke, b.end_stroke), ("一卖", z.start_stroke, z.end_stroke))
+            if weakening(a, b):
+                append_once(SignalEvent("一卖", b.end_stroke, b.confirm_i, "同向上涨力度衰减（宽松口径）", z.start_stroke if z else None, z.end_stroke if z else None, z.break_stroke if z else None, a.start_stroke, b.end_stroke), ("一卖", z.start_stroke, z.end_stroke) if z else None)
     # Second/third-class points require a complete departure-pullback-confirm
     # sequence.  A single breakout segment is never sufficient.
     for j in range(2, len(segments)):
@@ -421,6 +426,45 @@ def detect_buy_sell(strokes: list[Stroke], segments: list[Segment], centers: lis
                     append_once(SignalEvent("三卖", confirm.end_stroke, confirm.confirm_i, "离开顶部中枢后回抽不回中枢", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("三卖", z.start_stroke, z.end_stroke))
                 elif depart.high >= z.zd and pull.high <= depart.high:
                     append_once(SignalEvent("二卖", confirm.end_stroke, confirm.confirm_i, "下行后首次反抽不破前高", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("二卖", z.start_stroke, z.end_stroke))
+    return events
+
+
+def macd_histogram(bars: list[Kline], fast: int = 12, slow: int = 26, signal: int = 9) -> list[float]:
+    """Return causal MACD histogram values from close prices."""
+    closes = [float(b.close if b.close is not None else (b.high + b.low) / 2) for b in bars]
+    def ema(values, period):
+        alpha = 2 / (period + 1); out = []; prev = values[0]
+        for value in values:
+            prev = alpha * value + (1 - alpha) * prev; out.append(prev)
+        return out
+    dif = [a - b for a, b in zip(ema(closes, fast), ema(closes, slow))]
+    dea = ema(dif, signal)
+    return [a - b for a, b in zip(dif, dea)]
+
+
+def detect_buy_sell_classic(strokes, segments, centers, bars):
+    """Classic-style experiment: trend centers + MACD area divergence."""
+    hist = macd_histogram(bars)
+    def area(seg):
+        lo = max(0, seg.start_stroke < len(strokes) and strokes[seg.start_stroke].start.i or 0)
+        hi = min(len(hist), (strokes[seg.end_stroke].end.i + 1) if seg.end_stroke < len(strokes) else len(hist))
+        return sum(abs(x) for x in hist[lo:hi])
+    events = []
+    emitted = set()
+    for j in range(2, len(segments)):
+        a, mid, b = segments[j-2:j+1]
+        if a.direction != b.direction or mid.direction == a.direction: continue
+        prior = [z for z in centers if z.end_stroke < a.start_stroke]
+        same = [z for z in prior if z.kind == ('bottom_candidate' if a.direction == 'down' else 'top_candidate')]
+        trend = len(same) >= 2 and ((a.direction == 'down' and same[-1].zd < same[-2].zd) or (a.direction == 'up' and same[-1].zg > same[-2].zg))
+        if not trend or area(a) <= 0 or area(b) <= 0 or area(b) >= area(a): continue
+        if a.direction == 'down' and b.low >= a.low: continue
+        if a.direction == 'up' and b.high <= a.high: continue
+        key = (a.direction, same[-1].start_stroke, same[-1].end_stroke)
+        if key in emitted: continue
+        emitted.add(key)
+        kind = '一买' if a.direction == 'down' else '一卖'
+        events.append(SignalEvent(kind, b.end_stroke, b.confirm_i, '双中枢趋势 + MACD面积背驰', same[-1].start_stroke, same[-1].end_stroke, None, a.start_stroke, b.end_stroke))
     return events
 
 

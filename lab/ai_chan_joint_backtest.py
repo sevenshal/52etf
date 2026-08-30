@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "lab")]
 
 from chan_native import Kline, calculate, detect_buy_sell, build_segments  # noqa: E402
+from src.core.services.chan_analysis import analyze_bars_czsc_legacy  # noqa: E402
 
 
 BUY = "一买"
@@ -59,6 +60,8 @@ class Config:
     daily_lookback: int
     max_stock_weight: float = 0.20
     gap_threshold: float = 0.01
+    recommendation_1m_only: bool = False
+    exit_only_without_today_recommendation: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lookbacks", nargs="+", type=int, default=[20, 40, 60, 90, 120])
     p.add_argument("--output-dir", default="lab/output/ai_chan_joint_backtest_20260829")
     p.add_argument("--symbol-limit", type=int, default=0, help="仅用于快速冒烟测试；0表示全部")
+    p.add_argument("--signal-engine", choices=("native", "czsc_legacy"), default="native")
+    p.add_argument("--recommendation-1m-only", action="store_true", help="仅推荐后1m一买入场")
+    p.add_argument("--exit-only-without-today-recommendation", action="store_true", help="仅今日未推荐且非当日买入时按1m一卖退出")
     return p.parse_args()
 
 
@@ -176,15 +182,23 @@ def native_events(frame: pd.DataFrame, time_col: str, daily: bool = False) -> di
     return dict(out)
 
 
-def prepare_symbol_features(daily: pd.DataFrame, minute: pd.DataFrame) -> dict[str, dict[str, Any]]:
+def prepare_symbol_features(daily: pd.DataFrame, minute: pd.DataFrame, signal_engine: str = "native") -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for symbol, d in daily.groupby("ts_code", sort=False):
         d = d.sort_values("trade_date").reset_index(drop=True)
         # Events are generated from all available history, but each event is
         # only exposed at its own confirmed daily close.
-        d_events = native_events(d, "trade_date", daily=True)
+        if signal_engine == "czsc_legacy":
+            d_rows = [{"timestamp": pd.Timestamp(r.trade_date), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": 0, "turnover": 0} for r in d.itertuples()]
+            d_events = _legacy_events(symbol, d_rows, "d")
+        else:
+            d_events = native_events(d, "trade_date", daily=True)
         m = minute[minute["ts_code"] == symbol].sort_values("trade_time").reset_index(drop=True)
-        m_events = native_events(m, "trade_time")
+        if signal_engine == "czsc_legacy":
+            m_rows = [{"timestamp": pd.Timestamp(r.trade_time), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": 0, "turnover": 0} for r in m.itertuples()]
+            m_events = _legacy_events(symbol, m_rows, "1m")
+        else:
+            m_events = native_events(m, "trade_time")
         result[symbol] = {
             "daily": d,
             "minute": m,
@@ -192,6 +206,21 @@ def prepare_symbol_features(daily: pd.DataFrame, minute: pd.DataFrame) -> dict[s
             "minute_events": m_events,
         }
     return result
+
+
+def _legacy_events(symbol: str, rows: list[dict[str, Any]], freq: str) -> dict[pd.Timestamp, set[str]]:
+    if len(rows) < 20:
+        return {}
+    try:
+        analysis = analyze_bars_czsc_legacy(symbol, rows, freq, confirmed=True, include_history=True)
+    except Exception:
+        return {}
+    out: dict[pd.Timestamp, set[str]] = defaultdict(set)
+    for signal in analysis.get("signal_history", []):
+        kind = signal.get("type")
+        if kind in {BUY, SELL}:
+            out[pd.Timestamp(signal["bar_time"])] .add(kind)
+    return dict(out)
 
 
 def _latest_daily_state(events: dict[pd.Timestamp, set[str]], as_of: date, sessions: list[date], lookback: int) -> tuple[bool, int | None]:
@@ -276,17 +305,19 @@ def simulate(
     run_date = None
     open_buy_candidates: dict[date, list[dict[str, Any]]] = defaultdict(list)
     wait_candidates: dict[date, list[dict[str, Any]]] = defaultdict(list)
-    for day in sessions:
+    today_recommended: dict[date, set[str]] = defaultdict(set)
+    for day in eval_sessions:
         for rec in rec_by_day.get(day, []):
             symbol = rec["ts_code"]
             if symbol not in features:
                 continue
+            today_recommended[day].add(symbol)
             available = pd.Timestamp(rec["available_at"])
             dstate, age = _latest_daily_state(features[symbol]["daily_events"], day, sessions, cfg.daily_lookback)
             rec.update({"daily_buy_recent": dstate, "daily_buy_age": age})
-            if dstate and available.time() <= time(9, 30):
+            if (not cfg.recommendation_1m_only) and dstate and available.time() <= time(9, 30):
                 open_buy_candidates[day].append(rec)
-            if (not dstate) or available.time() > time(9, 30) or dstate:
+            if cfg.recommendation_1m_only or (not dstate) or available.time() > time(9, 30) or dstate:
                 wait_candidates[day].append(rec)
 
     # Candidate keys prevent repeated refreshes and ensure one buy per name/day.
@@ -343,7 +374,7 @@ def simulate(
     daily_sell_exec: dict[tuple[date, str], set[str]] = defaultdict(set)
     for symbol, f in features.items():
         for ts, kinds in f["daily_events"].items():
-            if SELL not in kinds:
+            if cfg.exit_only_without_today_recommendation or SELL not in kinds:
                 continue
             d = pd.Timestamp(ts).date()
             next_days = [x for x in sessions if x > d]
@@ -380,6 +411,8 @@ def simulate(
         # buy date, defer to the first minute of the next session for T+1.
         for confirm_i, kind, signal_ts in event_exec.get((symbol, i), []):
             if kind != SELL or symbol not in positions:
+                continue
+            if cfg.exit_only_without_today_recommendation and (symbol in today_recommended.get(day, set()) or positions[symbol]["buy_time"].date() == day):
                 continue
             buy_day = positions[symbol]["buy_time"].date()
             if buy_day == day:
@@ -467,14 +500,14 @@ def main() -> None:
     all_recs = all_recs[all_recs.ts_code.isin(available_symbols)].copy()
     preopen = preopen[preopen.ts_code.isin(available_symbols)].copy()
     print(f"市场数据覆盖: {len(available_symbols)} symbols, {len(sessions)} sessions, minute={minute.trade_time.min()}~{minute.trade_time.max()}", flush=True)
-    features = prepare_symbol_features(daily, minute)
+    features = prepare_symbol_features(daily, minute, args.signal_engine)
     print(f"缠论特征完成: {len(features)} symbols", flush=True)
 
     out_dir = ROOT / args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     summaries: list[dict[str, Any]] = []
     for lookback in args.lookbacks:
-        cfg = Config(args.analytics_db, args.main_db, start, end, lookback)
+        cfg = Config(args.analytics_db, args.main_db, start, end, lookback, recommendation_1m_only=args.recommendation_1m_only, exit_only_without_today_recommendation=args.exit_only_without_today_recommendation)
         summary, trades, equity = simulate(features, all_recs, preopen, sessions, cfg)
         summary.update({"start_date": start.isoformat(), "end_date": end.isoformat(), "minute_data_as_of": str(minute.trade_time.max()), "daily_data_as_of": str(daily.trade_date.max()), "recommendation_prompt_versions": sorted(all_recs.prompt_version.dropna().astype(str).unique())})
         summaries.append(summary)

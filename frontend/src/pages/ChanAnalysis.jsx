@@ -38,7 +38,6 @@ const ChanAnalysis = () => {
   const [scanLoading, setScanLoading] = useState(false);
   const [boardOptions, setBoardOptions] = useState([]);
   const [showHistorySignals, setShowHistorySignals] = useState(false);
-  const [showSegments, setShowSegments] = useState(true);
 
   const searchSymbols = useCallback(query => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -165,14 +164,14 @@ const ChanAnalysis = () => {
       const start = findIndex(item.start);
       const end = findIndex(item.end);
       const up = isUp(item.direction);
-      const lineStyle = { color: up ? '#722ed1' : '#eb2f96', width: 2.2, opacity: 0.72, type: [7, 5] };
       const startPrice = item.start_price ?? (up ? item.low : item.high);
       const endPrice = item.end_price ?? (up ? item.high : item.low);
-      return [
-        { coord: [start, startPrice], lineStyle, segmentInfo: { ...item, confirmed: true } },
-        { coord: [end, endPrice], lineStyle },
-      ];
-    }).filter(item => item[0].coord[0] >= 0 && item[1].coord[0] >= 0);
+      return {
+        value: [start, startPrice, end, endPrice, 1],
+        segmentInfo: { ...item, start_price: startPrice, end_price: endPrice, confirmed: true },
+        itemStyle: { color: up ? '#722ed1' : '#eb2f96' },
+      };
+    }).filter(item => item.value[0] >= 0 && item.value[2] >= 0);
     const confirmedSegments = analysis.segments || [];
     const strokes = analysis.strokes || [];
     const lastSegment = confirmedSegments[confirmedSegments.length - 1];
@@ -185,16 +184,51 @@ const ChanAnalysis = () => {
       if (start >= 0 && end >= 0 && end > start) {
         const startPrice = lastSegment.end_price ?? (up ? lastSegment.high : lastSegment.low);
         const endPrice = up ? lastStroke.high : lastStroke.low;
-        candidateLines.push([
-          { coord: [start, startPrice], lineStyle: { color: up ? '#722ed1' : '#eb2f96', width: 1.8, opacity: 0.78, type: [2, 3] }, segmentInfo: {
+        candidateLines.push({
+          value: [start, startPrice, end, endPrice, 0],
+          itemStyle: { color: up ? '#722ed1' : '#eb2f96' },
+          segmentInfo: {
             direction: lastStroke.direction, start: lastSegment.end, end: lastStroke.end,
             start_price: startPrice, end_price: endPrice, stroke_count: 1,
             power_price: Math.abs(Number(endPrice) - Number(startPrice)), confirmed: false,
-          } },
-          { coord: [end, endPrice] },
-        ]);
+          },
+        });
       }
     }
+
+    const segmentTooltip = params => {
+      const info = params?.data?.segmentInfo;
+      if (!info) return '';
+      const label = info.confirmed ? '方向性线段' : '当前方向候选 · 未确认';
+      const direction = isUp(info.direction) ? '向上' : '向下';
+      return `${label}<br/>方向：${direction}<br/>区间：${dayjs(info.start).format('YYYY-MM-DD HH:mm')} → ${dayjs(info.end).format('YYYY-MM-DD HH:mm')}<br/>起止价：${Number(info.start_price).toFixed(2)} → ${Number(info.end_price).toFixed(2)}<br/>笔数：${info.stroke_count || 1}<br/>强度：${Number(info.power_price || 0).toFixed(4)}`;
+    };
+    const renderSegment = (params, api) => {
+      const start = api.coord([api.value(0), api.value(1)]);
+      const end = api.coord([api.value(2), api.value(3)]);
+      const chartLeft = params.coordSys.x;
+      const chartRight = chartLeft + params.coordSys.width;
+      if (Math.max(start[0], end[0]) < chartLeft || Math.min(start[0], end[0]) > chartRight) return null;
+      const confirmed = Boolean(api.value(4));
+      const color = api.visual('color');
+      return {
+        type: 'group',
+        children: [
+          {
+            type: 'line',
+            shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
+            style: { stroke: color, lineWidth: confirmed ? 2.2 : 1.8, opacity: 0.78, lineDash: confirmed ? [7, 5] : [2, 3] },
+            emphasis: { style: { lineWidth: 4, opacity: 1 } },
+          },
+          {
+            // 宽透明命中线让细线段容易悬停，同时不遮挡 K 线。
+            type: 'line',
+            shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
+            style: { stroke: 'rgba(0,0,0,0.001)', lineWidth: 14 },
+          },
+        ],
+      };
+    };
 
     const centerAreas = (analysis.centers || []).filter(item => item.start && item.end).map(item => [
       { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
@@ -261,8 +295,8 @@ const ChanAnalysis = () => {
         { scale: true, gridIndex: 1, splitNumber: 2 },
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 45, end: 100 },
-        { type: 'slider', xAxisIndex: [0, 1], bottom: 4, start: 45, end: 100 },
+        { type: 'inside', xAxisIndex: [0, 1], startValue: Math.max(0, bars.length - (freq === '1m' ? 600 : 1000)), endValue: bars.length - 1 },
+        { type: 'slider', xAxisIndex: [0, 1], bottom: 4, startValue: Math.max(0, bars.length - (freq === '1m' ? 600 : 1000)), endValue: bars.length - 1 },
       ],
       series: [
         {
@@ -273,21 +307,12 @@ const ChanAnalysis = () => {
           markPoint: { label: { show: false }, data: signalMarkers },
           markLine: {
             symbol: ['none', 'none'],
-            // 允许点击线段；详情通过线段起点携带的 segmentInfo 返回。
-            silent: false,
-            emphasis: { lineStyle: { width: 3.5, opacity: 1 } },
-            tooltip: { formatter: params => {
-              const info = params?.data?.segmentInfo;
-              if (!info) return '';
-              const label = info.structure || (info.confirmed ? '方向性线段' : '当前方向候选 · 未确认');
-              return `${label}<br/>方向：${info.direction || '-'}<br/>区间：${info.start || '-'} → ${info.end || '-'}<br/>笔数：${info.stroke_count || 1}<br/>强度：${Number(info.power_price || 0).toFixed(4)}`;
-            } },
+            silent: true,
             label: { show: false },
             lineStyle: { width: 2, color: '#1677ff' },
             data: [
               ...fractalLines,
               ...strokeLines,
-              ...(showSegments ? [...segmentLines, ...candidateLines] : []),
             ],
           },
           markArea: {
@@ -298,11 +323,23 @@ const ChanAnalysis = () => {
         },
         {
           name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+          large: true, largeThreshold: 1000,
           data: bars.map((item, index) => ({ value: item.volume, itemStyle: { color: item.close >= item.open ? '#ef232a' : '#14b143' } })),
+        },
+        {
+          id: 'directional-segments',
+          name: '方向性线段',
+          type: 'custom',
+          coordinateSystem: 'cartesian2d',
+          renderItem: renderSegment,
+          data: [...segmentLines, ...candidateLines],
+          encode: { x: [0, 2], y: [1, 3] },
+          tooltip: { trigger: 'item', formatter: segmentTooltip },
+          z: 20,
         },
       ],
     };
-  }, [payload, showHistorySignals, showSegments]);
+  }, [freq, payload, showHistorySignals]);
 
   return (
     <div className="chan-page">
@@ -321,12 +358,12 @@ const ChanAnalysis = () => {
       <Card className="chan-chart-card" title={`${symbol} · ${freq === 'd' ? '日K' : freq}`}
         extra={payload?.analysis && <Space size="middle" wrap>
           <Space size={6}><Text type="secondary">历史买卖点</Text><Switch size="small" checked={showHistorySignals} onChange={setShowHistorySignals} /></Space>
-          <Space size={6}><Text type="secondary">方向性线段</Text><Switch size="small" checked={showSegments} onChange={setShowSegments} /></Space>
+          <Text type="secondary">方向性线段常显 · 悬停查看详情</Text>
           <Text type="secondary">{payload.analysis.engine === 'native_structural' ? '自算结构引擎' : `CZSC ${payload.analysis.czsc_version}`} · {payload.analysis.bar_count}根</Text>
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
-            {chartOption ? <ReactECharts option={chartOption} notMerge style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
+            {chartOption ? <ReactECharts option={chartOption} lazyUpdate opts={{ renderer: 'canvas' }} style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
           </div>
         </Spin>
       </Card>

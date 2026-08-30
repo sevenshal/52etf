@@ -5,13 +5,13 @@ from datetime import date
 from pathlib import Path
 import duckdb, numpy as np, pandas as pd
 ROOT=Path(__file__).resolve().parents[1]; sys.path[:0]=[str(ROOT/'backend'),str(ROOT/'lab')]
-from chan_native import Kline, calculate, build_segments, detect_buy_sell
+from chan_native import Kline, calculate, build_segments, detect_buy_sell, detect_buy_sell_classic
 from chan_signal_pair_backtest import BacktestConfig, INDEX_CODES, _load_bars, _load_daily_filters, _membership_intervals, _in_intervals
 
 BUY=('一买','二买','三买'); SELL=('一卖','二卖','三卖')
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--database',required=True); ap.add_argument('--start-date',default='2026-02-01'); ap.add_argument('--end-date',default='2026-08-28'); ap.add_argument('--supplemental-weights'); ap.add_argument('--output',default='lab/output/chan_signal_pair_backtest_20260829_120d/native_chan_pair_summary.csv'); ap.add_argument('--symbol-limit',type=int)
+    ap=argparse.ArgumentParser(); ap.add_argument('--database',required=True); ap.add_argument('--start-date',default='2026-02-01'); ap.add_argument('--end-date',default='2026-08-28'); ap.add_argument('--freq',default='1m',choices=('1m','5m','30m','d')); ap.add_argument('--supplemental-weights'); ap.add_argument('--output',default='lab/output/chan_signal_pair_backtest_20260829_120d/native_chan_pair_summary.csv'); ap.add_argument('--symbol-limit',type=int); ap.add_argument('--classic-macd',action='store_true'); ap.add_argument('--buy-type',default='一买',choices=BUY); ap.add_argument('--sell-type',default='一卖',choices=SELL)
     a=ap.parse_args(); cfg=BacktestConfig(a.database,date.fromisoformat(a.start_date),date.fromisoformat(a.end_date),100000,20,15,25,a.supplemental_weights)
     con=duckdb.connect(a.database,read_only=True); codes=list(INDEX_CODES)+['932000.CSI']
     w=con.execute(f"select index_code,con_code,trade_date,weight from a_stock_index_weight where index_code in ({','.join('?' for _ in codes)}) and trade_date<=?",[*codes,cfg.end_date]).fetchdf()
@@ -23,13 +23,13 @@ def main():
     rows=[]
     for n,sym in enumerate(symbols,1):
         try:
-            bars=_load_bars(con,sym,'1m',cfg)
+            bars=_load_bars(con,sym,a.freq,cfg)
             if len(bars)<100: continue
-            raw=[Kline(i=i,high=float(r.high),low=float(r.low),dt=pd.Timestamp(r.timestamp)) for i,r in enumerate(bars.itertuples())]; _,_,st,z=calculate(raw); seg=build_segments(st); events=sorted(detect_buy_sell(st,seg,z),key=lambda e:(e.confirm_i,e.kind))
+            raw=[Kline(i=i,high=float(r.high),low=float(r.low),close=float(r.close),dt=pd.Timestamp(r.timestamp)) for i,r in enumerate(bars.itertuples())]; _,_,st,z=calculate(raw); seg=build_segments(st); events=sorted((detect_buy_sell_classic(st,seg,z,raw) if a.classic_macd else detect_buy_sell(st,seg,z)),key=lambda e:(e.confirm_i,e.kind))
             times=pd.to_datetime(bars.timestamp); dates=np.asarray(times.dt.date); day_order={d:i for i,d in enumerate(dict.fromkeys(dates))}
             by_kind={k:[e for e in events if e.kind==k] for k in BUY+SELL}
-            for bt in BUY:
-                for stype in SELL:
+            for bt in (a.buy_type,):
+                for stype in (a.sell_type,):
                     entry=None
                     for e in events:
                         if e.confirm_i+1>=len(bars): continue
