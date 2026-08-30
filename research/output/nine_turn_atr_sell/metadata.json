@@ -1,0 +1,19 @@
+{
+  "source": "/home/quantd/quant_prod/quant_robot/analytics.duckdb",
+  "start_date": "2023-01-01",
+  "end_date": "2026-08-28",
+  "eligible_stocks": 2771,
+  "sell_candidates": 799006,
+  "low2_candidates": 193457,
+  "true_low2": 36299,
+  "local_highs": 38831,
+  "candidate_definition": "latest prior high_count>=9; subsequent low_count 2..9",
+  "truth_definition": "first eligible low2 after each strict +/-20-session local close high",
+  "drawdown_atr": "((anchor_close-signal_close)/anchor_close)/(ATR14/signal_close)",
+  "roc_auc_if_larger_drawdown_means_true": 0.3305959650125347,
+  "roc_auc_if_smaller_drawdown_means_true": 0.6694040349874653,
+  "best_maximum_drawdown_atr": 1.663174073632953,
+  "sensitivity_pct": 75.60814347502685,
+  "specificity_pct": 55.75344557706258,
+  "precision_pct": 28.299065806025858
+}

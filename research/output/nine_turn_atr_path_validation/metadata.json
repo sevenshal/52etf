@@ -1,0 +1,31 @@
+{
+  "source": "/home/quantd/quant_prod/quant_robot/analytics.duckdb",
+  "start_date": "2023-01-01",
+  "end_date": "2026-08-28",
+  "candidate_events": 649163,
+  "cycles": 27392,
+  "candidate_low_counts": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "future_horizon_days": 20,
+  "true_barrier_atr": 1.5,
+  "false_recovery_barrier_atr": 1.0,
+  "best_by_mean_20d_sell_advantage": {
+    "threshold_atr": 1.75,
+    "cycles_signaled": 19645.0,
+    "resolved_pct": 96.09060829727666,
+    "true_rate_pct": 36.90205011389522,
+    "median_low_count": 3.0,
+    "median_drawdown_atr": 2.105986029620407,
+    "mean_sell_advantage_5d_pct": -0.39654425134851506,
+    "mean_sell_advantage_10d_pct": 0.12209917575348661,
+    "mean_sell_advantage_20d_pct": 0.3000773171733877,
+    "median_sell_advantage_5d_pct": -0.28901629102638937,
+    "median_sell_advantage_10d_pct": -0.17109216495231339,
+    "median_sell_advantage_20d_pct": 0.10592451951081383
+  }
+}

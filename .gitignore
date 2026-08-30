@@ -49,3 +49,13 @@ cache/
 
 # lab 回测/分析输出产物（不提交）
 lab/output/
+
+# 九转 ATR 研究的大型明细/派生产物（仅提交摘要表）
+research/output/nine_turn_atr_sell/sell_events.csv
+research/output/nine_turn_atr_sell/turning_points.csv
+research/output/nine_turn_atr_path_validation/path_labeled_events.csv
+research/output/nine_turn_atr_path_validation/threshold_selections.csv
+research/output/nine_turn_atr_strategy_backtest*/trades.csv
+research/output/nine_turn_atr_strategy_backtest*/stock_summary.csv
+research/output/nine_turn_atr_strategy_backtest*/equal_weight_portfolio.csv
+research/output/nine_turn_atr_*/*.ipynb
