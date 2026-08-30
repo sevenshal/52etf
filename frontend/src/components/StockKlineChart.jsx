@@ -561,7 +561,7 @@ const StockKlineChart = ({
       tooltip: {
         trigger: 'item',
         triggerOn: 'click',
-        alwaysShowContent: true,
+        alwaysShowContent: false,
         enterable: true,
         formatter: function(params) {
           if (params?.seriesName !== 'K线') return '';
@@ -782,6 +782,11 @@ const StockKlineChart = ({
     const renderer = chart.getZr();
     renderer.on('click', event => {
       if (!event.target) chart.dispatchAction({ type: 'hideTip' });
+    });
+    chart.on('click', params => {
+      if (params?.seriesName !== 'K线') {
+        chart.dispatchAction({ type: 'hideTip' });
+      }
     });
   }, []);
 
