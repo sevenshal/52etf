@@ -136,6 +136,12 @@ const ChanAnalysis = () => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
   }, []);
 
+  const handleChartReady = useCallback(chart => {
+    chart.getZr().on('click', event => {
+      if (!event.target) chart.dispatchAction({ type: 'hideTip' });
+    });
+  }, []);
+
   const chartOption = useMemo(() => {
     const bars = payload?.bars || [];
     const analysis = payload?.analysis || {};
@@ -280,7 +286,7 @@ const ChanAnalysis = () => {
       animation: false,
       backgroundColor: '#fff',
       legend: { data: ['K线', '成交量'] },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      tooltip: { trigger: 'item', triggerOn: 'click', enterable: true },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
         { left: 60, right: 24, top: 42, height: '66%' },
@@ -303,6 +309,14 @@ const ChanAnalysis = () => {
           name: 'K线',
           type: 'candlestick',
           data: bars.map(item => [item.open, item.close, item.low, item.high]),
+          tooltip: {
+            show: true,
+            formatter: params => {
+              const values = params?.data || [];
+              const change = Number(values[0]) ? ((Number(values[1]) - Number(values[0])) / Number(values[0]) * 100) : 0;
+              return `K线<br/>时间：${params?.name || '-'}<br/>开盘：${Number(values[0]).toFixed(2)}<br/>收盘：${Number(values[1]).toFixed(2)}<br/>最低：${Number(values[2]).toFixed(2)}<br/>最高：${Number(values[3]).toFixed(2)}<br/>涨跌：${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+            },
+          },
           itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
           markPoint: { label: { show: false }, data: signalMarkers },
           markLine: {
@@ -324,6 +338,7 @@ const ChanAnalysis = () => {
         {
           name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
           large: true, largeThreshold: 1000,
+          tooltip: { show: false },
           data: bars.map((item, index) => ({ value: item.volume, itemStyle: { color: item.close >= item.open ? '#ef232a' : '#14b143' } })),
         },
         {
@@ -363,7 +378,7 @@ const ChanAnalysis = () => {
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
-            {chartOption ? <ReactECharts option={chartOption} lazyUpdate opts={{ renderer: 'canvas' }} style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
+            {chartOption ? <ReactECharts option={chartOption} lazyUpdate opts={{ renderer: 'canvas' }} onChartReady={handleChartReady} style={{ height: 650 }} /> : <Empty description="暂无K线数据" />}
           </div>
         </Spin>
       </Card>
