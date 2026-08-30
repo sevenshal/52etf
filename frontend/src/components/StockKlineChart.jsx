@@ -6,6 +6,7 @@ import dayjs from 'dayjs';
 import request from '../utils/request';
 import { formatNumber } from '../utils/format';
 import { appendRollingPocSupportResistance, preprocessKlinesVolume } from '../utils/klines';
+import { appendNineTurnAtr } from '../utils/nineTurn';
 
 const POC_WINDOW_OPTIONS = [
   { label: '125', value: 125 },
@@ -163,7 +164,9 @@ const StockKlineChart = ({
       volumeStdDevMultiplier,
       enableTurnoverDecay,
     });
-    const processed = preprocessKlinesVolume(enriched, volumeStdDevMultiplier, VOLUME_LOOKBACK_DAYS);
+    const processed = appendNineTurnAtr(
+      preprocessKlinesVolume(enriched, volumeStdDevMultiplier, VOLUME_LOOKBACK_DAYS)
+    );
     setProcessedKlines(processed);
   }, [rawKlines, supportResistanceWindow, volumeStdDevMultiplier, enableTurnoverDecay]);
 
@@ -325,6 +328,16 @@ const StockKlineChart = ({
     });
 
     const volumeBaseline = processedKlines.map(item => item.volumeMA);
+    const risingTrendPoints = processedKlines
+      .map((item, index) => item.highCount >= 2
+        ? [index, item.low - (item.atr14 || item.low * 0.01) * 0.22]
+        : null)
+      .filter(Boolean);
+    const fallingTrendPoints = processedKlines
+      .map((item, index) => item.lowCount >= 2
+        ? [index, item.high + (item.atr14 || item.high * 0.01) * 0.22]
+        : null)
+      .filter(Boolean);
 
     const buyPointMarkers = buyPoints.map(point => ({
       name: '买点',
@@ -371,6 +384,26 @@ const StockKlineChart = ({
         data: volumeBaseline,
         lineStyle: { color: '#FFA500', width: 1 },
         symbol: 'none'
+      },
+      {
+        name: '连续走强',
+        type: 'scatter',
+        data: risingTrendPoints,
+        symbol: 'circle',
+        symbolSize: 7,
+        itemStyle: { color: '#ef232a' },
+        tooltip: { show: false },
+        z: 12,
+      },
+      {
+        name: '连续走弱',
+        type: 'scatter',
+        data: fallingTrendPoints,
+        symbol: 'circle',
+        symbolSize: 7,
+        itemStyle: { color: '#14b143' },
+        tooltip: { show: false },
+        z: 12,
       }
     ];
 
@@ -526,13 +559,15 @@ const StockKlineChart = ({
     return {
       animation: false,
       tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'cross' },
+        trigger: 'item',
+        triggerOn: 'click',
+        alwaysShowContent: true,
+        enterable: true,
         formatter: function(params) {
+          if (params?.seriesName !== 'K线') return '';
           const fmtPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '--');
-          const date = params[0].axisValue;
-          const klineParam = params.find(p => p.seriesType === 'candlestick' || p.seriesName === 'K线');
-          const dataIndex = klineParam?.dataIndex ?? params[0]?.dataIndex;
+          const dataIndex = params?.dataIndex;
+          const date = dates[dataIndex] || params?.name;
           const rawKline = dataIndex !== undefined ? processedKlines[dataIndex] : null;
           const open = rawKline?.open;
           const close = rawKline?.close;
@@ -571,6 +606,25 @@ const StockKlineChart = ({
                   <span style="color: #666;">${VOLUME_LOOKBACK_DAYS}日几何均量：</span>${formatNumber(currentKline.volumeMA, 0)}
                   <span style="color:#999;margin-left:8px;">倍数 ${formatNumber(currentKline.volumeMultiple, 2)}</span>
                   <span style="color:#999;margin-left:8px;">logZ ${formatNumber(currentKline.volumeZScore, 2)}</span>
+                </div>
+              `;
+            }
+            if (Number.isFinite(currentKline.atr14)) {
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color: #666;">ATR14：</span>${fmtPrice(currentKline.atr14)}
+                </div>
+              `;
+            }
+            if ([2, 3, 4].includes(currentKline.lowCount) && Number.isFinite(currentKline.latestRisingClose)) {
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color:#14b143;">低${currentKline.lowCount}：</span>
+                  最近红点（高${currentKline.latestRisingCount}）收盘 ${fmtPrice(currentKline.latestRisingClose)}
+                </div>
+                <div style="margin-bottom: 4px;">
+                  <span style="color:#666;">相对该红点回撤：</span>${formatNumber(currentKline.risingDrawdownPct, 2)}%
+                  <span style="color:#999;margin-left:8px;">${formatNumber(currentKline.risingDrawdownAtr, 2)} ATR</span>
                 </div>
               `;
             }
@@ -619,6 +673,8 @@ const StockKlineChart = ({
           'K线',
           '成交量',
           VOLUME_BASELINE_SERIES_NAME,
+          '连续走强',
+          '连续走弱',
           '买点',
           '卖点',
           ...indicatorLegendNames,
@@ -722,6 +778,13 @@ const StockKlineChart = ({
     }
   }, [getChartOption, processedKlines.length]);
 
+  const handleChartReady = useCallback((chart) => {
+    const renderer = chart.getZr();
+    renderer.on('click', event => {
+      if (!event.target) chart.dispatchAction({ type: 'hideTip' });
+    });
+  }, []);
+
   return (
     <div>
       <Form layout="inline" style={{ marginBottom: 16 }}>
@@ -817,6 +880,7 @@ const StockKlineChart = ({
           key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}-${valuationDateOffsetDays}`}
           option={chartOption}
           notMerge={true}
+          onChartReady={handleChartReady}
           style={{ height }}
         />
       )}
