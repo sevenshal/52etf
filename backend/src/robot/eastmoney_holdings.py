@@ -261,6 +261,13 @@ def _save_rank_snapshot_and_load_rolling_pool(
     return pool
 
 
+def _rank_snapshot_exists(connection, rank_at: datetime) -> bool:
+    return bool(connection.execute(
+        f"SELECT 1 FROM {RANK_SNAPSHOT_TABLE} WHERE rank_type = ? AND rank_at = ? LIMIT 1",
+        [RANK_TYPE, rank_at],
+    ).fetchone())
+
+
 def _symbol(item: Dict[str, Any]) -> str:
     value = str(item.get("stkMktCode") or "").strip().upper()
     if len(value) == 8 and value[:2] in {"SH", "SZ", "BJ"}:
@@ -290,6 +297,12 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
         try:
             _ensure_schema(connection)
+            if _rank_snapshot_exists(connection, rank_at):
+                return {
+                    "skipped": True,
+                    "message": f"东方财富榜单时点 {rank_at.isoformat(sep=' ')} 已采集",
+                    "snapshot_at": rank_at.isoformat(sep=" "),
+                }
             rolling_rankings = _save_rank_snapshot_and_load_rolling_pool(
                 connection, rank_at=rank_at, rankings=rankings, now=now,
             )
