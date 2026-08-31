@@ -10,7 +10,7 @@ import os
 import random
 import string
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -289,7 +289,7 @@ def _save_rank_snapshot_and_load_rolling_pool(
     source_update_at: datetime,
     rankings: List[Dict[str, Any]],
     now: datetime,
-    lookback_days: int = 30,
+    lookback_trading_days: int = 5,
 ) -> List[Dict[str, Any]]:
     rank_rows = []
     for rank, item in enumerate(rankings, 1):
@@ -309,16 +309,29 @@ def _save_rank_snapshot_and_load_rolling_pool(
         connection.execute(
             f"INSERT OR REPLACE INTO {RANK_SNAPSHOT_TABLE} ({columns}) SELECT {columns} FROM eastmoney_rank_rows"
         )
-    cutoff = rank_at - timedelta(days=max(1, lookback_days))
     rows = connection.execute(f"""
+        WITH recent_rank_dates AS (
+            SELECT DISTINCT CAST(rank_at AS DATE) AS rank_date
+            FROM {RANK_SNAPSHOT_TABLE}
+            WHERE rank_type = ?
+              AND CAST(rank_at AS DATE) <= CAST(? AS DATE)
+            ORDER BY rank_date DESC
+            LIMIT ?
+        )
         SELECT raw_rank_json, rank, rank_at
         FROM {RANK_SNAPSHOT_TABLE}
-        WHERE rank_type = ? AND rank_at >= ?
+        WHERE rank_type = ?
+          AND CAST(rank_at AS DATE) IN (SELECT rank_date FROM recent_rank_dates)
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY combination_id ORDER BY rank_at DESC, rank ASC
         ) = 1
         ORDER BY rank ASC, rank_at DESC
-    """, [RANK_TYPE, cutoff]).fetchall()
+    """, [
+        RANK_TYPE,
+        rank_at,
+        max(1, int(lookback_trading_days)),
+        RANK_TYPE,
+    ]).fetchall()
     pool = []
     for raw_json, rank, item_rank_at in rows:
         item = json.loads(raw_json)

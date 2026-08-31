@@ -56,7 +56,7 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
         self.client.client.get = AsyncMock(return_value=response)
         await self.client.follow_combination(900000001)
 
-    def test_rank_snapshots_keep_intraday_history_and_build_30_day_union(self):
+    def test_rank_snapshots_keep_intraday_history_and_build_same_day_union(self):
         connection = duckdb.connect(":memory:")
         try:
             _ensure_schema(connection)
@@ -81,6 +81,28 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             self.assertTrue(_rank_snapshot_exists(connection, first_at))
             self.assertFalse(_rank_snapshot_exists(connection, first_at + timedelta(minutes=15)))
             self.assertFalse(_complete_holdings_snapshot_exists(connection, first_at))
+        finally:
+            connection.close()
+
+    def test_rolling_pool_uses_latest_five_distinct_rank_dates(self):
+        connection = duckdb.connect(":memory:")
+        try:
+            _ensure_schema(connection)
+            pool = []
+            for day, combination_id in enumerate(range(101, 107), start=1):
+                rank_at = datetime(2026, 9, day, 15, 0)
+                pool = _save_rank_snapshot_and_load_rolling_pool(
+                    connection,
+                    rank_at=rank_at,
+                    source_update_at=rank_at,
+                    rankings=[{
+                        "combinationId": combination_id,
+                        "userName": str(combination_id),
+                        "profitRate": "1",
+                    }],
+                    now=rank_at,
+                )
+            self.assertEqual({102, 103, 104, 105, 106}, {item["combinationId"] for item in pool})
         finally:
             connection.close()
 
