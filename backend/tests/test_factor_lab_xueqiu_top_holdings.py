@@ -402,6 +402,8 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual("逆势吸筹", by_symbol["SH.600001"]["direction"])  # 权重升 5.5x + 股价跌 0.9x
         self.assertEqual("借涨减仓", by_symbol["SH.600002"]["direction"])  # 权重降 0.417x + 股价升 1.1x
         self.assertEqual("持平", by_symbol["SH.600003"]["direction"])  # 无价格数据兑底
+        for symbol in ("SH.600001", "SH.600002", "SH.600003"):
+            self.assertEqual("持平", by_symbol[symbol]["direction_today"])
 
     def test_latest_weight_change_null_for_new_entries(self):
         with TemporaryDirectory() as tmpdir:

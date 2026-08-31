@@ -1175,6 +1175,11 @@ def load_xueqiu_top_holdings_latest(
                 item.get("momentum_multiple_5d"),
                 item.get("weight_price_ratio_5d"),
             )
+            item["direction_today"] = _xueqiu_direction(
+                item.get("weight_multiple_today"),
+                item.get("momentum_multiple_today"),
+                item.get("weight_price_ratio_today"),
+            )
         index_options = _attach_xueqiu_fear_index_memberships(
             connection,
             item_rows,

@@ -113,6 +113,21 @@ const xueqiuDirectionOf = record => {
   return '持平';
 };
 
+const xueqiuTodayDirectionOf = record => {
+  if (record?.direction_today) return record.direction_today;
+  const weight = weightMomentumRatioNumber(record?.weight_multiple_today);
+  const price = weightMomentumRatioNumber(record?.momentum_multiple_today);
+  const ratio = weightMomentumRatioNumber(record?.weight_price_ratio_today);
+  if (weight === null) return '新进';
+  if (weight > 1.05 && ratio !== null && ratio > 1.05) {
+    return price !== null && price >= 1 ? '顺势加仓' : '逆势吸筹';
+  }
+  if (weight < 0.95 && ratio !== null && ratio < 0.95) {
+    return price !== null && price >= 1 ? '借涨减仓' : '减仓';
+  }
+  return '持平';
+};
+
 const isCashSymbol = record => {
   const symbol = String(record?.stock_symbol || '').toUpperCase();
   return symbol === 'CASH' || symbol === 'CN_CASH';
@@ -171,7 +186,12 @@ const renderWeightMomentumRatio = (value, record) => {
 
 const renderTodayWeightPriceRatio = (value, record) => {
   const ratio = weightMomentumRatioNumber(value);
-  if (ratio === null) return '-';
+  const direction = isCashSymbol(record) ? null : xueqiuTodayDirectionOf(record);
+  if (ratio === null) {
+    return direction
+      ? <Tag color={XUEQIU_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag>
+      : '-';
+  }
   const weightMultiple = weightMomentumRatioNumber(record?.weight_multiple_today);
   const priceMultiple = weightMomentumRatioNumber(record?.momentum_multiple_today);
   const currentWeight = weightMomentumRatioNumber(record?.composite_weight_pct);
@@ -192,7 +212,10 @@ const renderTodayWeightPriceRatio = (value, record) => {
         + `（${priceMultiple !== null ? `${multipleFixed(priceMultiple)}x` : '-'}）`
       }
     >
-      <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+      <Space size={4}>
+        <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+        {direction ? <Tag color={XUEQIU_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag> : null}
+      </Space>
     </Tooltip>
   );
 };
@@ -1041,6 +1064,9 @@ const XueqiuTopHoldingsResearch = () => {
         - (weightMomentumRatioNumber(b.weight_price_ratio_today) ?? Number.NEGATIVE_INFINITY)
       ),
       sortDirections: ['descend', 'ascend'],
+      filters: XUEQIU_DIRECTIONS.map(direction => ({ text: direction, value: direction })),
+      filterMultiple: true,
+      onFilter: (value, record) => xueqiuTodayDirectionOf(record) === value,
       render: renderTodayWeightPriceRatio,
     },
     {
