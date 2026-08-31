@@ -169,6 +169,34 @@ const renderWeightMomentumRatio = (value, record) => {
   );
 };
 
+const renderTodayWeightPriceRatio = (value, record) => {
+  const ratio = weightMomentumRatioNumber(value);
+  if (ratio === null) return '-';
+  const weightMultiple = weightMomentumRatioNumber(record?.weight_multiple_today);
+  const priceMultiple = weightMomentumRatioNumber(record?.momentum_multiple_today);
+  const currentWeight = weightMomentumRatioNumber(record?.composite_weight_pct);
+  const previousWeight = weightMomentumRatioNumber(record?.weight_previous_close);
+  const weightChange = currentWeight !== null && previousWeight !== null
+    ? currentWeight - previousWeight
+    : null;
+  const priceChange = weightMomentumRatioNumber(record?.momentum_today);
+  let color = '#595959';
+  if (ratio > 1.15) color = '#389e0d';
+  else if (ratio < 0.85) color = '#cf1322';
+  return (
+    <Tooltip
+      title={
+        `今日权重 ${Number.isFinite(weightChange) ? `${signedFixed(weightChange)}pp` : '-'}`
+        + `（${weightMultiple !== null ? `${multipleFixed(weightMultiple)}x` : '-'}）`
+        + ` / 今日股价 ${priceChange !== null ? `${signedFixed(priceChange)}%` : '-'}`
+        + `（${priceMultiple !== null ? `${multipleFixed(priceMultiple)}x` : '-'}）`
+      }
+    >
+      <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+    </Tooltip>
+  );
+};
+
 const setNumericFilterValue = (setSelectedKeys, current, key, value) => {
   const next = { ...(current || {}), [key]: value };
   const hasMin = next.min !== null && next.min !== undefined && next.min !== '';
@@ -998,6 +1026,22 @@ const XueqiuTopHoldingsResearch = () => {
           ? <Tag color="green">新进</Tag>
           : renderRankDelta(value)
       ),
+    },
+    {
+      title: (
+        <Tooltip title="最新持仓时点相对上一交易日最后快照：权重倍数 ÷ 股价倍数。">
+          今日权价比
+        </Tooltip>
+      ),
+      dataIndex: 'weight_price_ratio_today',
+      width: 118,
+      align: 'right',
+      sorter: (a, b) => (
+        (weightMomentumRatioNumber(a.weight_price_ratio_today) ?? Number.NEGATIVE_INFINITY)
+        - (weightMomentumRatioNumber(b.weight_price_ratio_today) ?? Number.NEGATIVE_INFINITY)
+      ),
+      sortDirections: ['descend', 'ascend'],
+      render: renderTodayWeightPriceRatio,
     },
     {
       title: (

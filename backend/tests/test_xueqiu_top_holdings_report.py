@@ -23,6 +23,7 @@ from src.robot.xueqiu_top_holdings_report import (
     aggregate_holdings,
     append_rank_acceleration_email_section,
     append_weight_price_ratio_email_section,
+    attach_xueqiu_snapshot_prices,
     build_equal_top10_top12_buffer_plan,
     build_rank_acceleration_buffer_plan,
     build_weight_price_ratio_buffer_plan,
@@ -39,11 +40,13 @@ from src.robot.xueqiu_top_holdings_report import (
     load_or_refresh_year_top_cubes,
     load_cached_year_top_cubes,
     load_recent_xueqiu_rank_history_cube_sets,
+    load_xueqiu_rolling_rank_cubes,
     load_rank_acceleration_strategy_history,
     load_xueqiu_rank_comparison_snapshot,
     load_xueqiu_snapshot_signal_history,
     load_xueqiu_rank_drift_baselines,
     manager_rebalance_from_show_origin,
+    normalize_xueqiu_snapshot_at,
     rounded_rebalance_weights,
     process_xueqiu_top_holdings_rebalance_for_robot,
     resolve_fear_greed_target_count,
@@ -60,6 +63,43 @@ from src.robot.xueqiu_top_holdings_report import (
 
 
 class XueqiuTopHoldingsReportTest(TestCase):
+    def test_normalize_xueqiu_snapshot_at_uses_market_half_hours(self):
+        cases = {
+            datetime(2026, 9, 1, 9, 35): datetime(2026, 9, 1, 9, 30),
+            datetime(2026, 9, 1, 10, 5): datetime(2026, 9, 1, 10, 0),
+            datetime(2026, 9, 1, 11, 35): datetime(2026, 9, 1, 11, 30),
+            datetime(2026, 9, 1, 13, 5): datetime(2026, 9, 1, 13, 0),
+            datetime(2026, 9, 1, 15, 35): datetime(2026, 9, 1, 15, 0),
+        }
+        for actual, expected in cases.items():
+            with self.subTest(actual=actual):
+                self.assertEqual(expected, normalize_xueqiu_snapshot_at(actual))
+
+    def test_attach_xueqiu_snapshot_prices_uses_batch_quote_current(self):
+        results = [CubeCurrentResult(
+            cube=CubeInfo(year_rank=1, symbol="ZH000001"),
+            holdings=[{"stock_symbol": "SH600000", "weight": 10.0}],
+        )]
+        class FakeTushare:
+            def get_quote_batch(self, symbols, *, allow_sina_fallback=True):
+                self.symbols = symbols
+                self.allow_sina_fallback = allow_sina_fallback
+                return [{
+                    "symbol": "600000.SH",
+                    "price": 11.25,
+                    "source": "tushare_rt_min",
+                }]
+
+        service = FakeTushare()
+        with patch(
+            "src.core.services.tushare.TushareService.get_instance",
+            return_value=service,
+        ):
+            summary = asyncio.run(attach_xueqiu_snapshot_prices(results))
+        self.assertEqual(11.25, results[0].holdings[0]["current_price"])
+        self.assertEqual(1, summary["priced_symbol_count"])
+        self.assertFalse(service.allow_sina_fallback)
+
     def test_fear_greed_regime_selects_target_position_count_at_boundaries(self):
         self.assertEqual((10, "fear"), resolve_fear_greed_target_count({"score": 24.99}))
         self.assertEqual(
@@ -2585,7 +2625,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
             except FileNotFoundError:
                 pass
 
-    def test_save_xueqiu_cube_holdings_snapshots_to_duckdb_replaces_same_day_cube_snapshot(self):
+    def test_save_xueqiu_cube_holdings_snapshots_replaces_same_minute_and_keeps_other_times(self):
         fd, path = tempfile.mkstemp(suffix=".duckdb")
         os.close(fd)
         os.unlink(path)
@@ -2638,6 +2678,7 @@ class XueqiuTopHoldingsReportTest(TestCase):
                                     "stock_symbol": "SZ300308",
                                     "stock_name": "中际旭创",
                                     "weight": 12.0,
+                                    "current_price": 88.5,
                                 },
                             ],
                             latest_rebalance_at=datetime(2026, 6, 3, 14, 30, 0),
@@ -2647,6 +2688,18 @@ class XueqiuTopHoldingsReportTest(TestCase):
                             active=True,
                         )
                     ],
+                )
+                save_xueqiu_cube_holdings_snapshots_to_duckdb(
+                    run_at=datetime(2026, 6, 3, 15, 5, 0),
+                    active_rebalance_days=90,
+                    current_results=[CubeCurrentResult(
+                        cube=cube,
+                        holdings=[{
+                            "stock_symbol": "SZ300308", "stock_name": "中际旭创",
+                            "weight": 13.0, "current_price": 89.0,
+                        }],
+                        active=True,
+                    )],
                 )
 
                 connection = connect_duckdb(path, prefer_read_only=False)
@@ -2659,10 +2712,11 @@ class XueqiuTopHoldingsReportTest(TestCase):
                             stock_symbol,
                             stock_name,
                             weight_pct,
+                            current_price,
                             latest_rebalance_id,
                             is_active
                         FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
-                        ORDER BY cube_symbol, stock_symbol
+                        ORDER BY snapshot_at, cube_symbol, stock_symbol
                         """
                     ).fetchall()
                 finally:
@@ -2678,12 +2732,53 @@ class XueqiuTopHoldingsReportTest(TestCase):
                         "SZ.300308",
                         "中际旭创",
                         12.0,
+                        88.5,
                         789,
                         True,
-                    )
+                    ),
+                    ("2026-06-03", "ZH000001", "SZ.300308", "中际旭创", 13.0, 89.0, None, True),
                 ],
                 rows,
             )
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_load_xueqiu_rolling_rank_cubes_uses_five_dates_and_latest_metadata(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                for offset in range(6):
+                    cubes = [CubeInfo(
+                        year_rank=offset + 1,
+                        symbol=f"ZH{offset + 1:06d}",
+                        cube_name=f"组合{offset + 1}",
+                    )]
+                    if offset in (4, 5):
+                        cubes.append(CubeInfo(
+                            year_rank=99 - offset,
+                            symbol="ZH999999",
+                            cube_name=f"共享组合{offset}",
+                        ))
+                    save_xueqiu_cube_rank_history_to_duckdb(
+                        cubes,
+                        datetime(2026, 8, 24 + offset, 20, 0),
+                    )
+                rolling = load_xueqiu_rolling_rank_cubes(5)
+
+            symbols = {cube.symbol for cube in rolling}
+            self.assertNotIn("ZH000001", symbols)
+            self.assertEqual(
+                {"ZH000002", "ZH000003", "ZH000004", "ZH000005", "ZH000006", "ZH999999"},
+                symbols,
+            )
+            shared = next(cube for cube in rolling if cube.symbol == "ZH999999")
+            self.assertEqual("共享组合5", shared.cube_name)
+            self.assertEqual(2, shared.year_rank)
         finally:
             try:
                 os.unlink(path)

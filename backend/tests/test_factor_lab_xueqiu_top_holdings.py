@@ -3,12 +3,32 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+import polars as pl
+
 import duckdb
 
 from src.app.api import xueqiu_holdings as factor_lab
 
 
 class FactorLabXueqiuTopHoldingsTest(TestCase):
+    def test_today_ratio_uses_snapshot_price_and_previous_close(self):
+        items = [{
+            "stock_symbol": "SH.600000",
+            "current_price": 11.0,
+            "weight_multiple_today": 2.0,
+        }]
+        price_frame = pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "trade_date": [date(2026, 8, 28)],
+            "close": [10.0],
+        })
+        with patch.object(factor_lab, "_duckdb_table_exists", return_value=True), patch.object(
+            factor_lab, "_load_price_frame", return_value=price_frame
+        ):
+            factor_lab._attach_xueqiu_today_ratio(object(), items, date(2026, 8, 28))
+        self.assertEqual(1.1, items[0]["momentum_multiple_today"])
+        self.assertEqual(1.82, items[0]["weight_price_ratio_today"])
+
     def setUp(self):
         self.assertEqual(date(2026, 6, 25), factor_lab.XUEQIU_HOLDINGS_VALID_FROM)
         cutoff_patch = patch.object(

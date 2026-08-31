@@ -116,11 +116,18 @@ def _xueqiu_top_holdings_snapshot_cte(active_only: bool) -> str:
                 stock_name,
                 stock_id,
                 segment_name,
-                CAST(weight_pct AS DOUBLE) AS weight_pct
+                CAST(weight_pct AS DOUBLE) AS weight_pct,
+                COALESCE(
+                    TRY_CAST(json_extract_string(raw_holding_json, '$.current_price') AS DOUBLE),
+                    TRY_CAST(json_extract_string(raw_holding_json, '$.currentPrice') AS DOUBLE),
+                    TRY_CAST(json_extract_string(raw_holding_json, '$.current') AS DOUBLE),
+                    TRY_CAST(json_extract_string(raw_holding_json, '$.price') AS DOUBLE)
+                ) AS current_price
             FROM {table}
             WHERE weight_pct IS NOT NULL
               AND weight_pct > 0
               AND snapshot_date >= DATE '{XUEQIU_HOLDINGS_VALID_FROM.isoformat()}'
+            QUALIFY snapshot_at = MAX(snapshot_at) OVER (PARTITION BY snapshot_date)
         ),
         cube_rows AS (
             SELECT
@@ -161,7 +168,8 @@ def _xueqiu_top_holdings_snapshot_cte(active_only: bool) -> str:
                 '现金' AS stock_name,
                 CAST(NULL AS BIGINT) AS stock_id,
                 '现金' AS segment_name,
-                GREATEST(0.0, 100.0 - stock_weight_pct) AS weight_pct
+                GREATEST(0.0, 100.0 - stock_weight_pct) AS weight_pct,
+                CAST(NULL AS DOUBLE) AS current_price
             FROM cube_rows
             WHERE GREATEST(0.0, 100.0 - stock_weight_pct) > 0.005
         ),
@@ -426,6 +434,59 @@ def _attach_xueqiu_5d_momentum(
             item["weight_price_ratio_5d"] = round(float(weight_multiple) / multiple, 2)
         else:
             item["weight_price_ratio_5d"] = None
+
+
+def _attach_xueqiu_today_ratio(
+    connection,
+    items: List[Dict[str, Any]],
+    previous_close_snapshot_date: Any,
+) -> None:
+    """Attach latest-snapshot vs previous-close price and weight multiples."""
+    for item in items:
+        item.setdefault("momentum_today", None)
+        item.setdefault("momentum_multiple_today", None)
+        item.setdefault("weight_price_ratio_today", None)
+    if not items or previous_close_snapshot_date is None:
+        return
+    if not any(_duckdb_table_exists(connection, table) for table in _XUEQIU_PRICE_TABLES):
+        return
+    try:
+        previous_day = (
+            previous_close_snapshot_date
+            if isinstance(previous_close_snapshot_date, date)
+            else date.fromisoformat(str(previous_close_snapshot_date))
+        )
+    except ValueError:
+        return
+    symbols = [
+        symbol for symbol in (_xueqiu_symbol_to_ts_code(item.get("stock_symbol")) for item in items)
+        if symbol and SYMBOL_PATTERN.match(symbol)
+    ]
+    if not symbols:
+        return
+    try:
+        price_df = _load_price_frame(symbols, previous_day - timedelta(days=10), previous_day)
+        previous_close_by_symbol: Dict[str, float] = {}
+        for (symbol,), group in price_df.group_by("symbol"):
+            usable = group.filter(pl.col("trade_date") <= previous_day).sort("trade_date")
+            if not usable.is_empty():
+                previous_close_by_symbol[symbol] = usable.tail(1).select("close").to_series()[0]
+    except Exception as exc:
+        logger.warning("Unable to compute today price ratio for 雪球持仓: %s", exc)
+        return
+    for item in items:
+        price_symbol = _xueqiu_symbol_to_ts_code(item.get("stock_symbol"))
+        previous_close = previous_close_by_symbol.get(price_symbol)
+        current_price = _safe_float(item.get("current_price"))
+        weight_multiple = _safe_float(item.get("weight_multiple_today"))
+        if not previous_close or not current_price or previous_close <= 0 or current_price <= 0:
+            continue
+        price_multiple = current_price / previous_close
+        item["momentum_today"] = round((price_multiple - 1.0) * 100.0, 2)
+        item["momentum_multiple_today"] = round(price_multiple, 3)
+        if weight_multiple is not None and weight_multiple > 0:
+            item["weight_multiple_today"] = round(weight_multiple, 3)
+            item["weight_price_ratio_today"] = round(weight_multiple / price_multiple, 2)
 
 
 def _load_xueqiu_board_momentum(
@@ -910,6 +971,11 @@ def load_xueqiu_top_holdings_latest(
                 ) ranked_dates
                 WHERE snapshot_rank_desc = {XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
             ),
+            previous_snapshot AS (
+                SELECT MAX(snapshot_date) AS snapshot_date
+                FROM rank_dates
+                WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+            ),
             latest_cube_summary AS (
                 SELECT
                     cube_rows.snapshot_date,
@@ -933,6 +999,7 @@ def load_xueqiu_top_holdings_latest(
             SELECT
                 latest_snapshot.snapshot_date,
                 compare_snapshot.snapshot_date AS rank_compare_snapshot_date,
+                previous_snapshot.snapshot_date AS previous_close_snapshot_date,
                 latest_cube_summary.snapshot_at,
                 COALESCE(filtered_latest_summary.cube_count, 0) AS cube_count,
                 COALESCE(filtered_latest_summary.holding_row_count, 0) AS holding_row_count,
@@ -941,6 +1008,7 @@ def load_xueqiu_top_holdings_latest(
                 latest_cube_summary.active_rebalance_days
             FROM latest_snapshot
             LEFT JOIN compare_snapshot ON TRUE
+            LEFT JOIN previous_snapshot ON TRUE
             LEFT JOIN latest_cube_summary ON latest_cube_summary.snapshot_date = latest_snapshot.snapshot_date
             LEFT JOIN filtered_latest_summary ON filtered_latest_summary.snapshot_date = latest_snapshot.snapshot_date
             """,
@@ -973,6 +1041,11 @@ def load_xueqiu_top_holdings_latest(
                 ) ranked_dates
                 WHERE snapshot_rank_desc = {XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
             ),
+            previous_snapshot AS (
+                SELECT MAX(snapshot_date) AS snapshot_date
+                FROM rank_dates
+                WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+            ),
             snapshot_holdings AS (
                 SELECT filtered_holdings.*
                 FROM filtered_holdings
@@ -988,6 +1061,7 @@ def load_xueqiu_top_holdings_latest(
                     ANY_VALUE(raw_stock_symbol) AS raw_stock_symbol,
                     ANY_VALUE(stock_name) AS stock_name,
                     ANY_VALUE(segment_name) AS segment_name,
+                    ANY_VALUE(current_price) AS current_price,
                     MIN(year_rank) AS best_year_rank,
                     COUNT(DISTINCT cube_symbol) AS holding_cube_count,
                     SUM(weight_pct) AS total_weight_pct,
@@ -1032,6 +1106,23 @@ def load_xueqiu_top_holdings_latest(
                     ) AS composite_rank,
                     *
                 FROM compare_stock_summary
+            ),
+            previous_holdings AS (
+                SELECT filtered_holdings.*
+                FROM filtered_holdings
+                JOIN previous_snapshot ON filtered_holdings.snapshot_date = previous_snapshot.snapshot_date
+            ),
+            previous_snapshot_summary AS (
+                SELECT COUNT(DISTINCT cube_symbol) AS cube_count
+                FROM previous_holdings
+            ),
+            previous_stock_summary AS (
+                SELECT
+                    stock_symbol,
+                    SUM(weight_pct) / NULLIF(MAX(previous_snapshot_summary.cube_count), 0) AS composite_weight_pct
+                FROM previous_holdings
+                CROSS JOIN previous_snapshot_summary
+                GROUP BY stock_symbol
             )
             SELECT
                 ranked.*,
@@ -1051,9 +1142,17 @@ def load_xueqiu_top_holdings_latest(
                          OR compare_ranked.composite_weight_pct = 0
                     THEN NULL
                     ELSE ranked.composite_weight_pct / compare_ranked.composite_weight_pct
-                END AS weight_multiple_5d
+                END AS weight_multiple_5d,
+                previous_stock_summary.composite_weight_pct AS weight_previous_close,
+                CASE
+                    WHEN previous_stock_summary.composite_weight_pct IS NULL
+                         OR previous_stock_summary.composite_weight_pct = 0
+                    THEN NULL
+                    ELSE ranked.composite_weight_pct / previous_stock_summary.composite_weight_pct
+                END AS weight_multiple_today
             FROM ranked
             LEFT JOIN compare_ranked ON compare_ranked.stock_symbol = ranked.stock_symbol
+            LEFT JOIN previous_stock_summary ON previous_stock_summary.stock_symbol = ranked.stock_symbol
             ORDER BY ranked.composite_rank
             LIMIT ?
             """,
@@ -1064,6 +1163,11 @@ def load_xueqiu_top_holdings_latest(
             item_rows,
             metadata.get("rank_compare_snapshot_date"),
             snapshot_date,
+        )
+        _attach_xueqiu_today_ratio(
+            connection,
+            item_rows,
+            metadata.get("previous_close_snapshot_date"),
         )
         for item in item_rows:
             item["direction"] = _xueqiu_direction(

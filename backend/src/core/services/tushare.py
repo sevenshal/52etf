@@ -2165,7 +2165,12 @@ class TushareService(QuoteProvider):
 
         return results
 
-    def get_quote_batch(self, symbols: List[str]) -> List[Dict]:
+    def get_quote_batch(
+        self,
+        symbols: List[str],
+        *,
+        allow_sina_fallback: bool = True,
+    ) -> List[Dict]:
         if not symbols:
             return []
 
@@ -2238,24 +2243,25 @@ class TushareService(QuoteProvider):
 
         # Final fallback for names still absent after the bounded Tushare retry.
         missing = [symbol for symbol in unique_symbols if symbol not in quotes_by_symbol]
-        for offset in range(0, len(missing), 800):
-            batch = missing[offset:offset + 800]
-            try:
-                codes = [self._strip_exchange(s) for s in batch]
-                code_to_symbol = {self._strip_exchange(s): s for s in batch}
-                sina_frame = ts.get_realtime_quotes(codes)
-                if isinstance(sina_frame, pd.DataFrame) and not sina_frame.empty:
-                    for _, row in sina_frame.iterrows():
-                        data = self._row_to_dict(row)
-                        code = (data.get("code") or "").strip().upper()
-                        if not code:
-                            continue
-                        quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
-                        if quote:
-                            quote["source"] = "sina_realtime"
-                            quotes_by_symbol[quote["symbol"]] = quote
-            except Exception as exc:
-                self.logger.error("Sina realtime quote fallback failed for %d symbols: %s", len(batch), exc)
+        if allow_sina_fallback:
+            for offset in range(0, len(missing), 800):
+                batch = missing[offset:offset + 800]
+                try:
+                    codes = [self._strip_exchange(s) for s in batch]
+                    code_to_symbol = {self._strip_exchange(s): s for s in batch}
+                    sina_frame = ts.get_realtime_quotes(codes)
+                    if isinstance(sina_frame, pd.DataFrame) and not sina_frame.empty:
+                        for _, row in sina_frame.iterrows():
+                            data = self._row_to_dict(row)
+                            code = (data.get("code") or "").strip().upper()
+                            if not code:
+                                continue
+                            quote = self._quote_from_realtime_row(code_to_symbol.get(code, self._infer_symbol_from_code(code)), data, volume_scale=0.01)
+                            if quote:
+                                quote["source"] = "sina_realtime"
+                                quotes_by_symbol[quote["symbol"]] = quote
+                except Exception as exc:
+                    self.logger.error("Sina realtime quote fallback failed for %d symbols: %s", len(batch), exc)
 
         return [quotes_by_symbol[s] for s in normalized_symbols if s in quotes_by_symbol]
 

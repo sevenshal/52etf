@@ -14,7 +14,7 @@ import sys
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -192,6 +192,7 @@ XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS = [
     "stock_id",
     "segment_name",
     "weight_pct",
+    "current_price",
     "raw_holding_json",
     "created_at",
     "updated_at",
@@ -448,6 +449,24 @@ def get_holding_weight(holding: Dict[str, Any]) -> Optional[float]:
         if number is not None:
             return number
     return None
+
+
+def get_holding_current_price(holding: Dict[str, Any]) -> Optional[float]:
+    number = safe_float(holding.get("current_price"))
+    return number if number is not None and number > 0 else None
+
+
+def normalize_xueqiu_snapshot_at(value: datetime) -> datetime:
+    """Normalize scheduler delay to the matching half-hour market snapshot."""
+    parsed = (_to_naive_china_datetime(value) or value).replace(second=0, microsecond=0)
+    current_time = parsed.time()
+    if time(11, 30) <= current_time < time(13, 0):
+        return parsed.replace(hour=11, minute=30)
+    if current_time >= time(15, 0):
+        return parsed.replace(hour=15, minute=0)
+    if time(9, 30) <= current_time < time(11, 30) or time(13, 0) <= current_time < time(15, 0):
+        return parsed.replace(minute=30 if parsed.minute >= 30 else 0)
+    return parsed
 
 
 def calculate_cash_weight_from_holdings(non_cash_weight_pct: float) -> float:
@@ -1859,6 +1878,53 @@ def save_xueqiu_cube_rank_history_to_duckdb(
         connection.close()
 
 
+def load_xueqiu_rolling_rank_cubes(lookback_trading_days: int = 5) -> List[CubeInfo]:
+    """Load the union of cubes ranked on the latest distinct rank dates."""
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+    try:
+        if not _duckdb_table_exists(connection, XUEQIU_CUBE_RANK_HISTORY_TABLE):
+            return []
+        rows = connection.execute(
+            f"""
+            WITH recent_rank_dates AS (
+                SELECT DISTINCT rank_date
+                FROM {XUEQIU_CUBE_RANK_HISTORY_TABLE}
+                WHERE rank_type = ?
+                ORDER BY rank_date DESC
+                LIMIT ?
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY cube_symbol
+                    ORDER BY rank_date DESC, fetched_at DESC, year_rank ASC
+                ) AS recency_rank
+                FROM {XUEQIU_CUBE_RANK_HISTORY_TABLE}
+                WHERE rank_type = ?
+                  AND rank_date IN (SELECT rank_date FROM recent_rank_dates)
+            )
+            SELECT year_rank, cube_symbol, cube_id, cube_name, screen_name,
+                   daily_gain, week_gain, year_gain, recommend_count, net_value,
+                   raw_cube_json
+            FROM ranked
+            WHERE recency_rank = 1
+            ORDER BY year_rank, cube_symbol
+            """,
+            [RANK_CACHE_TYPE, max(1, int(lookback_trading_days)), RANK_CACHE_TYPE],
+        ).fetchall()
+        cubes: List[CubeInfo] = []
+        for row in rows:
+            raw_data = json.loads(row[10]) if row[10] else {}
+            cubes.append(CubeInfo(
+                year_rank=safe_int(row[0]), symbol=str(row[1]), cube_id=safe_int(row[2]),
+                cube_name=str(row[3] or ""), screen_name=str(row[4] or ""),
+                daily_gain=safe_float(row[5]), week_gain=safe_float(row[6]),
+                year_gain=safe_float(row[7]), recommend_count=safe_int(row[8]),
+                net_value=safe_float(row[9]), raw_data=raw_data,
+            ))
+        return cubes
+    finally:
+        connection.close()
+
+
 def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
     table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
     connection.execute(
@@ -1889,10 +1955,11 @@ def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
             stock_id BIGINT,
             segment_name VARCHAR,
             weight_pct DOUBLE,
+            current_price DOUBLE,
             raw_holding_json VARCHAR,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (snapshot_date, cube_symbol, stock_symbol)
+            PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
         )
         """
     )
@@ -1908,10 +1975,12 @@ def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
         "active_rebalance_status": "VARCHAR",
         "active_rebalance_category": "VARCHAR",
         "active_rebalance_source": "VARCHAR",
+        "current_price": "DOUBLE",
     }
     for column_name, column_type in column_ddls.items():
         if column_name not in existing_columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_type}")
+    _migrate_xueqiu_holdings_snapshot_primary_key(connection)
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_xueqiu_cube_holdings_snapshot_stock "
         f"ON {table}(snapshot_date, stock_symbol)"
@@ -1926,13 +1995,66 @@ def ensure_xueqiu_cube_holdings_snapshot_schema(connection) -> None:
     )
 
 
+def _migrate_xueqiu_holdings_snapshot_primary_key(connection) -> None:
+    table_info = connection.execute(
+        f"PRAGMA table_info({_quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)})"
+    ).fetchall()
+    primary_key_columns = [row[1] for row in sorted(table_info, key=lambda row: row[5]) if row[5]]
+    if primary_key_columns == ["snapshot_at", "cube_symbol", "stock_symbol"]:
+        return
+    table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
+    legacy_name = f"{XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}_legacy_date_pk"
+    legacy = _quote_duckdb_identifier(legacy_name)
+    logger.info("Migrating %s primary key from %s to snapshot_at", table, primary_key_columns)
+    connection.execute("BEGIN TRANSACTION")
+    try:
+        connection.execute("DROP INDEX IF EXISTS idx_xueqiu_cube_holdings_snapshot_stock")
+        connection.execute("DROP INDEX IF EXISTS idx_xueqiu_cube_holdings_snapshot_cube")
+        connection.execute("DROP INDEX IF EXISTS idx_xueqiu_cube_holdings_snapshot_active_stock")
+        connection.execute(f"DROP TABLE IF EXISTS {legacy}")
+        connection.execute(f"ALTER TABLE {table} RENAME TO {legacy_name}")
+        connection.execute(
+            f"""
+            CREATE TABLE {table} (
+                snapshot_date DATE NOT NULL, snapshot_at TIMESTAMP NOT NULL,
+                rank_type VARCHAR NOT NULL, year_rank INTEGER, cube_symbol VARCHAR NOT NULL,
+                cube_id BIGINT, cube_name VARCHAR, screen_name VARCHAR,
+                latest_rebalance_at TIMESTAMP, latest_rebalance_id BIGINT,
+                latest_rebalance_status VARCHAR, active_rebalance_at TIMESTAMP,
+                active_rebalance_id BIGINT, active_rebalance_status VARCHAR,
+                active_rebalance_category VARCHAR, active_rebalance_source VARCHAR,
+                holdings_source VARCHAR, active_rebalance_days INTEGER, is_active BOOLEAN,
+                stock_symbol VARCHAR NOT NULL, raw_stock_symbol VARCHAR, stock_name VARCHAR,
+                stock_id BIGINT, segment_name VARCHAR, weight_pct DOUBLE,
+                current_price DOUBLE, raw_holding_json VARCHAR,
+                created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
+            )
+            """
+        )
+        legacy_columns = {
+            row[1] for row in connection.execute(f"PRAGMA table_info({legacy})").fetchall()
+        }
+        target_columns = [
+            row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        ]
+        common_columns = [column for column in target_columns if column in legacy_columns]
+        quoted = ", ".join(_quote_duckdb_identifier(column) for column in common_columns)
+        connection.execute(f"INSERT INTO {table} ({quoted}) SELECT {quoted} FROM {legacy}")
+        connection.execute(f"DROP TABLE {legacy}")
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
 def build_xueqiu_cube_holdings_snapshot_rows(
     *,
     run_at: datetime,
     current_results: List[CubeCurrentResult],
     active_rebalance_days: Optional[int],
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    snapshot_at = _to_naive_china_datetime(run_at) or datetime.now()
+    snapshot_at = normalize_xueqiu_snapshot_at(run_at)
     snapshot_date = snapshot_at.date()
     saved_at = datetime.now(CHINA_TZ).replace(tzinfo=None)
     rows: List[Dict[str, Any]] = []
@@ -1981,6 +2103,7 @@ def build_xueqiu_cube_holdings_snapshot_rows(
                     "stock_id": _holding_stock_id(holding),
                     "segment_name": _holding_segment_name(holding),
                     "weight_pct": float(weight),
+                    "current_price": get_holding_current_price(holding),
                     "raw_holding_json": json.dumps(
                         holding,
                         ensure_ascii=False,
@@ -2005,7 +2128,7 @@ def save_xueqiu_cube_holdings_snapshots_to_duckdb(
         current_results=current_results,
         active_rebalance_days=active_rebalance_days,
     )
-    snapshot_at = _to_naive_china_datetime(run_at) or datetime.now()
+    snapshot_at = normalize_xueqiu_snapshot_at(run_at)
     snapshot_date = snapshot_at.date()
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
     table = _quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)
@@ -2020,10 +2143,10 @@ def save_xueqiu_cube_holdings_snapshots_to_duckdb(
                 (
                     f"DELETE FROM {table} "
                     f"USING {_quote_duckdb_identifier(temp_cubes_name)} AS source "
-                    f"WHERE {table}.snapshot_date = ? "
+                    f"WHERE {table}.snapshot_at = ? "
                     f"AND {table}.cube_symbol = source.cube_symbol"
                 ),
-                [snapshot_date],
+                [snapshot_at],
             )
         if rows:
             frame = pd.DataFrame(rows).loc[:, XUEQIU_CUBE_HOLDINGS_SNAPSHOT_COLUMNS]
@@ -2087,6 +2210,11 @@ def load_latest_saved_cube_holdings_snapshot(
                 "Frozen Xueqiu holdings snapshot is stale or has no matching A-share close: "
                 f"snapshot_date={snapshot_date} expected_signal_date={expected_signal_date}"
             )
+        snapshot_at_row = connection.execute(
+            f"SELECT MAX(snapshot_at) FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE} WHERE snapshot_date = ?",
+            [snapshot_date],
+        ).fetchone()
+        snapshot_at = snapshot_at_row[0] if snapshot_at_row else None
         rows = connection.execute(
             f"""
             SELECT year_rank, cube_symbol, cube_id, cube_name, screen_name,
@@ -2096,11 +2224,11 @@ def load_latest_saved_cube_holdings_snapshot(
                    COALESCE(is_active, FALSE), raw_holding_json, stock_symbol,
                    stock_name, stock_id, segment_name, weight_pct
             FROM {XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE}
-            WHERE snapshot_date = ?
+            WHERE snapshot_at = ?
               {"AND COALESCE(is_active, FALSE)" if active_only else ""}
             ORDER BY year_rank, cube_symbol, stock_symbol
             """,
-            [snapshot_date],
+            [snapshot_at],
         ).fetchall()
     finally:
         connection.close()
@@ -3106,6 +3234,7 @@ def load_xueqiu_rank_comparison_snapshot(
                   AND weight_pct IS NOT NULL
                   AND weight_pct > 0
                   {active_filter_sql}
+                QUALIFY snapshot_at = MAX(snapshot_at) OVER ()
             ),
             cube_weights AS (
                 SELECT cube_symbol, SUM(weight_pct) AS stock_weight_pct
@@ -6866,26 +6995,6 @@ async def run_top_holdings_cache_refresh_job(
     saved_activity_count = save_cube_activity_cache(activity_results)
     failed_results = [result for result in activity_results if result.error]
 
-    # Freeze the complete manager holdings after the rank/activity refresh.  The
-    # next trading-day rebalance consumes this EOD snapshot and matching close;
-    # it must not fetch a new intraday weight snapshot.
-    active_since = run_at - timedelta(days=ACTIVE_REBALANCE_LOOKBACK_DAYS)
-    current_results = await fetch_all_cube_current(
-        cubes,
-        cookie=cookie,
-        workers=workers,
-        timeout=timeout,
-        retries=retries,
-        active_since=active_since,
-        refresh_activity_cache=False,
-    )
-    ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
-    holdings_snapshot = save_xueqiu_cube_holdings_snapshots_to_duckdb(
-        run_at=run_at,
-        current_results=current_results,
-        active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
-    )
-
     return {
         "run_at": run_at.isoformat(),
         "rank_cache_fetched_at": rank_cache_fetched_at.isoformat() if rank_cache_fetched_at else None,
@@ -6895,7 +7004,6 @@ async def run_top_holdings_cache_refresh_job(
         "refresh_cube_count": len(refresh_cubes),
         "saved_activity_count": saved_activity_count,
         "failed_count": len(failed_results),
-        "holdings_snapshot": holdings_snapshot,
         "activity_source": ACTIVE_REBALANCE_ACTIVITY_TYPE,
         "activity_label": ACTIVE_REBALANCE_ACTIVITY_LABEL,
         "activity_cache_ttl_hours": activity_cache_ttl_hours,
@@ -6910,6 +7018,113 @@ async def run_top_holdings_cache_refresh_job(
             for result in failed_results[:10]
         ],
     }
+
+
+async def attach_xueqiu_snapshot_prices(
+    current_results: List[CubeCurrentResult],
+) -> Dict[str, int]:
+    symbols = sorted({
+        normalize_xueqiu_symbol(
+            holding.get("symbol") or holding.get("stock_symbol") or holding.get("stockSymbol")
+        )
+        for result in current_results
+        if not result.error
+        for holding in result.holdings
+        if not is_cash_symbol(
+            holding.get("symbol") or holding.get("stock_symbol") or holding.get("stockSymbol")
+        )
+    } - {""})
+    from ..core.services.tushare import TushareService
+
+    service = TushareService.get_instance()
+    quotes = await asyncio.to_thread(
+        service.get_quote_batch,
+        symbols,
+        allow_sina_fallback=False,
+    )
+    price_by_symbol = {
+        normalize_xueqiu_symbol(quote.get("symbol")): safe_float(quote.get("price"))
+        for quote in quotes
+        if quote.get("source") == "tushare_rt_min" and safe_float(quote.get("price")) is not None
+    }
+    priced_holdings = 0
+    for result in current_results:
+        if result.error:
+            continue
+        for holding in result.holdings:
+            symbol = normalize_xueqiu_symbol(
+                holding.get("symbol") or holding.get("stock_symbol") or holding.get("stockSymbol")
+            )
+            price = price_by_symbol.get(symbol)
+            if price is not None and price > 0:
+                holding["current_price"] = price
+                priced_holdings += 1
+    if symbols and not price_by_symbol:
+        raise RuntimeError("Tushare rt_min 未返回任何有效时点价格")
+    missing_count = len(set(symbols) - set(price_by_symbol))
+    if missing_count:
+        logger.warning(
+            "Tushare rt_min snapshot quotes missing: requested=%s priced=%s missing=%s",
+            len(symbols), len(price_by_symbol), missing_count,
+        )
+    return {
+        "requested_symbol_count": len(symbols),
+        "priced_symbol_count": len(price_by_symbol),
+        "missing_symbol_count": missing_count,
+        "priced_holding_count": priced_holdings,
+    }
+
+
+async def run_xueqiu_holdings_refresh_job(
+    *,
+    lookback_trading_days: int = 5,
+    workers: int = DEFAULT_WORKERS,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+) -> Dict[str, Any]:
+    run_at = datetime.now(CHINA_TZ)
+    cubes = load_xueqiu_rolling_rank_cubes(lookback_trading_days)
+    if not cubes:
+        raise RuntimeError("最近雪球榜单历史为空，无法刷新组合持仓")
+    cookie = get_latest_cookie()
+    current_results = await fetch_all_cube_current(
+        cubes,
+        cookie=cookie,
+        workers=workers,
+        timeout=timeout,
+        retries=retries,
+        active_since=run_at - timedelta(days=ACTIVE_REBALANCE_LOOKBACK_DAYS),
+        refresh_activity_cache=False,
+    )
+    ensure_xueqiu_current_fetch_quality(current_results, source_count=len(cubes))
+    quote_summary = await attach_xueqiu_snapshot_prices(
+        current_results,
+    )
+    snapshot = save_xueqiu_cube_holdings_snapshots_to_duckdb(
+        run_at=run_at,
+        current_results=current_results,
+        active_rebalance_days=ACTIVE_REBALANCE_LOOKBACK_DAYS,
+    )
+    return {
+        "run_at": run_at.isoformat(),
+        "lookback_trading_days": max(1, int(lookback_trading_days)),
+        "source_cube_count": len(cubes),
+        "failed_count": len([item for item in current_results if item.error]),
+        "quote_summary": quote_summary,
+        "holdings_snapshot": snapshot,
+    }
+
+
+def process_xueqiu_holdings_refresh_for_robot() -> str:
+    result = asyncio.run(run_xueqiu_holdings_refresh_job())
+    snapshot = result["holdings_snapshot"]
+    return (
+        "雪球组合持仓刷新 "
+        f"rolling_days={result['lookback_trading_days']} "
+        f"cubes={result['source_cube_count']} snapshot_at={snapshot['snapshot_at']} "
+        f"rows={snapshot['saved_rows']} priced={result['quote_summary']['priced_symbol_count']} "
+        f"failed={result['failed_count']}"
+    )
 
 
 def process_xueqiu_top_holdings_cache_refresh_for_robot(
@@ -6952,7 +7167,6 @@ def process_xueqiu_top_holdings_cache_refresh_for_robot(
         f"fresh_cache={result.get('fresh_cache_count')} "
         f"refresh={result.get('refresh_cube_count')} "
         f"saved={result.get('saved_activity_count')} "
-        f"snapshot_rows={(result.get('holdings_snapshot') or {}).get('saved_rows')} "
         f"failed={result.get('failed_count')}"
     )
 
