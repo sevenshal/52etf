@@ -1720,11 +1720,11 @@ class ScheduledTaskManager:
                 task_key="eastmoney_holdings_refresh",
                 name="东方财富实盘榜单与持仓刷新",
                 description="A股交易日收盘后抓取东方财富250日收益实盘榜单及全部组合持仓，并冻结每日快照。",
-                default_time="20:10",
+                default_time="09:35",
                 default_enabled=True,
                 sort_order=27,
                 runner=_run_eastmoney_holdings_refresh,
-                default_cron_rule="10 20 * * mon-fri",
+                default_cron_rule="5,35 9-15 * * mon-fri",
             ),
         }
 

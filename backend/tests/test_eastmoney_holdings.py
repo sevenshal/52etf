@@ -1,10 +1,15 @@
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
+from datetime import datetime, timedelta
+
+import duckdb
 
 from src.robot.eastmoney_holdings import (
     EastmoneyClient,
     EastmoneyCredentials,
     compute_eastmoney_sign,
+    _ensure_schema,
+    _save_rank_snapshot_and_load_rolling_pool,
 )
 
 
@@ -44,3 +49,26 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
         response.json = lambda: {"code": -1, "message": "加自选成功"}
         self.client.client.get = AsyncMock(return_value=response)
         await self.client.follow_combination(900000001)
+
+    def test_rank_snapshots_keep_intraday_history_and_build_30_day_union(self):
+        connection = duckdb.connect(":memory:")
+        try:
+            _ensure_schema(connection)
+            first_at = datetime(2026, 8, 31, 10, 0)
+            first = _save_rank_snapshot_and_load_rolling_pool(
+                connection,
+                rank_at=first_at,
+                rankings=[{"combinationId": 1, "userName": "一", "profitRate": "1"}],
+                now=first_at,
+            )
+            second = _save_rank_snapshot_and_load_rolling_pool(
+                connection,
+                rank_at=first_at + timedelta(minutes=30),
+                rankings=[{"combinationId": 2, "userName": "二", "profitRate": "2"}],
+                now=first_at + timedelta(minutes=30),
+            )
+            self.assertEqual([1], [item["combinationId"] for item in first])
+            self.assertEqual({1, 2}, {item["combinationId"] for item in second})
+            self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM eastmoney_rank_snapshots").fetchone()[0])
+        finally:
+            connection.close()

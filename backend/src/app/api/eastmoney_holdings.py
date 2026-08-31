@@ -156,6 +156,7 @@ def _eastmoney_top_holdings_snapshot_cte(active_only: bool) -> str:
             WHERE weight_pct IS NOT NULL
               AND weight_pct > 0
               AND snapshot_date >= DATE '{EASTMONEY_HOLDINGS_VALID_FROM.isoformat()}'
+            QUALIFY snapshot_at = MAX(snapshot_at) OVER (PARTITION BY snapshot_date)
         ),
         cube_rows AS (
             SELECT

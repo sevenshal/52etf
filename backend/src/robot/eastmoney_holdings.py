@@ -10,7 +10,7 @@ import os
 import random
 import string
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -27,6 +27,7 @@ logger = logging.getLogger("eastmoney_holdings")
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 API_BASE_URL = "https://spzhapi.dfcfs.cn"
 SNAPSHOT_TABLE = "eastmoney_cube_holdings_snapshots"
+RANK_SNAPSHOT_TABLE = "eastmoney_rank_snapshots"
 RANK_TYPE = "rate_250d_drawdown_0.2_asset_500k"
 SM4_KEY_AND_IV = bytes.fromhex("e4dd41fd138867c3665492702fe277eb")
 DEFAULT_DEVICE_ID = "E5099551-EB1E-4EDE-9B7A-7099B401C811"
@@ -175,6 +176,17 @@ class EastmoneyClient:
 
 def _ensure_schema(connection) -> None:
     connection.execute(f"""
+        CREATE TABLE IF NOT EXISTS {RANK_SNAPSHOT_TABLE} (
+            rank_at TIMESTAMP NOT NULL, rank_type VARCHAR NOT NULL, rank INTEGER NOT NULL,
+            combination_id BIGINT NOT NULL, user_id VARCHAR, user_name VARCHAR,
+            profit_rate DOUBLE, raw_rank_json VARCHAR, created_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (rank_at, rank_type, combination_id)
+        )
+    """)
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_eastmoney_rank_history_time ON {RANK_SNAPSHOT_TABLE}(rank_at, rank)"
+    )
+    connection.execute(f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
             snapshot_date DATE NOT NULL, snapshot_at TIMESTAMP NOT NULL,
             rank_type VARCHAR NOT NULL, year_rank INTEGER, cube_symbol VARCHAR NOT NULL,
@@ -187,12 +199,66 @@ def _ensure_schema(connection) -> None:
             stock_symbol VARCHAR NOT NULL, raw_stock_symbol VARCHAR, stock_name VARCHAR,
             stock_id BIGINT, segment_name VARCHAR, weight_pct DOUBLE,
             raw_holding_json VARCHAR, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (snapshot_date, cube_symbol, stock_symbol)
+            PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
         )
     """)
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_eastmoney_holdings_stock ON {SNAPSHOT_TABLE}(snapshot_date, stock_symbol)"
     )
+
+
+def _parse_rank_at(value: Any, fallback: datetime) -> datetime:
+    text = str(value or "").strip()
+    if text:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            logger.warning("无法解析东方财富榜单时间 %r，使用请求时间", text)
+    return fallback.replace(tzinfo=None, microsecond=0)
+
+
+def _save_rank_snapshot_and_load_rolling_pool(
+    connection,
+    *,
+    rank_at: datetime,
+    rankings: List[Dict[str, Any]],
+    now: datetime,
+    lookback_days: int = 30,
+) -> List[Dict[str, Any]]:
+    rank_rows = []
+    for rank, item in enumerate(rankings, 1):
+        rank_rows.append({
+            "rank_at": rank_at, "rank_type": RANK_TYPE, "rank": rank,
+            "combination_id": int(item["combinationId"]), "user_id": str(item.get("userId") or ""),
+            "user_name": str(item.get("userName") or ""),
+            "profit_rate": float(item.get("profitRate") or 0),
+            "raw_rank_json": json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+            "created_at": now,
+        })
+    if rank_rows:
+        frame = pd.DataFrame(rank_rows)
+        connection.register("eastmoney_rank_rows", frame)
+        columns = ", ".join(f'"{column}"' for column in frame.columns)
+        connection.execute(
+            f"INSERT OR REPLACE INTO {RANK_SNAPSHOT_TABLE} ({columns}) SELECT {columns} FROM eastmoney_rank_rows"
+        )
+    cutoff = rank_at - timedelta(days=max(1, lookback_days))
+    rows = connection.execute(f"""
+        SELECT raw_rank_json, rank, rank_at
+        FROM {RANK_SNAPSHOT_TABLE}
+        WHERE rank_type = ? AND rank_at >= ?
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY combination_id ORDER BY rank_at DESC, rank ASC
+        ) = 1
+        ORDER BY rank ASC, rank_at DESC
+    """, [RANK_TYPE, cutoff]).fetchall()
+    pool = []
+    for raw_json, rank, item_rank_at in rows:
+        item = json.loads(raw_json)
+        item["rollingRank"] = int(rank)
+        item["rollingRankAt"] = item_rank_at.isoformat() if item_rank_at else None
+        pool.append(item)
+    return pool
 
 
 def _symbol(item: Dict[str, Any]) -> str:
@@ -213,11 +279,22 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
         first = await client.fetch_rank_page(1)
         data = first.get("data") or {}
         rankings = list(data.get("pages") or [])
+        rank_at = _parse_rank_at(data.get("updateTime"), run_at)
         total_pages = int(data.get("totalPages") or 1)
         for page in range(2, total_pages + 1):
             payload = await client.fetch_rank_page(page)
             rankings.extend((payload.get("data") or {}).get("pages") or [])
             await asyncio.sleep(0.08)
+
+        now = datetime.now(CHINA_TZ).replace(tzinfo=None)
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+        try:
+            _ensure_schema(connection)
+            rolling_rankings = _save_rank_snapshot_and_load_rolling_pool(
+                connection, rank_at=rank_at, rankings=rankings, now=now,
+            )
+        finally:
+            connection.close()
 
         semaphore = asyncio.Semaphore(max(1, workers))
         async def fetch(rank: int, combination: Dict[str, Any]):
@@ -227,10 +304,12 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("东方财富组合 %s 持仓抓取失败: %s", combination.get("combinationId"), exc)
                     return rank, combination, [], str(exc)
-        results = await asyncio.gather(*(fetch(rank, item) for rank, item in enumerate(rankings, 1)))
+        results = await asyncio.gather(*(
+            fetch(int(item.get("rollingRank") or rank), item)
+            for rank, item in enumerate(rolling_rankings, 1)
+        ))
 
-    now = datetime.now(CHINA_TZ).replace(tzinfo=None)
-    snapshot_at = run_at.replace(tzinfo=None)
+    snapshot_at = rank_at
     rows = []
     failed = []
     for rank, combination, holdings, error in results:
@@ -266,12 +345,12 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
                 "raw_holding_json": json.dumps(holding, ensure_ascii=False, separators=(",", ":")),
                 "created_at": now, "updated_at": now,
             })
-    if rankings and len(failed) > max(3, len(rankings) // 10):
-        raise RuntimeError(f"东方财富持仓失败过多: {len(failed)}/{len(rankings)}")
+    if rolling_rankings and len(failed) > max(3, len(rolling_rankings) // 10):
+        raise RuntimeError(f"东方财富持仓失败过多: {len(failed)}/{len(rolling_rankings)}")
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
     try:
         _ensure_schema(connection)
-        connection.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE snapshot_date = ?", [snapshot_at.date()])
+        connection.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE snapshot_at = ?", [snapshot_at])
         if rows:
             frame = pd.DataFrame(rows)
             connection.register("eastmoney_snapshot_rows", frame)
@@ -280,7 +359,8 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
     finally:
         connection.close()
     return {
-        "snapshot_date": snapshot_at.date().isoformat(), "rank_count": len(rankings),
+        "snapshot_at": snapshot_at.isoformat(sep=" "), "rank_count": len(rankings),
+        "rolling_combination_count": len(rolling_rankings),
         "holding_rows": len(rows), "failed_count": len(failed), "failed": failed[:10],
     }
 
@@ -291,5 +371,7 @@ def process_eastmoney_holdings_refresh_for_robot() -> str:
         return f"跳过东方财富实盘榜单刷新: {result.get('message')}"
     return (
         f"东方财富实盘榜单与持仓刷新 rank={result['rank_count']} "
-        f"rows={result['holding_rows']} failed={result['failed_count']}"
+        f"rolling={result['rolling_combination_count']} "
+        f"rank_at={result['snapshot_at']} rows={result['holding_rows']} "
+        f"failed={result['failed_count']}"
     )
