@@ -993,6 +993,20 @@ def _run_xueqiu_top_holdings_cache_refresh(
     return result
 
 
+def _run_eastmoney_holdings_refresh():
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过东方财富实盘榜单与持仓刷新: {today_shanghai} 不是A股交易日"
+
+    from .eastmoney_holdings import process_eastmoney_holdings_refresh_for_robot
+
+    result = process_eastmoney_holdings_refresh_for_robot()
+    logging.getLogger("ScheduledTaskManager").info(
+        "Eastmoney holdings refresh result: %s", result,
+    )
+    return result
+
+
 def _run_xueqiu_token_freshness_check(
     max_age_hours: int = XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS,
 ):
@@ -1701,6 +1715,16 @@ class ScheduledTaskManager:
                         description="刷新主理人调仓时间时两次请求之间的最小间隔。",
                     ),
                 ),
+            ),
+            "eastmoney_holdings_refresh": TaskDefinition(
+                task_key="eastmoney_holdings_refresh",
+                name="东方财富实盘榜单与持仓刷新",
+                description="A股交易日收盘后抓取东方财富250日收益实盘榜单及全部组合持仓，并冻结每日快照。",
+                default_time="20:10",
+                default_enabled=True,
+                sort_order=27,
+                runner=_run_eastmoney_holdings_refresh,
+                default_cron_rule="10 20 * * mon-fri",
             ),
         }
 

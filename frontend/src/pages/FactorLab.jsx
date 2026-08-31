@@ -42,6 +42,7 @@ import AStockInnovation100 from './AStockInnovation100';
 import AStockFundFlow from './AStockFundFlow';
 import ValuationSimulation from './ValuationSimulation';
 import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
+import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
 import NineTurnBreadthResearch from './NineTurnBreadthResearch';
 import './FactorLab.css';
 
@@ -56,6 +57,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'innovation100', label: 'A创100' },
   { key: 'fund-flow', label: '资金流向' },
   { key: 'xueqiu-holdings', label: '雪球持仓' },
+  { key: 'eastmoney-holdings', label: '东方财富' },
   { key: 'nine-turn-breadth', label: '九转宽度' },
   { key: 'db', label: 'DB' },
 ];
@@ -3086,6 +3088,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const isInnovationTab = activeTab === 'innovation100';
   const isFundFlowTab = activeTab === 'fund-flow';
   const isXueqiuHoldingsTab = activeTab === 'xueqiu-holdings';
+  const isEastmoneyHoldingsTab = activeTab === 'eastmoney-holdings';
   const isNineTurnBreadthTab = activeTab === 'nine-turn-breadth';
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
@@ -3209,7 +3212,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               <h1>研究</h1>
               <Tag color="blue">{activeTabLabel}</Tag>
             </div>
-            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && !isXueqiuHoldingsTab && !isNineTurnBreadthTab && (
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && (
               <Space className="factor-lab-actions">
                 <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3251,6 +3254,8 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
 
       {activeTab === 'xueqiu-holdings' && <XueqiuTopHoldingsResearch />}
+
+      {activeTab === 'eastmoney-holdings' && <EastmoneyHoldingsResearch />}
 
       {activeTab === 'nine-turn-breadth' && <NineTurnBreadthResearch />}
 

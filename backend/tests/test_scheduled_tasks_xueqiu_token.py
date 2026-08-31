@@ -238,6 +238,7 @@ class XueqiuTokenMonitorTest(TestCase):
                 "activity_cache_ttl_hours",
                 "activity_request_min_interval_ms",
             },
+            "eastmoney_holdings_refresh": set(),
         }
 
         self.assertEqual(set(manager.task_definitions), set(expected_keys))

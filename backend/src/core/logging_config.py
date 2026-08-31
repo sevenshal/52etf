@@ -14,6 +14,8 @@ SENSITIVE_QUERY_PARAMS = {
     "nonce",
     "signature",
     "token",
+    "cttoken",
+    "uttoken",
     "access_token",
     "refresh_token",
     "authorization",

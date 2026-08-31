@@ -3,6 +3,7 @@ uvicorn==0.38.0
 websockets==15.0.1
 socksio==1.0.0
 httpx==0.28.1
+gmssl==3.2.2
 pydantic==2.12.3
 sqlalchemy==2.0.44
 duckdb==1.4.4

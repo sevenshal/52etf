@@ -1,0 +1,106 @@
+.eastmoney-holdings-page {
+  width: 100%;
+}
+
+.eastmoney-holdings-metrics {
+  margin-bottom: 12px;
+}
+
+.eastmoney-holdings-metrics .ant-card-body {
+  padding: 12px 14px;
+}
+
+.eastmoney-holdings-metrics .ant-statistic-title {
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.eastmoney-holdings-metrics .ant-statistic-content {
+  color: #172033;
+  font-size: 20px;
+}
+
+.eastmoney-holdings-toolbar {
+  justify-content: flex-end;
+}
+
+.eastmoney-holdings-toolbar .ant-input-affix-wrapper {
+  width: 180px;
+}
+
+.eastmoney-holdings-row-selected > td {
+  background: #eef6ff !important;
+}
+
+.eastmoney-holdings-latest-table .ant-table-tbody > tr,
+.eastmoney-holdings-history-table .ant-table-tbody > tr {
+  cursor: pointer;
+}
+
+.eastmoney-holdings-history-row-selected > td {
+  background: #fff7e6 !important;
+}
+
+.eastmoney-holdings-selected {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.eastmoney-holdings-selected h2 {
+  margin: 2px 0 0;
+  color: #172033;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.eastmoney-holdings-history-table {
+  margin-top: 8px;
+}
+
+.eastmoney-holdings-details {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #edf1f7;
+}
+
+.eastmoney-holdings-details__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.eastmoney-holdings-details__header h3 {
+  margin: 2px 0 0;
+  color: #172033;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+@media (max-width: 768px) {
+  .eastmoney-holdings-toolbar {
+    width: 100%;
+  }
+
+  .eastmoney-holdings-toolbar .ant-input-affix-wrapper {
+    flex: 1 1 160px;
+    width: auto;
+  }
+
+  .eastmoney-holdings-selected {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .eastmoney-holdings-details__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
