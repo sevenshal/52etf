@@ -174,24 +174,7 @@ class EastmoneyClient:
         return rows
 
 
-def _ensure_schema(connection) -> None:
-    connection.execute(f"""
-        CREATE TABLE IF NOT EXISTS {RANK_SNAPSHOT_TABLE} (
-            rank_at TIMESTAMP NOT NULL, source_update_at TIMESTAMP,
-            rank_type VARCHAR NOT NULL, rank INTEGER NOT NULL,
-            combination_id BIGINT NOT NULL, user_id VARCHAR, user_name VARCHAR,
-            profit_rate DOUBLE, raw_rank_json VARCHAR, created_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (rank_at, rank_type, combination_id)
-        )
-    """)
-    rank_columns = {
-        row[1] for row in connection.execute(f"PRAGMA table_info('{RANK_SNAPSHOT_TABLE}')").fetchall()
-    }
-    if "source_update_at" not in rank_columns:
-        connection.execute(f"ALTER TABLE {RANK_SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
-    connection.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_eastmoney_rank_history_time ON {RANK_SNAPSHOT_TABLE}(rank_at, rank)"
-    )
+def _create_holdings_snapshot_table(connection) -> None:
     connection.execute(f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
             snapshot_date DATE NOT NULL, snapshot_at TIMESTAMP NOT NULL,
@@ -210,6 +193,58 @@ def _ensure_schema(connection) -> None:
             PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
         )
     """)
+
+
+def _migrate_holdings_snapshot_primary_key(connection) -> None:
+    table_info = connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
+    primary_key_columns = [row[1] for row in sorted(table_info, key=lambda row: row[5]) if row[5]]
+    if primary_key_columns == ["snapshot_at", "cube_symbol", "stock_symbol"]:
+        return
+    legacy_table = f"{SNAPSHOT_TABLE}_legacy_date_pk"
+    logger.info("Migrating %s primary key from %s to intraday snapshot_at", SNAPSHOT_TABLE, primary_key_columns)
+    connection.execute("BEGIN TRANSACTION")
+    try:
+        connection.execute("DROP INDEX IF EXISTS idx_eastmoney_holdings_stock")
+        connection.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+        connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} RENAME TO {legacy_table}")
+        _create_holdings_snapshot_table(connection)
+        legacy_columns = {
+            row[1] for row in connection.execute(f"PRAGMA table_info('{legacy_table}')").fetchall()
+        }
+        target_columns = [
+            row[1] for row in connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
+        ]
+        common_columns = [column for column in target_columns if column in legacy_columns]
+        quoted = ", ".join(f'"{column}"' for column in common_columns)
+        connection.execute(
+            f"INSERT INTO {SNAPSHOT_TABLE} ({quoted}) SELECT {quoted} FROM {legacy_table}"
+        )
+        connection.execute(f"DROP TABLE {legacy_table}")
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _ensure_schema(connection) -> None:
+    connection.execute(f"""
+        CREATE TABLE IF NOT EXISTS {RANK_SNAPSHOT_TABLE} (
+            rank_at TIMESTAMP NOT NULL, source_update_at TIMESTAMP,
+            rank_type VARCHAR NOT NULL, rank INTEGER NOT NULL,
+            combination_id BIGINT NOT NULL, user_id VARCHAR, user_name VARCHAR,
+            profit_rate DOUBLE, raw_rank_json VARCHAR, created_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (rank_at, rank_type, combination_id)
+        )
+    """)
+    rank_columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info('{RANK_SNAPSHOT_TABLE}')").fetchall()
+    }
+    if "source_update_at" not in rank_columns:
+        connection.execute(f"ALTER TABLE {RANK_SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_eastmoney_rank_history_time ON {RANK_SNAPSHOT_TABLE}(rank_at, rank)"
+    )
+    _create_holdings_snapshot_table(connection)
     holding_columns = {
         row[1] for row in connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
     }
@@ -217,6 +252,7 @@ def _ensure_schema(connection) -> None:
         connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
     if "current_price" not in holding_columns:
         connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN current_price DOUBLE")
+    _migrate_holdings_snapshot_primary_key(connection)
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_eastmoney_holdings_stock ON {SNAPSHOT_TABLE}(snapshot_date, stock_symbol)"
     )

@@ -84,6 +84,36 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
+    def test_schema_migrates_legacy_daily_primary_key_to_intraday_key(self):
+        connection = duckdb.connect(":memory:")
+        try:
+            connection.execute("""
+                CREATE TABLE eastmoney_cube_holdings_snapshots (
+                    snapshot_date DATE NOT NULL, snapshot_at TIMESTAMP NOT NULL,
+                    rank_type VARCHAR NOT NULL, cube_symbol VARCHAR NOT NULL,
+                    stock_symbol VARCHAR NOT NULL, weight_pct DOUBLE,
+                    created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (snapshot_date, cube_symbol, stock_symbol)
+                )
+            """)
+            connection.execute("""
+                INSERT INTO eastmoney_cube_holdings_snapshots VALUES
+                ('2026-08-31', '2026-08-31 13:00:00', 'rate', '9001', 'SH.600000', 10, NOW(), NOW())
+            """)
+            _ensure_schema(connection)
+            primary_key_columns = [
+                row[1]
+                for row in sorted(
+                    connection.execute("PRAGMA table_info('eastmoney_cube_holdings_snapshots')").fetchall(),
+                    key=lambda row: row[5],
+                )
+                if row[5]
+            ]
+            self.assertEqual(["snapshot_at", "cube_symbol", "stock_symbol"], primary_key_columns)
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM eastmoney_cube_holdings_snapshots").fetchone()[0])
+        finally:
+            connection.close()
+
     def test_api_update_time_preserves_source_and_normalizes_market_breaks(self):
         fallback = datetime(2026, 8, 31, 16, 2)
         self.assertEqual(
