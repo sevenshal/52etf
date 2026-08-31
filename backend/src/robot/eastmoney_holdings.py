@@ -309,6 +309,8 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
     run_at = datetime.now(CHINA_TZ)
     if not force and run_at.weekday() >= 5:
         return {"skipped": True, "message": f"{run_at.date()} 不是A股交易日"}
+    if not force and run_at.time() < time(9, 30):
+        return {"skipped": True, "message": f"{run_at.strftime('%H:%M')} 尚未开盘"}
     credentials = _load_credentials()
     async with EastmoneyClient(credentials) as client:
         first = await client.fetch_rank_page(1)
