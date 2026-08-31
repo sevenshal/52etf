@@ -1,5 +1,5 @@
-import React, { useCallback, useMemo, useState, useEffect } from 'react';
-import { Card, Button } from 'antd';
+import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
+import { Card, Button, Select, Spin } from 'antd';
 import { LeftOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
@@ -13,6 +13,43 @@ const StockDetail = () => {
   const normalizedSymbol = useMemo(() => (symbol || '').toUpperCase(), [symbol]);
   const isAStock = useMemo(() => /\.(SH|SZ|BJ)$/.test(normalizedSymbol), [normalizedSymbol]);
   const [evcHistory, setEvcHistory] = useState([]);
+  const [stockName, setStockName] = useState('');
+  const [symbolOptions, setSymbolOptions] = useState([]);
+  const [symbolSearching, setSymbolSearching] = useState(false);
+  const symbolSearchTimer = useRef(null);
+  const symbolSearchSequence = useRef(0);
+
+  const searchSymbols = useCallback((query, immediate = false) => {
+    if (!isAStock) return;
+    if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
+    const sequence = ++symbolSearchSequence.current;
+    const runSearch = async () => {
+      setSymbolSearching(true);
+      try {
+        const { data } = await request.get('/api/stock/a-stock/symbols', {
+          params: { q: String(query || '').trim(), limit: 30 },
+        });
+        if (sequence !== symbolSearchSequence.current) return;
+        const options = data || [];
+        const current = options.find(item => item.value === normalizedSymbol);
+        setSymbolOptions(previousOptions => {
+          const currentOption = current
+            || previousOptions.find(item => item.value === normalizedSymbol);
+          return currentOption && !options.some(item => item.value === normalizedSymbol)
+            ? [currentOption, ...options]
+            : options;
+        });
+        if (current?.name) setStockName(current.name);
+      } catch (error) {
+        console.error('股票搜索失败:', error);
+      } finally {
+        if (sequence === symbolSearchSequence.current) setSymbolSearching(false);
+      }
+    };
+    if (immediate) runSearch();
+    else symbolSearchTimer.current = window.setTimeout(runSearch, 250);
+  }, [isAStock, normalizedSymbol]);
+
   const fetchEvcHistory = useCallback(async () => {
     try {
       const historyUrl = isAStock
@@ -26,8 +63,15 @@ const StockDetail = () => {
   }, [isAStock, normalizedSymbol]);
 
   useEffect(() => {
+    setStockName('');
+    setEvcHistory([]);
+    if (isAStock) searchSymbols(normalizedSymbol, true);
     fetchEvcHistory();
-  }, [fetchEvcHistory]);
+  }, [fetchEvcHistory, isAStock, normalizedSymbol, searchSymbols]);
+
+  useEffect(() => () => {
+    if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
+  }, []);
 
   return (
     <div style={{ padding: '24px' }}>
@@ -40,9 +84,24 @@ const StockDetail = () => {
               onClick={() => navigate(-1)}
               style={{ marginRight: '12px' }}
             />
-            <span>{normalizedSymbol} 股票详情</span>
+            <span>{stockName || normalizedSymbol} 股票详情</span>
           </div>
         }
+        extra={isAStock ? (
+          <Select
+            showSearch
+            value={normalizedSymbol}
+            options={symbolOptions}
+            loading={symbolSearching}
+            filterOption={false}
+            onSearch={value => searchSymbols(value)}
+            onDropdownVisibleChange={open => { if (open) searchSymbols(''); }}
+            onChange={value => navigate(`/stock/${value}`)}
+            placeholder="搜索股票名称或代码"
+            notFoundContent={symbolSearching ? <Spin size="small" /> : '没有匹配股票'}
+            style={{ width: 260 }}
+          />
+        ) : null}
       >
         <StockKlineChart
           symbol={normalizedSymbol}

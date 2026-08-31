@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime
 from ...core.database import StockFavorite, StockEVC, get_db, LongPortAccount
 from .account import valid_account
-from sqlalchemy import func
+from sqlalchemy import func, text
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...core.services.szdt import SZDTService
@@ -41,6 +41,59 @@ def _parse_date_query(value: Optional[str], field_name: str):
         return datetime.strptime(value, '%Y-%m-%d').date()
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid {field_name} format. Use YYYY-MM-DD")
+
+
+@router.get("/a-stock/symbols")
+def search_a_stock_symbols(
+    q: str = Query(default="", max_length=64),
+    limit: int = Query(default=20, ge=1, le=50),
+    _: str = Depends(valid_account),
+):
+    """按股票名称或代码搜索当前上市的 A 股。"""
+    search_text = str(q or "").strip().upper()
+    analytics_db = AnalyticsSession()
+    try:
+        rows = analytics_db.execute(
+            text(
+                """
+                SELECT ts_code, symbol, name
+                FROM a_stock_basic
+                WHERE list_status = 'L'
+                  AND (
+                        :query = ''
+                     OR UPPER(ts_code) LIKE :pattern
+                     OR UPPER(symbol) LIKE :pattern
+                     OR UPPER(COALESCE(name, '')) LIKE :pattern
+                  )
+                ORDER BY
+                    CASE
+                        WHEN UPPER(ts_code) = :query OR UPPER(symbol) = :query THEN 0
+                        WHEN UPPER(ts_code) LIKE :prefix OR UPPER(symbol) LIKE :prefix THEN 1
+                        WHEN UPPER(COALESCE(name, '')) LIKE :prefix THEN 2
+                        ELSE 3
+                    END,
+                    ts_code
+                LIMIT :limit
+                """
+            ),
+            {
+                "query": search_text,
+                "pattern": f"%{search_text}%",
+                "prefix": f"{search_text}%",
+                "limit": limit,
+            },
+        ).mappings().all()
+        return [
+            {
+                "value": row["ts_code"],
+                "label": f"{row['name']} · {row['ts_code']}" if row["name"] else row["ts_code"],
+                "name": row["name"],
+            }
+            for row in rows
+        ]
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
 
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])
