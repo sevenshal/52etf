@@ -5,7 +5,11 @@ import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import request from '../utils/request';
 import { formatNumber } from '../utils/format';
-import { appendRollingPocSupportResistance, preprocessKlinesVolume } from '../utils/klines';
+import {
+  appendRollingPocSupportResistance,
+  calculateCloseMovingAverage,
+  preprocessKlinesVolume,
+} from '../utils/klines';
 import { appendNineTurnAtr } from '../utils/nineTurn';
 
 const POC_WINDOW_OPTIONS = [
@@ -118,11 +122,7 @@ const StockKlineChart = ({
   const [rawKlines, setRawKlines] = useState([]);
   const [processedKlines, setProcessedKlines] = useState([]);
   const [supportResistanceWindow, setSupportResistanceWindow] = useState(125);
-  const [priceChangeRatio, setPriceChangeRatio] = useState(30);
-  const [stabilizationPeriod, setStabilizationPeriod] = useState(10);
   const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(1);
-  const [buyPoints, setBuyPoints] = useState([]);
-  const [sellPoints, setSellPoints] = useState([]);
   const [showSupportResistance, setShowSupportResistance] = useState(true);
   const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
   const [chartOption, setChartOption] = useState({});
@@ -175,82 +175,6 @@ const StockKlineChart = ({
       onKlinesChange(processedKlines);
     }
   }, [processedKlines, onKlinesChange]);
-
-  const calculateBuySellPoints = useCallback((klines) => {
-    const newBuyPoints = [];
-    const newSellPoints = [];
-    const buyPointIndexes = new Set();
-    const sellPointIndexes = new Set();
-    const signalWindow = Math.max(1, Number(supportResistanceWindow) || 1);
-    const changeRatio = priceChangeRatio / 100;
-    const stableBars = Math.max(1, Number(stabilizationPeriod) || 1);
-
-    const findHighestPoint = (startIndex, endIndex) => {
-      let highestPoint = { price: 0, index: -1 };
-      for (let i = startIndex; i <= endIndex; i++) {
-        if (klines[i].high > highestPoint.price) {
-          highestPoint = { price: klines[i].high, index: i };
-        }
-      }
-      return highestPoint;
-    };
-
-    const findLowestPoint = (startIndex, endIndex) => {
-      let lowestPoint = { price: Infinity, index: -1 };
-      for (let i = startIndex; i <= endIndex; i++) {
-        if (klines[i].low < lowestPoint.price) {
-          lowestPoint = { price: klines[i].low, index: i };
-        }
-      }
-      return lowestPoint;
-    };
-
-    const addFirstVolumeSpikePoint = (startIndex, endIndex, points, pointIndexes, priceKey) => {
-      for (let i = startIndex; i <= endIndex; i++) {
-        if (klines[i].isVolumeSpike) {
-          if (!pointIndexes.has(i)) {
-            pointIndexes.add(i);
-            points.push({
-              index: i,
-              price: klines[i][priceKey]
-            });
-          }
-          break;
-        }
-      }
-    };
-
-    for (let windowEnd = 0; windowEnd < klines.length; windowEnd++) {
-      const windowStart = Math.max(0, windowEnd - signalWindow + 1);
-
-      const highestPoint = findHighestPoint(windowStart, windowEnd);
-      if (highestPoint.index !== -1) {
-        const lowestPointAfterHigh = findLowestPoint(highestPoint.index + 1, windowEnd);
-        if (lowestPointAfterHigh.index !== -1 && highestPoint.price > 0 &&
-          (highestPoint.price - lowestPointAfterHigh.price) / highestPoint.price > changeRatio) {
-          const volumeSearchStart = lowestPointAfterHigh.index + stableBars;
-          if (volumeSearchStart <= windowEnd) {
-            addFirstVolumeSpikePoint(volumeSearchStart, windowEnd, newBuyPoints, buyPointIndexes, 'low');
-          }
-        }
-      }
-
-      const lowestPoint = findLowestPoint(windowStart, windowEnd);
-      if (lowestPoint.index !== -1) {
-        const highestPointAfterLow = findHighestPoint(lowestPoint.index + 1, windowEnd);
-        if (highestPointAfterLow.index !== -1 && lowestPoint.price > 0 &&
-          (highestPointAfterLow.price - lowestPoint.price) / lowestPoint.price > changeRatio) {
-          const volumeSearchStart = highestPointAfterLow.index + stableBars;
-          if (volumeSearchStart <= windowEnd) {
-            addFirstVolumeSpikePoint(volumeSearchStart, windowEnd, newSellPoints, sellPointIndexes, 'high');
-          }
-        }
-      }
-    }
-
-    setBuyPoints(newBuyPoints);
-    setSellPoints(newSellPoints);
-  }, [supportResistanceWindow, priceChangeRatio, stabilizationPeriod]);
 
   const getChartOption = useCallback(() => {
     const dates = processedKlines.map(item => formatDateKey(item.timestamp));
@@ -328,6 +252,7 @@ const StockKlineChart = ({
     });
 
     const volumeBaseline = processedKlines.map(item => item.volumeMA);
+    const ma20 = calculateCloseMovingAverage(processedKlines, 20);
     const risingTrendPoints = processedKlines
       .map((item, index) => item.highCount >= 2
         ? [index, item.low - (item.atr14 || item.low * 0.01) * 0.22]
@@ -339,35 +264,21 @@ const StockKlineChart = ({
         : null)
       .filter(Boolean);
 
-    const buyPointMarkers = buyPoints.map(point => ({
-      name: '买点',
-      value: 'B',
-      xAxis: point.index,
-      yAxis: point.price,
-      itemStyle: { color: 'red' }
-    }));
-
-    const sellPointMarkers = sellPoints.map(point => ({
-      name: '卖点',
-      value: 'S',
-      xAxis: point.index,
-      yAxis: point.price,
-      itemStyle: { color: 'green' }
-    }));
-
     const series = [
       {
         name: 'K线',
         type: 'candlestick',
         data: klineData,
-        markPoint: {
-          data: [...buyPointMarkers, ...sellPointMarkers],
-          symbolSize: 30,
-          label: {
-            show: true, formatter: '{b}', color: '#fff', fontSize: 12
-          },
-          symbolOffset: [0, '-50%']
-        }
+      },
+      {
+        name: 'MA20',
+        type: 'line',
+        data: ma20,
+        symbol: 'none',
+        smooth: false,
+        connectNulls: false,
+        lineStyle: { color: '#f5a623', width: 1.5 },
+        tooltip: { show: false },
       },
       {
         name: '成交量',
@@ -671,12 +582,11 @@ const StockKlineChart = ({
       legend: {
         data: [
           'K线',
+          'MA20',
           '成交量',
           VOLUME_BASELINE_SERIES_NAME,
           '连续走强',
           '连续走弱',
-          '买点',
-          '卖点',
           ...indicatorLegendNames,
           ...(hasFairValueHi ? ['估值上限'] : []),
           ...(hasFairValueLo ? ['估值下限'] : []),
@@ -752,23 +662,12 @@ const StockKlineChart = ({
       series
     };
   }, [
-    buyPoints,
     processedKlines,
-    sellPoints,
     showSupportResistance,
     valuationDateOffsetDays,
     valuationFillMode,
     valuationHistory,
   ]);
-
-  useEffect(() => {
-    if (processedKlines.length > 0 && priceChangeRatio > 0 && stabilizationPeriod >= 1) {
-      calculateBuySellPoints(processedKlines);
-    } else {
-      setBuyPoints([]);
-      setSellPoints([]);
-    }
-  }, [calculateBuySellPoints, processedKlines, priceChangeRatio, stabilizationPeriod]);
 
   useEffect(() => {
     if (processedKlines.length > 0) {
@@ -813,24 +712,6 @@ const StockKlineChart = ({
             onChange={value => setSupportResistanceWindow(value)}
           />
         </Form.Item>
-        <Form.Item label="涨跌幅(%)">
-          <InputNumber
-            min={1}
-            max={100}
-            step={1}
-            value={priceChangeRatio}
-            onChange={value => setPriceChangeRatio(value)}
-          />
-        </Form.Item>
-        <Form.Item label="企稳时间(K线数)">
-          <InputNumber
-            min={1}
-            max={100}
-            step={1}
-            value={stabilizationPeriod}
-            onChange={value => setStabilizationPeriod(value)}
-          />
-        </Form.Item>
         <Form.Item
           label={renderMetricTitle(
             '成交量Z阈值',
@@ -839,7 +720,7 @@ const StockKlineChart = ({
                 K 线放量使用：<code>z = (log10(当天成交量) - 过去{VOLUME_LOOKBACK_DAYS}日log均值) / 过去{VOLUME_LOOKBACK_DAYS}日log标准差</code>，不包含当天。
               </div>
               <div style={{ marginTop: 6 }}>
-                当 <code>z &gt; 阈值</code> 时，K 线和成交量柱会标记为放量，并参与买卖点识别。
+                当 <code>z &gt; 阈值</code> 时，K 线和成交量柱会标记为放量。
               </div>
               <div style={{ marginTop: 6 }}>
                 支撑压力线的价格桶覆盖量也使用这个阈值筛选高覆盖量价格位。
@@ -882,7 +763,7 @@ const StockKlineChart = ({
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${priceChangeRatio}-${stabilizationPeriod}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${buyPoints.length}-${sellPoints.length}-${valuationHistory.length}-${valuationDateOffsetDays}`}
+          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}`}
           option={chartOption}
           notMerge={true}
           onChartReady={handleChartReady}

@@ -22,6 +22,18 @@ const normalizeTurnoverRate = (value) => {
   return Math.min(numericRate, 1);
 };
 
+export const calculateCloseMovingAverage = (klines, window = 20) => {
+  const period = Math.max(1, Math.floor(Number(window) || 1));
+  return (klines || []).map((_, index) => {
+    if (index < period - 1) return null;
+    const closes = klines
+      .slice(index - period + 1, index + 1)
+      .map(item => toNumber(item?.close));
+    if (closes.some(value => value === null)) return null;
+    return closes.reduce((sum, value) => sum + value, 0) / period;
+  });
+};
+
 const isValidProfileKline = (kline) => {
   const high = toNumber(kline?.high);
   const low = toNumber(kline?.low);

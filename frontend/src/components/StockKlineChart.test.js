@@ -1,4 +1,5 @@
 import { appendNineTurnAtr } from '../utils/nineTurn';
+import { calculateCloseMovingAverage } from '../utils/klines';
 
 const kline = (close, index) => ({
   timestamp: `2026-01-${String(index + 1).padStart(2, '0')}`,
@@ -39,4 +40,13 @@ test('uses the latest red marker even when the rising count only reaches two', (
   expect(result[7].latestRisingCount).toBe(2);
   expect(result[7].risingDrawdownPct).toBeCloseTo((4 / 12) * 100);
   expect(result[7].risingDrawdownAtr).toBeGreaterThan(0);
+});
+
+test('calculates MA20 from closing prices', () => {
+  const rows = Array.from({ length: 21 }, (_, index) => kline(index + 1, index));
+  const ma20 = calculateCloseMovingAverage(rows, 20);
+
+  expect(ma20.slice(0, 19).every(value => value === null)).toBe(true);
+  expect(ma20[19]).toBe(10.5);
+  expect(ma20[20]).toBe(11.5);
 });
