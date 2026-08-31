@@ -10,7 +10,7 @@ import os
 import random
 import string
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -211,7 +211,12 @@ def _parse_rank_at(value: Any, fallback: datetime) -> datetime:
     text = str(value or "").strip()
     if text:
         try:
-            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            # 接口收盘后仍会刷新 updateTime（实测可到 16:00），但东财页面将
+            # 该批榜单的业务时间展示为 15:00。盘后快照统一封顶到收盘时点。
+            if parsed.time() > time(15, 0):
+                return parsed.replace(hour=15, minute=0, second=0, microsecond=0)
+            return parsed
         except ValueError:
             logger.warning("无法解析东方财富榜单时间 %r，使用请求时间", text)
     return fallback.replace(tzinfo=None, microsecond=0)

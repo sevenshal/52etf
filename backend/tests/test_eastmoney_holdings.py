@@ -11,6 +11,7 @@ from src.robot.eastmoney_holdings import (
     _ensure_schema,
     _save_rank_snapshot_and_load_rolling_pool,
     _rank_snapshot_exists,
+    _parse_rank_at,
 )
 
 
@@ -75,3 +76,14 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             self.assertFalse(_rank_snapshot_exists(connection, first_at + timedelta(minutes=15)))
         finally:
             connection.close()
+
+    def test_post_close_api_update_time_is_normalized_to_page_close_time(self):
+        fallback = datetime(2026, 8, 31, 16, 2)
+        self.assertEqual(
+            datetime(2026, 8, 31, 15, 0),
+            _parse_rank_at("2026-08-31 16:00:32", fallback),
+        )
+        self.assertEqual(
+            datetime(2026, 8, 31, 14, 30, 12),
+            _parse_rank_at("2026-08-31 14:30:12", fallback),
+        )

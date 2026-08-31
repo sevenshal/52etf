@@ -1724,7 +1724,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=27,
                 runner=_run_eastmoney_holdings_refresh,
-                default_cron_rule="5,35 9-15 * * mon-fri",
+                default_cron_rule="5,35 9-16 * * mon-fri",
             ),
         }
 
