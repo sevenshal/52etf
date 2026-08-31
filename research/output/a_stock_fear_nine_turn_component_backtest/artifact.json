@@ -1,0 +1,298 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "A股贪恐指数 × 神奇九转成分股回测",
+    "generatedAt": "2026-08-31T02:10:00+08:00",
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# A股贪恐指数 × 神奇九转成分股回测"
+      },
+      {
+        "id": "executive",
+        "type": "markdown",
+        "body": "## Executive Summary\n\n**这套规则能降低回撤，但没有提高全样本收益。** 联合使用均线或成交量底顶信号时，61 个指数的平均策略收益为 15.87%，对齐起点的买入持有为 27.23%；平均最大回撤则由 -29.62% 收窄至 -23.94%。\n\n**不建议把当前卖点作为一次性清仓信号。** 只有 21/61 个指数跑赢基准，而且期末 88.26% 的指数—股票组合仍持仓。更合适的下一步是测试分批减仓、去掉低四，以及卖后重新入场。"
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "strategy_return",
+          "drawdown",
+          "beat_rate",
+          "trade_quality",
+          "open_positions"
+        ]
+      },
+      {
+        "id": "mode_heading",
+        "type": "markdown",
+        "sourceId": "index_source",
+        "body": "## 三种指数信号模式都体现了收益与回撤的交换\n\n下图按指数等权，比较策略和从首次可参与底信号开始买入持有的累计收益。联合模式比纯均线略好，但仍少 11.36 个百分点；成交量模式只有 56 个有效指数，起点和样本不同，不宜直接横向排名。"
+      },
+      {
+        "id": "mode_chart_block",
+        "type": "chart",
+        "chartId": "mode_chart"
+      },
+      {
+        "id": "exit_heading",
+        "type": "markdown",
+        "sourceId": "trade_source",
+        "body": "## 低四卖出的质量最弱\n\n联合模式中，低二和低三卖出的单笔收益中位数分别为 7.07% 和 6.19%，低四只有 2.76%。这是触发后的分组描述，不是删除低四的因果效果；应当用同一批买点做完整路径对照。"
+      },
+      {
+        "id": "exit_chart_block",
+        "type": "chart",
+        "chartId": "exit_chart"
+      },
+      {
+        "id": "index_heading",
+        "type": "markdown",
+        "sourceId": "index_source",
+        "body": "## 规则在震荡行业更有效，在强趋势行业损失机会\n\n基建、证券和软件等指数跑赢较多；半导体材料设备、半导体、通信设备和科创 100 明显落后买入持有。主要风险不是止损失败，而是卖出后没有重新进入持续上涨趋势。"
+      },
+      {
+        "id": "index_table_block",
+        "type": "table",
+        "tableId": "index_table"
+      },
+      {
+        "id": "method",
+        "type": "markdown",
+        "body": "## 回测口径\n\n指数底信号后冻结该日可得的历史成分股；股票先出现低九，随后第一次高二时发出买入信号。指数顶信号后，股票出现低二/三/四、最近红点至少高七、并回撤超过 2 × ATR14 时发出卖出信号。买卖均在下一可交易日开盘执行，手续费双边各 0.03%，卖出印花税 0.05%。未平仓持仓按 2026 年 8 月 28 日收盘价计值。"
+      },
+      {
+        "id": "recommendation",
+        "type": "markdown",
+        "body": "## 建议\n\n1. 当前信号先用于减仓 1/3，不用于一次性清仓。\n2. 下一轮统一买点，比较低2/3与低2/3/4、2/2.5/3 ATR、全卖与分批卖。\n3. 增加卖后重新入场，重点修复强趋势行业的机会成本。\n4. 用 2023—2024 选参数，2025—2026 做严格样本外验证。"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## Caveats\n\n61 个指数成分高度重叠，不能视为 61 个独立样本；股票会跨指数重复出现，因此以逐指数等权作为主结论。成交量模式只有 56 个有效指数。期末仍持仓的组合占 88.26%，已完成交易胜率不能代表完整生命周期。回测未过滤 ST，也未模拟滑点、涨跌停无法成交及成分调整公告时点。"
+      }
+    ],
+    "cards": [
+      {
+        "id": "strategy_return",
+        "dataset": "headline",
+        "sourceId": "index_source",
+        "description": "61 个指数等权平均；联合底顶信号。",
+        "metrics": [
+          {"label": "平均策略收益", "field": "strategy_return", "format": "percent"},
+          {"label": "买入持有", "field": "buy_hold_return", "format": "percent"},
+          {"label": "超额", "field": "excess_return", "format": "percent", "signed": true}
+        ]
+      },
+      {
+        "id": "drawdown",
+        "dataset": "headline",
+        "sourceId": "index_source",
+        "description": "越接近零代表回撤越小。",
+        "metrics": [
+          {"label": "平均最大回撤", "field": "strategy_mdd", "format": "percent"},
+          {"label": "买入持有", "field": "buy_hold_mdd", "format": "percent"},
+          {"label": "改善", "field": "mdd_improvement", "format": "percent", "signed": true}
+        ]
+      },
+      {
+        "id": "beat_rate",
+        "dataset": "headline",
+        "sourceId": "index_source",
+        "description": "策略累计收益高于对齐买入持有的指数占比。",
+        "metrics": [
+          {"label": "指数跑赢率", "field": "beat_rate", "format": "percent"},
+          {"label": "跑赢指数", "field": "beat_count", "format": "number"}
+        ]
+      },
+      {
+        "id": "trade_quality",
+        "dataset": "headline",
+        "sourceId": "trade_source",
+        "description": "13,471 笔联合模式已完成交易。",
+        "metrics": [
+          {"label": "交易胜率", "field": "trade_win_rate", "format": "percent"},
+          {"label": "单笔中位数", "field": "median_trade_return", "format": "percent", "signed": true}
+        ]
+      },
+      {
+        "id": "open_positions",
+        "dataset": "headline",
+        "sourceId": "pair_source",
+        "description": "截止回测期末仍有持仓的指数—股票组合。",
+        "metrics": [
+          {"label": "期末持仓占比", "field": "open_position_rate", "format": "percent"},
+          {"label": "组合数", "field": "pair_count", "format": "number"}
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "mode_chart",
+        "title": "三种指数信号模式的平均累计收益",
+        "subtitle": "按指数等权；策略与对齐起点买入持有",
+        "type": "bar",
+        "dataset": "mode_comparison",
+        "sourceId": "index_source",
+        "encodings": {
+          "x": {"field": "mode_label", "type": "nominal"},
+          "y": {"field": "return_value", "type": "quantitative", "format": "percent"},
+          "color": {"field": "series", "type": "nominal"}
+        },
+        "options": {"grouping": "grouped", "orientation": "vertical", "legend": true}
+      },
+      {
+        "id": "exit_chart",
+        "title": "联合模式不同低计数卖出的单笔收益中位数",
+        "subtitle": "仅统计已完成卖出；低四组明显较弱",
+        "type": "bar",
+        "dataset": "exit_stage",
+        "sourceId": "trade_source",
+        "encodings": {
+          "x": {"field": "stage", "type": "nominal"},
+          "y": {"field": "median_return", "type": "quantitative", "format": "percent"}
+        },
+        "options": {"orientation": "vertical", "legend": false}
+      }
+    ],
+    "tables": [
+      {
+        "id": "index_table",
+        "title": "联合模式跑赢与落后幅度最大的指数",
+        "subtitle": "策略累计收益减去对齐起点买入持有；2023年1月至2026年8月",
+        "dataset": "index_extremes",
+        "sourceId": "index_source",
+        "defaultSort": {"field": "excess_return", "direction": "desc"},
+        "columns": [
+          {"field": "index_name", "label": "指数"},
+          {"field": "index_code", "label": "代码"},
+          {"field": "strategy_return", "label": "策略收益", "format": "percent", "movement": true},
+          {"field": "buy_hold_return", "label": "买入持有", "format": "percent", "movement": true},
+          {"field": "excess_return", "label": "超额", "format": "percent", "movement": true},
+          {"field": "strategy_mdd", "label": "策略回撤", "format": "percent", "movement": true},
+          {"field": "buy_hold_mdd", "label": "基准回撤", "format": "percent", "movement": true},
+          {"field": "completed_trades", "label": "已完成交易", "format": "number"}
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "index_source",
+        "label": "逐指数等权回测结果",
+        "path": "research/output/a_stock_fear_nine_turn_component_backtest/index_summary.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/index_summary.csv')",
+          "description": "读取每个贪恐指数在三种信号模式下的成分股等权组合和对齐买入持有结果。",
+          "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"],
+          "filters": ["trade_date between 2023-01-01 and 2026-08-28", "point-in-time constituent snapshot on or before each bottom signal"],
+          "metric_definitions": ["portfolio_return = 期末逐股票策略净值等权均值 - 1", "buy_hold_return = 股票首次进入底信号成分集合后买入并持有的期末等权收益", "max_drawdown = 净值相对历史峰值的最小跌幅"]
+        }
+      },
+      {
+        "id": "trade_source",
+        "label": "已完成交易明细",
+        "path": "research/output/a_stock_fear_nine_turn_component_backtest/trades.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/trades.csv')",
+          "description": "读取次日开盘执行的神奇九转买卖交易明细。",
+          "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"],
+          "filters": ["buy requires prior unconsumed low_count >= 9 followed by high_count = 2", "sell requires low_count in (2,3,4), latest red high_count >= 7, drawdown > 2 ATR14"],
+          "metric_definitions": ["net_return = 卖出扣费后资金 / 买入前资金 - 1", "win_rate = net_return > 0 的交易占比"]
+        }
+      },
+      {
+        "id": "pair_source",
+        "label": "逐指数—股票组合结果",
+        "path": "research/output/a_stock_fear_nine_turn_component_backtest/pair_summary.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/pair_summary.csv')",
+          "description": "读取每个指数—股票—信号模式组合的策略收益、基准收益和期末持仓状态。",
+          "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"],
+          "filters": ["trade_date between 2023-01-01 and 2026-08-28"],
+          "metric_definitions": ["open_position_rate = 期末仍持仓的组合数 / 全部组合数"]
+        }
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-31T02:10:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "strategy_return": 0.158726,
+          "buy_hold_return": 0.272286,
+          "excess_return": -0.11356,
+          "strategy_mdd": -0.239377,
+          "buy_hold_mdd": -0.296199,
+          "mdd_improvement": 0.056822,
+          "beat_rate": 0.344262,
+          "beat_count": 21,
+          "trade_win_rate": 0.593126,
+          "median_trade_return": 0.056247,
+          "open_position_rate": 0.882559,
+          "pair_count": 12568,
+          "completed_trades": 13471,
+          "index_count": 61,
+          "median_holding_days": 226
+        }
+      ],
+      "mode_comparison": [
+        {"mode": "any", "mode_label": "任一算法", "series": "策略", "return_value": 0.158726, "index_count": 61, "max_drawdown": -0.239377, "excess_return": -0.11356},
+        {"mode": "any", "mode_label": "任一算法", "series": "买入持有", "return_value": 0.272286, "index_count": 61, "max_drawdown": -0.296199, "excess_return": -0.11356},
+        {"mode": "ma5", "mode_label": "均线", "series": "策略", "return_value": 0.149127, "index_count": 61, "max_drawdown": -0.240049, "excess_return": -0.137837},
+        {"mode": "ma5", "mode_label": "均线", "series": "买入持有", "return_value": 0.286964, "index_count": 61, "max_drawdown": -0.295184, "excess_return": -0.137837},
+        {"mode": "volume", "mode_label": "成交量", "series": "策略", "return_value": 0.195706, "index_count": 56, "max_drawdown": -0.226462, "excess_return": -0.165547},
+        {"mode": "volume", "mode_label": "成交量", "series": "买入持有", "return_value": 0.361253, "index_count": 56, "max_drawdown": -0.28815, "excess_return": -0.165547}
+      ],
+      "exit_stage": [
+        {"stage": "低二", "low_count": 2, "trades": 5921, "win_rate": 0.607499, "median_return": 0.07068, "mean_return": 0.179029, "median_atr": 2.491744, "median_holding_days": 279},
+        {"stage": "低三", "low_count": 3, "trades": 3920, "win_rate": 0.609694, "median_return": 0.061936, "mean_return": 0.161928, "median_atr": 2.259258, "median_holding_days": 223},
+        {"stage": "低四", "low_count": 4, "trades": 3630, "win_rate": 0.551791, "median_return": 0.027614, "mean_return": 0.132751, "median_atr": 2.29378, "median_holding_days": 212.5}
+      ],
+      "index_extremes": [
+        {"index_code": "399995.SZ", "index_name": "基建工程", "strategy_return": 0.130873, "buy_hold_return": -0.015191, "excess_return": 0.146064, "strategy_mdd": -0.216165, "buy_hold_mdd": -0.242423, "completed_trades": 77},
+        {"index_code": "399975.SZ", "index_name": "证券公司", "strategy_return": 0.319023, "buy_hold_return": 0.197483, "excess_return": 0.12154, "strategy_mdd": -0.200056, "buy_hold_mdd": -0.259785, "completed_trades": 52},
+        {"index_code": "H30202.CSI", "index_name": "全指软件", "strategy_return": 0.130314, "buy_hold_return": 0.015171, "excess_return": 0.115144, "strategy_mdd": -0.318456, "buy_hold_mdd": -0.426369, "completed_trades": 40},
+        {"index_code": "399998.SZ", "index_name": "中证煤炭", "strategy_return": 0.628304, "buy_hold_return": 0.518235, "excess_return": 0.110069, "strategy_mdd": -0.204871, "buy_hold_mdd": -0.252661, "completed_trades": 40},
+        {"index_code": "H30588.CSI", "index_name": "中证证保", "strategy_return": 0.390927, "buy_hold_return": 0.286323, "excess_return": 0.104604, "strategy_mdd": -0.190821, "buy_hold_mdd": -0.246582, "completed_trades": 51},
+        {"index_code": "930851.CSI", "index_name": "云计算", "strategy_return": 0.207181, "buy_hold_return": 0.724902, "excess_return": -0.517721, "strategy_mdd": -0.157868, "buy_hold_mdd": -0.261595, "completed_trades": 49},
+        {"index_code": "000698.SH", "index_name": "科创100", "strategy_return": 0.548819, "buy_hold_return": 1.166011, "excess_return": -0.617192, "strategy_mdd": -0.217982, "buy_hold_mdd": -0.307803, "completed_trades": 144},
+        {"index_code": "931160.CSI", "index_name": "通信设备", "strategy_return": 1.410972, "buy_hold_return": 2.328297, "excess_return": -0.917325, "strategy_mdd": -0.218939, "buy_hold_mdd": -0.403021, "completed_trades": 72},
+        {"index_code": "H30184.CSI", "index_name": "半导体", "strategy_return": 0.345922, "buy_hold_return": 1.315999, "excess_return": -0.970077, "strategy_mdd": -0.156688, "buy_hold_mdd": -0.407682, "completed_trades": 88},
+        {"index_code": "931743.CSI", "index_name": "半导体材料设备", "strategy_return": 0.189934, "buy_hold_return": 1.357472, "excess_return": -1.167538, "strategy_mdd": -0.126847, "buy_hold_mdd": -0.388659, "completed_trades": 38}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "index_source",
+      "label": "逐指数等权回测结果",
+      "path": "research/output/a_stock_fear_nine_turn_component_backtest/index_summary.csv",
+      "query": {"engine": "duckdb", "language": "sql", "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/index_summary.csv')", "description": "逐指数结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"]}
+    },
+    {
+      "id": "trade_source",
+      "label": "已完成交易明细",
+      "path": "research/output/a_stock_fear_nine_turn_component_backtest/trades.csv",
+      "query": {"engine": "duckdb", "language": "sql", "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/trades.csv')", "description": "交易明细。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"]}
+    },
+    {
+      "id": "pair_source",
+      "label": "逐指数—股票组合结果",
+      "path": "research/output/a_stock_fear_nine_turn_component_backtest/pair_summary.csv",
+      "query": {"engine": "duckdb", "language": "sql", "sql": "SELECT * FROM read_csv_auto('research/output/a_stock_fear_nine_turn_component_backtest/pair_summary.csv')", "description": "组合结果。", "tables_used": ["a_stock_market_daily_qfq", "a_stock_index_weight", "etf_fear_greed_clone_history"]}
+    }
+  ]
+}

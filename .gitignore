@@ -59,3 +59,6 @@ research/output/nine_turn_atr_strategy_backtest*/trades.csv
 research/output/nine_turn_atr_strategy_backtest*/stock_summary.csv
 research/output/nine_turn_atr_strategy_backtest*/equal_weight_portfolio.csv
 research/output/nine_turn_atr_*/*.ipynb
+research/output/a_stock_fear_nine_turn_component_backtest/index_equity.csv
+research/output/a_stock_fear_nine_turn_component_backtest/pair_summary.csv
+research/output/a_stock_fear_nine_turn_component_backtest/trades.csv

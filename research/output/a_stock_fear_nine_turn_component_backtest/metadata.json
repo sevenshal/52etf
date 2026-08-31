@@ -1,0 +1,37 @@
+{
+  "analytics_source": "/home/quantd/quant_prod/quant_robot/analytics.duckdb",
+  "analytics_read_snapshot": "temporary byte-for-byte copy taken 2026-08-31 and removed after the run",
+  "analytics_source_snapshot_mtime": "2026-08-30 12:48:43.840901328 +0800",
+  "fear_source": "/home/quantd/quant_prod/quant_robot/evc_stocks.db",
+  "start_date": "2023-01-01",
+  "end_date": "2026-08-28",
+  "configured_indexes": 61,
+  "indexes_with_fear_history": 61,
+  "indexes_backtested": 61,
+  "signal_modes": [
+    "ma5",
+    "volume",
+    "any"
+  ],
+  "signal_config": {
+    "ma5_bottom_score": 25.0,
+    "ma5_top_score": 75.0,
+    "ma5_lookback_days": 5,
+    "volume_bottom_score": 25.0,
+    "volume_top_score": 75.0,
+    "volume_expand_z": 1.25,
+    "volume_shrink_z": -0.25,
+    "cooldown_days": 5,
+    "updated_at": "2026-08-18 13:57:02.864109"
+  },
+  "entry_rule": "after index bottom, point-in-time constituent buys on the first high_count == 2 after an unconsumed low_count >= 9; next open",
+  "exit_rule": "after index top, low_count in 2/3/4 and latest red marker high_count >= 7 and drawdown > 2 ATR14; next open",
+  "regime_rule": "latest bottom enables entries and cancels sell mode; latest top disables entries and enables exits",
+  "component_rule": "constituents frozen from latest index-weight snapshot available on each bottom-signal date",
+  "commission_each_side": 0.0003,
+  "sell_stamp_duty": 0.0005,
+  "open_positions_marked_at_final_close": true,
+  "candidate_stock_codes": 5583,
+  "index_stock_pairs": 36839,
+  "completed_trades": 35717
+}
