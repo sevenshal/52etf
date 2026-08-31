@@ -299,6 +299,18 @@ def _rank_snapshot_exists(connection, rank_at: datetime) -> bool:
     ).fetchone())
 
 
+def _complete_holdings_snapshot_exists(connection, rank_at: datetime) -> bool:
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS row_count, COUNT(current_price) AS priced_count
+        FROM {SNAPSHOT_TABLE}
+        WHERE snapshot_at = ?
+        """,
+        [rank_at],
+    ).fetchone()
+    return bool(row and row[0] > 0 and row[1] > 0)
+
+
 def _symbol(item: Dict[str, Any]) -> str:
     value = str(item.get("stkMktCode") or "").strip().upper()
     if len(value) == 8 and value[:2] in {"SH", "SZ", "BJ"}:
@@ -331,7 +343,7 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
         try:
             _ensure_schema(connection)
-            if _rank_snapshot_exists(connection, rank_at):
+            if _rank_snapshot_exists(connection, rank_at) and _complete_holdings_snapshot_exists(connection, rank_at):
                 return {
                     "skipped": True,
                     "message": f"东方财富榜单时点 {rank_at.isoformat(sep=' ')} 已采集",

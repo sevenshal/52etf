@@ -12,6 +12,7 @@ from src.robot.eastmoney_holdings import (
     _ensure_schema,
     _save_rank_snapshot_and_load_rolling_pool,
     _rank_snapshot_exists,
+    _complete_holdings_snapshot_exists,
     _normalize_rank_at,
     _parse_source_update_at,
 )
@@ -79,6 +80,7 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM eastmoney_rank_snapshots").fetchone()[0])
             self.assertTrue(_rank_snapshot_exists(connection, first_at))
             self.assertFalse(_rank_snapshot_exists(connection, first_at + timedelta(minutes=15)))
+            self.assertFalse(_complete_holdings_snapshot_exists(connection, first_at))
         finally:
             connection.close()
 
