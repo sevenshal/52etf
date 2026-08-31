@@ -205,6 +205,7 @@ def _ensure_schema(connection) -> None:
             holdings_source VARCHAR, active_rebalance_days INTEGER, is_active BOOLEAN,
             stock_symbol VARCHAR NOT NULL, raw_stock_symbol VARCHAR, stock_name VARCHAR,
             stock_id BIGINT, segment_name VARCHAR, weight_pct DOUBLE,
+            current_price DOUBLE,
             raw_holding_json VARCHAR, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
             PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
         )
@@ -214,6 +215,8 @@ def _ensure_schema(connection) -> None:
     }
     if "source_update_at" not in holding_columns:
         connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
+    if "current_price" not in holding_columns:
+        connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN current_price DOUBLE")
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_eastmoney_holdings_stock ON {SNAPSHOT_TABLE}(snapshot_date, stock_symbol)"
     )
@@ -388,6 +391,7 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
                 "stock_symbol": symbol, "raw_stock_symbol": symbol.replace(".", ""),
                 "stock_name": holding.get("__name") or "", "stock_id": None,
                 "segment_name": holding.get("segment_name") or "", "weight_pct": weight,
+                "current_price": float(holding.get("__zxjg") or 0) or None,
                 "raw_holding_json": json.dumps(holding, ensure_ascii=False, separators=(",", ":")),
                 "created_at": now, "updated_at": now,
             })

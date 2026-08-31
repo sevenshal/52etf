@@ -1,8 +1,9 @@
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timedelta
 
 import duckdb
+import polars as pl
 
 from src.robot.eastmoney_holdings import (
     EastmoneyClient,
@@ -14,6 +15,7 @@ from src.robot.eastmoney_holdings import (
     _normalize_rank_at,
     _parse_source_update_at,
 )
+from src.app.api.eastmoney_holdings import _attach_eastmoney_today_ratio
 
 
 class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
@@ -98,3 +100,21 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             datetime(2026, 8, 31, 14, 30),
             _normalize_rank_at(datetime(2026, 8, 31, 14, 47, 12)),
         )
+
+    def test_today_ratio_uses_snapshot_realtime_price_and_previous_close(self):
+        items = [{
+            "stock_symbol": "SH.600000",
+            "current_price": 11.0,
+            "weight_multiple_today": 2.0,
+        }]
+        price_frame = pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "trade_date": [datetime(2026, 9, 1).date()],
+            "close": [10.0],
+        })
+        with patch("src.app.api.eastmoney_holdings._duckdb_table_exists", return_value=True), patch(
+            "src.app.api.eastmoney_holdings._load_price_frame", return_value=price_frame
+        ):
+            _attach_eastmoney_today_ratio(object(), items, datetime(2026, 9, 1).date())
+        self.assertEqual(1.1, items[0]["momentum_multiple_today"])
+        self.assertEqual(1.82, items[0]["weight_price_ratio_today"])

@@ -151,7 +151,8 @@ def _eastmoney_top_holdings_snapshot_cte(active_only: bool) -> str:
                 stock_name,
                 stock_id,
                 segment_name,
-                CAST(weight_pct AS DOUBLE) AS weight_pct
+                CAST(weight_pct AS DOUBLE) AS weight_pct,
+                CAST(current_price AS DOUBLE) AS current_price
             FROM {table}
             WHERE weight_pct IS NOT NULL
               AND weight_pct > 0
@@ -198,6 +199,7 @@ def _eastmoney_top_holdings_snapshot_cte(active_only: bool) -> str:
                 CAST(NULL AS BIGINT) AS stock_id,
                 '现金' AS segment_name,
                 GREATEST(0.0, 100.0 - stock_weight_pct) AS weight_pct
+                ,CAST(NULL AS DOUBLE) AS current_price
             FROM cube_rows
             WHERE GREATEST(0.0, 100.0 - stock_weight_pct) > 0.005
         ),
@@ -369,6 +371,9 @@ def _attach_eastmoney_5d_momentum(
     items: List[Dict[str, Any]],
     compare_snapshot_date: Any,
     snapshot_date: Any,
+    *,
+    period_key: str = "5d",
+    weight_multiple_key: str = "weight_multiple_5d",
 ) -> None:
     """Attach 5-day price momentum and weight/price multiple ratio to latest holdings items.
 
@@ -381,10 +386,13 @@ def _attach_eastmoney_5d_momentum(
     together and the ratio is near 1. A ratio clearly above 1 (especially weight up while
     price down) means the weight rise is NOT caused by the rally — it reflects active buying.
     """
+    momentum_key = f"momentum_{period_key}"
+    momentum_multiple_key = f"momentum_multiple_{period_key}"
+    ratio_key = f"weight_price_ratio_{period_key}"
     for item in items:
-        item.setdefault("momentum_5d", None)
-        item.setdefault("momentum_multiple_5d", None)
-        item.setdefault("weight_price_ratio_5d", None)
+        item.setdefault(momentum_key, None)
+        item.setdefault(momentum_multiple_key, None)
+        item.setdefault(ratio_key, None)
     if not items or compare_snapshot_date is None or snapshot_date is None:
         return
     if not any(_duckdb_table_exists(connection, table) for table in _EASTMONEY_PRICE_TABLES):
@@ -447,21 +455,75 @@ def _attach_eastmoney_5d_momentum(
         )
         momentum = momentum_by_symbol.get(price_symbol)
         multiple = multiple_by_symbol.get(price_symbol)
-        item["momentum_5d"] = round(momentum, 2) if momentum is not None else None
-        item["momentum_multiple_5d"] = round(multiple, 3) if multiple is not None else None
-        weight_multiple = item.get("weight_multiple_5d")
+        item[momentum_key] = round(momentum, 2) if momentum is not None else None
+        item[momentum_multiple_key] = round(multiple, 3) if multiple is not None else None
+        weight_multiple = item.get(weight_multiple_key)
         if weight_multiple is not None:
-            item["weight_multiple_5d"] = round(float(weight_multiple), 3)
-            weight_multiple = item["weight_multiple_5d"]
+            item[weight_multiple_key] = round(float(weight_multiple), 3)
+            weight_multiple = item[weight_multiple_key]
         if (
             multiple is not None
             and weight_multiple is not None
             and multiple > 0
             and float(weight_multiple) > 0
         ):
-            item["weight_price_ratio_5d"] = round(float(weight_multiple) / multiple, 2)
+            item[ratio_key] = round(float(weight_multiple) / multiple, 2)
         else:
-            item["weight_price_ratio_5d"] = None
+            item[ratio_key] = None
+
+
+def _attach_eastmoney_today_ratio(
+    connection,
+    items: List[Dict[str, Any]],
+    previous_close_snapshot_date: Any,
+) -> None:
+    """Attach latest-snapshot vs previous-close price and weight multiples."""
+    for item in items:
+        item.setdefault("momentum_today", None)
+        item.setdefault("momentum_multiple_today", None)
+        item.setdefault("weight_price_ratio_today", None)
+    if not items or previous_close_snapshot_date is None:
+        return
+    if not any(_duckdb_table_exists(connection, table) for table in _EASTMONEY_PRICE_TABLES):
+        return
+    try:
+        previous_day = (
+            previous_close_snapshot_date
+            if isinstance(previous_close_snapshot_date, date)
+            else date.fromisoformat(str(previous_close_snapshot_date))
+        )
+    except ValueError:
+        return
+    symbols = []
+    for item in items:
+        price_symbol = _eastmoney_symbol_to_ts_code(item.get("stock_symbol"))
+        if price_symbol and SYMBOL_PATTERN.match(price_symbol):
+            symbols.append(price_symbol)
+    if not symbols:
+        return
+    try:
+        price_df = _load_price_frame(symbols, previous_day - timedelta(days=10), previous_day)
+        previous_close_by_symbol: Dict[str, float] = {}
+        for (symbol,), group in price_df.group_by("symbol"):
+            usable = group.filter(pl.col("trade_date") <= previous_day).sort("trade_date")
+            if not usable.is_empty():
+                previous_close_by_symbol[symbol] = usable.tail(1).select("close").to_series()[0]
+    except Exception as exc:
+        logger.warning("Unable to compute today price ratio for 东方财富持仓: %s", exc)
+        return
+    for item in items:
+        price_symbol = _eastmoney_symbol_to_ts_code(item.get("stock_symbol"))
+        previous_close = previous_close_by_symbol.get(price_symbol)
+        current_price = _safe_float(item.get("current_price"))
+        weight_multiple = _safe_float(item.get("weight_multiple_today"))
+        if not previous_close or not current_price or previous_close <= 0 or current_price <= 0:
+            continue
+        price_multiple = current_price / previous_close
+        item["momentum_today"] = round((price_multiple - 1.0) * 100.0, 2)
+        item["momentum_multiple_today"] = round(price_multiple, 3)
+        if weight_multiple is not None and weight_multiple > 0:
+            item["weight_multiple_today"] = round(weight_multiple, 3)
+            item["weight_price_ratio_today"] = round(weight_multiple / price_multiple, 2)
 
 
 def _load_eastmoney_board_momentum(
@@ -946,6 +1008,11 @@ def load_eastmoney_top_holdings_latest(
                 ) ranked_dates
                 WHERE snapshot_rank_desc = {EASTMONEY_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
             ),
+            previous_snapshot AS (
+                SELECT MAX(snapshot_date) AS snapshot_date
+                FROM rank_dates
+                WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+            ),
             latest_cube_summary AS (
                 SELECT
                     cube_rows.snapshot_date,
@@ -969,6 +1036,7 @@ def load_eastmoney_top_holdings_latest(
             SELECT
                 latest_snapshot.snapshot_date,
                 compare_snapshot.snapshot_date AS rank_compare_snapshot_date,
+                previous_snapshot.snapshot_date AS previous_close_snapshot_date,
                 latest_cube_summary.snapshot_at,
                 COALESCE(filtered_latest_summary.cube_count, 0) AS cube_count,
                 COALESCE(filtered_latest_summary.holding_row_count, 0) AS holding_row_count,
@@ -977,6 +1045,7 @@ def load_eastmoney_top_holdings_latest(
                 latest_cube_summary.active_rebalance_days
             FROM latest_snapshot
             LEFT JOIN compare_snapshot ON TRUE
+            LEFT JOIN previous_snapshot ON TRUE
             LEFT JOIN latest_cube_summary ON latest_cube_summary.snapshot_date = latest_snapshot.snapshot_date
             LEFT JOIN filtered_latest_summary ON filtered_latest_summary.snapshot_date = latest_snapshot.snapshot_date
             """,
@@ -1009,6 +1078,11 @@ def load_eastmoney_top_holdings_latest(
                 ) ranked_dates
                 WHERE snapshot_rank_desc = {EASTMONEY_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS}
             ),
+            previous_snapshot AS (
+                SELECT MAX(snapshot_date) AS snapshot_date
+                FROM rank_dates
+                WHERE snapshot_date < (SELECT snapshot_date FROM latest_snapshot)
+            ),
             snapshot_holdings AS (
                 SELECT filtered_holdings.*
                 FROM filtered_holdings
@@ -1024,6 +1098,7 @@ def load_eastmoney_top_holdings_latest(
                     ANY_VALUE(raw_stock_symbol) AS raw_stock_symbol,
                     ANY_VALUE(stock_name) AS stock_name,
                     ANY_VALUE(segment_name) AS segment_name,
+                    ANY_VALUE(current_price) AS current_price,
                     MIN(year_rank) AS best_year_rank,
                     COUNT(DISTINCT cube_symbol) AS holding_cube_count,
                     SUM(weight_pct) AS total_weight_pct,
@@ -1068,6 +1143,23 @@ def load_eastmoney_top_holdings_latest(
                     ) AS composite_rank,
                     *
                 FROM compare_stock_summary
+            ),
+            previous_holdings AS (
+                SELECT filtered_holdings.*
+                FROM filtered_holdings
+                JOIN previous_snapshot ON filtered_holdings.snapshot_date = previous_snapshot.snapshot_date
+            ),
+            previous_snapshot_summary AS (
+                SELECT COUNT(DISTINCT cube_symbol) AS cube_count
+                FROM previous_holdings
+            ),
+            previous_stock_summary AS (
+                SELECT
+                    stock_symbol,
+                    SUM(weight_pct) / NULLIF(MAX(previous_snapshot_summary.cube_count), 0) AS composite_weight_pct
+                FROM previous_holdings
+                CROSS JOIN previous_snapshot_summary
+                GROUP BY stock_symbol
             )
             SELECT
                 ranked.*,
@@ -1087,9 +1179,17 @@ def load_eastmoney_top_holdings_latest(
                          OR compare_ranked.composite_weight_pct = 0
                     THEN NULL
                     ELSE ranked.composite_weight_pct / compare_ranked.composite_weight_pct
-                END AS weight_multiple_5d
+                END AS weight_multiple_5d,
+                previous_stock_summary.composite_weight_pct AS weight_previous_close,
+                CASE
+                    WHEN previous_stock_summary.composite_weight_pct IS NULL
+                         OR previous_stock_summary.composite_weight_pct = 0
+                    THEN NULL
+                    ELSE ranked.composite_weight_pct / previous_stock_summary.composite_weight_pct
+                END AS weight_multiple_today
             FROM ranked
             LEFT JOIN compare_ranked ON compare_ranked.stock_symbol = ranked.stock_symbol
+            LEFT JOIN previous_stock_summary ON previous_stock_summary.stock_symbol = ranked.stock_symbol
             ORDER BY ranked.composite_rank
             LIMIT ?
             """,
@@ -1100,6 +1200,11 @@ def load_eastmoney_top_holdings_latest(
             item_rows,
             metadata.get("rank_compare_snapshot_date"),
             snapshot_date,
+        )
+        _attach_eastmoney_today_ratio(
+            connection,
+            item_rows,
+            metadata.get("previous_close_snapshot_date"),
         )
         for item in item_rows:
             item["direction"] = _eastmoney_direction(
@@ -1124,6 +1229,7 @@ def load_eastmoney_top_holdings_latest(
             "limit": normalized_limit,
             "snapshot_date": snapshot_date,
             "rank_compare_snapshot_date": metadata.get("rank_compare_snapshot_date"),
+            "previous_close_snapshot_date": metadata.get("previous_close_snapshot_date"),
             "rank_compare_trading_days": EASTMONEY_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS,
             "snapshot_at": metadata.get("snapshot_at"),
             "cube_count": metadata.get("cube_count") or 0,
