@@ -176,7 +176,7 @@ class BarchartService:
             },
         )
 
-    def refresh_session(self, symbol: str, page_name: str = "put-call-ratios") -> str:
+    def refresh_session(self, symbol: str, page_name: str = "put-call-ratios") -> Optional[str]:
         page_url = QUOTE_PAGE_URL.format(symbol=symbol, page_name=page_name)
         self._request_with_retries(
             "GET",
@@ -193,7 +193,11 @@ class BarchartService:
 
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if not xsrf_token:
-            raise RuntimeError(f"Barchart did not set XSRF-TOKEN for {symbol}")
+            # Barchart's public quote pages no longer consistently issue this
+            # cookie.  The Core API remains available with same-origin headers,
+            # so only send the XSRF header when the site supplied a token.
+            self._xsrf_token = None
+            return None
         self._xsrf_token = unquote(xsrf_token)
         return self._xsrf_token
 
@@ -301,16 +305,22 @@ class BarchartService:
             return None
 
     @staticmethod
-    def _api_headers(symbol: str, page_name: str, xsrf_token: str) -> Dict[str, str]:
-        return {
+    def _api_headers(
+        symbol: str,
+        page_name: str,
+        xsrf_token: Optional[str],
+    ) -> Dict[str, str]:
+        headers = {
             "Accept": "application/json",
             "Priority": "u=1, i",
             "Referer": QUOTE_PAGE_URL.format(symbol=symbol, page_name=page_name),
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "X-XSRF-TOKEN": xsrf_token,
         }
+        if xsrf_token:
+            headers["X-XSRF-TOKEN"] = xsrf_token
+        return headers
 
     @staticmethod
     def _to_int(value: Any, default: int = 0) -> int:
