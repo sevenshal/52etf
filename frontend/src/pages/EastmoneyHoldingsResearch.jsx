@@ -112,6 +112,21 @@ const eastmoneyDirectionOf = record => {
   return '持平';
 };
 
+const eastmoneyTodayDirectionOf = record => {
+  if (record?.direction_today) return record.direction_today;
+  const weight = weightMomentumRatioNumber(record?.weight_multiple_today);
+  const price = weightMomentumRatioNumber(record?.momentum_multiple_today);
+  const ratio = weightMomentumRatioNumber(record?.weight_price_ratio_today);
+  if (weight === null) return '新进';
+  if (weight > 1.05 && ratio !== null && ratio > 1.05) {
+    return price !== null && price >= 1 ? '顺势加仓' : '逆势吸筹';
+  }
+  if (weight < 0.95 && ratio !== null && ratio < 0.95) {
+    return price !== null && price >= 1 ? '借涨减仓' : '减仓';
+  }
+  return '持平';
+};
+
 const isCashSymbol = record => {
   const symbol = String(record?.stock_symbol || '').toUpperCase();
   return symbol === 'CASH' || symbol === 'CN_CASH';
@@ -182,6 +197,7 @@ const renderTodayWeightPriceRatio = (value, record) => {
   let color = '#595959';
   if (ratio > 1.15) color = '#389e0d';
   else if (ratio < 0.85) color = '#cf1322';
+  const direction = isCashSymbol(record) ? null : eastmoneyTodayDirectionOf(record);
   return (
     <Tooltip
       title={
@@ -191,7 +207,10 @@ const renderTodayWeightPriceRatio = (value, record) => {
         + `（${priceMultiple !== null ? `${multipleFixed(priceMultiple)}x` : '-'}）`
       }
     >
-      <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+      <Space size={4}>
+        <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+        {direction ? <Tag color={EASTMONEY_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag> : null}
+      </Space>
     </Tooltip>
   );
 };
@@ -758,6 +777,9 @@ const EastmoneyHoldingsResearch = () => {
         - (weightMomentumRatioNumber(b.weight_price_ratio_today) ?? Number.NEGATIVE_INFINITY)
       ),
       sortDirections: ['descend', 'ascend'],
+      filters: EASTMONEY_DIRECTIONS.map(direction => ({ text: direction, value: direction })),
+      filterMultiple: true,
+      onFilter: (value, record) => eastmoneyTodayDirectionOf(record) === value,
       render: renderTodayWeightPriceRatio,
     },
     {
