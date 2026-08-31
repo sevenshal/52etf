@@ -11,7 +11,8 @@ from src.robot.eastmoney_holdings import (
     _ensure_schema,
     _save_rank_snapshot_and_load_rolling_pool,
     _rank_snapshot_exists,
-    _parse_rank_at,
+    _normalize_rank_at,
+    _parse_source_update_at,
 )
 
 
@@ -60,12 +61,14 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             first = _save_rank_snapshot_and_load_rolling_pool(
                 connection,
                 rank_at=first_at,
+                source_update_at=first_at,
                 rankings=[{"combinationId": 1, "userName": "一", "profitRate": "1"}],
                 now=first_at,
             )
             second = _save_rank_snapshot_and_load_rolling_pool(
                 connection,
                 rank_at=first_at + timedelta(minutes=30),
+                source_update_at=first_at + timedelta(minutes=30, seconds=42),
                 rankings=[{"combinationId": 2, "userName": "二", "profitRate": "2"}],
                 now=first_at + timedelta(minutes=30),
             )
@@ -77,13 +80,21 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-    def test_post_close_api_update_time_is_normalized_to_page_close_time(self):
+    def test_api_update_time_preserves_source_and_normalizes_market_breaks(self):
         fallback = datetime(2026, 8, 31, 16, 2)
         self.assertEqual(
-            datetime(2026, 8, 31, 15, 0),
-            _parse_rank_at("2026-08-31 16:00:32", fallback),
+            datetime(2026, 8, 31, 16, 0, 32),
+            _parse_source_update_at("2026-08-31 16:00:32", fallback),
         )
         self.assertEqual(
-            datetime(2026, 8, 31, 14, 30, 12),
-            _parse_rank_at("2026-08-31 14:30:12", fallback),
+            datetime(2026, 8, 31, 15, 0),
+            _normalize_rank_at(datetime(2026, 8, 31, 16, 0, 32)),
+        )
+        self.assertEqual(
+            datetime(2026, 8, 31, 11, 30),
+            _normalize_rank_at(datetime(2026, 8, 31, 12, 35, 18)),
+        )
+        self.assertEqual(
+            datetime(2026, 8, 31, 14, 30),
+            _normalize_rank_at(datetime(2026, 8, 31, 14, 47, 12)),
         )

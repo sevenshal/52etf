@@ -177,18 +177,25 @@ class EastmoneyClient:
 def _ensure_schema(connection) -> None:
     connection.execute(f"""
         CREATE TABLE IF NOT EXISTS {RANK_SNAPSHOT_TABLE} (
-            rank_at TIMESTAMP NOT NULL, rank_type VARCHAR NOT NULL, rank INTEGER NOT NULL,
+            rank_at TIMESTAMP NOT NULL, source_update_at TIMESTAMP,
+            rank_type VARCHAR NOT NULL, rank INTEGER NOT NULL,
             combination_id BIGINT NOT NULL, user_id VARCHAR, user_name VARCHAR,
             profit_rate DOUBLE, raw_rank_json VARCHAR, created_at TIMESTAMP NOT NULL,
             PRIMARY KEY (rank_at, rank_type, combination_id)
         )
     """)
+    rank_columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info('{RANK_SNAPSHOT_TABLE}')").fetchall()
+    }
+    if "source_update_at" not in rank_columns:
+        connection.execute(f"ALTER TABLE {RANK_SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_eastmoney_rank_history_time ON {RANK_SNAPSHOT_TABLE}(rank_at, rank)"
     )
     connection.execute(f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
             snapshot_date DATE NOT NULL, snapshot_at TIMESTAMP NOT NULL,
+            source_update_at TIMESTAMP,
             rank_type VARCHAR NOT NULL, year_rank INTEGER, cube_symbol VARCHAR NOT NULL,
             cube_id BIGINT, cube_name VARCHAR, screen_name VARCHAR,
             latest_rebalance_at TIMESTAMP, latest_rebalance_id BIGINT,
@@ -202,30 +209,45 @@ def _ensure_schema(connection) -> None:
             PRIMARY KEY (snapshot_at, cube_symbol, stock_symbol)
         )
     """)
+    holding_columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
+    }
+    if "source_update_at" not in holding_columns:
+        connection.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN source_update_at TIMESTAMP")
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS idx_eastmoney_holdings_stock ON {SNAPSHOT_TABLE}(snapshot_date, stock_symbol)"
     )
 
 
-def _parse_rank_at(value: Any, fallback: datetime) -> datetime:
+def _parse_source_update_at(value: Any, fallback: datetime) -> datetime:
     text = str(value or "").strip()
     if text:
         try:
-            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-            # 接口收盘后仍会刷新 updateTime（实测可到 16:00），但东财页面将
-            # 该批榜单的业务时间展示为 15:00。盘后快照统一封顶到收盘时点。
-            if parsed.time() > time(15, 0):
-                return parsed.replace(hour=15, minute=0, second=0, microsecond=0)
-            return parsed
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             logger.warning("无法解析东方财富榜单时间 %r，使用请求时间", text)
     return fallback.replace(tzinfo=None, microsecond=0)
+
+
+def _normalize_rank_at(source_update_at: datetime) -> datetime:
+    """Map the API refresh timestamp to the business time shown on the leaderboard."""
+    parsed = source_update_at.replace(second=0, microsecond=0)
+    current_time = parsed.time()
+    if time(11, 30) <= current_time < time(13, 0):
+        return parsed.replace(hour=11, minute=30)
+    if current_time >= time(15, 0):
+        return parsed.replace(hour=15, minute=0)
+    # 有效交易时段按00/30分钟榜单批次向下归整。
+    if time(9, 30) <= current_time < time(11, 30) or time(13, 0) <= current_time < time(15, 0):
+        return parsed.replace(minute=30 if parsed.minute >= 30 else 0)
+    return parsed
 
 
 def _save_rank_snapshot_and_load_rolling_pool(
     connection,
     *,
     rank_at: datetime,
+    source_update_at: datetime,
     rankings: List[Dict[str, Any]],
     now: datetime,
     lookback_days: int = 30,
@@ -233,7 +255,8 @@ def _save_rank_snapshot_and_load_rolling_pool(
     rank_rows = []
     for rank, item in enumerate(rankings, 1):
         rank_rows.append({
-            "rank_at": rank_at, "rank_type": RANK_TYPE, "rank": rank,
+            "rank_at": rank_at, "source_update_at": source_update_at,
+            "rank_type": RANK_TYPE, "rank": rank,
             "combination_id": int(item["combinationId"]), "user_id": str(item.get("userId") or ""),
             "user_name": str(item.get("userName") or ""),
             "profit_rate": float(item.get("profitRate") or 0),
@@ -291,7 +314,8 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
         first = await client.fetch_rank_page(1)
         data = first.get("data") or {}
         rankings = list(data.get("pages") or [])
-        rank_at = _parse_rank_at(data.get("updateTime"), run_at)
+        source_update_at = _parse_source_update_at(data.get("updateTime"), run_at)
+        rank_at = _normalize_rank_at(source_update_at)
         total_pages = int(data.get("totalPages") or 1)
         for page in range(2, total_pages + 1):
             payload = await client.fetch_rank_page(page)
@@ -310,6 +334,7 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
                 }
             rolling_rankings = _save_rank_snapshot_and_load_rolling_pool(
                 connection, rank_at=rank_at, rankings=rankings, now=now,
+                source_update_at=source_update_at,
             )
         finally:
             connection.close()
@@ -345,6 +370,7 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
             symbol = _symbol(holding)
             rows.append({
                 "snapshot_date": snapshot_at.date(), "snapshot_at": snapshot_at,
+                "source_update_at": source_update_at,
                 "rank_type": RANK_TYPE, "year_rank": rank,
                 "cube_symbol": str(combination.get("combinationId")),
                 "cube_id": combination.get("combinationId"),
@@ -377,7 +403,9 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
     finally:
         connection.close()
     return {
-        "snapshot_at": snapshot_at.isoformat(sep=" "), "rank_count": len(rankings),
+        "snapshot_at": snapshot_at.isoformat(sep=" "),
+        "source_update_at": source_update_at.isoformat(sep=" "),
+        "rank_count": len(rankings),
         "rolling_combination_count": len(rolling_rankings),
         "holding_rows": len(rows), "failed_count": len(failed), "failed": failed[:10],
     }
