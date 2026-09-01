@@ -197,6 +197,9 @@ const renderTodayWeightPriceRatio = (value, record) => {
   let color = '#595959';
   if (ratio > 1.15) color = '#389e0d';
   else if (ratio < 0.85) color = '#cf1322';
+  const priceColor = priceMultiple === null
+    ? undefined
+    : (priceMultiple > 1 ? '#389e0d' : priceMultiple < 1 ? '#cf1322' : undefined);
   const direction = isCashSymbol(record) ? null : eastmoneyTodayDirectionOf(record);
   return (
     <Tooltip
@@ -207,9 +210,18 @@ const renderTodayWeightPriceRatio = (value, record) => {
         + `（${priceMultiple !== null ? `${multipleFixed(priceMultiple)}x` : '-'}）`
       }
     >
-      <Space size={4}>
-        <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
-        {direction ? <Tag color={EASTMONEY_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag> : null}
+      <Space size={4} direction="vertical" style={{ gap: 0 }}>
+        <Space size={4}>
+          <Text style={{ color }}>{ratio.toFixed(2)}x</Text>
+          {direction ? <Tag color={EASTMONEY_DIRECTION_COLORS[direction] || 'default'} style={{ marginInlineEnd: 0 }}>{direction}</Tag> : null}
+        </Space>
+        <Text type="secondary" style={{ fontSize: 11, lineHeight: '14px' }}>
+          权{weightMultiple !== null ? multipleFixed(weightMultiple) : '-'}x
+          {' / '}
+          <span style={{ color: priceColor }}>
+            价{priceMultiple !== null ? multipleFixed(priceMultiple) : '-'}x
+          </span>
+        </Text>
       </Space>
     </Tooltip>
   );
