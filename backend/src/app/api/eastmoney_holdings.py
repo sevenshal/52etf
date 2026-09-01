@@ -532,17 +532,18 @@ def _attach_eastmoney_today_ratio(
             item["weight_price_ratio_today"] = round(weight_multiple / price_multiple, 2)
 
 
-def _attach_eastmoney_history_today_ratios(rows: List[Dict[str, Any]]) -> None:
-    """Calculate each history row against the preceding holdings trading day."""
-    previous: Optional[Dict[str, Any]] = None
+def _attach_eastmoney_history_5d_ratios(rows: List[Dict[str, Any]]) -> None:
+    """Calculate each row over a rolling window of five holdings trading days."""
     today = _china_today()
     for index, row in enumerate(rows):
-        row["weight_previous_close"] = None
-        row["weight_multiple_today"] = None
-        row["momentum_multiple_today"] = None
-        row["weight_price_ratio_today"] = None
-        row["price_for_ratio_today"] = None
-        if previous is not None:
+        row["weight_5d_ago"] = None
+        row["weight_multiple_5d"] = None
+        row["momentum_multiple_5d"] = None
+        row["weight_price_ratio_5d"] = None
+        row["price_for_ratio_5d"] = None
+        row["direction_5d"] = None
+        if index >= EASTMONEY_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS - 1:
+            previous = rows[index - (EASTMONEY_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS - 1)]
             current_weight = _safe_float(row.get("composite_weight_pct"))
             previous_weight = _safe_float(previous.get("composite_weight_pct"))
             try:
@@ -555,23 +556,22 @@ def _attach_eastmoney_history_today_ratios(rows: List[Dict[str, Any]]) -> None:
             )
             previous_price = _safe_float(previous.get("close_price"))
             if previous_weight is not None and previous_weight > 0:
-                row["weight_previous_close"] = round(previous_weight, 4)
+                row["weight_5d_ago"] = round(previous_weight, 4)
                 if current_weight is not None and current_weight > 0:
-                    row["weight_multiple_today"] = round(current_weight / previous_weight, 3)
+                    row["weight_multiple_5d"] = round(current_weight / previous_weight, 3)
             if current_price is not None and current_price > 0 and previous_price is not None and previous_price > 0:
-                row["price_for_ratio_today"] = round(current_price, 3)
-                row["momentum_multiple_today"] = round(current_price / previous_price, 3)
-            if row["weight_multiple_today"] is not None and row["momentum_multiple_today"] is not None:
-                row["weight_price_ratio_today"] = round(
-                    row["weight_multiple_today"] / row["momentum_multiple_today"],
+                row["price_for_ratio_5d"] = round(current_price, 3)
+                row["momentum_multiple_5d"] = round(current_price / previous_price, 3)
+            if row["weight_multiple_5d"] is not None and row["momentum_multiple_5d"] is not None:
+                row["weight_price_ratio_5d"] = round(
+                    row["weight_multiple_5d"] / row["momentum_multiple_5d"],
                     2,
                 )
-        row["direction_today"] = _eastmoney_direction(
-            row.get("weight_multiple_today"),
-            row.get("momentum_multiple_today"),
-            row.get("weight_price_ratio_today"),
-        )
-        previous = row
+            row["direction_5d"] = _eastmoney_direction(
+                row.get("weight_multiple_5d"),
+                row.get("momentum_multiple_5d"),
+                row.get("weight_price_ratio_5d"),
+            )
 
 
 def _load_eastmoney_board_momentum(
@@ -1466,7 +1466,7 @@ def load_eastmoney_top_holdings_history(
                                 row[target] = round(price, 3) if price is not None else None
                 except Exception as exc:
                     logger.warning("Unable to load rt_k for 东方财富持仓 %s: %s", normalized_symbol, exc)
-        _attach_eastmoney_history_today_ratios(rows)
+        _attach_eastmoney_history_5d_ratios(rows)
         return {
             "available": True,
             "active_only": active_only,

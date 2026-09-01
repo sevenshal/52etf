@@ -17,7 +17,7 @@ from src.robot.eastmoney_holdings import (
     _parse_source_update_at,
 )
 from src.app.api.eastmoney_holdings import (
-    _attach_eastmoney_history_today_ratios,
+    _attach_eastmoney_history_5d_ratios,
     _attach_eastmoney_today_ratio,
 )
 
@@ -36,24 +36,27 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             compute_eastmoney_sign(envelope),
         )
 
-    def test_history_today_ratio_and_direction_use_previous_row(self):
+    def test_history_5d_ratio_and_direction_use_five_day_window(self):
         rows = [
             {"snapshot_date": "2026-09-01", "composite_weight_pct": 10.0, "close_price": 100.0},
+            {"snapshot_date": "2026-09-02", "composite_weight_pct": 10.5, "close_price": 102.0},
+            {"snapshot_date": "2026-09-03", "composite_weight_pct": 11.0, "close_price": 104.0},
+            {"snapshot_date": "2026-09-04", "composite_weight_pct": 11.5, "close_price": 106.0},
             {
-                "snapshot_date": "2026-09-02",
+                "snapshot_date": "2026-09-05",
                 "composite_weight_pct": 12.0,
                 "close_price": 110.0,
                 "current_price": 108.0,
             },
         ]
-        with patch("src.app.api.eastmoney_holdings._china_today", return_value=datetime(2026, 9, 2).date()):
-            _attach_eastmoney_history_today_ratios(rows)
-        self.assertIsNone(rows[0]["weight_price_ratio_today"])
-        self.assertEqual("新进", rows[0]["direction_today"])
-        self.assertEqual(108.0, rows[1]["price_for_ratio_today"])
-        self.assertEqual(110.0, rows[1]["close_price"])
-        self.assertEqual(1.11, rows[1]["weight_price_ratio_today"])
-        self.assertEqual("顺势加仓", rows[1]["direction_today"])
+        with patch("src.app.api.eastmoney_holdings._china_today", return_value=datetime(2026, 9, 5).date()):
+            _attach_eastmoney_history_5d_ratios(rows)
+        self.assertTrue(all(row["weight_price_ratio_5d"] is None for row in rows[:4]))
+        self.assertTrue(all(row["direction_5d"] is None for row in rows[:4]))
+        self.assertEqual(108.0, rows[4]["price_for_ratio_5d"])
+        self.assertEqual(110.0, rows[4]["close_price"])
+        self.assertEqual(1.11, rows[4]["weight_price_ratio_5d"])
+        self.assertEqual("顺势加仓", rows[4]["direction_5d"])
 
     async def test_holdings_are_flattened_with_segment(self):
         self.client._post = AsyncMock(return_value={
