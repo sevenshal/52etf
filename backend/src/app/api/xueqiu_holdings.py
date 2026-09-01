@@ -495,6 +495,48 @@ def _attach_xueqiu_today_ratio(
             item["weight_price_ratio_today"] = round(weight_multiple / price_multiple, 2)
 
 
+def _attach_xueqiu_history_today_ratios(rows: List[Dict[str, Any]]) -> None:
+    """Calculate each history row against the preceding holdings trading day."""
+    previous: Optional[Dict[str, Any]] = None
+    today = _china_today()
+    for index, row in enumerate(rows):
+        row["weight_previous_close"] = None
+        row["weight_multiple_today"] = None
+        row["momentum_multiple_today"] = None
+        row["weight_price_ratio_today"] = None
+        row["price_for_ratio_today"] = None
+        if previous is not None:
+            current_weight = _safe_float(row.get("composite_weight_pct"))
+            previous_weight = _safe_float(previous.get("composite_weight_pct"))
+            try:
+                row_day = date.fromisoformat(str(row.get("snapshot_date")))
+            except (TypeError, ValueError):
+                row_day = None
+            is_latest_intraday = index == len(rows) - 1 and row_day == today
+            current_price = _safe_float(
+                row.get("current_price") if is_latest_intraday else row.get("close_price")
+            )
+            previous_price = _safe_float(previous.get("close_price"))
+            if previous_weight is not None and previous_weight > 0:
+                row["weight_previous_close"] = round(previous_weight, 4)
+                if current_weight is not None and current_weight > 0:
+                    row["weight_multiple_today"] = round(current_weight / previous_weight, 3)
+            if current_price is not None and current_price > 0 and previous_price is not None and previous_price > 0:
+                row["price_for_ratio_today"] = round(current_price, 3)
+                row["momentum_multiple_today"] = round(current_price / previous_price, 3)
+            if row["weight_multiple_today"] is not None and row["momentum_multiple_today"] is not None:
+                row["weight_price_ratio_today"] = round(
+                    row["weight_multiple_today"] / row["momentum_multiple_today"],
+                    2,
+                )
+        row["direction_today"] = _xueqiu_direction(
+            row.get("weight_multiple_today"),
+            row.get("momentum_multiple_today"),
+            row.get("weight_price_ratio_today"),
+        )
+        previous = row
+
+
 def _load_xueqiu_board_momentum(
     connection,
     active_only: bool,
@@ -1292,6 +1334,7 @@ def load_xueqiu_top_holdings_history(
                     filtered_holdings.stock_symbol,
                     ANY_VALUE(filtered_holdings.raw_stock_symbol) AS raw_stock_symbol,
                     ANY_VALUE(filtered_holdings.stock_name) AS stock_name,
+                    AVG(filtered_holdings.current_price) AS current_price,
                     ANY_VALUE(filtered_holdings.segment_name) AS segment_name,
                     MIN(filtered_holdings.year_rank) AS best_year_rank,
                     COUNT(DISTINCT filtered_holdings.cube_symbol) AS holding_cube_count,
@@ -1384,6 +1427,7 @@ def load_xueqiu_top_holdings_history(
                                 row[target] = round(price, 3) if price is not None else None
                 except Exception as exc:
                     logger.warning("Unable to load rt_k for 雪球持仓 %s: %s", normalized_symbol, exc)
+        _attach_xueqiu_history_today_ratios(rows)
         return {
             "available": True,
             "active_only": active_only,

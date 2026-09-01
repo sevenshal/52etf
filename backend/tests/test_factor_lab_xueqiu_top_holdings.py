@@ -654,6 +654,8 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual([100.0, 90.0], [row["high_price"] for row in result["history"]])
         self.assertEqual([100.0, 90.0], [row["low_price"] for row in result["history"]])
         self.assertEqual(90.0, result["latest"]["close_price"])
+        self.assertEqual(0.86, result["latest"]["weight_price_ratio_today"])
+        self.assertEqual("减仓", result["latest"]["direction_today"])
 
     def test_history_uses_rt_k_when_current_day_daily_candle_is_missing(self):
         with TemporaryDirectory() as tmpdir:
@@ -664,6 +666,11 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
             try:
                 connection.execute(
                     "DELETE FROM a_stock_market_daily_qfq WHERE trade_date = '2026-06-22'"
+                )
+                connection.execute(
+                    "UPDATE xueqiu_cube_holdings_snapshots "
+                    "SET raw_holding_json = '{\"current_price\": 103}' "
+                    "WHERE snapshot_date = '2026-06-22' AND stock_symbol = 'SH.600001'"
                 )
             finally:
                 connection.close()
@@ -697,6 +704,9 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(106.0, result["latest"]["high_price"])
         self.assertEqual(99.0, result["latest"]["low_price"])
         self.assertEqual("tushare_rt_k", result["latest"]["price_source"])
+        self.assertEqual(103.0, result["latest"]["price_for_ratio_today"])
+        self.assertEqual(0.76, result["latest"]["weight_price_ratio_today"])
+        self.assertEqual("借涨减仓", result["latest"]["direction_today"])
 
     def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:
