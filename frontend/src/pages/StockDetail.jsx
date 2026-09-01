@@ -4,6 +4,7 @@ import { LeftOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import StockKlineChart from '../components/StockKlineChart';
+import XueqiuStockLink from '../components/XueqiuStockLink';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
 
@@ -84,7 +85,12 @@ const StockDetail = () => {
               onClick={() => navigate(-1)}
               style={{ marginRight: '12px' }}
             />
-            <span>{stockName || normalizedSymbol} 股票详情</span>
+            <span>
+              {stockName ? `${stockName}（` : ''}
+              <XueqiuStockLink symbol={normalizedSymbol}>{normalizedSymbol}</XueqiuStockLink>
+              {stockName ? '）' : ''}
+              {' 股票详情'}
+            </span>
           </div>
         }
         extra={isAStock ? (

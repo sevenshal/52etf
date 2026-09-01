@@ -30,7 +30,8 @@ import {
   StockOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
-import EastmoneyStockLink, { EastmoneyPortfolioLink } from '../components/EastmoneyStockLink';
+import { EastmoneyPortfolioLink } from '../components/EastmoneyStockLink';
+import StockDetailLink from '../components/StockDetailLink';
 import request from '../utils/request';
 import './EastmoneyHoldingsResearch.css';
 
@@ -822,7 +823,7 @@ const EastmoneyHoldingsResearch = () => {
         <Space size={6}>
           {isCashSymbol(record)
             ? <Text strong>{value}</Text>
-            : <EastmoneyStockLink symbol={value}><Text strong>{value}</Text></EastmoneyStockLink>}
+            : <StockDetailLink symbol={value}><Text strong>{value}</Text></StockDetailLink>}
           {isCashSymbol(record) ? <Tag color="gold">现金</Tag> : null}
         </Space>
       ),
@@ -1099,7 +1100,14 @@ const EastmoneyHoldingsResearch = () => {
       <Row gutter={[12, 12]} className="eastmoney-holdings-metrics">
         <Col xs={12} md={4}>
           <Card bordered={false}>
-            <Statistic title={snapshotDate ? '所选日期' : '最新日期'} value={latestData?.snapshot_date || snapshotDate || '-'} />
+            <Statistic
+              title={snapshotDate ? '所选日期' : '最新时点'}
+              value={snapshotDate
+                || (latestData?.snapshot_at
+                  ? dayjs(latestData.snapshot_at).format('YYYY-MM-DD HH:mm')
+                  : latestData?.snapshot_date)
+                || '-'}
+            />
           </Card>
         </Col>
         <Col xs={12} md={4}>
@@ -1303,9 +1311,9 @@ const EastmoneyHoldingsResearch = () => {
                   <div>
                     <Text type="secondary">当前标的</Text>
                     <h2>
-                      <EastmoneyStockLink symbol={selectedSymbol}>
+                      <StockDetailLink symbol={selectedSymbol}>
                         {selectedSymbol}
-                      </EastmoneyStockLink>
+                      </StockDetailLink>
                       {' '}
                       {selectedItem?.stock_name || historyData?.latest?.stock_name || ''}
                     </h2>
