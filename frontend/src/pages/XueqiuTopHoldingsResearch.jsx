@@ -1262,12 +1262,20 @@ const XueqiuTopHoldingsResearch = () => {
       render: value => `${signedFixed(value)}pp`,
     },
     {
-      title: '板块涨跌',
+      title: (
+        <Tooltip title="用该板块内当前被雪球组合持有且有时点价的成分股计算：逐股以最新时点价对比5日窗口首日收盘价，再等权合成。">
+          板块涨跌
+        </Tooltip>
+      ),
       dataIndex: 'momentum_5d',
       width: 110,
       align: 'right',
       sorter: (a, b) => Number(a.momentum_5d || 0) - Number(b.momentum_5d || 0),
-      render: value => `${signedFixed(value)}%`,
+      render: (value, record) => (
+        <Tooltip title={`时点价格覆盖 ${numberFormatter(record.priced_stock_count || 0)} / ${numberFormatter(record.stock_count || 0)} 只`}>
+          {signedFixed(value)}%
+        </Tooltip>
+      ),
     },
     {
       title: '雪球综合权重',

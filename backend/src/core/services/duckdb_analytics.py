@@ -32,6 +32,52 @@ def safe_float(value: Any, digits: Optional[int] = None) -> Optional[float]:
     return round(number, digits) if digits is not None else number
 
 
+def load_tushare_realtime_daily_k(ts_code: str, trade_date: date) -> Optional[Dict[str, Any]]:
+    """Load one current-day A-share candle from Tushare rt_k.
+
+    rt_k returns the previous trading day's row before the market opens or when
+    a quote is stale, so callers only receive a row when trade_time matches the
+    requested date and the OHLC values form a valid candle.
+    """
+    from .tushare import TushareService
+
+    normalized = str(ts_code or "").strip().upper()
+    if not normalized or trade_date is None:
+        return None
+    frame = TushareService.get_instance().get_a_stock_realtime_rt_k_frame([normalized])
+    if frame is None or not hasattr(frame, "empty") or frame.empty:
+        return None
+    for _, row in frame.iterrows():
+        if str(row.get("ts_code") or "").strip().upper() != normalized:
+            continue
+        trade_time = row.get("trade_time")
+        try:
+            quote_date = trade_time.date() if hasattr(trade_time, "date") else datetime.fromisoformat(str(trade_time)).date()
+        except (TypeError, ValueError):
+            continue
+        if quote_date != trade_date:
+            continue
+        open_price = safe_float(row.get("open"))
+        high_price = safe_float(row.get("high"))
+        low_price = safe_float(row.get("low"))
+        close_price = safe_float(row.get("close"))
+        if (
+            not all(value is not None and value > 0 for value in (open_price, high_price, low_price, close_price))
+            or high_price < max(open_price, close_price, low_price)
+            or low_price > min(open_price, close_price, high_price)
+        ):
+            continue
+        return {
+            "trade_date": trade_date,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "source": "tushare_rt_k",
+        }
+    return None
+
+
 def serialize_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()

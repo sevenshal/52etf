@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 import polars as pl
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,6 +27,7 @@ from ...core.services.duckdb_analytics import (
     duckdb_query_dicts as _duckdb_query_dicts,
     duckdb_table_exists as _duckdb_table_exists,
     load_price_frame as _load_price_frame,
+    load_tushare_realtime_daily_k as _load_tushare_realtime_daily_k,
     safe_float as _safe_float,
 )
 from ...core.services.factor_backtest_engine import (
@@ -40,6 +42,10 @@ from .account import valid_admin_account
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/factor-lab", tags=["Factor Lab · 东方财富组合"])
+
+
+def _china_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
 class EastmoneyCredentialUpdate(BaseModel):
@@ -532,8 +538,8 @@ def _load_eastmoney_board_momentum(
     snapshot_date: Any,
     compare_snapshot_date: Any,
 ) -> List[Dict[str, Any]]:
-    """Aggregate Eastmoney holdings into cached THS boards and calculate 5-day ratios."""
-    required = ("a_stock_ths_member", "a_stock_ths_daily")
+    """Aggregate holdings into THS boards with an equal-weight intraday price proxy."""
+    required = ("a_stock_ths_member",)
     if not snapshot_date or not compare_snapshot_date or not all(
         _duckdb_table_exists(connection, table) for table in required
     ):
@@ -572,6 +578,7 @@ def _load_eastmoney_board_momentum(
         current_stocks AS (
             SELECT
                 stock_symbol,
+                AVG(current_price) AS current_price,
                 SUM(weight_pct) / NULLIF(MAX(current_cube_count.value), 0) AS composite_weight_pct,
                 COUNT(DISTINCT cube_symbol) AS holding_cube_count
             FROM current_holdings CROSS JOIN current_cube_count
@@ -588,6 +595,7 @@ def _load_eastmoney_board_momentum(
         )
         SELECT
             current_stocks.stock_symbol,
+            current_stocks.current_price,
             current_stocks.composite_weight_pct,
             current_stocks.holding_cube_count,
             compare_stocks.composite_weight_pct AS weight_5d_ago,
@@ -608,6 +616,10 @@ def _load_eastmoney_board_momentum(
         compare_snapshot_date,
         snapshot_date,
     )
+    # Build the board's intraday price multiple from currently held constituents:
+    # each stock's live snapshot price / close on the 5-day comparison date,
+    # averaged with equal weight across constituents with usable prices.
+    _attach_eastmoney_today_ratio(connection, stock_rows, compare_snapshot_date)
     for stock in stock_rows:
         stock["direction"] = _eastmoney_direction(
             stock.get("weight_multiple_5d"),
@@ -635,6 +647,24 @@ def _load_eastmoney_board_momentum(
                 for stock in stock_rows
             ],
         )
+    connection.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE eastmoney_stock_intraday_prices (
+            stock_symbol VARCHAR,
+            price_multiple_5d DOUBLE
+        )
+        """
+    )
+    intraday_price_rows = [
+        (stock["stock_symbol"], stock.get("momentum_multiple_today"))
+        for stock in stock_rows
+        if stock.get("momentum_multiple_today") is not None
+    ]
+    if intraday_price_rows:
+        connection.executemany(
+            "INSERT INTO eastmoney_stock_intraday_prices VALUES (?, ?)",
+            intraday_price_rows,
+        )
     rows = _duckdb_query_dicts(
         connection,
         f"""
@@ -654,6 +684,7 @@ def _load_eastmoney_board_momentum(
         current_stocks AS (
             SELECT
                 stock_symbol,
+                AVG(current_price) AS current_price,
                 SUM(weight_pct) / NULLIF(MAX(current_cube_count.value), 0) AS composite_weight_pct,
                 COUNT(DISTINCT cube_symbol) AS holding_cube_count
             FROM current_holdings CROSS JOIN current_cube_count
@@ -692,11 +723,15 @@ def _load_eastmoney_board_momentum(
                     THEN current_stocks.stock_symbol
                 END) AS contrarian_stock_count,
                 SUM(current_stocks.composite_weight_pct) AS composite_weight_pct,
-                SUM(current_stocks.holding_cube_count) AS stock_cube_links
+                SUM(current_stocks.holding_cube_count) AS stock_cube_links,
+                AVG(intraday_prices.price_multiple_5d) AS price_multiple_5d,
+                COUNT(intraday_prices.price_multiple_5d) AS priced_stock_count
             FROM normalized_members members
             JOIN current_stocks ON current_stocks.stock_symbol = members.stock_symbol
             LEFT JOIN eastmoney_stock_directions directions
               ON directions.stock_symbol = current_stocks.stock_symbol
+            LEFT JOIN eastmoney_stock_intraday_prices intraday_prices
+              ON intraday_prices.stock_symbol = current_stocks.stock_symbol
             WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
               AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
             GROUP BY members.ths_code
@@ -710,29 +745,14 @@ def _load_eastmoney_board_momentum(
             WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
               AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
             GROUP BY members.ths_code
-        ),
-        latest_prices AS (
-            SELECT ths_code, close
-            FROM a_stock_ths_daily
-            WHERE trade_date <= CAST(? AS DATE)
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY ths_code ORDER BY trade_date DESC) = 1
-        ),
-        compare_prices AS (
-            SELECT ths_code, close
-            FROM a_stock_ths_daily
-            WHERE trade_date <= CAST(? AS DATE)
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY ths_code ORDER BY trade_date DESC) = 1
         )
         SELECT
             current_board_weights.*,
-            compare_board_weights.weight_5d_ago,
-            latest_prices.close AS close_price,
-            compare_prices.close AS close_5d_ago
+            compare_board_weights.weight_5d_ago
         FROM current_board_weights
         JOIN compare_board_weights USING (ths_code)
-        JOIN latest_prices USING (ths_code)
-        JOIN compare_prices USING (ths_code)
         WHERE current_board_weights.stock_count >= {EASTMONEY_BOARD_MIN_STOCKS}
+          AND current_board_weights.priced_stock_count > 0
         """,
         [
             snapshot_date,
@@ -741,8 +761,6 @@ def _load_eastmoney_board_momentum(
             snapshot_date,
             compare_snapshot_date,
             compare_snapshot_date,
-            snapshot_date,
-            compare_snapshot_date,
         ],
     )
     items: List[Dict[str, Any]] = []
@@ -750,12 +768,10 @@ def _load_eastmoney_board_momentum(
         meta = catalog.get(str(row.get("ths_code") or "").upper())
         current_weight = _safe_float(row.get("composite_weight_pct"))
         old_weight = _safe_float(row.get("weight_5d_ago"))
-        close_price = _safe_float(row.get("close_price"))
-        old_close = _safe_float(row.get("close_5d_ago"))
-        if not meta or not current_weight or not old_weight or not close_price or not old_close:
+        price_multiple = _safe_float(row.get("price_multiple_5d"))
+        if not meta or not current_weight or not old_weight or not price_multiple:
             continue
         weight_multiple = current_weight / old_weight
-        price_multiple = close_price / old_close
         ratio = weight_multiple / price_multiple if price_multiple > 0 else None
         direction = _eastmoney_direction(weight_multiple, price_multiple, ratio)
         items.append(
@@ -770,6 +786,8 @@ def _load_eastmoney_board_momentum(
                     2,
                 ),
                 "stock_cube_links": int(row.get("stock_cube_links") or 0),
+                "priced_stock_count": int(row.get("priced_stock_count") or 0),
+                "price_source": "held_constituent_equal_weight_intraday",
                 "composite_weight_pct": round(current_weight, 4),
                 "weight_5d_ago": round(old_weight, 4),
                 "weight_change_5d": round(current_weight - old_weight, 4),
@@ -1349,6 +1367,7 @@ def load_eastmoney_top_holdings_history(
         )
         for row in rows:
             row["price_date"] = None
+            row["price_source"] = None
             for field in ("open_price", "high_price", "low_price", "close_price"):
                 row[field] = None
         price_symbol = _eastmoney_symbol_to_ts_code(normalized_symbol)
@@ -1371,6 +1390,7 @@ def load_eastmoney_top_holdings_history(
                         if not available.is_empty():
                             price_row = available.tail(1).to_dicts()[0]
                             row["price_date"] = price_row.get("trade_date")
+                            row["price_source"] = "daily_cache"
                             for source, target in (
                                 ("open", "open_price"),
                                 ("high", "high_price"),
@@ -1381,6 +1401,28 @@ def load_eastmoney_top_holdings_history(
                                 row[target] = round(price, 3) if price is not None else None
             except Exception as exc:
                 logger.warning("Unable to load price history for 东方财富持仓 %s: %s", normalized_symbol, exc)
+        if rows and price_symbol and SYMBOL_PATTERN.match(price_symbol):
+            latest_snapshot_day = date.fromisoformat(str(rows[-1]["snapshot_date"]))
+            latest_price_day = str(rows[-1].get("price_date") or "")
+            if latest_snapshot_day == _china_today() and latest_price_day != latest_snapshot_day.isoformat():
+                try:
+                    realtime_k = _load_tushare_realtime_daily_k(price_symbol, latest_snapshot_day)
+                    if realtime_k:
+                        for row in rows:
+                            if date.fromisoformat(str(row["snapshot_date"])) != latest_snapshot_day:
+                                continue
+                            row["price_date"] = latest_snapshot_day
+                            row["price_source"] = "tushare_rt_k"
+                            for source, target in (
+                                ("open", "open_price"),
+                                ("high", "high_price"),
+                                ("low", "low_price"),
+                                ("close", "close_price"),
+                            ):
+                                price = _safe_float(realtime_k.get(source))
+                                row[target] = round(price, 3) if price is not None else None
+                except Exception as exc:
+                    logger.warning("Unable to load rt_k for 东方财富持仓 %s: %s", normalized_symbol, exc)
         return {
             "available": True,
             "active_only": active_only,

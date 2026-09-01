@@ -655,6 +655,49 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual([100.0, 90.0], [row["low_price"] for row in result["history"]])
         self.assertEqual(90.0, result["latest"]["close_price"])
 
+    def test_history_uses_rt_k_when_current_day_daily_candle_is_missing(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db(db_path)
+            self._create_price_db(db_path)
+            connection = duckdb.connect(db_path)
+            try:
+                connection.execute(
+                    "DELETE FROM a_stock_market_daily_qfq WHERE trade_date = '2026-06-22'"
+                )
+            finally:
+                connection.close()
+
+            realtime_k = {
+                "trade_date": date(2026, 6, 22),
+                "open": 101.0,
+                "high": 106.0,
+                "low": 99.0,
+                "close": 105.0,
+                "source": "tushare_rt_k",
+            }
+            with (
+                patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path),
+                patch.object(factor_lab, "_china_today", return_value=date(2026, 6, 22)),
+                patch.object(
+                    factor_lab,
+                    "_load_tushare_realtime_daily_k",
+                    return_value=realtime_k,
+                ) as realtime_loader,
+            ):
+                result = factor_lab.load_xueqiu_top_holdings_history(
+                    symbol="SH600001",
+                    active_only=True,
+                    limit=10,
+                )
+
+        realtime_loader.assert_called_once_with("600001.SH", date(2026, 6, 22))
+        self.assertEqual([100.0, 105.0], [row["close_price"] for row in result["history"]])
+        self.assertEqual(101.0, result["latest"]["open_price"])
+        self.assertEqual(106.0, result["latest"]["high_price"])
+        self.assertEqual(99.0, result["latest"]["low_price"])
+        self.assertEqual("tushare_rt_k", result["latest"]["price_source"])
+
     def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"
@@ -718,6 +761,11 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 connection.execute(
                     "UPDATE xueqiu_cube_holdings_snapshots SET weight_pct = 60 "
                     "WHERE snapshot_date = '2026-06-22' AND stock_symbol = 'SH.600003'"
+                )
+                connection.execute(
+                    "UPDATE xueqiu_cube_holdings_snapshots "
+                    "SET raw_holding_json = '{\"current_price\": 90}' "
+                    "WHERE snapshot_date = '2026-06-22'"
                 )
                 connection.execute(
                     """
@@ -786,6 +834,11 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                 )
 
         self.assertEqual(1, len(result["board_items"]))
+        self.assertEqual(3, result["board_items"][0]["priced_stock_count"])
+        self.assertEqual(
+            "held_constituent_equal_weight_intraday",
+            result["board_items"][0]["price_source"],
+        )
         board = result["board_items"][0]
         self.assertEqual("测试细分板块", board["name"])
         self.assertEqual("逆势吸筹", board["direction"])
