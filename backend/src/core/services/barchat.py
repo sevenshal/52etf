@@ -17,6 +17,7 @@ BASE_URL = "https://www.barchart.com"
 QUOTE_PAGE_URL = f"{BASE_URL}/etfs-funds/quotes/{{symbol}}/{{page_name}}"
 OPTIONS_HISTORICAL_URL = f"{BASE_URL}/proxies/core-api/v1/options-historical/get"
 OPTIONS_EXPIRATIONS_URL = f"{BASE_URL}/proxies/core-api/v1/options-expirations/get"
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 PUT_CALL_RATIO_FIELDS = (
     "putVolume",
@@ -247,7 +248,7 @@ class BarchartService:
         for attempt in range(self.max_retries + 1):
             self._throttle()
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-            if response.status_code != 429:
+            if response.status_code not in RETRYABLE_STATUS_CODES:
                 if response.status_code not in allowed_statuses:
                     response.raise_for_status()
                 return response
@@ -257,7 +258,8 @@ class BarchartService:
 
             wait_seconds = self._retry_wait_seconds(response, attempt)
             self.logger.warning(
-                "Barchart 429 for %s, retry %s/%s after %.1fs: %s",
+                "Barchart HTTP %s for %s, retry %s/%s after %.1fs: %s",
+                response.status_code,
                 symbol,
                 attempt + 1,
                 self.max_retries,
