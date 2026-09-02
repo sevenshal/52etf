@@ -1,3 +1,4 @@
+import chan_native
 from chan_native import Center, Fractal, Kline, Segment, Stroke, build_centers, build_segments, calculate, classify_center_relations, detect_buy_sell, detect_fractals, promote_segments_to_strokes, remove_inclusion, replay_snapshots, recursive_levels
 
 
@@ -157,3 +158,93 @@ def test_recursive_promotion_preserves_direction_and_confirmation():
     promoted = promote_segments_to_strokes(lower)
     assert [s.direction for s in promoted] == ["up", "down", "up", "down"]
     assert [s.confirm_i for s in promoted] == [20, 21, 22, 23]
+
+
+def test_center_zone_is_fixed_and_extremes_track_true_range():
+    """The [zd, zg] overlap is frozen at formation; gg/dd widen on extension."""
+    segs = [
+        Segment(0, 0, "down", 12, 9, 1),
+        Segment(1, 1, "up", 11, 8, 2),
+        Segment(2, 2, "down", 13, 10, 3),
+        Segment(3, 3, "up", 15, 7, 4),   # still intersects [10, 11], wider extremes
+        Segment(4, 4, "down", 20, 18, 5),  # clean break above the fixed zone
+    ]
+    centers = build_centers([], segs)
+    assert len(centers) == 1
+    z = centers[0]
+    assert (z.zg, z.zd) == (11, 10)          # min(12,11,13), max(9,8,10)
+    assert z.end_stroke == 3
+    assert (z.gg, z.dd) == (15, 7)           # true extremes across formation + extension
+    assert z.status == "broken" and z.break_stroke == 4 and z.break_direction == "down"
+
+
+def _fx(i, mark, p):
+    return Fractal(i, mark, p, i + 1, i)
+
+
+def test_gap_feature_sequence_makes_a_second_type_segment():
+    strokes = [
+        Stroke(_fx(0, "bottom", 0), _fx(4, "top", 10), "up", 5),
+        Stroke(_fx(4, "top", 10), _fx(8, "bottom", 8), "down", 9),
+        Stroke(_fx(8, "bottom", 8), _fx(12, "top", 12), "up", 13),
+        Stroke(_fx(12, "top", 12), _fx(16, "bottom", 11), "down", 17),   # gap vs stroke 1
+        Stroke(_fx(16, "bottom", 11), _fx(20, "top", 11.5), "up", 21),
+        Stroke(_fx(20, "top", 11.5), _fx(24, "bottom", 10.5), "down", 25),
+        Stroke(_fx(24, "bottom", 10.5), _fx(28, "top", 11.8), "up", 29),
+        Stroke(_fx(28, "top", 11.8), _fx(32, "bottom", 10), "down", 33),
+    ]
+    segments = build_segments(strokes)
+    assert len(segments) == 1
+    assert segments[0].direction == "up"
+    assert segments[0].partition == "second"
+    assert segments[0].end_stroke == 4
+    assert segments[0].confirm_i == 33   # confirmed only after three further strokes
+
+
+def test_first_buy_requires_center_boundary_break():
+    """Divergence alone is not enough; the leg must break the center's low."""
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "down")]
+    segs = [
+        Segment(3, 3, "down", 9, 8.5, 5, power_price=4, power_time=4),   # low 8.5 >= zd 8
+        Segment(4, 4, "up", 9, 8.7, 6, power_price=2, power_time=2),
+        Segment(5, 5, "down", 9, 8.2, 7, power_price=2, power_time=4),
+    ]
+    assert not [e for e in detect_buy_sell([], segs, centers) if e.kind == "一买"]
+
+
+def test_first_buy_uses_macd_area_divergence_when_bars_given(monkeypatch):
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "down")]
+    strokes = [
+        Stroke(_fx(0, "bottom", 8), _fx(5, "top", 9), "up", 6),
+        Stroke(_fx(5, "top", 9), _fx(9, "bottom", 8), "down", 10),
+        Stroke(_fx(9, "bottom", 8), _fx(14, "top", 9), "up", 15),
+        Stroke(_fx(14, "top", 9), _fx(24, "bottom", 7), "down", 25),      # leg a: bars 14..24
+        Stroke(_fx(24, "bottom", 7), _fx(34, "top", 8.5), "up", 35),
+        Stroke(_fx(34, "top", 8.5), _fx(44, "bottom", 6), "down", 45),    # leg b: bars 34..44
+    ]
+    segs = [
+        Segment(3, 3, "down", 9, 7, 25, start_price=9, end_price=7),
+        Segment(4, 4, "up", 8.5, 7, 35, start_price=7, end_price=8.5),
+        Segment(5, 5, "down", 8.5, 6, 45, start_price=8.5, end_price=6),
+    ]
+    hist = [0.0] * 46
+    for k in range(14, 25):
+        hist[k] = -1.0                      # area_a = 11
+    for k in range(34, 45):
+        hist[k] = -0.2                      # area_b = 2.2  (weaker second leg, new low)
+    monkeypatch.setattr(chan_native, "macd_histogram", lambda bars, **kw: hist)
+    bars = [Kline(i, 1.0, 0.0) for i in range(46)]
+
+    hits = [e for e in detect_buy_sell(strokes, segs, centers, bars=bars) if e.kind == "一买"]
+    assert hits and "MACD面积" in hits[0].detail
+
+    for k in range(34, 45):
+        hist[k] = -2.0                      # stronger second leg -> no 背驰
+    assert not [e for e in detect_buy_sell(strokes, segs, centers, bars=bars) if e.kind == "一买"]
+
+
+def test_recursive_levels_tag_center_level():
+    bars = [Kline(i, 100 + (i % 7) * 2, 96 + (i % 7) * 2) for i in range(60)]
+    levels = recursive_levels(bars, levels=2, min_gap=1)
+    for depth, level in enumerate(levels):
+        assert all(z.level == depth for z in level["centers"])

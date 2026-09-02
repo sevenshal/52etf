@@ -236,13 +236,36 @@ const ChanAnalysis = () => {
       };
     };
 
-    const centerAreas = (analysis.centers || []).filter(item => item.start && item.end).map(item => [
-      { xAxis: Math.max(0, findIndex(item.start)), yAxis: item.zd },
-      { xAxis: Math.max(0, findIndex(item.end)), yAxis: item.zg, itemStyle: {
-        color: item.status === 'broken' ? 'rgba(140, 140, 140, 0.10)' : 'rgba(250, 173, 20, 0.16)',
-        borderColor: item.status === 'broken' ? '#999' : '#faad14', borderWidth: 1,
-      } },
-    ]);
+    const trendMark = trend => (trend === 'up' ? '↑' : trend === 'down' ? '↓' : trend === 'range' ? '⇄' : '');
+    const centerAreas = (analysis.centers || []).filter(item => item.start && item.end).flatMap(item => {
+      const x0 = Math.max(0, findIndex(item.start));
+      const x1 = Math.max(0, findIndex(item.end));
+      const broken = item.status === 'broken';
+      const rects = [];
+      // GG/DD 真实极值影线带：更浅，衬在固定区间后面。
+      if (item.gg != null && item.dd != null && (item.gg > item.zg || item.dd < item.zd)) {
+        rects.push([
+          { xAxis: x0, yAxis: item.dd },
+          { xAxis: x1, yAxis: item.gg, itemStyle: {
+            color: broken ? 'rgba(140, 140, 140, 0.05)' : 'rgba(250, 173, 20, 0.06)',
+            borderColor: broken ? '#bfbfbf' : '#ffd591', borderWidth: 1, borderType: 'dashed',
+          } },
+        ]);
+      }
+      // 固定区间 [ZD, ZG]，左上角标级别与中枢关系。
+      rects.push([
+        { xAxis: x0, yAxis: item.zd, label: {
+          show: true,
+          formatter: `L${item.level ?? 0}${trendMark(item.trend) ? ` ${trendMark(item.trend)}` : ''}`,
+          position: 'insideTopLeft', color: broken ? '#8c8c8c' : '#d48806', fontSize: 10,
+        } },
+        { xAxis: x1, yAxis: item.zg, itemStyle: {
+          color: broken ? 'rgba(140, 140, 140, 0.10)' : 'rgba(250, 173, 20, 0.16)',
+          borderColor: broken ? '#999' : '#faad14', borderWidth: 1,
+        } },
+      ]);
+      return rects;
+    });
 
     const fractalPoints = (analysis.fractals || []).map(item => ({
       index: findIndex(item.dt), price: item.price,
@@ -374,7 +397,7 @@ const ChanAnalysis = () => {
         extra={payload?.analysis && <Space size="middle" wrap>
           <Space size={6}><Text type="secondary">历史买卖点</Text><Switch size="small" checked={showHistorySignals} onChange={setShowHistorySignals} /></Space>
           <Text type="secondary">方向性线段常显 · 悬停查看详情</Text>
-          <Text type="secondary">{payload.analysis.engine === 'native_structural' ? '自算结构引擎' : `CZSC ${payload.analysis.czsc_version}`} · {payload.analysis.bar_count}根</Text>
+          <Text type="secondary">自算结构引擎 v{payload.analysis.engine_version} · {payload.analysis.bar_count}根</Text>
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">

@@ -237,7 +237,7 @@ class ChanScanRun(AnalyticsBase):
 
 
 class ChanScanSignal(AnalyticsBase):
-    """Confirmed official CZSC signal found by one scan run."""
+    """Confirmed native structural Chan signal found by one scan run."""
     __tablename__ = "chan_scan_signal"
 
     id = Column(String(80), primary_key=True)
