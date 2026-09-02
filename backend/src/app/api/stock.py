@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
-from datetime import datetime
+import math
+from datetime import datetime, time
 from ...core.database import StockFavorite, StockEVC, get_db, LongPortAccount
 from .account import valid_account
 from sqlalchemy import func, text
@@ -12,6 +13,7 @@ from ...core.services.szdt import SZDTService
 from ...core.static_info import get_static_info_snapshot_map
 from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
+from ...core.services.tushare import TushareService
 from sqlalchemy.orm import Session
 
 # db_session removed, use dependency injection
@@ -32,6 +34,60 @@ class FavoriteResponse(BaseModel):
     """收藏响应"""
     success: bool
     message: str
+
+
+def _safe_quote_number(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_current_a_stock_kline(symbol: str, expected_date):
+    """读取 Tushare 实时日K；只接受当天数据，避免未开盘时混入上一交易日。"""
+    service = TushareService.get_instance()
+    stock_frame = service.get_a_stock_realtime_rt_k_frame([symbol])
+    frames = [stock_frame]
+    if stock_frame is None or not hasattr(stock_frame, "empty") or stock_frame.empty:
+        frames.append(service.get_a_stock_realtime_etf_rt_k_frame([symbol]))
+    normalized_symbol = str(symbol or "").strip().upper()
+    for frame in frames:
+        if frame is None or not hasattr(frame, "empty") or frame.empty:
+            continue
+        for _, row in frame.iterrows():
+            if str(row.get("ts_code") or "").strip().upper() != normalized_symbol:
+                continue
+            trade_time = row.get("trade_time")
+            parsed_time = trade_time if isinstance(trade_time, datetime) else None
+            if parsed_time is None:
+                try:
+                    parsed_time = datetime.fromisoformat(str(trade_time))
+                except (TypeError, ValueError):
+                    continue
+            if parsed_time.date() != expected_date:
+                continue
+            open_price = _safe_quote_number(row.get("open"))
+            high_price = _safe_quote_number(row.get("high"))
+            low_price = _safe_quote_number(row.get("low"))
+            close_price = _safe_quote_number(row.get("close"))
+            if (
+                not all(value is not None and value > 0 for value in (open_price, high_price, low_price, close_price))
+                or high_price < max(open_price, close_price, low_price)
+                or low_price > min(open_price, close_price, high_price)
+            ):
+                continue
+            return {
+                "timestamp": datetime.combine(expected_date, time(hour=15)),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume": _safe_quote_number(row.get("vol")) or 0.0,
+                "turnover": _safe_quote_number(row.get("amount")) or 0.0,
+                "turnover_rate": None,
+            }
+    return None
 
 
 def _parse_date_query(value: Optional[str], field_name: str):
@@ -94,6 +150,55 @@ def search_a_stock_symbols(
     finally:
         analytics_db.close()
         AnalyticsSession.remove()
+
+
+@router.get("/a-stock/summary/{symbol}")
+def get_a_stock_summary(
+    symbol: str,
+    _: str = Depends(valid_account),
+    db: Session = Depends(get_db),
+):
+    """返回详情页行情头部所需的名称、股本和最新财务快照。"""
+    normalized_symbol = str(symbol or "").strip().upper()
+    static_info = get_static_info_snapshot_map(db, [normalized_symbol]).get(normalized_symbol, {})
+    analytics_db = AnalyticsSession()
+    try:
+        basic = analytics_db.execute(
+            text("SELECT name FROM a_stock_basic WHERE ts_code = :symbol LIMIT 1"),
+            {"symbol": normalized_symbol},
+        ).mappings().first()
+        latest = analytics_db.execute(
+            text(
+                """
+                SELECT total_share, float_share
+                FROM a_stock_market_daily
+                WHERE ts_code = :symbol
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """
+            ),
+            {"symbol": normalized_symbol},
+        ).mappings().first()
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
+    def shares(static_key, daily_key):
+        value = static_info.get(static_key)
+        if value is not None:
+            return _safe_quote_number(value)
+        daily_value = _safe_quote_number(latest.get(daily_key)) if latest else None
+        return daily_value * 10_000 if daily_value is not None else None
+
+    return {
+        "symbol": normalized_symbol,
+        "name": (basic.get("name") if basic else None) or static_info.get("name_cn"),
+        "currency": static_info.get("currency") or "CNY",
+        "eps": _safe_quote_number(static_info.get("eps")),
+        "bps": _safe_quote_number(static_info.get("bps")),
+        "total_shares": shares("total_shares", "total_share"),
+        "circulating_shares": shares("circulating_shares", "float_share"),
+    }
 
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])
@@ -185,12 +290,20 @@ async def get_a_stock_klines(
             start_date=parsed_start_date,
             end_date=parsed_end_date,
         )
-        return [KLineData(**row) for row in rows]
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         analytics_db.close()
         AnalyticsSession.remove()
+
+    # DuckDB 会话先关闭，再执行 Tushare 网络 IO，避免把短事务拖成长事务。
+    today = datetime.now().date()
+    has_today = any(row["timestamp"].date() == today for row in rows)
+    if parsed_start_date <= today <= parsed_end_date and not has_today:
+        realtime_row = await asyncio.to_thread(_load_current_a_stock_kline, symbol, today)
+        if realtime_row:
+            rows.append(realtime_row)
+    return [KLineData(**row) for row in rows]
 
 
 @router.post("/favorites/{symbol}", response_model=FavoriteResponse)

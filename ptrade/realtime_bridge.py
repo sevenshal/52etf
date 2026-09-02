@@ -57,6 +57,32 @@ def _number(value):
     return result
 
 
+def _quote_from_tick_row(row):
+    """把 PTrade tick 累计字段归一成与 Tushare 日K一致的单位。
+
+    business_amount 是当日累计成交股数，Tushare vol 使用手；
+    business_balance 是当日累计成交金额（元），Tushare amount 使用千元。
+    """
+    return {
+        "last_px": _number(row["last_px"]),
+        "preclose_px": _number(row["preclose_px"]),
+        "open_px": _number(row["open_px"]),
+        "high_px": _number(row["high_px"]),
+        "low_px": _number(row["low_px"]),
+        "up_px": _number(row["up_px"]),
+        "down_px": _number(row["down_px"]),
+        "volume": _number(row["business_amount"]) / 100.0,
+        "amount": _number(row["business_balance"]) / 1000.0,
+        "vol_ratio": _number(row["vol_ratio"]),
+        "turnover_ratio": _number(row["turnover_ratio"]),
+        "entrust_rate": _number(row["entrust_rate"]),
+        "pe_rate": _number(row["pe_rate"]),
+        "pb_rate": _number(row["pb_rate"]),
+        "hs_time": str(row["hsTimeStamp"]),
+        "trade_status": str(row["trade_status"]),
+    }
+
+
 def _sync_pool(context, quotes):
     """上报报价，并从响应里取最新股票池；池变化时 set_universe 增量更新订阅。"""
     payload = json.dumps({
@@ -117,14 +143,5 @@ def tick_data(context, data):
         if tick is None or len(tick) == 0:
             continue
         row = tick.iloc[-1]
-        quotes[_to_backend_code(code)] = {
-            "last_px": _number(row["last_px"]),
-            "preclose_px": _number(row["preclose_px"]),
-            "open_px": _number(row["open_px"]),
-            "high_px": _number(row["high_px"]),
-            "low_px": _number(row["low_px"]),
-            "amount": _number(row["amount"]),
-            "hs_time": str(row["hsTimeStamp"]),
-            "trade_status": str(row["trade_status"]),
-        }
+        quotes[_to_backend_code(code)] = _quote_from_tick_row(row)
     _sync_pool(context, quotes)

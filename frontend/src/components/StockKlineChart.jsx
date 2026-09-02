@@ -116,6 +116,7 @@ const StockKlineChart = ({
   valuationFillMode = 'exact',
   valuationDateOffsetDays = -1,
   onKlinesChange,
+  realtimeQuote,
   height = 600,
 }) => {
   const [loading, setLoading] = useState(true);
@@ -149,6 +150,39 @@ const StockKlineChart = ({
   useEffect(() => {
     fetchKlines();
   }, [fetchKlines]);
+
+  useEffect(() => {
+    if (!realtimeQuote) return;
+    const marketTime = dayjs(realtimeQuote.hs_time);
+    const quoteTime = marketTime.isValid() ? marketTime : dayjs(realtimeQuote.updated_at);
+    if (!quoteTime.isValid() || quoteTime.format('YYYY-MM-DD') !== dayjs().format('YYYY-MM-DD')) return;
+    const close = toPositiveNumber(realtimeQuote.last_px);
+    if (close === null) return;
+
+    setRawKlines(previous => {
+      const todayKey = dayjs().format('YYYY-MM-DD');
+      const index = previous.findIndex(item => formatDateKey(item.timestamp) === todayKey);
+      const existing = index >= 0 ? previous[index] : null;
+      const open = toPositiveNumber(realtimeQuote.open_px) ?? existing?.open ?? close;
+      const high = Math.max(toPositiveNumber(realtimeQuote.high_px) ?? existing?.high ?? close, open, close);
+      const low = Math.min(toPositiveNumber(realtimeQuote.low_px) ?? existing?.low ?? close, open, close);
+      const updated = {
+        ...(existing || {}),
+        timestamp: existing?.timestamp || `${todayKey}T15:00:00`,
+        open,
+        high,
+        low,
+        close,
+        volume: toFiniteNumber(realtimeQuote.volume) ?? existing?.volume ?? 0,
+        turnover: toFiniteNumber(realtimeQuote.amount) ?? existing?.turnover ?? 0,
+        turnover_rate: existing?.turnover_rate ?? null,
+      };
+      if (index < 0) return [...previous, updated];
+      const next = [...previous];
+      next[index] = updated;
+      return next;
+    });
+  }, [realtimeQuote]);
 
   useEffect(() => {
     if (!rawKlines.length) {
