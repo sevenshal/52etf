@@ -3,6 +3,7 @@ from datetime import date
 from src.core.services.a_stock_consensus import (
     _aggregate_report_rows,
     build_a_stock_consensus_history,
+    build_a_stock_rolling_consensus_history,
     build_a_stock_consensus_candidates,
     normalize_a_stock_symbol,
     search_a_stock_consensus_candidates,
@@ -275,6 +276,65 @@ def test_consensus_history_maps_target_price_range_to_valuation_fields():
     assert history[0]["forward_next_fy_lo"] is None
     assert history[0]["forward_next_fy_hi"] is None
     assert round(history[0]["growth_pct"], 4) == 20.0
+
+
+def test_rolling_consensus_history_uses_point_in_time_percentile_range():
+    rows = [
+        {
+            "report_date": date(2026, 1, day),
+            "report_title": f"报告{day}",
+            "org_name": f"机构{day}",
+            "author_name": f"分析师{day}",
+            "min_price": target,
+            "max_price": target,
+        }
+        for day, target in ((1, 100.0), (2, 110.0), (3, 120.0), (20, 1000.0))
+    ]
+
+    history = build_a_stock_rolling_consensus_history(
+        rows,
+        [date(2026, 1, 2), date(2026, 1, 3)],
+        report_lookback_days=180,
+    )
+
+    assert [item["date"] for item in history] == ["2026-01-02", "2026-01-03"]
+    assert history[0]["fair_value_lo"] == 102.5
+    assert history[0]["fair_value_hi"] == 107.5
+    assert history[0]["target_report_count"] == 2
+    assert history[1]["fair_value_lo"] == 105.0
+    assert history[1]["fair_value_hi"] == 115.0
+    assert history[1]["target_report_count"] == 3
+
+
+def test_rolling_consensus_history_expires_reports_outside_window():
+    rows = [
+        {
+            "report_date": date(2026, 1, 1),
+            "report_title": "旧报告",
+            "org_name": "旧机构",
+            "author_name": "旧分析师",
+            "min_price": 100.0,
+            "max_price": 100.0,
+        },
+        {
+            "report_date": date(2026, 1, 10),
+            "report_title": "新报告",
+            "org_name": "新机构",
+            "author_name": "新分析师",
+            "min_price": 120.0,
+            "max_price": 120.0,
+        },
+    ]
+
+    history = build_a_stock_rolling_consensus_history(
+        rows,
+        [date(2026, 1, 15)],
+        report_lookback_days=7,
+    )
+
+    assert history[0]["fair_value_lo"] == 120.0
+    assert history[0]["fair_value_hi"] == 120.0
+    assert history[0]["target_report_count"] == 1
 
 
 def test_search_consensus_candidates_supports_name_query():

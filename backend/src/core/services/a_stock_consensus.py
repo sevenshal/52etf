@@ -381,12 +381,99 @@ def build_a_stock_consensus_history(
     return history[:normalized_limit]
 
 
-def load_a_stock_consensus_history(db: Any, symbol: str, *, limit: int = 1260) -> List[Dict[str, Any]]:
+def build_a_stock_rolling_consensus_history(
+    rows: Sequence[Mapping[str, Any]],
+    trade_dates: Iterable[date],
+    *,
+    report_lookback_days: int = 180,
+) -> List[Dict[str, Any]]:
+    """Build point-in-time consensus ranges for each trading day."""
+    normalized_dates = sorted(set(day for day in trade_dates if day))
+    dated_rows = sorted(
+        (
+            (report_day, row)
+            for row in rows
+            if (report_day := _row_to_date(row.get("report_date"))) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if not normalized_dates or not dated_rows:
+        return []
+
+    lookback = timedelta(days=max(1, min(int(report_lookback_days or 180), 1095)))
+    cursor = 0
+    active_rows: List[Mapping[str, Any]] = []
+    history: List[Dict[str, Any]] = []
+    for trade_day in normalized_dates:
+        while cursor < len(dated_rows) and dated_rows[cursor][0] <= trade_day:
+            active_rows.append(dated_rows[cursor][1])
+            cursor += 1
+        window_start = trade_day - lookback
+        active_rows = [
+            row for row in active_rows
+            if (_row_to_date(row.get("report_date")) or date.min) >= window_start
+        ]
+        aggregate = _aggregate_report_rows(active_rows, trade_day)
+        if aggregate is None:
+            continue
+        growth_pct = aggregate.get("growth_pct")
+        growth_factor = 1.0 + growth_pct / 100.0 if growth_pct is not None else None
+        fair_value_lo = aggregate.get("target_price_q25")
+        fair_value_hi = aggregate.get("target_price_q75")
+        history.append({
+            "date": trade_day.isoformat(),
+            "fair_value_lo": fair_value_lo,
+            "fair_value_hi": fair_value_hi,
+            "target_price_avg": aggregate.get("target_price_avg"),
+            "target_price_min": aggregate.get("target_price_min"),
+            "target_price_max": aggregate.get("target_price_max"),
+            "forward_next_fy_lo": (
+                fair_value_lo * growth_factor
+                if fair_value_lo is not None and growth_factor is not None else None
+            ),
+            "forward_next_fy_hi": (
+                fair_value_hi * growth_factor
+                if fair_value_hi is not None and growth_factor is not None else None
+            ),
+            "pe_ratio": aggregate.get("consensus_pe"),
+            "forward_pe_ratio": aggregate.get("next_consensus_pe"),
+            "growth_pct": growth_pct,
+            "growth_source": aggregate.get("growth_source"),
+            "forecast_year": aggregate.get("forecast_year"),
+            "next_forecast_year": aggregate.get("next_forecast_year"),
+            "report_count": aggregate.get("report_count"),
+            "target_report_count": aggregate.get("target_report_count"),
+            "organization_count": aggregate.get("organization_count"),
+            "rating": aggregate.get("rating"),
+        })
+    return history
+
+
+def load_a_stock_consensus_history(
+    db: Any,
+    symbol: str,
+    *,
+    limit: int = 1260,
+    report_lookback_days: int = 180,
+) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_a_stock_symbol(symbol)
     if not normalized_symbol:
         return []
 
-    latest_trade_date = db.execute(text("SELECT MAX(trade_date) FROM a_stock_market_daily")).scalar()
+    normalized_limit = max(1, min(int(limit or 1260), 5000))
+    trade_dates = [row[0] for row in db.execute(text("""
+        SELECT trade_date
+        FROM a_stock_market_daily
+        WHERE ts_code = :symbol
+        ORDER BY trade_date DESC
+        LIMIT :limit
+    """), {"symbol": normalized_symbol, "limit": normalized_limit}).all()]
+    if not trade_dates:
+        return []
+    earliest_trade_date = min(trade_dates)
+    report_start = earliest_trade_date - timedelta(
+        days=max(1, min(int(report_lookback_days or 180), 1095))
+    )
     rows = db.execute(
         text(
             """
@@ -406,12 +493,17 @@ def load_a_stock_consensus_history(db: Any, symbol: str, *, limit: int = 1260) -
                 min_price
             FROM a_stock_report_rc
             WHERE ts_code = :symbol
+              AND report_date >= :report_start
             ORDER BY report_date DESC
             """
         ),
-        {"symbol": normalized_symbol},
+        {"symbol": normalized_symbol, "report_start": report_start},
     ).mappings().all()
-    return build_a_stock_consensus_history(rows, latest_trade_date, limit=limit)
+    return build_a_stock_rolling_consensus_history(
+        rows,
+        trade_dates,
+        report_lookback_days=report_lookback_days,
+    )
 
 
 def load_a_stock_consensus_valuation_map(
