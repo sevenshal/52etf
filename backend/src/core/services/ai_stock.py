@@ -2014,54 +2014,64 @@ def _holding_days(bought_at: datetime, today: date) -> int:
 _CSI_TOP_BOTTOM_CACHE: Dict[str, Any] = {}
 _CSI_TOP_BOTTOM_LOCK = threading.Lock()
 _CSI_TOP_BOTTOM_TTL = timedelta(hours=12)
-_CSI_BOTTOM_REGIMES = {"volume_bottom", "ma5_bottom", "bottom_both"}
-_CSI_TOP_REGIMES = {"volume_top", "ma5_top", "top_both"}
+_CSI_ALL_SHARE_SYMBOL = "000985.SH"  # 中证全指
 
 
 def _compute_csi_all_share_top_bottom(now: datetime, params: Dict[str, Any]) -> Dict[str, Any]:
-    """中证全指贪恐顶/底 —— 直接复用星澜同款计算。
+    """中证全指贪恐「最近一个顶/底信号」—— 与前端自算贪恐历史曲线的顶底标记同源。
 
-    ``load_latest_csi_all_share_fear_greed``（贪恐值 + proxy-ETF log 量比 z + 近 7 日分）
-    + ``resolve_xueqiu_strategy_position_target``（量能型 + MA5 拐点型判顶/底），信号阈值
-    走 ``load_fear_greed_signal_config``。只把返回的目标仓位数替换成本模拟盘的顶/底持仓数：
-    顶信号 → top_positions，底信号 → bottom_positions，中性/无信号 → top_positions（保守）。
+    ``ETFFearGreedCloneCalculator.load_history_from_db`` 会对全量历史调用
+    ``compute_turn_signals``（MA5 均线型 + 量能型，阈值走 ``fear_greed_signal_configs``、
+    量能用多只宽基 ETF 成交额加总代理），逐日给出 ``ma5_bottom`` / ``ma5_top`` /
+    ``volume_bottom`` / ``volume_top`` 标记 —— 这正是「自算贪恐历史曲线」上渲染的顶/底点。
+
+    这里沿历史**从后往前**找**最后一个**带标记的交易日：kind 以 ``_bottom`` 结尾 → 「底」，
+    以 ``_top`` 结尾 → 「顶」。历史中从未出现任何标记时按「顶」处理（保守）。
+    与旧实现的区别：旧实现只判断「今天」是否恰好是顶/底信号日，非信号日一律回落到「顶」，
+    导致与曲线上「最近一次信号」（可能在几天/几周前）不一致。
     """
-    from ...robot.xueqiu_top_holdings_report import (
-        load_latest_csi_all_share_fear_greed,
-        resolve_xueqiu_strategy_position_target,
-    )
-    from .fear_greed_signal_config import load_fear_greed_signal_config
+    from .etf_fear_greed_clone_service import ETFFearGreedCloneCalculator
 
     as_of = _now(now).date().isoformat()
     top_positions = max(1, int(_safe_float(params.get("top_positions"), 3.0) or 3))
     bottom_positions = max(1, int(_safe_float(params.get("bottom_positions"), 10.0) or 10))
+
+    signal: Optional[str] = None
+    signal_kind: Optional[str] = None
+    signal_date: Optional[str] = None
+    signal_score: Optional[float] = None
     try:
-        snapshot = load_latest_csi_all_share_fear_greed()
+        history = ETFFearGreedCloneCalculator().load_history_from_db(
+            symbol=_CSI_ALL_SHARE_SYMBOL,
+            include_components=False,
+            include_latest_holdings=False,
+        )
+        for item in reversed(history.get("data") or []):
+            kinds = [str(mark.get("kind") or "") for mark in (item.get("signals") or [])]
+            has_bottom = any(kind.endswith("_bottom") for kind in kinds)
+            has_top = any(kind.endswith("_top") for kind in kinds)
+            if not (has_bottom or has_top):
+                continue
+            if has_bottom and not has_top:
+                signal = "底"
+            elif has_top and not has_bottom:
+                signal = "顶"
+            else:  # 同日冲突（极罕见）：以最后触发的为准
+                signal = "底" if kinds[-1].endswith("_bottom") else "顶"
+            signal_kind = kinds[-1] or None
+            signal_date = item.get("date")
+            signal_score = _safe_float(item.get("score"))
+            break
     except Exception as exc:  # noqa: BLE001 - position control must not break process_minute
-        logger.warning("CSI all-share fear-greed snapshot unavailable: %s", exc)
-        snapshot = None
-    cfg = load_fear_greed_signal_config()
-    max_positions, regime = resolve_xueqiu_strategy_position_target(
-        snapshot,
-        current_holding_count=None,
-        fear_threshold=cfg["volume_bottom_score"],
-        greed_threshold=cfg["volume_top_score"],
-        fear_volume_std=cfg["volume_expand_std"],
-        greed_volume_std=cfg["volume_shrink_std"],
-        ma5_bottom_score=cfg["ma5_bottom_score"],
-        ma5_top_score=cfg["ma5_top_score"],
-        ma5_lookback_days=cfg["ma5_lookback_days"],
-        fear_target_count=bottom_positions,
-        greed_target_count=top_positions,
-        default_top_n=top_positions,
-    )
-    signal = "底" if regime in _CSI_BOTTOM_REGIMES else ("顶" if regime in _CSI_TOP_REGIMES else None)
+        logger.warning("CSI all-share turn-signal history unavailable: %s", exc)
+
+    max_positions = bottom_positions if signal == "底" else top_positions
     return {
         "signal": signal,
-        "regime": regime,
-        "date": (snapshot or {}).get("date"),
-        "score": (snapshot or {}).get("score"),
-        "max_positions": max(1, int(max_positions)),
+        "regime": signal_kind,
+        "date": signal_date,
+        "score": signal_score,
+        "max_positions": max_positions,
         "top_positions": top_positions,
         "bottom_positions": bottom_positions,
         "as_of": as_of,

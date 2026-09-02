@@ -801,7 +801,7 @@ const AIStock = () => {
         type="info"
         showIcon
         message={positionControl
-          ? `中证全指贪恐信号：${positionControl.signal || '无（默认按顶处理）'}${positionControl.date ? `（${positionControl.date}）` : ''} · 当前最大持仓数 ${positionControl.max_positions}（顶 ${positionControl.top_positions} / 底 ${positionControl.bottom_positions}）`
+          ? `中证全指贪恐最近一次顶/底信号：${positionControl.signal || '历史无信号（默认按顶处理）'}${positionControl.date ? `（${positionControl.date}）` : ''} · 当前最大持仓数 ${positionControl.max_positions}（顶 ${positionControl.top_positions} / 底 ${positionControl.bottom_positions}）`
           : '仓位控制信号加载中…'}
       />
       <Alert type="warning" showIcon message="AI 根据最新新闻与雪球活跃组合方向直接给出卖/持建议；建议「卖出」的持仓待缠论 1 分钟一卖信号确认后离场。" />

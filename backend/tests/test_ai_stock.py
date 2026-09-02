@@ -1123,31 +1123,39 @@ def test_ai_stock_chan_returns_not_confirmed_on_short_history(monkeypatch):
     assert ok is False and "不足" in detail["reason"]
 
 
-def test_compute_csi_all_share_top_bottom_reuses_xueqiu_calculation(monkeypatch):
+def test_compute_csi_all_share_top_bottom_uses_last_turn_signal_from_chart_history(monkeypatch):
     from src.core.services import ai_stock as ai_stock_module
-    from src.robot import xueqiu_top_holdings_report as xq
+    from src.core.services import etf_fear_greed_clone_service as clone_module
 
     ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
     captured = {}
 
-    def _fake_resolve(snapshot, **kwargs):
-        captured["snapshot"] = snapshot
-        captured["kwargs"] = kwargs
-        return kwargs["fear_target_count"], "ma5_bottom"
+    # 与「自算贪恐历史曲线」同源：每日 signals 已由 compute_turn_signals 计算好。
+    # 最后一个带标记的交易日是 08-14 的 ma5_bottom（更晚的 08-17/08-18 无标记）。
+    history = {
+        "data": [
+            {"date": "2026-08-10", "score": 55.0, "signals": []},
+            {"date": "2026-08-12", "score": 74.0, "signals": [{"kind": "volume_top", "value": 74.0}]},
+            {"date": "2026-08-14", "score": 24.0, "signals": [{"kind": "ma5_bottom", "value": 26.0}]},
+            {"date": "2026-08-17", "score": 30.0, "signals": []},
+            {"date": "2026-08-18", "score": 33.0, "signals": []},
+        ]
+    }
 
-    monkeypatch.setattr(xq, "load_latest_csi_all_share_fear_greed", lambda: {"date": "2026-08-10", "score": 22.0})
-    monkeypatch.setattr(xq, "resolve_xueqiu_strategy_position_target", _fake_resolve)
+    def _fake_load_history(self, **kwargs):
+        captured["kwargs"] = kwargs
+        return history
+
+    monkeypatch.setattr(clone_module.ETFFearGreedCloneCalculator, "load_history_from_db", _fake_load_history)
 
     result = ai_stock_module._compute_csi_all_share_top_bottom(
-        datetime(2026, 8, 11, 10, 0), {"top_positions": 3, "bottom_positions": 10}
+        datetime(2026, 8, 19, 10, 0), {"top_positions": 3, "bottom_positions": 10}
     )
-    assert result["signal"] == "底"
+    assert result["signal"] == "底"  # 最近一次信号是 08-14 的底，而非今天无信号
     assert result["regime"] == "ma5_bottom"
+    assert result["date"] == "2026-08-14"
     assert result["max_positions"] == 10  # 底 → bottom_positions
-    # 顶/底持仓数按本模拟盘配置传入星澜同款计算
-    assert captured["kwargs"]["fear_target_count"] == 10
-    assert captured["kwargs"]["greed_target_count"] == 3
-    assert captured["kwargs"]["default_top_n"] == 3
+    assert captured["kwargs"]["symbol"] == "000985.SH"
     ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
 
 
