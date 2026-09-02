@@ -342,26 +342,82 @@ def _xueqiu_direction(
     return "持平"
 
 
+def _xueqiu_5d_ratio_fields(
+    current_weight: Any,
+    previous_weight: Any,
+    current_price: Any,
+    previous_price: Any,
+) -> Dict[str, Any]:
+    """雪球「5日权价比 / 方向」的统一算法。
+
+    「最新综合持仓」的 ``权重/股价 5日`` 列与「权重和排名历史」的 ``5日权价比 / 方向``
+    两列共用此函数，保证两处的取整口径、锚点语义一致：
+
+    - ``weight_multiple_5d``   = round(当前综合权重 / 5 个持仓日前综合权重, 3)
+    - ``momentum_multiple_5d`` = round(当前价 / 5 个持仓日前收盘价, 3)
+      当前价由调用方决定：最新盘中日传持仓时点价，其余日期传当日收盘价。
+    - ``weight_price_ratio_5d`` = round(weight_multiple_5d / momentum_multiple_5d, 2)
+      直接用两个已取整到 3 位的倍数相除，使界面上的「权x / 价x」可直接复算出该比值。
+    - ``direction_5d`` 由上述三个取整后的值判定（见 ``_xueqiu_direction``）。
+    """
+    current_weight = _safe_float(current_weight)
+    previous_weight = _safe_float(previous_weight)
+    current_price = _safe_float(current_price)
+    previous_price = _safe_float(previous_price)
+
+    weight_multiple = (
+        round(current_weight / previous_weight, 3)
+        if current_weight is not None
+        and previous_weight is not None
+        and current_weight > 0
+        and previous_weight > 0
+        else None
+    )
+    momentum_multiple = (
+        round(current_price / previous_price, 3)
+        if current_price is not None
+        and previous_price is not None
+        and current_price > 0
+        and previous_price > 0
+        else None
+    )
+    ratio = (
+        round(weight_multiple / momentum_multiple, 2)
+        if weight_multiple is not None
+        and momentum_multiple is not None
+        and momentum_multiple > 0
+        else None
+    )
+    return {
+        "weight_multiple_5d": weight_multiple,
+        "momentum_multiple_5d": momentum_multiple,
+        "weight_price_ratio_5d": ratio,
+        "direction_5d": _xueqiu_direction(weight_multiple, momentum_multiple, ratio),
+    }
+
+
 def _attach_xueqiu_5d_momentum(
     connection,
     items: List[Dict[str, Any]],
     compare_snapshot_date: Any,
     snapshot_date: Any,
 ) -> None:
-    """Attach 5-day price momentum and weight/price multiple ratio to latest holdings items.
+    """为「最新综合持仓」补上 5 日价格动量与「权重/股价 5日」比值。
 
-    momentum_5d = price return (pct) between the compare snapshot and the latest snapshot.
-    momentum_multiple_5d = close(latest) / close(compare) price multiple.
-    weight_multiple_5d = composite weight multiple (computed in SQL).
-    weight_price_ratio_5d = weight_multiple_5d / momentum_multiple_5d.
+    与「权重和排名历史」表的 5日权价比完全同源（统一走 ``_xueqiu_5d_ratio_fields``）：
 
-    If a stock's weight rise is purely driven by its own price rise, both multiples move
-    together and the ratio is near 1. A ratio clearly above 1 (especially weight up while
-    price down) means the weight rise is NOT caused by the rally — it reflects active buying.
+    - 锚点：全局快照序列中 5 个持仓日前的那一天（``compare_snapshot_date``），
+      与 rank_change_5d 用的是同一个日期。
+    - 当前价：最新快照日若为当天则用持仓时点价 ``current_price``，否则用当日收盘价。
+    - 历史价：锚点日收盘价，取到 3 位小数以与 history 表存的 ``close_price`` 对齐。
+    - 比值：round(权重倍数r3 / 价格倍数r3, 2)，可由界面「权x / 价x」直接复算。
+
+    权重倍数明显 >1（尤其权重升而股价跌）说明权重上升不是被行情带起来的，疑似主动加仓。
     """
     for item in items:
         item.setdefault("momentum_5d", None)
         item.setdefault("momentum_multiple_5d", None)
+        item.setdefault("weight_multiple_5d", None)
         item.setdefault("weight_price_ratio_5d", None)
     if not items or compare_snapshot_date is None or snapshot_date is None:
         return
@@ -393,6 +449,8 @@ def _attach_xueqiu_5d_momentum(
     if not price_symbols:
         return
 
+    base_close_by_symbol: Dict[str, float] = {}
+    latest_close_by_symbol: Dict[str, float] = {}
     try:
         price_df = _load_price_frame(
             price_symbols,
@@ -404,42 +462,48 @@ def _attach_xueqiu_5d_momentum(
         usable = price_df.filter(pl.col("trade_date") <= snapshot_day)
         if usable.is_empty():
             return
-        momentum_by_symbol: Dict[str, float] = {}
-        multiple_by_symbol: Dict[str, float] = {}
         for (symbol,), group in usable.group_by("symbol"):
-            latest_close = group.sort("trade_date").tail(1).select("close").to_series()[0]
-            base = group.filter(pl.col("trade_date") <= compare_day)
+            ordered = group.sort("trade_date")
+            latest_close = ordered.tail(1).select("close").to_series()[0]
+            base = ordered.filter(pl.col("trade_date") <= compare_day)
             if base.is_empty():
                 continue
-            base_close = base.sort("trade_date").tail(1).select("close").to_series()[0]
+            base_close = base.tail(1).select("close").to_series()[0]
             if base_close and base_close > 0 and latest_close and latest_close > 0:
-                momentum_by_symbol[symbol] = (latest_close / base_close - 1.0) * 100.0
-                multiple_by_symbol[symbol] = latest_close / base_close
+                base_close_by_symbol[symbol] = round(float(base_close), 3)
+                latest_close_by_symbol[symbol] = round(float(latest_close), 3)
     except Exception as exc:
         logger.warning("Unable to compute 5d price momentum for 雪球持仓: %s", exc)
         return
 
+    is_latest_intraday = snapshot_day == _china_today()
     for item in items:
         price_symbol = _xueqiu_symbol_to_ts_code(
             str(item.get("stock_symbol") or "").strip().upper()
         )
-        momentum = momentum_by_symbol.get(price_symbol)
-        multiple = multiple_by_symbol.get(price_symbol)
-        item["momentum_5d"] = round(momentum, 2) if momentum is not None else None
-        item["momentum_multiple_5d"] = round(multiple, 3) if multiple is not None else None
-        weight_multiple = item.get("weight_multiple_5d")
-        if weight_multiple is not None:
-            item["weight_multiple_5d"] = round(float(weight_multiple), 3)
-            weight_multiple = item["weight_multiple_5d"]
-        if (
-            multiple is not None
-            and weight_multiple is not None
-            and multiple > 0
-            and float(weight_multiple) > 0
-        ):
-            item["weight_price_ratio_5d"] = round(float(weight_multiple) / multiple, 2)
+        previous_price = base_close_by_symbol.get(price_symbol)
+        if is_latest_intraday:
+            current_price = _safe_float(item.get("current_price"))
+            if current_price is None or current_price <= 0:
+                current_price = latest_close_by_symbol.get(price_symbol)
         else:
-            item["weight_price_ratio_5d"] = None
+            current_price = latest_close_by_symbol.get(price_symbol)
+
+        fields = _xueqiu_5d_ratio_fields(
+            item.get("composite_weight_pct"),
+            item.get("weight_5d_ago"),
+            current_price,
+            previous_price,
+        )
+        item["weight_multiple_5d"] = fields["weight_multiple_5d"]
+        item["momentum_multiple_5d"] = fields["momentum_multiple_5d"]
+        item["weight_price_ratio_5d"] = fields["weight_price_ratio_5d"]
+        momentum_multiple = fields["momentum_multiple_5d"]
+        item["momentum_5d"] = (
+            round((momentum_multiple - 1.0) * 100.0, 2)
+            if momentum_multiple is not None
+            else None
+        )
 
 
 def _attach_xueqiu_today_ratio(
@@ -495,46 +559,77 @@ def _attach_xueqiu_today_ratio(
             item["weight_price_ratio_today"] = round(weight_multiple / price_multiple, 2)
 
 
-def _attach_xueqiu_history_5d_ratios(rows: List[Dict[str, Any]]) -> None:
-    """Calculate each row over a rolling window of five holdings trading days."""
+def _attach_xueqiu_history_5d_ratios(
+    rows: List[Dict[str, Any]],
+    global_snapshot_dates: Optional[List[date]] = None,
+) -> None:
+    """按「5 个持仓日前」的滑动窗口为每行补上 5日权价比 / 方向。
+
+    锚点与「最新综合持仓」的 ``rank_compare_snapshot_date`` 一致：取全局快照序列里
+    往前第 5 个交易日（而非本股票行序里往前第 4 行），个股中途掉出榜单也不会漂移，
+    且比值改由 ``_xueqiu_5d_ratio_fields`` 计算，与最新综合持仓列同一套取整口径。
+    传入 ``global_snapshot_dates`` 时用全局序列定位锚点；缺省时退回本股票行序兜底。
+    """
+    lookback = XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS
     today = _china_today()
-    for index, row in enumerate(rows):
+    for row in rows:
         row["weight_5d_ago"] = None
         row["weight_multiple_5d"] = None
         row["momentum_multiple_5d"] = None
         row["weight_price_ratio_5d"] = None
         row["price_for_ratio_5d"] = None
         row["direction_5d"] = None
-        if index >= XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS - 1:
-            previous = rows[index - (XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS - 1)]
-            current_weight = _safe_float(row.get("composite_weight_pct"))
-            previous_weight = _safe_float(previous.get("composite_weight_pct"))
-            try:
-                row_day = date.fromisoformat(str(row.get("snapshot_date")))
-            except (TypeError, ValueError):
-                row_day = None
-            is_latest_intraday = index == len(rows) - 1 and row_day == today
-            current_price = _safe_float(
-                row.get("current_price") if is_latest_intraday else row.get("close_price")
-            )
-            previous_price = _safe_float(previous.get("close_price"))
-            if previous_weight is not None and previous_weight > 0:
-                row["weight_5d_ago"] = round(previous_weight, 4)
-                if current_weight is not None and current_weight > 0:
-                    row["weight_multiple_5d"] = round(current_weight / previous_weight, 3)
-            if current_price is not None and current_price > 0 and previous_price is not None and previous_price > 0:
-                row["price_for_ratio_5d"] = round(current_price, 3)
-                row["momentum_multiple_5d"] = round(current_price / previous_price, 3)
-            if row["weight_multiple_5d"] is not None and row["momentum_multiple_5d"] is not None:
-                row["weight_price_ratio_5d"] = round(
-                    row["weight_multiple_5d"] / row["momentum_multiple_5d"],
-                    2,
-                )
-            row["direction_5d"] = _xueqiu_direction(
-                row.get("weight_multiple_5d"),
-                row.get("momentum_multiple_5d"),
-                row.get("weight_price_ratio_5d"),
-            )
+    if not rows:
+        return
+
+    rows_by_day: Dict[date, Dict[str, Any]] = {}
+    for row in rows:
+        try:
+            rows_by_day[date.fromisoformat(str(row.get("snapshot_date")))] = row
+        except (TypeError, ValueError):
+            continue
+    date_position = {
+        day: idx for idx, day in enumerate(global_snapshot_dates or [])
+    }
+    last_row = rows[-1]
+
+    for index, row in enumerate(rows):
+        try:
+            row_day = date.fromisoformat(str(row.get("snapshot_date")))
+        except (TypeError, ValueError):
+            continue
+
+        anchor_row: Optional[Dict[str, Any]] = None
+        if date_position:
+            position = date_position.get(row_day)
+            if position is not None and position >= lookback:
+                anchor_row = rows_by_day.get(global_snapshot_dates[position - lookback])
+        elif index >= lookback:
+            anchor_row = rows[index - lookback]
+        if anchor_row is None:
+            continue
+
+        is_latest_intraday = row is last_row and row_day == today
+        current_price = _safe_float(
+            row.get("current_price") if is_latest_intraday else row.get("close_price")
+        )
+        previous_price = _safe_float(anchor_row.get("close_price"))
+        previous_weight = _safe_float(anchor_row.get("composite_weight_pct"))
+        if previous_weight is not None and previous_weight > 0:
+            row["weight_5d_ago"] = round(previous_weight, 4)
+        if current_price is not None and current_price > 0:
+            row["price_for_ratio_5d"] = round(current_price, 3)
+
+        fields = _xueqiu_5d_ratio_fields(
+            row.get("composite_weight_pct"),
+            anchor_row.get("composite_weight_pct"),
+            current_price,
+            previous_price,
+        )
+        row["weight_multiple_5d"] = fields["weight_multiple_5d"]
+        row["momentum_multiple_5d"] = fields["momentum_multiple_5d"]
+        row["weight_price_ratio_5d"] = fields["weight_price_ratio_5d"]
+        row["direction_5d"] = fields["direction_5d"]
 
 
 def _load_xueqiu_board_momentum(
@@ -1427,7 +1522,23 @@ def load_xueqiu_top_holdings_history(
                                 row[target] = round(price, 3) if price is not None else None
                 except Exception as exc:
                     logger.warning("Unable to load rt_k for 雪球持仓 %s: %s", normalized_symbol, exc)
-        _attach_xueqiu_history_5d_ratios(rows)
+        global_snapshot_dates: List[date] = []
+        try:
+            global_snapshot_dates = [
+                date.fromisoformat(str(record["snapshot_date"]))
+                for record in _duckdb_query_dicts(
+                    connection,
+                    f"{cte} SELECT DISTINCT snapshot_date FROM filtered_holdings "
+                    "ORDER BY snapshot_date",
+                )
+            ]
+        except Exception as exc:
+            logger.warning(
+                "Unable to load global snapshot dates for 雪球持仓 %s: %s",
+                normalized_symbol,
+                exc,
+            )
+        _attach_xueqiu_history_5d_ratios(rows, global_snapshot_dates)
         return {
             "available": True,
             "active_only": active_only,

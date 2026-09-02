@@ -1,6 +1,6 @@
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import duckdb
 import polars as pl
@@ -19,6 +19,7 @@ from src.robot.eastmoney_holdings import (
 from src.app.api.eastmoney_holdings import (
     _attach_eastmoney_history_5d_ratios,
     _attach_eastmoney_today_ratio,
+    _eastmoney_5d_ratio_fields,
 )
 
 
@@ -36,27 +37,48 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             compute_eastmoney_sign(envelope),
         )
 
-    def test_history_5d_ratio_and_direction_use_five_day_window(self):
+    def test_history_5d_ratio_anchors_on_global_fifth_prior_snapshot(self):
         rows = [
             {"snapshot_date": "2026-09-01", "composite_weight_pct": 10.0, "close_price": 100.0},
             {"snapshot_date": "2026-09-02", "composite_weight_pct": 10.5, "close_price": 102.0},
             {"snapshot_date": "2026-09-03", "composite_weight_pct": 11.0, "close_price": 104.0},
             {"snapshot_date": "2026-09-04", "composite_weight_pct": 11.5, "close_price": 106.0},
+            {"snapshot_date": "2026-09-05", "composite_weight_pct": 11.8, "close_price": 108.0},
             {
-                "snapshot_date": "2026-09-05",
+                "snapshot_date": "2026-09-08",
                 "composite_weight_pct": 12.0,
                 "close_price": 110.0,
                 "current_price": 108.0,
             },
         ]
-        with patch("src.app.api.eastmoney_holdings._china_today", return_value=datetime(2026, 9, 5).date()):
+        global_dates = [date.fromisoformat(row["snapshot_date"]) for row in rows]
+        with patch("src.app.api.eastmoney_holdings._china_today", return_value=date(2026, 9, 8)):
+            _attach_eastmoney_history_5d_ratios(rows, global_dates)
+        # Only the 6th row has a full 5-trading-day lookback; rows[:5] stay empty.
+        self.assertTrue(all(row["weight_price_ratio_5d"] is None for row in rows[:5]))
+        self.assertTrue(all(row["direction_5d"] is None for row in rows[:5]))
+        newest = rows[5]
+        # Anchor is 2026-09-01 (5 global steps back), current price is the 时点价 108.
+        self.assertEqual(108.0, newest["price_for_ratio_5d"])
+        self.assertEqual(1.2, newest["weight_multiple_5d"])  # 12.0 / 10.0
+        self.assertEqual(1.08, newest["momentum_multiple_5d"])  # 108 / 100
+        self.assertEqual(1.11, newest["weight_price_ratio_5d"])  # round(1.2 / 1.08, 2)
+        self.assertEqual("顺势加仓", newest["direction_5d"])
+
+    def test_history_5d_ratio_falls_back_to_row_order_without_global_dates(self):
+        rows = [
+            {"snapshot_date": f"2026-09-0{day}", "composite_weight_pct": 10.0 + day, "close_price": 100.0 + day}
+            for day in range(1, 7)
+        ]
+        # today not in the rows -> newest row uses its own close_price, not 时点价.
+        with patch("src.app.api.eastmoney_holdings._china_today", return_value=date(2026, 9, 9)):
             _attach_eastmoney_history_5d_ratios(rows)
-        self.assertTrue(all(row["weight_price_ratio_5d"] is None for row in rows[:4]))
-        self.assertTrue(all(row["direction_5d"] is None for row in rows[:4]))
-        self.assertEqual(108.0, rows[4]["price_for_ratio_5d"])
-        self.assertEqual(110.0, rows[4]["close_price"])
-        self.assertEqual(1.11, rows[4]["weight_price_ratio_5d"])
-        self.assertEqual("顺势加仓", rows[4]["direction_5d"])
+        self.assertTrue(all(row["weight_price_ratio_5d"] is None for row in rows[:5]))
+        # rows[5] anchors on rows[0] (5 rows back) even without a global sequence.
+        expected = _eastmoney_5d_ratio_fields(16.0, 11.0, 106.0, 101.0)
+        self.assertEqual(expected["weight_price_ratio_5d"], rows[5]["weight_price_ratio_5d"])
+        self.assertEqual(expected["direction_5d"], rows[5]["direction_5d"])
+        self.assertIsNotNone(rows[5]["weight_price_ratio_5d"])
 
     async def test_holdings_are_flattened_with_segment(self):
         self.client._post = AsyncMock(return_value={
