@@ -1319,7 +1319,7 @@ const XueqiuTopHoldingsResearch = () => {
     { title: '排名', dataIndex: 'composite_rank', width: 88, align: 'right', render: value => (value ? `#${value}` : '-') },
     { title: '综合权重', dataIndex: 'composite_weight_pct', width: 116, align: 'right', render: percentFormatter },
     {
-      title: <Tooltip title="最近5个持仓交易日的滑动窗口：当前综合权重相对窗口首日权重的倍数 ÷ 当前价格相对窗口首日收盘价的倍数。最新盘中日期使用持仓时点价。">5日权价比</Tooltip>,
+      title: <Tooltip title="相对 5 个持仓交易日前那一天：当前综合权重倍数 ÷ 当前价格倍数（锚点与「最新综合持仓」的 5 日对比同一天）。当前价：最新盘中日用持仓时点价，其余日期用当日收盘价。与「最新综合持仓」表的「权重/股价 5日」同源。">5日权价比</Tooltip>,
       dataIndex: 'weight_price_ratio_5d',
       width: 100,
       align: 'right',

@@ -707,6 +707,104 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertIsNone(result["latest"]["weight_price_ratio_5d"])
         self.assertIsNone(result["latest"]["direction_5d"])
 
+    def test_5d_ratio_fields_divides_two_rounded_multiples(self):
+        fields = factor_lab._xueqiu_5d_ratio_fields(55.0, 10.0, 90.0, 100.0)
+        self.assertEqual(5.5, fields["weight_multiple_5d"])
+        self.assertEqual(0.9, fields["momentum_multiple_5d"])
+        # round(round(55/10, 3) / round(90/100, 3), 2) == round(5.5 / 0.9, 2)
+        self.assertEqual(6.11, fields["weight_price_ratio_5d"])
+        self.assertEqual("逆势吸筹", fields["direction_5d"])
+        missing = factor_lab._xueqiu_5d_ratio_fields(55.0, 10.0, None, 100.0)
+        self.assertIsNone(missing["momentum_multiple_5d"])
+        self.assertIsNone(missing["weight_price_ratio_5d"])
+        self.assertEqual("持平", missing["direction_5d"])
+
+    def test_history_5d_ratio_matches_latest_column_for_same_symbol(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_rank_trend(db_path)
+            self._create_price_db(db_path)
+
+            with patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path):
+                latest = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+                histories = {
+                    symbol: factor_lab.load_xueqiu_top_holdings_history(
+                        symbol=symbol, active_only=True, limit=50
+                    )
+                    for symbol in ("SH600001", "SH600002", "SH600003")
+                }
+
+        by_symbol = {row["stock_symbol"]: row for row in latest["items"]}
+        # The newest history row shares the anchor (rank_compare_snapshot_date) and the
+        # rounding口径 with the「权重/股价 5日」column, so the two must agree exactly.
+        for norm_symbol, api_symbol in (
+            ("SH.600001", "SH600001"),
+            ("SH.600002", "SH600002"),
+            ("SH.600003", "SH600003"),
+        ):
+            newest = histories[api_symbol]["history"][-1]
+            self.assertEqual("2026-06-22", newest["snapshot_date"])
+            self.assertEqual(
+                by_symbol[norm_symbol]["weight_price_ratio_5d"],
+                newest["weight_price_ratio_5d"],
+                msg=f"ratio mismatch for {norm_symbol}",
+            )
+            self.assertEqual(
+                by_symbol[norm_symbol]["weight_multiple_5d"],
+                newest["weight_multiple_5d"],
+            )
+            self.assertEqual(
+                by_symbol[norm_symbol]["momentum_multiple_5d"],
+                newest["momentum_multiple_5d"],
+            )
+            self.assertEqual(
+                by_symbol[norm_symbol]["direction"],
+                newest["direction_5d"],
+            )
+        self.assertEqual(6.11, histories["SH600001"]["history"][-1]["weight_price_ratio_5d"])
+        self.assertEqual("逆势吸筹", histories["SH600001"]["history"][-1]["direction_5d"])
+        # Anchor is the 5th prior snapshot in the GLOBAL sequence (2026-06-15),
+        # not this symbol's own 4-rows-back row (2026-06-16).
+        self.assertEqual(10.0, histories["SH600001"]["history"][-1]["weight_5d_ago"])
+
+    def test_history_and_latest_both_use_intraday_point_price_on_current_day(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_rank_trend(db_path)
+            self._create_price_db(db_path)
+            connection = duckdb.connect(db_path)
+            try:
+                connection.execute(
+                    "UPDATE xueqiu_cube_holdings_snapshots "
+                    "SET raw_holding_json = '{\"current_price\": 81}' "
+                    "WHERE snapshot_date = '2026-06-22' AND stock_symbol = 'SH.600001'"
+                )
+            finally:
+                connection.close()
+
+            with (
+                patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path),
+                patch.object(factor_lab, "_china_today", return_value=date(2026, 6, 22)),
+            ):
+                latest = factor_lab.load_xueqiu_top_holdings_latest(active_only=True, limit=10)
+                history = factor_lab.load_xueqiu_top_holdings_history(
+                    symbol="SH600001", active_only=True, limit=50
+                )
+
+        by_symbol = {row["stock_symbol"]: row for row in latest["items"]}
+        newest = history["history"][-1]
+        # 时点价 81 vs anchor close 100 -> momentum 0.81, ratio round(5.5 / 0.81, 2) = 6.79
+        self.assertEqual(0.81, newest["momentum_multiple_5d"])
+        self.assertEqual(6.79, newest["weight_price_ratio_5d"])
+        self.assertEqual(
+            by_symbol["SH.600001"]["weight_price_ratio_5d"],
+            newest["weight_price_ratio_5d"],
+        )
+        self.assertEqual(
+            by_symbol["SH.600001"]["momentum_multiple_5d"],
+            newest["momentum_multiple_5d"],
+        )
+
     def test_details_returns_holding_cubes_for_symbol_and_snapshot_date(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"
