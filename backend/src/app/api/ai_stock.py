@@ -198,6 +198,11 @@ def get_paper_hold_evaluations(limit: int = Query(100, ge=1, le=500), _: str = D
     return AIStockPaperTradingService().hold_evaluations(limit=limit)
 
 
+@router.get("/paper/position-control")
+def get_paper_position_control(_: str = Depends(valid_ai_stock_viewer)):
+    return AIStockPaperTradingService().position_control()
+
+
 @router.get("/paper/statistics")
 def get_paper_statistics(_: str = Depends(valid_ai_stock_viewer)):
     return AIStockPaperTradingService().paper_statistics()
@@ -210,19 +215,14 @@ def get_paper_strategy_config(_: str = Depends(valid_admin_account)):
 
 class PaperStrategyConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
-    max_positions: Optional[float] = Field(default=None, ge=1, le=1000)
-    slot_count: Optional[float] = Field(default=None, ge=1, le=1000)
-    single_stock_cap: Optional[float] = Field(default=None, ge=0, le=1.0)
-    max_execution_target: Optional[float] = Field(default=None, ge=0, le=1.0)
-    entry_price_cap_pct: Optional[float] = Field(default=None, ge=0, le=20)
-    stop_loss_half_pct: Optional[float] = Field(default=None, ge=-100, le=0)
+    top_positions: Optional[float] = Field(default=None, ge=1, le=100)
+    bottom_positions: Optional[float] = Field(default=None, ge=1, le=100)
+    buy_top_n: Optional[float] = Field(default=None, ge=1, le=50)
+    buy_min_confidence: Optional[float] = Field(default=None, ge=0, le=100)
+    position_pct: Optional[float] = Field(default=None, gt=0, le=1.0)
     stop_loss_full_pct: Optional[float] = Field(default=None, ge=-100, le=0)
     trading_start_minute: Optional[float] = Field(default=None, ge=570, le=690)
     hold_evaluation_enabled: Optional[bool] = None
-    hold_sell_threshold: Optional[float] = Field(default=None, ge=0, le=100)
-    max_buys_per_day: Optional[float] = Field(default=None, ge=1, le=1000)
-    rotation_confidence_gap: Optional[float] = Field(default=None, ge=0, le=100)
-    rotation_stale_days: Optional[float] = Field(default=None, ge=1, le=1000)
 
 
 @router.put("/paper/config")

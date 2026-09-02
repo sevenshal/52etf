@@ -47,6 +47,7 @@ from .a_stock_fund_flow import (
 )
 from ..duckdb_utils import connect_duckdb
 from ..event_stream import publish_event
+from . import ai_stock_chan
 from .tushare import TushareService
 
 
@@ -70,8 +71,6 @@ XUEQIU_SIGNAL_ENABLED = 0  # 雪球活跃组合行为信号(xueqiu块)是否喂�
 XUEQIU_WEIGHT_GAIN_CLIP = (0.2, 10.0)  # 权重5日升速(倍数)裁剪区间；极端值(如新进小权重被大量买入)会爆到几百倍
 XUEQIU_RATIO_CLIP = (0.0, 10.0)  # 权价比(权重升速÷价格升速)裁剪上限
 XUEQIU_EXTREME_RATIO = 6.0  # 历史回测显示 >6 的逆势吸筹不具备常规加分效果，多为低基数倍数失真
-_TRADING_DAYS_ELAPSED_CACHE: Dict[Tuple[date, date], int] = {}
-_TRADING_DAYS_ELAPSED_LOCK = threading.Lock()
 MAX_EVENTS = 8
 MAX_BOARDS = 8
 MAX_CANDIDATES_PER_BOARD = 200
@@ -1006,25 +1005,6 @@ class AIStockDataProvider:
         )
         return {"generated_at": generated_at, "trade_date": as_of.date().isoformat(), "market_as_of_date": market_date.isoformat(), "data_as_of": data_as_of, "events": events, "boards": boards, "candidates": eligible, "source_status": {"ths_index": "SUCCESS", "ths_member": "SUCCESS", "ths_daily": "SUCCESS", "moneyflow_cnt_ths": "SUCCESS", "limit_cpt_list": "SUCCESS", "candidate_count": len(eligible)}}
 
-    def minute_entry_confirmed(self, ts_code: str) -> Tuple[bool, Dict[str, Any]]:
-        bars = self.tushare.get_a_stock_realtime_minute_frame(ts_code, "1MIN")
-        if bars is None or len(bars) < 5:
-            return False, {"reason": "分钟行情不足，无法确认入场"}
-        recent = bars.tail(5)
-        latest = recent.iloc[-1]
-        prior = recent.iloc[-2]
-        latest_close = _safe_float(latest.get("close"), 0.0) or 0.0
-        prior_close = _safe_float(prior.get("close"), 0.0) or 0.0
-        latest_volume = _safe_float(latest.get("vol"), 0.0) or 0.0
-        baseline = _safe_float(bars.tail(min(20, len(bars))).iloc[:-1]["vol"].mean(), 0.0) or 0.0
-        confirmed = latest_close >= prior_close and latest_volume >= baseline * 0.8
-        return confirmed, {
-            "latest_close": latest_close,
-            "prior_close": prior_close,
-            "latest_volume": latest_volume,
-            "average_volume": baseline,
-        }
-
     def quotes(self, symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         result = self.tushare.get_quote_batch(list(dict.fromkeys(symbols)))
         return {_normalize_ts_code(item.get("symbol")): item for item in result}
@@ -1283,25 +1263,27 @@ class DeepSeekStockSelector:
             raise AIStockModelError("DeepSeek 返回不包含 picks 列表")
         return {"model": self.model, "response": raw_response, "transcript": {"stage": "THS_BOARDS_TO_STOCK_SELECTION", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
 
-    def evaluate_positions(
+    def advise_positions(
         self,
         event_stage: Dict[str, Any],
         board_stage: Dict[str, Any],
         positions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Round 4: score current paper positions (hold_score 0-100, low = sell).
+        """Round 4: direct 卖出/持有 advice for the current paper positions.
 
         Reuses the round-1 news context (same message pattern as round 3) so the
-        model judges each open position against today's raw headlines, events and
-        sector strength.  The score is advisory only: process_minute still enforces
-        the hard price rules.
+        model judges each open position against today's raw headlines, events,
+        sector strength and the Xueqiu active-portfolio direction (when known).
+        The advice is advisory only: a position advised 卖出 is exited by
+        process_minute only once a Chan 1-minute 一卖 signal confirms.
         """
         if not positions:
             raise AIStockModelError("没有持仓需要评估")
         instruction = {
-            "task": "延续新闻事件会话。以下是今日事件、THS 板块映射及模拟盘当前持仓（成本/现价/盈亏/持有天数）。请结合今日新闻事件与板块强弱，为每只持仓给出 hold_score(0-100)：分数越低越倾向卖出，越高越倾向继续持有。只评估现有持仓，不得新增或推荐其他标的。",
+            "task": "延续新闻事件会话。以下是今日事件、THS 板块映射及模拟盘当前持仓（成本/现价/盈亏/持有天数，可能附雪球活跃组合方向 xueqiu_direction）。请结合今日新闻事件、板块强弱和雪球活跃组合的加减仓方向，为每只持仓直接给出是否应当卖出的建议。只评估现有持仓，不得新增或推荐其他标的。",
             "constraints": {
-                "score_meaning": "0-100：≥70=继续持有/加仓(错价机会大、事件与板块强势)；50=中性；≤30=倾向卖出(基本面恶化、过度反应追高风险、事件利空、板块转弱)",
+                "action_values": ["卖出", "持有"],
+                "action_meaning": "卖出=基本面/事件转空、板块明显转弱、或雪球活跃组合借涨减仓/减仓；持有=错价逻辑仍成立、事件与板块未转弱。证据不足时给持有。",
                 "must_return_json": True,
             },
             "validated_events": event_stage["events"],
@@ -1309,32 +1291,41 @@ class DeepSeekStockSelector:
             "board_market_snapshot": board_stage.get("boards") or [],
             "positions": positions,
             "response_schema": {
-                "evaluations": [
-                    {"ts_code": "持仓 ts_code", "hold_score": 0, "reason": "中文理由：结合新闻事件/板块/盈亏的一句话判断"}
+                "advices": [
+                    {"ts_code": "持仓 ts_code", "action": "卖出/持有", "reason": "中文一句话：结合新闻事件/板块/雪球方向/盈亏的判断"}
                 ]
             },
         }
         first_messages = event_stage["transcript"]["request"]["messages"]
         messages = [*first_messages, {"role": "assistant", "content": event_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
-        if not isinstance(raw_response.get("evaluations"), list):
-            raise AIStockModelError("DeepSeek 返回不包含 evaluations 列表")
-        return {"model": self.model, "response": raw_response, "transcript": {"stage": "HOLD_EVALUATION", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
+        if not isinstance(raw_response.get("advices"), list):
+            raise AIStockModelError("DeepSeek 返回不包含 advices 列表")
+        return {"model": self.model, "response": raw_response, "transcript": {"stage": "HOLD_ADVICE", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
 
 def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict[str, Any], board_stage: Dict[str, Any], run_id: int, selector: Optional[DeepSeekStockSelector] = None) -> Dict[str, Any]:
-    """Advisory round-4 hold evaluation persisted to ai_stock_hold_evaluations.
+    """Advisory round-4 sell/hold advice persisted to ai_stock_hold_evaluations.
 
     Reads current paper positions as plain snapshots (short transaction),
-    asks the model to score each with hold_score (low = sell bias), then
-    persists valid evaluations.  Failures are reported but never raise: the
-    recommendation batch itself must not depend on this advisory step.
+    asks the model for a direct 卖出/持有 call per holding (news + sector +
+    Xueqiu direction), then persists valid advice.  Failures are reported but
+    never raise: the recommendation batch must not depend on this step.
     """
     paper = AIStockPaperTradingService()
     positions = paper.positions()
     if not positions:
         return {"evaluated": False, "reason": "无持仓"}
-    compact = [
-        {
+    direction_by_code: Dict[str, str] = {}
+    try:
+        behavior_map, _ = _load_xueqiu_behavior_snapshot()
+        for code, item in behavior_map.items():
+            if item.get("direction"):
+                direction_by_code[code] = item["direction"]
+    except Exception as exc:  # noqa: BLE001 - Xueqiu direction is best-effort context
+        logger.warning("Xueqiu direction snapshot unavailable for hold advice: %s", exc)
+    compact = []
+    for item in positions:
+        row = {
             "ts_code": item["ts_code"],
             "name": item["name"],
             "cost": item["cost"],
@@ -1342,38 +1333,44 @@ def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict
             "pnl_pct": item["pnl_pct"],
             "held_days": item["held_days"],
         }
-        for item in positions
-    ]
+        if item["ts_code"] in direction_by_code:
+            row["xueqiu_direction"] = direction_by_code[item["ts_code"]]
+        compact.append(row)
     try:
-        selection = (selector or DeepSeekStockSelector()).evaluate_positions(event_stage, board_stage, compact)
+        selection = (selector or DeepSeekStockSelector()).advise_positions(event_stage, board_stage, compact)
     except Exception as exc:
-        logger.warning("AI hold evaluation skipped: %s", exc)
+        logger.warning("AI hold advice skipped: %s", exc)
         return {"evaluated": False, "reason": str(exc)[:200]}
     raw = selection["response"]
     by_code = {_normalize_ts_code(item["ts_code"]): item for item in positions}
     valid = []
-    for item in raw.get("evaluations") or []:
+    for item in raw.get("advices") or []:
         if not isinstance(item, dict):
             continue
         code = _normalize_ts_code(item.get("ts_code"))
         pos = by_code.get(code)
         if not pos:
             continue
+        action = str(item.get("action") or "").strip()
+        if action not in {"卖出", "持有"}:
+            continue
         valid.append(
             {
                 "ts_code": code,
                 "name": pos["name"],
-                "hold_score": _clamp(item.get("hold_score"), 0.0, 100.0, 50.0),
+                "action": action,
+                # legacy column kept populated for back-compat readers
+                "hold_score": 0.0 if action == "卖出" else 100.0,
                 "reason": str(item.get("reason") or "")[:500],
             }
         )
     if not valid:
-        return {"evaluated": False, "reason": "AI 未返回有效评估"}
+        return {"evaluated": False, "reason": "AI 未返回有效持仓建议"}
     with get_db_ctx() as db:
         portfolio = AIStockPaperTradingService._ensure_portfolio(db)
         for item in valid:
-            db.add(AIStockHoldEvaluation(portfolio_id=portfolio.id, run_id=run_id, ts_code=item["ts_code"], name=item["name"], hold_score=item["hold_score"], reason=item["reason"]))
-    return {"evaluated": True, "count": len(valid)}
+            db.add(AIStockHoldEvaluation(portfolio_id=portfolio.id, run_id=run_id, ts_code=item["ts_code"], name=item["name"], hold_score=item["hold_score"], advice=item["action"], reason=item["reason"]))
+    return {"evaluated": True, "count": len(valid), "sell": sum(1 for item in valid if item["action"] == "卖出")}
 
 
 def _validated_board_mappings(raw_response: Dict[str, Any], events: List[Dict[str, Any]], catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2010,61 +2007,106 @@ def _sell_fee(amount: float) -> float:
     return round(max(MIN_COMMISSION, amount * COMMISSION_RATE) + amount * (TRANSFER_RATE + SELL_STAMP_DUTY_RATE), 2)
 
 
-def _fear_greed_target(fear_greed: float) -> float:
-    if fear_greed >= 80:
-        return 0.20
-    if fear_greed >= 60:
-        return 0.375
-    if fear_greed <= 20:
-        return 0.60
-    return 0.50
-
-
 def _holding_days(bought_at: datetime, today: date) -> int:
     return max(0, (today - bought_at.date()).days)
 
 
-def _a_stock_trading_days_elapsed(start_exclusive: date, end_inclusive: date) -> Optional[int]:
-    """Count open A-share days in ``(start_exclusive, end_inclusive]``.
+_CSI_TOP_BOTTOM_CACHE: Dict[str, Any] = {}
+_CSI_TOP_BOTTOM_LOCK = threading.Lock()
+_CSI_TOP_BOTTOM_TTL = timedelta(hours=12)
+_CSI_BOTTOM_REGIMES = {"volume_bottom", "ma5_bottom", "bottom_both"}
+_CSI_TOP_REGIMES = {"volume_top", "ma5_top", "top_both"}
 
-    A stale-position rotation must not treat weekends or exchange holidays as
-    days without a recommendation.  If the authoritative calendar is
-    unavailable, return ``None`` so this optional rotation signal is skipped
-    rather than silently falling back to calendar days.
+
+def _compute_csi_all_share_top_bottom(now: datetime, params: Dict[str, Any]) -> Dict[str, Any]:
+    """中证全指贪恐顶/底 —— 直接复用星澜同款计算。
+
+    ``load_latest_csi_all_share_fear_greed``（贪恐值 + proxy-ETF log 量比 z + 近 7 日分）
+    + ``resolve_xueqiu_strategy_position_target``（量能型 + MA5 拐点型判顶/底），信号阈值
+    走 ``load_fear_greed_signal_config``。只把返回的目标仓位数替换成本模拟盘的顶/底持仓数：
+    顶信号 → top_positions，底信号 → bottom_positions，中性/无信号 → top_positions（保守）。
     """
-    if start_exclusive >= end_inclusive:
-        return 0
-    cache_key = (start_exclusive, end_inclusive)
-    with _TRADING_DAYS_ELAPSED_LOCK:
-        cached = _TRADING_DAYS_ELAPSED_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    try:
-        frame = TushareService.get_instance().get_trade_calendar_frame(
-            start_exclusive + timedelta(days=1), end_inclusive
-        )
-    except Exception as exc:
-        logger.warning("A-share trading calendar unavailable for stale rotation: %s", exc)
-        return None
-    if frame is None or frame.empty:
-        logger.warning(
-            "A-share trading calendar empty for stale rotation: %s~%s",
-            start_exclusive,
-            end_inclusive,
-        )
-        return None
-    elapsed = sum(
-        1
-        for _, row in frame.iterrows()
-        if str(row.get("is_open")) in {"1", "1.0"}
-        and row.get("cal_date")
-        and start_exclusive < row.get("cal_date") <= end_inclusive
+    from ...robot.xueqiu_top_holdings_report import (
+        load_latest_csi_all_share_fear_greed,
+        resolve_xueqiu_strategy_position_target,
     )
-    with _TRADING_DAYS_ELAPSED_LOCK:
-        if len(_TRADING_DAYS_ELAPSED_CACHE) >= 512:
-            _TRADING_DAYS_ELAPSED_CACHE.clear()
-        _TRADING_DAYS_ELAPSED_CACHE[cache_key] = elapsed
-    return elapsed
+    from .fear_greed_signal_config import load_fear_greed_signal_config
+
+    as_of = _now(now).date().isoformat()
+    top_positions = max(1, int(_safe_float(params.get("top_positions"), 3.0) or 3))
+    bottom_positions = max(1, int(_safe_float(params.get("bottom_positions"), 10.0) or 10))
+    try:
+        snapshot = load_latest_csi_all_share_fear_greed()
+    except Exception as exc:  # noqa: BLE001 - position control must not break process_minute
+        logger.warning("CSI all-share fear-greed snapshot unavailable: %s", exc)
+        snapshot = None
+    cfg = load_fear_greed_signal_config()
+    max_positions, regime = resolve_xueqiu_strategy_position_target(
+        snapshot,
+        current_holding_count=None,
+        fear_threshold=cfg["volume_bottom_score"],
+        greed_threshold=cfg["volume_top_score"],
+        fear_volume_std=cfg["volume_expand_std"],
+        greed_volume_std=cfg["volume_shrink_std"],
+        ma5_bottom_score=cfg["ma5_bottom_score"],
+        ma5_top_score=cfg["ma5_top_score"],
+        ma5_lookback_days=cfg["ma5_lookback_days"],
+        fear_target_count=bottom_positions,
+        greed_target_count=top_positions,
+        default_top_n=top_positions,
+    )
+    signal = "底" if regime in _CSI_BOTTOM_REGIMES else ("顶" if regime in _CSI_TOP_REGIMES else None)
+    return {
+        "signal": signal,
+        "regime": regime,
+        "date": (snapshot or {}).get("date"),
+        "score": (snapshot or {}).get("score"),
+        "max_positions": max(1, int(max_positions)),
+        "top_positions": top_positions,
+        "bottom_positions": bottom_positions,
+        "as_of": as_of,
+    }
+
+
+def csi_all_share_top_bottom(now: Optional[datetime] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """中证全指贪恐顶/底信号 + 由此得出的最大持仓数，按交易日缓存 12 小时。"""
+    ts = _now(now)
+    params = params or {}
+    params_key = (
+        int(_safe_float(params.get("top_positions"), 3.0) or 3),
+        int(_safe_float(params.get("bottom_positions"), 10.0) or 10),
+    )
+    with _CSI_TOP_BOTTOM_LOCK:
+        cached = _CSI_TOP_BOTTOM_CACHE.get("result")
+        computed_at = _CSI_TOP_BOTTOM_CACHE.get("computed_at")
+        if (
+            cached is not None
+            and computed_at is not None
+            and cached.get("as_of") == ts.date().isoformat()
+            and _CSI_TOP_BOTTOM_CACHE.get("params_key") == params_key
+            and ts - computed_at <= _CSI_TOP_BOTTOM_TTL
+        ):
+            return cached
+    try:
+        result = _compute_csi_all_share_top_bottom(ts, params)
+    except Exception as exc:  # noqa: BLE001 - position control must not break process_minute
+        logger.warning("CSI all-share top/bottom computation failed: %s", exc)
+        result = {"signal": None, "regime": None, "date": None, "score": None,
+                  "max_positions": params_key[0], "top_positions": params_key[0],
+                  "bottom_positions": params_key[1], "as_of": ts.date().isoformat()}
+    with _CSI_TOP_BOTTOM_LOCK:
+        _CSI_TOP_BOTTOM_CACHE.update({"result": result, "computed_at": ts, "params_key": params_key})
+    return result
+
+
+def _resolve_max_positions(top_bottom: Optional[Dict[str, Any]], params: Dict[str, Any]) -> int:
+    """顶 → top_positions；底 → bottom_positions；中性/无信号 → top_positions（保守）。"""
+    tb = top_bottom or {}
+    if tb.get("max_positions"):
+        return max(1, int(tb["max_positions"]))
+    top_positions = max(1, int(_safe_float(params.get("top_positions"), 3.0) or 3))
+    bottom_positions = max(1, int(_safe_float(params.get("bottom_positions"), 10.0) or 10))
+    return bottom_positions if tb.get("signal") == "底" else top_positions
 
 
 @dataclass
@@ -2101,19 +2143,14 @@ class AIStockPaperTradingService:
             config = AIStockStrategyConfig(
                 id=1,
                 parameters={
-                    "max_positions": 10,
-                    "slot_count": 5,
-                    "single_stock_cap": 0.20,
-                    "max_execution_target": 0.90,
-                    "entry_price_cap_pct": 1.0,
-                    "stop_loss_half_pct": -8.0,
+                    "top_positions": 3,
+                    "bottom_positions": 10,
+                    "buy_top_n": 3,
+                    "buy_min_confidence": 75.0,
+                    "position_pct": 0.10,
                     "stop_loss_full_pct": -12.0,
                     "trading_start_minute": 585,
                     "hold_evaluation_enabled": False,
-                    "hold_sell_threshold": 30.0,
-                    "max_buys_per_day": 3,
-                    "rotation_confidence_gap": 20.0,
-                    "rotation_stale_days": 3,
                 },
             )
             db.add(config)
@@ -2125,14 +2162,6 @@ class AIStockPaperTradingService:
             portfolio = self._ensure_portfolio(db)
             strategy_config = self._ensure_strategy_config(db)
             lots = db.query(AIStockPaperLot).filter(AIStockPaperLot.portfolio_id == portfolio.id, AIStockPaperLot.remaining_quantity > 0).order_by(AIStockPaperLot.bought_at).all()
-            since = datetime.combine(snapshot_date, datetime.min.time()) - timedelta(days=2)
-            recommendations = (
-                db.query(AIStockRecommendation)
-                .join(AIStockRecommendationRun, AIStockRecommendation.run_id == AIStockRecommendationRun.id)
-                .filter(AIStockRecommendationRun.status == "SUCCESS", AIStockRecommendationRun.run_at >= since)
-                .order_by(desc(AIStockRecommendationRun.run_at), AIStockRecommendation.rank)
-                .all()
-            )
             today_buys = db.query(AIStockPaperTrade).filter(
                 AIStockPaperTrade.portfolio_id == portfolio.id,
                 AIStockPaperTrade.side == "BUY",
@@ -2144,31 +2173,19 @@ class AIStockPaperTradingService:
                 .order_by(desc(AIStockHoldEvaluation.evaluated_at))
                 .all()
             )
-            hold_scores: Dict[str, Dict[str, Any]] = {}
+            # 每只持仓最近一条 AI 持仓建议（卖出/持有 + 理由）
+            hold_advice: Dict[str, Dict[str, Any]] = {}
             for ev in eval_rows:
-                if ev.ts_code not in hold_scores:
-                    hold_scores[ev.ts_code] = {"hold_score": float(ev.hold_score), "reason": ev.reason}
-            # 每只持仓最近一次被推荐（SUCCESS 批次）的 trade_date，用于"未获再推荐"换仓
-            last_recommended: Dict[str, date] = {}
-            held_codes = [lot.ts_code for lot in lots]
-            if held_codes:
-                rec_dates = (
-                    db.query(AIStockRecommendation.ts_code, AIStockRecommendationRun.trade_date)
-                    .join(AIStockRecommendationRun, AIStockRecommendation.run_id == AIStockRecommendationRun.id)
-                    .filter(AIStockRecommendationRun.status == "SUCCESS", AIStockRecommendation.ts_code.in_(held_codes))
-                    .order_by(desc(AIStockRecommendationRun.trade_date))
-                    .all()
-                )
-                for ts_code, trade_date in rec_dates:
-                    if ts_code not in last_recommended:
-                        last_recommended[ts_code] = trade_date
+                if ev.ts_code in hold_advice:
+                    continue
+                action = ev.advice or ("卖出" if (ev.hold_score is not None and ev.hold_score <= 0.0) else "持有")
+                hold_advice[ev.ts_code] = {"action": action, "reason": ev.reason}
             return {
                 "portfolio": {
                     "id": portfolio.id,
                     "enabled": portfolio.enabled,
                     "cash": portfolio.cash,
                     "last_processed_minute": portfolio.last_processed_minute,
-                    "last_execution_target": portfolio.last_execution_target,
                     "strategy_enabled": strategy_config.enabled,
                     "strategy_params": dict(strategy_config.parameters or {}),
                 },
@@ -2183,16 +2200,16 @@ class AIStockPaperTradingService:
                         "remaining_quantity": row.remaining_quantity,
                         "target_price": row.target_price,
                         "peak_price": row.peak_price if row.peak_price is not None else row.buy_price,
-                        "stop_half_triggered": row.stop_half_triggered,
                     }
                     for row in lots
                 ],
-                "recommendations": [AIStockRecommendationService._recommendation_payload(row) for row in recommendations],
                 "today_buys": {(row.ts_code, row.recommendation_id) for row in today_buys},
-                "today_buy_count": len(today_buys),
-                "hold_scores": hold_scores,
-                "last_recommended_dates": last_recommended,
+                "hold_advice": hold_advice,
             }
+
+    def _today_recommendations(self) -> List[Dict[str, Any]]:
+        """今日推荐（按 ts_code 去重、信心分均值降序）；抽成方法便于测试替换。"""
+        return AIStockRecommendationService().today()
 
     def process_minute(self, now: Optional[datetime] = None, fear_greed: Optional[float] = None) -> Dict[str, Any]:
         timestamp = _now(now)
@@ -2211,21 +2228,31 @@ class AIStockPaperTradingService:
         if not portfolio["enabled"] or not portfolio.get("strategy_enabled", True) or portfolio["last_processed_minute"] == minute_key:
             return {"processed": False, "reason": "模拟盘未启用或该分钟已处理"}
 
+        # 监控买入候选：今日推荐里信心分 >= 阈值，按信心分降序取前 N
+        buy_min_confidence = float(_safe_float(sp.get("buy_min_confidence"), 75.0))
+        buy_top_n = max(1, int(_safe_float(sp.get("buy_top_n"), 3.0)))
+        try:
+            today_recs = self._today_recommendations()
+        except Exception as exc:
+            logger.warning("AI stock paper: today() recommendations unavailable: %s", exc)
+            today_recs = []
+        candidates = [rec for rec in today_recs if float(rec.get("ai_confidence") or 0.0) >= buy_min_confidence]
+        candidates.sort(key=lambda rec: (-float(rec.get("ai_confidence") or 0.0), rec.get("rank") or 999))
+        candidates = candidates[:buy_top_n]
+
         fg = _clamp(fear_greed if fear_greed is not None else os.getenv("AI_STOCK_DEFAULT_FEAR_GREED"), 0.0, 100.0, 50.0)
-        symbols = [lot["ts_code"] for lot in state["lots"]] + [item["ts_code"] for item in state["recommendations"]]
+        symbols = [lot["ts_code"] for lot in state["lots"]] + [item["ts_code"] for item in candidates]
         try:
             quotes = self.provider.quotes(symbols)
         except Exception as exc:
             return {"processed": False, "reason": f"行情读取失败: {exc}"}
 
-        sp = state["portfolio"].get("strategy_params") or {}
-        execution_target = min(_safe_float(sp.get("max_execution_target"), 0.90), _fear_greed_target(fg) * 1.4)
         stop_loss_full = _safe_float(sp.get("stop_loss_full_pct"), -12.0)
-        stop_loss_half = _safe_float(sp.get("stop_loss_half_pct"), -8.0)
-        rotation_gap = _safe_float(sp.get("rotation_confidence_gap"), 20.0)
-        rotation_stale_days = int(_safe_float(sp.get("rotation_stale_days"), 3.0))
-        max_buys_per_day = int(_safe_float(sp.get("max_buys_per_day"), 3.0))
-        hold_enabled = bool(sp.get("hold_evaluation_enabled"))
+        position_pct = float(_safe_float(sp.get("position_pct"), 0.10))
+        # 顶/底最大持仓数（复用星澜同款计算，12h 缓存）
+        top_bottom = csi_all_share_top_bottom(timestamp, sp)
+        max_positions = _resolve_max_positions(top_bottom, sp)
+        hold_advice = state.get("hold_advice") or {}
         # 移动止盈所需 MA10（按日缓存，一天只拉一次日线）
         ma10_by_symbol = _ma10_by_symbol([lot["ts_code"] for lot in state["lots"]], timestamp.date())
         plans: List[PlannedTrade] = []
@@ -2240,41 +2267,33 @@ class AIStockPaperTradingService:
             held_days = _holding_days(lot["bought_at"], timestamp.date())
             reason_code = None
             quantity = lot["remaining_quantity"]
-            hold_info = (state.get("hold_scores") or {}).get(lot["ts_code"])
-            hold_score = hold_info.get("hold_score") if hold_info else None
-            hold_sell_threshold = float(_safe_float(sp.get("hold_sell_threshold"), 30.0))
             peak = _safe_float(lot.get("peak_price"), lot["buy_price"]) or lot["buy_price"]
             ma10 = ma10_by_symbol.get(lot["ts_code"])
-            last_rec = (state.get("last_recommended_dates") or {}).get(lot["ts_code"])
-            if price >= lot["target_price"] and not (hold_enabled and hold_score is not None and hold_score >= 70):
-                # AI 高评分(≥70=继续持有)时可延迟止盈，让错价修复的利润奔跑
+            advice = hold_advice.get(lot["ts_code"]) or {}
+            chan_detail: Dict[str, Any] = {}
+            if price >= lot["target_price"]:
                 reason_code = "TARGET_PROFIT"
-            elif (
-                peak >= lot["target_price"]
-                and ma10 is not None and price < ma10
-                and (last_rec is None or last_rec < timestamp.date())
-            ):
-                # 移动止盈：目标价已触及后，现价跌破 MA10 且当日未被再推荐 → 离场
+            elif peak >= lot["target_price"] and ma10 is not None and price < ma10:
+                # 移动止盈：目标价已触及后，现价跌破 MA10 → 离场
                 reason_code = "TRAILING_STOP"
-            elif pnl_pct <= stop_loss_full and fg >= 20:
+            elif pnl_pct <= stop_loss_full:
                 reason_code = "STOP_LOSS_FULL"
-            elif pnl_pct <= stop_loss_half and not lot.get("stop_half_triggered"):
-                reason_code = "STOP_LOSS_HALF"
-                quantity = max(100, (quantity // 2 // 100) * 100)
-            elif fg >= 80:
-                reason_code = "EXTREME_GREED_EXIT"
-            elif hold_enabled and hold_score is not None and hold_score <= hold_sell_threshold:
-                # AI 低评分 = 倾向卖出（基本面/事件/板块转弱），作为规则外的补充信号
-                reason_code = "AI_SIGNAL"
             elif held_days >= 30:
                 reason_code = "MAX_HOLD_DAYS"
+            elif advice.get("action") == "卖出":
+                # AI 建议卖出：等缠论 1 分钟一卖确认后再离场
+                confirmed, chan_detail = ai_stock_chan.first_sell_confirmed(lot["ts_code"], timestamp)
+                if confirmed:
+                    reason_code = "AI_ADVICE_FIRST_SELL"
             if reason_code and quantity > 0:
                 if reason_code == "TRAILING_STOP":
-                    reason_text = f"TRAILING_STOP: 目标价 {lot['target_price']:.3f} 已触及，现价 {price:.3f} 跌破 MA10({ma10:.3f})，当日未获再推荐，移动止盈离场"
+                    reason_text = f"TRAILING_STOP: 目标价 {lot['target_price']:.3f} 已触及，现价 {price:.3f} 跌破 MA10({ma10:.3f})，移动止盈离场"
+                elif reason_code == "AI_ADVICE_FIRST_SELL":
+                    reason_text = f"AI_ADVICE_FIRST_SELL: AI 建议卖出且 1 分钟一卖确认，现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
+                    if advice.get("reason"):
+                        reason_text += f"；AI建议: {advice['reason']}"
                 else:
                     reason_text = f"{reason_code}: 现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
-                    if reason_code == "AI_SIGNAL" and hold_info and hold_info.get("reason"):
-                        reason_text += f"；AI评估(hold_score={hold_score:.0f}): {hold_info['reason']}"
                 plans.append(
                     PlannedTrade(
                         side="SELL",
@@ -2285,34 +2304,9 @@ class AIStockPaperTradingService:
                         lot_id=lot["id"],
                         reason_code=reason_code,
                         reason=reason_text,
-                        state_snapshot={"fear_greed": fg, "pnl_pct": pnl_pct, "held_days": held_days, "hold_score": hold_score},
+                        state_snapshot={"fear_greed": fg, "pnl_pct": pnl_pct, "held_days": held_days, "advice": advice.get("action"), "chan": chan_detail or None},
                     )
                 )
-
-        # A sharp risk-appetite downgrade reduces sellable lots proportionally.
-        previous_target = _safe_float(portfolio.get("last_execution_target"))
-        if previous_target and previous_target - execution_target > 0.15:
-            reduce_ratio = 1 - execution_target / previous_target
-            already_selling_lots = {plan.lot_id for plan in plans if plan.side == "SELL"}
-            for lot in state["lots"]:
-                if lot["id"] in already_selling_lots or lot["bought_at"].date() >= timestamp.date():
-                    continue
-                price = _safe_float((quotes.get(lot["ts_code"]) or {}).get("price"), 0.0) or 0.0
-                quantity = int((lot["remaining_quantity"] * reduce_ratio) // 100) * 100
-                if price > 0 and quantity >= 100:
-                    plans.append(
-                        PlannedTrade(
-                            side="SELL",
-                            ts_code=lot["ts_code"],
-                            name=lot["name"],
-                            price=price,
-                            quantity=quantity,
-                            lot_id=lot["id"],
-                            reason_code="ALLOCATION_DOWNSHIFT",
-                            reason=f"贪恐目标仓位由 {previous_target:.0%} 下调至 {execution_target:.0%}",
-                            state_snapshot={"fear_greed": fg, "previous_target": previous_target, "execution_target": execution_target},
-                        )
-                    )
 
         sell_value_by_symbol = defaultdict(float)
         for plan in plans:
@@ -2324,113 +2318,38 @@ class AIStockPaperTradingService:
         }
         equity_before = float(portfolio["cash"]) + sum(position_values.values())
         projected_cash = float(portfolio["cash"]) + sum(sell_value_by_symbol.values())
+        selling_symbols = {plan.ts_code for plan in plans if plan.side == "SELL"}
         projected_positions = {
-            symbol: max(0.0, value - sum(plan.price * plan.quantity for plan in plans if plan.side == "SELL" and plan.ts_code == symbol))
-            for symbol, value in position_values.items()
+            symbol: value for symbol, value in position_values.items()
+            if value > 0 and symbol not in selling_symbols
         }
-        projected_positions = {symbol: value for symbol, value in projected_positions.items() if value > 0}
-        slot_value = equity_before * execution_target / max(int(sp.get("slot_count", 5)), 1)
 
         planned_codes = {plan.ts_code for plan in plans if plan.side == "BUY"}
-        # 同一轮处理内只要某标的已有卖出计划，就禁止再买回；否则轮换/AI卖出
-        # 可能与后续推荐相撞，形成同一分钟原价卖出又买入的无效双边成交。
-        blocked_buy_codes = {plan.ts_code for plan in plans if plan.side == "SELL"}
+        blocked_buy_codes = set(selling_symbols)
         position_count = len(projected_positions)
-        entry_price_cap = 1.0 + _safe_float(sp.get("entry_price_cap_pct"), 1.0) / 100.0
-        max_positions = max(int(sp.get("max_positions", 10)), 1)
-        single_stock_cap = _safe_float(sp.get("single_stock_cap"), 0.20)
-        # 分批建仓：当日买入次数上限（新建仓与加仓都计入）
-        buys_today = int(state.get("today_buy_count", 0)) + len([p for p in plans if p.side == "BUY"])
-        for recommendation in state["recommendations"]:
-            if buys_today >= max_buys_per_day:
+        for recommendation in candidates:
+            if position_count >= max_positions:
                 break
             ts_code = recommendation["ts_code"]
-            if ts_code in planned_codes or ts_code in blocked_buy_codes or (ts_code, recommendation["id"]) in state["today_buys"]:
+            if (
+                ts_code in planned_codes
+                or ts_code in blocked_buy_codes
+                or ts_code in projected_positions
+                or (ts_code, recommendation["id"]) in state["today_buys"]
+            ):
                 continue
             quote = quotes.get(ts_code) or {}
             price = _safe_float(quote.get("price"), 0.0) or 0.0
-            if price <= 0 or price > recommendation["recommendation_price"] * entry_price_cap:
+            if price <= 0:
                 continue
-            current_value = projected_positions.get(ts_code, 0.0)
-            is_add = current_value > 0
-            if is_add and current_value >= slot_value / 2:
-                continue
-            if not is_add and position_count >= max_positions:
-                # 满仓换仓（两信号，先"未获再推荐"后"信心差"）：
-                # 信号1：持仓已连续 N 个交易日未被再推荐（AI 已失去关注）→ 卖最久的那只
-                # 信号2：新推荐信心与最低 hold_score 持仓的差值超阈值
-                selling_lots = {plan.lot_id for plan in plans if plan.side == "SELL" and plan.lot_id}
-                last_rec = state.get("last_recommended_dates") or {}
-                today = timestamp.date()
-                out_lot = None
-                out_reason = ""
-                out_state: Dict[str, Any] = {"fear_greed": fg}
-                sellable = [
-                    held for held in state["lots"]
-                    if held["bought_at"].date() < today and held["id"] not in selling_lots
-                ]
-                # 信号1：最久未获再推荐
-                if sellable:
-                    stale_days_by_symbol: Dict[str, Optional[int]] = {}
-
-                    def _stale_days(held):
-                        rec = last_rec.get(held["ts_code"]) or held["bought_at"].date()
-                        if held["ts_code"] not in stale_days_by_symbol:
-                            stale_days_by_symbol[held["ts_code"]] = _a_stock_trading_days_elapsed(rec, today)
-                        return stale_days_by_symbol[held["ts_code"]]
-
-                    stale_candidates = [(days, held) for held in sellable if (days := _stale_days(held)) is not None]
-                    most_stale_pair = max(stale_candidates, key=lambda item: item[0], default=None)
-                    if most_stale_pair is not None and most_stale_pair[0] >= rotation_stale_days:
-                        stale_days, most_stale = most_stale_pair
-                        out_lot = most_stale
-                        out_reason = f"轮换让位：已{stale_days}个交易日未获再推荐，为今日新推荐 {recommendation['name']}(#{recommendation['rank']}) 腾位"
-                        out_state["stale_days"] = stale_days
-                # 信号2：hold_score 信心差
-                if out_lot is None and sellable:
-                    rotation_candidates = []
-                    for held in sellable:
-                        hs = (state.get("hold_scores") or {}).get(held["ts_code"])
-                        if hs is not None:
-                            rotation_candidates.append((hs["hold_score"], held))
-                    if rotation_candidates:
-                        rotation_candidates.sort(key=lambda item: item[0])
-                        out_score, candidate = rotation_candidates[0]
-                        if recommendation["ai_confidence"] - out_score >= rotation_gap:
-                            out_lot = candidate
-                            out_reason = f"换仓：新推荐 {recommendation['name']} 信心 {recommendation['ai_confidence']:.1f} 高于 {candidate['name']} hold_score {out_score:.0f}"
-                            out_state.update({"hold_score": out_score, "incoming_confidence": recommendation["ai_confidence"]})
-                if out_lot is None:
-                    continue
-                out_price = _safe_float((quotes.get(out_lot["ts_code"]) or {}).get("price"), 0.0) or 0.0
-                if out_price <= 0:
-                    continue
-                plans.append(
-                    PlannedTrade(
-                        side="SELL",
-                        ts_code=out_lot["ts_code"],
-                        name=out_lot["name"],
-                        price=out_price,
-                        quantity=out_lot["remaining_quantity"],
-                        lot_id=out_lot["id"],
-                        reason_code="ROTATION_OUT",
-                        reason=out_reason,
-                        state_snapshot=out_state,
-                    )
-                )
-                blocked_buy_codes.add(out_lot["ts_code"])
-                projected_cash += out_price * out_lot["remaining_quantity"] - _sell_fee(out_price * out_lot["remaining_quantity"])
-                projected_positions.pop(out_lot["ts_code"], None)
-                position_count -= 1
             try:
-                confirmed, minute_state = self.provider.minute_entry_confirmed(ts_code)
+                confirmed, chan_detail = ai_stock_chan.first_buy_confirmed(ts_code, timestamp)
             except Exception as exc:
-                logger.warning("AI stock minute confirmation failed for %s: %s", ts_code, exc)
+                logger.warning("AI stock chan first-buy failed for %s: %s", ts_code, exc)
                 continue
             if not confirmed:
                 continue
-            max_single = equity_before * single_stock_cap
-            amount = min(slot_value - current_value, max_single - current_value, projected_cash)
+            amount = min(equity_before * position_pct, projected_cash)
             quantity = int(max(0.0, amount) / price // 100) * 100
             if quantity < 100:
                 continue
@@ -2449,21 +2368,19 @@ class AIStockPaperTradingService:
                     price=price,
                     quantity=quantity,
                     recommendation_id=recommendation["id"],
-                    reason_code="AI_RECOMMENDATION_ENTRY",
-                    reason=f"{'补仓·AI推荐' if is_add else 'AI推荐买入'}：AI 推荐 #{recommendation['rank']}，信心 {recommendation['ai_confidence']:.1f}，分钟趋势确认",
-                    state_snapshot={"fear_greed": fg, "execution_target": execution_target, "minute": minute_state},
+                    reason_code="AI_FIRST_BUY_ENTRY",
+                    reason=f"缠论一买：AI 推荐 #{recommendation['rank']}，信心 {recommendation['ai_confidence']:.1f}，1 分钟一买信号确认",
+                    state_snapshot={"fear_greed": fg, "top_bottom": top_bottom, "max_positions": max_positions, "chan": chan_detail},
                 )
             )
             planned_codes.add(ts_code)
             projected_cash -= amount + _buy_fee(amount)
-            projected_positions[ts_code] = current_value + amount
-            if not is_add:
-                position_count += 1
-            buys_today += 1
+            projected_positions[ts_code] = amount
+            position_count += 1
 
-        return self._commit_minute(timestamp, minute_key, fg, execution_target, quotes, plans)
+        return self._commit_minute(timestamp, minute_key, fg, quotes, plans)
 
-    def _commit_minute(self, timestamp: datetime, minute_key: datetime, fear_greed: float, execution_target: float, quotes: Dict[str, Dict[str, Any]], plans: List[PlannedTrade]) -> Dict[str, Any]:
+    def _commit_minute(self, timestamp: datetime, minute_key: datetime, fear_greed: float, quotes: Dict[str, Dict[str, Any]], plans: List[PlannedTrade]) -> Dict[str, Any]:
         with get_db_ctx() as db:
             portfolio = self._ensure_portfolio(db)
             if portfolio.last_processed_minute == minute_key:
@@ -2497,8 +2414,6 @@ class AIStockPaperTradingService:
                     if not lot or lot.remaining_quantity < plan.quantity or lot.bought_at.date() >= timestamp.date():
                         continue
                     lot.remaining_quantity -= plan.quantity
-                    if plan.reason_code == "STOP_LOSS_HALF":
-                        lot.stop_half_triggered = True
                     portfolio.cash = round(portfolio.cash + amount - fee, 2)
                     realized_pnl = round((plan.price - lot.buy_price) * plan.quantity - fee, 2)
                 db.add(
@@ -2526,8 +2441,6 @@ class AIStockPaperTradingService:
             active_lots = db.query(AIStockPaperLot).filter(AIStockPaperLot.portfolio_id == portfolio.id, AIStockPaperLot.remaining_quantity > 0).all()
             for active_lot in active_lots:
                 current_price = _safe_float((quotes.get(active_lot.ts_code) or {}).get("price"), active_lot.buy_price) or active_lot.buy_price
-                if active_lot.stop_half_triggered and current_price >= active_lot.buy_price * 0.95:
-                    active_lot.stop_half_triggered = False
                 # 移动止盈基准：逐分钟抬升已见最高价（初始等于成本价）
                 current_peak = active_lot.peak_price if active_lot.peak_price is not None else active_lot.buy_price
                 if current_price > current_peak:
@@ -2543,7 +2456,6 @@ class AIStockPaperTradingService:
                 )
             )
             portfolio.last_processed_minute = minute_key
-            portfolio.last_execution_target = execution_target
             return {"processed": True, "trades": executed, "fear_greed": fear_greed}
 
     def strategy_config(self) -> Dict[str, Any]:
@@ -2555,13 +2467,26 @@ class AIStockPaperTradingService:
                 "parameters": dict(config.parameters or {}),
             }
 
+    def position_control(self) -> Dict[str, Any]:
+        """当前中证全指顶/底信号与由此得出的最大持仓数（供前端展示）。"""
+        sp = (self.strategy_config().get("parameters") or {})
+        top_bottom = csi_all_share_top_bottom(None, sp)
+        return {
+            "signal": top_bottom.get("signal"),
+            "regime": top_bottom.get("regime"),
+            "date": top_bottom.get("date"),
+            "score": top_bottom.get("score"),
+            "max_positions": _resolve_max_positions(top_bottom, sp),
+            "top_positions": top_bottom.get("top_positions") or int(_safe_float(sp.get("top_positions"), 3.0) or 3),
+            "bottom_positions": top_bottom.get("bottom_positions") or int(_safe_float(sp.get("bottom_positions"), 10.0) or 10),
+        }
+
     def update_strategy_config(self, *, updated_by: str, enabled: Optional[bool] = None, **parameters) -> Dict[str, Any]:
         """Persist paper-trading strategy parameters in one short transaction."""
         allowed = {
-            "max_positions", "slot_count", "single_stock_cap", "max_execution_target",
-            "entry_price_cap_pct", "stop_loss_half_pct", "stop_loss_full_pct",
-            "trading_start_minute", "hold_evaluation_enabled", "hold_sell_threshold",
-            "max_buys_per_day", "rotation_confidence_gap", "rotation_stale_days",
+            "top_positions", "bottom_positions", "buy_top_n", "buy_min_confidence",
+            "position_pct", "stop_loss_full_pct", "trading_start_minute",
+            "hold_evaluation_enabled",
         }
         unknown = set(parameters) - allowed
         if unknown:
@@ -2571,10 +2496,19 @@ class AIStockPaperTradingService:
                 value = float(value)
             except (TypeError, ValueError):
                 raise ValueError(f"{name} 必须是数字")
-            if name in {"max_positions", "slot_count", "max_buys_per_day", "rotation_stale_days"}:
-                if value < 1 or value > 1000 or value != int(value):
-                    raise ValueError(f"{name} 必须是 1-1000 的整数")
-            elif name in {"stop_loss_half_pct", "stop_loss_full_pct"}:
+            if name in {"top_positions", "bottom_positions"}:
+                if value < 1 or value > 100 or value != int(value):
+                    raise ValueError(f"{name} 必须是 1-100 的整数")
+            elif name == "buy_top_n":
+                if value < 1 or value > 50 or value != int(value):
+                    raise ValueError(f"{name} 必须是 1-50 的整数")
+            elif name == "buy_min_confidence":
+                if value < 0 or value > 100:
+                    raise ValueError(f"{name} 必须是 0-100 的分数")
+            elif name == "position_pct":
+                if value <= 0 or value > 1.0:
+                    raise ValueError(f"{name} 必须是 0-1 之间的比例")
+            elif name == "stop_loss_full_pct":
                 if value < -100 or value > 0:
                     raise ValueError(f"{name} 必须是 -100~0 的百分比")
             elif name == "trading_start_minute":
@@ -2582,15 +2516,6 @@ class AIStockPaperTradingService:
                     raise ValueError(f"{name} 必须是 570(9:30)~690(11:30) 的整数分钟")
             elif name == "hold_evaluation_enabled":
                 value = bool(value)
-            elif name == "hold_sell_threshold":
-                if value < 0 or value > 100:
-                    raise ValueError(f"{name} 必须是 0-100 的分数")
-            elif name == "rotation_confidence_gap":
-                if value < 0 or value > 100:
-                    raise ValueError(f"{name} 必须是 0-100 的分数差")
-            else:
-                if value < 0 or value > 1.0:
-                    raise ValueError(f"{name} 必须是 0-1 之间的比例")
             parameters[name] = value
         with get_db_ctx() as db:
             config = self._ensure_strategy_config(db)
@@ -2665,7 +2590,7 @@ class AIStockPaperTradingService:
         return sorted(result, key=lambda item: -item["market_value"])
 
     def hold_evaluations(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Recent AI hold evaluations, newest first (short read, no external IO)."""
+        """Recent AI hold advice (卖出/持有), newest first, annotated with live pnl."""
         safe_limit = min(max(1, int(limit)), 500)
         with get_db_ctx() as db:
             portfolio = self._ensure_portfolio(db)
@@ -2676,17 +2601,26 @@ class AIStockPaperTradingService:
                 .limit(safe_limit)
                 .all()
             )
-            return [
+            items = [
                 {
                     "id": row.id,
                     "ts_code": row.ts_code,
                     "name": row.name,
-                    "hold_score": row.hold_score,
+                    "action": row.advice or ("卖出" if (row.hold_score is not None and row.hold_score <= 0.0) else "持有"),
                     "reason": row.reason,
                     "evaluated_at": row.evaluated_at,
                 }
                 for row in rows
             ]
+        try:
+            pos_by_code = {item["ts_code"]: item for item in self.positions()}
+        except Exception:  # noqa: BLE001 - live quote lookup is best-effort annotation
+            pos_by_code = {}
+        for item in items:
+            pos = pos_by_code.get(item["ts_code"])
+            item["price"] = pos["price"] if pos else None
+            item["pnl_pct"] = pos["pnl_pct"] if pos else None
+        return items
 
     def paper_statistics(self) -> Dict[str, Any]:
         """胜率统计：按已平仓卖出事件汇总（每笔 SELL 为一个已实现盈亏事件）。"""
