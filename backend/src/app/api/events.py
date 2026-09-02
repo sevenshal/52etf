@@ -63,8 +63,9 @@ async def _fetch_missing_tushare_quotes(codes: list[str]) -> Dict[str, Dict[str,
                 "open_px": _quote_number(row.get("open")),
                 "high_px": _quote_number(row.get("high")),
                 "low_px": _quote_number(row.get("low")),
-                "volume": _quote_number(row.get("vol")),
-                "amount": _quote_number(row.get("amount")),
+                # Tushare 实时口径为股/元，统一成K线使用的手/千元。
+                "volume": (_quote_number(row.get("vol")) or 0.0) / 100.0,
+                "amount": (_quote_number(row.get("amount")) or 0.0) / 1000.0,
                 "hs_time": None if pd.isna(parsed_time) else parsed_time.isoformat(),
                 "source": "tushare_rt",
             }

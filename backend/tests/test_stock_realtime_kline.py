@@ -34,8 +34,8 @@ def test_current_a_stock_kline_uses_today_rt_k_ohlcv():
         "high": 1420.0,
         "low": 1395.0,
         "close": 1410.0,
-        "volume": 12345.0,
-        "turnover": 1730000.0,
+        "volume": 123.45,
+        "turnover": 1730.0,
         "turnover_rate": None,
     }
 
