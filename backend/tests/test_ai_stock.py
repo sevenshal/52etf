@@ -1098,19 +1098,19 @@ def test_csi_all_share_top_bottom_caches_for_12h(monkeypatch):
     ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
 
 
-def test_ai_stock_chan_first_buy_and_sell_read_czsc_signals(monkeypatch):
+def test_ai_stock_chan_first_buy_and_sell_read_native_signals(monkeypatch):
     from src.core.services import ai_stock_chan
     from src.core.services import chan_analysis
 
     rows = [{"open": 1, "high": 1, "low": 1, "close": 1} for _ in range(60)]
     monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: rows)
 
-    monkeypatch.setattr(chan_analysis, "analyze_bars_czsc_legacy", lambda *a, **k: {"signals": [{"type": "一买", "bar_time": "t", "detail": "d"}]})
+    monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, **k: {"signals": [{"type": "一买", "bar_time": "t", "detail": "d"}]})
     ok, detail = ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
     assert ok and detail["signal"] == "一买"
     assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
 
-    monkeypatch.setattr(chan_analysis, "analyze_bars_czsc_legacy", lambda *a, **k: {"signals": [{"type": "一卖", "bar_time": "t"}]})
+    monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, **k: {"signals": [{"type": "一卖", "bar_time": "t"}]})
     assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is True
     assert ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
 

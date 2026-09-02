@@ -1,10 +1,12 @@
 """Chan 1-minute 一买 / 一卖 confirmation for the AI-stock paper portfolio.
 
-Entry and AI-advised exit both defer to the open-source CZSC engine
-(``analyze_bars_czsc_legacy``): rolling 1-minute bars are read from DuckDB and
-merged with the current day's realtime minute bars (the same data path
-``chan_scanner`` uses).  Any missing feed, short history or engine error
-resolves to "not confirmed" so an outage never forces a trade.
+Entry and AI-advised exit both defer to the native structure engine
+(``chan_analysis.analyze_bars``) — the same engine that drives the Chan
+analysis chart and the background scanner, so the paper portfolio never
+trades a signal the chart would not show.  Rolling 1-minute bars are read
+from DuckDB and merged with the current day's realtime minute bars (the same
+data path ``chan_scanner`` uses).  Any missing feed, short history or engine
+error resolves to "not confirmed" so an outage never forces a trade.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-MIN_BARS = 40  # CZSC needs >= 20; keep a margin so early-session noise is ignored
+MIN_BARS = 40  # native engine needs >= 20; keep a margin so early-session noise is ignored
 HISTORY_CALENDAR_DAYS = 12
 
 
@@ -54,9 +56,9 @@ def _detect(ts_code: str, now: datetime, wanted: str) -> Tuple[bool, Dict[str, A
         rows = _load_1m_rows(ts_code, now)
         if len(rows) < MIN_BARS:
             return False, {"reason": f"1分钟K线不足({len(rows)})"}
-        from .chan_analysis import analyze_bars_czsc_legacy
+        from .chan_analysis import analyze_bars
 
-        analysis = analyze_bars_czsc_legacy(
+        analysis = analyze_bars(
             ts_code, rows, "1m", confirmed=False, include_history=False
         )
         hits = [
@@ -78,10 +80,10 @@ def _detect(ts_code: str, now: datetime, wanted: str) -> Tuple[bool, Dict[str, A
 
 
 def first_buy_confirmed(ts_code: str, now: datetime) -> Tuple[bool, Dict[str, Any]]:
-    """Return whether a CZSC 一买 signal is active on the latest 1-minute bar."""
+    """Return whether a native 一买 signal is active on the latest 1-minute bar."""
     return _detect(ts_code, now, "一买")
 
 
 def first_sell_confirmed(ts_code: str, now: datetime) -> Tuple[bool, Dict[str, Any]]:
-    """Return whether a CZSC 一卖 signal is active on the latest 1-minute bar."""
+    """Return whether a native 一卖 signal is active on the latest 1-minute bar."""
     return _detect(ts_code, now, "一卖")

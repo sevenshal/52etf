@@ -11,7 +11,9 @@ python lab/chan_native_backtest.py --database /path/to/analytics.duckdb --start-
 python lab/chan_native_pair_backtest.py --database /path/to/analytics.duckdb --supplemental-weights lab/output/chan_signal_pair_backtest_20260829_120d/csi_missing_weights.csv
 ```
 
-结构定义和未来函数约束见 `chan_native_methodology.md`；`chan_native_audit.py`、`chan_recursive_audit.py` 用于检查结构不变量和递归确认时间。`chan_signal_pair_backtest.py` 是旧 CZSC 对照基座。
+结构定义和未来函数约束见 `chan_native_methodology.md`；`chan_native_audit.py`、`chan_recursive_audit.py` 用于检查结构不变量和递归确认时间。`chan_signal_pair_backtest.py` 是旧 CZSC 对照基座；CZSC 对照适配层已迁到 `czsc_oracle.py`（`analyze_bars_czsc_legacy`），backend 生产代码不再依赖 CZSC 信号引擎。
+
+> 结构引擎已升级到 v2（固定区间中枢 + 真实 GG/DD + 级别标签、线段第一/第二种划分、MACD 面积盘整/趋势背驰）。下方“已验证结论”里的数字先于 v2，需按本节命令重跑后更新。
 
 ## 已验证结论
 
